@@ -24,6 +24,8 @@ For XML sourcedata, keep records sorted by ascending UUID. The workflow in `.git
 ## Testing Guidelines
 Tests are standard `*Test.java` classes, usually colocated by package path with the code they verify. The current suite uses JUnit 4-style assertions and `@Test`, with JUnit 5 runtime support and Mockito for isolated logic tests. Add or update tests for every behavior change; Sonar runs on PRs, so avoid leaving new branches untested.
 
+A test that extends `OBBaseTest` or `WeldBaseTest`, directly or through a base class, needs a database: name it `*IntegrationTest`. `./gradlew goTestUnit` (from the Etendo root) runs every other test with no database, and `.github/workflows/unit-test-classification.yml` fails the PR when a DB-backed test is named otherwise. Every PR into develop runs both halves in `.github/workflows/mini-pipeline.yml`, the DB-backed ones on a fresh database holding only the F&B, QA_Testing and GOClient sample data: a DB-backed test builds its fixture from that data, never from records that exist only in a local database.
+
 Before adding a test class, find the existing ones for the class (`make find-tests FILE=<Class>` from `etendo_schema_forge`) and extend them; a new class needs a justification. Every new or modified test class declares `@covers <fully.qualified.Class>` in its Javadoc and is named by behavior, never by ticket. `.github/workflows/test-hygiene.yml` (`scripts/check-test-hygiene.py`) annotates violations and blocks from 2026-10-10. Full protocol: `docs/testing/test-reuse-policy.md` in `etendo_schema_forge`.
 
 ## Commit & Pull Request Guidelines

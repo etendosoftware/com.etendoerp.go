@@ -17,39 +17,145 @@ additional environment, and how an environment's commercial plan is recorded.
 | Layer | Choice |
 |-------|--------|
 | Application API | **OpenFeature** — `dev.openfeature:sdk:1.20.1` (the real SDK, not a lookalike) |
-| Control plane | **Local configuration**, via `PropertiesFeatureProvider` |
-| Evaluation | In-process. No network call, no background thread, no polling. |
+| Control plane | **Datadog Feature Flags** → **ConfigCat** → **local configuration**, first usable arm wins (see *The swap point*) |
+| Evaluation | In-process on every arm. The hosted arms evaluate against an in-memory snapshot refreshed in the background; a flag check is never a network call. |
 
 Application code never imports an OpenFeature type. It calls one entry point:
 
 ```java
 boolean enabled = GoFeatureFlags.isEnabled(
-    GoFeatureFlags.FLAG_TENANT_UPGRADE,
+    GoFeatureFlags.FLAG_BP_PORTAL_LINK,
     FeatureFlagContext.forAccount(accountEmail));
 ```
 
-The hosted control plane (Mixpanel Feature Flags with local evaluation and polling, per team plan
-§5.6) is **deliberately deferred**. Standing up OpenFeature first means the migration later is a
-provider swap rather than a rewrite of every call site.
-
 ### The swap point
 
-`GoFeatureFlags.createProvider()` is the **only** place that decides which provider backs the API:
+`GoFeatureFlags.createProvider()` is the **only** place that decides which provider backs the API.
+It installs exactly one provider, the first arm whose prerequisites are all met
+(`GoFeatureFlags.selectProvider(...)`):
 
-```java
-private static FeatureProvider createProvider() {
-  return new PropertiesFeatureProvider();
-}
-```
+| # | Arm | Selected when | Provider |
+|---|-----|---------------|----------|
+| 1 | **Datadog** (ETP-5751) | `DD_FEATURE_FLAGS_ENABLED=true` (or `-Ddd.feature.flags.enabled=true`) **and** `dd-java-agent` is loaded in the JVM | `datadog.trace.api.openfeature.Provider` (`com.datadoghq:dd-openfeature`) |
+| 2 | **ConfigCat** (ETP-5267) | `etendo.go.configcat.sdkKey` / `ETGO_CONFIGCAT_SDK_KEY` is set and not blank | `ConfigCatProvider` (`dev.openfeature.contrib.providers:configcat:0.1.1`) |
+| 3 | **Local properties** | neither of the above | `PropertiesFeatureProvider` |
 
-Moving to a hosted control plane means returning a different `FeatureProvider` from that one method,
-plus adding its dependency in `build.gradle`. Nothing else in `GoFeatureFlags`, nothing else in the
-package, and no caller anywhere changes.
+Two rules govern the order, and they point in opposite directions on purpose:
 
-Keep it that way. Provider-specific concerns — credentials, polling schedules, caches, retry and
-staleness handling — belong **inside** the provider. Any provider bound here must honour the
-guarantees below: never block the calling thread on I/O, never throw, and resolve to the caller's
-default when it cannot answer.
+- **A missing prerequisite skips an arm.** The Datadog switch on in a JVM without the agent (dev, CI,
+  e2e, a local Tomcat) falls through to ConfigCat, then to local properties, and logs a `WARN` that
+  names `DD_FEATURE_FLAGS_ENABLED`. A blank SDK key falls through the same way. Absent configuration
+  is not an error.
+- **A selected arm that breaks turns every flag off.** Once a hosted arm is installed, a failure to
+  initialize it (a wrong ConfigCat key, a Datadog provider that cannot start) resolves every flag to
+  its `false` code default. It never falls through to a lower arm whose local value might say `true`
+  — that is the ETP-4966 shape and must never be "improved" into a fallback that allows.
+
+The agent check is a class probe, not a configuration read: `dd-openfeature` is only a bridge to
+classes that `dd-java-agent` puts on the bootstrap class path
+(`datadog.trace.api.featureflag.FeatureFlaggingGateway`), which no public jar ships. Without them the
+provider can never become ready, so installing it would silently turn every flag off.
+
+Moving to another control plane still means returning a different `FeatureProvider` from that one
+method, plus its dependency in `build.gradle`. Nothing else in `GoFeatureFlags`, nothing else in the
+package, and no caller anywhere changes. Keep it that way. Provider-specific concerns — credentials,
+polling schedules, caches, retry and staleness handling — belong **inside** the provider. Any
+provider bound here must honour the guarantees below: never block the calling thread on I/O beyond
+the bounded first wait, never throw, and resolve to the caller's default when it cannot answer.
+
+### Datadog Feature Flags (ETP-5751)
+
+The flags live in the Datadog Feature Flags product. `dd-openfeature` is a thin OpenFeature
+provider; the flag configuration is fetched by **`dd-java-agent`**, which must be loaded with
+`-javaagent`. The runtime image (`.github/docker/Dockerfile.runtime`) bakes the agent in at
+`/opt/datadog/dd-java-agent.jar` with a pinned version and SHA-256, and
+`.github/docker/docker-entrypoint.sh` appends `-javaagent:` to `CATALINA_OPTS` **only when
+`DD_FEATURE_FLAGS_ENABLED` is true** — an environment without the `DD_*` variables starts exactly as
+before. Tracing is not needed for this and defaults to disabled (`DD_TRACE_ENABLED=false`).
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `DD_FEATURE_FLAGS_ENABLED` | `true` | Starts the agent's feature-flag subsystem **and** selects the Datadog arm here — one knob, not two that can disagree. **The only documented value is `true`** (the entrypoint and `GoRuntimeProperties.readBoolean` both also take `Y`; `1`/`yes` are rejected by both) |
+| `DD_API_KEY` | secret | Authenticates the agentless configuration fetch |
+| `DD_SITE` | e.g. `datadoghq.eu` | Datadog site of the organisation |
+| `DD_ENV` | `experimental` / `production` / … | **Chooses the Datadog environment** the flags answer from (see below) |
+| `DD_SERVICE` | `etendo-go` | Service identity |
+| `DD_VERSION` | image version | Optional, reported with evaluations |
+| `DD_TRACE_ENABLED` | `false` | No APM tracing — only feature flags |
+
+**`DD_ENV` → Datadog environment.** Each Datadog environment declares the `DD_ENV` values it answers
+to (its *queries*). Flags do not target services: every service whose `DD_ENV` matches an
+environment reads that environment's flag state.
+
+| ECS deployment | `DD_ENV` | Datadog environment |
+|----------------|----------|---------------------|
+| experimental | `experimental` | Experimental |
+| production | `production` | Production (also answers to `prod`) |
+| staging | `staging` | Staging (also answers to `stage`) — **disabled** in Datadog |
+
+Only **Experimental** and **Production** are enabled in Datadog today; Staging and Development are
+disabled, so a JVM whose `DD_ENV` points at them resolves every flag to its `false` code default —
+the same result as a `DD_ENV` that matches no environment, which is not an error either. The web
+client maps `VITE_APP_ENV` onto the same environments. Check the queries in Datadog before
+introducing a new value.
+
+**Targeting.** Datadog has no reserved user fields: the targeting key drives percentage bucketing
+and every rule matches a flat attribute **by its exact, case-sensitive name**. The rules in the
+Datadog project match on lowercase `email`, so `FeatureFlagContext.forAccount(...)` publishes the
+account email as the targeting key, as `email` (Datadog, **lowercased** with `Locale.ROOT` — rule
+values are matched case-sensitively and every value in the Datadog project is lowercase) **and** as
+`Email` (ConfigCat, as stored — see *Per-account targeting* below). Drop `Email` only when ConfigCat is retired.
+
+**Data sent to Datadog.** Evaluation is in-process, but the agent reports flag exposures and
+evaluations to Datadog with the evaluation context — the account email included — so that context
+leaves the JVM. The web client sends the same attributes from the browser (see
+`docs/feature-flags.md` in the functional repo). This is accepted under the same Datadog data
+processing as our logs and RUM.
+
+**Startup.** Installing the provider waits at most 5 s (`DATADOG_MAX_INIT_WAIT_SECONDS`; Datadog's
+own default is 30 s) for the first configuration. If it has not arrived, the provider stays
+installed, every flag reads `false` meanwhile, and it turns ready by itself as soon as the agent
+delivers the configuration — no restart. After that, flag changes in Datadog reach the JVM without a
+restart.
+
+> **VERSION LOCK — `dd-openfeature` MUST equal the deployed `dd-java-agent` version** (currently
+> **1.66.0**). The provider
+> calls into the agent's internal bootstrap classes, which carry no compatibility guarantee across
+> versions. The version is pinned once, as `ext.ddJavaAgentVersion` in this module's `build.gradle`.
+> `deploy-staging.yml` reads it and passes it to the image build as `--build-arg
+> DD_JAVA_AGENT_VERSION`, and `Dockerfile.runtime` verifies the download against its pinned
+> `DD_JAVA_AGENT_SHA256` — so bumping the Gradle pin without updating the checksum **fails the image
+> build** instead of shipping a mismatch. Update both in the same change (and the mirror copy in
+> `etendo-go-infraestructure/docker/Dockerfile.runtime`). A mismatch that did reach runtime would
+> show as "every flag off" or a `LinkageError` at the first evaluation.
+
+**Where the image is built.** `deploy-staging.yml` builds the staging image from
+`.github/docker/` of this module. The experimental and production images are built on their build
+servers from `/opt/docker-build`, whose copies have diverged: the agent block of
+`Dockerfile.runtime` and the `DD_FEATURE_FLAGS_ENABLED` block of `docker-entrypoint.sh` are
+**patched into** those copies by hand, never copied over whole.
+
+**Applying the variables.** Every `DD_*` is read from the process environment, not from
+`Openbravo.properties`, so each one is applied with `setup-env-var.sh apply --no-entrypoint` and no
+`--prop`. `DD_API_KEY` is a per-environment secret, `etendo/<env>/datadog-api-key`;
+`DD_FEATURE_FLAGS_ENABLED=true` goes last, with `--deploy`. Experimental first, then the smoke check
+— including the *proof it reads Datadog and not ConfigCat* (a targeting rule that makes a flag
+diverge between the two control planes for one tester) — and only then production. Full procedure:
+`etendo-go-infraestructure/COMO-REEMPLAZAR-AL-TUTI.md`, section *Datadog Feature Flags (ETP-5751)*.
+
+**Rollback.** Remove `DD_FEATURE_FLAGS_ENABLED` from the task definition (or set it to `false`) and
+redeploy. The entrypoint stops loading the agent and the backend falls back to ConfigCat (while
+`ETGO_CONFIGCAT_SDK_KEY` is set) or to local properties. No image rebuild is needed. The web
+client's rollback is independent: the `VITE_FLAGS_PROVIDER=configcat` Actions variable plus a
+redeploy.
+
+### ConfigCat (ETP-5267)
+
+`etendo.go.configcat.sdkKey` (JVM system property or `Openbravo.properties`) or the environment
+variable `ETGO_CONFIGCAT_SDK_KEY` selects ConfigCat when the Datadog arm is not selected. Note the
+spelling: **`sdkKey`**, camel case — `etendo.go.configcat.sdk-key` is not read. While Datadog rolls
+out, ConfigCat stays as the second arm so an environment whose image has not gained the agent keeps
+reading hosted flags.
 
 The provider is bound to the OpenFeature **domain** `etendo-go` rather than the global default
 provider, so this module cannot clobber a provider installed by another module.
@@ -60,7 +166,8 @@ A flag `my-flag` is read from `etendo.go.flags.my-flag`, resolved in priority or
 property, `Openbravo.properties`, environment variable `ETGO_FLAG_MY_FLAG` (uppercased, every
 non-alphanumeric character replaced by `_`). See `com.etendoerp.go.common.GoRuntimeProperties`.
 
-These local properties are a **plain boolean per environment**. Per-account targeting is a ConfigCat
+These local properties are a **plain boolean per environment**, and they are read **only on the local
+arm** — wherever Datadog or ConfigCat is selected they are inert. Per-account targeting is a hosted-arm
 concern only — see **Per-account targeting** below for why there is deliberately no local equivalent.
 
 Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
@@ -68,15 +175,20 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | Flag | Property | Environment variable | Default |
 |------|----------|---------------------|---------|
 | `bp-portal-link` | `etendo.go.flags.bp-portal-link` | `ETGO_FLAG_BP_PORTAL_LINK` | absent ⇒ **`false`** |
+| `environment-access-enforcement-off` | `etendo.go.flags.environment-access-enforcement-off` | `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF` | absent ⇒ **`false`** = enforcing (an OFF switch — see its section below) |
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
+| `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
+| `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
+| `billing-reconciliation-schedule` | `etendo.go.flags.billing-reconciliation-schedule` | `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
 Business Partner self-service portal. It is **targeted per sending account** and false for everyone
-until a ConfigCat targeting rule names that account's email, so day-to-day enablement happens in the
-ConfigCat dashboard and takes effect without a restart. Where no SDK key is configured the flag
-degrades to the local per-environment boolean above, which has no per-account notion — so a shared
-environment needs ConfigCat set up before the link is switched on for anyone. It is
+until a targeting rule on the hosted control plane (Datadog, or ConfigCat while it remains a
+fallback) names that account's email, so day-to-day enablement happens in that dashboard and takes
+effect without a restart. Where no hosted arm is selected the flag degrades to the local
+per-environment boolean above, which has no per-account notion — so a shared environment needs a
+hosted arm set up before the link is switched on for anyone. It is
 **backend-only** — no key in the web client's `flag-keys.js`, nothing in the
 browser reads it, and none must be added. It gates the link only: the portal route, the three
 `/sws/portal/*` endpoints, the `etgo_portal_access` table and the revoke action all ship
@@ -93,7 +205,11 @@ indistinguishable from a disabled feature — which is how a charged account got
 Accepted affirmatives: `true`, `Y`, `yes`, `1`. Accepted negatives: `false`, `N`, `no`, `0`
 (case-insensitive).
 
-### Per-account targeting (ETP-5267) — ConfigCat only, deliberately
+### Per-account targeting (ETP-5267) — hosted arms only, deliberately
+
+> ETP-5751 added the Datadog arm and the lowercase `email` attribute it matches on (see *Datadog
+> Feature Flags* above). Everything below about ConfigCat's `Email` still holds while ConfigCat is a
+> fallback arm.
 
 This module publishes the account identity into every evaluation, so a hosted provider can target on
 it: `FeatureFlagContext.forAccount(...)` sets the `ETGO_ACCOUNT` email as the OpenFeature
@@ -116,15 +232,16 @@ iteration of ETP-5267 added an `etendo.go.flags.<key>.emails` allowlist to
 Consequences to hold onto:
 
 - **A dev box needs no targeting.** It has one user, so the plain boolean is enough there.
-- **A shared environment must have ConfigCat configured before the flag is switched on**, because
-  the local arm can only answer "everyone" or "nobody".
-- **Evaluation is in-memory and costs no network call.** ConfigCat's `autoPoll` fetches in the
-  background (60 s here, `CONFIGCAT_POLL_SECONDS`) and evaluates against the in-memory snapshot, so
-  a flag check inside request handling is a map lookup.
-- **A flag that does not exist in ConfigCat resolves to its code default, `false`** — asking for an
-  undefined key is never an error.
-- **Creating a flag or changing a targeting rule is visible within one poll interval, with no
-  restart.** That, not the local properties, is the day-to-day path.
+- **A shared environment must have a hosted arm (Datadog, or ConfigCat while it remains the
+  fallback) configured before the flag is switched on**, because the local arm can only answer
+  "everyone" or "nobody".
+- **Evaluation is in-memory and costs no network call.** `dd-java-agent` keeps the Datadog
+  configuration in memory and refreshes it in the background; ConfigCat's `autoPoll` does the same
+  every 60 s (`CONFIGCAT_POLL_SECONDS`). A flag check inside request handling is a map lookup.
+- **A flag that does not exist on the hosted control plane resolves to its code default, `false`** —
+  asking for an undefined key is never an error.
+- **Creating a flag or changing a targeting rule takes effect with no restart** (on ConfigCat,
+  within one poll interval). That, not the local properties, is the day-to-day path.
 
 ### Targeting key — still OPEN for any future flag, no longer blocking this capability
 
@@ -184,6 +301,8 @@ flag read on both ends still needs the frontend half of ETP-4693 first.
 | Flag not configured | Code default (`false`) |
 | Flag configured with a non-boolean value | Code default, with a `PARSE_ERROR` on the evaluation so a typo is visible rather than silently reading as "disabled" |
 | Provider registration failed | No provider bound; every flag resolves to its default |
+| Hosted provider not ready within the bounded first wait | Provider stays bound; every flag resolves to its default until the first configuration arrives, then it serves live values |
+| Datadog switched on but `dd-java-agent` not loaded | The Datadog arm is skipped (logged `WARN`); the next arm is selected |
 | Unknown flag key, type mismatch, unexpected error | Default |
 
 Every flag's code default is **`false`**, so with no configuration at all a gated feature stays
@@ -230,15 +349,208 @@ purchase with no selection therefore remains `NOT_REQUESTED`; the browser must n
 choice. The recovery procedure is in
 [`demo-data-transfer-recovery.md`](demo-data-transfer-recovery.md).
 
+### `environment-access-enforcement-off` (ETP-5047) — backend-only kill switch, enforcing by default
+
+The commercial access check — HTTP 402 once a demo trial has expired or a subscription's payment
+grace has elapsed — went live with ETP-5443 with no off switch. This flag is that switch. It is
+**phrased as an OFF switch on purpose**: every failure in the table above resolves to `false`, and
+`false` here means *still enforcing*. An unset key, an unreachable ConfigCat, a wrong SDK key or an
+evaluation error therefore all keep today's behaviour; only the flag resolving to `true` — on ConfigCat the boolean setting served as `true`; locally
+(`etendo.go.flags.environment-access-enforcement-off` / `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF`)
+any of `true`, `Y`, `yes`, `1`, case-insensitive and trimmed. `false`, `N`, `no`, `0` keep
+enforcing, and any other value is a `PARSE_ERROR` that keeps enforcing too.
+A positively phrased "enforcement enabled" flag would do the opposite — a missing key would silently
+open every blocked tenant — so do not flip the polarity.
+
+Evaluated in exactly one place, `EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId)`,
+called only by `EnvironmentAccessGuard` — the one check every tenant entry point shares: the bind
+step of the shared auth pipeline (`EnvironmentRequestAuthenticator`, ETP-5455) for every surface
+whose `SurfacePolicy` requires commercial access (`NEO_API`: NEO; `NEO_DATA`: favorites, fiscal test
+mode, report selectors, the OAuth2 API-key endpoints), the `/sws/go` endpoints that act on the
+session's tenant (`resolveTenantSession`), MCP (`McpServlet`) and the legacy environment login
+(`GET /sws/go/login`). `NEO_AUXILIARY` surfaces (survey configuration, support) never ask.
+`POST /sws/go/session/environment` evaluates it but never refuses — it reports `accessDecision`,
+which is informational and backend-only (the SPA's blocked screen is driven by the NEO 402) — so
+the blocked customer reaches the pay path. The context is
+account-less and carries the tenant as the `clientId` attribute, so a ConfigCat rule can switch
+enforcement off for one tenant or for all. It is consulted **only for a denial**: an allowed request
+never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off=true` /
+`ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF=true`.
+
+| Flag | A tenant whose decision is `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` |
+|---|---|
+| unset / `false` / unreadable | 402 on NEO, the `NEO_DATA` servlets, the `/sws/go` tenant-session endpoints, MCP and `GET /sws/go/login`; INFO log `Commercial access denied at <entry point> for tenant <id>: <DECISION>` |
+| `true` (for that `clientId`, or globally) | allowed; INFO log `Environment access enforcement is switched off: <entry point> would have refused tenant <id> (<DECISION>)` |
+
+It is an incident switch (a wrong status after a provider outage, a bad deploy), not a way to give a
+tenant free access. No key exists in the web client's `flag-keys.js`, and none must be added: the
+SPA follows the 402 it is given. The 402 body and the entry points are in *Operating
+environment-access enforcement* below and in `neo-headless.md` §4.1; keep the body's `message`
+unchanged for at least one release after a backend change, since an older SPA still parses it
+(`environmentAccessGate.js` reads `error.decision` first). The row lifecycle behind the decision is
+`open-and-notable-topics.md` §3.7; the registry entry is `environment-access-enforcement-kill-switch`
+in `schema_forge/flags-registry.json`.
+
+### Operating environment-access enforcement (ETP-5047) — deploy, switch off, support
+
+The one operator-facing page for the commercial block. Enforcement needs **no switch to turn on**:
+it is live from the moment the module is deployed.
+
+**Deploy order.**
+
+1. Deploy the ETP-5047 module (`update.database` adds `ETGO_SUBSCRIPTION.GRACE_ANCHOR` and
+   `LAST_EVENT_AT`).
+2. Only then run the `R37-tenant-subscription-backfill` data-fix — opt-in, as step 4 of *The
+   subscription-model switch* (§3), after `ETGO_SubscriptionModel` is set. It now inserts into those two
+   columns, so run before the deploy it fails on every tenant (`FAILED`, retried by the runner — an
+   error, not a silent skip). An environment that already ran the pre-ETP-5047 R37 needs nothing
+   re-run: its rows are read through the `GRACE_ANCHOR` / watermark fallbacks
+   (`open-and-notable-topics.md` §2.3, §3.7).
+3. Before running R37 on an environment, settle the two edge cases in `open-and-notable-topics.md`
+   §3.11: list the tenants whose `ETGO_SubscriptionStatus` is `PAST_DUE` with no valid
+   `ETGO_SubscriptionDueAt` (R37 backfills them `past_due` with no anchor — blocked at once), and,
+   if subscriptions have already been canceled live on that environment, decide the `@check`
+   change first.
+
+**Switching enforcement off (incident only).**
+
+| Where | How | Scope | Takes effect |
+|---|---|---|---|
+| ConfigCat (SDK key configured) | boolean setting `environment-access-enforcement-off` served as `true` | everyone, or one tenant through a targeting rule on the `clientId` attribute (the tenant's `AD_Client_ID`) | without a restart, on the next poll |
+| Local configuration (no SDK key) | `etendo.go.flags.environment-access-enforcement-off=true` in `Openbravo.properties` (or the JVM property, or `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF=true`) | the whole environment — there is no per-tenant form locally | after a Tomcat restart |
+
+Confirm it took: a would-be refusal logs `Environment access enforcement is switched off: <entry
+point> would have refused tenant <id> (<DECISION>) and allowed it` at INFO, and
+`GET /sws/go/environments` reports that tenant's `accessState` as `ALLOWED`. Undo by removing the
+rule/property (or setting `false`). Anything that is not a clean `true` keeps enforcing.
+
+**The customer is not told.** A tenant in payment grace keeps seeing the in-app failed-payment
+banner (ETP-5049) announcing that the environment *will be blocked on* its `graceEndsAt`, even
+with the switch on for it; once that date passes the banner disappears and the environment keeps
+working with no in-app warning at all. The SPA cannot see the switch: during grace `accessState`
+reads `ALLOWED` either way. Accepted known limitation — tell support when you switch a tenant in
+grace off; details and the possible fix in `open-and-notable-topics.md` §4.17.
+
+**What support sees for a blocked tenant.**
+
+- **The customer**, after entering the environment (entry is never refused), gets the blocked
+  screen instead of the app: *"Access suspended for non-payment"* with **Manage subscription** →
+  `/account` (`SUBSCRIPTION_REQUIRED`), or *"Your trial period has ended"* with **Upgrade plan** →
+  `/upgrade` (`DEMO_TRIAL_EXPIRED`). `/account` (billing, Stripe Customer Portal) and `/upgrade`
+  keep working, and the environment picker labels the tenant *Access suspended* / trial expired
+  from `accessState`.
+- **An API client or AI agent** gets HTTP 402 with
+  `{"error":{"message":"Environment access is not available: <DECISION>","status":402,"code":"ENVIRONMENT_ACCESS_DENIED","decision":"<DECISION>"}}`
+  from NEO, MCP (a plain HTTP 402, not a JSON-RPC error), the `NEO_DATA` servlets (favorites,
+  fiscal test mode, report selectors), the `/sws/go` tenant-session endpoints and
+  `GET /sws/go/login`. (The OAuth2 API-key endpoints refuse through the same guard, in the OAuth2
+  servlet's own error envelope.) A token on org `0` (the System client after `COALESCE`) is judged
+  on its role's tenant, on NEO and MCP alike; if that role lookup fails the request gets **503**
+  (`The environment of this credential could not be verified; retry later`) — never an unjudged
+  pass (`open-and-notable-topics.md` §3.12). One gap: an Etendo JWT minted **before** the block
+  keeps working on Copilot until it expires (`open-and-notable-topics.md` §3.10).
+- **The log** has exactly one INFO line per refused request, written by `EnvironmentAccessGuard`
+  whichever surface refused: `Commercial access denied at <entry point> for tenant <AD_Client_ID>:
+  <DECISION>`. Entry points: `neo`, `mcp`, `report-selectors`, `oauth2-api-keys`,
+  `tenant-session` (the `/sws/go` tenant-session endpoints), `environment-login`
+  (`GET /sws/go/login`), and the `JwtAuthUtils` servlets' own labels (`favorites GET`,
+  `fiscal-test-mode GET`, ...). Grep for `Commercial access denied` and the tenant id. Entering the
+  environment (`POST /sws/go/session/environment`) writes no such line: it refuses nothing.
+- **Why it is blocked**: `GET /sws/go/environments` (`accessState`, `subscriptionStatus`, trial
+  fields) and the tenant's subscription rows —
+
+  ```sql
+  select status, start_date, end_date, grace_anchor, current_period_start, current_period_end,
+         last_event_at, stripe_subscription_id
+    from etgo_subscription
+   where environment_client_id = '<AD_Client_ID>' and isactive = 'Y'
+   order by end_date desc nulls first, created desc;
+  ```
+
+  A `past_due` row is blocked once `grace_anchor + etendo.go.billing.grace.days` (default 15) has
+  passed; a `canceled` or closed row is blocked at once. The lifecycle events that led there are in
+  `ETGO_BILLING_EVENT` (`event_result`, `failure_reason`); a `charge.dispute.created` there never
+  blocks anyone.
+- **Unblocking** is the customer paying: for a `past_due` row, through `/account` (the Stripe
+  Customer Portal) — the resulting `invoice.paid` sets the open row back to `active`; for a canceled
+  subscription, a new purchase, which opens a fresh row (`open-and-notable-topics.md` §3.7). A hand edit of the row is overwritten by the next
+  lifecycle event; the kill switch is for incidents, not for granting access.
+- **A new tenant whose row has no billing period** (`current_period_start/end` NULL in the query
+  above). A paid onboarding reads the period from Stripe right after it closes the checkout
+  request, because the purchase's first `invoice.paid` / `customer.subscription.updated` arrive
+  before the tenant exists and are ignored for good (`unresolved subscription`). When that read
+  fails the log has one WARN, `Could not read the billing period of Stripe subscription <sub_…>
+  for client <AD_Client_ID>: <reason>. The subscription row stays without a period until its next
+  lifecycle event` (preceded by the transport's own `Provider answered …` / `Payment provider
+  call … did not complete` WARN for a 5xx, 429, timeout or DNS/TLS failure); an unexpected
+  failure outside the read logs `The subscription of client <id> could not be given its billing
+  period` instead. Access is unaffected — the period is for the quotas and period usage
+  (ETP-5051), not the access decision — and the next lifecycle event (the first renewal at the
+  latest) fills it. A row with no `stripe_subscription_id` (payment-mode checkout) is skipped with
+  an INFO and stays periodless. See `open-and-notable-topics.md` §3.7 and §5.5.
+
 ### `onboarding-tenant-pool` (ETP-5389) — backend-only, off by default
 
 Switches onboarding between the classic from-scratch path (off) and claiming a pre-provisioned
 tenant from `ETGO_TENANT_POOL` (on). Evaluated through `TenantPoolConfig.isEnabled(accountEmail)`
-at two points: the onboarding claim (with the signup's account, so ConfigCat can target it per
-account) and every run of the "Tenant Pool Filler" background process (account-less). Off, the
+at two points: the onboarding claim (with the signup's account, so the hosted control plane can target
+it per account) and every run of the "Tenant Pool Filler" background process (account-less). Off, the
 claim never touches the pool and the filler run does nothing — onboarding is byte-for-byte the
 classic path. The pool size and the other knobs are plain runtime properties, not flags. Full
 reference: [`onboarding-flow.md`](onboarding-flow.md), "Tenant pool".
+
+### `mcp-modern-era-disabled` (ETP-5640) — backend-only kill switch, inverted
+
+Turns off the stateless MCP era (spec 2026-07-28) on `/sws/mcp`: `true` makes `server/discover`
+answer `-32601` again and serves every request under the `initialize`-based era, exactly as before
+ETP-5640. **Inverted on purpose**: every flag resolves to `false` when it is missing or the control
+plane is unreachable, and that must leave the server dual-era rather than switch it off. Environment
+level only (evaluated with an empty context) — never target it per account, because MCP clients
+cache the era per origin and one origin serves every tenant. Its only caller is
+`McpRequestEra.modernEnabled()`. Retire it, keeping the modern path, once the modern era is stable in
+production. Full reference: [`neo-headless.md`](neo-headless.md) §4.12.30.
+
+### `batch-callout-skip-disabled` (ETP-5676) — backend-only kill switch, inverted
+
+Turns off the per-batch redundant-callout skip: `true` makes every `/sws/neo/batch` and
+`etendo_batch` request run every create-cascade callout, even one sent with
+`_skipRedundantCallouts: true`. Unset or `false` honours that opt-in; a batch without it never
+skips anything either way. Inverted for the same reason as `mcp-modern-era-disabled`: a missing
+flag or an unreachable control plane must not change behaviour. Environment level (empty context),
+evaluated once per batch; its only caller is `NeoBatchScope.calloutSkipKillSwitchOn()`. Retire it,
+keeping the skip, once the skip has run on real tenant imports without a wrong default. Full
+reference: [`neo-headless.md`](neo-headless.md) §4.3.6.
+
+To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local value
+(`etendo.go.flags.batch-callout-skip-disabled=true` in `Openbravo.properties`, or
+`ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
+ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
+when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
+
+### `billing-reconciliation-schedule` (ETP-5048) — backend-only, strictly off by default
+
+Whether the billing reconciliation (`ETGO_BillingReconciliation`) runs on a schedule.
+
+- **Production schedules it by hand.** Production is updated by delta and never restarted, so no
+  startup hook runs there: turn the flag on and create a Process Request for **Billing
+  Reconciliation** (client System, timing *Schedule*, hourly), like Demo Trial Notices.
+- **Environments that restart:** while the flag is off, `BillingReconciliationScheduleStartup`
+  plants no process request; turning it on takes effect at the next restart (hourly by default,
+  `etendo.go.billing.reconcile.interval.minutes`). A fixed request an operator unscheduled is left
+  as it is, never planted again.
+- **The flag gates every scheduled run** (timing *Schedule*), the planted one or one an
+  administrator created. While it is off such a run does no work and ends as an **ERROR** in
+  Process Monitor, saying to turn the flag on or unschedule the request; the first such run of each
+  UTC day also sends one internal alert (`billing-reconcile-schedule-flag-off`).
+- A run started from the Classic menu **Billing Reconciliation**, or a Process Request run
+  immediately or later once, is never gated.
+
+Environment level, evaluated with an empty context; read on every scheduled run, so turning it off
+(ConfigCat, live within one poll) stops the scheduled work without a restart. Its callers are
+`BillingReconciliationScheduleStartup` and `BillingReconciliationProcess`. Operating the
+reconciliation (scheduling, settings, alerts, procedures):
+[`billing-reconciliation.md`](billing-reconciliation.md). Design of record:
+[`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).
 
 ## 2. The onboarding paywall
 
@@ -313,6 +625,67 @@ length on every read rather than stored, so changing it — including the 15 →
 deadline of existing demos too, not only new ones. The renewal grace window is separate:
 `etendo.go.billing.grace.days` (`ETGO_BILLING_GRACE_DAYS`), 15 days.
 
+### Frozen demo trial (ETP-5847)
+
+A demo that must never expire (a sales demo) gets the client preference
+`ETGO_DemoTrialFrozenDays`, set by hand in Classic. Its value is the number of days left the demo
+always shows: `14` on a demo created today keeps showing 14.
+
+- **How it works:** `TenantEnvironmentLifecycleService.resolve` reports a trial start that moves
+  with the clock (`now - (trial days - frozen days)`). The access check, the trial bar of
+  `GET /sws/go/environments` and the HubSpot sync all read that snapshot, so the demo is never
+  expired and they all agree. `trialStartedAt` in the API therefore moves too.
+- **The stored start is kept:** `ETGO_DemoTrialStartedAt` is never rewritten. Removing (or
+  deactivating) the preference resumes the trial from its real start, so an old demo is expired at
+  once.
+- **Only the trial:** a demo associated with a productive environment
+  (`ETGO_AssociatedProductiveClientId`) stays blocked. To keep a demo next to its productive,
+  remove that preference from the demo as well.
+- **Notices and periods:** the daily *Demo Trial Notices* pass sends a frozen demo no notice (its
+  start moves, so the notice key would change every day) and opens its never-opened fiscal periods
+  through the end the trial shows, in the owner's default role and organization. Without that pass
+  scheduled, the demo can post only within the periods the onboarding opened.
+- **Invalid values:** anything but a whole number of 0 or more is ignored with a warning in the
+  log, and the trial runs as usual.
+
+### Trial notices (ETP-5453)
+
+The owner of a demo is emailed before the trial ends and once it has ended, by the background
+process **Demo Trial Notices** (`ETGO_DemoTrialNotices`, `DemoTrialNoticeProcess`).
+It is **scheduled by hand**, once per instance: in Classic, as System Administrator, open
+**Process Request**, create a record for *Demo Trial Notices* with timing *Scheduled*, frequency
+*Daily* and a morning start time, and press *Schedule Process*. Nothing schedules it at startup on
+purpose: production is updated by delta and never restarted, so a startup hook would never run
+there. An instance where nobody scheduled it sends no notices at all.
+
+- **Who is checked:** every active client carrying `ETGO_DemoTrialStartedAt` or
+  `ETGO_LegacyTransitionStartedAt`. `DemoTrialNoticePlanner` decides from
+  `EnvironmentAccessPolicy`, so the email and the access gate cannot disagree about when a trial
+  ends.
+- **What is sent:** a reminder when the days left (rounded up, as the picker shows them) fit a
+  threshold — `etendo.go.demo.trial.reminder.days` (`ETGO_DEMO_TRIAL_REMINDER_DAYS`), default `3,1`
+  — and the expiry notice once the decision becomes `DEMO_TRIAL_EXPIRED`. The smallest fitting
+  threshold wins, so a missed run is caught up the next day. The expiry notice goes out only during
+  the first 3 days after the end: older demos are never mailed out of the blue, including on the
+  first run after a deploy.
+- **Who is never notified:** productive environments, inactive clients, tenants with no lifecycle
+  metadata, demos with a frozen trial (see above), and any demo associated with a productive
+  environment. A demo is never converted:
+  paying creates a new productive environment and the old demo is cut at once, so its owner must not
+  be told that the trial "ended".
+- **Recipient and language:** the platform account (`ETGO_ACCOUNT`) behind the client's owner
+  (`AD_User.EM_ETGO_Is_Owner`), in the client's language (`AD_Client.AD_Language`). Onboarding does
+  not set that column today, so the notices currently go out in Spanish, the email fallback.
+- **Idempotency:** contract `demo-trial-notice`, keyed on client, trial start and milestone
+  (`reminder-3`, `reminder-1`, `expired`) in `ETGO_Email_Safety`. A re-run, a restart or a retry
+  sends nothing new; a trial restarted with a new start is notified again.
+- **Best effort:** each environment commits on its own. A failed send is logged, counted in the
+  run's result (a warning, not an error) and retried on the next run.
+- **Not callable from the browser:** the contract accepts only a System-context caller and
+  re-derives the owed notice itself; the command carries nothing but `clientId`.
+
+Local verification, case by case: `etendo_schema_forge/docs/etp-5396-local-lifecycle-tool.md`.
+
 For legacy free tenants, enforcement is opt-in through `etendo.go.demo.transition.activation.at`
 (`ETGO_DEMO_TRANSITION_ACTIVATION_AT`), an ISO-8601 UTC instant selected during rollout. The first
 lifecycle read persists that instant per tenant as `ETGO_LegacyTransitionStartedAt`; the configured
@@ -325,11 +698,87 @@ scoped to the authenticated account and expose only the local purchase status, e
 and safe provisioning reference. They do not expose Stripe customer/session identifiers or create
 a second payment ledger.
 
-`GET /sws/go/billing/offers` retrieves the Stripe Price identified by the same
-`CheckoutConfiguration.priceId()` used by hosted checkout. Amount, currency, and recurring interval
-therefore come from the chargeable price itself. The endpoint returns 503 when Stripe cannot be
-reached or the configured price is missing, inactive, or has an unsupported shape; it never shows an
-independent configured price as a fallback.
+**The billing offer (ETP-5049).** `GET /sws/go/billing/offers` quotes the plan catalog's default
+plan (`PlanCatalogService#findDefaultPurchasablePlan`), from the Stripe Price checkout charges for
+it:
+
+- while the legacy price fallback is active, the grandfathered `legacy-productive` plan at the
+  configured `CheckoutConfiguration.priceId()` — exactly what a checkout that names no plan charges;
+- otherwise the first purchasable plan of `GET /sws/go/plans` (cheapest first, the plan the upgrade
+  page selects by default) at its own `PROVIDER_PRICE_ID`.
+
+Both branches use the predicates checkout decides on, so the offer never quotes a plan checkout
+would refuse. The default matches the first `/plans` entry **only while that plan can be quoted**:
+`/plans` leaves out a plan it cannot quote (the grandfathered plan when Stripe cannot price the
+configured legacy id, a catalog row with no display price or currency) and lists the next one,
+whereas the offer does not skip ahead — it quotes the default plan live from Stripe and answers 503
+when Stripe cannot price it. Amount, currency, and recurring interval come from the chargeable price itself:
+
+```json
+{ "code": "productive-tenant", "planKey": "productive-monthly",
+  "amountMinor": 2900, "currency": "EUR", "interval": "month" }
+```
+
+`planKey` (added in ETP-5049) is the key a checkout for the quoted plan names. The response carries
+no provider price id (removed in ETP-5049; nothing read it). The endpoint returns
+`503 BILLING_OFFER_UNAVAILABLE` when nothing is for sale, when Stripe cannot be reached, or when the
+price is missing, inactive, or has an unsupported shape; it never shows an independent configured
+price as a fallback. Before ETP-5049 the offer always quoted `CheckoutConfiguration.priceId()`, so
+after the cutover it disagreed with the charged price (`open-and-notable-topics.md` §2.1).
+
+> **No frontend caller.** Since the ETP-5049 frontend slice the upgrade page quotes the plan catalog
+> (`GET /sws/go/plans`) only and no longer calls this endpoint (`getBillingOffer` was removed from
+> `lib/upgrade/api.js`). The endpoint is kept server-side for any other billing consumer; removing it
+> is a separate decision.
+
+**No browser-facing response carries a provider price id.** The `POST /sws/go/checkout/sessions`
+and `POST /sws/go/billing/purchases` answers (`requestId`, `checkoutUrl`, `mode`, plus the selection
+fields each endpoint adds) no longer carry the `priceId` they had until ETP-5049
+(`open-and-notable-topics.md` §4.8). The charged price id stays on the checkout request row.
+
+**The subscription page (`GET /sws/go/billing/subscription`).** Besides the live Stripe detail
+(`plan`, `amountMinor`, `currency`, `status`, `renewalAt`, `cancelAtPeriodEnd`), the stored grace
+state (`graceEndsAt`, `graceDaysRemaining`) and `clientId`, the answer carries the plan catalog view
+of the subscription (ETP-5049, additive):
+
+```json
+{
+  "hasSubscription": true,
+  "plan": "Etendo GO Productive", "amountMinor": 2900, "currency": "EUR", "status": "active",
+  "renewalAt": "2026-11-23T00:00:00Z", "cancelAtPeriodEnd": false,
+  "graceEndsAt": null, "graceDaysRemaining": 0, "clientId": "4B1E…",
+  "planKey": "productive-monthly",
+  "planName": "Productive",
+  "planQuotas": [
+    { "resourceKey": "POSTED_SALES_INVOICES", "resourceName": "POSTED_SALES_INVOICES",
+      "unitLabel": "Inv", "includedQty": 500, "enforcementMode": "warn", "warningThreshold": 80,
+      "period": "month" }
+  ]
+}
+```
+
+- **`planKey` / `planName`** come from the tenant's `ETGO_SUBSCRIPTION` row (open, else the latest
+  closed one — `SubscriptionService#findLatest`, the row the lifecycle reads) and its `ETGO_PLAN`.
+  `plan` stays the live Stripe product name. Both are JSON null when the tenant has no subscription
+  row — no environment yet, or a tenant still answered by the retired `ETGO_TenantPlan` preference —
+  never `"free"`, which would name a catalog row that does not exist.
+- **`planQuotas`** lists the plan's active `ETGO_PLAN_QUOTA` rows, ordered by resource key. It is
+  informational — what the plan includes, not what has been used. `resourceKey`, `resourceName` and
+  `unitLabel` come from `ETGO_BILLING_RESOURCE`; `includedQty`, `enforcementMode`
+  (`warn`/`block`/`off`) and `warningThreshold` (percent, may be null) from the quota row; `period`
+  is the plan's billing interval (`month`/`year`, null when the plan has none), which is the quota's
+  consumption window (`open-and-notable-topics.md` §5.5, §5.8). It is empty when there is no plan
+  **and** when the plan has no quota rows — with a `planKey`, empty means **unlimited** (§5.1).
+- **`graceEndsAt`** is computed by `EnvironmentAccessPolicy.graceEndsAt`: the stored renewal due
+  date plus `etendo.go.billing.grace.days`, for a `PAST_DUE` subscription only. The access policy
+  and the per-environment `graceEndsAt` of `GET /sws/go/environments` use the same method, so the
+  page, the banner and the lockout cannot drift apart — except that the kill switch can cancel the
+  lockout without the page or the banner knowing (`open-and-notable-topics.md` §4.17).
+
+> **No UI consumer yet for `planKey`, `planName` and `planQuotas`.** ETP-5049 ships them in this
+> response only. The `/account` Subscription section (`SubscriptionSection`, schema_forge) still
+> shows `plan` (the live Stripe product name), the amount, the renewal and the grace state; showing
+> the catalog plan name and the included quotas there was moved to ETP-5051.
 
 `POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
 the same account and environment name. A duplicate submission returns the existing purchase only
@@ -345,7 +794,8 @@ the expired session; the replacement ID is then saved on the same request. This 
 sessions from charging the same purchase and preserves the original price and environment choice.
 
 Demo selection is valid only when the request is made from an authenticated free/demo environment
-linked to the account. A productive environment cannot supply a demo selection. When one or more
+linked to the account. A productive environment cannot supply a demo selection, nor be one — a
+canceled one included, although its plan reads free (ETP-5047, below). When one or more
 free/demo environments are linked to the account, include the chosen environment's
 `AD_CLIENT_ID` as `demoClientId` in the checkout request. Selection is required in this case. The
 backend validates that it is a free/demo environment
@@ -380,6 +830,60 @@ the demo) and revokes its access. From then on the demo is spent as a source:
   the source and provisions a clean productive environment — no association, profile copy,
   revocation or data transfer.
 
+**A productive environment is never a source, even when its plan reads free (ETP-5047).** A
+canceled subscription closes the tenant's row, and a closed row reads plan `free`
+(`TenantPlanService#resolvePlan`), so the plan alone would let a canceled productive tenant pass for
+a free demo. Source eligibility therefore also asks
+`TenantEnvironmentLifecycleService#isProductiveEnvironment`, which reads the lifecycle type the same
+way `resolve` does: any active subscription row, open or closed, makes the tenant productive (both
+reads of `SubscriptionService#findLatest` ignore an inactive row); without one,
+the `ETGO_EnvironmentType = PRODUCTIVE` marker or the retired `ETGO_TenantPlan` preference does, so
+the check holds while `ETGO_SubscriptionModel` is OFF too.
+
+- The rule excludes what is positively productive; it does not require a demo marker. A tenant that
+  predates the lifecycle metadata (no row, a missing or blank `ETGO_EnvironmentType`, free plan) stays
+  a valid source.
+- It is eligibility, not access: it never reads the access decision, so the access-enforcement kill
+  switch does not change it.
+- A purchase whose session is in a canceled productive environment is treated like any
+  productive-origin purchase: no `DEMO_SELECTION_REQUIRED`, any `demoClientId` / `dataTransfer` in
+  the body is ignored, and a clean productive environment is provisioned. Naming such an environment
+  as `demoClientId` from a demo session answers 400 `INVALID_DEMO_SELECTION`.
+- The account's source candidates (`EtendoGoJwtDalHelper#findFreeTenantIdsByAccountEmail`, used by
+  the paid onboarding re-check and by the data-transfer status and retry fallbacks, both through
+  `findOnlyFreeTenantIdByAccountEmail`) leave it out.
+- A purchase that recorded a productive environment as its source before this rule existed is
+  already paid, so onboarding does not refuse it: like a spent demo, it drops the source and
+  provisions a clean productive environment.
+- **It fails closed on the type reads only.** When the `SubscriptionService#findLatest` read or the
+  `ETGO_EnvironmentType` read throws, the answer is "productive" (not a source): the worst outcome
+  is a clean environment, never the association of the wrong tenant. A genuine demo whose read
+  fails is dropped as a source without a message — accepted 2026-10-14 (Martin Taal),
+  `open-and-notable-topics.md` §4.14. A failure inside the retired `ETGO_TenantPlan` fallback
+  (`TenantPlanPreferenceFallback#isProductive`, via `TenantPlanService#resolvePlanWithoutSubscription`)
+  is swallowed there and answers `free`, so the tenant counts as **not** productive — fail-open,
+  accepted the same day; the fallback retires in Phase F.
+- `GET /sws/go/environments` keeps reporting the facts: `plan: "free"`, `environmentType:
+  "PRODUCTIVE"`, `subscriptionStatus: "EXPIRED"`. The upgrade page keys its picker on
+  `environmentType`, not only on `plan`.
+
+**Only the demo's owner may give it away (ETP-5743).** An invited member has an environment user
+in the owner's demo, so matching the account email alone is not proof of ownership: the purchase
+copies the demo's profile and data and then locks it. Every purchase-source check therefore
+requires the account's user in that demo to carry `AD_User.EM_ETGO_Is_Owner = 'Y'`
+(`EtendoGoJwtDalHelper.clientOwnedByAccountEmail`):
+
+- `GET /sws/go/environments` reports `ownedByAccount: false` for a demo the account was only
+  invited into, and the upgrade page leaves it out of the source picker.
+- A purchase whose session is in such a demo is a clean productive purchase, exactly like one from
+  a spent demo: the body's `demoClientId` / `dataTransfer` are ignored.
+- Naming such a demo as `demoClientId` answers 400 `INVALID_DEMO_SELECTION`.
+- Onboarding resolves a paid purchase's recorded source against the account's **owned** free demos
+  only, so a selection recorded before this rule is refused with `DEMO_SELECTION_REQUIRED` (409)
+  instead of copying another owner's demo.
+- A tenant created before the owner flag existed (ETP-4830) has no owner at all. For those the
+  account email match is still accepted, until a backfill assigns an owner.
+
 Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
 taken from `PAID`; if the row has remained `PROVISIONING` longer than
 `etendo.go.billing.provisioning.lease.minutes` (`ETGO_BILLING_PROVISIONING_LEASE_MINUTES`), it is
@@ -404,8 +908,10 @@ current cost and their prices, and active contacts are copied under target clien
 global units and tax categories remain global references. Only prices on the demo's **default**
 sales and purchase price lists are migrated (the newest version of each), onto the target's
 default lists; prices on any other list are left behind. A contact address reuses only an
-address row already used by another contact, never the organization's fiscal address. Missing
-required target references fail the job with a visible reason.
+address row already used by another contact, never the organization's fiscal address. A contact
+keeps its source currency, else gets the target organization's (ETP-5768): the copy runs as
+System and bypasses the NEO hook that defaults it, and Core refuses to complete any document for
+a contact without one. Missing required target references fail the job with a visible reason.
 
 Each product and each contact is committed on its own, so the First Steps counters move while
 the job runs. A failure therefore rolls back only the item in progress and leaves the earlier
@@ -424,7 +930,8 @@ the browser has lost state or another demo environment has since been created.
 
 For new purchases, a recorded empty selection means that this purchase has no demo source; onboarding
 does not infer one. A saved demo ID that is no longer linked to the account or is no longer free/demo
-is rejected before provisioning starts. Legacy purchases with no saved selection marker resume the
+is rejected before provisioning starts — except a spent demo or a productive environment, which
+continue without a source (see *A productive environment is never a source* above). Legacy purchases with no saved selection marker resume the
 original purchase/session and provision without associating, copying, revoking, or transferring from
 a demo. Reopening those purchases does not prompt for a new demo choice.
 
@@ -487,6 +994,13 @@ payment Stripe's webhook confirmed:
 | Any other value, including one merely *shaped* like the retired mock token | `PAYMENT_DECLINED` |
 | absent / blank | `PAYMENT_REQUIRED` |
 
+**What is sold comes from the Subscription Plan Catalog (ETP-5046).** The browser names a plan by
+`planKey` (listed by `GET /sws/go/plans`), never a price; the server resolves the plan's Stripe
+price. While no plan carries a provider price, the **legacy price fallback** keeps selling the
+grandfathered `legacy-productive` plan at `etendo.go.checkout.price.id`, and the first priced plan
+retires it with no redeploy. Rules: `plans/2026-09-18-etp-5046-plan-and-subscription-design.md`
+§6–§6.1; operator go-live procedure: §6.2.
+
 ### Checkout provisioning status contract
 
 `GET /sws/go/checkout/sessions/{requestId}` is the account-scoped polling contract after the
@@ -503,11 +1017,13 @@ fixed `failureReason` describing that code:
 | `provisioning_failed` | The last attempt recorded a diagnostic failure | `true`, unless its `failureCode` is non-retryable |
 | `stalled` | The provisioning lease expired without a diagnostic failure | `true` |
 | `provisioned` | The request is terminal and carries its created client id | `false` |
+| `expired` | ETP-5048: the billing reconciliation closed the request after the provider confirmed its session expired unpaid (`CHECKOUT_STATUS = EXPIRED`); a new purchase starts a new request | `false` |
 
 **Failure codes (ETP-5548).** The raw cause of a failed attempt (exception text, internal ids,
 SQL) stays in `ETGO_CHECKOUT_REQUEST.FAILURE_REASON` for operations and is never returned. The row
 stores it as `CODE: cause`; the endpoint returns only the code and a fixed description, and the
-client localizes the code:
+client localizes the code. The codes, their encoding and their fixed descriptions live in
+`com.etendoerp.go.payment.ProvisioningFailureReason`; `CheckoutRequestStore` only consults them:
 
 | `failureCode` | Cause | Retryable |
 |---------------|-------|-----------|
@@ -618,6 +1134,14 @@ hypothetical preconditions for a future gateway:
 
 ## 3. The plan marker
 
+> **Since ETP-5046 the marker is no longer the source of truth — on an environment that has
+> switched to the subscription model.** There a tenant is productive when it has an open
+> `ETGO_SUBSCRIPTION` row in status `active` or `past_due`; the `ETGO_TenantPlan` preference
+> described below is written only when that subscription write fails, is retired per tenant, and is
+> read only as a transitional fallback. Until the operator switches (the System preference
+> `ETGO_SubscriptionModel = Y`, see *The subscription-model switch* below), every new purchase still
+> writes the marker and opens no row, exactly as before ETP-5046.
+
 A tenant created through the paid flow is marked **productive**; every other tenant is **free**.
 
 Storage is an `AD_Preference` row with attribute **`ETGO_TenantPlan`**, made visible at the tenant's
@@ -629,11 +1153,14 @@ favorites and saved filters. The row is created at runtime as ordinary data, so 
 Absence of the preference means `free`. Every tenant provisioned before this feature, and every first
 (unpaid) tenant, reads back as free without a migration.
 
-**Since ETP-5548 the marker is mandatory, and it is the last write before the commit.** The plan,
-the lifecycle projection (`ETGO_EnvironmentType=PRODUCTIVE`) and the removal of the tenant's own
-`ETSG_ForceTestMode` override are written by `applyPaidUpgradeSideEffects` immediately before the
-onboarding `commitDalChanges`, after the organization, dataset and demo-profile steps. A failure of
-any of the three aborts the onboarding, so a paid tenant never commits unmarked or half-marked.
+**Since ETP-5548 the plan record is mandatory, and it is the last write before the commit.** The
+plan (since ETP-5046 the `ETGO_SUBSCRIPTION` row, or this marker as the fallback when the row cannot
+be opened — see *Transitional read fallback* below), the lifecycle projection
+(`ETGO_EnvironmentType=PRODUCTIVE`) and the removal of the tenant's own `ETSG_ForceTestMode` override
+are written by `applyPaidUpgradeSideEffects` immediately before the onboarding `commitDalChanges`,
+after the organization, dataset and demo-profile steps. A failure of any of the three — for the
+plan, neither the subscription nor the fallback marker recorded — aborts the onboarding, so a paid
+tenant never commits unmarked or half-marked.
 
 The position matters as much as the obligation. The classic path commits internally while it builds
 the tenant (`InitialClientSetup`, `InitialOrgSetup`), and a marker written before those steps was
@@ -662,8 +1189,298 @@ paid tenant read back as free with nothing reporting it. `TenantPlanServiceTest`
 for that reason.
 
 A `paymentToken` the webhook confirmed is what makes an environment productive — including for an
-account's first environment. A purchase never converts an existing environment (ETP-5548): it
-always provisions a new one.
+account's first environment.
+
+**A purchase provisions a new environment (ETP-5548); a re-subscription does not (ETP-5742).**
+`resolveCheckoutSelection` turns a purchase from a productive or spent-demo session into a clean
+new environment, and the paid onboarding's `selectTenant` only ever picks a pooled tenant, a new
+classic client, or the half-built client this same checkout left under its provisioning name —
+never a finished environment. Since ETP-5047 a canceled productive tenant is no longer a demo
+source either (§2, *A productive environment is never a source*). Getting a canceled environment
+back is the re-subscription below, decided 2026-10-14 (Martin Taal).
+
+#### Re-subscribing a canceled environment (ETP-5742)
+
+The owner of a productive environment whose subscription was **canceled** pays for that same
+environment again, with its data. It is not a purchase of a new one.
+
+- **Where.** The blocked screen of a `SUBSCRIPTION_REQUIRED` environment whose `/environments`
+  entry reads `subscriptionStatus: "EXPIRED"` (`isCanceledSubscription` in
+  `environmentPresentation.js`) says the subscription was canceled. The owner
+  (`ownedByAccount: true`) gets **Reactivar suscripción**, which goes straight to Stripe Checkout.
+  An invited member is told to ask the owner. A subscription left **unpaid** (`PAST_DUE` past its
+  grace) keeps **Gestionar suscripción** → `/account`: the Customer Portal fixes the payment
+  method, and a second subscription would bill twice.
+- **`POST /sws/go/billing/reactivation`.** The body is empty. The environment is the session's,
+  never a request field, and the call is account-level like every other pay endpoint, so a blocked
+  session reaches it. It refuses `403 REACTIVATION_OWNER_REQUIRED` unless
+  `clientOwnedByAccountEmail` (ETP-5743), and `409 REACTIVATION_NOT_AVAILABLE` unless the lifecycle
+  snapshot is `PRODUCTIVE` + `EXPIRED` (a closed `ETGO_SUBSCRIPTION` row and the
+  `ETGO_SubscriptionStatus` preference answer alike). It answers like a purchase: `201` with
+  `requestId` and `checkoutUrl`. An unpaid re-subscription of the same environment is reopened
+  (`200`); one already paid answers `200 {"requestId", "status": "paid"}`. The plan is the canceled
+  row's; with no row it is the legacy price fallback, as a purchase naming no plan.
+- **The request names its tenant from the start.** `ETGO_CHECKOUT_REQUEST.CREATED_CLIENT_ID` is set
+  when the request is recorded. A new purchase sets it only at `PROVISIONED`, so "names a tenant
+  and is not provisioned" identifies a re-subscription (`CheckoutRequestStore.isPendingReactivation`)
+  with no column of its own. Onboarding never claims one: `claimForProvisioning` requires
+  `CREATED_CLIENT_ID is null`.
+- **The payment webhook applies it** (`applyReactivationIfPending`, on `checkout.session.completed`).
+  It records the payment exactly as a paid upgrade does (`applyPaidUpgradeSideEffects`), then
+  closes the request as `PROVISIONED`, which commits both together:
+  - **a tenant with a row** — a fresh row opens next to the closed one, and its period is read from
+    Stripe afterwards, as after an onboarding;
+  - **a tenant with no row** (switch OFF) — the `ETGO_TenantPlan` marker and
+    `ETGO_SubscriptionStatus = CURRENT` are written, and `ETGO_SubscriptionEventAt` moves to the
+    payment, so a late event of the canceled subscription is stale.
+- **A lost payment webhook is repaired by the billing reconciliation** (ETP-5048): it records the
+  payment from Stripe and applies the re-subscription through the same method, via
+  `PaidReactivationService`. `CheckoutRequestStore.findPaidReactivation` locks and re-reads the
+  request, so the webhook and the reconciliation apply it once.
+
+  A failure rolls back with the event: the webhook answers 500, Stripe redelivers, and the request
+  is still `PAID` for the retry. The new subscription's own lifecycle events find the tenant
+  through the request (`findByStripeSubscription`) or through the open row.
+- **Return.** Stripe returns to `/dashboard?reactivation=success&requestId=…` (cancel:
+  `reactivation=cancelled`, back to the button). The blocked screen polls
+  `GET /checkout/sessions/{requestId}` until `provisioned` and reloads the app. Usually the webhook
+  has already applied it and the app simply loads.
+- **The canceled environment keeps its name.** The pre-checkout and onboarding name checks
+  (`ownsProductiveNamed`) also count a tenant whose lifecycle type is productive. A closed row makes
+  its plan read `free`, and without that a new purchase under its name would be charged and then
+  refused by the company-name constraint. That check reads `resolve` and fails open; it does not use
+  `isProductiveEnvironment`, which fails closed.
+
+The plan record was built for this already:
+
+- a tenant with any `ETGO_SUBSCRIPTION` row, open or closed, is recorded on a row whatever the
+  subscription-model switch says (*Only a tenant's first row is switched*, below), so its payment
+  never lands in a marker hidden behind a closed row;
+- `SubscriptionService#openSubscription` opens a fresh row next to a closed one, and closes a
+  canceled open row whose close never arrived before it does
+  (`SubscriptionResubscriptionIntegrationTest`; `open-and-notable-topics.md` §3.7,
+  "Re-subscribing opens a fresh row").
+
+The one way such a tenant's payment could still reach the marker is a *failed* row lookup with the
+switch OFF — an accepted edge, see *Only a tenant's first row is switched*. The re-subscription
+does not take it: it asks `hasAnySubscription` itself, unguarded, before recording the payment, so a
+failing lookup fails the webhook for a retry instead.
+
+### Transitional read fallback (ETP-5046 cutover) — grep `ETP-5046-TRANSITIONAL-FALLBACK`
+
+Since ETP-5046 the source of truth for "is this tenant paying" is the tenant's **open
+`ETGO_SUBSCRIPTION` row** when it has one, not the preference. A tenant without a row — every paying
+tenant of an environment that has not switched yet (below), and on a switched one any tenant the
+opt-in **R37 backfill** has not reached — would otherwise resolve to `free`: paid features off,
+wrong environment ordering, and, once ETP-5047's enforcement lands, denied login. The backfill is
+deliberately gated on a human re-verifying that production Stripe checkout has not gone live (if it
+has, a real paying cohort exists that the backfill would orphan), so it is opt-in and never part of
+a full data-fix run.
+
+#### The subscription-model switch (`ETGO_SubscriptionModel`) — operator steps
+
+Each environment moves to the subscription model **once, at a moment its operator chooses**. Until
+then the whole environment — new customers included — keeps the preferences (`ETGO_TenantPlan`,
+`ETGO_SubscriptionStatus`/`DueAt`, `ETGO_EnvironmentType`) exactly as develop does, and the
+transitional fallback below is what answers for every paying tenant.
+
+`com.etendoerp.go.payment.SubscriptionModelSwitch#isOn` is the single answer. It reads an active
+**list** preference at System level — Property `ETGO_SubscriptionModel` (an `AD_Ref_List` value of
+`Property Configuration`), `AD_CLIENT_ID = '0'`, no visibility narrower than the system (Visible-at
+Client/Organization empty or `0`, no role, user or window) — and is ON only for the value `Y`.
+Absent, any other value, a tenant-scoped row or a failed read all mean OFF. It is read on every
+purchase (no cache, no restart needed) and only `applyPaidUpgradeSideEffects` consults it: it
+switches whether a **new** tenant gets a row, never how a tenant is read — a tenant with a row is
+decided by the row whatever the switch says. The module ships the list value but no preference row;
+a shipped row would be reset by every `update.database`.
+
+**After installing ETP-5046/5047 nothing changes in how purchases are recorded.** The switch is OFF
+(no row ships), and R37 is opt-in (`-- @optIn: true`), so a plain `make data-fixes` never runs it.
+At the time of writing (2026-10-14, before ETP-5046 reaches develop) develop has no
+`SubscriptionService`, so an environment built from develop has no subscription rows; one that ran
+an ETP-5046/5047 feature-branch build may already have some. A tenant without a row keeps writing
+the `ETGO_TenantPlan` marker until the operator switches.
+
+Switching, on the target environment — **switch first, then backfill** (order decided 2026-10-14,
+Martin Taal):
+
+1. Re-verify the R37 pre-check (production Stripe checkout has not gone live since 2026-08-27,
+   recorded in R37's `@report`), and settle the two R37 edge cases of
+   `open-and-notable-topics.md` §3.11 there.
+2. `make data-fixes` in `schema_forge` — bring every tenant's chain current. R37 is **opt-in**: a
+   full run never applies it, and `FIX=` refuses a tenant whose chain is behind R37's date
+   (`BLOCKED_CHAIN_BEHIND`, `optInChainGate` in `cli/src/data-fixes/run.js`).
+3. Set the System preference in the Classic **Preference** window (System Administrator): Client
+   System, **Property List** checked, Property *Billing: new purchases open a subscription row
+   (Y/N)* (`ETGO_SubscriptionModel`), Value `Y`, Organization `*`, no role/user/window, **no
+   Module**. No restart: it is read on every purchase. It is system-wide; there is no per-client
+   form.
+4. Run R37 — for the whole environment, or client by client with `CLIENT=<ad_client_id>`; dry run
+   first each time:
+   ```bash
+   make data-fixes FIX=R37-tenant-subscription-backfill [CLIENT=<ad_client_id>] DRY_RUN=1
+   make data-fixes FIX=R37-tenant-subscription-backfill [CLIENT=<ad_client_id>]
+   ```
+   A tenant onboarded after step 2 is refused `BLOCKED_CHAIN_BEHIND` (its chain starts at the
+   onboarding baseline): run `make data-fixes` again and repeat this step for it.
+5. Verify: R37's rows in `etgo_data_fix_history`
+   (`fix_id = '20261005T180000Z__R37-tenant-subscription-backfill'`) are all `APPLIED` or
+   `SKIPPED_NOT_NEEDED`, and
+   `select count(*) from ad_preference where attribute = 'ETGO_TenantPlan' and isactive = 'Y' and
+   upper(trim(value)) = 'PRODUCTIVE'` returns **0**, and the switch row reads exactly as the
+   reader selects it — exactly ONE row, with `trim(value) = 'Y'` (the value is not filtered on
+   purpose, so a second row or an `N` shows up instead of hiding):
+   ```sql
+   select ad_preference_id, value, created, updated from ad_preference
+    where property = 'ETGO_SubscriptionModel' and ispropertylist = 'Y' and isactive = 'Y'
+      and ad_client_id = '0' and coalesce(visibleat_client_id, '0') = '0'
+      and coalesce(visibleat_org_id, '0') = '0' and visibleat_role_id is null
+      and ad_user_id is null and ad_window_id is null
+    order by created desc, updated desc, ad_preference_id desc;
+   ```
+   **Done** when `select count(*) from ad_preference where attribute = 'ETGO_TenantPlan';` returns
+   **0** and the `ETP-5046-TRANSITIONAL-FALLBACK` WARN lines stop. Between steps 3 and 4 those
+   lines are expected: with the switch ON the fallback logs every tenant still on the marker at WARN
+   (at DEBUG while OFF), and each tenant's line stops once R37 has reached it. Rows that remain
+   are the worklist: a tenant with no subscription row whose marker is inactive or not
+   `productive` matches neither R37 branch and needs a decision by hand, and a tenant onboarded
+   later can get its marker back from R42 (`open-and-notable-topics.md` §3.13).
+
+**Why switch first.** Once the switch is ON every new purchase opens a row, so a single R37 pass
+catches every tenant still on the marker. In the old order (R37, then the switch) a purchase made
+between the two steps still wrote the marker and needed a second R37 run. Both orders are safe —
+rows are decided by the row, markers by the fallback. Migrating client by client *before*
+switching on has the same gap: a migrated tenant has a row and needs nothing more, but every other
+tenant that bought while the switch was OFF wrote the marker, so run R37 once more for the whole
+environment after enabling the switch.
+
+Notes for the operator:
+
+- **Both models coexist until the end.** The switch is system-wide; only R37 is per client. Readers
+  look at the tenant's row first and fall back to the preference, so a tenant R37 has not reached
+  keeps working.
+- **One-way per tenant.** Once a tenant has any `ETGO_SUBSCRIPTION` row it stays on rows whatever
+  the switch says (`SubscriptionService#hasAnySubscription`, below).
+- **What R37 touches.** It inserts the backfilled row and deletes the tenant's `ETGO_TenantPlan`
+  preference. It does **not** create the `ETGO_SubscriptionModel` preference (step 3 does), and it
+  deliberately keeps `ETGO_EnvironmentType` and `ETGO_SubscriptionStatus`: every purchase writes
+  them on both routes (`TenantEnvironmentLifecycleService#markProductive`), and nothing reads them
+  once a row exists. On a row tenant `ETGO_SubscriptionStatus` goes stale — read `ETGO_SUBSCRIPTION`.
+- **Not picked up by R37:** a productive tenant without an `ETGO_TenantPlan` marker (made productive
+  by hand or with a dev tool). R37's `@check` keys on the marker, so such a tenant gets no row.
+
+**Only a tenant's first row is switched.** A tenant that already has a subscription row — any row,
+open or closed — is recorded on a row when it pays, whatever the switch says, because its row is
+what every read answers from; a payment recorded only in the marker would leave it blocked behind a
+canceled or closed row. **A failed row lookup takes the marker path — accepted, decided 2026-10-14
+(Martin Taal), no code change.** With the switch OFF, a lookup that throws is logged at ERROR and
+answered "no row", so a re-purchasing tenant whose only row is closed would stay blocked while it
+pays. No purchase reaches a tenant with a closed row, and the ETP-5742 re-subscription, which does,
+checks for a row itself and fails instead (above). The acceptance does not depend on it — it
+fails closed in practice: the lookup runs in the onboarding transaction, and on PostgreSQL a failed
+SQL statement aborts it, so the upgrade fails and stays retryable; only a failure other than a
+failed SQL statement (a mapping or hydration error after the statement ran, for instance) can reach
+the marker (`open-and-notable-topics.md` §2.9, design doc §6.3).
+
+**One-way in practice.** Setting the switch back to `N` sends only tenants that have never had a
+row back to the marker; every tenant with a row stays on it, payments included. Two populations that
+only grow apart — turning it back OFF undoes nothing. Full design: §6.2/§6.3 of
+`plans/2026-09-18-etp-5046-plan-and-subscription-design.md`.
+
+**The preference is the safety net, not a parallel truth — and it is retired per tenant.** With the
+switch OFF and no row for the tenant, `applyPaidUpgradeSideEffects` opens no row and calls
+`markProductive`, logged at INFO.
+With it ON it writes the subscription row and then:
+
+- **success** → it does *not* call `markProductive`; it calls
+  `TenantPlanService.retireProductivePreference(clientId)` instead, removing any stale
+  `ETGO_TenantPlan` row this tenant still carries, so a newly paid tenant lands directly in the
+  post-cutover state;
+- **failure** → it calls `markProductive`, because the preference is then the only record that the
+  tenant paid, and the fallback below is the only thing that will read it back. If that write fails
+  too, the onboarding aborts (ETP-5548, see above) and the purchase stays retryable.
+
+Both writes are **System-owned rows (client `0`) written from the new tenant's context**, so both
+run through `payment/SystemContext` (the subscription insert in `SubscriptionService.openSubscription`,
+the marker delete in `TenantPlanService.retireProductivePreference`). Admin mode alone is not
+enough: `setAdminMode(true)` keeps the DAL check that a row's client equals the *current* client,
+and a refusal from that check also marks the whole request for rollback, which no best-effort
+`catch` can undo. A refused subscription save is additionally evicted from the session, so it
+cannot resurface as a `StaleStateException` in the onboarding's next flush. Both are pinned from a
+real tenant context by `TenantContextSubscriptionWriteIntegrationTest`. The billing period the
+onboarding later reads from Stripe for that row (ETP-5047) is written the same way — under
+`SystemContext`, so its `UPDATEDBY` is `0` — but as one conditional HQL `UPDATE` in its own
+transaction, after the checkout request is closed (`open-and-notable-topics.md` §3.7).
+
+R37 — run by the operator as step 4 of the switch above — does the same thing for tenants that
+predate the subscription model (statement 3 of its `@apply`, in the same transaction as the
+backfilled row) — and, more widely than the runtime path,
+for **every tenant that has any `ETGO_SUBSCRIPTION` row**, open or closed. That widening exists
+because develop's data-fix R42 (`20260929T190000Z__R42-paid-provisioning-commercial-metadata`,
+ETP-5548) re-inserts the marker for paid-provisioned tenants, including ones that already have a
+row; the runner runs R37 only for a tenant whose chain is already past R42, so R37 removes it
+(design doc §8 and §8.2, including the `run.js --fix <R42>` caveat and the residual for tenants
+that first reach R42 after the switch, `open-and-notable-topics.md` §3.13). The fleet therefore
+converges from both ends onto one **observable end condition**: `select count(*) from ad_preference where
+attribute = 'ETGO_TenantPlan'` reaching 0, with the WARN line below silent. Both retirement paths
+remove *every* `ETGO_TenantPlan` row visible at the tenant, whatever its value or `isactive` flag —
+a leftover would keep that count above zero forever and block Phase F. Neither retirement may fail
+an upgrade that has already been paid for: a failed one is logged and ignored, since the fallback
+simply keeps answering until R37 retires the row.
+
+**Any future data-fix must key on `etgo_subscription`, not on `ETGO_TenantPlan`** — after R37 the
+preference is present only for tenants the backfill has not reached, so "no productive preference"
+increasingly means "already migrated paying tenant", not "free tenant". `R31`/`R32` are safe only
+because the runner's filename-ordered, watermark-gated execution — plus its rule that an opt-in fix
+such as R37 runs only for a tenant whose chain is already past the fix's date — guarantees they can
+never run for a tenant after R37 has; see §8.2 of
+`plans/2026-09-18-etp-5046-plan-and-subscription-design.md`.
+
+The read side therefore tolerates the gap. `com.etendoerp.go.payment.TenantPlanPreferenceFallback`
+answers for a tenant **only when it has no active subscription row, open or closed** (since
+ETP-5047 a canceled subscription closes its row, and a closed row reads as `canceled`, so it must not
+fall through to the preference; both reads of `SubscriptionService#findLatest` filter on `isactive`,
+so a tenant whose only rows are inactive falls back too):
+
+| Path | Where | Cost |
+|---|---|---|
+| Single tenant | `TenantPlanService.resolvePlan` | one extra query, and only when the tenant has no active subscription row |
+| Bulk (`GET /environments`) | `EnvironmentPlanCache.of(allClientIds, openSubscriptions)` | **one** extra query for all the missing ids at once; none when every tenant has a row |
+
+Both paths must fall back or neither: if only one did, the environment list and `resolvePlan` would
+disagree about the same tenant, which is worse than the bug being worked around.
+
+**The preference is not scoped by `AD_CLIENT_ID`.** `Preferences.setPreferenceValue` stores the row
+at `AD_CLIENT_ID = '0'` and encodes the tenant it is about in **`VISIBLEAT_CLIENT_ID`** only, so a
+lookup filtered on `AD_CLIENT_ID` matches **zero** rows for every tenant — silently. That exact
+mistake nearly shipped in the R37 backfill SQL, and two specs
+(`TenantPlanServiceTest.PreferenceFallback#scopesTheLookupByVisibleAtClientAndNeverByAdClient` for
+the read, `TenantPlanServiceTest.RetireProductivePreference#scopesTheLookupByVisibleAtClientAndNeverByAdClient`
+for the retirement) pin the column so it cannot recur. It is worse on the retirement side: a removal
+filtered on `AD_CLIENT_ID` is a silent no-op, so the end-condition count would never reach 0 and
+Phase F would be blocked forever with nothing reporting why.
+
+A tenant answered by the fallback reports `plan: "productive"` with **`planKey` and
+`subscriptionStatus` both JSON null**. There is genuinely no Subscription Plan Catalog row and no subscription behind
+it; inventing a key such as `"legacy-productive"` would claim a row that does not exist and would
+hide the gap from anyone reading the payload.
+
+Every resolution served by the fallback logs one line naming the tenant — one line per resolution,
+never per comparison — at a level that follows the subscription-model switch (read only when the
+fallback serves a tenant, at most once per resolution or batch). With the switch **OFF** it is
+**DEBUG**: every paying tenant is recorded with the preference on purpose. With it **ON** it is
+**WARN**, pointing at the backfill, because a tenant without a row is unexpected there:
+
+```
+ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no active ETGO_SUBSCRIPTION row, open or closed; resolving it as '{}' from the retired {} preference. The ETP-5046 backfill has not run for this tenant — run it and this line disappears.
+```
+
+Once switched, that WARN is the deletion signal:
+**when it stops appearing, every tenant has a subscription row** and the fallback is safe to remove. Read it
+together with the preference count above: the count says no tenant still *has* a marker, the silence
+says no tenant still *needs* one. Phase F deletes `TenantPlanPreferenceFallback`, `markProductive`,
+`retireProductivePreference`, `PREFERENCE_ATTRIBUTE` and every call site — one
+`grep -r ETP-5046-TRANSITIONAL-FALLBACK` finds all of it.
 
 ### Exposure in `/environments`
 
@@ -686,6 +1503,18 @@ The `GET /sws/go/environments` response gained two additive fields:
   badges as *Demo* / *Productivo*. This field is the user-visible end of the whole chain: when
   ETP-4966 was reported as "I paid and it still says Demo", this is the value that was wrong.
 - **`accountEmail`** (top level) is the account identity described in §1.
+- **`graceEndsAt`** (per environment, with the other lifecycle fields — `subscriptionStatus`,
+  `renewalDueAt`, the trial fields — so absent when the tenant has no lifecycle metadata) is the
+  ISO instant a `PAST_DUE` subscription's payment grace ends, JSON null for any other status
+  (ETP-5049). It is `EnvironmentAccessPolicy.graceEndsAt`, the rule the access policy locks the
+  tenant out on and `GET /sws/go/billing/subscription` reports, so an in-app grace banner needs no
+  copy of `etendo.go.billing.grace.days`. It is the policy's date, not a promise: with the kill
+  switch on for the tenant nothing is locked at that instant, and no field here says so
+  (`open-and-notable-topics.md` §4.17).
+- **`accessState`** (per environment, when the tenant has lifecycle metadata) is the
+  `EnvironmentAccessPolicy.Decision` name. Since ETP-5047 it is the decision **actually enforced**
+  (`EnvironmentAccessGuard.enforcedDecision`): with the kill switch on for that tenant a refusal
+  reads `ALLOWED`, while `subscriptionStatus` and the trial fields keep reporting the facts.
 
 Both are backward compatible; clients that ignore them are unaffected.
 
@@ -790,8 +1619,10 @@ must never break the session.
 | Payload allow-list (what may ever be written down) | `com.etendoerp.go.payment.WebhookPayloadSummary` |
 | Confirmed-payment correlation, checkout lifecycle | `com.etendoerp.go.payment.CheckoutRequestStore` (`ETGO_CHECKOUT_REQUEST`) |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
+| Subscription-model switch (does a new purchase open a row?) | `com.etendoerp.go.payment.SubscriptionModelSwitch` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
 | Demo data transfer worker | `com.etendoerp.go.payment.DemoDataTransferService` |
+| Environment access check (auth pipeline bind step, MCP, `/login`, tenant session), 402 body, kill switch | `com.etendoerp.go.payment.EnvironmentAccessGuard`, `EnvironmentAccessEnforcementFlag`; carried to the consumers by `com.etendoerp.go.auth.EnvironmentAuthOutcome#getAccessDenial` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |
 
 ## Internal provisioning outcome alerts (ETP-5548)

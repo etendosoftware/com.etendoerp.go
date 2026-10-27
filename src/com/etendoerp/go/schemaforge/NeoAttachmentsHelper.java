@@ -17,30 +17,23 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.Part;
 
 import org.apache.commons.lang3.StringUtils;
@@ -53,10 +46,11 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
-import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.application.attachment.AttachImplementation;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
+import org.openbravo.client.application.attachment.AttachmentUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -64,6 +58,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Attachment;
+import org.openbravo.model.ad.utility.AttachmentConfig;
 
 /**
  * Cross-cutting helper for the NEO Headless attachments endpoint
@@ -73,11 +68,12 @@ import org.openbravo.model.ad.utility.Attachment;
  * Attachments tab can list, upload, download (single + zip), delete and
  * update-description without each window having to declare its own handler.
  *
- * <p>The methods that return JSON yield a {@link NeoResponse}; the two methods
- * that stream binary content ({@link #handleDownload} and
- * {@link #handleDownloadAll}) write directly to the {@link HttpServletResponse}
- * and signal to the caller (via a {@code void} return) that the response body
- * has already been committed.</p>
+ * <p>Every method here yields a {@link NeoResponse} the servlet serializes. The
+ * two operations that stream binary content instead — the single-file download
+ * and the zip archive — live in {@link NeoAttachmentsDownloader}, together with
+ * the HTTP plumbing only they use ({@code Content-Disposition}, the content-type
+ * fallback and the JSON error writer); that class writes the response body
+ * itself and returns {@code void} to say so (ETP-5526).</p>
  *
  * <p>This class assumes the caller has already activated admin mode — the
  * built-in endpoint dispatcher in {@link NeoServlet} sets it before delegating
@@ -96,14 +92,17 @@ public final class NeoAttachmentsHelper {
           .withZone(ZoneOffset.UTC);
 
   private static final String MULTIPART_FILE_PART = "file";
-  private static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
-  private static final String ZIP_CONTENT_TYPE = "application/zip";
   private static final String UI_PATTERN_STD = "STD";
-  private static final String ERR_ATTACHMENT_NOT_FOUND = "Attachment not found";
-  private static final String TABLENAME_RECORDID_REQUIRED = "tableName and recordId are required";
-  private static final String ATTACHMENTID_REQUIRED = "attachmentId is required";
-  private static final String CONTENT_DISPOSITION = "Content-Disposition";
   private static final String MAIN_FLAG_COLUMN = "EM_ETGO_ISPREVIEWMAIN";
+
+  // Package-private: the error texts and the header name are shared verbatim with
+  // NeoAttachmentsDownloader, which serves the streaming half of the same endpoint.
+  // One declaration each, so the two halves cannot answer different messages.
+  static final String ERR_ATTACHMENT_NOT_FOUND = "Attachment not found";
+  static final String TABLENAME_RECORDID_REQUIRED = "tableName and recordId are required";
+  static final String ATTACHMENTID_REQUIRED = "attachmentId is required";
+  static final String CONTENT_DISPOSITION = "Content-Disposition";
+
   private static final String ERR_FISCAL_DECL_NOT_DRAFT_PREFIX =
       "Cannot delete an attachment of a fiscal declaration that is not in draft status: ";
 
@@ -270,7 +269,7 @@ public final class NeoAttachmentsHelper {
    * previously-marked attachment for that same (table, record) first — always
    * exactly one "main" attachment per record, sidebar and preview never diverge.
    */
-  private static void markAsMain(Attachment attachment) {
+  static void markAsMain(Attachment attachment) {
     String tableId = attachment.getTable().getId();
     String recordId = attachment.getRecord();
     Attachment previous = findMainAttachment(tableId, recordId);
@@ -345,72 +344,20 @@ public final class NeoAttachmentsHelper {
       return NeoResponse.error(400, "Expected multipart/form-data");
     }
 
-    File tempFile = null;
     try {
       Part filePart = request.getPart(MULTIPART_FILE_PART);
       if (filePart == null) {
         return NeoResponse.error(400, "Missing 'file' part");
       }
-
-      // ETP-5038: the size/type policy is enforced HERE, not only in the dropzone — the
-      // browser is not the only caller and the part's Content-Type is chosen by whoever
-      // is calling. Cheap checks (declared size, extension) run before a single byte is
-      // written to disk; the magic-byte check needs the materialized file and runs below.
-      String submittedName = resolveFileName(filePart);
-      String rejection = NeoAttachmentPolicy.validateMetadata(submittedName, filePart.getSize());
-      if (rejection != null) {
-        return NeoResponse.error(400, rejection);
-      }
-
-      String tableId = resolveTableId(tableName);
-      String tabId = resolveTabId(tableId, request.getParameter("tabId"));
-      if (tabId == null) {
-        return NeoResponse.error(400,
-            "Could not resolve a standard tab for table '" + tableName + "'");
-      }
-
-      // ETP-5309: an unsaved record (the SPA's literal id "new") used to reach the core,
-      // whose OBSecurityException came back as a raw 500. Answer a clean 404 instead.
-      if (!recordExists(tableId, recordId)) {
-        return NeoResponse.error(404, "Record '" + recordId + "' does not exist in table '"
-            + tableName + "'. Save it before attaching files.");
-      }
-
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-
-      tempFile = materializeTempFile(filePart);
-
-      rejection = NeoAttachmentPolicy.validateContent(submittedName, tempFile);
-      if (rejection != null) {
-        return NeoResponse.error(400, rejection);
-      }
-
-      AttachImplementationManager aim = getAttachManager();
-      aim.upload(new HashMap<>(), tabId, recordId, orgId, tempFile);
-
-      JSONObject body = new JSONObject();
-      body.put("name", tempFile.getName());
-      body.put("message", "uploaded");
-
-      if (markAsMain) {
-        Attachment uploaded = findLatestUploadedAttachment(tableId, recordId, tempFile.getName());
-        if (uploaded != null) {
-          markAsMain(uploaded);
-          body.put("id", uploaded.getId());
-          body.put("isMain", true);
-        }
-      }
-      return NeoResponse.created(body);
-    } catch (OBException e) {
-      OBDal.getInstance().rollbackAndClose();
-      log.warn("Attachment upload failed for {}/{}: {}", tableName, recordId, e.getMessage());
-      return NeoResponse.error(500, e.getMessage());
+      // ETP-5715: everything after the part is in hand lives in NeoAttachmentStore, shared with
+      // the MCP upload link — one policy, one storage path, one main-document replacement.
+      return NeoAttachmentStore.store(new NeoAttachmentUpload(tableName, recordId,
+          request.getParameter("tabId"), resolveFileName(filePart), filePart.getSize(),
+          fileName -> materializeTempFile(filePart), markAsMain));
     } catch (Exception e) {
       OBDal.getInstance().rollbackAndClose();
       log.error("Attachment upload failed for {}/{}", tableName, recordId, e);
       return NeoResponse.error(500, "Internal error uploading attachment");
-    } finally {
-      cleanupTempFile(tempFile);
     }
   }
 
@@ -429,120 +376,6 @@ public final class NeoAttachmentsHelper {
     } catch (JSONException e) {
       log.error("Failed to build the attachments policy response", e);
       return NeoResponse.error(500, "Failed to build the attachments policy response");
-    }
-  }
-
-  // ── Download (single) ───────────────────────────────────────────────────────
-
-  /**
-   * Streams a single attachment to the response.
-   *
-   * <p>Writes the response body directly. Callers MUST NOT serialize a
-   * {@link NeoResponse} after this method returns — the body is already
-   * committed.</p>
-   *
-   * @param attachmentId the C_File_ID
-   * @param response     the HTTP response to write to
-   * @throws IOException if writing the response fails
-   */
-  public static void handleDownload(String attachmentId, HttpServletResponse response)
-      throws IOException {
-    if (StringUtils.isBlank(attachmentId)) {
-      writeError(response, 400, ATTACHMENTID_REQUIRED);
-      return;
-    }
-    Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
-    if (attachment == null) {
-      writeError(response, 404, ERR_ATTACHMENT_NOT_FOUND);
-      return;
-    }
-    try {
-      AttachImplementationManager aim = getAttachManager();
-      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-      aim.download(attachmentId, buffer);
-
-      response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(resolveContentType(attachment.getDataType()));
-      response.setHeader(CONTENT_DISPOSITION, buildContentDisposition(attachment.getName()));
-      byte[] bytes = buffer.toByteArray();
-      response.setContentLength(bytes.length);
-      try (OutputStream out = response.getOutputStream()) {
-        out.write(bytes);
-        out.flush();
-      }
-    } catch (OBException e) {
-      log.warn("Attachment download failed for id {}: {}", attachmentId, e.getMessage());
-      if (!response.isCommitted()) {
-        writeError(response, 500, e.getMessage());
-      }
-    } catch (Exception e) {
-      log.error("Attachment download failed for id {}", attachmentId, e);
-      if (!response.isCommitted()) {
-        writeError(response, 500, "Internal error downloading attachment");
-      }
-    }
-  }
-
-  // ── Download (zip of all attachments for a record) ──────────────────────────
-
-  /**
-   * Streams all of a record's attachments as a single zip file, including
-   * whichever one is marked as the record's main document — it now appears
-   * in the Attachments tab's own list (see {@link #handleList}), so omitting
-   * it here would silently download fewer files than the tab shows.
-   *
-   * @param tableName the AD_Table.name (case-insensitive)
-   * @param recordId  the record's primary key
-   * @param response  the HTTP response to write to
-   * @throws IOException if writing the response fails
-   */
-  public static void handleDownloadAll(String tableName, String recordId,
-      HttpServletResponse response) throws IOException {
-    if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
-      writeError(response, 400, TABLENAME_RECORDID_REQUIRED);
-      return;
-    }
-    try {
-      String tableId = resolveTableId(tableName);
-
-      OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
-      criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
-      criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, recordId));
-      criteria.setFilterOnReadableOrganization(false);
-
-      AttachImplementationManager aim = getAttachManager();
-      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-      try (ZipOutputStream zip = new ZipOutputStream(buffer)) {
-        for (Attachment attachment : criteria.list()) {
-          ByteArrayOutputStream fileBuffer = new ByteArrayOutputStream();
-          aim.download(attachment.getId(), fileBuffer);
-          zip.putNextEntry(new ZipEntry(attachment.getName()));
-          zip.write(fileBuffer.toByteArray());
-          zip.closeEntry();
-        }
-      }
-
-      response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(ZIP_CONTENT_TYPE);
-      response.setHeader(CONTENT_DISPOSITION,
-          buildContentDisposition("attachments_" + recordId + ".zip"));
-      byte[] bytes = buffer.toByteArray();
-      response.setContentLength(bytes.length);
-      try (OutputStream out = response.getOutputStream()) {
-        out.write(bytes);
-        out.flush();
-      }
-    } catch (OBException e) {
-      log.warn("Attachment downloadAll failed for {}/{}: {}",
-          tableName, recordId, e.getMessage());
-      if (!response.isCommitted()) {
-        writeError(response, 500, e.getMessage());
-      }
-    } catch (Exception e) {
-      log.error("Attachment downloadAll failed for {}/{}", tableName, recordId, e);
-      if (!response.isCommitted()) {
-        writeError(response, 500, "Internal error downloading attachments archive");
-      }
     }
   }
 
@@ -786,7 +619,7 @@ public final class NeoAttachmentsHelper {
    * used right after {@link AttachImplementationManager#upload} to identify the
    * row that call just created, since it has no return value of its own.
    */
-  private static Attachment findLatestUploadedAttachment(String tableId, String recordId,
+  static Attachment findLatestUploadedAttachment(String tableId, String recordId,
       String fileName) {
     OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
     criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
@@ -833,23 +666,59 @@ public final class NeoAttachmentsHelper {
   }
 
   /**
-   * Returns the file size in bytes by inspecting the attachment payload on disk.
-   * Returns 0 when the file is missing (e.g. configured to an alternative
-   * storage backend or moved out-of-band).
+   * Returns the file size in bytes, asking the configured attach implementation
+   * for the payload instead of rebuilding the path by hand.
+   *
+   * <p>The path must not be derived from {@code c_file.path}: that column is
+   * {@code NULL} for every attachment stored the "old way"
+   * ({@code CoreAttachImplementation.getPath} returns {@code null} whenever the
+   * directory contains a {@code -}), so a hand-built path yields 0 bytes for
+   * those rows. {@link AttachImplementation#downloadFile(Attachment)} is the same
+   * contract {@link AttachImplementationManager#download} uses, so the size always
+   * matches what the download actually serves, on any storage backend.</p>
+   *
+   * <p>Backends that materialize a temporary copy ({@link
+   * AttachImplementation#isTempFile()}) have it removed again right away.</p>
+   *
+   * <p>Defensive by design: this runs inside the list response, so any failure
+   * (no handler, missing file, backend error) degrades to 0 instead of breaking
+   * the listing.</p>
    */
   private static long computeFileSize(Attachment attachment) {
-    if (attachment.getPath() == null || attachment.getName() == null) {
+    if (attachment == null || StringUtils.isBlank(attachment.getName())) {
       return 0L;
     }
-    String attachRoot = OBPropertiesProvider.getInstance()
-        .getOpenbravoProperties()
-        .getProperty("attach.path");
-    if (StringUtils.isBlank(attachRoot)) {
+    try {
+      AttachImplementation handler = resolveAttachHandler(attachment);
+      if (handler == null) {
+        return 0L;
+      }
+      File file = handler.downloadFile(attachment);
+      if (file == null || !file.exists()) {
+        return 0L;
+      }
+      long size = file.length();
+      if (handler.isTempFile()) {
+        cleanupTempFile(file);
+      }
+      return size;
+    } catch (RuntimeException e) {
+      log.warn("Could not compute size of attachment {}: {}", attachment.getId(), e.getMessage());
       return 0L;
     }
-    File file = new File(attachRoot + File.separator + attachment.getPath(),
-        attachment.getName());
-    return file.exists() ? file.length() : 0L;
+  }
+
+  /**
+   * Resolves the {@link AttachImplementation} configured for the given attachment,
+   * falling back to the default method when the row carries no attachment config.
+   */
+  private static AttachImplementation resolveAttachHandler(Attachment attachment) {
+    String method = AttachmentUtils.DEFAULT_METHOD;
+    AttachmentConfig config = attachment.getAttachmentConf();
+    if (config != null && config.getAttachmentMethod() != null) {
+      method = config.getAttachmentMethod().getValue();
+    }
+    return getAttachManager().getHandler(method);
   }
 
   /**
@@ -871,12 +740,19 @@ public final class NeoAttachmentsHelper {
     return tempFile;
   }
 
-  private static void cleanupTempFile(File tempFile) {
+  static void cleanupTempFile(File tempFile) {
     if (tempFile == null) {
       return;
     }
     try {
       Files.deleteIfExists(tempFile.toPath());
+      // ETP-5715: the upload link materializes the bytes in a directory of its own so two uploads
+      // of the same file name cannot overwrite each other; that directory goes with the file. The
+      // multipart path writes straight into the system temp dir, which is never removed.
+      File parent = tempFile.getParentFile();
+      if (parent != null && !parent.equals(new File(System.getProperty("java.io.tmpdir")))) {
+        Files.deleteIfExists(parent.toPath());
+      }
     } catch (IOException e) {
       log.warn("Could not delete temporary upload file: {}", tempFile.getAbsolutePath(), e);
     }
@@ -911,46 +787,7 @@ public final class NeoAttachmentsHelper {
    * path traversal when materializing the temporary file.
    */
   private static String sanitizeFileName(String name) {
-    String trimmed = name.trim();
-    int sep = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-    if (sep >= 0) {
-      trimmed = trimmed.substring(sep + 1);
-    }
-    return trimmed.isEmpty() ? "attachment" : trimmed;
-  }
-
-  private static String resolveContentType(String dataType) {
-    return StringUtils.isBlank(dataType) ? DEFAULT_CONTENT_TYPE : dataType;
-  }
-
-  /**
-   * Builds an RFC 5987 compliant {@code Content-Disposition} header so that
-   * UTF-8 filenames survive across browsers.
-   */
-  private static String buildContentDisposition(String fileName) {
-    String safe = fileName == null ? "download" : fileName.replace("\"", "_");
-    String encoded;
-    try {
-      encoded = URLEncoder.encode(safe, StandardCharsets.UTF_8.name()).replace("+", "%20");
-    } catch (java.io.UnsupportedEncodingException e) {
-      encoded = safe;
-    }
-    return "attachment; filename=\"" + safe + "\"; filename*=UTF-8''" + encoded;
-  }
-
-  /**
-   * Writes a NEO-style JSON error directly to the response. Used by the
-   * streaming endpoints, which cannot return a {@link NeoResponse}.
-   */
-  private static void writeError(HttpServletResponse response, int status, String message)
-      throws IOException {
-    NeoResponse error = NeoResponse.error(status, message);
-    response.setStatus(error.getHttpStatus());
-    if (error.getBody() != null) {
-      response.setContentType("application/json");
-      response.setCharacterEncoding(StandardCharsets.UTF_8.name());
-      response.getWriter().write(error.getBody().toString());
-    }
+    return NeoAttachmentPolicy.sanitizeFileName(name);
   }
 
   /**

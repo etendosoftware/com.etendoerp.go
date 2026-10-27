@@ -495,6 +495,7 @@ public class CompanyInvitationService {
       if (invitation.getExpiresAt() != null) {
         item.put(FIELD_EXPIRES_AT, invitation.getExpiresAt().toInstant().toString());
       }
+      putInvitationOrigin(item, invitation);
       invitations.put(item);
     }
 
@@ -502,6 +503,28 @@ public class CompanyInvitationService {
     result.put(FIELD_STATUS, FIELD_SUCCESS);
     result.put("invitations", invitations);
     return result;
+  }
+
+  /**
+   * ETP-5734 — where an invitation comes from, for the "Mis empresas" pending-invitation notice:
+   * the company id (so the page can tell the notice apart from the company's own row), when it
+   * was sent, and who sent it. The inviter is the record's creator, set by
+   * {@code persistInvitation} from the inviting admin's context. Additive: existing consumers
+   * ignore the new keys.
+   */
+  private static void putInvitationOrigin(JSONObject item, Invitation invitation)
+      throws JSONException {
+    if (invitation.getClient() != null) {
+      item.put("clientId", invitation.getClient().getId());
+    }
+    if (invitation.getCreationDate() != null) {
+      item.put("invitedAt", invitation.getCreationDate().toInstant().toString());
+    }
+    User inviter = invitation.getCreatedBy();
+    if (inviter != null) {
+      item.put("inviterName", StringUtils.defaultString(inviter.getName()));
+      item.put("inviterEmail", StringUtils.defaultString(inviter.getEmail()));
+    }
   }
 
   /**

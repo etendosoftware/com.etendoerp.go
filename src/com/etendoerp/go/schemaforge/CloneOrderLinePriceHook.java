@@ -49,6 +49,38 @@ public class CloneOrderLinePriceHook extends CloneLinePriceHook {
     super(delegate);
   }
 
+  /**
+   * After the core clone: the core hook zeroes the line quantities and the header delivered flag
+   * but copies the header "invoiced" flag and the line delivery / invoice dates, so a draft copy
+   * of an invoiced order would still look invoiced. Reset them (the copy has no invoices).
+   */
+  @Override
+  public BaseOBObject postCopy(BaseOBObject originalRecord, BaseOBObject newRecord)
+      throws Exception {
+    BaseOBObject copied = super.postCopy(originalRecord, newRecord);
+    Order clone = (Order) copied;
+    clone.setReinvoice(false);
+    // The core hook moves the order date to today but copies the accounting date: align it, so
+    // the copy does not post earlier than its own order date.
+    clone.setAccountingDate(clone.getOrderDate());
+    // A fresh record points at none of the source's related documents (ETP-5709).
+    clone.setQuotation(null);
+    clone.setCancelledorder(null);
+    clone.setCancelled(false);
+    clone.setReplacedorder(null);
+    clone.setReplacementorder(null);
+    clone.setEtvfacReversedInvoice(null);
+    for (OrderLine line : clone.getOrderLineList()) {
+      line.setDateDelivered(null);
+      line.setInvoiceDate(null);
+      line.setSOPOReference(null);
+      line.setQuotationLine(null);
+      line.setGoodsShipmentLine(null);
+      line.setReplacedorderline(null);
+    }
+    return copied;
+  }
+
   @Override
   protected void restoreListPrices(BaseOBObject originalRecord, BaseOBObject copied) {
     List<OrderLine> sourceLines = ((Order) originalRecord).getOrderLineList();

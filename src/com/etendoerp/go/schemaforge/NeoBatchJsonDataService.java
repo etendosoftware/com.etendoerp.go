@@ -21,8 +21,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -63,13 +61,17 @@ import org.openbravo.service.json.JsonUtils;
  * subclassed instead — which core explicitly sanctions: "This class can however also be extended
  * and instantiated directly."</p>
  *
+ * <p>The complete update and remove implementations are copies of core. Review both methods,
+ * including their extracted helpers, against core on every upgrade.</p>
+ *
  * <h2>What is different from core</h2>
- * <p>{@link #update(Map, String)} is core's method with exactly two lines removed:</p>
+ * <p>{@link #update(Map, String)} is core's method with exactly two lines made conditional on a
+ * batch owning the transaction:</p>
  * <ul>
- *   <li>the {@code commitAndClose()} that ends the success branch — the caller commits once, after
+ *   <li>the {@code commitAndClose()} that ends the success branch — the batch commits once, after
  *       every operation has succeeded;</li>
  *   <li>the {@code rollbackAndClose()} in the conversion-error branch — it would close the session
- *       out from under the caller mid-batch, so the caller is left to roll back instead.</li>
+ *       out from under the batch mid-way, so the batch is left to roll back instead.</li>
  * </ul>
  * <p>Everything else (save, flush, the dirty-session loop, the session clear, the refresh of
  * computed columns, {@code doPreAction}/{@code doPostAction}, the error shapes) is byte-for-byte
@@ -77,8 +79,18 @@ import org.openbravo.service.json.JsonUtils;
  * "deliberately leaves the commit to the caller" — see
  * {@code FiscalDeclCrudHandler#replaceIncidentsNoCommit} (ETP-4456).</p>
  *
- * <h2>The two things this class must keep in step with core</h2>
- * <p>Both are {@code private} upstream and so had to be duplicated. If core changes either, this
+ * <h2>Single writes too, and why (ETP-5782)</h2>
+ * <p>Every NEO write goes through this class ({@link BatchService#currentJsonService()}), not only
+ * a batch's. Outside a batch {@link #update(Map, String)} commits (and, on a conversion error,
+ * rolls back) exactly where core does, so a single write persists as before. The reason is the
+ * catch: core turns a failed write into translated prose and drops the exception, which left NEO
+ * classifying failures by their text. Here the throwable is still in hand, so
+ * {@link NeoErrorResponses#writeFailure} attaches its classification (a trigger refusal, a
+ * foreign-key violation, a deadlock…) to core's failure body before it is lost.
+ * {@link #remove(Map)} is overridden for the same reason and is otherwise core's.</p>
+ *
+ * <h2>Private helpers copied in addition to the update and remove bodies</h2>
+ * <p>These are {@code private} upstream and so had to be duplicated. If core changes either, this
  * class drifts <b>silently</b> — there is no compiler error to catch it:</p>
  * <ul>
  *   <li>{@link #ADD_FLAG}, core's {@code "_doingAdd"} marker;</li>
@@ -108,7 +120,6 @@ import org.openbravo.service.json.JsonUtils;
  */
 public class NeoBatchJsonDataService extends DefaultJsonDataService {
 
-  private static final Logger log = LogManager.getLogger();
 
   /** Duplicated from core's private constant — see the class javadoc on silent drift. */
   private static final String ADD_FLAG = "_doingAdd";
@@ -168,17 +179,29 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
       final List<BaseOBObject> bobs = buildBobsFromContent(parameters, fromJsonConverter,
           jsonContent, originalData);
 
+      final boolean callerOwnsTransaction = BatchService.callerOwnsTransaction();
       if (fromJsonConverter.hasErrors()) {
-        // Core rolls back and closes the session here. Deliberately not done: the caller owns the
-        // transaction, and closing it mid-batch would break every later operation. The caller
+        // Core rolls back and closes the session here. Not done while a batch owns the
+        // transaction: closing it mid-batch would break every later operation, and the batch
         // rolls back when it sees this validation_error.
+        if (!callerOwnsTransaction) {
+          OBDal.getInstance().rollbackAndClose();
+        }
         return conversionErrorResponse(fromJsonConverter);
       }
-      return persistWithoutCommitting(parameters, content, bobs, originalData, sendOriginalIdBack);
+      String result = persistWithoutCommitting(parameters, content, bobs, originalData,
+          sendOriginalIdBack);
+      if (!callerOwnsTransaction) {
+        // A single write commits exactly where core does: inside the try, so a failure at commit
+        // time (a deferred constraint) is reported like any other.
+        OBDal.getInstance().commitAndClose();
+      }
+      return result;
     } catch (Throwable t) { // NOSONAR — core catches Throwable here and the shape must match
       Throwable localThrowable = DbUtility.getUnderlyingSQLException(t);
-      logUpdateFailure(parameters, localThrowable);
-      return JsonUtils.convertExceptionToJson(localThrowable);
+      // ETP-5782: core's body, plus the classification of the throwable it is about to lose.
+      return NeoErrorResponses.writeFailure(t, localThrowable,
+          parameters.containsKey(ADD_FLAG) ? "POST" : "PUT");
     } finally {
       OBContext.restorePreviousCrossOrgReferenceMode();
     }
@@ -224,22 +247,62 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
   }
 
   /**
-   * Logs an {@code update}/{@code add} failure exactly like core, minus the rollback core performs
-   * before logging (the caller owns the transaction here). Extracted from {@link #update(Map,
-   * String)} purely to reduce its cognitive complexity (Sonar).
+   * Core's {@code remove}, verbatim, except that a failure keeps its throwable: the failure body is
+   * built by {@link NeoErrorResponses#writeFailure}, which attaches the classification (ETP-5782) —
+   * a foreign-key violation here means the record is still in use, a 409, not a 500.
    *
-   * @param parameters      the datasource parameters, used to tell add from update for the message
-   * @param localThrowable  the underlying throwable, already unwrapped via
-   *                        {@link DbUtility#getUnderlyingSQLException(Throwable)}
+   * <p>Like core, it commits twice (the response is built and committed before the delete runs in a
+   * transaction of its own). Customizations can dispatch a delete inside a batch; this inherited
+   * commit behavior must be checked when upgrading core.
+   *
+   * {@inheritDoc}
    */
-  private void logUpdateFailure(Map<String, String> parameters, Throwable localThrowable) {
-    if (!(localThrowable instanceof OBException
-        && !((OBException) localThrowable).isLogExceptionNeeded())) {
-      if (parameters.containsKey(ADD_FLAG)) {
-        log.error("Error adding new object (caller-owned transaction)", localThrowable);
-      } else {
-        log.error("Error updating object (caller-owned transaction)", localThrowable);
-      }
+  @Override
+  public String remove(Map<String, String> parameters) {
+    final String id = parameters.get(JsonConstants.ID);
+    if (id == null) {
+      return JsonUtils.convertExceptionToJson(new IllegalStateException("No id parameter"));
+    }
+    final String entityName = parameters.get(JsonConstants.ENTITYNAME);
+    if (entityName == null) {
+      return JsonUtils.convertExceptionToJson(new IllegalStateException("No entityName parameter"));
+    }
+    BaseOBObject bob = OBDal.getInstance().get(entityName, id);
+    if (bob == null) {
+      return JsonUtils.convertExceptionToJson(new IllegalStateException("Object not found"));
+    }
+    try {
+      // create the result info before deleting to prevent Hibernate errors
+      final DataToJsonConverter toJsonConverter = OBProvider.getInstance()
+          .get(DataToJsonConverter.class);
+      final List<JSONObject> jsonObjects = toJsonConverter
+          .toJsonObjects(Collections.singletonList(bob));
+
+      final JSONObject jsonResult = new JSONObject();
+      final JSONObject jsonResponse = new JSONObject();
+      jsonResponse.put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_SUCCESS);
+      jsonResponse.put(JsonConstants.RESPONSE_DATA, new JSONArray(jsonObjects));
+      jsonResult.put(JsonConstants.RESPONSE_RESPONSE, jsonResponse);
+      OBDal.getInstance().commitAndClose();
+
+      doPreAction(parameters, jsonObjects.toString(), DataSourceAction.REMOVE);
+
+      // now do the real delete in a separate transaction
+      // to prevent side effects that a child can not be deleted
+      // from its parent
+      // https://issues.openbravo.com/view.php?id=21229
+      bob = OBDal.getInstance().get(entityName, id);
+      OBDal.getInstance().remove(bob);
+
+      final String result = doPostAction(parameters, jsonResult.toString(),
+          DataSourceAction.REMOVE, null);
+
+      OBDal.getInstance().commitAndClose();
+
+      return result;
+    } catch (Throwable t) { // NOSONAR — core catches Throwable here and the shape must match
+      // Core passes the original throwable to convertExceptionToJson here, not the unwrapped one.
+      return NeoErrorResponses.writeFailure(t, t, "DELETE");
     }
   }
 
@@ -402,9 +465,9 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
     Check.isNotNull(content, "Content must be set");
     final Object jsonRepresentation;
     if (content.trim().startsWith("[")) {
-      jsonRepresentation = new JSONArray(content);
+      jsonRepresentation = NeoRequestBodyParser.parseJsonArraySafely(content);
     } else {
-      final JSONObject jsonObject = new JSONObject(content);
+      final JSONObject jsonObject = NeoRequestBodyParser.parseJsonObjectSafely(content);
       jsonRepresentation = jsonObject.get(JsonConstants.DATA);
     }
     return jsonRepresentation;

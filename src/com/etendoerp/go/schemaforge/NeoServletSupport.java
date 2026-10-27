@@ -29,6 +29,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerResolutionCache;
 class NeoServletSupport {
 
   private static final Logger log = LogManager.getLogger(NeoServletSupport.class);
+  private static final String HOOK_HANDLER_ERROR_PREFIX = "Hook handler error: ";
   private static final EnvironmentRequestAuthenticator AUTHENTICATOR =
       new EnvironmentRequestAuthenticator();
 
@@ -48,6 +49,20 @@ class NeoServletSupport {
    */
   static EnvironmentAuthOutcome authenticate(HttpServletRequest request, SurfacePolicy policy) {
     return AUTHENTICATOR.authenticate(request, policy);
+  }
+
+  /**
+   * {@link #authenticate(HttpServletRequest, SurfacePolicy)} naming the entry point for the
+   * commercial-access guard's log line (ETP-5047), so support can tell the surfaces apart.
+   *
+   * @param request    the incoming request
+   * @param policy     what the calling surface requires beyond a valid credential
+   * @param entryPoint a short label for the guard's log line ({@code "report-selectors"}, ...)
+   * @return the outcome; on refusal it carries the status and message to answer with
+   */
+  static EnvironmentAuthOutcome authenticate(HttpServletRequest request, SurfacePolicy policy,
+      String entryPoint) {
+    return AUTHENTICATOR.authenticate(request, policy, entryPoint);
   }
 
   /**
@@ -127,7 +142,10 @@ class NeoServletSupport {
         if (StringUtils.isNotBlank(javaQualifier)) {
           log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
         }
-        return defaultStep.apply(context);
+        NeoResponse result = defaultStep.apply(context);
+        // Core serialises `updated` to the second; the refresh re-stamps it with milliseconds.
+        NeoAuditTokenRefresh.refreshInResponse(context, result);
+        return result;
       }
 
       NeoResponse preResult = preDispatch.response();
@@ -140,7 +158,7 @@ class NeoServletSupport {
         if (preResult.getHttpStatus() >= 400) {
           return preResult;
         }
-        return runPostHook(request, handler, preResult);
+        return runPostHookAfterCommit(request, handler, preResult, javaQualifier);
       }
 
       NeoResponse defaultResult = defaultStep.apply(context);
@@ -153,10 +171,30 @@ class NeoServletSupport {
         return defaultResult;
       }
 
-      return runPostHook(request, handler, defaultResult);
+      return runPostHookAfterCommit(request, handler, defaultResult, javaQualifier);
     } catch (Exception e) {
-      log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+      // ETP-5782: a customization's refusal is classified like any other failure — a trigger or an
+      // AD-message-keyed refusal is a 422 the caller can act on, a fault stays a 500 — and the
+      // session is rolled back, discarding what was not committed yet. A failure in afterHandle,
+      // after the main write committed, never gets here: see runPostHookAfterCommit.
+      // A 5xx message is sanitized: it used to forward e.getMessage() verbatim, SQL included.
+      return NeoErrorResponses.fromException(e, context.getHttpMethod(),
+          "Hook handler " + javaQualifier, HOOK_HANDLER_ERROR_PREFIX);
+    }
+  }
+
+  /**
+   * {@link #runPostHook}, with a failure answered by {@link NeoErrorResponses#afterCommitFailure}
+   * (ETP-5782): by the time {@code afterHandle} runs the main write succeeded and, outside a batch,
+   * is committed, so a failure here must not read as a refusal to correct and re-send.
+   */
+  private static NeoResponse runPostHookAfterCommit(NeoExtensionRequest request,
+      NeoHandler handler, NeoResponse previousResult, String javaQualifier) {
+    try {
+      return runPostHook(request, handler, previousResult);
+    } catch (RuntimeException e) {
+      return NeoErrorResponses.afterCommitFailure(e, request.context().getHttpMethod(),
+          "Hook handler " + javaQualifier + " afterHandle", HOOK_HANDLER_ERROR_PREFIX);
     }
   }
 

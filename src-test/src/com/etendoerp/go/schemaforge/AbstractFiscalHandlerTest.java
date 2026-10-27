@@ -23,8 +23,11 @@ import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -44,6 +47,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.hibernate.Session;
 import org.hibernate.query.Query;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -62,7 +66,10 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for routing logic in {@link AbstractFiscalHandler}.
@@ -70,6 +77,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * Uses a minimal stub subclass so the base-class routing (declarations path,
  * dispatch exception handling, allowsPost default) can be exercised without
  * a real database connection.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractFiscalHandler
  */
 public class AbstractFiscalHandlerTest {
 
@@ -181,7 +190,7 @@ public class AbstractFiscalHandlerTest {
     servlet = mock(NeoServlet.class);
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @After
@@ -276,7 +285,7 @@ public class AbstractFiscalHandlerTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("GET"))).thenReturn(false);
 
     StubHandler handler = new StubHandler(servlet, false);
     handler.handle("declarations", "GET", req, resp);
@@ -297,7 +306,7 @@ public class AbstractFiscalHandlerTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("POST"))).thenReturn(false);
 
     StubHandler handler = new StubHandler(servlet, false);
     handler.handle("known", "POST", req, resp);
@@ -624,6 +633,285 @@ public class AbstractFiscalHandlerTest {
     }
   }
 
+  // ── resolvePeriods — annual mode (ETP-5716) ───────────────────────
+
+  private static Period period(long no) {
+    Period p = mock(Period.class);
+    when(p.getPeriodNo()).thenReturn(no);
+    return p;
+  }
+
+  private static List<Period> periodsOf(long... numbers) {
+    List<Period> list = new java.util.ArrayList<>();
+    for (long n : numbers) {
+      list.add(period(n));
+    }
+    return list;
+  }
+
+  /** "0A" binds months 1-12 and returns the 12 periods of the fiscal year. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolvePeriodsAnnualBindsWholeYear() {
+    StubHandler handler = new StubHandler(servlet, false);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+      Query<Period> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Period.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      List<Period> twelve = periodsOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+      when(q.list()).thenReturn(twelve);
+
+      List<Period> result =
+          handler.resolvePeriods("org1", 2025, AbstractFiscalHandler.ANNUAL_PERIOD);
+
+      assertEquals(twelve, result);
+      verify(q).setParameter(eq("from"), eq(1L));
+      verify(q).setParameter(eq("to"), eq(12L));
+      verify(q).setParameter(eq("year"), eq("2025"));
+    }
+  }
+
+  /** An annual declaration over an incomplete calendar fails, naming the missing months. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolvePeriodsAnnualFailsWhenAMonthIsMissing() {
+    StubHandler handler = new StubHandler(servlet, false);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+      Query<Period> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Period.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      List<Period> incomplete = periodsOf(1, 2, 3, 4, 5, 6, 8, 9, 10, 11);
+      when(q.list()).thenReturn(incomplete);
+
+      try {
+        handler.resolvePeriods("org1", 2025, AbstractFiscalHandler.ANNUAL_PERIOD);
+        fail("Expected IncompleteFiscalYearException for an incomplete fiscal year");
+      } catch (IncompleteFiscalYearException e) {
+        assertTrue(e.getMessage(), e.getMessage().contains("[7, 12]"));
+        assertTrue(e.getMessage(), e.getMessage().contains("2025"));
+        assertEquals(2025, e.getYear());
+        assertEquals(List.of(7L, 12L), e.getMissingPeriods());
+      }
+    }
+  }
+
+  /**
+   * ETP-5716 (review B3): "single ordinary per exercise" is a per-model hook, not a model literal
+   * in the shared CRUD handler — linkSubmittedSnapshotProviders wires it from each handler's
+   * allowsSingleOrdinary() (only the 390 says yes) into every handler's declarations CRUD.
+   */
+  @Test
+  public void testSingleOrdinaryRuleComesFromTheModelHandlers() {
+    Fiscal390BoxesHandler h390 = new Fiscal390BoxesHandler(servlet);
+    Fiscal303BoxesHandler h303 = new Fiscal303BoxesHandler(servlet);
+    assertTrue(h390.allowsSingleOrdinary());
+    assertTrue(!h303.allowsSingleOrdinary());
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303, h390);
+    for (AbstractFiscalHandler h : List.of(h303, h390)) {
+      assertTrue(h.declHandler().singleOrdinarySupport.isSingleOrdinaryModel(h390.getDeclModel()));
+      assertTrue(!h.declHandler().singleOrdinarySupport.isSingleOrdinaryModel(h303.getDeclModel()));
+      assertTrue(!h.declHandler().singleOrdinarySupport.isSingleOrdinaryModel("unknown"));
+    }
+  }
+
+  /** A year with no period at all is rejected too (no silent empty compute): every month. */
+  @Test
+  public void testRequireFullYearRejectsEmptyCalendar() {
+    try {
+      AbstractFiscalHandler.requireFullYear(Collections.emptyList(), "org1", 2025);
+      fail("Expected IncompleteFiscalYearException for an empty calendar");
+    } catch (IncompleteFiscalYearException e) {
+      assertEquals(12, e.getMissingPeriods().size());
+      // The text sent to the client never carries the organization id (the log message does).
+      assertTrue(e.getMessage(), e.getMessage().contains("org1"));
+      assertTrue(e.userText(), !e.userText().contains("org1"));
+    }
+  }
+
+  /**
+   * ETP-5716 — wherever it is raised under dispatch (wrapped by runDispatch), an incomplete
+   * fiscal year is answered as the structured 422 INCOMPLETE_FISCAL_YEAR, not the generic 500.
+   */
+  @Test
+  public void testIncompleteFiscalYearYields422WithCode() throws Exception {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("2025");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("0A");
+    StubHandler handler = new StubHandler(servlet, true,
+        new IncompleteFiscalYearException("ORG1", 2025, List.of(11L, 12L)));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext    ctx = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("ORG1");
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      handler.handle("known", "GET", req, resp);
+    }
+
+    org.mockito.ArgumentCaptor<NeoResponse> captor =
+        org.mockito.ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(resp), captor.capture());
+    verify(servlet, org.mockito.Mockito.never()).sendError(eq(resp),
+        eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR), anyString());
+    assertEquals(IncompleteFiscalYearException.HTTP_STATUS, captor.getValue().getHttpStatus());
+    org.codehaus.jettison.json.JSONObject error = captor.getValue().getBody().getJSONObject("error");
+    assertEquals("INCOMPLETE_FISCAL_YEAR", error.getString("code"));
+    assertEquals(2025, error.getInt("year"));
+    assertEquals(2, error.getJSONArray("missingPeriods").length());
+    assertEquals(11, error.getJSONArray("missingPeriods").getInt(0));
+    assertTrue(error.getString("message"), !error.getString("message").contains("ORG1"));
+  }
+
+  /** Quarter/month codes never run the full-year check: a partial result is returned as-is. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolvePeriodsQuarterDoesNotRequireFullYear() {
+    StubHandler handler = new StubHandler(servlet, false);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+      Query<Period> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Period.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      List<Period> two = periodsOf(4, 5);
+      when(q.list()).thenReturn(two);
+
+      assertEquals(two, handler.resolvePeriods("org1", 2025, "T2"));
+    }
+  }
+
+  // ── findLatestTaxReport / pickLatestTaxReport (ETP-5716) ──────────
+
+  private static final java.util.regex.Pattern AEAT390_KEY =
+      java.util.regex.Pattern.compile("^AEAT390_(\\d{4})_Y$");
+
+  private static org.openbravo.module.taxreportlauncher.TaxReport report(String key, String orgId,
+      boolean active) {
+    org.openbravo.module.taxreportlauncher.TaxReport r =
+        mock(org.openbravo.module.taxreportlauncher.TaxReport.class);
+    when(r.getSearchKey()).thenReturn(key);
+    when(r.isActive()).thenReturn(active);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    when(r.getOrganization()).thenReturn(org);
+    return r;
+  }
+
+  /** The exercise's own report wins when it exists; it is not a fallback. */
+  @Test
+  public void testPickLatestTaxReportPrefersExactYear() {
+    org.openbravo.module.taxreportlauncher.TaxReport y2024 = report("AEAT390_2024_Y", "0", true);
+    org.openbravo.module.taxreportlauncher.TaxReport y2025 = report("AEAT390_2025_Y", "0", true);
+
+    AbstractFiscalHandler.ResolvedTaxReport r = AbstractFiscalHandler.pickLatestTaxReport(
+        java.util.Arrays.asList(y2024, y2025), AEAT390_KEY, 2025, "org1");
+
+    assertEquals(y2025, r.report);
+    assertEquals("AEAT390_2025_Y", r.searchKey);
+    assertEquals(2025, r.layoutYear);
+    assertTrue(!r.isFallback());
+  }
+
+  /**
+   * The normal 2026 path (product decision: no AEAT390_2026_Y entry): 2026 resolves to the latest
+   * earlier report, flagged as a fallback.
+   */
+  @Test
+  public void testPickLatestTaxReportFallsBackToLatestEarlierYear() {
+    org.openbravo.module.taxreportlauncher.TaxReport y2023 = report("AEAT390_2023_Y", "0", true);
+    org.openbravo.module.taxreportlauncher.TaxReport y2025 = report("AEAT390_2025_Y", "0", true);
+    org.openbravo.module.taxreportlauncher.TaxReport y2024 = report("AEAT390_2024_Y", "0", true);
+
+    AbstractFiscalHandler.ResolvedTaxReport r = AbstractFiscalHandler.pickLatestTaxReport(
+        java.util.Arrays.asList(y2023, y2025, y2024), AEAT390_KEY, 2026, "org1");
+
+    assertEquals("AEAT390_2025_Y", r.searchKey);
+    assertEquals(2025, r.layoutYear);
+    assertTrue(r.isFallback());
+  }
+
+  /** A later year's report is never used for an earlier exercise (no "today" involved). */
+  @Test
+  public void testPickLatestTaxReportIgnoresLaterYears() {
+    AbstractFiscalHandler.ResolvedTaxReport r = AbstractFiscalHandler.pickLatestTaxReport(
+        java.util.Arrays.asList(report("AEAT390_2025_Y", "0", true),
+            report("AEAT390_2023_Y", "0", true)),
+        AEAT390_KEY, 2024, "org1");
+
+    assertEquals("AEAT390_2023_Y", r.searchKey);
+  }
+
+  /** An inactive newer row never shadows an active older one. */
+  @Test
+  public void testPickLatestTaxReportSkipsInactiveRows() {
+    AbstractFiscalHandler.ResolvedTaxReport r = AbstractFiscalHandler.pickLatestTaxReport(
+        java.util.Arrays.asList(report("AEAT390_2025_Y", "org1", false),
+            report("AEAT390_2024_Y", "0", true)),
+        AEAT390_KEY, 2026, "org1");
+
+    assertEquals("AEAT390_2024_Y", r.searchKey);
+  }
+
+  /** Same layout year in org 0 and in the org: the org's own row wins, whatever the order. */
+  @Test
+  public void testPickLatestTaxReportTiePrefersOrgRow() {
+    org.openbravo.module.taxreportlauncher.TaxReport system = report("AEAT390_2025_Y", "0", true);
+    org.openbravo.module.taxreportlauncher.TaxReport own = report("AEAT390_2025_Y", "org1", true);
+
+    assertEquals(own, AbstractFiscalHandler.pickLatestTaxReport(
+        java.util.Arrays.asList(system, own), AEAT390_KEY, 2026, "org1").report);
+    assertEquals(own, AbstractFiscalHandler.pickLatestTaxReport(
+        java.util.Arrays.asList(own, system), AEAT390_KEY, 2026, "org1").report);
+  }
+
+  /** Keys not fully matching the pattern (the yearless AEAT390_Y, other models) are ignored. */
+  @Test
+  public void testPickLatestTaxReportIgnoresNonMatchingKeys() {
+    AbstractFiscalHandler.ResolvedTaxReport r = AbstractFiscalHandler.pickLatestTaxReport(
+        java.util.Arrays.asList(report("AEAT390_Y", "0", true),
+            report("AEAT390_2025_Y_COPY", "0", true), report("AEAT303_Q_2025", "0", true),
+            report(null, "0", true)),
+        AEAT390_KEY, 2026, "org1");
+
+    assertEquals(null, r);
+  }
+
+  /** findLatestTaxReport queries active rows of the org or org 0 and applies the pick rule. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindLatestTaxReportQueriesAndPicks() {
+    StubHandler handler = new StubHandler(servlet, false);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<org.openbravo.module.taxreportlauncher.TaxReport> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(org.openbravo.module.taxreportlauncher.TaxReport.class))
+          .thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      List<org.openbravo.module.taxreportlauncher.TaxReport> rows =
+          Collections.singletonList(report("AEAT390_2025_Y", "0", true));
+      when(crit.list()).thenReturn(rows);
+
+      AbstractFiscalHandler.ResolvedTaxReport r =
+          handler.findLatestTaxReport("org1", "AEAT390%_Y", AEAT390_KEY, 2026);
+
+      assertEquals("AEAT390_2025_Y", r.searchKey);
+      verify(crit, org.mockito.Mockito.times(3)).add(any());
+    }
+  }
+
   // ── handle() routing — missing/invalid params ─────────────────────
 
   @Test
@@ -906,5 +1194,47 @@ public class AbstractFiscalHandlerTest {
 
     org.mockito.Mockito.verify(decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
         "{\"boxes\":{\"46\":\"1.00\"},\"sourceCount\":2}");
+  }
+
+  // ── malformed client JSON → 400 ───────────────────────────────────
+
+  private static MalformedJsonException malformedBody() {
+    try {
+      BoundedJsonParser.parseObject("{\"x\":[");
+    } catch (MalformedJsonException e) {
+      return e;
+    }
+    throw new AssertionError("expected the body to be malformed");
+  }
+
+  /** A body the declarations delegate cannot parse is the client's error: 400, not 500. */
+  @Test
+  public void testDeclarationsMalformedBodyIs400() throws Exception {
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    MalformedJsonException malformed = malformedBody();
+
+    try (MockedConstruction<FiscalDeclCrudHandler> decl = mockConstruction(
+        FiscalDeclCrudHandler.class, (m, ctx) -> doThrow(malformed).when(m)
+            .handleDeclarations(anyString(), any(), any()))) {
+      new StubHandler(servlet, false).handle("declarations", "POST",
+          mock(HttpServletRequest.class), resp);
+    }
+
+    verify(servlet).sendError(resp, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+    verify(servlet, never()).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        anyString());
+  }
+
+  /** {@code runDispatch} answers a malformed body with a 400 instead of wrapping it as a 500. */
+  @Test
+  public void testRunDispatchMalformedBodyIs400() throws Exception {
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    MalformedJsonException malformed = malformedBody();
+
+    new StubHandler(servlet, false).runDispatch(resp, () -> {
+      throw malformed;
+    });
+
+    verify(servlet).sendError(resp, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
   }
 }

@@ -17,8 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.List;
-
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -33,6 +31,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
@@ -41,6 +40,9 @@ import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+
+import com.etendoerp.go.schemaforge.util.PostingAccountCombinations;
+import com.etendoerp.go.schemaforge.util.PostingAccountGuard;
 
 /**
  * NeoHandler for the {@code accountingConfiguration} entity of the {@code financial-account} spec
@@ -138,9 +140,13 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
       }
       return null;
     } catch (OBException e) {
+      // A caught error still commits at request end: drop the fields applied before the throw and
+      // a row findOrCreateRow just created (ETP-5693).
+      SessionHandler.getInstance().rollback();
       log.warn("financial-account accountingConfiguration business error: {}", e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e);
     } catch (Exception e) {
+      SessionHandler.getInstance().rollback();
       log.error("financial-account accountingConfiguration error", e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
     } finally {
@@ -172,15 +178,15 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     }
 
     FIN_FinancialAccountAccounting row = findOrCreateRow(account, ledger);
-    applyCombination(row::setFINBankrevaluationgainAcct, body, FIELD_BANK_REVAL_GAIN_ACCT, ledger);
-    applyCombination(row::setFINBankrevaluationlossAcct, body, FIELD_BANK_REVAL_LOSS_ACCT, ledger);
-    applyCombination(row::setFINBankfeeAcct, body, FIELD_BANK_FEE_ACCT, ledger);
-    applyCombination(row::setInTransitPaymentAccountIN, body, FIELD_IN_TRANSIT_IN_ACCT, ledger);
-    applyCombination(row::setDepositAccount, body, FIELD_DEPOSIT_ACCT, ledger);
-    applyCombination(row::setClearedPaymentAccount, body, FIELD_CLEARED_PAYMENT_ACCT_IN, ledger);
-    applyCombination(row::setFINOutIntransitAcct, body, FIELD_IN_TRANSIT_OUT_ACCT, ledger);
-    applyCombination(row::setWithdrawalAccount, body, FIELD_WITHDRAWAL_ACCT, ledger);
-    applyCombination(row::setClearedPaymentAccountOUT, body, FIELD_CLEARED_PAYMENT_ACCT_OUT, ledger);
+    applyCombination(row::setFINBankrevaluationgainAcct, row.getFINBankrevaluationgainAcct(), body, FIELD_BANK_REVAL_GAIN_ACCT, ledger);
+    applyCombination(row::setFINBankrevaluationlossAcct, row.getFINBankrevaluationlossAcct(), body, FIELD_BANK_REVAL_LOSS_ACCT, ledger);
+    applyCombination(row::setFINBankfeeAcct, row.getFINBankfeeAcct(), body, FIELD_BANK_FEE_ACCT, ledger);
+    applyCombination(row::setInTransitPaymentAccountIN, row.getInTransitPaymentAccountIN(), body, FIELD_IN_TRANSIT_IN_ACCT, ledger);
+    applyCombination(row::setDepositAccount, row.getDepositAccount(), body, FIELD_DEPOSIT_ACCT, ledger);
+    applyCombination(row::setClearedPaymentAccount, row.getClearedPaymentAccount(), body, FIELD_CLEARED_PAYMENT_ACCT_IN, ledger);
+    applyCombination(row::setFINOutIntransitAcct, row.getFINOutIntransitAcct(), body, FIELD_IN_TRANSIT_OUT_ACCT, ledger);
+    applyCombination(row::setWithdrawalAccount, row.getWithdrawalAccount(), body, FIELD_WITHDRAWAL_ACCT, ledger);
+    applyCombination(row::setClearedPaymentAccountOUT, row.getClearedPaymentAccountOUT(), body, FIELD_CLEARED_PAYMENT_ACCT_OUT, ledger);
     // ETP-4530 set this to Y on EVERY Contabilidad save so Classic's bank-statement accounting
     // engine would read the row at all. ETP-5305 narrowed it to the only case where it is both
     // legal and useful, because forcing it unconditionally had become purely destructive:
@@ -226,12 +232,19 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
    * sibling tab of this window.
    */
   private void applyCombination(java.util.function.Consumer<AccountingCombination> setter,
-      JSONObject body, String field, AcctSchema ledger) {
+      AccountingCombination current, JSONObject body, String field, AcctSchema ledger) {
     if (!body.has(field)) {
       return;
     }
     String id = body.isNull(field) ? null : StringUtils.trimToNull(body.optString(field, null));
-    setter.accept(id != null ? resolveCombination(id, ledger) : null);
+    // ETP-5693: an unchanged value is not re-checked, so a pre-existing row stays saveable
+    if (id == null) {
+      setter.accept(null);
+    } else if (current != null && current.getId().equals(id)) {
+      setter.accept(current);
+    } else {
+      setter.accept(resolveCombination(id, ledger, field));
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -312,16 +325,14 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     return org != null ? org.getGeneralLedger() : null;
   }
 
-  private AccountingCombination resolveCombination(String id, AcctSchema ledger) {
+  private AccountingCombination resolveCombination(String id, AcctSchema ledger, String field) {
     // tenant-ok: the combination is then required to belong to the validated account ledger
     AccountingCombination combo = OBDal.getInstance().get(AccountingCombination.class, id);
     if (combo == null) {
       throw new OBException("Accounting combination not found: " + id);
     }
-    if (combo.getAccountingSchema() != null && ledger != null
-        && !combo.getAccountingSchema().getId().equals(ledger.getId())) {
-      throw new OBException("Accounting combination does not belong to the account's ledger: " + id);
-    }
+    // ETP-5693: the ledger check is the shared keyed one, so the SPA can translate it
+    PostingAccountGuard.requirePosting(combo, ledger, field);
     return combo;
   }
 
@@ -403,14 +414,8 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     if (ledger == null) {
       return out;
     }
-    OBCriteria<AccountingCombination> criteria = OBDal.getInstance().createCriteria(AccountingCombination.class);
-    criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNTINGSCHEMA, ledger));
-    criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACTIVE, true));
-    criteria.addOrder(Order.asc(AccountingCombination.PROPERTY_COMBINATION));
-    @SuppressWarnings("unchecked")
-    List<AccountingCombination> rows = criteria.list();
-
-    for (AccountingCombination combo : rows) {
+    // ETP-5681: posting (leaf, active) accounts only — a summary account is a heading.
+    for (AccountingCombination combo : PostingAccountCombinations.forSchema(ledger)) {
       JSONObject item = new JSONObject();
       item.put(FIELD_ID, combo.getId());
       item.put("code", resolveCombinationCode(combo));
@@ -437,6 +442,8 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     if (StringUtils.isBlank(name)) {
       return code;
     }
-    return StringUtils.isNotBlank(code) ? code + " — " + name : name;
+    // ETP-5681: "<code> - <name>", the label every other account selector shows (the generic
+    // ValidCombination selector and the Esquema contable catalog).
+    return StringUtils.isNotBlank(code) ? code + " - " + name : name;
   }
 }

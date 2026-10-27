@@ -27,9 +27,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -39,7 +41,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
@@ -112,6 +113,14 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
   protected abstract TotalDiscountService getTotalDiscountService();
 
   /**
+   * The concrete handler's own {@link DocumentCurrencyRate} (ETP-5840), built with the document's
+   * {@link DocumentCurrencyRate.RateType} — the reference date and the name it is shown under are the
+   * entity's, so each subclass declares them. One instance per handler instance: it carries a
+   * deferral from {@code handle()} to {@code afterHandle()} of the same request.
+   */
+  protected abstract DocumentCurrencyRate currencyRate();
+
+  /**
    * Mirrors the single visible {@code orderDate} field into the hidden {@code accountingDate}
    * field on the request body, unconditionally, before the default CRUD path persists it
    * (ETP-4531 — unified date). The user never sees or edits accountingDate directly; whatever
@@ -177,7 +186,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
   }
 
-  private static boolean isCompleteAction(NeoContext context) {
+  /** Package-private: also read by {@link DocumentRateGuards} (ETP-5840). */
+  static boolean isCompleteAction(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return isCrudComplete(context);
     }
@@ -194,7 +204,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     return body != null && "CO".equals(body.optString(FIELD_DOCUMENT_ACTION, ""));
   }
 
-  private static boolean isActionDocumentActionComplete(NeoContext context) {
+  /** Package-private: also read by {@link DocumentRateGuards} (ETP-5840). */
+  static boolean isActionDocumentActionComplete(NeoContext context) {
     if (!FIELD_DOCUMENT_ACTION.equals(context.getFieldName())) {
       return false;
     }
@@ -236,7 +247,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return;
     }
-    if (!"DocAction".equals(context.getFieldName())) {
+    if (!isDocActionButtonName(context)) {
       return;
     }
     String recordId = context.getRecordId();
@@ -250,6 +261,23 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error syncing total discount on DocAction for {} id={}", docType, recordId, e);
     }
+  }
+
+  /**
+   * Whether the request names the DocAction button the way {@link #syncTotalDiscountOnDocAction}
+   * serves it: by its column ({@code DocAction}, what the SPA's quotation modal posts) or — on an
+   * MCP call only — by its field name, which is what {@code etendo_action} reaches a customization
+   * under whichever spelling the agent typed (ETP-5710). A completion by field name is already
+   * recalculated by {@link #applyTotalDiscountBeforeComplete}, so it is left to that. REST is
+   * untouched: only the MCP origin widens the match.
+   */
+  private static boolean isDocActionButtonName(NeoContext context) {
+    String name = context.getFieldName();
+    if ("DocAction".equals(name)) {
+      return true;
+    }
+    return context.isMcpOrigin() && FIELD_DOCUMENT_ACTION.equals(name)
+        && !isActionDocumentActionComplete(context);
   }
 
   // -----------------------------------------------------------------------
@@ -269,10 +297,11 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    *       {@code priceList} whose {@code M_PriceList.IsActive = 'N'}, replace it
    *       with the client's first active price list of the correct type and append
    *       a WARNING message.</li>
-   *   <li><b>Exchange rate warning.</b> When the user directly changes
-   *       {@code currency}, check whether a {@code C_Conversion_Rate} row exists
-   *       for (docCurrency → orgCurrency, orderDate). If none exists, append a
-   *       WARNING message so the user can create the rate before confirming.</li>
+   *   <li><b>Exchange rate (ETP-5840).</b> When the user changes the {@code currency} or the
+   *       {@code orderDate}, the recalculated org→document rate for the order date is returned in
+   *       {@code updates.eTGOCurrencyRate} ({@code {"value": null}} when no rate is configured), so
+   *       the form shows it before saving — see {@link DocumentCurrencyRate#applyToCallout}. It
+   *       replaced the untranslated {@code noExchangeRateAvailable} warning.</li>
    * </ol>
    *
    * <p>All mutations are applied directly to the callout response body so they
@@ -295,7 +324,9 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
           && fields.updates().has(FIELD_PRICE_LIST)) {
         applyPriceListFallbackIfNeeded(fields.body(), fields.updates());
       }
-      checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
+      JSONObject formState = fields.formState();
+      currencyRate().applyToCallout(fields,
+          formState != null ? formState.optString(FIELD_ID, null) : null);
     } catch (Exception e) {
       log.warn("[ETP-4027] afterCallout failed (non-fatal): {}", e.getMessage());
     }
@@ -306,39 +337,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     if (updates != null && updates.has(FIELD_CURRENCY) && !FIELD_CURRENCY.equals(triggerField)) {
       updates.remove(FIELD_CURRENCY);
       log.debug("[ETP-4027] Removed callout-driven currency update (trigger={})", triggerField);
-    }
-  }
-
-  /**
-   * Appends a {@code WARNING} to the callout body when the user directly changes the order's
-   * currency and no rate is available for (orgCurrency → docCurrency, orderDate).
-   *
-   * <p>ETP-4838: rate availability is resolved by {@link NeoExchangeRateService#hasRate} — the same
-   * lookup {@code GET /sws/neo/validate-exchange-rate} serves the frontend — so the callout warning
-   * and the frontend's own pre-check can never disagree.
-   */
-  private static void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
-      JSONObject formState, String triggerField) {
-    if (formState == null) {
-      return;
-    }
-    if (!FIELD_CURRENCY.equals(triggerField) && !"currencyid".equals(triggerField)) {
-      return;
-    }
-    // Use requestBody.value (the newly selected currency) instead of formState.currency,
-    // which may still carry the previous value when the callout fires.
-    String docCurrencyId = requestBody != null ? requestBody.optString(FIELD_VALUE, "") : "";
-    if (docCurrencyId.isEmpty()) {
-      docCurrencyId = formState.optString("currencyid", "");
-    }
-    String orderDate = formState.optString("orderDate", "");
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-    if (!docCurrencyId.isEmpty() && orgCurrencyId != null
-        && !docCurrencyId.equals(orgCurrencyId) && !orderDate.isEmpty()
-        && !NeoExchangeRateService.hasRate(orgCurrencyId, docCurrencyId, orderDate)) {
-      appendMessage(body, "WARNING", "noExchangeRateAvailable");
-      log.debug("[ETP-4027] No conversion rate warning added (currency={})", docCurrencyId);
     }
   }
 
@@ -432,8 +430,39 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     return true;
   }
 
+  /**
+   * Redirects a list filter on each status percentage {@link #applyCorrectedStatusPercentages}
+   * rewrites to its stored computed twin (ETP-5705).
+   *
+   * <p>The three virtual columns are rewritten after the query, so a filter on them matched the
+   * raw core value: sales orders shown at {@code deliveryStatus = 100} matched
+   * {@code deliveryStatus < 100}. The stored twins ({@code EM_ETGO_Invoice_Status},
+   * {@code EM_ETGO_Delivery_Status}, {@code EM_ETGO_Deliv_Status_Purchase}) are computed by
+   * {@code ETGO_GET_ORDER_INVOICE_STATUS} / {@code ETGO_GET_ORDER_DELIVERY_STATUS} /
+   * {@code ETGO_GET_PO_DELIVERY_STATUS}, which apply exactly the exclusion and the cancelled /
+   * zero-quantity guards that {@link #batchComputeStatusPercentages} applies, so they hold the
+   * value this handler displays. They are {@code NULL} on an order that never had a line (the
+   * refresh is triggered by {@code C_OrderLine}); the shared filter falls back to the virtual
+   * value there, which is {@code 0} — again what is displayed.</p>
+   *
+   * @param context the read context (unused: the mapping is the same for every read)
+   * @return the three displayed properties, each mapped to its stored twin
+   */
+  @Override
+  public Map<String, String> filterAliases(NeoContext context) {
+    return Map.of(
+        FIELD_INVOICE_STATUS, Order.PROPERTY_ETGOINVOICESTATUS,
+        FIELD_DELIVERY_STATUS, Order.PROPERTY_ETGODELIVERYSTATUS,
+        FIELD_DELIVERY_STATUS_PURCHASE, Order.PROPERTY_ETGODELIVSTATUSPURCHASE);
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5840: a create whose currency or order date only the create cascade derived.
+    NeoResponse rateRefusal = currencyRate().afterWrite(context);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     syncLineCurrenciesOnCurrencyPatch(context);
     if (!"GET".equals(context.getHttpMethod())) {
       return null;
@@ -449,20 +478,24 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
         return null;
       }
       JSONArray dataArr = responseWrapper.optJSONArray("data");
-      if (dataArr == null || dataArr.length() == 0) {
-        return null;
+      boolean changed = false;
+      if (dataArr != null && dataArr.length() > 0) {
+        for (int i = 0; i < dataArr.length(); i++) {
+          applyTotalDiscountToRecord(dataArr.getJSONObject(i));
+        }
+        if (context.getRecordId() != null) {
+          dataArr.getJSONObject(0).put("hasLinkedDocuments", checkLinkedDocuments(context.getRecordId()));
+        } else {
+          annotateListWithLinkedDocuments(dataArr);
+        }
+        annotatePendingDocuments(dataArr);
+        applyCorrectedStatusPercentages(dataArr);
+        changed = true;
       }
-      for (int i = 0; i < dataArr.length(); i++) {
-        applyTotalDiscountToRecord(dataArr.getJSONObject(i));
-      }
-      if (context.getRecordId() != null) {
-        dataArr.getJSONObject(0).put("hasLinkedDocuments", checkLinkedDocuments(context.getRecordId()));
-      } else {
-        annotateListWithLinkedDocuments(dataArr);
-      }
-      annotatePendingDocuments(dataArr);
-      applyCorrectedStatusPercentages(dataArr);
-      return NeoResponse.ok(body);
+      // ETP-5757: whole-set footer totals, also for an empty page. Last on purpose: a failed
+      // grouped query aborts the PG transaction, so nothing may query after it.
+      changed |= DocumentListTotals.injectInto(context, false);
+      return changed ? NeoResponse.ok(body) : null;
     } catch (Exception e) {
       log.error("Error post-processing order header GET response (id={})", context.getRecordId(), e);
       return null;
@@ -692,7 +725,34 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     return result;
   }
 
+  /**
+   * The single-record {@code hasLinkedDocuments} annotation. Degrades to {@code false} on a DB
+   * failure: a GET must never fail because of this flag.
+   */
   private boolean checkLinkedDocuments(String orderId) {
+    try {
+      return hasLinkedDocuments(orderId);
+    } catch (Exception e) {
+      log.error("DB error querying linked documents for order {}", orderId, e);
+      return false;
+    }
+  }
+
+  /**
+   * Whether the order has a linked shipment/receipt or invoice: an active {@code C_Invoice} or
+   * {@code M_InOut} whose header {@code C_Order_ID} is the order, in any document status.
+   *
+   * <p>This is the one definition of "linked documents" behind both the {@code hasLinkedDocuments}
+   * flag the SPA hides Reactivate with and {@link OrderReactivationGuard}, which refuses the same
+   * action in the backend (ETP-5704) — so the two can never disagree. Unlike
+   * {@link #checkLinkedDocuments} it lets a DB failure propagate: the guard must fail closed, while
+   * the GET annotation must not fail at all.
+   *
+   * @param orderId the {@code C_Order_ID} to look up
+   * @return {@code true} when at least one linked document exists
+   * @throws SQLException when the lookup cannot be run
+   */
+  static boolean hasLinkedDocuments(String orderId) throws SQLException {
     String sql =
         "SELECT 1 FROM C_Invoice WHERE C_Order_ID = ? AND IsActive = 'Y' " +
         "UNION ALL " +
@@ -705,9 +765,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next();
       }
-    } catch (Exception e) {
-      log.error("DB error querying linked documents for order {}", orderId, e);
-      return false;
     }
   }
 
@@ -865,7 +922,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           result.put(rs.getString(1),
-              new OrderQuantities(zeroIfNull(rs.getBigDecimal(2)), zeroIfNull(rs.getBigDecimal(3))));
+              new OrderQuantities(Objects.requireNonNullElse(rs.getBigDecimal(2), BigDecimal.ZERO),
+                  Objects.requireNonNullElse(rs.getBigDecimal(3), BigDecimal.ZERO)));
         }
       }
     }
@@ -964,7 +1022,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
         while (rs.next()) {
           String orderId = rs.getString(1);
           if (DOC_STATUS_COMPLETED.equals(rs.getString(2))) {
-            completedTotals.put(orderId, zeroIfNull(rs.getBigDecimal(3)));
+            completedTotals.put(orderId,
+                Objects.requireNonNullElse(rs.getBigDecimal(3), BigDecimal.ZERO));
           } else {
             withDraft.add(orderId);
           }
@@ -983,10 +1042,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   private static String placeholders(List<String> ids) {
     return ids.stream().map(id -> "?").collect(Collectors.joining(","));
-  }
-
-  private static BigDecimal zeroIfNull(BigDecimal value) {
-    return value != null ? value : BigDecimal.ZERO;
   }
 
   /**

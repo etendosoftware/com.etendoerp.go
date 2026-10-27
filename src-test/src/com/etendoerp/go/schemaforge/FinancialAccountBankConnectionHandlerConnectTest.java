@@ -65,6 +65,7 @@ import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionBuilder;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionHelper;
 
 /**
  * Unit tests for the {@link FinancialAccountBankConnectionHandler} POST {@code connect}, {@code reconnect}
@@ -250,7 +251,9 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<SaltEdgeConnectionHelper> connectionHelper =
+            mockStatic(SaltEdgeConnectionHelper.class)) {
       stubObContext(obContext);
       linkHelper.when(() -> SaltEdgeAccountLinkHelper.getConnectionForFinAccAndSaltEdgeId(
           finAcc, CONNECTION_ID)).thenReturn(connection);
@@ -266,6 +269,10 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
       assertTrue(dataOf(response).getBoolean("connected"));
       linkHelper.verify(() -> SaltEdgeAccountLinkHelper.syncAllConnectionsForSaltEdgeId(
           CONNECTION_ID, "AC", expiry));
+      // ETP-5089: the stale state left by the failure that prompted the reconnect is cleared now,
+      // as Classic does, instead of lingering until the next sync.
+      connectionHelper.verify(() -> SaltEdgeConnectionHelper.syncConnectionHealthFromDetails(
+          CONNECTION_ID, details));
     }
   }
 

@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -42,6 +43,7 @@ import java.util.stream.Stream;
 
 import javax.servlet.http.HttpServletRequest;
 
+import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,12 +54,15 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
@@ -90,6 +95,9 @@ class EnvironmentRequestAuthenticatorTest {
   private static final String OAUTH2_TOKEN = "oauth2-opaque-token-xyz";
   private static final String LANGUAGE = "es_ES";
   private static final String LEGACY_BEARER_PROPERTY = "etgo.legacy.bearer.enabled";
+  /** ETP-5047 — the local form of the {@code environment-access-enforcement-off} kill switch. */
+  private static final String ENFORCEMENT_OFF_PROPERTY =
+      "etendo.go.flags.environment-access-enforcement-off";
 
   private GoSessionAuthenticator sessionAuthenticator;
   private TenantEnvironmentLifecycleService lifecycleService;
@@ -168,14 +176,16 @@ class EnvironmentRequestAuthenticatorTest {
     } else if (policy.isCommercialAccessRequired() && blocked) {
       assertEquals(Status.PAYMENT_REQUIRED, outcome.getStatus());
       assertEquals(402, outcome.getHttpStatus());
-      assertEquals("Environment access is not available: " + decision.name(),
-          outcome.getMessage());
+      assertEquals(EnvironmentAccessGuard.MESSAGE_PREFIX + decision.name(), outcome.getMessage());
       assertEquals(scheme, outcome.getScheme());
+      // ETP-5047 — the refusal carries the shared guard's denial for the structured 402 body.
+      assertEquals(decision, outcome.getAccessDenial().decision());
     } else {
       assertTrue(outcome.isAuthenticated(), "expected the request to be let through");
       assertEquals(scheme, outcome.getScheme());
       assertSame(context, outcome.getContext());
       assertNull(outcome.getMessage());
+      assertNull(outcome.getAccessDenial());
     }
 
     int expectedPolicyChecks = schemeAccepted && policy.isCommercialAccessRequired() ? 1 : 0;
@@ -197,6 +207,29 @@ class EnvironmentRequestAuthenticatorTest {
 
     assertTrue(outcome.isAuthenticated());
     verify(lifecycleService, never()).evaluateAccess(anyString(), eq(true), any(Instant.class));
+  }
+
+  /**
+   * ETP-5047 — the bind step decides through {@code EnvironmentAccessGuard}, so the
+   * {@code environment-access-enforcement-off} kill switch holds on every commercially gated
+   * surface: switched off, a blocked tenant is let through.
+   */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(value = SurfacePolicy.class, names = { "NEO_API", "NEO_DATA" })
+  void theEnforcementKillSwitchLetsABlockedTenantThrough(SurfacePolicy policy) {
+    System.setProperty(ENFORCEMENT_OFF_PROPERTY, "true");
+    try {
+      when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+          .thenReturn(Decision.SUBSCRIPTION_REQUIRED);
+
+      EnvironmentAuthOutcome outcome = authenticator.authenticate(requestFor(AuthScheme.COOKIE),
+          policy);
+
+      assertTrue(outcome.isAuthenticated());
+      assertNull(outcome.getAccessDenial());
+    } finally {
+      System.clearProperty(ENFORCEMENT_OFF_PROPERTY);
+    }
   }
 
   // ============================== kill switch ==============================
@@ -324,6 +357,76 @@ class EnvironmentRequestAuthenticatorTest {
         anyString(), anyString(), anyString(), any(), anyString()), never());
   }
 
+  // ============================== legacy JWT role check (ETP-5270) ==============================
+
+  /** The claim is the role at login: every JWT is checked against the roles the user holds now. */
+  @Test
+  void aJwtRoleIsCheckedAgainstTheRolesTheUserHoldsNow() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubJwt();
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(bearerRequest(BEARER_TOKEN), SurfacePolicy.NEO_API);
+
+    assertTrue(outcome.isAuthenticated());
+    verify(roleReconciler).requireHeldRole(USER_ID, ROLE_ID, CLIENT_ID);
+  }
+
+  /** A JWT cannot be rebound like a cookie session: a revoked role refuses it on every surface. */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(SurfacePolicy.class)
+  void aJwtWhoseRoleWasRevokedIs401OnEverySurface(SurfacePolicy policy) {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubJwt();
+    doThrow(new SessionRoleRevokedException(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED))
+        .when(roleReconciler).requireHeldRole(USER_ID, ROLE_ID, CLIENT_ID);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(bearerRequest(BEARER_TOKEN), policy);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED, outcome.getMessage());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()), never());
+  }
+
+  /** identify() resolves without binding, and must not skip the check either (support chat). */
+  @Test
+  void identifyRefusesAJwtWhoseRoleWasRevoked() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubJwt();
+    doThrow(new SessionRoleRevokedException(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED))
+        .when(roleReconciler).requireHeldRole(USER_ID, ROLE_ID, CLIENT_ID);
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.identify(bearerRequest(BEARER_TOKEN), SurfacePolicy.NEO_AUXILIARY);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED, outcome.getMessage());
+  }
+
+  /** The kill switch answers first: a retired credential never costs a role lookup. */
+  @Test
+  void withTheSwitchOffAJwtRoleIsNeverLookedUp() {
+    System.setProperty(LEGACY_BEARER_PROPERTY, "false");
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubJwt();
+
+    authenticator.authenticate(bearerRequest(BEARER_TOKEN), SurfacePolicy.NEO_API);
+
+    verify(roleReconciler, never()).requireHeldRole(any(), any(), any());
+  }
+
+  /** OAuth2 tokens are not the legacy credential and keep their own lifecycle (out of scope). */
+  @Test
+  void anOAuth2TokenIsNotSubjectToTheJwtRoleCheck() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2("neo:*");
+
+    assertTrue(authenticator.authenticate(bearerRequest(OAUTH2_TOKEN), SurfacePolicy.NEO_API)
+        .isAuthenticated());
+    verify(roleReconciler, never()).requireHeldRole(any(), any(), any());
+  }
+
   @Test
   void noCredentialIs401() {
     when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
@@ -357,8 +460,10 @@ class EnvironmentRequestAuthenticatorTest {
 
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
-    assertEquals(401, outcome.getHttpStatus());
-    assertEquals("Insufficient scope or invalid token context", outcome.getMessage());
+    // ETP-5783: a valid token without the scope is 403, not the 401 a client reads as "expired".
+    assertEquals(Status.INSUFFICIENT_SCOPE, outcome.getStatus());
+    assertEquals(403, outcome.getHttpStatus());
+    assertEquals("Insufficient scope: this request requires etendo:write", outcome.getMessage());
     verify(lifecycleService, never()).evaluateAccess(anyString(), eq(true), any(Instant.class));
   }
 
@@ -389,26 +494,150 @@ class EnvironmentRequestAuthenticatorTest {
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
     assertEquals(authenticated, outcome.isAuthenticated(), outcome.getMessage());
+    if (!authenticated) {
+      assertEquals(403, outcome.getHttpStatus());
+    }
   }
 
-  /** Our own OBException messages are safe to show... */
+  /**
+   * ETP-5783: a NEO action route runs a document action or a process, which is what
+   * {@code etendo:process} grants. {@code etendo:write} alone (any alias) is not enough, a process
+   * scope alone is, and the decision reads the path's structure, never a name in it.
+   */
+  @ParameterizedTest(name = "POST {0} with [{1}] -> authenticated={2}")
+  @CsvSource({
+      "/sales-order/header/ID1/action/documentAction, etendo:write,             false",
+      "/sales-order/header/ID1/action/documentAction, neo:write,                false",
+      "/sales-order/header/ID1/action/documentAction, etendo:read etendo:write, false",
+      "/sales-order/header/ID1/action/documentAction, etendo:process,           true",
+      "/sales-order/header/ID1/action/documentAction, neo:process,              true",
+      "/sales-order/header/ID1/action/documentAction, etendo:*,                 true",
+      "/anything/at-all/ANY/action/whatever,          etendo:write,             false",
+      "/anything/at-all/ANY/action/whatever,          etendo:process,           true",
+      "/sales-order/header,                           etendo:write,             true",
+      "/sales-order/header/ID1,                       etendo:write,             true",
+      "/sales-order/header/ID1,                       etendo:process,           false",
+      "/batch,                                        etendo:write,             true",
+      "/batch,                                        etendo:process,           false",
+      "/sales-order/header/selectors/action,          etendo:write,             true",
+      "/sales-order//ID1/action/documentAction,       etendo:write,             false",
+      "/sales-order/header/ID1/ACTION/documentAction, etendo:write,             true",
+      "/sales-order/header/ID1/action/documentAction/, etendo:write,            false",
+      "/sales-order/header/ID1/action/documentAction/x/y, etendo:write,         false",
+      "/sales-order/header/ID1/action/documentAction/x/y, etendo:process,       true",
+      "/sales-order/header/ID1/action,                etendo:write,             false"
+  })
+  void anActionRouteNeedsTheProcessScope(String pathInfo, String scopes, boolean authenticated) {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2(scopes);
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getPathInfo()).thenReturn(pathInfo);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(authenticated, outcome.isAuthenticated(), outcome.getMessage());
+    if (!authenticated) {
+      assertEquals(Status.INSUFFICIENT_SCOPE, outcome.getStatus());
+      assertEquals(403, outcome.getHttpStatus());
+    }
+  }
+
+  /** Listing the actions of a record is a read: GET on an action route needs no process scope. */
   @Test
-  void anOBExceptionWhileBindingKeepsItsMessage() {
+  void listingTheActionsOfARecordOnlyNeedsTheReadScope() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2("etendo:read");
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+    when(request.getPathInfo()).thenReturn("/sales-order/header/ID1/action");
+
+    assertTrue(authenticator.authenticate(request, SurfacePolicy.NEO_API).isAuthenticated());
+  }
+
+  /** The SPA's credentials are never narrowed by scope: a cookie session may run an action. */
+  @Test
+  void aCookieSessionRunsAnActionWithoutAnyScope() {
+    stubCookie();
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getPathInfo()).thenReturn("/sales-order/header/ID1/action/documentAction");
+    when(request.getHeader("Accept-Language")).thenReturn(LANGUAGE);
+
+    assertTrue(authenticator.authenticate(request, SurfacePolicy.NEO_API).isAuthenticated());
+  }
+
+  /** The scope an OAuth2 token holds is kept for the check a process spec needs (not a path). */
+  @Test
+  void theGrantedScopesAreKeptOnTheRequestForTheProcessSpecCheck() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2("etendo:write");
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+    when(request.getMethod()).thenReturn("POST");
+
+    authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    verify(request).setAttribute(EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES,
+        "etendo:write");
+  }
+
+  @ParameterizedTest(name = "scopes [{0}] require process -> {1}")
+  @CsvSource({ "etendo:write, false", "neo:process, true", "etendo:*, true", "etendo:process, true" })
+  void isScopeGrantedReadsTheKeptScopesAndNeverLimitsOtherCredentials(String scopes,
+      boolean granted) {
+    HttpServletRequest oauth2 = mock(HttpServletRequest.class);
+    when(oauth2.getAttribute(EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES))
+        .thenReturn(scopes);
+    assertEquals(granted, EnvironmentRequestAuthenticator.isScopeGranted(oauth2,
+        com.etendoerp.go.oauth2.ApiScopes.PROCESS));
+
+    HttpServletRequest session = mock(HttpServletRequest.class);
+    assertTrue(EnvironmentRequestAuthenticator.isScopeGranted(session,
+        com.etendoerp.go.oauth2.ApiScopes.PROCESS));
+  }
+
+  /** An identity that lacks its claims is still a 401: that is a bad token, not a missing scope. */
+  @Test
+  void anOAuth2TokenWithoutItsClaimsStaysA401() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    Map<String, String> identity = new HashMap<>();
+    identity.put(OAuth2Filter.ATTR_SCOPES, "etendo:*");
+    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(bearerRequest(OAUTH2_TOKEN), SurfacePolicy.NEO_API);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals("Insufficient scope or invalid token context", outcome.getMessage());
+  }
+
+  // ============================== bind failures (ETP-5489) ==============================
+
+  /**
+   * The credential resolved and the server then failed to build its context: a 500, never a 401.
+   * A 401 is what made the client log a live session out and re-enter it in a loop. The
+   * OBExceptions raised while binding come from the platform core, so even their message stays
+   * in the log...
+   */
+  @Test
+  void anOBExceptionWhileBindingIsA500ThatKeepsItsMessageInTheLog() {
     stubCookie();
     swsStatic.when(() -> SecureWebServicesUtils.createContext(
         anyString(), anyString(), anyString(), any(), anyString()))
-        .thenThrow(new OBException("Role not granted"));
+        .thenThrow(new OBException("Current Client GOClient is not active!"));
     HttpServletRequest request = mock(HttpServletRequest.class);
 
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
-    assertEquals(401, outcome.getHttpStatus());
-    assertEquals("Role not granted", outcome.getMessage());
+    assertFalse(outcome.isAuthenticated());
+    assertEquals(Status.CONTEXT_UNAVAILABLE, outcome.getStatus());
+    assertEquals(500, outcome.getHttpStatus());
+    assertEquals("Environment context could not be established", outcome.getMessage());
   }
 
-  /** ...anything else (NPEs, driver errors) must not leak internals. */
+  /** ...and so does anything else (NPEs, driver errors). */
   @Test
-  void anyOtherFailureWhileBindingIsTheGenericInvalidToken() {
+  void anyOtherFailureWhileBindingIsA500WithTheGenericMessage() {
     stubCookie();
     swsStatic.when(() -> SecureWebServicesUtils.createContext(
         anyString(), anyString(), anyString(), any(), anyString()))
@@ -418,8 +647,55 @@ class EnvironmentRequestAuthenticatorTest {
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
     assertFalse(outcome.isAuthenticated());
+    assertEquals(500, outcome.getHttpStatus());
+    assertEquals("Environment context could not be established", outcome.getMessage());
+  }
+
+  /** ETP-5488, the production case: an entity the role cannot read while setting up the context. */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(value = AuthScheme.class, names = { "COOKIE", "JWT", "OAUTH2" })
+  void aSecurityExceptionWhileBindingIsA500ForEveryScheme(AuthScheme scheme) {
+    swsStatic.when(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()))
+        .thenThrow(new OBSecurityException("Entity ADPreference is not readable by the user"));
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(requestFor(scheme), SurfacePolicy.NEO_API);
+
+    assertEquals(Status.CONTEXT_UNAVAILABLE, outcome.getStatus());
+    assertEquals(500, outcome.getHttpStatus());
+    assertEquals(scheme, outcome.getScheme());
+  }
+
+  /** The whole bind step is covered, not only createContext: the commercial check runs after it. */
+  @Test
+  void aFailureAfterTheContextIsBuiltIsStillA500() {
+    stubCookie();
+    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenThrow(new IllegalStateException("lifecycle lookup failed"));
+    HttpServletRequest request = mock(HttpServletRequest.class);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(Status.CONTEXT_UNAVAILABLE, outcome.getStatus());
+    assertEquals(500, outcome.getHttpStatus());
+    languageStatic.verify(() -> NeoLanguage.applyToContext(any()), never());
+  }
+
+  /** The other side of the boundary: an unexpected failure while resolving stays a 401. */
+  @Test
+  void anUnexpectedFailureWhileResolvingStaysA401() {
+    when(sessionAuthenticator.authenticate(any()))
+        .thenThrow(new IllegalStateException("session lookup failed"));
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(mock(HttpServletRequest.class), SurfacePolicy.NEO_API);
+
+    assertEquals(Status.UNAUTHENTICATED, outcome.getStatus());
     assertEquals(401, outcome.getHttpStatus());
     assertEquals("Invalid or expired token", outcome.getMessage());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()), never());
   }
 
   // ============================== identify (resolve without binding) ==============================
@@ -464,6 +740,97 @@ class EnvironmentRequestAuthenticatorTest {
         authenticator.identify(requestFor(AuthScheme.JWT), SurfacePolicy.NEO_AUXILIARY);
     assertEquals(401, jwt.getHttpStatus());
     assertEquals("Missing or invalid Authorization header", jwt.getMessage());
+  }
+
+  // ======================= the wildcard client of an OAuth2 token (ETP-5047) =======================
+
+  /** The tenant the token's role belongs to, as the role lookup answers it. */
+  private static final String ROLE_TENANT = "tenant-of-role-1";
+
+  /**
+   * An OAuth2 token on org {@code 0}: {@code OAuth2Filter} derives its client with
+   * {@code COALESCE(org.ad_client_id, oauth2_client.ad_client_id)}, so it carries the System
+   * client {@code "0"}. The role lookup answers {@code roleLookup} (a client id, null, or a
+   * failure to throw).
+   */
+  private EnvironmentAuthOutcome authenticateWildcardOAuth2(Object roleLookup) {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    Map<String, String> identity = new HashMap<>();
+    identity.put(OAuth2Filter.ATTR_USER_ID, USER_ID);
+    identity.put(OAuth2Filter.ATTR_ROLE_ID, ROLE_ID);
+    identity.put(OAuth2Filter.ATTR_ORG_ID, "0");
+    identity.put(OAuth2Filter.ATTR_CLIENT_ID, "0");
+    identity.put(OAuth2Filter.ATTR_SCOPES, "neo:*");
+    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    if (roleLookup instanceof RuntimeException) {
+      when(session.doReturningWork(any())).thenThrow((RuntimeException) roleLookup);
+    } else {
+      when(session.doReturningWork(any())).thenReturn(roleLookup);
+    }
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      return authenticator.authenticate(bearerRequest(OAUTH2_TOKEN), SurfacePolicy.NEO_API);
+    }
+  }
+
+  /**
+   * ETP-5047 review W1 — the guard AND the context get the role's tenant, one value: judging the
+   * tenant but running as {@code "0"} (or the reverse) would split the request in two.
+   */
+  @Test
+  void anOrg0OAuth2TokenIsJudgedAndRunsAsItsRolesTenant() {
+    when(lifecycleService.evaluateAccess(eq(ROLE_TENANT), eq(true), any(Instant.class)))
+        .thenReturn(Decision.ALLOWED);
+
+    EnvironmentAuthOutcome outcome = authenticateWildcardOAuth2(ROLE_TENANT);
+
+    assertTrue(outcome.isAuthenticated(), outcome.getMessage());
+    verify(lifecycleService).evaluateAccess(eq(ROLE_TENANT), eq(true), any(Instant.class));
+    verify(lifecycleService, never()).evaluateAccess(eq("0"), eq(true), any(Instant.class));
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, ROLE_ID, "0", null,
+        ROLE_TENANT));
+    assertEquals(ROLE_TENANT, outcome.getClientId());
+  }
+
+  /** Before the fix the guard was asked about {@code "0"}, found no lifecycle and allowed. */
+  @Test
+  void anOrg0OAuth2TokenOfABlockedTenantIsRefusedWith402() {
+    when(lifecycleService.evaluateAccess(eq(ROLE_TENANT), eq(true), any(Instant.class)))
+        .thenReturn(Decision.SUBSCRIPTION_REQUIRED);
+
+    EnvironmentAuthOutcome outcome = authenticateWildcardOAuth2(ROLE_TENANT);
+
+    assertEquals(402, outcome.getHttpStatus());
+  }
+
+  /**
+   * ETP-5047 review W2 — fail closed: a role lookup that FAILED must not fall back to {@code "0"},
+   * which the guard allows. The request is refused before any context exists.
+   */
+  @Test
+  void aFailedRoleLookupRefusesTheRequestWithoutJudgingOrBinding() {
+    EnvironmentAuthOutcome outcome =
+        authenticateWildcardOAuth2(new IllegalStateException("db down"));
+
+    assertFalse(outcome.isAuthenticated());
+    assertEquals(503, outcome.getHttpStatus());
+    verify(lifecycleService, never()).evaluateAccess(anyString(), eq(true), any(Instant.class));
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()), never());
+  }
+
+  /** A System role legitimately has no tenant: it keeps {@code "0"} and is allowed, as before. */
+  @Test
+  void aSystemRoleKeepsTheSystemClientAndIsAllowed() {
+    EnvironmentAuthOutcome outcome = authenticateWildcardOAuth2(null);
+
+    assertTrue(outcome.isAuthenticated(), outcome.getMessage());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, ROLE_ID, "0", null, "0"));
+    assertEquals("0", outcome.getClientId());
   }
 
   // ============================== fixtures ==============================

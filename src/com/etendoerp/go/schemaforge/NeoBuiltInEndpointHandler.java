@@ -14,9 +14,11 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Routes NEO endpoints that are served directly by the servlet rather than by
@@ -38,6 +40,12 @@ class NeoBuiltInEndpointHandler {
   private static final String DESCRIPTION_FIELD = "description";
   private static final String IS_MAIN_FIELD = "isMain";
   private static final String MARK_AS_MAIN_PARAM = "markAsMain";
+  /**
+   * Optional query parameter of the {@code /zip} sub-resource: a comma-separated list of
+   * attachment ids restricting the archive to that subset (ETP-5526). Absent = every
+   * attachment of the record, exactly as before.
+   */
+  private static final String ATTACHMENT_IDS_PARAM = "ids";
   private static final String INVALID_JSON_BODY_PREFIX = "Invalid JSON body: ";
   /** Path segment that turns {@code /image/...} into the ETP-5184 upload-ticket endpoint. */
   static final String IMAGE_UPLOAD_SEGMENT = "upload";
@@ -46,6 +54,7 @@ class NeoBuiltInEndpointHandler {
   private final NeoDiscoveryHandler discoveryHandler;
   private final Fiscal303BoxesHandler fiscal303Handler;
   private final Fiscal349BoxesHandler fiscal349Handler;
+  private final Fiscal390BoxesHandler fiscal390Handler;
   private final TransactionalEmailService transactionalEmailService;
 
   NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler) {
@@ -58,10 +67,23 @@ class NeoBuiltInEndpointHandler {
     this.discoveryHandler = discoveryHandler;
     this.fiscal303Handler = new Fiscal303BoxesHandler(servlet);
     this.fiscal349Handler = new Fiscal349BoxesHandler(servlet);
+    this.fiscal390Handler = new Fiscal390BoxesHandler(servlet);
     // ETP-5438 — every declaration PUT arrives through /fiscal303/declarations whatever its
-    // model, so each handler's CRUD delegate must reach both models' snapshot compute.
-    AbstractFiscalHandler.linkSubmittedSnapshotProviders(fiscal303Handler, fiscal349Handler);
+    // model, so each handler's CRUD delegate must reach every model's snapshot compute.
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(fiscal303Handler, fiscal349Handler,
+        fiscal390Handler);
     this.transactionalEmailService = transactionalEmailService;
+  }
+
+  /** The fiscal-model handler of {@code /fiscal303}, {@code /fiscal349} or {@code /fiscal390}. */
+  private AbstractFiscalHandler fiscalHandlerFor(String specName) {
+    if ("fiscal303".equals(specName)) {
+      return fiscal303Handler;
+    }
+    if ("fiscal349".equals(specName)) {
+      return fiscal349Handler;
+    }
+    return "fiscal390".equals(specName) ? fiscal390Handler : null;
   }
 
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
@@ -96,12 +118,9 @@ class NeoBuiltInEndpointHandler {
       handleAttachmentsEndpoint(method, request, response);
       return true;
     }
-    if ("fiscal303".equals(pathInfo.specName)) {
-      fiscal303Handler.handle(pathInfo.entityName, method, request, response);
-      return true;
-    }
-    if ("fiscal349".equals(pathInfo.specName)) {
-      fiscal349Handler.handle(pathInfo.entityName, method, request, response);
+    AbstractFiscalHandler fiscalHandler = fiscalHandlerFor(pathInfo.specName);
+    if (fiscalHandler != null) {
+      fiscalHandler.handle(pathInfo.entityName, method, request, response);
       return true;
     }
     if ("fiscal-models-catalog".equals(pathInfo.specName)) {
@@ -159,12 +178,12 @@ class NeoBuiltInEndpointHandler {
    *
    * <p>ETP-5546: "Modelos Fiscales" access is represented by the role's grant on the Tax
    * Report window (ETP-5116 proxy) — gate both verbs on it before reaching the service, same
-   * window id {@link NeoAttachmentAuthorizer#TAX_REPORT_WINDOW_ID} the attachment authorizer
-   * already proxies through.
+   * shared window id {@link RoleAccessMatrix#TAX_MODELS_PROXY_WINDOW_ID} the attachment
+   * authorizer already proxies through (ETP-5540).
    */
   private void handleFiscalModelsCatalogEndpoint(String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
-    if (!NeoAccessHelper.hasWindowAccess(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, method)) {
+    if (!NeoAccessHelper.hasWindowAccess(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, method)) {
       servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN, "Access denied");
       return;
     }
@@ -208,8 +227,13 @@ class NeoBuiltInEndpointHandler {
   private void handleFilterPresetMutation(NeoServlet.NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     if ("PUT".equals(method)) {
-      NeoFiltersService.savePreset(pathInfo.entityName, pathInfo.recordId,
-          NeoRequestBodyParser.readRequestBody(request));
+      try {
+        NeoFiltersService.savePreset(pathInfo.entityName, pathInfo.recordId,
+            NeoRequestBodyParser.readRequestBody(request));
+      } catch (IllegalArgumentException e) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+        return;
+      }
       OBDal.getInstance().flush();
       servlet.writeResponse(response, null);
       return;
@@ -290,14 +314,18 @@ class NeoBuiltInEndpointHandler {
 
   /**
    * Dispatches {@code /sws/neo/attachments/*} requests to the cross-cutting
-   * {@link NeoAttachmentsHelper}. Supported shapes:
+   * {@link NeoAttachmentsHelper}, or to {@link NeoAttachmentsDownloader} for the two
+   * shapes that stream binary content (the single-file download and the zip).
+   * Supported shapes:
    * <ul>
    *   <li>{@code GET    /attachments/config}                        — the upload policy
    *       (max size + accepted types) enforced by the upload endpoint below</li>
    *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments</li>
    *   <li>{@code POST   /attachments/{tableName}/{recordId}}        — multipart upload;
    *       {@code ?markAsMain=true} marks the uploaded file as main atomically</li>
-   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip;
+   *       {@code ?ids=a,b,c} restricts the archive to those attachments, every one of which
+   *       must belong to {@code {recordId}} (ETP-5526)</li>
    *   <li>{@code GET    /attachments/{tableName}/{recordId}/main}   — look up the attachment
    *       marked as this record's main document, or {@code {}} if none</li>
    *   <li>{@code GET    /attachments/{tableName}/{recordId}/count}  — {@code {count: N}}, the
@@ -344,7 +372,8 @@ class NeoBuiltInEndpointHandler {
     String tableName = segments[0];
     String recordId = segments[1];
     if (segments.length >= 3 && isGetOnlySubresource(segments[2])) {
-      handleAttachmentsGetOnlySubresource(segments[2], tableName, recordId, method, response);
+      handleAttachmentsGetOnlySubresource(segments[2], tableName, recordId, method, request,
+          response);
       return;
     }
 
@@ -383,16 +412,24 @@ class NeoBuiltInEndpointHandler {
    * Handles the GET-only record sub-resources
    * {@code /attachments/{tableName}/{recordId}/zip|main|count}; any other verb gets
    * {@code 405 "Attachments <subresource> endpoint only supports GET"}.
+   *
+   * <p>The {@code zip} sub-resource reads the optional {@code ids} query parameter
+   * (ETP-5526). It is passed through verbatim — {@code null} when the caller did not
+   * supply it, which is what keeps the "every attachment of the record" behaviour
+   * byte-for-byte identical for existing callers. The helper, not this dispatcher,
+   * parses it and enforces that every id belongs to {@code recordId}.</p>
    */
   private void handleAttachmentsGetOnlySubresource(String subresource, String tableName,
-      String recordId, String method, HttpServletResponse response) throws IOException {
+      String recordId, String method, HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
     if (!"GET".equals(method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Attachments " + subresource + " endpoint only supports GET");
       return;
     }
     if (ATTACHMENTS_SEGMENT_ZIP.equals(subresource)) {
-      NeoAttachmentsHelper.handleDownloadAll(tableName, recordId, response);
+      NeoAttachmentsDownloader.handleDownloadAll(tableName, recordId,
+          request.getParameter(ATTACHMENT_IDS_PARAM), response);
     } else if (ATTACHMENTS_SEGMENT_MAIN.equals(subresource)) {
       servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
     } else {
@@ -421,7 +458,7 @@ class NeoBuiltInEndpointHandler {
     }
 
     if ("GET".equals(method)) {
-      NeoAttachmentsHelper.handleDownload(attachmentId, response);
+      NeoAttachmentsDownloader.handleDownload(attachmentId, response);
       return;
     }
     // ETP-5205 — every remaining verb writes: delete and description need the write tier.
@@ -504,7 +541,7 @@ class NeoBuiltInEndpointHandler {
       return Optional.empty();
     }
     try {
-      JSONObject json = new JSONObject(body);
+      JSONObject json = BoundedJsonParser.parseObject(body);
       if (!json.has(IS_MAIN_FIELD) || json.isNull(IS_MAIN_FIELD)) {
         servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Required field: isMain");
@@ -554,7 +591,7 @@ class NeoBuiltInEndpointHandler {
       return null;
     }
     try {
-      JSONObject json = new JSONObject(body);
+      JSONObject json = BoundedJsonParser.parseObject(body);
       if (!json.has(DESCRIPTION_FIELD) || json.isNull(DESCRIPTION_FIELD)) {
         return null;
       }
@@ -599,7 +636,7 @@ class NeoBuiltInEndpointHandler {
     String assetId;
     try {
       String body = readBody(request);
-      JSONObject json = new JSONObject(body);
+      JSONObject json = BoundedJsonParser.parseObject(body);
       assetId = json.optString("assetId", null);
     } catch (Exception e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,

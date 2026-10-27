@@ -16,13 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.attribute.FileAttribute;
-import java.nio.file.attribute.PosixFilePermission;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -259,6 +252,7 @@ class Fiscal303SubmissionSupport {
     }
 
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    // tenant-ok: request declId, but belongsTo() below 404s another client/org's declaration
     FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, declId);
     if (!owner.belongsTo(decl, clientId, orgId)) {
       owner.servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
@@ -278,6 +272,27 @@ class Fiscal303SubmissionSupport {
       return;
     }
 
+    // ETP-5725 (reopened QA review, Blocker B1) — this is the REAL AEAT telematic filing
+    // (production and test-mode validation alike), distinct from the manual "Registrar/
+    // Presentar" PUT-present flow (FiscalDeclCorrectiveConsistencySupport#rejectCorrectiveConsistencyViolation)
+    // and from the "Generar fichero" preview (Fiscal303BoxesHandler#dispatch's GENERATE branch,
+    // just above). Before this fix neither of those guards ever ran on this endpoint: a direct
+    // call to /fiscal303/submit with a valid declId (or any future frontend path that reaches
+    // AeatSubmitFlow without going through FmModel303Page#handlePresent's own pre-flight check)
+    // could file a corrective declaration with AEAT with no presented ordinaria, or file a
+    // duplicate ordinaria, with the server accepting it — exactly the invalid-AEAT-filing class
+    // of bug this ticket exists to close. Same `Rectificativa=Y` dedicated, unambiguous param
+    // the GENERATE branch reads (AeatSubmitFlow.jsx forwards it too, via the same shared
+    // `applyIdentParams` helper generate303File uses) — never the overloaded `IsComplementary`,
+    // which this same request also carries for the UNRELATED legacy "complementaria" checkbox.
+    // Thrown as `AlreadySubmittedException` (reused, not a new type — see
+    // AbstractFiscalHandler#guardCorrectiveConsistency's own javadoc) and caught by
+    // `Fiscal303BoxesHandler#dispatch`'s shared `runDispatch`, which wraps this SUBMIT branch
+    // exactly like every other one.
+    boolean effectivelyCorrective = "Y".equalsIgnoreCase(request.getParameter("Rectificativa"));
+    owner.guardCorrectiveConsistency(orgId, year, period, "303", effectivelyCorrective);
+
+    // tenant-ok: orgId is dispatch's resolveEffectiveOrg() (session org), never the request
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
     AEAT303SubmissionService service = new AEAT303SubmissionService();
 
@@ -605,79 +620,21 @@ class Fiscal303SubmissionSupport {
    * method now relies on {@link #commitSubmissionBestEffort} to commit once, together with the
    * incidents write and (for production) the declaration status write, instead of its own
    * independent transaction (ETP-4456 atomicity fix).</p>
+   *
+   * <p>The attachment itself is the model-agnostic {@link FiscalAeatSubmissionSupport#attachPdf}
+   * (ETP-5716), shared with the Modelo 390 submission.</p>
    */
   private void attachJustificante(FiscalDecl decl, Organization org, String fileName,
       byte[] pdfContent) {
-    String tabId;
-    try {
-      String tableId = NeoAttachmentsHelper.resolveTableId(FiscalDecl.TABLE_NAME);
-      tabId = NeoAttachmentsHelper.resolveTabId(tableId, null);
-    } catch (Exception e) {
-      AbstractFiscalHandler.log.warn("Could not resolve an AD_Tab for " + FiscalDecl.TABLE_NAME + " attachments", e);
-      tabId = null;
-    }
-    if (tabId == null) {
-      AbstractFiscalHandler.log.warn("No AD_Tab configured for " + FiscalDecl.TABLE_NAME + " attachments yet — the "
-          + "AEAT 303 justificante PDF for declaration " + decl.getId() + " was not persisted as "
-          + "an attachment (it is still returned inline in the API response).");
-      return;
-    }
-
-    Path tempDir = null;
-    try {
-      // SonarQube java:S5443 (ETP-4456): the rule's own "Sensitive Code Example" is exactly
-      // Files.createTempDirectory(prefix) with no explicit FileAttribute — even though the JDK's
-      // implicit default happens to be 0700 on POSIX today, that default is not declared in this
-      // code, so the rule's documented "Compliant Solution" is to pass the permissions explicitly.
-      // Etendo GO's production runtime is Linux-only and every CI workflow for this module runs on
-      // ubuntu-latest, so PosixFilePermissions is safe to use unconditionally here (no non-POSIX
-      // execution path exists for this module).
-      FileAttribute<Set<PosixFilePermission>> ownerOnly =
-          PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"));
-      tempDir = Files.createTempDirectory("aeat303go", ownerOnly);
-      Path pdfPath = tempDir.resolve(fileName);
-      Files.write(pdfPath, pdfContent);
-      NeoAttachmentsHelper.getAttachManager()
-          .upload(new HashMap<>(), tabId, decl.getId(), org.getId(), pdfPath.toFile());
-    } catch (Exception e) {
-      AbstractFiscalHandler.log.error("Could not attach the AEAT 303 justificante PDF to declaration "
-          + decl.getId(), e);
-    } finally {
-      cleanupTempDir(tempDir);
-    }
-  }
-
-  private void cleanupTempDir(Path tempDir) {
-    if (tempDir == null) {
-      return;
-    }
-    try {
-      File[] children = tempDir.toFile().listFiles();
-      if (children != null) {
-        for (File child : children) {
-          Files.deleteIfExists(child.toPath());
-        }
-      }
-      Files.deleteIfExists(tempDir);
-    } catch (Exception e) {
-      AbstractFiscalHandler.log.warn("Could not clean up temporary directory " + tempDir, e);
-    }
+    FiscalAeatSubmissionSupport.attachPdf(decl, org, fileName, pdfContent, "aeat303go", "303");
   }
 
   private JSONObject readJsonBody(HttpServletRequest request) throws Exception {
-    StringBuilder sb = new StringBuilder();
-    try (BufferedReader reader = request.getReader()) {
-      String line;
-      while ((line = reader.readLine()) != null) sb.append(line);
-    }
-    String raw = sb.toString();
-    return raw.isEmpty() ? new JSONObject() : new JSONObject(raw);
+    return FiscalAeatSubmissionSupport.readJsonBody(request);
   }
 
   private void writeJson(HttpServletResponse response, int status, JSONObject body)
       throws Exception {
-    response.setContentType(AbstractFiscalHandler.JSON_CT);
-    response.setStatus(status);
-    response.getWriter().write(body.toString());
+    FiscalAeatSubmissionSupport.writeJson(response, status, body);
   }
 }

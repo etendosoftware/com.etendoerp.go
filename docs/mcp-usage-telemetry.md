@@ -72,9 +72,14 @@ Indexes: `etgo_mcp_usage_cli_created (ad_client_id, created)` and `etgo_mcp_usag
 (session_key)`.
 
 **`AD_Client_ID` / `AD_Org_ID` are the tenant the call ran under, not the token's (ETP-5594).** An
-MCP token commonly carries the wildcard client and org `0`. `McpSessionManager.executeInContext`
-resolves them — the client from the role, the org as the role's first transactional org — before it
-builds the `OBContext`, and binds the result in a request-scoped `ThreadLocal`
+MCP token commonly carries the wildcard client and org `0`. The client is resolved from the role by
+`com.etendoerp.go.auth.EffectiveClientResolver` — once, in `McpServlet.doPost`, before the
+commercial access guard (ETP-5047), which then judges the same tenant; a failed role lookup refuses
+the request with 503, so no row is recorded for it — and `McpSessionManager.executeInContext`
+resolves the org as the role's first transactional org (and the client again only if it is still
+`0`) before it builds the `OBContext` — for a System role, whose first lookup legitimately keeps
+`0`, a failure of that second lookup surfaces as a JSON-RPC error with a fallback telemetry row
+(the token's own values), not as the 503 — and binds the result in a request-scoped `ThreadLocal`
 (`McpUsageTelemetry.setCurrentTenant`). `McpServlet.recordToolCall` reads it, so the row carries the
 same tenant the business code used; `doPost` clears it in its `finally`, next to the session key,
 because servlet threads are pooled. The binding happens before the context is built, so a call that
@@ -126,6 +131,37 @@ request, which is what ties a sequence of tool calls together and what carries `
 A client that ignores the header still works: its rows carry a null `session_key` and no client
 name. The registry holds at most 1 000 sessions and evicts oldest-first; losing an entry costs the
 client name on later rows of a very old session and can never fail a call.
+
+### Modern clients (MCP 2026-07-28, ETP-5640)
+
+The stateless revision has neither `initialize` nor `Mcp-Session-Id`. A modern client names itself on
+every request, in `params._meta["io.modelcontextprotocol/clientInfo"]`, and that is where
+`client_name` / `client_version` come from (`McpUsageTelemetry.clientInfoFromMeta`). A stale
+`Mcp-Session-Id` on such a request is ignored.
+
+The session key is **derived** (`McpUsageTelemetry.modernSession`): one per (user, token client, role),
+renewed after 30 minutes without a call, and prefixed `m-` — so
+`session_key LIKE 'm-%'` (or `session=m-*` in Datadog) separates the eras without a column of its own.
+Each new derived session logs one INFO line:
+
+```
+MCP modern session started: session=m-… client=claude-code/<version> protocol=2026-07-28 traceparent=yes|no
+```
+
+Known limits, accepted: two parallel conversations of one user with one agent merge into one session,
+and with several Tomcat nodes one task can be split across nodes (the map is per node). Every row
+still carries the user, the client name and its timestamp, so SQL can regroup them cluster-wide.
+
+The client name is read whatever the `mcp-modern-era-disabled` kill switch says: a client that cached
+the modern era keeps sending `_meta` after a rollback, and its rows keep their client name. The
+derived session is not: with the kill switch on such a request is legacy, keeps its `Mcp-Session-Id`
+(if any, else `session=none`) and logs no "modern session started", so a rollback adds nothing to
+that evidence. The feedback bucket is still keyed on the caller. The client
+name is deliberately not part of the key: it is client-controlled, so a client that changes it on every
+request would otherwise mint a session per request. For the same reason the `etendo_feedback`
+rate-limit bucket is keyed on the authenticated caller (user, token client, role), not on the session
+or the client name — a rotating name cannot reset it. The derived-session map evicts the least
+recently used entry, so a burst of new callers never drops an active session.
 
 ## Opt-out (D28)
 

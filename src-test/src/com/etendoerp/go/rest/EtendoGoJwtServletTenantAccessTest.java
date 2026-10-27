@@ -46,6 +46,7 @@ import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.payment.DemoDataTransferService;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -83,8 +84,7 @@ class EtendoGoJwtServletTenantAccessTest {
 
     ResponseCapture resp = fixture.cookieGet(COMPANY_DATA_PATH);
 
-    assertEquals(402, resp.status);
-    assertTrue(resp.body().contains("SUBSCRIPTION_REQUIRED"), resp.body());
+    assertEnvironmentAccessDenied(resp, Decision.SUBSCRIPTION_REQUIRED);
     verifyNoInteractions(fixture.companyDataService);
     verify(fixture.lifecycle).evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class));
   }
@@ -96,8 +96,7 @@ class EtendoGoJwtServletTenantAccessTest {
 
     ResponseCapture resp = fixture.bearerGet(COMPANY_DATA_PATH);
 
-    assertEquals(402, resp.status);
-    assertTrue(resp.body().contains("DEMO_TRIAL_EXPIRED"), resp.body());
+    assertEnvironmentAccessDenied(resp, Decision.DEMO_TRIAL_EXPIRED);
     verifyNoInteractions(fixture.companyDataService);
   }
 
@@ -123,7 +122,7 @@ class EtendoGoJwtServletTenantAccessTest {
 
     ResponseCapture resp = fixture.cookieGet(TRANSFER_PATH);
 
-    assertEquals(402, resp.status);
+    assertEnvironmentAccessDenied(resp, Decision.SUBSCRIPTION_REQUIRED);
     verifyNoInteractions(fixture.transferService);
   }
 
@@ -138,6 +137,29 @@ class EtendoGoJwtServletTenantAccessTest {
 
     assertEquals(200, resp.status);
     verify(fixture.transferService).status(eq(CLIENT_ID), any());
+  }
+
+  /**
+   * The whole shared denial, not a substring of it: HTTP 402 as JSON, and the body every refusing
+   * entry point answers with — the pre-ETP-5047 {@code message} a legacy client still parses, and
+   * the machine-readable {@code status}, {@code code} and {@code decision} new clients read.
+   */
+  private static void assertEnvironmentAccessDenied(ResponseCapture resp, Decision decision)
+      throws Exception {
+    assertEquals(402, resp.status, resp.body());
+    verify(resp.response).setContentType("application/json");
+    verify(resp.response).setCharacterEncoding("UTF-8");
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals(1, body.length(), "only the error envelope: " + resp.body());
+    JSONObject error = body.getJSONObject("error");
+    assertEquals(4, error.length(), "exactly message, status, code, decision: " + resp.body());
+    assertTrue(error.getString("message").startsWith(EnvironmentAccessGuard.MESSAGE_PREFIX),
+        resp.body());
+    assertEquals("Environment access is not available: " + decision.name(),
+        error.getString("message"));
+    assertEquals(402, error.getInt("status"));
+    assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+    assertEquals(decision.name(), error.getString("decision"));
   }
 
   // ===================== fixture =====================

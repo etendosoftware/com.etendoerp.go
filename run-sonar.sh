@@ -1060,7 +1060,6 @@ with open(handoff_file, "w") as fh:
 # Also echo it (captured to the step log) plus a short header.
 print("\n❌ QUALITY GATE FAILED — this push would fail CI's SonarQube gate.")
 print(handoff)
-print("\n  Bypass with 'git push --no-verify' (WIP only).")
 sys.exit(1)
 PYEOF
   GATE_RC=$?
@@ -1153,7 +1152,6 @@ if current < min_coverage:
     print(f"    {gate_branch} coverage: {current:.2f}%")
     print(f"\n❌ COVERAGE BELOW MINIMUM — {current:.2f}% < {min_coverage:.2f}% required.")
     print( "   Add tests until overall coverage reaches the minimum, then re-push.")
-    print( "   Bypass with 'git push --no-verify' (WIP only).")
     sys.exit(1)
 
 if base_cov is None:
@@ -1171,7 +1169,6 @@ if current < min_required:
     print(f"\n❌ COVERAGE DECREASED — this push would fail Jenkins' 'Compare Coverage Results'.")
     print(f"   {current:.2f}% < {min_required:.2f}% (base {base_cov:.2f}% − {tolerance:.2f}pp) on '{cmp_branch}' (short {short:.2f}pp).")
     print( "   Add tests until overall coverage is >= the base (minus tolerance), then re-push.")
-    print( "   Bypass with 'git push --no-verify' (WIP only).")
     sys.exit(1)
 
 print("    Coverage is OK ✅ (not below base − tolerance, and above the minimum).")

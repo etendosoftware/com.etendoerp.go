@@ -663,11 +663,12 @@ class NeoDateFormatTest {
   class AuditToken {
 
     /**
-     * The exact round trip the server performs: emit the token, then read it back the way
-     * {@code JsonToDataConverter} does.
+     * The exact round trip the server performs: emit the token, hand core its fraction-less form
+     * as every write path does, then read it back the way {@code JsonToDataConverter} does.
      */
     private Date reread(String token) throws ParseException {
-      return JsonUtils.createDateTimeFormat().parse(JsonUtils.convertFromXSDToJavaFormat(token));
+      return JsonUtils.createDateTimeFormat()
+          .parse(JsonUtils.convertFromXSDToJavaFormat(NeoRecordVersion.forCore(token)));
     }
 
     /** Core's comparison zeroes milliseconds, so the contract is equality to the second. */
@@ -718,7 +719,7 @@ class NeoDateFormatTest {
       // colon offset (`+02:00`) — the only shape core's own reader repair recognises. Hence the
       // `XXX` pattern letter rather than `Z`.
       OffsetDateTime parsed = OffsetDateTime.parse(
-          token, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + "XXX"));
+          token, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + ".SSSXXX"));
 
       ZoneOffset expected = ZoneId.systemDefault().getRules().getOffset(updated.toInstant());
       assertEquals(expected, parsed.getOffset());

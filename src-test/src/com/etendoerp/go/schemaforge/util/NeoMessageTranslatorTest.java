@@ -21,6 +21,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -28,13 +30,48 @@ import java.util.List;
 
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
  * Unit tests for {@link NeoMessageTranslator} — the single place where NEO turns raw
  * {@code @AD_Message_Key@} tokens into session-language text before they reach the browser.
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoMessageTranslator
  */
 public class NeoMessageTranslatorTest {
+
+  private static final List<String> PERIOD_KEYS = NeoMessageTranslator.PERIOD_REFUSAL_KEYS;
+
+  /** ETP-5577: a raw {@code @Key@} token names the refusal without any catalog lookup. */
+  @Test
+  public void recognizeMessageKeys_rawToken() {
+    assertEquals(List.of("PeriodNotValid"),
+        NeoMessageTranslator.recognizeMessageKeys("@PeriodNotValid@", PERIOD_KEYS));
+  }
+
+  /**
+   * ETP-5577: a classic process may hand the refusal over translated in ANOTHER language than the
+   * user's (FIN_AddPaymentFromJournal answers in English to a Spanish user), so every translation
+   * of the message counts; unrelated text, and an unreadable catalog, name nothing.
+   */
+  @Test
+  public void recognizeMessageKeys_translatedTextInAnyLanguage() {
+    try (MockedStatic<NeoMessageTranslator> translator =
+        mockStatic(NeoMessageTranslator.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      translator.when(() -> NeoMessageTranslator.messageTexts("PeriodNotAvailable"))
+          .thenReturn(Arrays.asList("The Period does not exist or it is not opened",
+              "El Periodo no existe o no está abierto", null));
+      translator.when(() -> NeoMessageTranslator.messageTexts("PeriodNotValid"))
+          .thenReturn(Collections.emptyList());
+
+      assertEquals(List.of("PeriodNotAvailable"), NeoMessageTranslator.recognizeMessageKeys(
+          "The Period does not exist or it is not opened", PERIOD_KEYS));
+      assertTrue(NeoMessageTranslator.recognizeMessageKeys("BP currency is not set", PERIOD_KEYS)
+          .isEmpty());
+      assertTrue(NeoMessageTranslator.recognizeMessageKeys(null, PERIOD_KEYS).isEmpty());
+    }
+  }
 
   private static final String KEY = "@AEAT349_Phone_Contact_Mandatory@";
   private static final String TRANSLATED =
@@ -193,5 +230,55 @@ public class NeoMessageTranslatorTest {
     assertTrue(NeoMessageTranslator.extractMessageKeys("user@example.com").isEmpty());
     assertTrue(NeoMessageTranslator
         .extractMessageKeys("Could not notify user@example.com about the failure").isEmpty());
+  }
+
+  // ---- translateDbMessage (ETP-5782) ----
+
+  @Test
+  public void translateDbMessageReturnsCoreTranslation() {
+    org.openbravo.erpCommon.utility.OBError translated =
+        new org.openbravo.erpCommon.utility.OBError();
+    translated.setMessage("Cannot change business partner or price list if there are lines.");
+    try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+      msg.when(() -> OBMessageUtils.translateError(org.mockito.ArgumentMatchers.any(),
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+          org.mockito.ArgumentMatchers.eq("ERROR: @20502@"))).thenReturn(translated);
+
+      assertEquals("Cannot change business partner or price list if there are lines.",
+          NeoMessageTranslator.translateDbMessage("ERROR: @20502@"));
+    }
+  }
+
+  @Test
+  public void translateDbMessageFallsBackToTheTextWhenTranslationFails() {
+    try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+      msg.when(() -> OBMessageUtils.translateError(org.mockito.ArgumentMatchers.any(),
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+          org.mockito.ArgumentMatchers.anyString()))
+          .thenThrow(new IllegalStateException("current transaction is aborted"));
+
+      assertEquals("@20502@", NeoMessageTranslator.translateDbMessage("@20502@"));
+    }
+  }
+
+  @Test
+  public void translateDbMessagePassesBlankThrough() {
+    assertNull(NeoMessageTranslator.translateDbMessage(null));
+    assertEquals(" ", NeoMessageTranslator.translateDbMessage(" "));
+  }
+
+  /**
+   * {@code setAdminMode} pushes its stack entry before it can fail, so a lookup whose
+   * {@code setAdminMode} throws must still pop it: the entry would otherwise leak onto the thread.
+   */
+  @Test
+  public void messageTextsPopsTheAdminModeEntryWhenSettingItFails() {
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class)) {
+      context.when(() -> OBContext.setAdminMode(true)).thenThrow(new IllegalStateException("no DAL"));
+
+      assertTrue(NeoMessageTranslator.messageTexts("ZzNoSuchMessageKey").isEmpty());
+
+      context.verify(OBContext::restorePreviousMode, times(1));
+    }
   }
 }

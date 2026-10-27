@@ -17,17 +17,13 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,24 +36,19 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.businessUtility.Tax;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.invoice.InvoiceLine;
-import org.openbravo.model.common.invoice.ReversedInvoice;
-import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.model.pricing.pricelist.PriceList;
-import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Shared static helpers for return shipment / return receipt handler pairs.
@@ -71,7 +62,7 @@ final class ReturnShipmentUtils {
   private static final String KEY_RESPONSE = "response";
   // Package-private: also read by RectifiableInvoiceUtils, split out for java:S1448.
   static final String FIELD_DOCUMENT_NO = "documentNo";
-  private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   /** Request-body key carrying the ids of the invoices to rectify (ETP-5381). */
   static final String PARAM_ORIGIN_INVOICES = "originInvoices";
   /**
@@ -82,8 +73,36 @@ final class ReturnShipmentUtils {
   static final int DEFAULT_RECTIFIABLE_PAGE_SIZE = 80;
   // English literal on purpose: localized by tools/app-shell/src/lib/backendErrors.js.
   static final String ERR_RECTIFIED_INVOICE_REQUIRED =
-      "Select at least one invoice to rectify: a rectificative invoice cannot be confirmed "
-          + "without it.";
+      "This return has no invoice to rectify: the document it returns has not been invoiced, so "
+          + "the factura rectificativa has nothing to link to. Invoice the original document "
+          + "first, or pass originInvoices with the id of an invoice from rectifiableInvoices.";
+  /**
+   * Request-body key that lets {@code createReturnInvoice} create a second rectificativa for a
+   * return that already has one (ETP-5712). Only a JSON boolean {@code true} counts.
+   */
+  static final String PARAM_ALLOW_DUPLICATE = "allowDuplicate";
+  /** {@code error.code} of the 409 of a return that already has a non-voided rectificativa (ETP-5712). */
+  static final String ERROR_RETURN_INVOICE_ALREADY_EXISTS = "returnInvoiceAlreadyExists";
+  // English literal on purpose: the exact legacy sentence tools/app-shell/src/lib/backendErrors.js
+  // already localizes (backendError.returnInvoiceAlreadyExists). Do not reword it.
+  static final String MSG_RETURN_INVOICE_ALREADY_EXISTS =
+      "A rectificative invoice already exists for this return document.";
+  /** {@code error.hint} of that 409: the one way past it, which the screen does not offer. */
+  static final String HINT_RETURN_INVOICE_ALREADY_EXISTS = "Pass allowDuplicate:true only if a "
+      + "second rectificative invoice for this return is really intended (for example one per "
+      + "origin invoice). Nothing was created.";
+  /** The 422 message of an {@code allowDuplicate} that is not a JSON boolean. */
+  static final String MSG_ALLOW_DUPLICATE_NOT_BOOLEAN =
+      "'allowDuplicate' must be the JSON boolean true or false. Nothing was created.";
+  /** {@code error.code} of the 422 of a rectificativa whose lines would all end at price 0 (ETP-5712). */
+  static final String ERROR_RETURN_INVOICE_WITHOUT_AMOUNT = "returnInvoiceWithoutAmount";
+  // English literals on purpose: localized by tools/app-shell/src/lib/backendErrors.js, which
+  // splits the message on exactly this prefix and suffix.
+  static final String MSG_WITHOUT_AMOUNT_PREFIX = "The corrective invoice (factura rectificativa) "
+      + "cannot be created: no price source was found for ";
+  static final String MSG_WITHOUT_AMOUNT_SUFFIX = " (not on the invoice being rectified, nor on its "
+      + "order line, nor in the price list), so it would be confirmed with a zero amount. Give "
+      + "those products a price in the price list, or rectify an invoice that has them.";
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
 
   private ReturnShipmentUtils() {}
@@ -241,6 +260,10 @@ final class ReturnShipmentUtils {
    * Resolves the document type to use for an auto-generated return invoice, scoped to the
    * given organization (falling back to org {@code '0'}, then to the first active candidate).
    *
+   * @param client              the client of the source document; the lookup is restricted to its document
+   *                            types. Every client owns its own types (and org {@code '0'} exists in every
+   *                            client), so without it another client's type can win and the return consumes
+   *                            that client's document sequence
    * @param orgId               the shipment/receipt's organization id
    * @param docCategory         the {@code DocBaseType} to match (e.g. {@code "ARC"}, {@code "APC"})
    * @param isSales             whether to match sales-side ({@code true}) or purchase-side document types
@@ -253,13 +276,16 @@ final class ReturnShipmentUtils {
    *     installed — see {@link RectificativeSupport#isColumnPresent()}), so the lookup degrades
    *     gracefully to the plain category-based match in deployments without the module.
    */
-  static DocumentType findReturnDocTypeForOrg(String orgId, String docCategory,
+  static DocumentType findReturnDocTypeForOrg(Client client, String orgId, String docCategory,
       boolean isSales, boolean requireReturn, boolean requireRectificative) {
     OBCriteria<DocumentType> crit = OBDal.getInstance().createCriteria(DocumentType.class)
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, docCategory))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, isSales))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true));
     crit.add(Restrictions.eq(DocumentType.PROPERTY_RETURN, requireReturn));
+    if (client != null) {
+      crit.add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, client));
+    }
     if (requireRectificative && RectificativeSupport.isColumnPresent()) {
       crit.add(Restrictions.eq(DocumentType.PROPERTY_ETSGISRECTIFICATIVE, true));
     }
@@ -395,6 +421,64 @@ final class ReturnShipmentUtils {
     OBDal.getInstance().save(retLine);
   }
 
+  /** One usable entry of an import request: the source line and the quantity to return. */
+  private static final class ImportEntry {
+    final ShipmentInOutLine sourceLine;
+    final BigDecimal quantity;
+
+    ImportEntry(ShipmentInOutLine sourceLine, BigDecimal quantity) {
+      this.sourceLine = sourceLine;
+      this.quantity = quantity;
+    }
+  }
+
+  /**
+   * The shared body of {@code importReceiptLines} / {@code importShipmentLines}: adds one return
+   * line per usable entry of {@code requested} ({@code {sourceLineId, returnQuantity}}) to the
+   * draft return {@code returnDoc}, each linked to the source line it returns.
+   *
+   * <p>ETP-5711: the quantities asked of each source line (a line listed twice counts both, and the
+   * lines the return already holds are counted by the database) are checked against what is still
+   * returnable BEFORE anything is created, through {@link ReturnableQuantity}. An over-return is a
+   * 422 and creates nothing, not even the entries that were fine. Entries without a source line
+   * id, with a quantity that is not a positive number, or naming a line that does not exist are
+   * skipped, as before.
+   *
+   * @return {@code {response:{data:{importedCount}}}}, or the 422 of the cap
+   */
+  static NeoResponse importReturnLines(ShipmentInOut returnDoc, String returnId,
+      JSONArray requested) throws Exception {
+    long nextLineNo = fetchMaxLineNo(returnId) + 10;
+    List<ImportEntry> entries = new ArrayList<>();
+    ReturnableQuantity.Requests requests = new ReturnableQuantity.Requests();
+    for (int i = 0; i < requested.length(); i++) {
+      JSONObject req = requested.getJSONObject(i);
+      String sourceLineId = req.optString("sourceLineId", null);
+      BigDecimal qty = ReturnableQuantity.parseQuantity(req.opt("returnQuantity"));
+      ShipmentInOutLine sourceLine = sourceLineId != null
+          ? OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId) : null;
+      if (sourceLine == null || qty == null || qty.signum() <= 0) {
+        continue;
+      }
+      entries.add(new ImportEntry(sourceLine, qty));
+      requests.add(sourceLine, qty);
+    }
+    NeoResponse refusal = ReturnableQuantity.refuseIfExceeds(requests);
+    if (refusal != null) {
+      return refusal;
+    }
+    for (ImportEntry entry : entries) {
+      // ETP-5313: the stored sign is owned by ReturnLineQuantityPolicy, applied inside
+      // buildAndSaveReturnLine — pass the user-facing POSITIVE quantity.
+      buildAndSaveReturnLine(returnDoc, entry.sourceLine, nextLineNo, entry.quantity);
+      nextLineNo += 10;
+    }
+    OBDal.getInstance().flush();
+    JSONObject data = new JSONObject();
+    data.put("importedCount", entries.size());
+    return wrapOkData(data);
+  }
+
   // ---------------------------------------------------------------------------
   // Available document / line row builders – shared result-set mappers
   // ---------------------------------------------------------------------------
@@ -466,10 +550,51 @@ final class ReturnShipmentUtils {
   // SQL helpers – return invoices
   // ---------------------------------------------------------------------------
 
-  @SuppressWarnings("java:S2077")
   static Map<String, List<JSONObject>> fetchReturnInvoices(List<String> ids) {
     Map<String, List<JSONObject>> result = new HashMap<>();
-    if (ids.isEmpty()) return result;
+    try {
+      queryReturnInvoices(ids, result);
+    } catch (Exception e) {
+      log.warn("Error fetching return invoices: {}", e.getMessage());
+    }
+    return result;
+  }
+
+  /**
+   * The factura rectificativas a return document already has, BEFORE a new one is created
+   * (ETP-5712): the non-voided invoices whose lines point at the return's lines, as
+   * {@code [{id, documentNo, documentStatus}]}. Same query as {@link #fetchReturnInvoices} (the
+   * {@code returnInvoices} / {@code hasReturnInvoice} of the header), so the warning and the flag
+   * can never disagree.
+   *
+   * <p>Unlike {@code fetchReturnInvoices} it PROPAGATES a failure: a swallowed error here would
+   * answer "this is the first one" and hide exactly the duplicate the field exists to report.
+   *
+   * @throws OBException when the lookup fails
+   */
+  static JSONArray fetchPreviousReturnInvoices(String returnId) {
+    Map<String, List<JSONObject>> found = new HashMap<>();
+    try {
+      queryReturnInvoices(Collections.singletonList(returnId), found);
+    } catch (Exception e) {
+      log.error("Error checking the existing rectificativas of {}: {}", returnId, e.getMessage(), e);
+      throw new OBException("Could not verify the existing invoices of this return document", e);
+    }
+    JSONArray previous = new JSONArray();
+    for (JSONObject inv : found.getOrDefault(returnId, Collections.emptyList())) {
+      JSONObject row = new JSONObject();
+      putQuietly(row, "id", inv.opt("id"));
+      putQuietly(row, FIELD_DOCUMENT_NO, inv.opt(FIELD_DOCUMENT_NO));
+      putQuietly(row, FIELD_DOCUMENT_STATUS, inv.opt(FIELD_DOCUMENT_STATUS));
+      previous.put(row);
+    }
+    return previous;
+  }
+
+  @SuppressWarnings("java:S2077")
+  private static void queryReturnInvoices(List<String> ids, Map<String, List<JSONObject>> result)
+      throws java.sql.SQLException {
+    if (ids.isEmpty()) return;
     String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
     String sql =
         "SELECT DISTINCT l.M_InOut_ID, i.C_Invoice_ID, i.DocumentNo, i.DocStatus, " +
@@ -488,10 +613,18 @@ final class ReturnShipmentUtils {
           addInvoiceToMap(result, rs);
         }
       }
-    } catch (Exception e) {
-      log.warn("Error fetching return invoices: {}", e.getMessage());
     }
-    return result;
+  }
+
+  /** {@code JSONObject.put} that tolerates a {@code null} value (it is left out). */
+  static void putQuietly(JSONObject target, String key, Object value) {
+    try {
+      if (value != null && !JSONObject.NULL.equals(value)) {
+        target.put(key, value);
+      }
+    } catch (Exception e) {
+      log.warn("Could not put {} into the response: {}", key, e.getMessage());
+    }
   }
 
   private static void addInvoiceToMap(Map<String, List<JSONObject>> result, ResultSet rs) {
@@ -604,280 +737,5 @@ final class ReturnShipmentUtils {
     rec.put("hasReturnInvoice", !invoices.isEmpty());
     rec.put("linesCount", lineCountMap.getOrDefault(id, 0));
     rec.put(FIELD_INVOICE_STATUS, invoiceStatusMap.getOrDefault(id, 0));
-  }
-
-  // ---------------------------------------------------------------------------
-  // Invoice finalization – shared between both return header handlers
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Builds the rectificative invoice's lines, links it to the invoice(s) it rectifies, and
-   * completes it — in that order (ETP-5381).
-   *
-   * <p><b>The order is not stylistic.</b> The {@code C_INVOICE_REVERSE_TRG} database trigger
-   * rejects any insert into {@code C_Invoice_Reverse} once the invoice is {@code Processed='Y'},
-   * so the link can only be created while the invoice is still a draft. And the link must exist
-   * before completing, because {@code ETSG_CHECK_RECTIF_INV_DOC} rejects a rectificative document
-   * type with no rectified invoices attached ("El tipo de documento es rectificativo, pero no se
-   * han asociado facturas a rectificar"). Complete first and the invoice can never be confirmed
-   * nor linked — a permanently stuck document.
-   *
-   * @param originInvoiceIds ids of the invoices being rectified; must not be empty
-   */
-  static NeoResponse finalizeReturnInvoice(Invoice invoice, List<ShipmentInOutLine> lines,
-      CreateDraftInvoiceHandler createDraftInvoiceHandler, List<String> originInvoiceIds,
-      OBContext obContext) throws Exception {
-    addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler);
-    OBDal.getInstance().flush();
-    OBDal.getInstance().getSession().refresh(invoice);
-    createDraftInvoiceHandler.ensureDocumentNo(invoice);
-    createDraftInvoiceHandler.getSupport().ensureLineGrossAmounts(invoice);
-    createDraftInvoiceHandler.recalculateTotals(invoice);
-    linkRectifiedInvoices(invoice, originInvoiceIds);
-    OBDal.getInstance().flush();
-
-    String invoiceId = invoice.getId();
-    InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, obContext);
-    Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
-
-    JSONObject data = new JSONObject();
-    data.put("id", invoiceId);
-    data.put(FIELD_DOCUMENT_NO, completed.getDocumentNo());
-    data.put(FIELD_DOCUMENT_STATUS, completed.getDocumentStatus());
-    return wrapOkData(data);
-  }
-
-  /**
-   * Creates the {@code C_Invoice_Reverse} rows tying a rectificative invoice to the invoices it
-   * rectifies, skipping any link that already exists.
-   *
-   * <p>Note the DB trigger also requires both invoices to share a business partner; candidates are
-   * sourced from the return document's own origin invoices, so that holds by construction.
-   */
-  static void linkRectifiedInvoices(Invoice invoice, List<String> originInvoiceIds) {
-    if (originInvoiceIds == null || originInvoiceIds.isEmpty()) {
-      throw new OBException(ERR_RECTIFIED_INVOICE_REQUIRED);
-    }
-    for (String originId : originInvoiceIds) {
-      Invoice origin = OBDal.getInstance().get(Invoice.class, originId);
-      if (origin == null) {
-        throw new OBException("Invoice to rectify not found: " + originId);
-      }
-      OBCriteria<ReversedInvoice> existing = OBDal.getInstance().createCriteria(ReversedInvoice.class);
-      existing.add(Restrictions.eq(ReversedInvoice.PROPERTY_INVOICE, invoice));
-      existing.add(Restrictions.eq(ReversedInvoice.PROPERTY_REVERSEDINVOICE, origin));
-      if (!existing.list().isEmpty()) {
-        continue;
-      }
-      ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
-      link.setClient(invoice.getClient());
-      link.setOrganization(invoice.getOrganization());
-      link.setInvoice(invoice);
-      link.setReversedInvoice(origin);
-      OBDal.getInstance().save(link);
-    }
-  }
-
-  /**
-   * Resolves which invoices a rectificative invoice will rectify: the ones the caller explicitly
-   * picked, or — when the caller picked none — the newest invoice auto-detected from the return
-   * lines.
-   *
-   * <p>The fallback reads from {@link RectifiableInvoiceUtils#fetchAutoDetectedInvoices}, NOT from
-   * the broader selectable
-   * list: that list is every confirmed invoice of the flow, so falling back to its first entry
-   * would silently rectify an arbitrary unrelated invoice. Only the document chain
-   * (return line → original line → its invoice) is a safe automatic answer.
-   *
-   * <p>Never returns empty: a rectificative invoice with no rectified invoice cannot be confirmed,
-   * so failing here — before anything is written — is strictly better than creating a document
-   * that is stuck in draft forever.
-   */
-  static List<String> resolveRectifiedInvoiceIds(JSONObject body, String inOutId) {
-    List<String> ids = new ArrayList<>();
-    JSONArray requested = body != null ? body.optJSONArray(PARAM_ORIGIN_INVOICES) : null;
-    if (requested != null) {
-      for (int i = 0; i < requested.length(); i++) {
-        String id = requested.optString(i, null);
-        if (id != null && !id.isBlank() && !ids.contains(id)) {
-          ids.add(id);
-        }
-      }
-    }
-    if (ids.isEmpty()) {
-      List<JSONObject> detected = RectifiableInvoiceUtils.fetchAutoDetectedInvoices(inOutId);
-      if (!detected.isEmpty()) {
-        ids.add(detected.get(0).optString("id"));
-      }
-    }
-    if (ids.isEmpty()) {
-      throw new OBException(ERR_RECTIFIED_INVOICE_REQUIRED);
-    }
-    return ids;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Invoice building helpers
-  // ---------------------------------------------------------------------------
-
-  static Invoice findSourceInvoice(List<ShipmentInOutLine> lines) {
-    for (ShipmentInOutLine retLine : lines) {
-      ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
-      if (origLine == null) continue;
-      String hql = "SELECT il.invoice FROM InvoiceLine il " +
-          "WHERE il.goodsShipmentLine.id = :lineId AND il.invoice.documentStatus != 'VO'";
-      List<Invoice> results = OBDal.getInstance().getSession()
-          .createQuery(hql, Invoice.class)
-          .setParameter("lineId", origLine.getId())
-          .setMaxResults(1)
-          .list();
-      if (!results.isEmpty()) return results.get(0);
-    }
-    return null;
-  }
-
-  static void addReturnInvoiceLines(Invoice invoice, List<ShipmentInOutLine> lines,
-      CreateDraftInvoiceHandler createDraftInvoiceHandler) {
-    int precision = invoice.getCurrency() != null
-        ? invoice.getCurrency().getStandardPrecision().intValue() : 2;
-    long lineNo = 10;
-    for (ShipmentInOutLine retLine : lines) {
-      // ETP-4737: the rectificative invoice line must always come out negative regardless of
-      // which sign convention the SOURCE return document uses for movementQuantity. When this
-      // was written Sales (RFC Receipt) stored it positive while Purchases (RTV Shipment)
-      // already stored it negative, so a blind .negate() flipped Purchase-side rectificativas
-      // back to positive (e.g. REC-1000007). abs().negate() forces the correct sign either way
-      // without touching the return document's own movementQuantity.
-      // ETP-5313 aligned Sales onto the same stored-negative convention (see
-      // ReturnLineQuantityPolicy), so both sides now arrive negative — this stays sign-agnostic
-      // on purpose: it must keep working for documents created before that change.
-      BigDecimal qty = retLine.getMovementQuantity() != null
-          ? retLine.getMovementQuantity().abs().negate() : BigDecimal.ZERO;
-      if (retLine.getProduct() == null || qty.compareTo(BigDecimal.ZERO) == 0) continue;
-      buildAndSaveInvoiceLine(invoice, retLine, qty, precision, lineNo, createDraftInvoiceHandler);
-      lineNo += 10;
-    }
-  }
-
-  static void buildAndSaveInvoiceLine(Invoice invoice, ShipmentInOutLine retLine,
-      BigDecimal qty, int precision, long lineNo, CreateDraftInvoiceHandler createDraftInvoiceHandler) {
-    ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
-    ShipmentInOutLine pricingLine = (origLine != null) ? origLine : retLine;
-    InvoiceLine il = createDraftInvoiceHandler.createShipmentInvoiceLine(invoice, pricingLine, qty, lineNo);
-    il.setGoodsShipmentLine(retLine);
-
-    BigDecimal unitPrice = il.getUnitPrice() != null ? il.getUnitPrice() : BigDecimal.ZERO;
-    if (unitPrice.compareTo(BigDecimal.ZERO) == 0 && origLine != null) {
-      unitPrice = resolvePriceFromSourceInvoiceLine(origLine.getId(), "unitPrice", BigDecimal.ZERO);
-      if (unitPrice.compareTo(BigDecimal.ZERO) != 0) {
-        BigDecimal listPrice = resolvePriceFromSourceInvoiceLine(origLine.getId(), "listPrice", unitPrice);
-        il.setUnitPrice(unitPrice);
-        il.setListPrice(listPrice);
-        il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
-      }
-    }
-    if (unitPrice.compareTo(BigDecimal.ZERO) == 0
-        && retLine.getProduct() != null && invoice.getPriceList() != null) {
-      String productId = retLine.getProduct().getId();
-      String priceListId = invoice.getPriceList().getId();
-      unitPrice = resolvePriceFromPriceList(productId, priceListId, "standardPrice", BigDecimal.ZERO);
-      BigDecimal listPrice = resolvePriceFromPriceList(productId, priceListId, "listPrice", unitPrice);
-      il.setUnitPrice(unitPrice);
-      il.setListPrice(listPrice);
-      il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
-    }
-
-    if (il.getTax() == null && retLine.getProduct() != null) {
-      il.setTax(resolveApplicableTax(invoice, retLine));
-    }
-    if (il.getTax() == null && unitPrice.compareTo(BigDecimal.ZERO) != 0) {
-      throw new OBException("Cannot determine tax rate for product '"
-          + retLine.getProduct().getName() + "'.");
-    }
-
-    OBDal.getInstance().save(il);
-  }
-
-  static TaxRate resolveApplicableTax(Invoice invoice, ShipmentInOutLine retLine) {
-    try {
-      String productId = retLine.getProduct().getId();
-      String orgId = invoice.getOrganization().getId();
-      String warehouseId = retLine.getShipmentReceipt() != null
-          && retLine.getShipmentReceipt().getWarehouse() != null
-          ? retLine.getShipmentReceipt().getWarehouse().getId() : "";
-      String bpLocId = invoice.getPartnerAddress() != null
-          ? invoice.getPartnerAddress().getId() : "";
-      Date invoiceDate = invoice.getInvoiceDate() != null ? invoice.getInvoiceDate() : new Date();
-      String strDate = new SimpleDateFormat("dd-MM-yyyy").format(invoiceDate);
-      boolean isSOTrx = Boolean.TRUE.equals(invoice.isSalesTransaction());
-      String taxId = Tax.get(new DalConnectionProvider(), productId, strDate, orgId,
-          warehouseId, bpLocId, bpLocId, "", isSOTrx);
-      if (taxId != null && !taxId.isEmpty()) {
-        return OBDal.getInstance().get(TaxRate.class, taxId);
-      }
-    } catch (Exception e) {
-      log.warn("Tax.get() fallback failed for product {}: {}", retLine.getProduct().getId(),
-          e.getMessage());
-    }
-    return null;
-  }
-
-  static BigDecimal resolvePriceFromSourceInvoiceLine(String shipmentLineId,
-      String priceField, BigDecimal fallback) {
-    if (shipmentLineId == null) return fallback;
-    try {
-      String hql =
-          "SELECT il." + priceField + " FROM InvoiceLine il " +
-          "WHERE il.goodsShipmentLine.id = :lineId " +
-          "AND il.active = true " +
-          "AND il.invoice.documentStatus = 'CO' " +
-          "ORDER BY il.invoice.invoiceDate DESC";
-      List<BigDecimal> rows = OBDal.getInstance().getSession()
-          .createQuery(hql, BigDecimal.class)
-          .setParameter("lineId", shipmentLineId)
-          .setMaxResults(1)
-          .list();
-      if (!rows.isEmpty()) {
-        BigDecimal price = rows.get(0);
-        return (price != null && price.compareTo(BigDecimal.ZERO) > 0) ? price : fallback;
-      }
-      log.warn("No completed invoice line found for shipment line {} ({})", shipmentLineId, priceField);
-    } catch (Exception e) {
-      log.warn("Could not resolve {} from source invoice line {}: {}",
-          priceField, shipmentLineId, e.getMessage());
-    }
-    return fallback;
-  }
-
-  static BigDecimal resolvePriceFromPriceList(String productId, String priceListId,
-      String priceProperty, BigDecimal fallback) {
-    if (productId == null || priceListId == null) return fallback;
-    try {
-      String hql =
-          "SELECT pp." + priceProperty + " FROM PricingProductPrice pp " +
-          "WHERE pp.product.id = :productId " +
-          "AND pp.priceListVersion.priceList.id = :priceListId " +
-          "AND pp.priceListVersion.active = true " +
-          "AND pp.active = true " +
-          "AND pp.priceListVersion.validFromDate <= :today " +
-          "ORDER BY pp.priceListVersion.validFromDate DESC";
-      List<BigDecimal> rows = OBDal.getInstance().getSession()
-          .createQuery(hql, BigDecimal.class)
-          .setParameter("productId", productId)
-          .setParameter("priceListId", priceListId)
-          .setParameter("today", new Date())
-          .setMaxResults(1)
-          .list();
-      if (!rows.isEmpty()) {
-        BigDecimal price = rows.get(0);
-        return (price != null && price.compareTo(BigDecimal.ZERO) > 0) ? price : fallback;
-      }
-      log.warn("No price list entry for product {} in price list {} ({})",
-          productId, priceListId, priceProperty);
-    } catch (Exception e) {
-      log.warn("Could not resolve {} for product {} from price list {}: {}",
-          priceProperty, productId, priceListId, e.getMessage());
-    }
-    return fallback;
   }
 }

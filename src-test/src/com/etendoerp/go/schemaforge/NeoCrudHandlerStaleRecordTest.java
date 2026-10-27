@@ -41,7 +41,7 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 /**
  * Unit tests for the optimistic-locking guards {@code NeoCrudHandler} gained in ETP-5073 / DOC-04:
  * {@code validateUpdateRequest} (the 400 for an update that carries no {@code updated}),
- * {@code detectStaleRecord} and {@code buildStaleRecordResponse} (the 409 for one that carries a
+ * {@code detectStaleRecord} and {@code NeoErrorResponses.staleRecord} (the 409 for one that carries a
  * stale value).
  *
  * <p>All three are private, so they are reached by reflection — the same approach
@@ -49,6 +49,9 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
  * mocked statically rather than being driven through a mocked DAL: what is under test here is the
  * WIRING (does a stale verdict become a 409 with the right discriminator), while the verdict itself
  * is covered by {@code NeoRecordVersionTest}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
+ * @covers com.etendoerp.go.schemaforge.NeoErrorResponses
  */
 class NeoCrudHandlerStaleRecordTest {
 
@@ -103,12 +106,6 @@ class NeoCrudHandlerStaleRecordTest {
     return (NeoResponse) method.invoke(handler, context, dalEntityName);
   }
 
-  private NeoResponse invokeBuildStaleRecordResponse(String message) throws Exception {
-    Method method = NeoCrudHandler.class.getDeclaredMethod("buildStaleRecordResponse",
-        String.class);
-    method.setAccessible(true);
-    return (NeoResponse) method.invoke(handler, message);
-  }
 
   /**
    * The case that matters most for not breaking every existing caller: a well-formed update must
@@ -137,12 +134,19 @@ class NeoCrudHandlerStaleRecordTest {
     assertFalse(body.getString("hint").trim().isEmpty());
   }
 
+  /**
+   * No body at all is refused before the token check (ETP-5475): there is nothing to write, so it
+   * is a plain 400 "Request body is required", not a {@code missing_updated} logged at ERROR.
+   * What this test guards is that it is still refused, never written without a check.
+   */
   @Test
-  @DisplayName("an update with no request body at all is refused as 400 missing_updated")
+  @DisplayName("an update with no request body at all is refused as 400 before the token check")
   void updateWithoutBodyIsRefused() throws Exception {
     NeoResponse response = invokeValidateUpdateRequest(updateContext(RECORD_ID, null));
     assertNotNull(response);
-    assertEquals("missing_updated", response.getBody().getString("error"));
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getHttpStatus());
+    assertEquals("Request body is required",
+        response.getBody().getJSONObject("error").getString("message"));
   }
 
   /**
@@ -268,7 +272,7 @@ class NeoCrudHandlerStaleRecordTest {
   @Test
   @DisplayName("the 409 body carries the discriminator, the message, and the remedy")
   void staleRecordResponseShape() throws Exception {
-    NeoResponse response = invokeBuildStaleRecordResponse("Somebody else changed this record.");
+    NeoResponse response = NeoErrorResponses.staleRecord("Somebody else changed this record.");
 
     assertEquals(HttpServletResponse.SC_CONFLICT, response.getHttpStatus());
     JSONObject body = response.getBody();

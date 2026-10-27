@@ -1,0 +1,188 @@
+name: Mini Pipeline
+
+# ETP-5695: the per-PR mini pipeline. On every PR into develop: the core and the extra modules,
+# install against a throwaway Postgres (GenerateEntitiesTask reads the dictionary from the database
+# to write src-gen, which the core needs to compile), then goTestUnit, the module's database-free
+# tests. It runs here rather than in Jenkins: on the same commit and tests the Jenkins version took
+# more than twice as long, mostly waiting for its pod and cloning what it did not need.
+#
+# ETP-5838: then the database-backed tests, against the database the install built. Before, they
+# first ran on the daily cut into main, where one broken test held up the whole day's release
+# (etendo-go-tests #2403 failed after ~1h21m on a fixture that this job's database lacks too).
+#
+# On a push to develop it only fills the Gradle cache: a PR can restore its base branch's caches,
+# so even the first run of a new PR skips the ~3.5 min of dependency downloads.
+#
+# Secrets: ETENDOBOT_TOKEN reads etendo_core and the GitHub modules; NEXUS_USER/NEXUS_PASSWORD
+# resolve dependencies; BITBUCKET_SSH_KEY (read access to bitbucket.org/koodu_software) clones the
+# Bitbucket modules listed in jenkinsExtraModules.txt, which this module's code imports.
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+# The checkouts of other repos use ETENDOBOT_TOKEN; the workflow's own token only reads this one.
+permissions:
+  contents: read
+
+concurrency:
+  group: mini-pipeline-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-test:
+    name: ${{ github.event_name == 'push' && 'Warm the Gradle cache' || 'goTest' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: syspass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CORE_BRANCH: epic/ETP-3504
+      MODULE_BRANCH: ${{ github.head_ref || github.ref_name }}
+    steps:
+      # The Jenkins pod starts Postgres with these off; a service container takes no arguments,
+      # but all three can be changed on a running server.
+      - name: Tune Postgres for a throwaway database
+        if: github.event_name != 'push'
+        env:
+          PGPASSWORD: syspass
+        run: |
+          psql -h localhost -U postgres \
+            -c "ALTER SYSTEM SET fsync = off" \
+            -c "ALTER SYSTEM SET synchronous_commit = off" \
+            -c "ALTER SYSTEM SET full_page_writes = off" \
+            -c "SELECT pg_reload_conf()"
+
+      - name: Checkout etendo_core
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo_core
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: ${{ env.CORE_BRANCH }}
+          path: etendo_core
+
+      - name: Checkout com.etendoerp.go
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: etendo_core/modules/com.etendoerp.go
+
+      # Same branch choice as moduleBranchUtils.groovy: the PR's branch when the module has it
+      # (never for develop, main, hotfix/* or mergeblock/*), otherwise the core's branch.
+      - name: Clone the extra modules
+        env:
+          BITBUCKET_SSH_KEY: ${{ secrets.BITBUCKET_SSH_KEY }}
+          ETENDOBOT_TOKEN: ${{ secrets.ETENDOBOT_TOKEN }}
+        run: |
+          if [ -z "$BITBUCKET_SSH_KEY" ]; then
+            echo "::error::BITBUCKET_SSH_KEY is not set: the modules on bitbucket.org/koodu_software cannot be cloned."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          # A key saved with Windows line endings fails to load ("error in libcrypto"): drop the CRs.
+          printf '%s\n' "$BITBUCKET_SSH_KEY" | tr -d '\r' > ~/.ssh/bitbucket
+          chmod 600 ~/.ssh/bitbucket
+          if ! ssh-keygen -y -P '' -f ~/.ssh/bitbucket >/dev/null 2>&1; then
+            crlf=no; case "$BITBUCKET_SSH_KEY" in *$'\r'*) crlf=yes ;; esac
+            echo "::error::BITBUCKET_SSH_KEY is not a usable private key ($(wc -l < ~/.ssh/bitbucket) lines, CRLF: $crlf)." \
+              "Store the whole key, BEGIN and END lines included, with its line breaks and no passphrase."
+            exit 1
+          fi
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/bitbucket -o StrictHostKeyChecking=no"
+          case "$MODULE_BRANCH" in
+            develop|main|hotfix/*|mergeblock/*) try_branch="" ;;
+            *) try_branch="$MODULE_BRANCH" ;;
+          esac
+          cd etendo_core/modules
+          for url in $(tr ',' ' ' < com.etendoerp.go/jenkinsExtraModules.txt); do
+            name="$(basename "$url" .git)"
+            case "$url" in
+              git@github.com:*) url="https://x-access-token:${ETENDOBOT_TOKEN}@github.com/${url#git@github.com:}" ;;
+            esac
+            if [ -n "$try_branch" ] && git clone -q --depth 1 --branch "$try_branch" "$url" "$name" 2>/dev/null; then
+              echo "$name: $try_branch"
+            else
+              git clone -q --depth 1 --branch "$CORE_BRANCH" "$url" "$name"
+              echo "$name: $CORE_BRANCH"
+            fi
+          done
+
+      # The Gradle cache keys on the build files of the core and the cloned modules, so it runs after
+      # the checkouts. Without it prepareConfig spends ~3.5 min downloading dependencies.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Configure gradle.properties
+        working-directory: etendo_core
+        run: |
+          cat > gradle.properties <<EOF
+          context.name=etendo
+          bbdd.sid=etendo
+          bbdd.port=5432
+          bbdd.systemUser=postgres
+          bbdd.systemPassword=syspass
+          bbdd.user=tad
+          bbdd.password=tad
+          nexusUser=${{ secrets.NEXUS_USER }}
+          nexusPassword=${{ secrets.NEXUS_PASSWORD }}
+          githubUser=etendobot
+          githubToken=${{ secrets.ETENDOBOT_TOKEN }}
+          etendo.go.runtime.environment=local
+          allow.root=true
+          org.gradle.daemon=false
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          EOF
+
+      # The first Gradle run of the job downloads the dependencies; setup-java saves them at the end.
+      - name: Warm the Gradle cache
+        if: github.event_name == 'push'
+        working-directory: etendo_core
+        run: ./gradlew prepareConfig
+
+      - name: Install
+        id: install
+        if: github.event_name != 'push'
+        working-directory: etendo_core
+        run: |
+          ./gradlew prepareConfig
+          ./gradlew setup
+          ./gradlew install
+
+      - name: goTestUnit
+        if: github.event_name != 'push'
+        working-directory: etendo_core
+        run: ./gradlew goTestUnit
+
+      # Runs even when goTestUnit failed, so one run reports both halves. goTestUnit never writes to
+      # the database, so these start from the same clean data as on Jenkins. The root test task
+      # finalizes into goIsolatedDalTest, which runs the classes that need a JVM of their own.
+      - name: Integration tests
+        if: ${{ !cancelled() && github.event_name != 'push' && steps.install.outcome == 'success' }}
+        working-directory: etendo_core
+        run: ./gradlew test --tests 'com.etendoerp.go.*IntegrationTest'
+
+      - name: Upload the test reports
+        if: always() && github.event_name != 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: goTest-reports
+          path: |
+            etendo_core/build/reports/tests/goTestUnit
+            etendo_core/build/reports/tests/test
+            etendo_core/build/reports/tests/goIsolatedDalTest
+          retention-days: 7
+          if-no-files-found: ignore

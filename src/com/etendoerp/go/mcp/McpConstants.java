@@ -40,6 +40,8 @@ final class McpConstants {
   /** Requested output format of a {@code generate_*} report tool (ETP-4793 / IMP-19). */
   static final String PARAM_FORMAT = "format";
   static final String PARAM_PARENT_ID = "parentId";
+  /** The record id a tool acts on or, for {@code etendo_schema(view:"actions")}, judges. */
+  static final String PARAM_ID = "id";
   static final String PARAM_ASSET_ID = "assetId";
   /** Widget enum key for the {@code etendo_widget} tool. */
   static final String PARAM_WIDGET = "widget";
@@ -77,6 +79,33 @@ final class McpConstants {
   static final String TOOL_NEO_REQUEST_IMAGE_UPLOAD = "etendo_request_image_upload";
   /** Tool name of the read-only ticket-status lookup (ETP-5184). */
   static final String TOOL_NEO_GET_IMAGE_UPLOAD = "etendo_get_image_upload";
+  /** Tool name of the single-use attachment upload link request (ETP-5715). */
+  static final String TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD = "etendo_request_attachment_upload";
+  /** Tool name of the read-only listing of a document's attachments, download links included (ETP-5715). */
+  static final String TOOL_NEO_LIST_ATTACHMENTS = "etendo_list_attachments";
+  /** Tool name of the removal of one attachment of a document (ETP-5715). */
+  static final String TOOL_NEO_DELETE_ATTACHMENT = "etendo_delete_attachment";
+  /** Tool name of the read-only fetch of the PDF the application stored for a document (ETP-5715). */
+  static final String TOOL_NEO_GET_DOCUMENT_PDF = "etendo_get_document_pdf";
+  /** Tool name of the document email send, the application's "Enviar" (ETP-5715). */
+  static final String TOOL_NEO_SEND_DOCUMENT_EMAIL = "etendo_send_document_email";
+  /** Tool name of the single-use link that stages a PDF for data extraction (ETP-5715). */
+  static final String TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD =
+      "etendo_request_document_extraction_upload";
+  /** Tool name of the data extraction of a staged supplier-invoice PDF, read-only (ETP-5715). */
+  static final String TOOL_NEO_EXTRACT_INVOICE_DOCUMENT = "etendo_extract_invoice_document";
+  /** Error code: the extraction service could not be used (503, ETP-5715). */
+  static final String ERROR_OCR_UNAVAILABLE = "ocr_unavailable";
+  /** Error code: the staged document exists but its file has not been uploaded yet (409, ETP-5715). */
+  static final String ERROR_NOT_UPLOADED = "not_uploaded";
+  /** HTTP-style status for a request the service rejected before running (ETP-5715). */
+  static final int STATUS_BAD_REQUEST = 400;
+  /** HTTP-style status for a dependency that cannot be reached (ETP-5715). */
+  static final int STATUS_SERVICE_UNAVAILABLE = 503;
+  /** Error code: the document has no stored PDF yet (409, ETP-5715). */
+  static final String ERROR_NO_PDF = "no_pdf";
+  /** Error code: the stored PDF predates the document's last change and is not current (409, ETP-5715). */
+  static final String ERROR_PDF_STALE = "pdf_stale";
   /**
    * Hard cap on the DECODED size of {@link #TOOL_NEO_UPLOAD_IMAGE}'s {@code data_base64}.
    *
@@ -240,12 +269,12 @@ final class McpConstants {
    * own step — a create path that silently persists a zero gross amount is a data bug worth
    * landing on its own evidence rather than inside a re-enablement. ETP-5528 left this shared path
    * as it is: sales order and sales quotation lines get the amounts from their own customizations
-   * ({@code OrderLineDiscountSupport}) on every create, and so do sales invoice lines
-   * ({@code SalesInvoiceLineHandler} → {@code InvoiceLineAmountSupport}: {@code lineNetAmount} and
-   * {@code grossAmount}). Every other entity still does not on {@code etendo_create}, as on
-   * {@code develop} — purchase invoice lines and purchase order lines included (a purchase invoice
-   * line still persists {@code lineNetAmount 0} / {@code grossAmount 0}) — see
-   * {@code neo-headless.md} §4.12.9 and §4.12.20.
+   * ({@code OrderLineDiscountSupport}) on every create, and so do sales and purchase invoice lines
+   * ({@code SalesInvoiceLineHandler} / {@code PurchaseInvoiceLineHandler} →
+   * {@code InvoiceLineAmountSupport}: the discounted price, {@code lineNetAmount} and
+   * {@code grossAmount}, recalculated on an update too — ETP-5710). Every other entity still does
+   * not on {@code etendo_create}, as on {@code develop} — purchase order lines included (ETP-5727)
+   * — see {@code neo-headless.md} §4.12.9 and §4.12.20.
    *
    * <p>The guard against this drifting again is {@code NeoExtensionParityTest} (E4), which asserts
    * over the execution trace that one customization is reached by every channel. It cannot see a
@@ -441,8 +470,14 @@ final class McpConstants {
   static final String TOOL_NEO_DISCOVER = "etendo_discover";
   /** Tool name for the multi-operation write tool. */
   static final String TOOL_NEO_BATCH = "etendo_batch";
+  /** Tool name for reading the status of an asynchronous batch job (ETP-5677). */
+  static final String TOOL_NEO_JOB_STATUS = "etendo_job_status";
+  /** Tool name for cancelling an asynchronous batch job (ETP-5677). */
+  static final String TOOL_NEO_JOB_CANCEL = "etendo_job_cancel";
   /** Tool name for the document action / process tool. */
   static final String TOOL_NEO_ACTION = "etendo_action";
+  /** Tool name for one document action over several documents, one result each (ETP-5715). */
+  static final String TOOL_NEO_ACTION_BATCH = "etendo_action_batch";
 
   /** Tool name for the business-widget enum tool (gap G4, ETP-4284). */
   static final String TOOL_NEO_WIDGET = "etendo_widget";
@@ -456,9 +491,9 @@ final class McpConstants {
    * executed under the old name.
    */
   static final Set<String> TOOLS_RENAMED_FROM_NEO = Set.of(
-      "etendo_discover", TOOL_NEO_LIST, TOOL_NEO_GET, TOOL_NEO_CREATE, TOOL_NEO_UPDATE,
-      TOOL_NEO_DELETE, TOOL_NEO_SELECTORS, TOOL_NEO_DEFAULTS, TOOL_NEO_SCHEMA, "etendo_batch",
-      "etendo_action", TOOL_NEO_WIDGET, TOOL_NEO_VECTOR_SEARCH, TOOL_NEO_FEEDBACK,
+      TOOL_NEO_DISCOVER, TOOL_NEO_LIST, TOOL_NEO_GET, TOOL_NEO_CREATE, TOOL_NEO_UPDATE,
+      TOOL_NEO_DELETE, TOOL_NEO_SELECTORS, TOOL_NEO_DEFAULTS, TOOL_NEO_SCHEMA, TOOL_NEO_BATCH,
+      TOOL_NEO_ACTION, TOOL_NEO_WIDGET, TOOL_NEO_VECTOR_SEARCH, TOOL_NEO_FEEDBACK,
       TOOL_NEO_UPLOAD_IMAGE, TOOL_NEO_REQUEST_IMAGE_UPLOAD, TOOL_NEO_GET_IMAGE_UPLOAD,
       TOOL_GENERATE_AMORTIZATION_PLAN);
 

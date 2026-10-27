@@ -21,11 +21,17 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Single place where NEO resolves {@code @AD_Message_Key@} tokens into the text of the current
@@ -51,6 +57,14 @@ public final class NeoMessageTranslator {
    * pattern is unambiguous and has no backtracking surface (java:S5852) even on a long message.
    */
   private static final Pattern MESSAGE_KEY_TOKEN = Pattern.compile("@(\\w+)@");
+
+  /**
+   * ETP-5577 — the AD_Messages core raises when a document's date has no open period:
+   * {@code PeriodNotAvailable} (completions, posting) and {@code PeriodNotValid} (the
+   * {@code GL_JOURNAL} insert/update trigger). Both have the same way out — open the period.
+   */
+  public static final List<String> PERIOD_REFUSAL_KEYS =
+      List.of("PeriodNotAvailable", "PeriodNotValid");
 
   private NeoMessageTranslator() {
   }
@@ -78,6 +92,40 @@ public final class NeoMessageTranslator {
   }
 
   /**
+   * Translates a raw failure message the way core's datasource does, but in an explicit language:
+   * {@code @Key@} tokens are resolved through {@code AD_Message}, and a constraint violation is
+   * replaced by the AD message named after the constraint, when there is one (ETP-5782).
+   *
+   * <p>Why not {@link OBMessageUtils#messageBD(String)}: it reads the language from the request's
+   * session variables, which NEO's token-authenticated requests do not carry, and it has already
+   * echoed a message code straight back to a client (ETP-5073). The language here is the
+   * {@link OBContext} one, which {@code NeoAuthenticator} sets from {@code Accept-Language}.
+   *
+   * <p>Never throws, and needs a usable session: a translation that fails — no context, an aborted
+   * transaction — returns {@code text} unchanged.
+   *
+   * @param text the raw message; may be {@code null}
+   * @return the translated message, or {@code text} when nothing could be resolved
+   */
+  public static String translateDbMessage(String text) {
+    if (text == null || text.isBlank()) {
+      return text;
+    }
+    try {
+      OBContext context = OBContext.getOBContext();
+      String language = context != null && context.getLanguage() != null
+          ? context.getLanguage().getLanguage()
+          : null;
+      OBError translated = OBMessageUtils.translateError(new DalConnectionProvider(false), null,
+          language, text);
+      String message = translated != null ? translated.getMessage() : null;
+      return message == null || message.isBlank() ? text : message;
+    } catch (Exception e) {
+      return text;
+    }
+  }
+
+  /**
    * Extracts, in order of appearance, the AD_Message <em>search keys</em> a raw message carries as
    * {@code @Key@} tokens — the stable identity of the failure, before {@link
    * #safeParseTranslation(String)} replaces them with prose.
@@ -98,6 +146,84 @@ public final class NeoMessageTranslator {
    * @return the distinct keys in order of appearance, or an empty list when there are none
    */
   public static List<String> extractMessageKeys(String text) {
+    return extractKeys(text);
+  }
+
+  /**
+   * Which of {@code candidateKeys} a failure message is, recognised from its {@code @Key@} token
+   * or from the message's own text in ANY language.
+   *
+   * <p>ETP-5577: some core paths hand NEO the error already translated — {@code ProcessInvoiceUtil}
+   * and {@code FIN_AddPaymentFromJournal} translate it themselves (the latter in its own language,
+   * not the user's), and a datasource write reports a trigger's message as prose. The raw token is
+   * gone, so the AD_Message text is the only identity left. Matching every translation, not just
+   * the session language, is what makes the English text a Spanish user receives recognisable.
+   *
+   * <p>Never throws: the keys are a convenience on an error that is already being answered, so a
+   * failed catalog lookup only means no key.
+   *
+   * @param text          the message as received; may be {@code null}
+   * @param candidateKeys the AD_Message search keys to look for
+   * @return the recognised keys, in {@code candidateKeys} order; empty when none
+   */
+  public static List<String> recognizeMessageKeys(String text, List<String> candidateKeys) {
+    if (text == null || text.isBlank()) {
+      return Collections.emptyList();
+    }
+    List<String> tokens = extractKeys(text);
+    List<String> recognized = new ArrayList<>();
+    for (String key : candidateKeys) {
+      if (tokens.contains(key) || messageTexts(key).stream()
+          .anyMatch(t -> t != null && !t.isBlank() && text.contains(t.trim()))) {
+        recognized.add(key);
+      }
+    }
+    return recognized;
+  }
+
+  /** AD_Message texts per key; they only change on a rebuild. Failed reads are not cached. */
+  private static final Map<String, List<String>> MESSAGE_TEXTS = new ConcurrentHashMap<>();
+
+  /**
+   * Every text of an AD_Message: the base one and each translation. Empty when unreadable. Cached:
+   * this runs on error responses, possibly in a session whose transaction is already aborted.
+   */
+  static List<String> messageTexts(String key) {
+    List<String> cached = MESSAGE_TEXTS.get(key);
+    if (cached != null) {
+      return cached;
+    }
+    List<String> loaded = loadMessageTexts(key);
+    if (!loaded.isEmpty()) {
+      MESSAGE_TEXTS.put(key, Collections.unmodifiableList(loaded));
+    }
+    return loaded;
+  }
+
+  private static List<String> loadMessageTexts(String key) {
+    try {
+      NeoAdminMode.enter();
+      try {
+        List<String> texts = new ArrayList<>(OBDal.getInstance().getSession()
+            .createQuery("select m.messageText from ADMessage m where m.searchKey = :key",
+                String.class)
+            .setParameter("key", key)
+            .list());
+        texts.addAll(OBDal.getInstance().getSession()
+            .createQuery("select t.messageText from ADMessageTrl t where t.message.searchKey = :key",
+                String.class)
+            .setParameter("key", key)
+            .list());
+        return texts;
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      return Collections.emptyList();
+    }
+  }
+
+  private static List<String> extractKeys(String text) {
     if (text == null || text.isEmpty()) {
       return Collections.emptyList();
     }

@@ -43,6 +43,9 @@ import com.etendoerp.go.schemaforge.data.SFField;
  */
 final class McpQuerySupport {
 
+  /** Response key of the note {@link #attachFilterAliases} adds to an {@code etendo_list} body. */
+  static final String KEY_FILTER_ALIASES = "filterAliases";
+
   private McpQuerySupport() {
     // utility class — no instances
   }
@@ -74,6 +77,28 @@ final class McpQuerySupport {
    */
   static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
       org.apache.logging.log4j.Logger log) throws JSONException {
+    return buildWhereFromFilters(filters, adTab, sfEntity, java.util.Collections.emptyMap(), null,
+        log);
+  }
+
+  /**
+   * {@link #buildWhereFromFilters(JSONObject, Tab, SFEntity, org.apache.logging.log4j.Logger)},
+   * with the customization's {@code filterAliases} honoured (ETP-5705).
+   *
+   * <p>A filter whose resolved property is aliased is evaluated on the alias target (see
+   * {@link #aliasTarget} and {@link #filterPath}), whatever its shape — equality, a comparison
+   * operator or {@code between}. The key is still resolved and gated as the caller spelled it, so
+   * an excluded or unknown key is refused exactly as before; only the compared expression
+   * changes. A named {@code status} filter is never aliased: it is a hand-authored fragment, not a
+   * property.</p>
+   *
+   * @param aliases the customization's aliases, property name to property name; never {@code null}
+   * @param applied collects every alias actually used, for the response note (see
+   *                {@link #aliasTarget} for what a {@code null} value means); may be {@code null}
+   */
+  static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
+      java.util.Map<String, String> aliases, java.util.Map<String, String> applied,
+      org.apache.logging.log4j.Logger log) throws JSONException {
     Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
     if (dalEntity == null) {
@@ -93,10 +118,12 @@ final class McpQuerySupport {
           && appendStatusCondition(where, sfEntity, (String) value, log)) {
         continue;
       }
+      Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
+      Property target = aliasTarget(dalEntity, prop, aliases, excluded, applied);
       if (value instanceof JSONObject) {
-        appendOperatorConditions(where, dalEntity, sfEntity, excluded, key, (JSONObject) value);
+        appendOperatorConditions(where, prop, target, key, (JSONObject) value);
       } else {
-        appendEqualityCondition(where, dalEntity, sfEntity, excluded, key, value);
+        appendEqualityCondition(where, prop, target, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
@@ -394,25 +421,167 @@ final class McpQuerySupport {
     return new java.util.ArrayList<>(names);
   }
 
-  /** Append {@code e.prop = value} (or {@code e.prop.id = 'value'} for a FK), type-aware. */
-  private static void appendEqualityCondition(StringBuilder where, Entity dalEntity,
-      SFEntity sfEntity, java.util.Set<String> excluded, String key, Object value) {
-    Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
+  /**
+   * The HQL path of a resolved filter property, rooted at the {@code e} alias.
+   *
+   * <p>ETP-5705: a computed column (AD SQLLogic) is a DAL property but not a mapped Hibernate
+   * one, so {@code e.<name>} failed with "could not resolve property" and every filter on it
+   * answered 500. Hibernate only reaches it through the {@code _computedColumns} proxy, the same
+   * path core's {@code AdvancedQueryBuilder} uses. Any other property keeps {@code e.<name>}.</p>
+   */
+  private static String hqlPath(Property prop) {
+    return prop.isComputedColumn()
+        ? "e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + "." + prop.getName()
+        : "e." + prop.getName();
+  }
+
+  /**
+   * The HQL expression a filter on {@code prop} compares against: its {@link #hqlPath} plus
+   * {@code suffix}, or — when the customization aliased it (ETP-5705) —
+   * {@code coalesce(<target path><suffix>, <own path><suffix>)}.
+   *
+   * <p>The alias target comes first because it holds the value the caller is shown. The fallback
+   * to the property's own value covers a target that has not been computed yet: a stored twin that
+   * is only refreshed when a dependency changes is {@code NULL} until then, and comparing a bare
+   * {@code NULL} would drop the row from every result, including the ones the caller asked for.</p>
+   *
+   * @param prop   the property the caller filtered on
+   * @param target the alias target, or {@code null} when none applies
+   * @param suffix appended to each path ({@code ".id"} for a foreign-key equality, else empty)
+   * @return the HQL expression
+   */
+  private static String filterPath(Property prop, Property target, String suffix) {
+    String own = hqlPath(prop) + suffix;
+    return target == null ? own : "coalesce(" + hqlPath(target) + suffix + ", " + own + ")";
+  }
+
+  /**
+   * The property a filter on {@code prop} is redirected to by the customization's
+   * {@link com.etendoerp.go.schemaforge.NeoHandler#filterAliases}, recording the redirection in
+   * {@code applied}.
+   *
+   * <p>Matched on the resolved property name, so a caller that spells the key as its DB column
+   * name is redirected too. The target is not checked against the spec's excluded fields for the
+   * evaluation: it is declared by the server, and the condition only compares the value the
+   * caller is already shown. A target that is not a property of the entity, or whose type
+   * differs from the filtered property's (the value is formatted for the latter), is a
+   * customization bug, not a caller mistake, so it fails the read instead of silently filtering
+   * on the raw value.</p>
+   *
+   * <p>The exclusion does decide what the note may name, though. A target the spec excludes is
+   * recorded with a {@code null} value: the evaluation is the same, but naming it would invite a
+   * filter that {@link #resolveFilterProperty} refuses with 422 {@code unknown_filter_field}, and
+   * would disclose a field the spec was curated to hide.</p>
+   *
+   * @param dalEntity the DAL entity being read
+   * @param prop      the property the caller filtered on
+   * @param aliases   the customization's aliases, property name to property name
+   * @param excluded  the property names the spec excluded, as {@link #excludedPropertyNames}
+   *                  resolves them — the same set that refuses a filter key
+   * @param applied   collects {@code prop -> target} for every alias used, with a {@code null}
+   *                  target when the spec excludes it; may be {@code null}
+   * @return the target property, or {@code null} when {@code prop} is not aliased
+   * @throws IllegalStateException when the declared target does not exist on the entity or its
+   *                               type differs from {@code prop}'s
+   */
+  static Property aliasTarget(Entity dalEntity, Property prop,
+      java.util.Map<String, String> aliases, java.util.Set<String> excluded,
+      java.util.Map<String, String> applied) {
+    String targetName = aliases == null ? null : aliases.get(prop.getName());
+    if (StringUtils.isBlank(targetName) || targetName.equals(prop.getName())) {
+      return null;
+    }
+    Property target = dalEntity.getProperty(targetName, false);
+    if (target == null) {
+      throw new IllegalStateException("Filter alias " + prop.getName() + " -> " + targetName
+          + " names no property of entity " + dalEntity.getName());
+    }
+    if (prop.isPrimitive() != target.isPrimitive() || (prop.isPrimitive()
+        && !java.util.Objects.equals(prop.getPrimitiveObjectType(),
+            target.getPrimitiveObjectType()))) {
+      throw new IllegalStateException("Filter alias " + prop.getName() + " -> " + targetName
+          + " joins properties of different types on entity " + dalEntity.getName());
+    }
+    if (applied != null) {
+      applied.put(prop.getName(),
+          excluded.contains(target.getName()) ? null : target.getName());
+    }
+    return target;
+  }
+
+  /**
+   * Put the {@code filterAliases} note on an {@code etendo_list} body when any filter was
+   * evaluated on an alias target (ETP-5705), so the caller is not left to wonder why a filter on
+   * one field was answered by another. Nothing is added otherwise.
+   *
+   * <p>Shape: {@code "filterAliases": [{"filter": <requested>, "evaluatedOn": <target>,
+   * "reason": <one sentence>}]}, a top-level sibling of the rows exactly like the
+   * {@code namedFilters} block {@link McpNamedFilters#attachApplied} adds. When the spec excludes
+   * the target ({@code null} in {@code applied}), the entry is still emitted — the caller must
+   * know the filter was redirected — but {@code evaluatedOn} is omitted and the reason does not
+   * name the target: every field a note names must be one the caller can filter on.</p>
+   *
+   * @param body    the response body about to be returned
+   * @param applied the redirections {@link #aliasTarget} recorded, a {@code null} target meaning
+   *                the spec does not expose it; may be {@code null} or empty
+   * @throws JSONException never in practice (all values are plain strings)
+   */
+  static void attachFilterAliases(JSONObject body, java.util.Map<String, String> applied)
+      throws JSONException {
+    if (body == null || applied == null || applied.isEmpty()) {
+      return;
+    }
+    JSONArray notes = new JSONArray();
+    for (java.util.Map.Entry<String, String> alias : applied.entrySet()) {
+      notes.put(filterAliasNote(alias.getKey(), alias.getValue()));
+    }
+    body.put(KEY_FILTER_ALIASES, notes);
+  }
+
+  /**
+   * One entry of the {@code filterAliases} note.
+   *
+   * @param filter the property the caller filtered on
+   * @param target the property the filter was evaluated on, or {@code null} when the spec does not
+   *               expose it
+   * @return the note entry
+   * @throws JSONException never in practice (all values are plain strings)
+   */
+  private static JSONObject filterAliasNote(String filter, String target) throws JSONException {
+    JSONObject note = new JSONObject();
+    note.put("filter", filter);
+    if (target == null) {
+      note.put("reason", "The filter on " + filter + " was evaluated on the stored value this list"
+          + " shows for " + filter
+          + "; the field holding that value is not exposed by this spec.");
+    } else {
+      note.put("evaluatedOn", target);
+      note.put("reason", "The filter on " + filter + " was evaluated on " + target
+          + ", which holds the value this list shows for " + filter + ".");
+    }
+    return note;
+  }
+
+  /**
+   * Append {@code <path> = value} (or {@code <path>.id = 'value'} for a FK), type-aware, where
+   * {@code <path>} is the expression from {@link #filterPath}.
+   */
+  private static void appendEqualityCondition(StringBuilder where, Property prop, Property target,
+      Object value) {
     appendAnd(where);
     if (!prop.isPrimitive()) {
-      where.append("e.").append(prop.getName()).append(".id=")
+      where.append(filterPath(prop, target, ".id")).append('=')
           .append(McpBusinessFilters.formatHqlValue(String.class, false, value));
     } else {
-      where.append("e.").append(prop.getName()).append('=').append(
+      where.append(filterPath(prop, target, "")).append('=').append(
           McpBusinessFilters.formatHqlValue(prop.getPrimitiveObjectType(), true, value));
     }
   }
 
   /** Append one HQL comparison per range operator found in {@code operators}. */
-  private static void appendOperatorConditions(StringBuilder where, Entity dalEntity,
-      SFEntity sfEntity, java.util.Set<String> excluded, String key,
-      JSONObject operators) throws JSONException {
-    Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
+  private static void appendOperatorConditions(StringBuilder where, Property prop,
+      Property target, String key, JSONObject operators) throws JSONException {
+    String path = filterPath(prop, target, "");
     Class<?> type = prop.isPrimitive() ? prop.getPrimitiveObjectType() : String.class;
     java.util.Iterator<String> ops = operators.keys();
     while (ops.hasNext()) {
@@ -427,7 +596,7 @@ final class McpQuerySupport {
               "the 'between' operator takes a two-element [from, to] array");
         }
         appendAnd(where);
-        where.append("e.").append(prop.getName()).append(" between ")
+        where.append(path).append(" between ")
             .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
             .append(" and ")
             .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
@@ -438,7 +607,7 @@ final class McpQuerySupport {
               McpBusinessFilters.operatorKeys());
         }
         appendAnd(where);
-        where.append("e.").append(prop.getName()).append(' ').append(sql).append(' ')
+        where.append(path).append(' ').append(sql).append(' ')
             .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), operators.get(op)));
       }
     }

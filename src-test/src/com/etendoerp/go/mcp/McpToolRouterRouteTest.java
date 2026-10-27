@@ -66,6 +66,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -76,6 +77,7 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -520,6 +522,7 @@ class McpToolRouterRouteTest {
 
       JSONObject args = new JSONObject();
       args.put("operations", operations);
+      args.put("async", false); // these tests exercise the synchronous, atomic path
       return args;
     }
 
@@ -547,7 +550,7 @@ class McpToolRouterRouteTest {
         // The denial must short-circuit before any DAL work — BatchService must never
         // be reached once authorizeSpecAccess throws.
         org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
-            .executeBatch(any(), any());
+            .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
       }
     }
 
@@ -568,16 +571,319 @@ class McpToolRouterRouteTest {
             .thenReturn(mockBatch);
         JSONObject batchResult = new JSONObject();
         batchResult.put("committed", true);
-        when(mockBatch.executeBatch(any(), any())).thenReturn(batchResult);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(batchResult);
 
         JSONObject result = router.handleBatch(buildBatchArgs());
 
         assertFalse(result.has("isError"));
-        // ETP-5415: the two-arg overload is the assertion, not an incidental detail — the MCP
-        // body transforms now ride along as a per-operation preprocessor, and a call through the
-        // one-arg overload would silently run the batch with none of them.
-        org.mockito.Mockito.verify(mockBatch).executeBatch(any(), any());
+        // ETP-5415: a non-null preprocessor is the assertion, not an incidental detail — the MCP
+        // body transforms ride along as a per-operation preprocessor, and a call through the
+        // one-arg overload would silently run the batch with none of them. ETP-5676: the
+        // _onlyReturnIds and _skipRedundantCallouts options default to false on MCP.
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
+            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(false),
+            org.mockito.ArgumentMatchers.eq(false));
       }
+    }
+
+    /** ETP-5676: the etendo_batch argument reaches BatchService with the REST option's meaning. */
+    @Test
+    @DisplayName("an etendo_batch forwards _onlyReturnIds and _skipRedundantCallouts")
+    void batchForwardsOnlyReturnIds() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME))
+          .thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"))
+          .thenReturn(true);
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+        JSONObject batchResult = new JSONObject();
+        batchResult.put("committed", true);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(batchResult);
+        JSONObject args = buildBatchArgs();
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS, true);
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, true);
+
+        JSONObject result = router.handleBatch(args);
+
+        assertFalse(result.has("isError"));
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
+            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(true),
+            org.mockito.ArgumentMatchers.eq(true));
+      }
+    }
+  }
+
+  // ── etendo_batch async + job tools (ETP-5677) ────────────────────────────
+
+  /**
+   * The async mode shares the synchronous call's access check and hands the job to
+   * {@code BatchJobService}; the two job tools only forward to the same service.
+   */
+  @Nested
+  @DisplayName("etendo_batch async and etendo_job_* (ETP-5677)")
+  class BatchJobTests {
+
+    private JSONObject asyncArgs() throws Exception {
+      JSONObject op = new JSONObject().put("id", "op1").put("spec", SPEC_NAME)
+          .put("entity", ENTITY_NAME).put("body", new JSONObject());
+      return new JSONObject().put("operations", new JSONArray().put(op)).put("async", true);
+    }
+
+    private String textOf(JSONObject result) throws Exception {
+      return result.getJSONArray("content").getJSONObject(0).getString("text");
+    }
+
+    @Test
+    @DisplayName("async:true is access-checked per spec, then submitted as an mcp job without running a batch")
+    void asyncSubmitsAJobAfterTheAccessCheck() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(true);
+
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      when(jobs.submit(any(), any(), eq("mcp"), any()))
+          .thenReturn(new JSONObject().put("jobId", "J1").put("state", "QUEUED"));
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current)
+            .thenReturn(new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O",
+                "en_US", null));
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+
+        JSONObject result = router.handleBatch(asyncArgs());
+
+        assertFalse(result.has("isError"));
+        assertEquals("J1", new JSONObject(textOf(result)).getString("jobId"));
+        org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
+            .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyBoolean());
+      }
+    }
+
+    /**
+     * Volume is the default: without {@code async} the call is a job, and only an explicit
+     * {@code async:false} runs the atomic, synchronous batch.
+     */
+    @Test
+    @DisplayName("async omitted submits a job; async:false runs the synchronous batch")
+    void asyncIsTheDefaultAndFalseOptsOut() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(true);
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      when(jobs.submit(any(), any(), eq("mcp"), any()))
+          .thenReturn(new JSONObject().put("jobId", "J1").put("state", "QUEUED"));
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current)
+            .thenReturn(new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O",
+                "en_US", null));
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(new JSONObject().put("committed", true));
+
+        JSONObject omitted = asyncArgs();
+        omitted.remove("async");
+        JSONObject defaulted = router.handleBatch(omitted);
+        assertEquals("J1", new JSONObject(textOf(defaulted)).getString("jobId"));
+        verify(jobs).submit(any(), any(), eq("mcp"), any());
+        org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
+            .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyBoolean());
+
+        JSONObject optedOut = asyncArgs();
+        optedOut.put("async", false);
+        router.handleBatch(optedOut);
+        org.mockito.Mockito.verify(jobs, org.mockito.Mockito.times(1))
+            .submit(any(), any(), eq("mcp"), any());
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
+            org.mockito.ArgumentMatchers.notNull(), eq(false), eq(false));
+      }
+    }
+
+    /**
+     * REST/MCP parity: the job's per-row runner IS the synchronous MCP call — same
+     * {@code executeBatch} with the MCP preprocessor and the request's options, under admin mode,
+     * and a failed row gets the same IMP-5 envelope rewrite the synchronous tool applies.
+     */
+    @Test
+    @DisplayName("the async row runner is the synchronous MCP call, row by row")
+    void theAsyncRowRunnerIsTheSynchronousMcpCall() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(true);
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      when(jobs.submit(any(), any(), eq("mcp"), any())).thenReturn(new JSONObject().put("jobId", "J1"));
+      JSONObject failure = new JSONObject().put("committed", false).put("error", new JSONObject());
+      JSONArray rowOps = new JSONArray().put(new JSONObject().put("id", "r"));
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchService.class);
+          MockedStatic<McpBatchEnvelope> envelopeMock = mockStatic(McpBatchEnvelope.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current)
+            .thenReturn(new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O",
+                "en_US", null));
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly).thenReturn(mockBatch);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(failure);
+        JSONObject args = asyncArgs();
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS, true);
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, true);
+
+        router.handleBatch(args);
+
+        ArgumentCaptor<com.etendoerp.go.schemaforge.BatchJobService.RowRunner> runner =
+            ArgumentCaptor.forClass(com.etendoerp.go.schemaforge.BatchJobService.RowRunner.class);
+        verify(jobs).submit(any(), any(), eq("mcp"), runner.capture());
+        obContextMock.clearInvocations();
+        JSONObject outcome = runner.getValue().run(rowOps);
+
+        assertEquals(failure, outcome);
+        verify(mockBatch).executeBatch(eq(rowOps), org.mockito.ArgumentMatchers.notNull(), eq(true),
+            eq(true));
+        envelopeMock.verify(() -> McpBatchEnvelope.toMcpBatchFailure(failure));
+        obContextMock.verify(OBContext::setAdminMode);
+        obContextMock.verify(OBContext::restorePreviousMode);
+      }
+    }
+
+    @Test
+    @DisplayName("a read-only role cannot start an async batch either")
+    void asyncIsDeniedForAReadOnlyRole() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(false);
+
+      JSONObject result = router.handleBatch(asyncArgs());
+
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(textOf(result).contains("Access denied"));
+    }
+
+    @Test
+    @DisplayName("a refused submit (429) tells the agent when to retry")
+    void aTooBusySubmitCarriesTheRetryHint() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(true);
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      when(jobs.submit(any(), any(), any(), any())).thenThrow(
+          new com.etendoerp.go.schemaforge.BatchJobService.JobException(429, "Too many", 5));
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current)
+            .thenReturn(new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O",
+                "en_US", null));
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mock(com.etendoerp.go.schemaforge.BatchService.class));
+
+        JSONObject result = router.handleBatch(asyncArgs());
+
+        assertTrue(result.getBoolean("isError"));
+        assertTrue(textOf(result).contains("retry after 5 s"));
+      }
+    }
+
+    @Test
+    @DisplayName("etendo_job_status returns the stored status of the caller's job")
+    void jobStatusForwardsToTheService() throws Exception {
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      com.etendoerp.go.schemaforge.BatchJobService.Owner owner =
+          new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O", "en_US", null);
+      when(jobs.status(owner, "J1")).thenReturn(new JSONObject().put("state", "RUNNING"));
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current).thenReturn(owner);
+
+        JSONObject result = McpBatchJobTools.handleBatchJob("etendo_job_status",
+            new JSONObject().put("jobId", "J1"));
+
+        assertFalse(result.has("isError"));
+        assertEquals("RUNNING", new JSONObject(textOf(result)).getString("state"));
+      }
+    }
+
+    @Test
+    @DisplayName("etendo_job_cancel forwards to cancel, and a stranger's job answers not found")
+    void jobCancelForwardsAndMapsRefusals() throws Exception {
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      com.etendoerp.go.schemaforge.BatchJobService.Owner owner =
+          new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O", "en_US", null);
+      when(jobs.cancel(owner, "MINE")).thenReturn(new JSONObject().put("state", "CANCELLED"));
+      when(jobs.cancel(owner, "THEIRS")).thenThrow(
+          new com.etendoerp.go.schemaforge.BatchJobService.JobException(404, "Job not found: THEIRS",
+              null));
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current).thenReturn(owner);
+
+        JSONObject mine = McpBatchJobTools.handleBatchJob("etendo_job_cancel", new JSONObject().put("jobId", "MINE"));
+        JSONObject theirs = McpBatchJobTools.handleBatchJob("etendo_job_cancel", new JSONObject().put("jobId", "THEIRS"));
+
+        assertEquals("CANCELLED", new JSONObject(textOf(mine)).getString("state"));
+        assertTrue(theirs.getBoolean("isError"));
+        assertTrue(textOf(theirs).contains("Job not found"));
+      }
+    }
+
+    @Test
+    @DisplayName("a job tool without a jobId is refused")
+    void jobToolsRequireAJobId() throws Exception {
+      JSONObject result = McpBatchJobTools.handleBatchJob("etendo_job_status", new JSONObject());
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(textOf(result).contains("jobId is required"));
     }
   }
 
@@ -634,6 +940,33 @@ class McpToolRouterRouteTest {
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       JSONObject body = new JSONObject(text);
       assertEquals(1, body.getInt("count"));
+    }
+
+    @Test
+    @DisplayName("etendo_discover hides a spec whose entities are all hidden accounting (ETP-5648)")
+    @SuppressWarnings("unchecked")
+    void discoverHidesAllAccountingSpec() throws Exception {
+      SFSpec spec = mockSpec();
+      OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
+      when(specCriteria.list()).thenReturn(List.of(spec));
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(eq(spec), eq("W")))
+          .thenReturn(true);
+      List<SFEntity> included = List.of(mock(SFEntity.class));
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(included);
+      try (MockedStatic<NeoAccountingAccessPolicy> policyMock =
+          mockStatic(NeoAccountingAccessPolicy.class)) {
+        policyMock.when(() -> NeoAccountingAccessPolicy.visibleEntities(included))
+            .thenReturn(Collections.emptyList());
+
+        JSONObject body = new JSONObject(router.route("etendo_discover", null, READ_SCOPES)
+            .getJSONArray("content").getJSONObject(0).getString("text"));
+
+        assertEquals(0, body.getInt("count"));
+      }
+      supportMock.verify(() -> McpToolRouterSupport.buildDiscoverSpec(
+          any(), any(), any(), any(), any()), never());
     }
 
     // ── IMP-53 (ETP-5639): etendo_discover({spec}) narrows the catalog ──────
@@ -833,6 +1166,49 @@ class McpToolRouterRouteTest {
       assertEquals("unknown_argument", envelope.getString("error"));
       assertTrue(envelope.getJSONArray("available").toString().contains("spec"));
     }
+
+    @Test
+    @DisplayName("etendo_send_document_email refuses a wrong-case or unknown key before any send")
+    void sendDocumentEmailRejectsUnknownKeysBeforeSending() throws Exception {
+      stubCatalog();
+      try (MockedStatic<McpDocumentEmailTool> handler = mockStatic(McpDocumentEmailTool.class)) {
+        for (String key : List.of("Preview", "recipient", "bcc")) {
+          JSONObject args = new JSONObject();
+          args.put("spec", SPEC_NAME);
+          args.put("id", "REC1");
+          args.put("to", new org.codehaus.jettison.json.JSONArray(List.of("a@b.example")));
+          args.put(key, true);
+
+          JSONObject result = router.route(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL, args,
+              WRITE_SCOPES);
+
+          assertTrue(result.getBoolean("isError"), result.toString());
+          assertEquals("unknown_argument", bodyOf(result).getString("error"), key);
+          assertEquals(key, bodyOf(result).getString("field"));
+        }
+        handler.verify(() -> McpDocumentEmailTool.handle(any()), org.mockito.Mockito.never());
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5669: etendo_action refuses a top-level docAction and points at 'parameters'")
+    void actionRejectsTopLevelDocAction() throws Exception {
+      stubCatalog();
+
+      JSONObject args = new JSONObject();
+      args.put("spec", SPEC_NAME);
+      args.put("entity", "header");
+      args.put("id", "J1");
+      args.put("action", "documentAction");
+      args.put("docAction", "CO");
+      JSONObject result = router.route("etendo_action", args, WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      JSONObject envelope = bodyOf(result);
+      assertEquals("unknown_argument", envelope.getString("error"));
+      assertEquals("docAction", envelope.getString("field"));
+      assertTrue(envelope.getString("hint").contains("'parameters'"), envelope.toString());
+    }
   }
 
   // ── etendo_list ──────────────────────────────────────────────────────────
@@ -1016,6 +1392,24 @@ class McpToolRouterRouteTest {
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("id"));
+    }
+    @Test
+    @DisplayName("etendo_update rejects blank and null-string versions before record lookup")
+    void updateRejectsUnusableVersion() throws Exception {
+      setupSpecLookup(mockSpec());
+      for (String updated : new String[] { "", "  ", "null" }) {
+        JSONObject args = buildCrudArgs();
+        args.put("id", "record-id");
+        args.put("fields", new JSONObject());
+        args.put("updated", updated);
+
+        JSONObject result = router.route("etendo_update", args, WRITE_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        JSONObject envelope = new JSONObject(contentText(result));
+        assertEquals(422, envelope.getInt("status"));
+        assertTrue(envelope.getString("detail").contains("updated"), envelope.toString());
+      }
     }
   }
 
@@ -1764,6 +2158,76 @@ class McpToolRouterRouteTest {
     }
 
     /**
+     * ETP-5714: the tool description used to give 'Header' as the entity example while the catalogue
+     * spells it 'header', so the first call of an agent that followed it failed. A miss on the
+     * entity is retried ONCE with the spelling the spec uses, and the argument itself is rewritten
+     * so every later consumer sees the canonical name.
+     */
+    @Test
+    @DisplayName("an entity typed with other capitals is routed as the spec spells it")
+    void entityTypedWithOtherCapitalsIsRetriedCanonically() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenThrow(McpRoutingException.entityNotFound("x", SPEC_NAME, List.of("header")));
+      JSONObject args = new JSONObject().put("spec", SPEC_NAME).put("entity", "Header");
+
+      try (MockedStatic<McpEntityNames> names = mockStatic(McpEntityNames.class)) {
+        names.when(() -> McpEntityNames.canonicalName(SPEC_NAME, "Header")).thenReturn("header");
+
+        JSONObject result = router.route("etendo_list", args, READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+      }
+      assertEquals("header", args.getString("entity"), "the argument is rewritten, not just shadowed");
+      supportMock.verify(() -> McpToolRouterSupport.findIncludedEntity(anyString(),
+          org.mockito.ArgumentMatchers.eq("Header")));
+      supportMock.verify(() -> McpToolRouterSupport.findIncludedEntity(anyString(),
+          org.mockito.ArgumentMatchers.eq("header")));
+    }
+
+    @Test
+    @DisplayName("an entity no capitalisation explains is NOT retried and keeps the typed name")
+    void unknownEntityIsNotRetried() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenThrow(McpRoutingException.entityNotFound("Nope", SPEC_NAME, List.of("header")));
+      JSONObject args = new JSONObject().put("spec", SPEC_NAME).put("entity", "Nope");
+
+      try (MockedStatic<McpEntityNames> names = mockStatic(McpEntityNames.class)) {
+        JSONObject result = router.route("etendo_list", args, READ_SCOPES);
+
+        assertEquals(404, new JSONObject(contentText(result)).getInt("status"));
+        names.verify(() -> McpEntityNames.canonicalName(SPEC_NAME, "Nope"));
+      }
+      assertEquals("Nope", args.getString("entity"));
+      supportMock.verify(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()),
+          org.mockito.Mockito.times(1));
+    }
+
+    @Test
+    @DisplayName("a missing spec is not an entity miss: no canonical lookup happens")
+    void missingSpecIsNotRetried() throws Exception {
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString()))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
+          .thenThrow(McpRoutingException.specNotFound(SPEC_NAME));
+
+      try (MockedStatic<McpEntityNames> names = mockStatic(McpEntityNames.class)) {
+        router.route("etendo_list", buildCrudArgs(), READ_SCOPES);
+
+        names.verifyNoInteractions();
+      }
+    }
+
+    /**
      * An entity with neither a tab nor a handler is unserviceable, and ETP-5405 made the router
      * say so as a routing failure instead of a server fault.
      *
@@ -2181,7 +2645,7 @@ class McpToolRouterRouteTest {
   @DisplayName("route — etendo_action")
   class ActionTests {
 
-    private static final Set<String> ACTION_SCOPES = Set.of("neo:write");
+    private static final Set<String> ACTION_SCOPES = Set.of("neo:process");
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
     /**
@@ -2191,8 +2655,18 @@ class McpToolRouterRouteTest {
      */
     private static final String HANDLER_QUALIFIER = "action-test-handler";
 
+    /**
+     * ETP-5558's record-ownership guard runs before every action. Unstubbed it reaches the real
+     * {@code ModelProvider}, which initializes against the database: these tests passed only while
+     * a local PostgreSQL was up, and failed with a 404 instead of the action result when it was not.
+     * The guard has its own coverage in {@code NeoActionRecordGuardTest}; here it admits the record.
+     */
+    private MockedStatic<NeoActionRecordGuard> recordGuardMock;
+
     @BeforeEach
     void setupActionSupport() {
+      recordGuardMock = mockStatic(NeoActionRecordGuard.class);
+      recordGuardMock.when(() -> NeoActionRecordGuard.refusalFor(any(), any())).thenReturn(null);
       supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
@@ -2203,6 +2677,13 @@ class McpToolRouterRouteTest {
       // the body is passed through so the test asserts on what the handler said.
       supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
           .thenAnswer(invocation -> invocation.getArgument(0));
+    }
+
+    @AfterEach
+    void closeRecordGuard() {
+      if (recordGuardMock != null) {
+        recordGuardMock.close();
+      }
     }
 
     private JSONObject buildActionArgs() throws Exception {
@@ -2490,6 +2971,460 @@ class McpToolRouterRouteTest {
 
         assertTrue(contentText(result).contains("warning"));
       }
+    }
+  }
+
+  // ── etendo_action_batch (ETP-5715) ────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — etendo_action_batch")
+  class ActionBatchTests {
+
+    private static final String ACTION_NAME = "documentAction";
+
+    @BeforeEach
+    void setupBatchSupport() {
+      supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
+          .thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
+          .thenCallRealMethod();
+      // the batch calls this one; with the support class mocked it must run for real
+      supportMock.when(() -> McpToolRouterSupport.validateArgs(any(), any(String[].class)))
+          .thenCallRealMethod();
+      org.openbravo.model.ad.datamodel.Column button =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(button.getDBColumnName()).thenReturn("DocAction");
+      buttonActionMock.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(button);
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, mockTab());
+    }
+
+    private JSONObject batchArgs(String... ids) throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("spec", SPEC_NAME);
+      args.put("entity", ENTITY_NAME);
+      args.put("action", ACTION_NAME);
+      args.put("ids", new JSONArray(java.util.Arrays.asList(ids)));
+      args.put("parameters", new JSONObject().put("docAction", "CO"));
+      return args;
+    }
+
+    private NeoResponse processOk(String message) throws Exception {
+      return NeoResponse.ok(new JSONObject().put("status", "success").put("message", message));
+    }
+
+    @Test
+    @DisplayName("completes three documents through the etendo_action path, one process call each")
+    void completesThreeDocuments() throws Exception {
+      buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(SFEntity.class), anyString(), anyString(), any()))
+          .thenAnswer(inv -> processOk("completed " + inv.getArgument(1)));
+
+      JSONObject result = router.route("etendo_action_batch", batchArgs("o1", "o2", "o3"),
+          WRITE_SCOPES);
+
+      assertFalse(result.has("isError"));
+      JSONObject answer = new JSONObject(contentText(result));
+      assertEquals(3, answer.getJSONObject("summary").getInt("succeeded"));
+      assertEquals("completed o2", answer.getJSONArray("results").getJSONObject(1)
+          .getJSONObject("result").getString("processMessage"));
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(SFEntity.class), anyString(), eq(ACTION_NAME), any()), org.mockito.Mockito.times(3));
+      verify(mockOBDal, org.mockito.Mockito.times(3)).commitAndClose();
+    }
+
+    @Test
+    @DisplayName("one document the core refuses does not stop the others, and is rolled back")
+    void oneRefusedAmongThree() throws Exception {
+      buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(SFEntity.class), anyString(), anyString(), any()))
+          .thenAnswer(inv -> "o2".equals(inv.getArgument(1))
+              ? new NeoResponse(400, new JSONObject().put("status", "error")
+                  .put("message", "Document already completed"))
+              : processOk("completed"));
+
+      JSONObject result = router.route("etendo_action_batch", batchArgs("o1", "o2", "o3"),
+          WRITE_SCOPES);
+
+      JSONObject answer = new JSONObject(contentText(result));
+      assertEquals(2, answer.getJSONObject("summary").getInt("succeeded"));
+      assertEquals(1, answer.getJSONObject("summary").getInt("failed"));
+      JSONObject bad = answer.getJSONArray("results").getJSONObject(1);
+      assertFalse(bad.getBoolean("ok"));
+      assertEquals("Document already completed",
+          bad.getJSONObject("error").getString("processMessage"));
+      verify(mockOBDal).rollbackAndClose();
+      verify(mockOBDal, org.mockito.Mockito.times(2)).commitAndClose();
+    }
+
+    @Test
+    @DisplayName("an exception thrown by the process answers that document only")
+    void exceptionAnswersOnlyThatDocument() throws Exception {
+      buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(SFEntity.class), anyString(), anyString(), any()))
+          .thenAnswer(inv -> {
+            if ("o1".equals(inv.getArgument(1))) {
+              throw new IllegalStateException("process blew up");
+            }
+            return processOk("completed");
+          });
+
+      JSONObject answer = new JSONObject(contentText(
+          router.route("etendo_action_batch", batchArgs("o1", "o2"), WRITE_SCOPES)));
+
+      assertFalse(answer.getJSONArray("results").getJSONObject(0).getBoolean("ok"));
+      assertTrue(answer.getJSONArray("results").getJSONObject(1).getBoolean("ok"));
+    }
+
+    @Test
+    @DisplayName("a role without access to the spec is refused and no process runs")
+    void unauthorizedSpecRunsNothing() throws Exception {
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
+          .thenReturn(false);
+
+      JSONObject result = router.route("etendo_action_batch", batchArgs("o1", "o2"), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(contentText(result).contains("Access denied"));
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), anyString(), anyString(), any()), never());
+    }
+
+    @Test
+    @DisplayName("the argument guard is armed for the new tool: 'id' is refused, 'ids' is the name")
+    void singularIdIsRefused() throws Exception {
+      JSONObject args = batchArgs("o1");
+      args.remove("ids");
+      args.put("id", "o1");
+
+      JSONObject result = router.route("etendo_action_batch", args, WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(contentText(result).contains("'id'"), contentText(result));
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), anyString(), anyString(), any()), never());
+    }
+
+    @Test
+    @DisplayName("repeated ids reach the caller as a refusal, never a double completion")
+    void repeatedIdsRunNothing() throws Exception {
+      JSONObject result = router.route("etendo_action_batch", batchArgs("o1", "o1"), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      assertEquals("ids", new JSONObject(contentText(result)).getString("field"));
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), anyString(), anyString(), any()), never());
+    }
+  }
+
+  // ── etendo_action on ONE posted document: un-post, then reactivate (ETP-5715 round 3) ──
+
+  @Nested
+  @DisplayName("route — etendo_action reactivating a posted document")
+  class SingleReactivationUnpostTests {
+
+    private static final String INVOICE_ID = "inv-001";
+    private static final String DAL_ENTITY = "Invoice";
+    private final List<String> events = new ArrayList<>();
+    private MockedStatic<McpDeclaredActions> declaredMock;
+    private MockedStatic<org.openbravo.base.model.ModelProvider> modelMock;
+    private boolean posted = true;
+
+    @BeforeEach
+    void setUp() throws Exception {
+      supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
+          .thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
+          .thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.validateArgs(any(), any(String[].class)))
+          .thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      when(entity.getETGOSFSpec()).thenReturn(spec);
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      org.openbravo.model.ad.datamodel.Column docAction =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(docAction.getDBColumnName()).thenReturn("DocAction");
+      buttonActionMock.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(docAction);
+
+      // the entity declares unpost; every other action is judged as an AD button
+      com.etendoerp.go.schemaforge.util.NeoActionContract unpostContract =
+          mock(com.etendoerp.go.schemaforge.util.NeoActionContract.class);
+      when(unpostContract.getName()).thenReturn("unpost");
+      when(unpostContract.getHttpMethod()).thenReturn("POST");
+      declaredMock = mockStatic(McpDeclaredActions.class);
+      declaredMock.when(() -> McpDeclaredActions.precheck(any(), anyString(), any()))
+          .thenAnswer(inv -> "unpost".equals(inv.getArgument(1)) ? unpostContract : null);
+      declaredMock.when(() -> McpDeclaredActions.customizationNameOf(any(), anyString()))
+          .thenAnswer(inv -> inv.getArgument(1));
+      declaredMock.when(() -> McpDeclaredActions.unpostsBeforeReactivation(any())).thenReturn(true);
+
+      org.openbravo.base.model.Entity dal = mock(org.openbravo.base.model.Entity.class);
+      when(dal.getName()).thenReturn(DAL_ENTITY);
+      org.openbravo.base.model.Property postedProperty =
+          mock(org.openbravo.base.model.Property.class);
+      when(postedProperty.getName()).thenReturn("posted");
+      when(dal.getPropertyByColumnName("Posted", false)).thenReturn(postedProperty);
+      org.openbravo.base.model.ModelProvider provider =
+          mock(org.openbravo.base.model.ModelProvider.class);
+      when(provider.getEntityByTableId(anyString())).thenReturn(dal);
+      modelMock = mockStatic(org.openbravo.base.model.ModelProvider.class);
+      modelMock.when(org.openbravo.base.model.ModelProvider::getInstance).thenReturn(provider);
+
+      when(mockOBDal.get(eq(DAL_ENTITY), anyString())).thenAnswer(inv -> {
+        if ("ghost".equals(inv.getArgument(1))) {
+          return null;
+        }
+        org.openbravo.base.structure.BaseOBObject row =
+            mock(org.openbravo.base.structure.BaseOBObject.class);
+        when(row.get("posted")).thenReturn(posted ? "Y" : "N");
+        return row;
+      });
+      org.mockito.Mockito.doAnswer(inv -> events.add("commit")).when(mockOBDal).commitAndClose();
+      org.mockito.Mockito.doAnswer(inv -> events.add("rollback")).when(mockOBDal)
+          .rollbackAndClose();
+    }
+
+    @AfterEach
+    void closeStatics() {
+      declaredMock.close();
+      modelMock.close();
+    }
+
+    private JSONObject reactivateArgs(String docAction) throws Exception {
+      return new JSONObject().put("spec", SPEC_NAME).put("entity", ENTITY_NAME)
+          .put("id", INVOICE_ID).put("action", "documentAction")
+          .put("parameters", new JSONObject().put("docAction", docAction));
+    }
+
+    /** The process answers: refuse the action named in {@code failing}, accept everything else. */
+    private void processAnswers(String failing) {
+      buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(SFEntity.class), anyString(), anyString(), any())).thenAnswer(inv -> {
+            String action = inv.getArgument(2);
+            events.add("run:" + action);
+            return action.equals(failing)
+                ? new NeoResponse(422, new JSONObject().put("status", "error")
+                    .put("message", action + " refused"))
+                : NeoResponse.ok(new JSONObject().put("status", "success")
+                    .put("message", action + " done"));
+          });
+    }
+
+    @Test
+    @DisplayName("a posted invoice is un-posted, committed, then reactivated")
+    void postedInvoiceIsUnpostedFirst() throws Exception {
+      processAnswers(null);
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertFalse(result.has("isError"));
+      JSONObject body = new JSONObject(contentText(result));
+      assertEquals("success", body.getString("processResult"));
+      assertEquals("unpost", body.getJSONArray("steps").getString(0));
+      assertEquals("documentAction", body.getJSONArray("steps").getString(1));
+      assertEquals(List.of("run:unpost", "commit", "run:documentAction"), events);
+    }
+
+    @Test
+    @DisplayName("an invoice that is not posted is reactivated with no extra step")
+    void notPostedHasNoExtraStep() throws Exception {
+      posted = false;
+      processAnswers(null);
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertFalse(new JSONObject(contentText(result)).has("steps"));
+      assertEquals(List.of("run:documentAction"), events);
+    }
+
+    @Test
+    @DisplayName("a failed un-post is the answer and nothing is reactivated")
+    void failedUnpostStopsTheReactivation() throws Exception {
+      processAnswers("unpost");
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      JSONObject body = new JSONObject(contentText(result));
+      assertEquals("unpost refused", body.getString("processMessage"));
+      assertEquals(1, body.getJSONArray("steps").length());
+      assertFalse(body.has("partial"));
+      assertEquals(List.of("run:unpost", "rollback"), events);
+    }
+
+    @Test
+    @DisplayName("a refused reactivation after a committed un-post says the un-post stays")
+    void refusedReactivationReportsPartial() throws Exception {
+      processAnswers("documentAction");
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      JSONObject body = new JSONObject(contentText(result));
+      assertEquals("documentAction refused", body.getString("processMessage"));
+      assertEquals(2, body.getJSONArray("steps").length());
+      assertTrue(body.getString("partial").contains("not undone"), body.toString());
+      assertEquals(List.of("run:unpost", "commit", "run:documentAction", "rollback"), events);
+    }
+
+    @Test
+    @DisplayName("a reactivation the customization rules out is not un-posted first")
+    void ruledOutReactivationUnpostsNothing() throws Exception {
+      declaredMock.when(() -> McpDeclaredActions.unavailableFor(any(), any()))
+          .thenReturn(java.util.Map.of("documentAction:RE", "accepted and rectified"));
+      processAnswers("documentAction");
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertFalse(new JSONObject(contentText(result)).has("steps"));
+      assertEquals(List.of("run:documentAction"), events);
+    }
+
+    @Test
+    @DisplayName("completing or voiding a posted invoice never un-posts")
+    void otherDocActionsAreUnchanged() throws Exception {
+      processAnswers(null);
+
+      for (String docAction : new String[] {"CO", "VO"}) {
+        events.clear();
+        JSONObject result = router.route("etendo_action", reactivateArgs(docAction), WRITE_SCOPES);
+        assertFalse(new JSONObject(contentText(result)).has("steps"), docAction);
+        assertEquals(List.of("run:documentAction"), events, docAction);
+      }
+    }
+
+    @Test
+    @DisplayName("B2: a posted goods document or journal declares unpost but does not opt in: no un-post")
+    void entityThatDoesNotOptInIsUnchanged() throws Exception {
+      declaredMock.when(() -> McpDeclaredActions.unpostsBeforeReactivation(any())).thenReturn(false);
+      processAnswers(null);
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertFalse(new JSONObject(contentText(result)).has("steps"));
+      assertEquals(List.of("run:documentAction"), events);
+    }
+
+    @Test
+    @DisplayName("an entity that declares no unpost (an order) reactivates unchanged")
+    void entityWithoutUnpostIsUnchanged() throws Exception {
+      declaredMock.when(() -> McpDeclaredActions.precheck(any(), anyString(), any()))
+          .thenReturn(null);
+      processAnswers(null);
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertFalse(new JSONObject(contentText(result)).has("steps"));
+      assertEquals(List.of("run:documentAction"), events);
+    }
+
+    @Test
+    @DisplayName("W1: a DocAction on an id that is not a row answers the same 404 as a foreign id")
+    void missingDocumentIsARecordNotFound() throws Exception {
+      processAnswers(null);
+      JSONObject args = reactivateArgs("CO").put("id", "ghost");
+
+      JSONObject result = router.route("etendo_action", args, WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(contentText(result).contains("Record not found"), contentText(result));
+      assertEquals(List.of(), events, "no process may run for an id that is not a document");
+    }
+
+    @Test
+    @DisplayName("W1: in a batch a missing id is a per-document 404 and the others still run")
+    void batchAnswersMissingDocumentPerDocument() throws Exception {
+      processAnswers(null);
+      JSONObject args = new JSONObject().put("spec", SPEC_NAME).put("entity", ENTITY_NAME)
+          .put("action", "documentAction").put("ids", new JSONArray(List.of("ghost", INVOICE_ID)))
+          .put("parameters", new JSONObject().put("docAction", "CO"));
+
+      JSONObject result = router.route("etendo_action_batch", args, WRITE_SCOPES);
+
+      JSONObject answer = new JSONObject(contentText(result));
+      assertEquals(1, answer.getJSONObject("summary").getInt("failed"));
+      JSONObject ghost = answer.getJSONArray("results").getJSONObject(0);
+      assertFalse(ghost.getBoolean("ok"));
+      assertTrue(ghost.toString().contains("Record not found"), ghost.toString());
+      assertTrue(answer.getJSONArray("results").getJSONObject(1).getBoolean("ok"));
+      assertEquals(List.of("run:documentAction"), events.stream()
+          .filter(e -> e.startsWith("run:")).collect(java.util.stream.Collectors.toList()));
+    }
+
+    @Test
+    @DisplayName("W1: an action that is not the document action keeps running on an unknown id")
+    void missingIdOfAnotherActionIsUntouched() throws Exception {
+      org.openbravo.model.ad.datamodel.Column other =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(other.getDBColumnName()).thenReturn("Processed");
+      buttonActionMock.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(other);
+      processAnswers(null);
+
+      router.route("etendo_action", reactivateArgs("CO").put("id", "ghost"), WRITE_SCOPES);
+
+      assertEquals(List.of("run:documentAction"), events);
+    }
+
+    @Test
+    @DisplayName("W2: an exception after a committed un-post is reported with steps and partial")
+    void exceptionAfterCommittedUnpostIsReported() throws Exception {
+      buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(SFEntity.class), anyString(), anyString(), any())).thenAnswer(inv -> {
+            String action = inv.getArgument(2);
+            events.add("run:" + action);
+            if ("documentAction".equals(action)) {
+              throw new IllegalStateException("boom");
+            }
+            return NeoResponse.ok(new JSONObject().put("status", "success").put("message", "ok"));
+          });
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      JSONObject body = new JSONObject(contentText(result));
+      assertEquals(2, body.getJSONArray("steps").length());
+      assertTrue(body.getString("partial").contains("not undone"), body.toString());
+      assertEquals("rollback", events.get(events.size() - 1));
+    }
+
+    @Test
+    @DisplayName("W2: an exception when no un-post ran propagates exactly as before")
+    void exceptionWithoutUnpostIsUnchanged() throws Exception {
+      posted = false;
+      buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(SFEntity.class), anyString(), anyString(), any()))
+          .thenThrow(new IllegalStateException("boom"));
+
+      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      assertFalse(contentText(result).contains("steps"), contentText(result));
+    }
+
+    @Test
+    @DisplayName("an action that is not the document action is unchanged even with RE")
+    void otherButtonIsUnchanged() throws Exception {
+      org.openbravo.model.ad.datamodel.Column other =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(other.getDBColumnName()).thenReturn("Processed");
+      buttonActionMock.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(other);
+      processAnswers(null);
+
+      router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+
+      assertEquals(List.of("run:documentAction"), events);
     }
   }
 
@@ -2934,6 +3869,123 @@ class McpToolRouterRouteTest {
 
         hookMock.verify(() -> McpHookExecutor.resolveEntityHandler(entity), never());
         hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()), never());
+      }
+    }
+  }
+
+  // ── attachment tools (ETP-5715) ───────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — attachment tools")
+  class AttachmentToolsTests {
+
+    private final String[] tools = {McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+        McpConstants.TOOL_NEO_LIST_ATTACHMENTS, McpConstants.TOOL_NEO_DELETE_ATTACHMENT};
+
+    private JSONObject attachmentArgs() throws Exception {
+      return new JSONObject().put("spec", SPEC_NAME).put("id", "REC1");
+    }
+
+    @Test
+    @DisplayName("each tool is dispatched to the attachment handler, after the scope and spec checks")
+    void dispatchedAfterTheChecks() throws Exception {
+      setupSpecLookup(mockSpec());
+      JSONObject sentinel = McpToolRouter.wrapAsTextContent("handled");
+      try (MockedStatic<McpAttachmentTools> handler = mockStatic(McpAttachmentTools.class)) {
+        handler.when(() -> McpAttachmentTools.handle(anyString(), any())).thenReturn(sentinel);
+
+        for (String tool : tools) {
+          assertEquals(sentinel, router.route(tool, attachmentArgs(), WRITE_SCOPES), tool);
+          handler.verify(() -> McpAttachmentTools.handle(eq(tool), any()));
+          authMock.verify(() -> McpAuthorizationService.authorizeToolCall(eq(tool), any()));
+        }
+      }
+      supportMock.verify(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), eq("GET")),
+          org.mockito.Mockito.times(3));
+    }
+
+    @Test
+    @DisplayName("the email send is dispatched to its handler on a write scope, after the spec check")
+    void sendDocumentEmailIsDispatchedAfterTheChecks() throws Exception {
+      setupSpecLookup(mockSpec());
+      JSONObject sentinel = McpToolRouter.wrapAsTextContent("emailed");
+      try (MockedStatic<McpDocumentEmailTool> handler = mockStatic(McpDocumentEmailTool.class)) {
+        handler.when(() -> McpDocumentEmailTool.handle(any())).thenReturn(sentinel);
+
+        assertEquals(sentinel, router.route(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
+            attachmentArgs(), WRITE_SCOPES));
+
+        handler.verify(() -> McpDocumentEmailTool.handle(any()));
+        authMock.verify(() -> McpAuthorizationService
+            .authorizeToolCall(eq(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL), any()));
+      }
+    }
+
+    @Test
+    @DisplayName("the two extraction tools are dispatched to their handler on a write scope, after the spec check")
+    void documentExtractionToolsAreDispatchedAfterTheChecks() throws Exception {
+      setupSpecLookup(mockSpec());
+      JSONObject sentinel = McpToolRouter.wrapAsTextContent("extracted");
+      try (MockedStatic<McpOcrTools> handler = mockStatic(McpOcrTools.class)) {
+        handler.when(() -> McpOcrTools.handle(anyString(), any())).thenReturn(sentinel);
+
+        for (String tool : List.of(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD,
+            McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT)) {
+          JSONObject args = new JSONObject().put("spec", SPEC_NAME).put("name", "f.pdf")
+              .put("staged_document_id", "S1");
+          args.remove(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT.equals(tool) ? "name"
+              : "staged_document_id");
+          assertEquals(sentinel, router.route(tool, args, WRITE_SCOPES), tool);
+          handler.verify(() -> McpOcrTools.handle(eq(tool), any()));
+          authMock.verify(() -> McpAuthorizationService.authorizeToolCall(eq(tool), any()));
+        }
+      }
+    }
+
+    @Test
+    @DisplayName("the document PDF tool is dispatched to its handler on a read scope, after the spec check")
+    void documentPdfIsDispatchedAfterTheChecks() throws Exception {
+      setupSpecLookup(mockSpec());
+      JSONObject sentinel = McpToolRouter.wrapAsTextContent("pdf");
+      try (MockedStatic<McpDocumentPdfTool> handler = mockStatic(McpDocumentPdfTool.class)) {
+        handler.when(() -> McpDocumentPdfTool.handle(any())).thenReturn(sentinel);
+
+        assertEquals(sentinel,
+            router.route(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, attachmentArgs(), READ_SCOPES));
+
+        handler.verify(() -> McpDocumentPdfTool.handle(any()));
+        authMock.verify(() -> McpAuthorizationService
+            .authorizeToolCall(eq(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF), any()));
+      }
+      supportMock.verify(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), eq("GET")));
+    }
+
+    @Test
+    @DisplayName("a role without access to the spec is refused before the handler is reached")
+    void roleWithoutSpecAccessNeverReachesTheHandler() throws Exception {
+      setupSpecLookup(mockSpec());
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
+          .thenReturn(false);
+      try (MockedStatic<McpAttachmentTools> handler = mockStatic(McpAttachmentTools.class)) {
+        for (String tool : tools) {
+          JSONObject result = router.route(tool, attachmentArgs(), WRITE_SCOPES);
+
+          assertTrue(result.getBoolean("isError"), tool);
+        }
+        handler.verifyNoInteractions();
+      }
+    }
+
+    @Test
+    @DisplayName("an argument the tool does not declare is refused, not silently dropped")
+    void unknownArgumentIsRefused() throws Exception {
+      setupSpecLookup(mockSpec());
+      try (MockedStatic<McpAttachmentTools> handler = mockStatic(McpAttachmentTools.class)) {
+        JSONObject result = router.route(McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
+            attachmentArgs().put("attachmentId", "F1"), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        handler.verifyNoInteractions();
       }
     }
   }

@@ -36,6 +36,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Tab;
@@ -43,13 +44,22 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
 /**
+ * @covers com.etendoerp.go.schemaforge.NeoActionRecordGuard
+ * @covers com.etendoerp.go.schemaforge.TenantOwnership
+ *
  * ETP-5558 — the record an action runs on must belong to the caller's tenant.
  *
  * <p>The DAL is mocked at its edges (the model lookup, {@code OBDal.get} and the session's readable
  * clients and organizations); {@link TenantOwnership} runs for real, so the client/organization rule
  * is the production one.</p>
+ *
+ * <p>ETP-5715 — {@code refusalForMissingDocument}: the document-action button on an id that is no
+ * row of the table answers the same 404 as a foreign id.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoActionRecordGuard
  */
 @DisplayName("ETP-5558 — NeoActionRecordGuard")
 class NeoActionRecordGuardTest {
@@ -73,6 +83,10 @@ class NeoActionRecordGuardTest {
     dalMock = mockStatic(OBDal.class);
     dalMock.when(OBDal::getInstance).thenReturn(dal);
     OBContext context = mock(OBContext.class);
+    Client caller = mock(Client.class);
+    when(caller.getId()).thenReturn(OWN_CLIENT);
+    when(context.getCurrentClient()).thenReturn(caller);
+    when(context.getWritableOrganizations()).thenReturn(java.util.Set.of(OWN_ORG));
     when(context.getReadableClients()).thenReturn(new String[] { OWN_CLIENT });
     when(context.getReadableOrganizations()).thenReturn(new String[] { OWN_ORG });
     contextMock = mockStatic(OBContext.class);
@@ -260,5 +274,161 @@ class NeoActionRecordGuardTest {
     when(dal.get(FIN_Payment.class, RECORD)).thenReturn(foreign);
     assertNull(NeoActionRecordGuard.loadOwned(FIN_Payment.class, RECORD));
     assertFalse(NeoActionRecordGuard.isForeignRecord(paymentEntity(), ""));
+  }
+  @Test
+  void crudRefusesForeignAndMissingTargetsIdentically() throws Exception {
+    SFEntity entity = paymentEntity();
+    payment(OTHER_CLIENT, OWN_ORG);
+    NeoResponse foreign = NeoActionRecordGuard.writeRefusalFor(entity, RECORD);
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(null);
+    NeoResponse missing = NeoActionRecordGuard.writeRefusalFor(entity, RECORD);
+    assertRecordNotFound(foreign);
+    assertEquals(foreign.getBody().toString(), missing.getBody().toString());
+    assertEquals(foreign.getHttpStatus(), missing.getHttpStatus());
+  }
+
+  @Test
+  void crudAllowsOwnWritableRow() {
+    payment(OWN_CLIENT, OWN_ORG);
+    assertNull(NeoActionRecordGuard.writeRefusalFor(paymentEntity(), RECORD));
+  }
+
+  @Test
+  void crudRefusesReadableSystemRowsForTenantCallers() throws Exception {
+    OBContext context = OBContext.getOBContext();
+    when(context.getReadableClients()).thenReturn(new String[] {OWN_CLIENT, "0"});
+    payment("0", OWN_ORG);
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(paymentEntity(), RECORD));
+  }
+
+  @Test
+  void crudRefusesReadableButNotWritableOrganization() throws Exception {
+    when(OBContext.getOBContext().getReadableOrganizations())
+        .thenReturn(new String[] {OWN_ORG, OTHER_ORG});
+    payment(OWN_CLIENT, OTHER_ORG);
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(paymentEntity(), RECORD));
+  }
+
+  @Test
+  void crudFailsClosedOnLookupErrorOrMissingModel() throws Exception {
+    SFEntity entity = paymentEntity();
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenThrow(new IllegalStateException("broken"));
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(entity, RECORD));
+    when(model.getEntityByTableId(TABLE_ID)).thenReturn(null);
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(entity, RECORD));
+  }
+
+
+  // ── ETP-5715: refusalForMissingDocument ──────────────────────────────────
+
+  private static Column button(String dbColumnName) {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn(dbColumnName);
+    return column;
+  }
+
+  private SFEntity entityWithButton() {
+    SFEntity entity = paymentEntity();
+    when(entity.getId()).thenReturn("entity-1");
+    return entity;
+  }
+
+  @Test
+  @DisplayName("ETP-5715: DocAction on an id that is no row answers 404 Record not found")
+  void docActionOnAbsentRowIsRefused() throws Exception {
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(null);
+    Column btn = button("DocAction");
+    try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
+      helper.when(() -> NeoButtonActionHelper.findButtonColumn("entity-1", "documentAction"))
+          .thenReturn(btn);
+
+      assertRecordNotFound(NeoActionRecordGuard.refusalForMissingDocument(
+          entityWithButton(), RECORD, "documentAction"));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5715: a button that is not DocAction on an absent row is left untouched")
+  void otherButtonOnAbsentRowIsUntouched() {
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(null);
+    Column btn = button("Processed");
+    try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
+      helper.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(btn);
+
+      assertNull(NeoActionRecordGuard.refusalForMissingDocument(
+          entityWithButton(), RECORD, "Processed"));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5715: an action that is no button, or blank inputs, are left untouched")
+  void noButtonOrBlankInputsAreUntouched() {
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(null);
+    try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
+      helper.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(null);
+      SFEntity entity = entityWithButton();
+
+      assertNull(NeoActionRecordGuard.refusalForMissingDocument(entity, RECORD, "unpost"));
+      assertNull(NeoActionRecordGuard.refusalForMissingDocument(null, RECORD, "documentAction"));
+      assertNull(NeoActionRecordGuard.refusalForMissingDocument(entity, "", "documentAction"));
+      assertNull(NeoActionRecordGuard.refusalForMissingDocument(entity, RECORD, null));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5715: DocAction on an existing row of the caller's client is left untouched")
+  void docActionOnOwnRowIsUntouched() {
+    payment(OWN_CLIENT, OWN_ORG);
+    Column btn = button("DocAction");
+    try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
+      helper.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(btn);
+
+      assertNull(NeoActionRecordGuard.refusalForMissingDocument(
+          entityWithButton(), RECORD, "documentAction"));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5715: a foreign row and an absent one get the identical refusal (no existence leak)")
+  void foreignAndAbsentRowsAreIndistinguishable() throws Exception {
+    Column btn = button("DocAction");
+    try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
+      helper.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(btn);
+      SFEntity entity = entityWithButton();
+
+      payment(OTHER_CLIENT, OWN_ORG);
+      // the foreign row exists, so the missing-document check does not claim it; refusalFor does
+      assertNull(NeoActionRecordGuard.refusalForMissingDocument(entity, RECORD, "documentAction"));
+      NeoResponse foreign = NeoActionRecordGuard.refusalFor(entity, RECORD);
+
+      when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(null);
+      assertNull(NeoActionRecordGuard.refusalFor(entity, RECORD));
+      NeoResponse absent = NeoActionRecordGuard.refusalForMissingDocument(entity, RECORD,
+          "documentAction");
+
+      assertRecordNotFound(foreign);
+      assertRecordNotFound(absent);
+      assertEquals(foreign.getHttpStatus(), absent.getHttpStatus());
+      assertEquals(foreign.getBody().toString(), absent.getBody().toString());
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5715: a lookup that cannot be made lets the action run (admin mode restored)")
+  void failedLookupLetsDocActionRun() {
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenThrow(new IllegalStateException("boom"));
+    Column btn = button("DocAction");
+    try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
+      helper.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(btn);
+
+      assertNull(NeoActionRecordGuard.refusalForMissingDocument(
+          entityWithButton(), RECORD, "documentAction"));
+      contextMock.verify(OBContext::restorePreviousMode);
+    }
   }
 }

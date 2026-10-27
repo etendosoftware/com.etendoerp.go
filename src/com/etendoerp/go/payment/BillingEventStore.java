@@ -2,7 +2,11 @@
 package com.etendoerp.go.payment;
 
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Date;
+import java.util.List;
+import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -12,6 +16,7 @@ import org.hibernate.exception.ConstraintViolationException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -55,9 +60,12 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * applied. The next delivery reads that row as a duplicate and answers 200, so the payment is
  * never applied <em>and</em> never retried; it is visible only as a row stuck in {@code RECEIVED}.
  * Committing after the handler instead would trade this for double-application, which is worse for
- * a payment, so the window is accepted deliberately. Closing it needs a sweeper that re-opens rows
- * left {@code RECEIVED} past a threshold — that belongs to the reconciliation job (ETP-5048), not
- * to this store. The narrower lost-write variant is noted on {@link #markFailed}.
+ * a payment, so the window is accepted deliberately. ETP-5048's billing reconciliation closes it:
+ * it re-reads the provider state such an event could have moved, then marks a row left
+ * {@code RECEIVED} past a threshold ({@link #findStaleReceived}) {@code IGNORED} as superseded —
+ * but only one whose own request or subscription it re-read in full; any other it parks for
+ * review. It never replays the event through this at-most-once path. The narrower lost-write
+ * variant is noted on {@link #markFailed}.
  */
 public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private static final Logger log = LogManager.getLogger();
@@ -68,17 +76,20 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
 
   static final String PROVIDER_STRIPE = "stripe";
+  /** ETP-5048 — the {@code PROVIDER} of a row the billing reconciliation wrote. */
+  public static final String PROVIDER_RECONCILER = "reconciler";
   /** Recorded when a caller claims through the id-only {@link #claim(String)} form. */
   static final String EVENT_TYPE_UNKNOWN = "unknown";
 
   static final String RESULT_RECEIVED = "RECEIVED";
-  static final String RESULT_APPLIED = "APPLIED";
-  static final String RESULT_IGNORED = "IGNORED";
-  static final String RESULT_FAILED = "FAILED";
+  public static final String RESULT_APPLIED = "APPLIED";
+  public static final String RESULT_IGNORED = "IGNORED";
+  public static final String RESULT_FAILED = "FAILED";
 
   private static final int EVENT_TYPE_WIDTH = 120;
   private static final int REQUEST_ID_WIDTH = 64;
   private static final int REASON_WIDTH = 255;
+  private static final int EVENT_ID_WIDTH = 255;
   /**
    * Opening clause shared by every bulk update in this class. The entity is named by
    * {@link BillingEvent#ENTITY_NAME} rather than the Java simple name, which Etendo does not
@@ -89,7 +100,23 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       "update " + BillingEvent.ENTITY_NAME + " be";
   /** Name of the event-id parameter bound by every one of those updates. */
   private static final String PARAM_EVENT_ID = "eventId";
+  private static final String PARAM_REASON = "reason";
   private static final int SUMMARY_WIDTH = WebhookPayloadSummary.MAX_LENGTH;
+  /** ETP-5048 — the rows of one type the billing reconciliation wrote. */
+  private static final String RECONCILIATION_ROWS =
+      "as be where be.provider = :provider and be.eventType = :eventType";
+  /**
+   * HQL condition, on a billing event aliased {@code be}: a row {@code <prefix><event id>} exists,
+   * the review row the billing reconciliation wrote for that event. Binds {@code :reviewPrefix}.
+   */
+  private static final String UNDER_REVIEW = "exists (select 1 from " + BillingEvent.ENTITY_NAME
+      + " rv where rv.event = concat(:reviewPrefix, be.event))";
+  private static final String PARAM_REVIEW_PREFIX = "reviewPrefix";
+  private static final String PARAM_PROVIDER = "provider";
+  private static final String PARAM_EVENT_TYPE = "eventType";
+  private static final String PARAM_REQUEST_ID = "requestId";
+  private static final String PARAM_RESULT = "result";
+  private static final String PARAM_RECEIVED = "received";
 
   /**
    * Id-only claim, kept for the {@link CheckoutWebhookProcessor.EventStore} contract.
@@ -143,9 +170,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       throw new IllegalArgumentException("A billing event cannot be claimed without an event id");
     }
     Date now = new Date();
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       RuntimeException insertFailure = insertReceived(id, eventType, requestId, summary, now);
       if (insertFailure == null) {
         return true;
@@ -156,9 +181,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       }
       recordDuplicate(id, now, insertFailure);
       return false;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -195,6 +218,367 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
     } catch (RuntimeException e) {
       log.error("Could not mark billing event '{}' as failed", eventId, e);
     }
+  }
+
+  /**
+   * ETP-5048 — one Stripe event a crash left {@code RECEIVED}.
+   *
+   * @param eventId provider event id
+   * @param eventType provider event type
+   * @param requestId the correlation id the event carried, or null
+   * @param summary the allow-listed {@code PAYLOAD_SUMMARY}, or null
+   */
+  public record StaleEvent(String eventId, String eventType, String requestId, String summary) {
+
+    /**
+     * A stuck event without its summary.
+     *
+     * @param eventId provider event id
+     * @param eventType provider event type
+     * @param requestId the correlation id the event carried, or null
+     */
+    public StaleEvent(String eventId, String eventType, String requestId) {
+      this(eventId, eventType, requestId, null);
+    }
+  }
+
+  /**
+   * ETP-5048 — the provider events still {@code RECEIVED} that were received before
+   * {@code receivedBefore}, oldest first: the crash window this class documents, where an event was
+   * claimed and never applied. Rows this store wrote for the reconciliation are never returned.
+   *
+   * @param receivedBefore only events received before this instant
+   * @param max how many at most
+   * @return the stuck events
+   */
+  public List<StaleEvent> findStaleReceived(Date receivedBefore, int max) {
+    return findStaleReceived(receivedBefore, null, null, 0, max);
+  }
+
+  /**
+   * ETP-5048 — one page of the provider events still {@code RECEIVED} that were received before
+   * {@code receivedBefore}, oldest first, narrowed for the billing reconciliation's sweep.
+   *
+   * @param receivedBefore only events received before this instant
+   * @param types only these event types; null for every type
+   * @param reviewIdPrefix leave out an event for which a row {@code <prefix><event id>} exists (one
+   *     parked for review); null to leave none out
+   * @param offset how many matching events to skip
+   * @param max how many at most
+   * @return the stuck events
+   */
+  public List<StaleEvent> findStaleReceived(Date receivedBefore, Collection<String> types,
+      String reviewIdPrefix, int offset, int max) {
+    if (types != null && types.isEmpty()) {
+      return new ArrayList<>();
+    }
+    return runAsSystem(() -> {
+      StringBuilder where = new StringBuilder("as be where be.eventResult = :received"
+          + " and be.provider = :provider and be.receivedAt < :before");
+      if (types != null) {
+        where.append(" and be.eventType in (:types)");
+      }
+      if (reviewIdPrefix != null) {
+        where.append(" and not ").append(UNDER_REVIEW);
+      }
+      OBQuery<BillingEvent> query = OBDal.getInstance().createQuery(BillingEvent.class,
+              where.append(" order by be.receivedAt asc").toString())
+          .setNamedParameter(PARAM_RECEIVED, RESULT_RECEIVED)
+          .setNamedParameter(PARAM_PROVIDER, PROVIDER_STRIPE)
+          .setNamedParameter("before", receivedBefore)
+          .setFilterOnReadableClients(false)
+          .setFilterOnReadableOrganization(false)
+          .setFirstResult(Math.max(0, offset))
+          .setMaxResult(Math.max(1, max));
+      if (types != null) {
+        query.setNamedParameter("types", types);
+      }
+      if (reviewIdPrefix != null) {
+        query.setNamedParameter(PARAM_REVIEW_PREFIX, reviewIdPrefix);
+      }
+      List<StaleEvent> stale = new ArrayList<>();
+      for (BillingEvent event : query.list()) {
+        stale.add(new StaleEvent(event.getEvent(), event.getEventType(), event.getRequestID(),
+            event.getPayloadSummary()));
+      }
+      return stale;
+    });
+  }
+
+  /**
+   * ETP-5048 — how many provider events are still {@code RECEIVED} although a review row
+   * {@code <prefix><event id>} exists for them: the stuck events the billing reconciliation parked
+   * that nobody has resolved yet. {@link #findStaleReceived} leaves exactly these out.
+   *
+   * <p>Open is read off the original event, not the review row: an operator resolves a parked event
+   * by moving the original row out of {@code RECEIVED} ({@code IGNORED}, or {@code FAILED} and a
+   * resend), and may leave the review row as it is. So the count clears itself.
+   *
+   * @param reviewIdPrefix the review rows' id prefix; blank counts nothing
+   * @return the count
+   */
+  public int countReceivedUnderReview(String reviewIdPrefix) {
+    if (StringUtils.isBlank(reviewIdPrefix)) {
+      return 0;
+    }
+    return runAsSystem(() -> OBDal.getInstance().createQuery(BillingEvent.class,
+            "as be where be.eventResult = :received and be.provider = :provider and "
+                + UNDER_REVIEW)
+        .setNamedParameter(PARAM_RECEIVED, RESULT_RECEIVED)
+        .setNamedParameter(PARAM_PROVIDER, PROVIDER_STRIPE)
+        .setNamedParameter(PARAM_REVIEW_PREFIX, reviewIdPrefix)
+        .setFilterOnReadableClients(false)
+        .setFilterOnReadableOrganization(false)
+        .count());
+  }
+
+  /**
+   * ETP-5048 — whether a row with this event id exists. The billing reconciliation uses
+   * deterministic ids, so an existing row means that repair or alert was already recorded.
+   *
+   * @param eventId the event id
+   * @return whether a row exists
+   */
+  public boolean exists(String eventId) {
+    String id = StringUtils.trimToNull(eventId);
+    if (id == null) {
+      return false;
+    }
+    return runAsSystem(() -> !OBDal.getInstance().createQuery(BillingEvent.class,
+            "as be where be.event = :eventId")
+        .setNamedParameter(PARAM_EVENT_ID, id)
+        .setFilterOnReadableClients(false)
+        .setFilterOnReadableOrganization(false)
+        .setMaxResult(1)
+        .list()
+        .isEmpty());
+  }
+
+  /**
+   * ETP-5048 — whether the billing reconciliation holds an open ({@code FAILED}) row of this type
+   * for a request: for {@code reconciliation.needs-review}, a purchase parked for review. An
+   * operator releases it by setting the row to {@code IGNORED}.
+   *
+   * @param eventType a reconciliation event type
+   * @param requestId the checkout correlation id
+   * @return whether such a row exists
+   */
+  public boolean hasOpenReconciliation(String eventType, String requestId) {
+    return runAsSystem(() -> reconciliationRows(eventType, requestId, RESULT_FAILED)
+        .setMaxResult(1).count() > 0);
+  }
+
+  /**
+   * ETP-5048 — how many rows of this type the billing reconciliation wrote for a request, whatever
+   * their result.
+   *
+   * @param eventType a reconciliation event type
+   * @param requestId the checkout correlation id
+   * @return the count
+   */
+  public int countReconciliations(String eventType, String requestId) {
+    return runAsSystem(() -> reconciliationRows(eventType, requestId, null).count());
+  }
+
+  /**
+   * ETP-5048 — how many open ({@code FAILED}) rows of this type the billing reconciliation holds,
+   * across requests: for {@code reconciliation.needs-review}, the purchases awaiting review.
+   *
+   * @param eventType a reconciliation event type
+   * @return the count
+   */
+  public int countOpenReconciliations(String eventType) {
+    return runAsSystem(() -> reconciliationRows(eventType, null, RESULT_FAILED).count());
+  }
+
+  /**
+   * ETP-5048 — the {@code PAYLOAD_SUMMARY} of the newest row of this type and result the billing
+   * reconciliation wrote for a request.
+   *
+   * @param eventType a reconciliation event type
+   * @param requestId the checkout correlation id
+   * @param result the row result, e.g. {@link #RESULT_IGNORED} for a released review
+   * @return the summary, or null when there is no such row or it has none
+   */
+  public String latestReconciliationSummary(String eventType, String requestId, String result) {
+    return runAsSystem(() -> {
+      List<BillingEvent> rows = OBDal.getInstance().createQuery(BillingEvent.class,
+              RECONCILIATION_ROWS + " and be.requestID = :requestId and be.eventResult = :result"
+                  + " order by be.receivedAt desc")
+          .setNamedParameter(PARAM_PROVIDER, PROVIDER_RECONCILER)
+          .setNamedParameter(PARAM_EVENT_TYPE, eventType)
+          .setNamedParameter(PARAM_REQUEST_ID, requestId)
+          .setNamedParameter(PARAM_RESULT, result)
+          .setFilterOnReadableClients(false)
+          .setFilterOnReadableOrganization(false)
+          .setMaxResult(1)
+          .list();
+      return rows.isEmpty() ? null : rows.get(0).getPayloadSummary();
+    });
+  }
+
+  /**
+   * ETP-5048 — refreshes a reconciliation marker row, or records it ({@link #RESULT_FAILED}) when
+   * there is none yet: {@code LAST_DUPLICATE_AT} becomes now, {@code DUPLICATE_COUNT} grows by one
+   * and the reason is replaced. One row per marker, however often it is touched. Commits.
+   *
+   * <p>Update first, insert only when no row matched, so a refresh never logs a duplicate-key
+   * error. Race-safe: an insert that loses to a concurrent one (the deterministic id is unique)
+   * falls back to the update.
+   *
+   * @param eventId deterministic id
+   * @param eventType e.g. {@code reconciliation.retry-later}
+   * @param requestId the checkout correlation id
+   * @param reason operationally safe explanation
+   */
+  public void touchReconciliation(String eventId, String eventType, String requestId,
+      String reason) {
+    if (refreshMarker(eventId, reason) > 0) {
+      return;
+    }
+    if (!recordReconciliation(eventId, eventType, requestId, RESULT_FAILED, reason, null)) {
+      refreshMarker(eventId, reason); // a concurrent caller inserted it first
+    }
+  }
+
+  /** @return how many rows the refresh updated, 0 or 1; committed */
+  private int refreshMarker(String eventId, String reason) {
+    Date now = new Date();
+    return runAsSystem(() -> {
+      int updated = OBDal.getInstance().getSession().createQuery(UPDATE_BILLING_EVENT
+              + "   set be.duplicateCount = be.duplicateCount + 1,"
+              + "       be.lastDuplicateAt = :now,"
+              + "       be.failureReason = :reason,"
+              + "       be.updated = :now"
+              + " where be.event = :eventId")
+          .setParameter("now", now)
+          .setParameter(PARAM_REASON, StringUtils.abbreviate(StringUtils.trimToNull(reason),
+              REASON_WIDTH))
+          .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
+          .executeUpdate();
+      flushAndCommit();
+      return updated;
+    });
+  }
+
+  /**
+   * ETP-5048 — renames a reconciliation marker row, which keeps it as history and frees its
+   * deterministic id for the next occurrence (a pause episode that ended). Commits; a failure
+   * rolls the session back before it is rethrown, so the caller's next write is not poisoned.
+   *
+   * <p>The renamed row keeps its event type ({@code reconciliation.subscription-paused} or
+   * {@code reconciliation.pause-collection}): any future count by type must exclude the
+   * {@code :ended:} ids.
+   *
+   * @param eventId the current id
+   * @param newEventId the id it is kept under
+   * @param reason operationally safe note, stored as the row's reason
+   * @return whether a row was renamed
+   */
+  public boolean renameReconciliationMarker(String eventId, String newEventId, String reason) {
+    Date now = new Date();
+    return runAsSystem(() -> {
+      try {
+        int renamed = OBDal.getInstance().getSession().createQuery(UPDATE_BILLING_EVENT
+                + "   set be.event = :newEventId,"
+                + "       be.failureReason = :reason,"
+                + "       be.updated = :now"
+                + " where be.event = :eventId and be.provider = :provider")
+            .setParameter("newEventId", StringUtils.abbreviate(newEventId, EVENT_ID_WIDTH))
+            .setParameter(PARAM_REASON, StringUtils.abbreviate(StringUtils.trimToNull(reason),
+                REASON_WIDTH))
+            .setParameter("now", now)
+            .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
+            .setParameter(PARAM_PROVIDER, PROVIDER_RECONCILER)
+            .executeUpdate();
+        flushAndCommit();
+        return renamed > 0;
+      } catch (RuntimeException e) {
+        OBDal.getInstance().rollbackAndClose();
+        throw e;
+      }
+    });
+  }
+
+  private static OBQuery<BillingEvent> reconciliationRows(
+      String eventType, String requestId, String result) {
+    StringBuilder where = new StringBuilder(RECONCILIATION_ROWS);
+    if (requestId != null) {
+      where.append(" and be.requestID = :requestId");
+    }
+    if (result != null) {
+      where.append(" and be.eventResult = :result");
+    }
+    var query = OBDal.getInstance().createQuery(BillingEvent.class, where.toString())
+        .setNamedParameter(PARAM_PROVIDER, PROVIDER_RECONCILER)
+        .setNamedParameter(PARAM_EVENT_TYPE, eventType)
+        .setFilterOnReadableClients(false)
+        .setFilterOnReadableOrganization(false);
+    if (requestId != null) {
+      query.setNamedParameter(PARAM_REQUEST_ID, requestId);
+    }
+    if (result != null) {
+      query.setNamedParameter(PARAM_RESULT, result);
+    }
+    return query;
+  }
+
+  /**
+   * ETP-5048 — records one repair or alert of the billing reconciliation as its own row, so it is
+   * visible in the Billing Event window (and, linked by {@code requestId}, under its Checkout
+   * Request) rather than only in a log.
+   *
+   * <p><b>Commits the caller's pending changes with it.</b> A repair and its audit row are one
+   * transaction: the repair is never committed without the row that explains it, and a failed
+   * insert rolls both back. A row that already exists (the ids are deterministic) answers
+   * {@code false} after rolling back.
+   *
+   * @param eventId deterministic id, e.g. {@code reconcile:checkout-expired:<requestId>}
+   * @param eventType e.g. {@code reconciliation.checkout-expired}
+   * @param requestId the checkout correlation id, or null when the repair names none
+   * @param result {@link #RESULT_APPLIED}, {@link #RESULT_IGNORED} or {@link #RESULT_FAILED}
+   * @param reason operationally safe explanation, never customer or card data; may be null
+   * @param summary allow-listed facts (provider ids, statuses), may be null
+   * @return true when this call wrote the row
+   */
+  public boolean recordReconciliation(String eventId, String eventType, String requestId,
+      String result, String reason, String summary) {
+    String id = StringUtils.trimToNull(eventId);
+    if (id == null) {
+      throw new IllegalArgumentException("A reconciliation row needs an event id");
+    }
+    Date now = new Date();
+    return runAsSystem(() -> {
+      String correlation = StringUtils.abbreviate(StringUtils.trimToNull(requestId),
+          REQUEST_ID_WIDTH);
+      try {
+        BillingEvent event = OBProvider.getInstance().get(BillingEvent.class);
+        event.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+        event.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+        event.setEvent(id);
+        event.setEventType(StringUtils.abbreviate(StringUtils.trim(eventType), EVENT_TYPE_WIDTH));
+        event.setProvider(PROVIDER_RECONCILER);
+        event.setEventResult(result);
+        event.setRequestID(correlation);
+        event.setEtgoCheckoutRequest(CheckoutRequestStore.findByRequestId(correlation));
+        event.setPayloadSummary(StringUtils.abbreviate(StringUtils.trimToNull(summary),
+            SUMMARY_WIDTH));
+        event.setFailureReason(StringUtils.abbreviate(StringUtils.trimToNull(reason),
+            REASON_WIDTH));
+        event.setReceivedAt(now);
+        event.setProcessedAt(now);
+        event.setDuplicateCount(0L);
+        OBDal.getInstance().save(event);
+        flushAndCommit();
+        return true;
+      } catch (RuntimeException e) {
+        OBDal.getInstance().rollbackAndClose();
+        if (isUniqueEventViolation(e)) {
+          return false;
+        }
+        throw e;
+      }
+    });
   }
 
   /**
@@ -264,7 +648,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
             + "       be.updated = :now"
             + " where be.event = :eventId"
             + "   and be.eventResult = :failed")
-        .setParameter("received", RESULT_RECEIVED)
+        .setParameter(PARAM_RECEIVED, RESULT_RECEIVED)
         .setParameter("failed", RESULT_FAILED)
         .setParameter("now", now)
         .setParameter(PARAM_EVENT_ID, eventId)
@@ -323,44 +707,42 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
     if (id == null) {
       return;
     }
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      String trimmedReason = StringUtils.abbreviate(StringUtils.trimToNull(reason), REASON_WIDTH);
-      String setReason = trimmedReason == null ? "" : ", be.failureReason = :reason";
-      boolean guardApplied = !RESULT_APPLIED.equals(result);
-      org.hibernate.query.Query<?> update = OBDal.getInstance()
-          .getSession()
-          .createQuery(UPDATE_BILLING_EVENT
-              + "   set be.eventResult = :result,"
-              + "       be.processedAt = coalesce(be.processedAt, :now),"
-              + "       be.updated = :now"
-              + setReason
-              + " where be.event = :eventId"
-              + (guardApplied ? "   and be.eventResult <> :applied" : ""))
-          .setParameter("result", result)
-          .setParameter("now", new Date())
-          .setParameter(PARAM_EVENT_ID, id);
-      if (trimmedReason != null) {
-        update.setParameter("reason", trimmedReason);
+    runAsSystem(() -> {
+      try {
+        String trimmedReason = StringUtils.abbreviate(StringUtils.trimToNull(reason), REASON_WIDTH);
+        String setReason = trimmedReason == null ? "" : ", be.failureReason = :reason";
+        boolean guardApplied = !RESULT_APPLIED.equals(result);
+        org.hibernate.query.Query<?> update = OBDal.getInstance()
+            .getSession()
+            .createQuery(UPDATE_BILLING_EVENT
+                + "   set be.eventResult = :result,"
+                + "       be.processedAt = coalesce(be.processedAt, :now),"
+                + "       be.updated = :now"
+                + setReason
+                + " where be.event = :eventId"
+                + (guardApplied ? "   and be.eventResult <> :applied" : ""))
+            .setParameter("result", result)
+            .setParameter("now", new Date())
+            .setParameter(PARAM_EVENT_ID, id);
+        if (trimmedReason != null) {
+          update.setParameter(PARAM_REASON, trimmedReason);
+        }
+        if (guardApplied) {
+          update.setParameter("applied", RESULT_APPLIED);
+        }
+        int updated = update.executeUpdate();
+        flushAndCommit();
+        if (updated == 0) {
+          // Either there is no such row, or it is already APPLIED and the guard refused the write.
+          // Both are ordinary on a redelivery, and neither is actionable for the caller.
+          log.warn("No billing event row was updated for '{}' while marking it {} — the row is "
+              + "missing or already {}", id, result, RESULT_APPLIED);
+        }
+      } catch (RuntimeException e) {
+        OBDal.getInstance().rollbackAndClose();
+        throw e;
       }
-      if (guardApplied) {
-        update.setParameter("applied", RESULT_APPLIED);
-      }
-      int updated = update.executeUpdate();
-      flushAndCommit();
-      if (updated == 0) {
-        // Either there is no such row, or it is already APPLIED and the guard refused the write.
-        // Both are ordinary on a redelivery, and neither is actionable for the caller.
-        log.warn("No billing event row was updated for '{}' while marking it {} — the row is "
-            + "missing or already {}", id, result, RESULT_APPLIED);
-      }
-    } catch (RuntimeException e) {
-      OBDal.getInstance().rollbackAndClose();
-      throw e;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -387,6 +769,50 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       }
     }
     return false;
+  }
+
+  /**
+   * Runs {@code body} as the system user ({@code "0","0","0","0"}) with admin mode on, and hands
+   * the caller back exactly the execution context it arrived with.
+   *
+   * <p>Restoring is the part that is easy to get wrong, and this class got it wrong until this
+   * change, exactly as {@code CheckoutRequestStore} did (ETP-5045):
+   * {@link OBContext#restorePreviousMode()} pops the <em>admin-mode stack</em>, it does not undo
+   * {@link OBContext#setOBContext(String, String, String, String)}. So every method used to leave
+   * the system context installed on the calling thread.
+   *
+   * <p>It was invisible while the only caller was the Stripe webhook, which is matched before the
+   * authentication chain and has no context to lose. It stops being invisible for any caller that
+   * is in the middle of a unit of work: everything it ran afterwards would silently continue as
+   * system instead of as the identity it had established.
+   *
+   * <p><b>{@code null} is a legitimate previous context, not a missing one.</b> The webhook
+   * genuinely has none, so "no context" must be restored as no context;
+   * {@link OBContext#setOBContext(OBContext)} clears the thread-local when handed {@code null},
+   * which is the wanted behaviour — substituting a system context would leave the thread more
+   * privileged than it was found.
+   *
+   * <p>Delegates to {@link SystemContext#call(String, Supplier)}, the one implementation of this
+   * capture / install / unwind sequence.
+   *
+   * @param body the work to run as system
+   * @param <T> the body's result type
+   * @return whatever the body returned
+   */
+  private <T> T runAsSystem(Supplier<T> body) {
+    return SystemContext.call("a billing-event store operation", body);
+  }
+
+  /**
+   * Void form of {@link #runAsSystem(Supplier)}, for the methods that only write.
+   *
+   * @param body the work to run as system
+   */
+  private void runAsSystem(Runnable body) {
+    runAsSystem(() -> {
+      body.run();
+      return null;
+    });
   }
 
   private void flushAndCommit() {

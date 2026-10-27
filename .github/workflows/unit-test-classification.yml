@@ -1,0 +1,42 @@
+name: Unit Test Classification
+
+# goTestUnit (build.gradle, ETP-5695) runs this module's Java tests with no database and picks
+# them by name: every *IntegrationTest is left out. A test that reaches OBBaseTest/WeldBaseTest
+# under any other name would run there and fail with a DAL stack trace that reads like broken
+# infrastructure. scripts/check-unit-test-classification.sh turns that into an explicit error
+# naming the class and its rename. The same job unit-tests the scripts and hook libraries the
+# pre-push relies on, and scripts/back-merge-main.sh.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - 'src-test/**/*.java'
+      - 'build.gradle'
+      - 'scripts/check-unit-test-classification.sh'
+      - 'scripts/check-diff-coverage.py'
+      - 'scripts/test_check_diff_coverage.py'
+      - 'scripts/test_git_conventions.py'
+      - 'scripts/back-merge-main.sh'
+      - 'scripts/test_back_merge_main.py'
+      - '.githooks/lib/git-conventions.sh'
+      - '.githooks/lib/relevance.sh'
+      - 'scripts/test_relevance.py'
+      - '.github/workflows/unit-test-classification.yml'
+      - '.githooks/post-rewrite'
+      - '.githooks/lib/hooks-proof.sh'
+      - 'scripts/test_post_rewrite.py'
+
+jobs:
+  unit-test-classification:
+    name: Keep DB-backed tests out of goTestUnit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Unit-test the scripts
+        run: python3 -m unittest discover -s scripts
+
+      - name: Check the unit/integration split
+        run: bash scripts/check-unit-test-classification.sh

@@ -45,8 +45,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
@@ -74,7 +77,13 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  *   <li>org resolution failures (no concrete current org, org not found, org without general ledger)</li>
  *   <li>currency not found, accounting combination not found</li>
  *   <li>a mandatory dimension cannot be deactivated</li>
+ *   <li>tenant isolation: foreign combination / currency / org ids answer "not found", and every
+ *   error rolls the session back (ETP-5722)</li>
+ *   <li>a balancing switch left on without its account is refused and rolled back (ETP-5724)</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.GeneralLedgerConfigurationHandler
+ * @covers com.etendoerp.go.schemaforge.GeneralLedgerBalancingRule
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -89,6 +98,8 @@ class GeneralLedgerConfigurationHandlerTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
+  private MockedStatic<SessionHandler> sessionHandlerMock;
+  private SessionHandler sessionHandler;
   private OBDal obDal;
 
   // Model graph, rebuilt per test via the wire* helpers.
@@ -105,12 +116,17 @@ class GeneralLedgerConfigurationHandlerTest {
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     // setAdminMode / restorePreviousMode become no-ops; getOBContext is stubbed per-test when needed.
     obContextMock = mockStatic(OBContext.class);
+    // Every 400/500 rolls the DAL session back; without this stub getInstance() is null and NPEs.
+    sessionHandler = mock(SessionHandler.class);
+    sessionHandlerMock = mockStatic(SessionHandler.class);
+    sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(sessionHandler);
   }
 
   @AfterEach
   void tearDown() {
     obDalMock.close();
     obContextMock.close();
+    sessionHandlerMock.close();
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -553,6 +569,7 @@ class GeneralLedgerConfigurationHandlerTest {
     wireLoadCriteria(Collections.emptyList());
 
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn("combo-1");
     when(obDal.get(AccountingCombination.class, "combo-1")).thenReturn(combo);
 
@@ -563,6 +580,83 @@ class GeneralLedgerConfigurationHandlerTest {
 
     assertEquals(200, response.getHttpStatus());
     verify(defaults).set(AcctSchemaDefault.PROPERTY_BANKASSET, combo);
+  }
+
+  private AccountingCombination summaryCombo(String id) {
+    ElementValue account = mock(ElementValue.class);
+    when(account.isSummaryLevel()).thenReturn(true);
+    when(account.isActive()).thenReturn(true);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true);
+    when(combo.getId()).thenReturn(id);
+    when(combo.getAccount()).thenReturn(account);
+    when(obDal.get(AccountingCombination.class, id)).thenReturn(combo);
+    return combo;
+  }
+
+  @Test
+  @DisplayName("ETP-5693: a summary account is refused with its messageKey and the save rolled back")
+  void postRejectsSummaryAccount() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    summaryCombo("combo-sum");
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-sum"));
+
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD(any())).thenAnswer(i -> i.getArgument(0));
+      messages.when(() -> OBMessageUtils.parseTranslation(any(String.class), any()))
+          .thenAnswer(i -> i.getArgument(0));
+      NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("ETGO_AccountIsSummary", response.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+      verify(sessionHandler).rollback();
+      verify(defaults, never()).set(any(), any());
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5693: a combination of another ledger is refused with its messageKey")
+  void postRejectsOtherLedgerAccount() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    AcctSchema otherLedger = mock(AcctSchema.class);
+    when(otherLedger.getId()).thenReturn("other-ledger");
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true);
+    when(combo.getId()).thenReturn("combo-other");
+    when(combo.getAccountingSchema()).thenReturn(otherLedger);
+    when(obDal.get(AccountingCombination.class, "combo-other")).thenReturn(combo);
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-other"));
+
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD(any())).thenAnswer(i -> i.getArgument(0));
+      messages.when(() -> OBMessageUtils.parseTranslation(any(String.class), any()))
+          .thenAnswer(i -> i.getArgument(0));
+      NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("ETGO_AccountWrongLedger", response.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5693: an unchanged pre-existing summary account still saves (R2)")
+  void postKeepsUnchangedSummaryAccount() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    AccountingCombination stored = summaryCombo("combo-sum");
+    when(defaults.get(AcctSchemaDefault.PROPERTY_BANKASSET)).thenReturn(stored);
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-sum"));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
   }
 
   @Test
@@ -681,6 +775,7 @@ class GeneralLedgerConfigurationHandlerTest {
     wireOrgWithLedger();
 
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn("combo-x");
     when(combo.getAccount()).thenReturn(null);
     when(combo.getCombination()).thenReturn("1000");
@@ -711,6 +806,7 @@ class GeneralLedgerConfigurationHandlerTest {
     when(account.getName()).thenReturn("Bancos");
 
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn("combo-y");
     when(combo.getAccount()).thenReturn(account);
     when(combo.getCombination()).thenReturn("572");
@@ -1005,12 +1101,12 @@ class GeneralLedgerConfigurationHandlerTest {
     wireLoadCriteria(Collections.emptyList());
 
     when(generalAccounts.isSuspenseBalancingUse()).thenReturn(true);
-    when(generalAccounts.isSuspenseErrorUse()).thenReturn(false);
     when(generalAccounts.isCurrencyBalancingUse()).thenReturn(true);
     when(generalAccounts.isActive()).thenReturn(true);
     when(generalAccounts.isCreateClosing()).thenReturn(true);
 
     AccountingCombination retainedEarning = mock(AccountingCombination.class);
+    when(retainedEarning.isActive()).thenReturn(true); // ETP-5693 posting check
     when(retainedEarning.getId()).thenReturn("combo-retained");
     when(generalAccounts.getRetainedEarning()).thenReturn(retainedEarning);
 
@@ -1019,11 +1115,13 @@ class GeneralLedgerConfigurationHandlerTest {
 
     assertEquals("gl-acct-001", ga.getString("id"));
     assertTrue(ga.getBoolean("suspenseBalancingUse"));
-    assertFalse(ga.getBoolean("suspenseErrorUse"));
     assertTrue(ga.getBoolean("currencyBalancingUse"));
     assertTrue(ga.getBoolean("active"));
     assertTrue(ga.getBoolean("createClosing"));
     assertEquals("combo-retained", ga.getString("retainedEarning"));
+    // ETP-5682: the suspense error pair is never exposed, since core posting never reads it.
+    assertFalse(ga.has("suspenseErrorUse"));
+    assertFalse(ga.has("suspenseError"));
   }
 
   @Test
@@ -1033,11 +1131,14 @@ class GeneralLedgerConfigurationHandlerTest {
     wireLoadCriteria(Collections.emptyList());
 
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn("combo-income");
     when(obDal.get(AccountingCombination.class, "combo-income")).thenReturn(combo);
 
     JSONObject body = new JSONObject().put("generalAccounts", new JSONObject()
         .put("suspenseBalancingUse", true)
+        .put("suspenseErrorUse", true)
+        .put("suspenseError", "combo-ignored")
         .put("incomeSummary", "combo-income")
         .put("createClosing", false));
 
@@ -1046,6 +1147,9 @@ class GeneralLedgerConfigurationHandlerTest {
     assertEquals(200, response.getHttpStatus());
     verify(generalAccounts).setSuspenseBalancingUse(true);
     verify(generalAccounts).setIncomeSummary(combo);
+    // The suspense error pair is ignored on write as well.
+    verify(generalAccounts, never()).setSuspenseErrorUse(anyBoolean());
+    verify(generalAccounts, never()).setSuspenseError(any());
     verify(generalAccounts).setCreateClosing(false);
     verify(obDal).save(generalAccounts);
   }
@@ -1094,5 +1198,276 @@ class GeneralLedgerConfigurationHandlerTest {
 
     NeoResponse response = handler.handle(getCtx(ORG_ID));
     assertEquals(400, response.getHttpStatus());
+  }
+
+  // ── Tenant isolation (ETP-5722) ──────────────────────────────────────────────
+
+  private static final String OWN_CLIENT = "tenant-A";
+  private static final String FOREIGN_CLIENT = "tenant-B";
+
+  /** A session of tenant A: readable clients {A, 0}, readable orgs {0, ORG_ID}. */
+  private void wireTenantContext() {
+    OBContext ctx = mock(OBContext.class);
+    obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+    when(ctx.getReadableClients()).thenReturn(new String[] { OWN_CLIENT, "0" });
+    when(ctx.getReadableOrganizations()).thenReturn(new String[] { "0", ORG_ID });
+    Client own = client(OWN_CLIENT);
+    when(org.getClient()).thenReturn(own);
+  }
+
+  private static Client client(String id) {
+    Client c = mock(Client.class);
+    when(c.getId()).thenReturn(id);
+    return c;
+  }
+
+  private AccountingCombination comboOf(String id, String clientId) {
+    Organization star = mock(Organization.class);
+    when(star.getId()).thenReturn("0");
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
+    when(combo.getId()).thenReturn(id);
+    Client owner = client(clientId);
+    when(combo.getClient()).thenReturn(owner);
+    when(combo.getOrganization()).thenReturn(star);
+    when(obDal.get(AccountingCombination.class, id)).thenReturn(combo);
+    return combo;
+  }
+
+  private static String errorMessage(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  private NeoResponse postSuspense(String comboId) throws Exception {
+    return handler.handle(postCtx(ORG_ID, new JSONObject().put("generalAccounts",
+        new JSONObject().put("suspenseBalancing", comboId))));
+  }
+
+  @Test
+  @DisplayName("A combination of the caller's own tenant is accepted")
+  void ownTenantCombinationAccepted() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    AccountingCombination combo = comboOf("combo-own", OWN_CLIENT);
+
+    NeoResponse response = postSuspense("combo-own");
+
+    assertEquals(200, response.getHttpStatus());
+    verify(generalAccounts).setSuspenseBalancing(combo);
+  }
+
+  @Test
+  @DisplayName("A client-0 combination is accepted")
+  void systemCombinationAccepted() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    AccountingCombination combo = comboOf("combo-system", "0");
+
+    NeoResponse response = postSuspense("combo-system");
+
+    assertEquals(200, response.getHttpStatus());
+    verify(generalAccounts).setSuspenseBalancing(combo);
+  }
+
+  @Test
+  @DisplayName("A combination of another tenant is rejected as not found and nothing is written")
+  void foreignCombinationRejected() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    comboOf("combo-foreign", FOREIGN_CLIENT);
+
+    NeoResponse response = postSuspense("combo-foreign");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Accounting combination not found: combo-foreign", errorMessage(response));
+    verify(generalAccounts, never()).setSuspenseBalancing(any());
+    verify(obDal, never()).flush();
+    verify(sessionHandler).rollback();
+  }
+
+  @Test
+  @DisplayName("A 400 rolls back changes applied earlier in the same body")
+  void foreignCombinationRollsBackEarlierChanges() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    comboOf("combo-foreign", FOREIGN_CLIENT);
+
+    JSONObject body = new JSONObject()
+        .put("general", new JSONObject().put("name", "Renamed"))
+        .put("generalAccounts", new JSONObject().put("suspenseBalancing", "combo-foreign"));
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(400, response.getHttpStatus());
+    // The name was set on the session object before the throw; only the rollback discards it.
+    verify(schema).setName("Renamed");
+    verify(sessionHandler).rollback();
+  }
+
+  @Test
+  @DisplayName("A foreign combination in defaults is rejected too")
+  void foreignDefaultsCombinationRejected() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    comboOf("combo-foreign", FOREIGN_CLIENT);
+
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-foreign"));
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Accounting combination not found: combo-foreign", errorMessage(response));
+    verify(defaults, never()).set(any(), any());
+    verify(sessionHandler).rollback();
+  }
+
+  @Test
+  @DisplayName("A foreign selectedOrgId on GET answers 'Organization not found' without leaking its ledger")
+  void foreignOrgOnGetRejected() throws Exception {
+    wireOrgWithLedger();
+    wireTenantContext();
+    Client other = client(FOREIGN_CLIENT);
+    when(org.getClient()).thenReturn(other);
+
+    NeoResponse response = handler.handle(getCtx(ORG_ID));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Organization not found: " + ORG_ID, errorMessage(response));
+  }
+
+  @Test
+  @DisplayName("A foreign selectedOrgId in the POST body answers 'Organization not found'")
+  void foreignOrgInPostBodyRejected() throws Exception {
+    wireOrgWithLedger();
+    wireTenantContext();
+    Organization foreign = mock(Organization.class);
+    Client other = client(FOREIGN_CLIENT);
+    when(foreign.getClient()).thenReturn(other);
+    when(obDal.get(Organization.class, "org-foreign")).thenReturn(foreign);
+
+    JSONObject body = new JSONObject().put("selectedOrgId", "org-foreign")
+        .put("general", new JSONObject().put("name", "X"));
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Organization not found: org-foreign", errorMessage(response));
+  }
+
+  @Test
+  @DisplayName("A currency of another tenant is rejected; a client-0 currency is accepted")
+  void foreignCurrencyRejectedSystemCurrencyAccepted() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    Currency foreign = mock(Currency.class);
+    Client other = client(FOREIGN_CLIENT);
+    when(foreign.getClient()).thenReturn(other);
+    when(obDal.get(Currency.class, "cur-foreign")).thenReturn(foreign);
+    Currency eur = mock(Currency.class);
+    Client system = client("0");
+    when(eur.getClient()).thenReturn(system);
+    when(obDal.get(Currency.class, "cur-eur")).thenReturn(eur);
+
+    NeoResponse rejected = handler.handle(postCtx(ORG_ID,
+        new JSONObject().put("general", new JSONObject().put("currency", "cur-foreign"))));
+    assertEquals(400, rejected.getHttpStatus());
+    assertEquals("Currency not found: cur-foreign", errorMessage(rejected));
+    verify(schema, never()).setCurrency(any());
+
+    NeoResponse accepted = handler.handle(postCtx(ORG_ID,
+        new JSONObject().put("general", new JSONObject().put("currency", "cur-eur"))));
+    assertEquals(200, accepted.getHttpStatus());
+    verify(schema).setCurrency(eur);
+  }
+
+  // ── balancing switch requires its account (ETP-5724) ────────────────────────
+  // generalAccounts is a mock: get() stubs stand for the row as the setters leave it.
+
+  private NeoResponse postGeneralAccounts(JSONObject generalAccountsBody) throws Exception {
+    return handler.handle(postCtx(ORG_ID, new JSONObject().put("generalAccounts", generalAccountsBody)));
+  }
+
+  @Test
+  @DisplayName("ETP-5724: suspense switch on without its account answers MISSING_REQUIRED_FIELDS and rolls back")
+  void suspenseOnWithoutAccountRejected() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_SUSPENSEBALANCINGUSE)).thenReturn(true);
+
+    NeoResponse response = postGeneralAccounts(new JSONObject().put("suspenseBalancingUse", true));
+
+    assertEquals(400, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("MISSING_REQUIRED_FIELDS", error.getString("code"));
+    assertEquals("suspenseBalancing", error.getJSONArray("fields").getString(0));
+    assertEquals(1, error.getJSONArray("fields").length());
+    assertEquals("suspenseBalancing is required while suspenseBalancingUse is true", error.getString("message"));
+    verify(generalAccounts).setSuspenseBalancingUse(true);
+    verify(sessionHandler).rollback();
+    verify(obDal, never()).save(any());
+    verify(obDal, never()).flush();
+  }
+
+  @Test
+  @DisplayName("ETP-5724: currency switch on without its account is rejected on currencyBalancingAcct")
+  void currencyOnWithoutAccountRejected() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_CURRENCYBALANCINGUSE)).thenReturn(true);
+
+    NeoResponse response = postGeneralAccounts(new JSONObject().put("currencyBalancingAcct", JSONObject.NULL));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("currencyBalancingAcct", response.getBody().getJSONObject("error")
+        .getJSONArray("fields").getString(0));
+    verify(sessionHandler).rollback();
+  }
+
+  @Test
+  @DisplayName("ETP-5724: a broken stored row blocks a save that touches only 'general'")
+  void brokenStoredRowBlocksUnrelatedSave() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_SUSPENSEBALANCINGUSE)).thenReturn(true);
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID,
+        new JSONObject().put("general", new JSONObject().put("name", "Renamed"))));
+
+    assertEquals(400, response.getHttpStatus());
+    verify(sessionHandler).rollback();
+    verify(obDal, never()).flush();
+  }
+
+  @Test
+  @DisplayName("ETP-5724: suspenseBalancingUse \"Y\" is stored as off by optBoolean, so it saves")
+  void stringYIsStoredOffAndSaves() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    NeoResponse response = postGeneralAccounts(new JSONObject().put("suspenseBalancingUse", "Y"));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(generalAccounts).setSuspenseBalancingUse(false);
+  }
+
+  @Test
+  @DisplayName("ETP-5724: switch on with its account, or switch off without one, saves")
+  void validPairsSave() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_SUSPENSEBALANCINGUSE)).thenReturn(true);
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_SUSPENSEBALANCING))
+        .thenReturn(mock(AccountingCombination.class));
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_CURRENCYBALANCINGUSE)).thenReturn(false);
+
+    NeoResponse response = postGeneralAccounts(new JSONObject().put("suspenseBalancingUse", true));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(obDal).flush();
+    verify(sessionHandler, never()).rollback();
   }
 }

@@ -47,6 +47,8 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
@@ -59,6 +61,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
  * Unit tests for {@link FinancialAccountAccountingHandler}.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountAccountingHandler
  *
  * <p>ETP-4872 rewrite: the handler now exposes 9 fields (replacing the old
  * {@code fINAssetAcct}/{@code fINTransitoryAcct} pair) with PATCH-like semantics — a field key
@@ -121,6 +125,8 @@ class FinancialAccountAccountingHandlerTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
+  private MockedStatic<SessionHandler> sessionHandlerMock;
+  private SessionHandler sessionHandler;
   private OBDal obDal;
 
   private FIN_FinancialAccount account;
@@ -135,12 +141,17 @@ class FinancialAccountAccountingHandlerTest {
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     // setAdminMode / restorePreviousMode become no-ops on the mocked static.
     obContextMock = mockStatic(OBContext.class);
+    // ETP-5693: a refusal rolls the request session back.
+    sessionHandler = mock(SessionHandler.class);
+    sessionHandlerMock = mockStatic(SessionHandler.class);
+    sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(sessionHandler);
   }
 
   @AfterEach
   void tearDown() {
     obDalMock.close();
     obContextMock.close();
+    sessionHandlerMock.close();
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -215,6 +226,7 @@ class FinancialAccountAccountingHandlerTest {
   private AccountingCombination combination(String id, ElementValue account, String combo,
       String description) {
     AccountingCombination combination = mock(AccountingCombination.class);
+    when(combination.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combination.getId()).thenReturn(id);
     when(combination.getAccount()).thenReturn(account);
     when(combination.getCombination()).thenReturn(combo);
@@ -341,7 +353,8 @@ class FinancialAccountAccountingHandlerTest {
     assertEquals("row-1", row.getString("id"));
     assertEquals(ACCOUNT_ID, row.getString("financialAccountId"));
     assertEquals("id-1", row.getString(F_BANK_REVAL_GAIN));
-    assertTrue(row.getString(F_BANK_REVAL_GAIN + "$_identifier").contains("76800000"));
+    // ETP-5681 — the same "<code> - <name>" label every other account selector shows.
+    assertEquals("76800000 - Diferencias positivas de cambio", row.getString(F_BANK_REVAL_GAIN + "$_identifier"));
     assertEquals("id-2", row.getString(F_BANK_REVAL_LOSS));
     assertEquals("id-3", row.getString(F_BANK_FEE));
     assertEquals("id-4", row.getString(F_IN_TRANSIT_IN));
@@ -562,8 +575,8 @@ class FinancialAccountAccountingHandlerTest {
   }
 
   @Test
-  @DisplayName("Save throws when the submitted AccountingCombination belongs to a different ledger")
-  void saveCrossLedgerCombinationThrows400() throws Exception {
+  @DisplayName("ETP-5693: a combination of another ledger is refused with ETGO_AccountWrongLedger")
+  void saveCrossLedgerCombinationRefusedWithKey() throws Exception {
     wireAccountWithLedger();
     // findOrCreateRow runs before any combination is resolved — the cross-ledger validation
     // failure happens while updating an already-existing row.
@@ -574,6 +587,7 @@ class FinancialAccountAccountingHandlerTest {
     when(otherLedger.getId()).thenReturn("other-ledger");
 
     AccountingCombination badCombo = mock(AccountingCombination.class);
+    when(badCombo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(badCombo.getId()).thenReturn("deposit-bad");
     when(badCombo.getAccountingSchema()).thenReturn(otherLedger);
     when(obDal.get(AccountingCombination.class, "deposit-bad")).thenReturn(badCombo);
@@ -582,11 +596,52 @@ class FinancialAccountAccountingHandlerTest {
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
         .put(F_DEPOSIT, "deposit-bad");
 
-    NeoResponse response = handler.handle(saveCtx("POST", body));
+    NeoResponse response = saveWithKeyedMessages(body);
 
     assertEquals(400, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("does not belong to the account's ledger"));
+    assertEquals("ETGO_AccountWrongLedger", response.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
+  }
+
+  /** Saves with OBMessageUtils answering each message key verbatim, so a keyed refusal is readable. */
+  private NeoResponse saveWithKeyedMessages(JSONObject body) {
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD(any())).thenAnswer(i -> i.getArgument(0));
+      messages.when(() -> OBMessageUtils.parseTranslation(any(String.class), any()))
+          .thenAnswer(i -> i.getArgument(0));
+      return handler.handle(saveCtx("POST", body));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5693: a summary account is refused with its messageKey and the request rolled back")
+  void saveSummaryAccountRejectedAndRolledBack() throws Exception {
+    wireAccountWithLedger();
+    FIN_FinancialAccountAccounting existingRow = mock(FIN_FinancialAccountAccounting.class);
+    wireFindRowCriteria(existingRow);
+    ElementValue summaryAccount = mock(ElementValue.class);
+    when(summaryAccount.isSummaryLevel()).thenReturn(true);
+    AccountingCombination summary = mock(AccountingCombination.class);
+    when(summary.isActive()).thenReturn(true);
+    when(summary.getId()).thenReturn("deposit-sum");
+    when(summary.getAccount()).thenReturn(summaryAccount);
+    when(obDal.get(AccountingCombination.class, "deposit-sum")).thenReturn(summary);
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(F_DEPOSIT, "deposit-sum");
+
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD(any())).thenAnswer(i -> i.getArgument(0));
+      messages.when(() -> OBMessageUtils.parseTranslation(any(String.class), any()))
+          .thenAnswer(i -> i.getArgument(0));
+      NeoResponse response = handler.handle(saveCtx("POST", body));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("ETGO_AccountIsSummary", response.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+      verify(sessionHandler).rollback();
+      verify(obDal, never()).save(existingRow);
+    }
   }
 
   @Test
@@ -607,6 +662,7 @@ class FinancialAccountAccountingHandlerTest {
     AcctSchema otherLedger = mock(AcctSchema.class);
     when(otherLedger.getId()).thenReturn("other-ledger");
     AccountingCombination badWithdrawal = mock(AccountingCombination.class);
+    when(badWithdrawal.isActive()).thenReturn(true); // ETP-5693 posting check
     when(badWithdrawal.getId()).thenReturn("withdrawal-bad");
     when(badWithdrawal.getAccountingSchema()).thenReturn(otherLedger);
     when(obDal.get(AccountingCombination.class, "withdrawal-bad")).thenReturn(badWithdrawal);
@@ -616,11 +672,11 @@ class FinancialAccountAccountingHandlerTest {
         .put(F_DEPOSIT, "deposit-ok")
         .put(F_WITHDRAWAL, "withdrawal-bad");
 
-    NeoResponse response = handler.handle(saveCtx("POST", body));
+    NeoResponse response = saveWithKeyedMessages(body);
 
     assertEquals(400, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("does not belong to the account's ledger"));
+    assertEquals("ETGO_AccountWrongLedger", response.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
     // The whole request is rejected (400, nothing persisted) — but the earlier field in call
     // order already mutated the in-memory row before the later field's failure aborted the
     // method. This is NOT full object-level atomicity: only "never explicitly persisted".
@@ -849,13 +905,13 @@ class FinancialAccountAccountingHandlerTest {
     JSONObject item0 = accounts.getJSONObject(0);
     assertEquals("combo-1", item0.getString("id"));
     assertEquals("572", item0.getString("code"));
-    // resolveCombinationLabel formats "code — name" when both are present.
-    assertEquals("572 — Bancos", item0.getString("name"));
+    // resolveCombinationLabel formats "code - name" when both are present (ETP-5681: was an em dash).
+    assertEquals("572 - Bancos", item0.getString("name"));
 
     JSONObject item1 = accounts.getJSONObject(1);
     assertEquals("combo-2", item1.getString("id"));
     assertEquals("430000", item1.getString("code"));
-    assertEquals("430000 — Clientes", item1.getString("name"));
+    assertEquals("430000 - Clientes", item1.getString("name"));
   }
 
   // ── @Named qualifier sanity ──────────────────────────────────────────────────

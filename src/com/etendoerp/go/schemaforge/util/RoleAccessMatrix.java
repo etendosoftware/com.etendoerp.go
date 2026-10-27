@@ -194,8 +194,16 @@ public final class RoleAccessMatrix {
    * ETP-5071 — proxy {@code AD_Window_ID} standing in for "Modelos Fiscales" in the {@code
    * matrix}, same windowless-page situation as {@link #FISCAL_MONITOR_PROXY_WINDOW_ID}. The
    * product owner chose the Tax Report window as this row's access proxy.
+   *
+   * <p>ETP-5540 — the single backend source for "Modelos Fiscales is granted through Tax
+   * Report". Besides the roles matrices it is read by {@code NeoAttachmentAuthorizer} (the
+   * {@code ETGO_Fiscal_Decl} attachment proxy) and by the fiscal endpoint gates of ETP-5546
+   * ({@code AbstractFiscalHandler}, {@code NeoBuiltInEndpointHandler}). It stays here until
+   * ETP-4802 gives windowless GO features a declarative home in the permission system. The
+   * role-template grant data ({@code TemplateRoleWindowAccess} and its modulescript copy) keeps
+   * the literal id by design.
    */
-  static final String TAX_MODELS_PROXY_WINDOW_ID = "3E8FEA1EA7404D979306C9EE7FD2E7E8";
+  public static final String TAX_MODELS_PROXY_WINDOW_ID = "3E8FEA1EA7404D979306C9EE7FD2E7E8";
 
   /**
    * ETP-5071 — proxy {@code OBUIAPP_Process_ID} standing in for "Documentos no contabilizados" in

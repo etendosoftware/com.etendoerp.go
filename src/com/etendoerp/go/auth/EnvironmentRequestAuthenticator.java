@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.auth;
 
-import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map;
 
@@ -34,9 +33,12 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
-import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
+// Known package cycle (auth <-> schemaforge, as with NeoLanguage below): the action-path rule must be
+// the very parser NeoServlet dispatches with, which lives in schemaforge.
+import com.etendoerp.go.schemaforge.NeoActionPath;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
@@ -70,12 +72,27 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * was unified: support used to name the missing claim; every surface now answers
  * {@value #MSG_MISSING_CLAIMS}, still with 401.)
  *
+ * <p>ETP-5489 — one deliberate exception: a failure in the bind step, after the credential has
+ * resolved, is a 500 ({@link EnvironmentAuthOutcome.Status#CONTEXT_UNAVAILABLE}), no longer a 401.
+ * The session behind it is valid, and a 401 made the client log it out and re-enter it in a loop.
+ *
  * <p>ETP-5395 — a cookie session's role is bound once, at environment entry, and every one of
  * these surfaces used to authorize the request with it unconditionally. Resolving a cookie now
  * also runs {@link GoSessionRoleReconciler}, which rebinds a role an admin has since revoked to
  * one the user still holds (or refuses the request, {@code 401}, when none is left) — once, here,
  * so every {@link SurfacePolicy} gets it for free rather than each cookie-consuming call site
  * wiring it in on its own.
+ *
+ * <p>ETP-5270 — a legacy JWT gets the same check. Its role is a signed claim and cannot be rebound,
+ * so a token whose role was revoked is refused ({@code 401}) rather than authorized with it.
+ *
+ * <p>ETP-5047 — the bind step's commercial-access check is {@link EnvironmentAccessGuard}, the one
+ * check every tenant entry point shares (NEO, the {@code NEO_DATA} servlets, MCP, the environment
+ * login): it owns the decision, the {@code environment-access-enforcement-off} kill switch and the
+ * structured 402 body, which a refusal carries as {@link EnvironmentAuthOutcome#getAccessDenial()}.
+ * A credential whose tenant cannot be resolved is a {@code 503}
+ * ({@link EnvironmentAuthOutcome.Status#SERVICE_UNAVAILABLE}), answered by the bind step itself
+ * rather than through the ETP-5489 {@code 500}.
  */
 public class EnvironmentRequestAuthenticator {
 
@@ -87,20 +104,19 @@ public class EnvironmentRequestAuthenticator {
   static final String MSG_MISSING_CLAIMS = "Invalid token: missing required claims";
   static final String MSG_INVALID_TOKEN = "Invalid or expired token";
   static final String MSG_INSUFFICIENT_SCOPE = "Insufficient scope or invalid token context";
-  /**
-   * Prefix of the 402 answer for a commercially blocked environment, followed by the
-   * {@link EnvironmentAccessPolicy.Decision} name. Public because every surface that refuses a
-   * blocked environment must answer with the same wording: the SPA parses it to show the
-   * blocked-access screen (ETP-5642).
-   */
-  public static final String MSG_ACCESS_PREFIX = "Environment access is not available: ";
+  /** Request attribute holding the OAuth2 token's scopes; absent for sessions and legacy JWTs. */
+  public static final String ATTR_GRANTED_SCOPES = "com.etendoerp.go.auth.grantedScopes";
+  static final String MSG_CONTEXT_UNAVAILABLE = "Environment context could not be established";
+  /** ETP-5047 — the role lookup that resolves a wildcard client failed; retry. */
+  static final String MSG_TENANT_UNRESOLVED =
+      "The environment of this credential could not be verified; retry later";
 
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String HEADER_ACCEPT_LANGUAGE = "Accept-Language";
   private static final String BEARER_PREFIX = "Bearer ";
 
   private final GoSessionAuthenticator sessionAuthenticator;
-  private final TenantEnvironmentLifecycleService lifecycleService;
+  private final EnvironmentAccessGuard accessGuard;
   private final WarehouseResolver warehouseResolver;
   private final GoSessionRoleReconciler sessionRoleReconciler;
 
@@ -124,8 +140,25 @@ public class EnvironmentRequestAuthenticator {
   public EnvironmentRequestAuthenticator(GoSessionAuthenticator sessionAuthenticator,
       TenantEnvironmentLifecycleService lifecycleService, WarehouseResolver warehouseResolver,
       GoSessionRoleReconciler sessionRoleReconciler) {
+    this(sessionAuthenticator, new EnvironmentAccessGuard(lifecycleService), warehouseResolver,
+        sessionRoleReconciler);
+  }
+
+  /**
+   * Wiring with an explicit commercial-access guard (ETP-5047), for a caller or test that needs to
+   * control the guard itself rather than only the lifecycle service behind it.
+   *
+   * @param sessionAuthenticator  resolves the {@code __Host-go_session} cookie
+   * @param accessGuard           decides commercial access, kill switch included
+   * @param warehouseResolver     repairs a context whose warehouse the role cannot read
+   * @param sessionRoleReconciler rebinds a cookie session whose role was revoked since it was
+   *                              bound (ETP-5395)
+   */
+  public EnvironmentRequestAuthenticator(GoSessionAuthenticator sessionAuthenticator,
+      EnvironmentAccessGuard accessGuard, WarehouseResolver warehouseResolver,
+      GoSessionRoleReconciler sessionRoleReconciler) {
     this.sessionAuthenticator = sessionAuthenticator;
-    this.lifecycleService = lifecycleService;
+    this.accessGuard = accessGuard;
     this.warehouseResolver = warehouseResolver;
     this.sessionRoleReconciler = sessionRoleReconciler;
   }
@@ -138,6 +171,20 @@ public class EnvironmentRequestAuthenticator {
    * @return the outcome; on refusal it carries the status and message to answer with
    */
   public EnvironmentAuthOutcome authenticate(HttpServletRequest request, SurfacePolicy policy) {
+    return authenticate(request, policy, policy.name());
+  }
+
+  /**
+   * {@link #authenticate(HttpServletRequest, SurfacePolicy)} naming the entry point for the
+   * commercial-access log line (ETP-5047): {@code "neo"}, {@code "favorites GET"}, ...
+   *
+   * @param request    the incoming request
+   * @param policy     what the calling surface requires beyond a valid credential
+   * @param entryPoint a short label for the guard's log line
+   * @return the outcome; on refusal it carries the status and message to answer with
+   */
+  public EnvironmentAuthOutcome authenticate(HttpServletRequest request, SurfacePolicy policy,
+      String entryPoint) {
     Resolution resolution;
     try {
       resolution = resolve(request, policy);
@@ -148,9 +195,9 @@ public class EnvironmentRequestAuthenticator {
       return resolution.refusal;
     }
     try {
-      return bind(request, policy, resolution.identity);
+      return bind(request, policy, resolution.identity, entryPoint);
     } catch (RuntimeException e) {
-      return refusedFor(e, resolution.identity.scheme);
+      return contextUnavailableFor(e, resolution.identity.scheme);
     }
   }
 
@@ -249,7 +296,7 @@ public class EnvironmentRequestAuthenticator {
     }
   }
 
-  private static Resolution fromJwt(DecodedJWT jwt) {
+  private Resolution fromJwt(DecodedJWT jwt) {
     // The switch retires exactly this credential, and only this one is counted as a legacy
     // use: the counter is what says when turning the switch off is safe.
     if (!GoLegacyBearer.isEnabled()) {
@@ -261,6 +308,10 @@ public class EnvironmentRequestAuthenticator {
     if (identity.isIncomplete()) {
       return Resolution.refused(Status.UNAUTHENTICATED, MSG_MISSING_CLAIMS, AuthScheme.JWT);
     }
+    // ETP-5270 — the claim is the role at login; a signature still valid says nothing about
+    // whether an admin has revoked it since. Throws SessionRoleRevokedException, answered 401
+    // with its own message by authenticate()/identify(), like a cookie with no role left.
+    sessionRoleReconciler.requireHeldRole(identity.userId, identity.roleId, identity.clientId);
     return Resolution.of(identity);
   }
 
@@ -278,25 +329,71 @@ public class EnvironmentRequestAuthenticator {
     Identity identity = new Identity(AuthScheme.OAUTH2, validated.get(OAuth2Filter.ATTR_USER_ID),
         validated.get(OAuth2Filter.ATTR_ROLE_ID), validated.get(OAuth2Filter.ATTR_ORG_ID), null,
         validated.get(OAuth2Filter.ATTR_CLIENT_ID));
-    if (identity.isIncomplete()
-        || !hasRequiredScope(request.getMethod(), validated.get(OAuth2Filter.ATTR_SCOPES))) {
+    if (identity.isIncomplete()) {
       return Resolution.refused(Status.UNAUTHENTICATED, MSG_INSUFFICIENT_SCOPE, AuthScheme.OAUTH2);
     }
+    String scopes = validated.get(OAuth2Filter.ATTR_SCOPES);
+    String required = requiredScope(request.getMethod(), request.getPathInfo());
+    if (!ApiScopes.grants(scopes, required)) {
+      // ETP-5783 — 403, not 401: the token is valid, it just does not carry this scope.
+      return Resolution.refused(Status.INSUFFICIENT_SCOPE, ScopeRefusal.message(required),
+          AuthScheme.OAUTH2);
+    }
+    // Kept for the one decision the path cannot make (a process spec is told apart by its
+    // ETGO_SF_SPEC row, not by its path); see isScopeGranted.
+    request.setAttribute(ATTR_GRANTED_SCOPES, scopes == null ? "" : scopes);
     return Resolution.of(identity);
   }
 
-  private static boolean hasRequiredScope(String method, String scopes) {
+  /**
+   * The scope an OAuth2 request needs, decided by the request's structure alone: a read for
+   * {@code GET}/{@code HEAD}; for anything else {@code etendo:process} when the path is a NEO
+   * action route ({@code /{spec}/{entity}/{id}/action/{name}}, as {@code NeoServlet} parses it),
+   * {@code etendo:write} otherwise. No spec, entity or action name is consulted (ETP-5783).
+   *
+   * @param method   the HTTP method
+   * @param pathInfo the request's path info; may be {@code null}
+   * @return the scope to check with {@link ApiScopes#grants}
+   */
+  static String requiredScope(String method, String pathInfo) {
     if ("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) {
-      return ApiScopes.grants(scopes, ApiScopes.READ);
+      return ApiScopes.READ;
     }
-    return ApiScopes.grants(scopes, ApiScopes.WRITE);
+    return NeoActionPath.isActionPath(pathInfo) ? ApiScopes.PROCESS : ApiScopes.WRITE;
+  }
+
+  /**
+   * Whether the request may use {@code scope}, for a check the authenticator could not make from
+   * the path. A cookie session or legacy JWT is never narrowed by scope (RBAC decides), so a request
+   * that was not authenticated with an OAuth2 token passes; an OAuth2 one must have been granted it.
+   *
+   * @param request the authenticated request
+   * @param scope   the scope to require
+   * @return {@code true} when the request is not scope-limited or holds the scope
+   */
+  public static boolean isScopeGranted(HttpServletRequest request, String scope) {
+    Object granted = request.getAttribute(ATTR_GRANTED_SCOPES);
+    return !(granted instanceof String) || ApiScopes.grants((String) granted, scope);
   }
 
   // ------------------------------------------------------------------ phase 2: bind
 
   /** The one post-authentication step. Every scheme reaches it, and nothing here asks which. */
   private EnvironmentAuthOutcome bind(HttpServletRequest request, SurfacePolicy policy,
-      Identity identity) {
+      Identity credential, String entryPoint) {
+    // ETP-5047 — the tenant the request acts on, resolved ONCE and used for both the commercial
+    // check and the context: an OAuth2 token on org 0 carries the System client "0", which the
+    // guard allows, while the request runs on the role's tenant.
+    Identity identity;
+    try {
+      identity = credential.withClientId(
+          EffectiveClientResolver.effectiveClientId(credential.clientId, credential.roleId));
+    } catch (EffectiveClientResolver.ResolutionException e) {
+      log.warn("Refusing {} request of user {}: {}", entryPoint, credential.userId,
+          e.getMessage(), e);
+      return EnvironmentAuthOutcome.refused(Status.SERVICE_UNAVAILABLE, MSG_TENANT_UNRESOLVED,
+          credential.scheme);
+    }
     OBContext context = createContext(identity, identity.warehouseId);
     if (!isWarehouseReadable(context)) {
       log.warn("Warehouse '{}' is not in user '{}' readable orgs — resolving an accessible one",
@@ -307,13 +404,11 @@ public class EnvironmentRequestAuthenticator {
     OBContext.setOBContextInSession(request, context);
 
     if (policy.isCommercialAccessRequired()) {
-      EnvironmentAccessPolicy.Decision decision =
-          lifecycleService.evaluateAccess(identity.clientId, true, Instant.now());
-      // null is a tenant that predates lifecycle metadata: the controlled legacy transition,
-      // not a refusal.
-      if (decision != null && decision != EnvironmentAccessPolicy.Decision.ALLOWED) {
-        return EnvironmentAuthOutcome.refused(Status.PAYMENT_REQUIRED,
-            MSG_ACCESS_PREFIX + decision.name(), identity.scheme);
+      // ETP-5047 — the shared guard: null for an allowed tenant, for one that predates lifecycle
+      // metadata (the controlled legacy transition) and for a refusal the kill switch turned off.
+      EnvironmentAccessGuard.Denial denial = accessGuard.check(identity.clientId, entryPoint);
+      if (denial != null) {
+        return EnvironmentAuthOutcome.accessDenied(denial, identity.scheme);
       }
     }
     NeoLanguage.applyToContext(request.getHeader(HEADER_ACCEPT_LANGUAGE));
@@ -346,6 +441,20 @@ public class EnvironmentRequestAuthenticator {
     return EnvironmentAuthOutcome.refused(Status.UNAUTHENTICATED, message, scheme);
   }
 
+  /**
+   * ETP-5489 — a failure AFTER the credential resolved: the session is fine, the server could not
+   * build its context (ETP-5488 was an {@code OBSecurityException} reading a preference while
+   * binding). Answered 500, never 401, so the client does not log a live session out. Always the
+   * generic message: unlike {@link #refusedFor}, the OBExceptions raised here come from the
+   * platform core (entity access, "Current Client ... is not active!") and the trace is logged.
+   */
+  private static EnvironmentAuthOutcome contextUnavailableFor(RuntimeException e,
+      AuthScheme scheme) {
+    log.error("Environment context could not be established for an authenticated request", e);
+    return EnvironmentAuthOutcome.refused(Status.CONTEXT_UNAVAILABLE, MSG_CONTEXT_UNAVAILABLE,
+        scheme);
+  }
+
   /** The credential's claims, whatever carried them. */
   private static final class Identity {
     private final AuthScheme scheme;
@@ -367,6 +476,12 @@ public class EnvironmentRequestAuthenticator {
 
     private boolean isIncomplete() {
       return StringUtils.isAnyBlank(userId, roleId, orgId, clientId);
+    }
+
+    /** The same credential acting on {@code effectiveClientId}; {@code this} when unchanged. */
+    private Identity withClientId(String effectiveClientId) {
+      return StringUtils.equals(clientId, effectiveClientId) ? this
+          : new Identity(scheme, userId, roleId, orgId, warehouseId, effectiveClientId);
     }
   }
 

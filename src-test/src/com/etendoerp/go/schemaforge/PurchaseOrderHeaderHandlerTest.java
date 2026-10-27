@@ -56,7 +56,9 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for PurchaseOrderHeaderHandler.afterHandle().
@@ -64,6 +66,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * The afterHandle() logic is inherited from AbstractOrderHeaderHandler — it annotates
  * hasLinkedDocuments by querying C_Invoice and M_InOut. These tests confirm the same
  * contract holds for the purchase-order handler.
+ *
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.CreateGoodsReceiptHandler
+ * @covers com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.PartnerLocationDefaults
  */
 public class PurchaseOrderHeaderHandlerTest {
 
@@ -615,5 +622,81 @@ public class PurchaseOrderHeaderHandlerTest {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     assertNull(new PurchaseOrderHeaderHandler().handle(ctx));
+  }
+
+  // ── declared action contracts (ETP-5709) ──────────────────────────────────
+
+  @Test
+  public void actionContracts_declaresReceiptInvoiceAndCloneWithoutParams() {
+    Map<String, NeoActionContract> contracts = new PurchaseOrderHeaderHandler().actionContracts();
+
+    assertEquals(List.of("createGoodsReceipt", "createPurchaseInvoice", "cloneRecord"),
+        List.copyOf(contracts.keySet()));
+    for (NeoActionContract c : contracts.values()) {
+      assertEquals("POST", c.getHttpMethod());
+      assertTrue(c.getName() + " takes no parameters", c.getParams().isEmpty());
+    }
+    assertTrue(contracts.get("createGoodsReceipt").getDescription().contains("DRAFT"));
+    assertTrue(contracts.get("createPurchaseInvoice").getDescription().contains("COMPLETES"));
+    assertTrue(contracts.get("cloneRecord").getDescription().contains("NEW DRAFT"));
+  }
+
+  @Test
+  public void actionContracts_acceptTheEmptyBodyTheSpaSends() {
+    Map<String, NeoActionContract> contracts = new PurchaseOrderHeaderHandler().actionContracts();
+
+    for (String action : contracts.keySet()) {
+      assertNull(action, NeoActionContract.validate(contracts, action, new JSONObject()));
+      assertNull(action, NeoActionContract.validate(contracts, action, null));
+    }
+  }
+
+  @Test
+  public void actionContracts_rejectAnUndeclaredParameter() throws JSONException {
+    Map<String, NeoActionContract> contracts = new PurchaseOrderHeaderHandler().actionContracts();
+
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "createGoodsReceipt", new JSONObject().put("receiptIds", new JSONArray())).getHttpStatus());
+  }
+
+  /**
+   * ETP-5714: the keys PurchaseOrderHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("purchase order: enriched response keys are declared")
+  void enrichedKeysAreDeclaredPurchaseOrderHeaderHandler() {
+    java.util.Set<String> declared = new PurchaseOrderHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("hasLinkedDocuments", "needsPrimaryDoc", "needsInvoiceDoc")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
+  }
+
+  /**
+   * ETP-5881: a public API create that names only the vendor answered 400 for
+   * {@code partnerAddress}. With a single address, the pre-hook fills it and the bill-to with it,
+   * as on sales orders (ETP-5703).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testHandleCreateWithSingleLocationFillsPartnerAndInvoiceAddress() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      OBCriteria<Location> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Location.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new PurchaseOrderHeaderHandler().handle(NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD).requestBody(body).build()));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+      assertEquals("loc-1", body.getString("invoiceAddress"));
+    }
   }
 }

@@ -75,6 +75,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * @covers com.etendoerp.go.mcp.McpIndentResponse
  * @covers com.etendoerp.go.mcp.McpNamedFilterCatalog
  * @covers com.etendoerp.go.mcp.McpImageToolDefinitions
+ * @covers com.etendoerp.go.mcp.McpAttachmentToolDefinitions
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -972,6 +973,180 @@ class ToolRegistryGenerateToolsTest {
       }
     }
 
+    /**
+     * ETP-5640: MCP 2026-07-28 asks for a deterministic {@code tools/list} (client caching, LLM
+     * prompt-cache hits). The order is the registry's own — built-ins, process and report tools
+     * in spec order, CRUD tools, image tools — and the spec enums follow the specs' query order
+     * (by name), never a hash order. Pinned so a {@code HashMap}/{@code HashSet} slipped into the
+     * catalog fails here instead of reshuffling every client's cache.
+     */
+    @Test
+    @DisplayName("the catalog order and the spec enums are deterministic")
+    void catalogOrderIsDeterministic() {
+      SFSpec invoices = createWindowSpec(SPEC_INVOICES);
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      SFSpec processSpec = createProcessSpec(SPEC_COMPLETE_ORDER);
+      when(processSpec.getProcess()).thenReturn(null);
+      mockEmptyEntities();
+      mockSpecCriteria(List.of(invoices, salesOrder, processSpec));
+      Set<String> scopes = scopesOf("neo:read", "neo:write", "neo:process", "neo:report");
+
+      List<McpToolDefinition> first = registry.generateTools(scopes);
+      List<McpToolDefinition> second = new ToolRegistry().generateTools(scopes);
+
+      assertEquals(toolNames(first), toolNames(second));
+      for (int i = 0; i < first.size(); i++) {
+        assertEquals(String.valueOf(first.get(i).getInputSchema()),
+            String.valueOf(second.get(i).getInputSchema()), first.get(i).getName());
+      }
+      List<String> names = toolNames(first);
+      assertEquals(List.of("etendo_discover", "docs", McpConstants.TOOL_NEO_WIDGET,
+          McpConstants.TOOL_NEO_VECTOR_SEARCH, McpConstants.TOOL_NEO_FEEDBACK),
+          names.subList(0, 5), "built-ins first, in a fixed order: " + names);
+      assertTrue(names.indexOf("complete_order") < names.indexOf("etendo_list"),
+          "process tools before the CRUD tools: " + names);
+      Map<String, Object> listSchema = first.get(names.indexOf("etendo_list")).getInputSchema();
+      Map<?, ?> specProp = (Map<?, ?>) ((Map<?, ?>) listSchema.get("properties")).get("spec");
+      assertEquals(List.of(SPEC_INVOICES, SPEC_SALES_ORDER), specProp.get("enum"),
+          "the spec enum keeps the query order");
+    }
+
+    /**
+     * ETP-5715: the attachment tools address a window spec like every CRUD tool, so they are only
+     * published when a spec is accessible, and each follows its own scope — a read-only session can
+     * list (verify) a document's attachments but is never offered the upload or the delete.
+     */
+    @Test
+    @DisplayName("the attachment tools follow the scopes and need an accessible window spec")
+    void attachmentToolsFollowTheScopes() {
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(salesOrder));
+
+      List<String> readOnly = toolNames(registry.generateTools(scopesOf("neo:read")));
+      List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
+      List<String> both = toolNames(registry.generateTools(scopesOf("neo:read", "neo:write")));
+
+      assertTrue(readOnly.contains(McpConstants.TOOL_NEO_LIST_ATTACHMENTS), readOnly.toString());
+      assertFalse(readOnly.contains(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD));
+      assertFalse(readOnly.contains(McpConstants.TOOL_NEO_DELETE_ATTACHMENT));
+      assertFalse(writeOnly.contains(McpConstants.TOOL_NEO_LIST_ATTACHMENTS), writeOnly.toString());
+      assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD));
+      assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_DELETE_ATTACHMENT));
+      assertTrue(both.containsAll(List.of(McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
+          McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD, McpConstants.TOOL_NEO_DELETE_ATTACHMENT)));
+    }
+
+    /** ETP-5715: the PDF tool is a read: published to a read session, hidden from a write-only one. */
+    @Test
+    @DisplayName("the document PDF tool follows the read scope and declares ids")
+    void documentPdfToolFollowsTheReadScope() {
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(salesOrder));
+
+      List<String> readOnly = toolNames(registry.generateTools(scopesOf("neo:read")));
+      List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
+
+      assertTrue(readOnly.contains(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF), readOnly.toString());
+      assertFalse(writeOnly.contains(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF), writeOnly.toString());
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF)
+          .orElseThrow().containsAll(List.of("spec", "id", "ids", "entity")));
+    }
+
+    /** ETP-5715: the email send is a write, offered only for specs that have a send contract. */
+    @Test
+    @DisplayName("the email send follows the write scope and declares to, cc, subject, message, preview")
+    void sendDocumentEmailFollowsTheWriteScope() {
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(salesOrder));
+
+      try (MockedStatic<McpDocumentEmailContracts> contracts =
+          mockStatic(McpDocumentEmailContracts.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+        contracts.when(() -> McpDocumentEmailContracts.supportedSpecs(any()))
+            .thenReturn(List.of(SPEC_SALES_ORDER));
+
+        List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
+        List<String> readOnly = toolNames(registry.generateTools(scopesOf("neo:read")));
+
+        assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL),
+            writeOnly.toString());
+        assertFalse(readOnly.contains(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL),
+            readOnly.toString());
+      }
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL)
+          .orElseThrow().containsAll(List.of("spec", "id", "to", "cc", "subject", "message",
+              "preview")));
+    }
+
+    /**
+     * ETP-5715: the two extraction tools are write-tier and are offered only for the specs the OCR
+     * configuration declares (here purchase-invoice), never for any other window.
+     */
+    @Test
+    @DisplayName("the extraction tools follow the write scope and only the specs the OCR configuration declares")
+    void documentExtractionToolsFollowTheWriteScopeAndTheConfiguration() {
+      SFSpec purchaseInvoice = createWindowSpec("purchase-invoice");
+      when(purchaseInvoice.getADWindow()).thenReturn(null);
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+
+      mockSpecCriteria(List.of(purchaseInvoice, salesOrder));
+      List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
+      List<String> readOnly = toolNames(registry.generateTools(scopesOf("neo:read")));
+      assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD),
+          writeOnly.toString());
+      assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
+      assertFalse(readOnly.contains(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD),
+          readOnly.toString());
+      assertFalse(readOnly.contains(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
+      com.etendoerp.go.mcp.McpToolDefinition extract = registry.generateTools(scopesOf("neo:write"))
+          .stream().filter(t -> McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT.equals(t.getName()))
+          .findFirst().orElseThrow();
+      assertEquals(List.of("purchase-invoice"), enumOf(extract, "spec"));
+
+      mockSpecCriteria(List.of(salesOrder));
+      List<String> onlySales = toolNames(registry.generateTools(scopesOf("neo:write")));
+      assertFalse(onlySales.contains(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD),
+          onlySales.toString());
+      assertFalse(onlySales.contains(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> enumOf(com.etendoerp.go.mcp.McpToolDefinition tool, String property) {
+      Map<String, Object> properties = (Map<String, Object>) tool.getInputSchema().get("properties");
+      return (List<String>) ((Map<String, Object>) properties.get(property)).get("enum");
+    }
+
+    /** ETP-5715: they take the spec from the `spec` argument, so the router authorizes that spec. */
+    @Test
+    @DisplayName("the attachment tools resolve their spec from the arguments, like the CRUD tools")
+    void attachmentToolsResolveTheSpecFromTheArguments() throws Exception {
+      org.codehaus.jettison.json.JSONObject arguments = new org.codehaus.jettison.json.JSONObject();
+      arguments.put("spec", SPEC_SALES_ORDER);
+      for (String tool : List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+          McpConstants.TOOL_NEO_LIST_ATTACHMENTS, McpConstants.TOOL_NEO_DELETE_ATTACHMENT,
+          McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
+          McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD,
+          McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT)) {
+        assertTrue(ToolRegistry.isCrudTool(tool), tool);
+        assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName(tool, arguments), tool);
+        assertTrue(ToolRegistry.declaredArgumentNames(tool).orElseThrow().contains("spec"), tool);
+      }
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_DELETE_ATTACHMENT)
+          .orElseThrow().contains("attachment_id"));
+      // ETP-5715: the PDF staged for extraction can be attached through the upload tool, and the
+      // extraction recomputes for the vendor the user chose.
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD)
+          .orElseThrow().containsAll(List.of("name", "main", "staged_document_id")));
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT)
+          .orElseThrow().containsAll(List.of("spec", "staged_document_id", "vendor_id")));
+      assertTrue(ToolRegistry.declaredArgumentNames(
+          McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD).orElseThrow()
+          .containsAll(List.of("spec", "name")));
+    }
+
     @Test
     @DisplayName("spec processing exception is caught and does not break other specs")
     void specExceptionDoesNotBreakOthers() {
@@ -1719,16 +1894,18 @@ class ToolRegistryGenerateToolsTest {
   class NeoActionToolTests {
 
     @Test
-    @DisplayName("write scope registers etendo_action alongside write CRUD tools")
-    void writeScopeRegistersNeoAction() {
+    @DisplayName("process scope registers etendo_action, write scope alone does not (ETP-5783)")
+    void processScopeRegistersNeoAction() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
       when(spec.getADWindow()).thenReturn(null);
       mockSpecCriteria(List.of(spec));
 
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
-      List<String> names = toolNames(tools);
+      List<String> withProcess = toolNames(registry.generateTools(scopesOf("neo:process")));
+      List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
 
-      assertTrue(names.contains("etendo_action"), "etendo_action should be registered with write scope");
+      assertTrue(withProcess.contains("etendo_action"), "etendo_action needs the process scope");
+      assertFalse(writeOnly.contains("etendo_action"), "write alone must not publish etendo_action");
+      assertTrue(writeOnly.contains("etendo_create"), "write CRUD tools are unaffected");
     }
 
     @Test
@@ -1752,7 +1929,7 @@ class ToolRegistryGenerateToolsTest {
       when(spec.getADWindow()).thenReturn(null);
       mockSpecCriteria(List.of(spec));
 
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
 
       McpToolDefinition actionTool = tools.stream()
           .filter(t -> "etendo_action".equals(t.getName()))
@@ -1787,6 +1964,46 @@ class ToolRegistryGenerateToolsTest {
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
       assertTrue(toolNames(tools).contains("etendo_action"));
+    }
+
+    @Test
+    @DisplayName("etendo_action_batch is published with process scope and withheld from write")
+    void actionBatchFollowsTheProcessScope() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      assertTrue(toolNames(registry.generateTools(scopesOf("neo:process")))
+          .contains("etendo_action_batch"));
+      assertFalse(toolNames(registry.generateTools(scopesOf("neo:write")))
+          .contains("etendo_action_batch"));
+    }
+
+    @Test
+    @DisplayName("etendo_action_batch offers the same spec enum as etendo_action")
+    @SuppressWarnings("unchecked")
+    void actionBatchOffersTheSameSpecsAsEtendoAction() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      java.util.function.Function<String, Object> specEnum = toolName -> {
+        McpToolDefinition tool = tools.stream().filter(t -> toolName.equals(t.getName()))
+            .findFirst().orElse(null);
+        assertNotNull(tool, toolName + " must be registered");
+        return ((Map<String, Object>) ((Map<String, Object>) tool.getInputSchema()
+            .get("properties")).get("spec")).get("enum");
+      };
+      assertEquals(specEnum.apply("etendo_action"), specEnum.apply("etendo_action_batch"));
+      assertTrue(((List<String>) specEnum.apply("etendo_action_batch")).contains(SPEC_SALES_ORDER));
+    }
+
+    @Test
+    @DisplayName("isCrudTool returns true for etendo_action_batch (the spec comes from arguments)")
+    void actionBatchIsACrudTool() {
+      assertTrue(ToolRegistry.isCrudTool("etendo_action_batch"));
     }
   }
 
@@ -1936,7 +2153,7 @@ class ToolRegistryGenerateToolsTest {
       try (MockedStatic<McpToolRouterSupport> supportMock =
           setupMixedCatalog(writable, readOnly)) {
         List<McpToolDefinition> tools =
-            registry.generateTools(scopesOf("neo:read", "neo:write"));
+            registry.generateTools(scopesOf("neo:read", "neo:write", "neo:process"));
 
         List<String> actionEnum = specEnumOf(tools, "etendo_action");
         assertTrue(actionEnum.contains(SPEC_SALES_ORDER));
@@ -1995,7 +2212,7 @@ class ToolRegistryGenerateToolsTest {
             .thenReturn(false);
 
         List<McpToolDefinition> tools =
-            registry.generateTools(scopesOf("neo:read", "neo:write"));
+            registry.generateTools(scopesOf("neo:read", "neo:write", "neo:process"));
         List<String> names = toolNames(tools);
 
         assertTrue(names.contains("etendo_list"), "reads must still be available");
@@ -2240,7 +2457,7 @@ class ToolRegistryGenerateToolsTest {
         supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(actionSpec))
             .thenReturn(false);
 
-        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write", "neo:process"));
 
         McpToolDefinition actionTool = tools.stream()
             .filter(t -> "etendo_action".equals(t.getName()))

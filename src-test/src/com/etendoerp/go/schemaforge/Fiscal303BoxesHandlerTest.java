@@ -70,6 +70,7 @@ import org.hibernate.criterion.Criterion;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for {@link Fiscal303BoxesHandler}.
@@ -107,7 +108,7 @@ public class Fiscal303BoxesHandlerTest {
     declHandler = new FiscalDeclCrudHandler(null);
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @org.junit.After
@@ -461,7 +462,7 @@ public class Fiscal303BoxesHandlerTest {
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("GET"))).thenReturn(false);
 
     h.handle("boxes", "GET", req, res);
 
@@ -2198,6 +2199,106 @@ public class Fiscal303BoxesHandlerTest {
     }
 
     verify(h).computeBoxes("org1", 2026, "T1");
+  }
+
+  // ── guardCorrectiveConsistency (generate only, ETP-5725 reopened QA) ──────────────
+  //
+  // "Generar fichero 303" produces the literal AEAT submission artifact (not a preview), so it
+  // must be gated by the same corrective/ordinaria consistency rule as "Guardar"/"Registrar/
+  // Presentar" (FiscalDeclCorrectiveConsistencySupport#checkCorrectiveConsistency). `generate` has no persisted
+  // declaration to trust at call time (the frontend's handleGenerate never flushes a save
+  // first), so the guard reads a DEDICATED, unambiguous `Rectificativa` request param —
+  // deliberately NOT the pre-existing `IsComplementary`, which this same request also sets for
+  // the UNRELATED legacy "complementaria" checkbox.
+
+  /**
+   * The latest declaration is a draft (so {@code guardNotAlreadySubmitted} lets it through), the
+   * request is marked corrective ({@code Rectificativa=Y}), and there is no presented ordinaria
+   * sibling at all — rejected before the real generator ever runs.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateRejectsCorrectiveWithoutPresentedOrdinaria() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getParameter("Rectificativa")).thenReturn("Y");
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus303(0L, "draft");
+      when(query.list()).thenReturn(Collections.singletonList(draft));
+
+      h.dispatch("generate", "org1", 2026, "T1", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT),
+        org.mockito.ArgumentMatchers.contains("corrective declaration"));
+    verify(resp, never()).setHeader(eq("Content-Disposition"), anyString());
+  }
+
+  /**
+   * The mirror rule, same endpoint: generating as a genuine ORDINARIA (no {@code Rectificativa}
+   * param) while another ordinaria is ALREADY presented for the period — rejected too.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateRejectsOrdinariaWhenAnotherOrdinariaAlreadyPresented()
+      throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    HttpServletRequest req = mock(HttpServletRequest.class); // no Rectificativa param: ordinaria
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus303(1L, "draft");
+      BaseOBObject presentedOrdinaria = declWithSeqAndStatus303(0L, "submitted");
+      when(query.list()).thenReturn(Arrays.asList(draft, presentedOrdinaria));
+
+      h.dispatch("generate", "org1", 2026, "T1", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT),
+        org.mockito.ArgumentMatchers.contains("as ordinaria"));
+    verify(resp, never()).setHeader(eq("Content-Disposition"), anyString());
+  }
+
+  /**
+   * A VALID request (ordinaria, no conflicting sibling) must NOT be rejected by this guard — any
+   * failure further down the real generation pipeline (unmocked in this unit test) is expected
+   * and irrelevant to what this test asserts: that {@code guardCorrectiveConsistency} itself
+   * never false-positives on the ordinary case.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateDoesNotRejectValidOrdinariaWithNoConflict() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus303(0L, "draft");
+      when(query.list()).thenReturn(Collections.singletonList(draft));
+
+      try {
+        h.dispatch("generate", "org1", 2026, "T1", req, resp);
+      } catch (FiscalHandlerException expected) {
+        // Expected: the real generator has no further mocks here. Only this guard's own
+        // behavior is under test.
+      }
+    }
+
+    verify(servlet, never()).sendError(any(), eq(HttpServletResponse.SC_CONFLICT), anyString());
   }
 
   @SuppressWarnings("unchecked")

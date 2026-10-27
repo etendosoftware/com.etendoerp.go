@@ -17,10 +17,12 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -39,6 +41,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -50,6 +53,8 @@ import org.openbravo.model.ad.system.Client;
 
 /**
  * Unit tests for {@link ContactsBpTrendHandler}.
+ *
+ * @covers com.etendoerp.go.schemaforge.ContactsBpTrendHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -157,6 +162,21 @@ class ContactsBpTrendHandlerTest {
 
       assertEquals(3000.0, data.getJSONArray("revenue").getDouble(0), 0.01);
       assertEquals(1500.0, data.getJSONArray("expenses").getDouble(1), 0.01);
+    }
+
+    @Test
+    void sumsNetAmountsNotGrandTotal() {
+      when(nativeQuery.list()).thenReturn(Collections.emptyList());
+
+      Map<String, String> params = new HashMap<>();
+      params.put("businessPartnerId", "bp-1");
+
+      assertEquals(200, handler.handle(buildContext("GET", params)).getHttpStatus());
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session).createNativeQuery(sql.capture());
+      assertTrue(sql.getValue().contains("i.totallines"), "amounts must be net (totallines)");
+      assertFalse(sql.getValue().contains("grandtotal"), "amounts must not include VAT");
     }
 
     @Test

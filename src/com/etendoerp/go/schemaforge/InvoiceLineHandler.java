@@ -34,6 +34,8 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.schemaforge.util.NeoAdminMode;
+
 /**
  * NeoHandler for invoice line entities (Sales Invoice, Purchase Invoice).
  *
@@ -54,6 +56,10 @@ import org.openbravo.model.common.order.Order;
  * lines, mirroring Classic's {@code Create Lines From} — see
  * {@link #syncInvoiceOrderReferenceAfterLineSave(NeoContext)} for why this cannot be a frontend
  * PATCH.
+ *
+ * <p>On PATCH/PUT (ETP-5692): a line of a processed invoice accepts only
+ * {@link CompletedInvoiceWriteFence#lineEditableWhenCompleted()}, and those only while the invoice
+ * is {@code CO} and not posted — see {@link CompletedInvoiceWriteFence}.
  *
  * <p>Registered via {@code javaQualifier = "invoiceLineHandler"} on the lines
  * entity of sales-invoice and purchase-invoice specs.
@@ -95,6 +101,12 @@ public class InvoiceLineHandler implements NeoHandler {
     String method = context.getHttpMethod();
     if (!"POST".equals(method) && !"PATCH".equals(method) && !"PUT".equals(method)) {
       return null;
+    }
+    // ETP-5692: a line of a processed invoice accepts only editableLineFieldsWhenCompleted
+    // (project, costcenter), and those only while the invoice is CO and not posted.
+    NeoResponse fence = CompletedInvoiceWriteFence.checkLine(context);
+    if (fence != null) {
+      return fence;
     }
     JSONObject body = context.getRequestBody();
     // ETP-4737: capture + strip sourceInvoiceLineId BEFORE the generic field filter runs.
@@ -220,7 +232,7 @@ public class InvoiceLineHandler implements NeoHandler {
    */
   private NeoResponse autoFillExemptionCauseAfterLineSave(NeoContext context) {
     try {
-      OBContext.setAdminMode(true);
+      NeoAdminMode.enter();
       try {
         String invoiceId = resolveParentInvoiceIdAfterSave(context);
         if (StringUtils.isBlank(invoiceId) || !shouldAutoFillExemptionCause(invoiceId)) {

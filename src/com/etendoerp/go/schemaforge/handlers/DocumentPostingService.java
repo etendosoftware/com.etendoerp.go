@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -128,7 +130,21 @@ public class DocumentPostingService {
    * cost yet. Reusing a real, already-translated core {@code AD_MESSAGE} beats a hardcoded EN/ES
    * pair maintained only in Java.</p>
    */
-  private static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
+  static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
+
+  /**
+   * How long a caller should wait before posting again when cost is still being calculated
+   * (ETP-5714). Etendo calculates cost in a background process that runs about every 30 seconds,
+   * so a post made right after completing a goods document usually fails once and succeeds a
+   * moment later; the answer says so instead of leaving the caller to guess.
+   */
+  static final int COST_RETRY_AFTER_SECONDS = 30;
+  /** {@code messageParams} entry (and body key) carrying {@link #COST_RETRY_AFTER_SECONDS}. */
+  static final String MESSAGE_PARAMS_RETRY_AFTER_SECONDS = "retryAfterSeconds";
+  /** The error code of a post refused only because cost is not calculated yet (ETP-5714). */
+  static final String ERROR_COST_NOT_CALCULATED = "costNotCalculated";
+  /** HTTP 409: nothing is wrong with the request, retry once cost has been calculated. */
+  static final int STATUS_RETRY_LATER = 409;
 
   /**
    * The {@code C_BP_Group_Acct} columns relevant to this app's document types (ETP-5175) — a
@@ -211,7 +227,8 @@ public class DocumentPostingService {
    * by identity; never {@code null}, empty when there are none. {@code messageParams} (ETP-5175)
    * are the values those keys interpolate, so a client can render the whole sentence in its own
    * locale instead of trusting the backend prose; never {@code null}, empty when there are none.
-   * Values are {@code String} or {@code List<String>}.
+   * Values are {@code String}, {@code List<String>} or, for {@code retryAfterSeconds}, an
+   * {@code Integer}.
    */
   public record PostResult(boolean ok, String message, List<String> messageKeys,
       Map<String, Object> messageParams) {
@@ -340,7 +357,10 @@ public class DocumentPostingService {
       boolean posted = acct.post(recordId, false, vars, conn, con);
       if (!posted || acct.errors != 0) {
         conn.releaseRollbackConnection(con);
-        return failureOf(acct);
+        PostResult notPostable = AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())
+            ? notPostableFailure(acct.tableName, recordId, conn)
+            : null;
+        return notPostable != null ? notPostable : failureOf(acct);
       }
       conn.releaseCommitConnection(con);
       return new PostResult(true, "Document posted");
@@ -522,6 +542,12 @@ public class DocumentPostingService {
       body.put("success", result.ok());
       body.put("message", result.message());
       putMessageIdentity(body, result);
+      if (CostingStall.isRetryable(result)) {
+        return CostingStall.retryLater(body, result);
+      }
+      if (CostingStall.isStalled(result)) {
+        return CostingStall.answer(body, result);
+      }
       // NOTE: pass the JSONObject itself, NOT body.toString() — that String would bind to the
       // NeoResponse.error(int, String) overload, which wraps it as a nested error.message
       // string instead of sending this flat body, silently discarding the real message from
@@ -557,6 +583,108 @@ public class DocumentPostingService {
   private static final String MSG_OTHER_POSTING_PROCESS_ACTIVE = "OtherPostingProcessActive";
 
   /**
+   * {@code AD_MESSAGE.VALUE} core resolves for {@code STATUS_PeriodClosed}: the accounting date
+   * falls in a period that is not open. ETP-5577: a productive tenant starts with every period
+   * never-opened, so the SPA keys its "go open the period" guidance on this identity.
+   */
+  private static final String MSG_PERIOD_NOT_AVAILABLE = "PeriodNotAvailable";
+
+  /**
+   * Stable identity sent as the failure's {@code messageKeys} when {@code AcctServer} refused a
+   * document that is not processed yet (a draft) — ETP-5692. A plain string, deliberately NOT an
+   * AD_MESSAGE record: the text is plain English ({@link #TEXT_DOCUMENT_NOT_PROCESSED}), like this
+   * service's own "Document posted" / "Unposted (N entries removed)". No core message says exactly
+   * this for every table (core's {@code *CreateDocNotCompleted} are about generating documents).
+   */
+  static final String MSG_DOCUMENT_NOT_PROCESSED = "ETGO_PostingDocumentNotProcessed";
+
+  /**
+   * {@code AD_MESSAGE.VALUE} core resolves to "Document already Posted." ({@code AD_MESSAGE_ID =
+   * 800116} in core's {@code AD_MESSAGE.xml}, translated by the language packs) — reused for a
+   * post of a document whose {@code Posted} is already {@code 'Y'} (ETP-5692).
+   */
+  static final String MSG_DOCUMENT_ALREADY_POSTED = "PostedDocument";
+
+  /** The not-processed text, and the English fallback of {@link #MSG_DOCUMENT_ALREADY_POSTED}. */
+  private static final String TEXT_DOCUMENT_NOT_PROCESSED =
+      "Only processed (completed) documents can be posted. Complete the document first.";
+  private static final String TEXT_DOCUMENT_ALREADY_POSTED = "Document already Posted.";
+
+  /**
+   * The real reason behind a {@code STATUS_DocumentLocked} failure, or {@code null} to keep
+   * {@link #failureOf}'s {@code OtherPostingProcessActive} (ETP-5692).
+   *
+   * <p><b>Why.</b> {@code AcctServer.post} takes its lock with
+   * {@code UPDATE <table> SET Processing='Y' WHERE <table>_ID=? AND Processed='Y'
+   * AND (Processing='N' OR Processing IS NULL) AND Posted<>'Y'}
+   * ({@code AcctServer_data.xsql}, method {@code update}) and maps every "0 rows updated" to
+   * {@code STATUS_DocumentLocked} — "This record is being posted by another process". So a post
+   * of a <em>draft</em> (Processed='N') and a post of an <em>already posted</em> document were
+   * both reported as a concurrency lock, which is false and gives the caller nothing to act on
+   * (live QA: a draft invoice answered "being posted by another process" with Processing='N').
+   * This re-reads the two columns of that very statement and names the condition that failed.</p>
+   *
+   * <p><b>Structural, not identity.</b> {@code Processed} and {@code Posted} are the columns
+   * {@code AcctServer} itself requires on every table it posts, and {@code tableName} is the one
+   * {@code AcctServer.get} resolved — no table is named here, so the answer is correct for every
+   * document this service posts.</p>
+   *
+   * <p>Fails open: an unknown table, a missing row or a failed read keeps the existing
+   * lock message.</p>
+   *
+   * <p>The connection from {@code conn.getConnection()} is borrowed — with
+   * {@code DalConnectionProvider} it is the shared DAL session connection — so it is never closed
+   * here (only the statement and result set are); a pooled provider would need different
+   * handling.</p>
+   *
+   * @param tableName {@code AcctServer.tableName} of the failed post; {@code null} skips the check
+   * @param recordId  the document id
+   * @param conn      the provider whose (non-transaction) connection reads the row
+   * @return the precise failure, or {@code null} when the lock really is the cause or the state
+   *     cannot be read
+   */
+  // tableName comes from AcctServer's own table registry (never from the request) and is the same
+  // identifier AcctServerData.update interpolates; the id is bound.
+  @SuppressWarnings("java:S2077")
+  private static PostResult notPostableFailure(String tableName, String recordId,
+      ConnectionProvider conn) {
+    if (StringUtils.isBlank(tableName) || !tableName.matches("\\w+") || conn == null) {
+      return null;
+    }
+    String sql = "SELECT Processed, Posted FROM " + tableName + " WHERE " + tableName + "_ID = ?";
+    try {
+      Connection connection = conn.getConnection();
+      try (PreparedStatement ps = connection.prepareStatement(sql)) {
+        ps.setString(1, recordId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (!rs.next()) {
+            return null;
+          }
+          if (!"Y".equals(rs.getString(1))) {
+            return new PostResult(false, TEXT_DOCUMENT_NOT_PROCESSED,
+                List.of(MSG_DOCUMENT_NOT_PROCESSED));
+          }
+          if ("Y".equals(rs.getString(2))) {
+            return localizedFailure(MSG_DOCUMENT_ALREADY_POSTED, TEXT_DOCUMENT_ALREADY_POSTED);
+          }
+          return null;
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not read the posting state of {} {}; keeping the lock message", tableName,
+          recordId, e);
+      return null;
+    }
+  }
+
+  /** A keyed failure whose text is {@code messageKey} in the GO locale, else {@code fallback}. */
+  private static PostResult localizedFailure(String messageKey, String fallback) {
+    String text = localizedMessage(messageKey);
+    return new PostResult(false, StringUtils.isNotBlank(text) ? text : fallback,
+        List.of(messageKey));
+  }
+
+  /**
    * {@code OBMessageUtils.messageBD(key)} in the {@link OBContext} (GO) language, or {@code null}
    * when there is no context or no language (ETP-5529): {@code messageBD} dereferences the language
    * unguarded, so a background caller would otherwise turn a known posting failure into a
@@ -568,6 +696,33 @@ public class DocumentPostingService {
       return null;
     }
     return OBMessageUtils.messageBD(messageKey);
+  }
+
+  /**
+   * The AD message the failure's text is re-resolved from in the GO locale, or {@code null} to keep
+   * core's text. {@code InvalidAccount} (ETP-5175), {@code OtherPostingProcessActive} for a document
+   * another process holds (ETP-5529), {@code PeriodNotAvailable} (ETP-5577) and
+   * {@code NotCalculatedCost} (ETP-5714: core resolves {@code NC} to the per-product
+   * "NotCalculatedCostWithTransaction" text in the classic session's language, while the answer
+   * carries the generic, GO-locale one). ETP-5436: {@code D} on a Goods Movement means the same "cost
+   * not yet calculated" condition, so it reuses {@code NotCalculatedCost} instead of a second
+   * hardcoded message.
+   */
+  private static String relocalizedKeyOf(AcctServer acct) {
+    String status = acct.getStatus();
+    if (AcctServer.STATUS_InvalidAccount.equals(status)) {
+      return MSG_INVALID_ACCOUNT_BASE;
+    }
+    if (AcctServer.STATUS_DocumentLocked.equals(status)) {
+      return MSG_OTHER_POSTING_PROCESS_ACTIVE;
+    }
+    if (AcctServer.STATUS_PeriodClosed.equals(status)) {
+      return MSG_PERIOD_NOT_AVAILABLE;
+    }
+    boolean goodsMovementDisabled = AcctServer.STATUS_DocumentDisabled.equals(status)
+        && TABLE_M_MOVEMENT.equals(acct.tableName);
+    return AcctServer.STATUS_NotCalculatedCost.equals(status) || goodsMovementDisabled
+        ? MSG_NOT_CALCULATED_COST : null;
   }
 
   private static String errorMessageOf(AcctServer acct) {
@@ -585,28 +740,11 @@ public class DocumentPostingService {
     // GO locale for the statuses we know — OBMessageUtils.messageBD already follows OBContext's
     // language like the rest of this file's own enrichment messages. Any other status keeps
     // core's text as-is.
-    if (AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
-      String localizedBase = localizedMessage(MSG_INVALID_ACCOUNT_BASE);
-      if (StringUtils.isNotBlank(localizedBase)) {
-        message = localizedBase;
-      }
-    }
-    // ETP-5529: a document another posting process holds (or whose Processing lock AcctServer
-    // could not take) — "This record is being posted by another process".
-    if (AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())) {
-      String localizedLocked = localizedMessage(MSG_OTHER_POSTING_PROCESS_ACTIVE);
-      if (StringUtils.isNotBlank(localizedLocked)) {
-        message = localizedLocked;
-      }
-    }
-    // ETP-5436: 'D' on a Goods Movement means the same "cost not yet calculated" condition
-    // MSG_NOT_CALCULATED_COST already describes (see its javadoc) — reuse it rather than a
-    // second hardcoded message.
-    if (AcctServer.STATUS_DocumentDisabled.equals(acct.getStatus())
-        && TABLE_M_MOVEMENT.equals(acct.tableName)) {
-      String localizedNotCalculated = localizedMessage(MSG_NOT_CALCULATED_COST);
-      if (StringUtils.isNotBlank(localizedNotCalculated)) {
-        message = localizedNotCalculated;
+    String key = relocalizedKeyOf(acct);
+    if (key != null) {
+      String localized = localizedMessage(key);
+      if (StringUtils.isNotBlank(localized)) {
+        message = localized;
       }
     }
     return message;
@@ -615,7 +753,8 @@ public class DocumentPostingService {
   /**
    * Failure result for a failed {@code acct.post()}. Every status keeps core's (re-localized, see
    * {@link #errorMessageOf}) message and no identity, except {@code STATUS_DocumentLocked}, which
-   * names {@code OtherPostingProcessActive} (ETP-5529), and {@code STATUS_InvalidAccount}: core's
+   * names {@code OtherPostingProcessActive} (ETP-5529), {@code STATUS_PeriodClosed}, which names
+   * {@code PeriodNotAvailable} (ETP-5577), and {@code STATUS_InvalidAccount}: core's
    * accounting engine does not always say which entity caused that failure — {@code
    * DocInOut#createFact} (and other {@code Doc*} subclasses) can leave an account null and fall
    * through to {@code AcctServer#post}'s generic {@code setMessageResult(conn, vars, getStatus(),
@@ -636,8 +775,21 @@ public class DocumentPostingService {
    */
   private static PostResult failureOf(AcctServer acct) {
     String message = errorMessageOf(acct);
+    if (AcctServer.STATUS_NotCalculatedCost.equals(acct.getStatus())) {
+      if (CostingStall.isQueueStalled(acct)) {
+        return CostingStall.failure(localizedMessage(CostingStall.MSG_COSTING_STALLED));
+      }
+      // ETP-5714: retryable, with its own identity. Goods documents (receipts, shipments, returns)
+      // post as soon as their cost has been calculated, which a background process does shortly
+      // after completion — the caller should wait and repeat, not conclude the document is broken.
+      return new PostResult(false, message, List.of(MSG_NOT_CALCULATED_COST),
+          Map.of(MESSAGE_PARAMS_RETRY_AFTER_SECONDS, COST_RETRY_AFTER_SECONDS));
+    }
     if (AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())) {
       return new PostResult(false, message, List.of(MSG_OTHER_POSTING_PROCESS_ACTIVE));
+    }
+    if (AcctServer.STATUS_PeriodClosed.equals(acct.getStatus())) {
+      return new PostResult(false, message, List.of(MSG_PERIOD_NOT_AVAILABLE));
     }
     if (!AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
       return new PostResult(false, message);

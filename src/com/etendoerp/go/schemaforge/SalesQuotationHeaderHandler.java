@@ -17,9 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -27,12 +24,12 @@ import java.util.Map;
 import javax.inject.Inject;
 import javax.inject.Named;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
@@ -82,10 +79,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String DOC_STATUS_COMPLETED = "CO";
-  private static final String ACTION_DOC_ACTION = "DocAction";
-  private static final String FIELD_DOCUMENT_ACTION = "documentAction";
-  private static final String PARAM_DOC_ACTION = "docAction";
   private static final String DOC_ACTION_REJECT = "RJ";
+  /** The button's column name, what the SPA posts. */
+  private static final String ACTION_CONVERT_COLUMN = "Convertquotation";
+  /** The button's field name, what an MCP {@code etendo_action} call reaches the handler under (ETP-5710). */
+  private static final String ACTION_CONVERT_FIELD = "convertquotation";
 
   /** The named actions published to agents, in presentation order (ETP-5535). */
   private static final Map<String, NeoActionContract> ACTION_CONTRACTS = buildActionContracts();
@@ -111,6 +109,21 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   @Inject
   private ConvertQuotationIntoOrder convertQuotationProcess;
 
+  /**
+   * ETP-5840: the rate is the one valid on the {@code orderDate} ({@code DateOrdered}), shown as
+   * "Quotation date". Order-family rules in {@link DocumentRateGuards#guardOrderHeader}.
+   */
+  static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
+      Order.ENTITY_NAME, Order.PROPERTY_ETGOCURRENCYRATE, Order.PROPERTY_ORDERDATE,
+      DocumentRateMessages.LABEL_QUOTATION_DATE);
+
+  private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
+
+  @Override
+  protected DocumentCurrencyRate currencyRate() {
+    return currencyRate;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
@@ -118,16 +131,37 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
+    // ETP-5703: a create that names a business partner but no address (an agent; the SPA always
+    // sends one) gets the partner's only ship-to location — the AD rule of
+    // C_Order.C_BPartner_Location_ID is "C_BPartner Location - Ship To" — and, only then, a bill-to
+    // for BillTo_ID ("C_BPartner Location - Bill To") that is never left empty (see
+    // PartnerLocationDefaults#alignBillTo). REST single and batch; etendo_create keeps its 422
+    // (declared divergence, neo-headless.md §4.12.9).
+    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
+        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
     // ETP-5535: ahead of the total-discount sync, which recalculates on every DocAction — a
     // rejection does not touch the lines, exactly as the UI's rejectQuotation does not.
     if (isRejectDocAction(context)) {
       return rejectQuotationHandler.reject(context);
     }
+    // ETP-5840: exchange rate — recalculation, save and confirmation validation — before the
+    // total-discount sync and the actions run.
+    NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(context, totalDiscountService, false);
 
     if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && "Convertquotation".equals(context.getFieldName())) {
+        && isConvertQuotationAction(context.getFieldName())) {
+      // ETP-5840: a foreign-currency quotation without a rate is not converted; the client gets the
+      // translated completion refusal. The SPA's confirm modal only pre-checks — this is the rule.
+      NeoResponse missingRate = currencyRate.refuseCompletionWithoutRate(context.getRecordId());
+      if (missingRate != null) {
+        return missingRate;
+      }
       return handleConvertQuotation(context.getRecordId());
     }
 
@@ -152,6 +186,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static Map<String, NeoActionContract> buildActionContracts() {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(CreateDraftInvoiceHandler.QUOTATION_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.QUOTATION_CONTRACT);
     contracts.put(RejectQuotationHandler.CONTRACT.getName(), RejectQuotationHandler.CONTRACT);
     contracts.put(CreateRejectReasonHandler.CONTRACT.getName(), CreateRejectReasonHandler.CONTRACT);
     return Collections.unmodifiableMap(contracts);
@@ -168,41 +204,23 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * uses, {@link RejectQuotationHandler#reject}, which takes the reason in the same body. Both the
    * MCP and the REST action reach this handler, so both channels get it.</p>
    *
-   * <p>The value is read where the action requests carry it: {@code docAction} at the root (the
-   * {@code actionParameter} {@code etendo_schema} advertises for the button), {@code documentAction}
-   * at the root, or {@code fieldValues.documentAction}. The button is named by its column
-   * ({@code DocAction}) or its field ({@code documentAction}), as {@code findButtonColumn} accepts
-   * both. A {@code DocAction} request without an explicit {@code RJ} — the SPA's
+   * <p>Where the value and the button name are read from is {@link DocActionRequestSupport#requests}
+   * (extracted from this class in ETP-5704): root {@code docAction} first — the key the process
+   * itself runs — then {@code fieldValues.documentAction}, then root {@code documentAction}. Until
+   * ETP-5704 {@code fieldValues.documentAction} was read first, so a body naming RJ there and CO in
+   * {@code docAction} was rejected instead of completed. The record's stored DocAction never
+   * triggers the rejection. A {@code DocAction} request without an explicit {@code RJ} — the SPA's
    * {@code SendToEvaluationModal} sends {@code fieldValues: {}} — is not affected.</p>
    *
    * @param context the request
    * @return {@code true} for a POST ACTION on the DocAction button asking for {@code RJ}
    */
   static boolean isRejectDocAction(NeoContext context) {
-    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
-        || !"POST".equals(context.getHttpMethod())) {
-      return false;
-    }
-    String action = context.getFieldName();
-    if (!ACTION_DOC_ACTION.equals(action) && !FIELD_DOCUMENT_ACTION.equals(action)) {
-      return false;
-    }
-    return DOC_ACTION_REJECT.equals(requestedDocAction(context.getRequestBody()));
+    return DocActionRequestSupport.requests(context, DOC_ACTION_REJECT);
   }
 
-  private static String requestedDocAction(JSONObject body) {
-    if (body == null) {
-      return null;
-    }
-    JSONObject fieldValues = body.optJSONObject("fieldValues");
-    String nested = fieldValues != null
-        ? StringUtils.trimToNull(fieldValues.optString(FIELD_DOCUMENT_ACTION, null)) : null;
-    if (nested != null) {
-      return nested;
-    }
-    String root = StringUtils.trimToNull(body.optString(PARAM_DOC_ACTION, null));
-    return root != null ? root
-        : StringUtils.trimToNull(body.optString(FIELD_DOCUMENT_ACTION, null));
+  private static boolean isConvertQuotationAction(String action) {
+    return ACTION_CONVERT_COLUMN.equals(action) || ACTION_CONVERT_FIELD.equals(action);
   }
 
   /**
@@ -240,6 +258,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
       log.info("[ETP-4027] Created sales order {} from quotation {} with quoted prices preserved",
           newOrder.getDocumentNo(), quotationId);
       reactivateConvertedOrder(newOrder);
+      recomputeConvertedOrderRate(newOrder);
       JSONObject result = new JSONObject();
       result.put("salesOrderId", newOrder.getId());
       result.put(FIELD_DOCUMENT_STATUS, newOrder.getDocumentStatus());
@@ -272,64 +291,23 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     }
   }
 
-  /**
-   * After {@code Convertquotation} creates a sales order from the quotation,
-   * copies {@code EM_ETGO_Currency_Rate} from the quotation header to the new order header
-   * so that the agreed exchange rate is preserved across documents.
-   */
-  @Override
-  public NeoResponse afterHandle(NeoContext context) {
-    if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && "Convertquotation".equals(context.getFieldName())) {
-      transferCurrencyRateToNewOrder(context.getRecordId());
-    }
-    return super.afterHandle(context);
-  }
-
   @Override
   protected TotalDiscountService getTotalDiscountService() {
     return totalDiscountService;
   }
 
-  private void transferCurrencyRateToNewOrder(String quotationId) {
-    if (quotationId == null || quotationId.isEmpty()) {
-      return;
-    }
-    try {
-      Connection conn = OBDal.getInstance().getConnection();
-      String rate = null;
-      try (PreparedStatement ps = conn.prepareStatement(
-          "SELECT em_etgo_currency_rate FROM c_order WHERE c_order_id = ?")) {
-        ps.setString(1, quotationId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            rate = rs.getString(1);
-          }
-        }
-      }
-      if (rate == null) {
-        return;
-      }
-      final java.math.BigDecimal rateVal = new java.math.BigDecimal(rate);
-      // Update the most recently created order from this quotation that does not already have a rate.
-      try (PreparedStatement ps = conn.prepareStatement(
-          "UPDATE c_order SET em_etgo_currency_rate = ? "
-        + "WHERE c_order_id = ("
-        + "  SELECT c_order_id FROM c_order"
-        + "  WHERE quotation_id = ? AND issotrx = 'Y' AND em_etgo_currency_rate IS NULL"
-        + "  ORDER BY created DESC LIMIT 1"
-        + ")")) {
-        ps.setBigDecimal(1, rateVal);
-        ps.setString(2, quotationId);
-        int rows = ps.executeUpdate();
-        if (rows > 0) {
-          log.info("[ETP-4027] Copied currency rate {} from quotation {} to new order",
-              rateVal, quotationId);
-        }
-      }
-    } catch (Exception e) {
-      log.warn("[ETP-4027] transferCurrencyRateToNewOrder failed for quotation {}: {}",
-          quotationId, e.getMessage());
-    }
+  /**
+   * Recomputes the exchange rate of the order {@code Convertquotation} just created (ETP-5840).
+   *
+   * <p>Core's {@code DalUtil.copy} carries the quotation's {@code EM_ETGO_Currency_Rate} over, but
+   * the order is dated today, so the quotation's rate is not the order's: it is recomputed from the
+   * order's own reference date with the sales order's rate rules, never copied. No rate configured →
+   * {@code null}, and the order's next save is refused until one is entered. Runs after the
+   * reactivation, on the Draft order; an order core left Completed (reactivation reported a failure)
+   * is left as it is.
+   */
+  private static void recomputeConvertedOrderRate(Order order) {
+    OBDal.getInstance().getSession().refresh(order);
+    new DocumentCurrencyRate(SalesOrderHeaderHandler.RATE_TYPE).recompute(order);
   }
 }

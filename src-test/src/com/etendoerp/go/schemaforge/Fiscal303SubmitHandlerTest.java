@@ -80,6 +80,7 @@ import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxRepor
 
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for the AEAT 303 telematic submission entity added to {@link Fiscal303BoxesHandler}
@@ -136,7 +137,7 @@ public class Fiscal303SubmitHandlerTest {
     handler = snapshotStubbed(mock(NeoServlet.class));
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @After
@@ -452,6 +453,7 @@ public class Fiscal303SubmitHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "missing-decl")).thenReturn(null);
 
       h.handle("submit", "POST", req, res);
@@ -473,6 +475,7 @@ public class Fiscal303SubmitHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       FiscalDecl decl = matchingDecl("client1", "org1");
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
 
@@ -501,6 +504,7 @@ public class Fiscal303SubmitHandlerTest {
                 (mockService, ctx) -> when(mockService.hasOrgCertificate(any())).thenReturn(false))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       FiscalDecl decl = matchingDecl("client1", "org1");
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
@@ -538,6 +542,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -583,6 +588,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -634,6 +640,7 @@ public class Fiscal303SubmitHandlerTest {
                 when(mockService.hasOrgCertificate(any())).thenReturn(true))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -723,6 +730,7 @@ public class Fiscal303SubmitHandlerTest {
                 when(mockService.hasOrgCertificate(any())).thenReturn(true))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -773,6 +781,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -823,6 +832,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -867,6 +877,7 @@ public class Fiscal303SubmitHandlerTest {
                     anyString())).thenReturn(testResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -904,6 +915,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -966,6 +978,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1012,6 +1025,7 @@ public class Fiscal303SubmitHandlerTest {
           .thenReturn(TRANSLATED_MESSAGE);
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1055,6 +1069,7 @@ public class Fiscal303SubmitHandlerTest {
           .thenThrow(new NullPointerException("no OBContext"));
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1126,6 +1141,7 @@ public class Fiscal303SubmitHandlerTest {
             mockConstruction(AEAT303SubmissionService.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
 
       h.handle("submit", "POST", req, res);
@@ -1164,7 +1180,7 @@ public class Fiscal303SubmitHandlerTest {
     Fiscal303BoxesHandler h = snapshotStubbed(servlet);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("POST"))).thenReturn(false);
 
     try (MockedConstruction<AEAT303SubmissionService> serviceMock =
         mockConstruction(AEAT303SubmissionService.class)) {
@@ -1210,6 +1226,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1255,6 +1272,7 @@ public class Fiscal303SubmitHandlerTest {
                 when(mockService.hasOrgCertificate(any())).thenReturn(true))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal, ThrowingTaxReportGenerator.class);
@@ -1300,6 +1318,7 @@ public class Fiscal303SubmitHandlerTest {
           .thenReturn(TRANSLATED_MESSAGE);
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal, KeyThrowingTaxReportGenerator.class);
@@ -1339,6 +1358,7 @@ public class Fiscal303SubmitHandlerTest {
           .thenThrow(new NullPointerException("no OBContext"));
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal, KeyThrowingTaxReportGenerator.class);
@@ -1386,6 +1406,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1426,6 +1447,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1466,6 +1488,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1504,6 +1527,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1550,6 +1574,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(errorResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1588,6 +1613,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1636,6 +1662,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(errorResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1686,6 +1713,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(successResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1748,6 +1776,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1815,6 +1844,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(mixedResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1870,6 +1900,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(successResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1933,6 +1964,7 @@ public class Fiscal303SubmitHandlerTest {
             })) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -1989,6 +2021,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal);
@@ -2050,6 +2083,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal, RecordingTaxReportGenerator.class);
@@ -2085,6 +2119,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal, RecordingTaxReportGenerator.class);
@@ -2126,6 +2161,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal, RecordingTaxReportGenerator.class);
@@ -2164,6 +2200,7 @@ public class Fiscal303SubmitHandlerTest {
                     .thenReturn(validationResult))) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblingDeclarations(obDal);
       when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
       when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
       stubFileGeneration(obDal, RecordingTaxReportGenerator.class);
@@ -2349,6 +2386,24 @@ public class Fiscal303SubmitHandlerTest {
     when(decl.getClient()).thenReturn(client);
     when(decl.getOrganization()).thenReturn(org);
     return decl;
+  }
+
+  /**
+   * ETP-5725 (reopened QA review, Blocker B1) — stubs {@code obDal.createQuery(ENTITY_FISCAL_DECL,
+   * ...)} (the shared {@code naturalKeyQuery} helper {@code AbstractFiscalHandler
+   * #guardCorrectiveConsistency} funnels through, now called from {@code
+   * Fiscal303SubmissionSupport#handleSubmit} before every production/test-mode AEAT filing) to
+   * report NO sibling declarations at all — matching the implicit single-declaration assumption
+   * every pre-existing {@code handleSubmit} test in this file already made. Mirrors {@code
+   * FiscalDeclCrudHandlerTest#stubNoSiblings}; duplicated rather than shared across test classes
+   * because the two mock {@code OBDal} independently within their own try-with-resources scopes.
+   */
+  @SuppressWarnings("unchecked")
+  private static void stubNoSiblingDeclarations(OBDal obDal) {
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+        .thenReturn(query);
+    when(query.list()).thenReturn(Collections.emptyList());
   }
 
   /**

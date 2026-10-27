@@ -43,8 +43,11 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.DefaultJsonDataService;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
@@ -118,6 +121,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  */
 public class BatchService {
 
+  private static final String KEY_ERROR = "error";
   private static final Logger log = LogManager.getLogger(BatchService.class);
 
   /**
@@ -144,16 +148,30 @@ public class BatchService {
   }
 
   /**
-   * The write path the current thread must use: the deferred-commit one while a batch owns the
-   * transaction, core's self-committing one otherwise. Single decision point — callers such as
-   * {@link NeoCrudHandler} ask for "the current service" and never branch themselves.
+   * Whether a batch owns the current thread's transaction: writes defer their commit to it, and a
+   * failure must not roll back or close the session under it (the batch rolls back the whole set).
    *
-   * @return the {@link DefaultJsonDataService} appropriate for the current thread
+   * @return {@code true} between {@link #beginCallerOwnedTransaction()} and
+   *         {@link #endCallerOwnedTransaction()}
    */
-  static DefaultJsonDataService currentJsonService() {
-    return Boolean.TRUE.equals(CALLER_OWNS_TRANSACTION.get())
-        ? NeoBatchJsonDataService.deferredCommitInstance()
-        : DefaultJsonDataService.getInstance();
+  static boolean callerOwnsTransaction() {
+    return Boolean.TRUE.equals(CALLER_OWNS_TRANSACTION.get());
+  }
+
+  /**
+   * The write path every NEO write uses: {@link NeoBatchJsonDataService}, which defers its commit
+   * while a batch owns the transaction and commits like core otherwise. Single decision point —
+   * callers such as {@link NeoCrudHandler} ask for "the current service" and never branch
+   * themselves.
+   *
+   * <p>Since ETP-5782 a single write goes through it too, not through core's service: it is the
+   * only write path that still holds the exception when a write fails, which is what lets the
+   * failure be classified by what it is rather than by its translated text.
+   *
+   * @return the {@link DefaultJsonDataService} for the current thread
+   */
+  public static DefaultJsonDataService currentJsonService() {
+    return NeoBatchJsonDataService.deferredCommitInstance();
   }
 
   /**
@@ -178,6 +196,22 @@ public class BatchService {
   public static final String FIELD_PERSISTED = "persisted";
   /** @see #FIELD_COMMITTED */
   public static final String FIELD_HINT = "hint";
+  /**
+   * ETP-5676: optional top-level boolean of a batch request (REST body, MCP {@code etendo_batch}
+   * argument). {@code true} lets every operation skip the work that only decorates the record a
+   * write echoes back — identifier enrichment, display flags — because a batch reads nothing but
+   * the new id from it. The batch response itself is unchanged: it always carried ids only.
+   */
+  public static final String PARAM_ONLY_RETURN_IDS = "_onlyReturnIds";
+  /**
+   * ETP-5676: optional top-level boolean of a batch request (REST body, MCP {@code etendo_batch}
+   * argument), default {@code false}. {@code true} lets a create-cascade callout be skipped once an
+   * earlier operation of the same batch, on the same tab, field and trigger value, proved that
+   * every value it writes is discarded by the caller's own fields (see
+   * {@link NeoCalloutDiscardMemory}). Without it every batch runs every callout. The server-side
+   * kill switch {@code batch-callout-skip-disabled} overrides it.
+   */
+  public static final String PARAM_SKIP_REDUNDANT_CALLOUTS = "_skipRedundantCallouts";
   private static final String FIELD_PARENT_ID = "parentId";
   private static final String FIELD_ID = "id";
   private static final String FIELD_ENTITY = "entity";
@@ -232,7 +266,7 @@ public class BatchService {
         servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Empty request body");
         return;
       }
-      body = new JSONObject(raw);
+      body = BoundedJsonParser.parseObject(raw);
     } catch (JSONException e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Invalid JSON body: " + e.getMessage());
@@ -246,9 +280,15 @@ public class BatchService {
       return;
     }
 
+    if (body.optBoolean(BatchJobService.PARAM_ASYNC, false)) {
+      handleAsync(body, operations, response);
+      return;
+    }
+
     JSONObject result;
     try {
-      result = executeBatch(operations);
+      result = executeBatch(operations, null, body.optBoolean(PARAM_ONLY_RETURN_IDS, false),
+          body.optBoolean(PARAM_SKIP_REDUNDANT_CALLOUTS, false));
     } catch (JSONException e) {
       log.error("[BATCH] JSON error while executing batch", e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -258,7 +298,7 @@ public class BatchService {
 
     int status = HttpServletResponse.SC_OK;
     if (!result.optBoolean(FIELD_COMMITTED, false)) {
-      JSONObject error = result.optJSONObject("error");
+      JSONObject error = result.optJSONObject(KEY_ERROR);
       if (error != null) {
         status = error.optInt("status", HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
       } else {
@@ -266,6 +306,61 @@ public class BatchService {
       }
     }
     servlet.writeResponse(response, new NeoResponse(status, result));
+  }
+
+  /**
+   * {@code POST /sws/neo/batch} with {@code async:true} (ETP-5677): records the batch as a job,
+   * answers {@code 202 {jobId, state, totalRows, totalOps}} at once and lets a worker run it row by
+   * row. Each row goes through the very same {@link #executeBatch} the synchronous request uses.
+   */
+  private void handleAsync(JSONObject body, JSONArray operations, HttpServletResponse response)
+      throws IOException {
+    boolean onlyReturnIds = body.optBoolean(PARAM_ONLY_RETURN_IDS, false);
+    boolean skipCallouts = body.optBoolean(PARAM_SKIP_REDUNDANT_CALLOUTS, false);
+    try {
+      JSONObject accepted = BatchJobService.getInstance().submit(BatchJobService.Owner.current(),
+          operations, "rest",
+          rowOps -> executeBatch(rowOps, null, onlyReturnIds, skipCallouts));
+      servlet.writeResponse(response, new NeoResponse(HttpServletResponse.SC_ACCEPTED, accepted));
+    } catch (BatchJobService.JobException e) {
+      writeJobError(response, e);
+    } catch (JSONException | RuntimeException e) {
+      log.error("[BATCH] could not submit the async batch", e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Could not start the batch job: " + e.getMessage());
+    }
+  }
+
+  /**
+   * {@code GET /sws/neo/batch/jobs/{id}} (status) and {@code DELETE /sws/neo/batch/jobs/{id}}
+   * (cancel) — only the job's owner sees it (ETP-5677).
+   */
+  void handleJob(String method, String jobId, HttpServletResponse response) throws IOException {
+    if (servlet == null) {
+      throw new IllegalStateException("BatchService.handleJob requires the servlet-bound constructor");
+    }
+    try {
+      BatchJobService.Owner owner = BatchJobService.Owner.current();
+      JSONObject job = "DELETE".equals(method)
+          ? BatchJobService.getInstance().cancel(owner, jobId)
+          : BatchJobService.getInstance().status(owner, jobId);
+      servlet.writeResponse(response, new NeoResponse(HttpServletResponse.SC_OK, job));
+    } catch (BatchJobService.JobException e) {
+      writeJobError(response, e);
+    } catch (JSONException | RuntimeException e) {
+      log.error("[BATCH] job request failed", e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Batch job request failed: " + e.getMessage());
+    }
+  }
+
+  private void writeJobError(HttpServletResponse response, BatchJobService.JobException e)
+      throws IOException {
+    NeoResponse error = NeoResponse.error(e.getStatus(), e.getMessage());
+    if (e.getRetryAfter() != null) {
+      error = error.withHeader("Retry-After", String.valueOf(e.getRetryAfter()));
+    }
+    servlet.writeResponse(response, error);
   }
 
   /**
@@ -328,6 +423,35 @@ public class BatchService {
    */
   public JSONObject executeBatch(JSONArray operations, OperationPreprocessor preprocessor)
       throws JSONException {
+    return executeBatch(operations, preprocessor, false);
+  }
+
+  /**
+   * Overload taking the request's {@link #PARAM_ONLY_RETURN_IDS} option (ETP-5676).
+   *
+   * @param operations    the ordered list of operation objects (must be non-null)
+   * @param preprocessor  invoked per operation, or {@code null}
+   * @param onlyReturnIds {@code true} to let each write skip decorating the record it echoes
+   * @return a JSONObject in one of the two shapes documented on {@link #executeBatch(JSONArray)}
+   * @throws JSONException only on truly unexpected JSON serialization failures
+   */
+  public JSONObject executeBatch(JSONArray operations, OperationPreprocessor preprocessor,
+      boolean onlyReturnIds) throws JSONException {
+    return executeBatch(operations, preprocessor, onlyReturnIds, false);
+  }
+
+  /**
+   * Overload taking both request options (ETP-5676).
+   *
+   * @param operations            the ordered list of operation objects (must be non-null)
+   * @param preprocessor          invoked per operation, or {@code null}
+   * @param onlyReturnIds         {@code true} to let each write skip decorating the record it echoes
+   * @param skipRedundantCallouts the request's {@link #PARAM_SKIP_REDUNDANT_CALLOUTS} option
+   * @return a JSONObject in one of the two shapes documented on {@link #executeBatch(JSONArray)}
+   * @throws JSONException only on truly unexpected JSON serialization failures
+   */
+  public JSONObject executeBatch(JSONArray operations, OperationPreprocessor preprocessor,
+      boolean onlyReturnIds, boolean skipRedundantCallouts) throws JSONException {
     if (operations == null) {
       return failureBody(-1, null, HttpServletResponse.SC_BAD_REQUEST,
           "Missing 'operations' array", null, null);
@@ -342,13 +466,19 @@ public class BatchService {
     // finally: the request thread is pooled, and a leaked flag would stop the next, unrelated
     // request on that thread from ever committing.
     beginCallerOwnedTransaction();
+    // ETP-5676: per-request state shared by the operations (the callout-discard memory). Opened
+    // after the claim and closed in the same finally, so it can never outlive this request.
     TransactionTracker tracker = new TransactionTracker();
+    NeoBatchScope previousScope = NeoBatchScope.open(onlyReturnIds, skipRedundantCallouts);
     try {
       for (int i = 0; i < operations.length(); i++) {
         JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds, opResults,
             tracker, preprocessor);
         if (failure != null) {
           rollbackQuietly();
+          // ETP-5782: a refusal classified mid-batch could not be translated on the batch's
+          // aborted session; now that it is rolled back, AD message keys resolve.
+          NeoErrorResponses.retranslateBatchFailure(failure);
           return failure;
         }
       }
@@ -362,14 +492,26 @@ public class BatchService {
       ok.put("operations", opResults);
       return ok;
     } catch (Exception e) {
-      log.error("[BATCH] unexpected failure", e);
       if (!commitAttempted) {
         rollbackQuietly();
       }
-      return failureBody(-1, null, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Batch failed: " + e.getMessage(), null, tracker.durable());
+      // ETP-5782: classified like any NEO failure (a deferred trigger refusing the commit is a 422,
+      // a customization's keyed refusal too); the session is already rolled back, so the
+      // classification's own rollback is skipped (the batch still owns the transaction) and the
+      // translation reads AD_Message on a usable session. A 5xx message is sanitized: it used to
+      // forward e.getMessage() verbatim.
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST", "[BATCH] batch",
+          "Batch failed: ");
+      return failureBody(-1, null, classified.getHttpStatus(), errorMessageOf(classified),
+          refusalDetail(classified), tracker.durable());
     } finally {
-      endCallerOwnedTransaction();
+      // Nested so the transaction claim is released whatever closing the scope does: a claim left
+      // on the pooled thread would stop the next, unrelated request from ever committing.
+      try {
+        NeoBatchScope.close(previousScope);
+      } finally {
+        endCallerOwnedTransaction();
+      }
     }
   }
 
@@ -396,7 +538,9 @@ public class BatchService {
       return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
           OPS_PREFIX + i + "].id duplicates an earlier op", null, tracker.durable());
     }
-    SFSpec spec = NeoServletSupport.findSpec(specName);
+    // ETP-5676: once per batch — a 1000-row import names the same spec on every operation.
+    SFSpec spec = NeoBatchScope.memoize(BatchService.class.getName() + "|spec|"
+        + specName.toLowerCase(java.util.Locale.ROOT), () -> NeoServletSupport.findSpec(specName));
     if (spec == null) {
       return failureBody(i, opId, HttpServletResponse.SC_NOT_FOUND,
           "Spec not found: " + specName, null, tracker.durable());
@@ -469,11 +613,30 @@ public class BatchService {
     try {
       return preprocessor.preprocess(op);
     } catch (Exception e) {
-      log.error("[BATCH] preprocessor failed on op '{}' (index {})", op.opId(), op.index(), e);
-      return failureBody(op.index(), op.opId(), HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to preprocess operation '" + op.opId() + "': " + e.getMessage(), null,
-          tracker.durable());
+      // ETP-5782: classified, and a 5xx message sanitized (it used to forward e.getMessage()).
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST",
+          "[BATCH] preprocessor on op '" + op.opId() + "' (index " + op.index() + ")",
+          "Failed to preprocess operation '" + op.opId() + "': ");
+      return failureBody(op.index(), op.opId(), classified.getHttpStatus(),
+          errorMessageOf(classified), refusalDetail(classified), tracker.durable());
     }
+  }
+
+  /**
+   * The body of a classified refusal, as the failure's {@code detail} so its {@code code} and
+   * {@code messageKeys} reach the caller; {@code null} for a 5xx, whose failure carried no detail.
+   */
+  private static JSONObject refusalDetail(NeoResponse classified) {
+    return classified.getHttpStatus() < HttpServletResponse.SC_INTERNAL_SERVER_ERROR
+        ? classified.getBody()
+        : null;
+  }
+
+  /** The {@code error.message} of a NEO error response, or {@code null}. */
+  private static String errorMessageOf(NeoResponse response) {
+    JSONObject body = response.getBody();
+    JSONObject error = body != null ? body.optJSONObject(KEY_ERROR) : null;
+    return error != null ? error.optString("message", null) : null;
   }
 
   /**
@@ -631,7 +794,7 @@ public class BatchService {
     if (detail != null) {
       error.put("detail", detail);
     }
-    body.put("error", error);
+    body.put(KEY_ERROR, error);
     return body;
   }
 
@@ -720,7 +883,20 @@ public class BatchService {
    * single batch request, so all writes participate in one transaction.
    */
   private NeoResponse createRecord(SFSpec spec, String entityName, JSONObject body, String parentId) {
-    SFEntity sfEntity = findEntity(spec.getId(), entityName);
+    // ETP-5772: /batch runs under admin mode, so DAL's own write check is off; without this the
+    // REST batch reached any spec, unlike MCP etendo_batch (authorizeSpecAccess per op).
+    if (!NeoAccessHelper.hasWindowAccessForSpec(spec, NeoMethodPolicy.METHOD_POST)) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to spec for current role");
+    }
+    // ETP-5648: MCP etendo_batch swallows the findIncludedEntity refusal, so this is the gate.
+    if (!NeoAccountingAccessPolicy.isEntityNameAllowed(spec, entityName)) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to accounting entity for current role");
+    }
+    SFEntity sfEntity = NeoBatchScope.memoize(BatchService.class.getName() + "|entity|"
+        + spec.getId() + "|" + entityName.toLowerCase(java.util.Locale.ROOT),
+        () -> findEntity(spec.getId(), entityName));
     if (sfEntity == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           "Entity not found in spec '" + spec.getId() + "': " + entityName);
@@ -777,6 +953,7 @@ public class BatchService {
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
+        .idsOnlyResponse(isOnlyReturnIds())
         .build();
 
     // Entities with a configured Java_Qualifier own logic the generic CRUD path knows
@@ -797,6 +974,11 @@ public class BatchService {
     // customization, and returning to handleDefault here would have made the annotation work on
     // every path except batch. handleWithHooks falls back to handleDefault itself when nothing
     // resolves, so the generic behaviour for a genuinely uncustomised entity is unchanged.
+    // ETP-5785: same pre-dispatch check as a single REST write, before the customization runs.
+    NeoResponse refusal = NeoWritePreflight.refusalFor(ctx);
+    if (refusal != null) {
+      return refusal;
+    }
     return NeoServletSupport.handleWithHooks(sfEntity.getJavaQualifier(), ctx, crudHandler,
         NeoExtensionChannel.REST_BATCH);
   }
@@ -815,6 +997,12 @@ public class BatchService {
     criteria.setMaxResults(1);
     List<SFEntity> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  /** Whether the batch running on this thread was sent with {@link #PARAM_ONLY_RETURN_IDS}. */
+  private static boolean isOnlyReturnIds() {
+    NeoBatchScope scope = NeoBatchScope.current();
+    return scope != null && scope.isOnlyReturnIds();
   }
 
   private static boolean isSuccess(NeoResponse response) {

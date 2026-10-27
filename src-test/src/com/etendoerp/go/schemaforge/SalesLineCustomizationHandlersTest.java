@@ -21,12 +21,14 @@ import static com.etendoerp.go.schemaforge.LineAmountTestSupport.assertAmount;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import java.util.LinkedHashSet;
@@ -40,6 +42,7 @@ import javax.inject.Named;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -50,8 +53,9 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.util.NeoExtensionIndex;
 
 /**
- * The three ETP-5528 line customizations — {@link SalesOrderLineHandler},
- * {@link SalesQuotationLineHandler} and {@link SalesInvoiceLineHandler} — share one shape: bound by
+ * The ETP-5528 / ETP-5710 line customizations — {@link SalesOrderLineHandler},
+ * {@link SalesQuotationLineHandler}, {@link SalesInvoiceLineHandler} and
+ * {@link PurchaseInvoiceLineHandler} — share one shape: bound by
  * {@link NeoExtension} only, extending the handler the purchase side keeps using. What can regress
  * is the binding (a wrong pair, a stray {@code @Named} making the parent's qualifier ambiguous, a
  * purchase entity caught by it) and the wiring of {@code handle} to its support class.
@@ -62,6 +66,8 @@ import com.etendoerp.go.schemaforge.util.NeoExtensionIndex;
  * <p>Not covered: "a response from the parent's {@code handle} short-circuits". Neither
  * {@link OrderLineHandler#handle} nor {@link InvoiceLineHandler#handle} ever returns a non-null
  * response, so that branch cannot be reached through real input.
+ *
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderLineHandler
  */
 class SalesLineCustomizationHandlersTest {
 
@@ -76,7 +82,9 @@ class SalesLineCustomizationHandlersTest {
         Arguments.of(SalesQuotationLineHandler.class, OrderLineHandler.class, "sales-quotation",
             "quotationLine", orderLine, "lineGrossAmount"),
         Arguments.of(SalesInvoiceLineHandler.class, InvoiceLineHandler.class, "sales-invoice",
-            "lines", invoiceLine, "grossAmount"));
+            "lines", invoiceLine, "grossAmount"),
+        Arguments.of(PurchaseInvoiceLineHandler.class, InvoiceLineHandler.class,
+            "purchase-invoice", "lines", invoiceLine, "grossAmount"));
   }
 
   @BeforeEach
@@ -100,7 +108,7 @@ class SalesLineCustomizationHandlersTest {
     assertEquals(entity, binding.entity());
     assertNull(handler.getAnnotation(Named.class),
         "a @Named here would make the parent's qualifier ambiguous");
-    assertEquals(parent, handler.getSuperclass(),
+    assertTrue(parent.isAssignableFrom(handler),
         "the customization must inherit everything the parent handler does");
   }
 
@@ -138,23 +146,25 @@ class SalesLineCustomizationHandlersTest {
         Arguments.of("sales-invoice", "lines", "invoiceLineHandler",
             SalesInvoiceLineHandler.class),
         Arguments.of("purchase-order", "lines", "orderLineHandler", null),
-        Arguments.of("purchase-invoice", "lines", "invoiceLineHandler", null));
+        Arguments.of("purchase-invoice", "lines", "invoiceLineHandler",
+            PurchaseInvoiceLineHandler.class));
   }
 
   /**
-   * The index resolves each customization for its own pair and nothing for the purchase pairs,
-   * which fall back to the row's qualifier — the plain parent — as before. The deployment also holds
+   * The index resolves each customization for its own pair and nothing for purchase-order lines,
+   * which fall back to the row's qualifier — the plain parent — as before (ETP-5727 owns them). The deployment also holds
    * the unannotated parents, as in production.
    */
   @ParameterizedTest(name = "{0}/{1}")
   @MethodSource("resolutions")
-  void indexResolvesOnlyTheSalesPairs(String spec, String entity, String qualifier,
+  void indexResolvesEachCustomizedPairAndNothingElse(String spec, String entity, String qualifier,
       Class<?> expected) {
     BeanManager bm = mock(BeanManager.class);
     Set<Bean<?>> beans = new LinkedHashSet<>();
     beans.add(deployedBean(bm, new SalesOrderLineHandler()));
     beans.add(deployedBean(bm, new SalesQuotationLineHandler()));
     beans.add(deployedBean(bm, new SalesInvoiceLineHandler()));
+    beans.add(deployedBean(bm, new PurchaseInvoiceLineHandler()));
     beans.add(deployedBean(bm, new OrderLineHandler()));
     beans.add(deployedBean(bm, new InvoiceLineHandler()));
     when(bm.getBeans(NeoHandler.class, WeldUtils.ANY_LITERAL)).thenReturn(beans);
@@ -190,5 +200,70 @@ class SalesLineCustomizationHandlersTest {
         .endpointType(NeoEndpointType.CRUD)
         .requestBody(body)
         .build();
+  }
+
+  /**
+   * The invoice-line customizations (sales and purchase) also recalculate on a PATCH: 10 x 24.50
+   * patched to quantity 20 → net 490. The plain parent leaves the body alone.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("invoiceCustomizations")
+  void handleRecalculatesTheAmountsOnUpdate(Class<? extends NeoHandler> handler, String spec)
+      throws Exception {
+    JSONObject patch = new JSONObject("{\"invoicedQuantity\":20}");
+    JSONObject plainPatch = new JSONObject("{\"invoicedQuantity\":20}");
+    NeoContext ctx = NeoContext.builder().specName(spec).entityName("lines").httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD).recordId(LineAmountTestSupport.STORED_LINE_ID)
+        .requestBody(patch).build();
+    NeoContext plainCtx = NeoContext.builder().specName(spec).entityName("lines")
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .recordId(LineAmountTestSupport.STORED_LINE_ID).requestBody(plainPatch).build();
+
+    NeoResponse response;
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0,
+        LineAmountTestSupport.storedInvoiceLine("10", "24.5", "25", "2", "0", TAX_ID))) {
+      response = handler.getDeclaredConstructor().newInstance().handle(ctx);
+      new InvoiceLineHandler().handle(plainCtx);
+    }
+
+    assertNull(response);
+    assertAmount(handler.getSimpleName(), "490", patch, "lineNetAmount");
+    assertAmount("plain parent", null, plainPatch, "lineNetAmount");
+  }
+
+  static Stream<Arguments> invoiceCustomizations() {
+    return Stream.of(Arguments.of(SalesInvoiceLineHandler.class, "sales-invoice"),
+        Arguments.of(PurchaseInvoiceLineHandler.class, "purchase-invoice"));
+  }
+
+  /**
+   * {@link PurchaseOrderLineHandler} (ETP-5881) runs the parent's pre-hook and then prices the
+   * created line from the price list; it lets default CRUD continue. The parent's own response
+   * cannot be non-null (see the class note), so only the pricing leg is observable.
+   */
+  @Test
+  void purchaseOrderLineHandlerPricesACreatedLineAndContinuesCrud() throws Exception {
+    NeoContext ctx = createContext("purchase-order", "lines", new JSONObject("{\"product\":\"P1\"}"));
+
+    NeoResponse response;
+    try (MockedStatic<OrderLineDiscountSupport> pricing = mockStatic(
+        OrderLineDiscountSupport.class)) {
+      response = new PurchaseOrderLineHandler().handle(ctx);
+
+      pricing.verify(() -> OrderLineDiscountSupport.setStandardPriceOnCreate(same(ctx)), times(1));
+    }
+
+    assertNull(response, "the pre-hook must let default CRUD continue");
+  }
+
+  @Test
+  void purchaseOrderLineHandlerIsBoundByAnnotationOnly() {
+    NeoExtension binding = PurchaseOrderLineHandler.class.getAnnotation(NeoExtension.class);
+
+    assertNotNull(binding);
+    assertEquals("purchase-order", binding.spec());
+    assertEquals("lines", binding.entity());
+    assertNull(PurchaseOrderLineHandler.class.getAnnotation(Named.class));
+    assertTrue(OrderLineHandler.class.isAssignableFrom(PurchaseOrderLineHandler.class));
   }
 }

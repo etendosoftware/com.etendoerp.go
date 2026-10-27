@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -32,6 +33,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -93,17 +95,50 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String FIELD_TAX_CATEGORY = "taxCategory";
   private static final String FIELD_PRODUCT_CATEGORY = "productCategory";
   private static final String FIELD_PRODUCT_TYPE = "productType";
+  /** Suffix of the display-value companion key of a reference field in a payload. */
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
   private static final String FIELD_STOCKED = "stocked";
   private static final String FIELD_RETURNABLE = "returnable";
   // ETP-4943 (Service) / ETP-5091 (Expense, Resource) — none of these product types have a
   // physical existence in inventory.
   private static final Set<String> NON_STOCKABLE_PRODUCT_TYPES = Set.of("S", "E", "R");
+  /**
+   * ETP-5680: tax category the Product window pairs with each product type, matched by
+   * {@code C_TaxCategory.Name} inside the tenant (the names the Spanish accounting package seeds).
+   * A name the tenant does not have resolves to nothing and the caller keeps its own value.
+   */
+  static final String TAX_CATEGORY_NAME_SERVICE = "IVA Normal Servicios";
+  static final String TAX_CATEGORY_NAME_GOODS = "IVA Normal";
+  /** Query parameter of {@code /product/defaults} carrying the product type to resolve for. */
+  static final String PARAM_PRODUCT_TYPE = "productType";
+  /**
+   * The product types a request may ask for. Hardcoded: it mirrors the AD list reference of
+   * {@code M_Product.ProductType} and must be updated if that list gains values.
+   */
+  private static final Set<String> PRODUCT_TYPES = Set.of("I", "S", "E", "R", "O");
+  /**
+   * Key added to the {@code /defaults} payload when {@link #PARAM_PRODUCT_TYPE} is sent: the id
+   * (plus {@code $_identifier}) of the type's tax category. Repeats {@code taxCategory} when the
+   * requested type's named category exists; its absence is the UI's no-match signal.
+   */
+  static final String DEFAULT_KEY_TYPE_TAX_CATEGORY = "typeTaxCategory";
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_END_ROW = "endRow";
   private static final String SYSTEM_CLIENT_ID = "0";
   private static final String FIELD_RESPONSE = "response";
   /** Display-only flag consumed by the Product window's cost banner and save gate. */
   private static final String FIELD_HAS_COST = "etgoHasCost";
+  /**
+   * ETP-5676: create-body directive. {@code true} skips {@link #seedDefaultPrices} for this
+   * product. Read and removed by {@link #handle} before the generic CRUD path sees the body, so it
+   * never reaches the field filter or the DAL.
+   */
+  static final String DIRECTIVE_SKIP_PRICES_SEED = "_skipPricesSeed";
+  /** In a parsed {@link #DIRECTIVE_SKIP_PRICES_SEED}: skip both directions, whatever the tariff. */
+  static final String SKIP_ALL_TARIFFS = "*";
+  /** Carries {@link #DIRECTIVE_SKIP_PRICES_SEED} from the pre-hook to {@link #afterHandle}. */
+  private static final String ATTR_SKIP_PRICES_SEED =
+      ProductDefaultsHandler.class.getName() + ".skipPricesSeed";
   /**
    * ETP-5009: excludes products whose category is flagged {@code EM_Etgo_IsSystemCategory = 'Y'}
    * (DAL property {@code etgoIssystemcategory}, a Yes/No column mapped as {@code Boolean} — the
@@ -135,6 +170,12 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    // Stripped on PATCH too, so the directive never reaches the generic write path; honoured on
+    // create only, the one place a price is seeded.
+    Set<String> skipPricesSeed = consumeSkipPricesSeed(body);
+    if (isCreate && !skipPricesSeed.isEmpty()) {
+      context.setAttribute(ATTR_SKIP_PRICES_SEED, skipPricesSeed);
+    }
     try {
       enforceNonStockableProductTypes(body);
     } catch (Exception e) {
@@ -143,8 +184,8 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (isCreate) {
       try {
         String clientId = resolveClientId(context);
-        injectIfMissing(body, FIELD_UOM, UOM.class, clientId);
-        injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+        injectIfMissing(body, FIELD_UOM, UOM.class, clientId, context);
+        injectTaxCategoryIfMissing(body, clientId, context);
       } catch (Exception e) {
         log.error("product pre-hook: failed to inject uOM/taxCategory default", e);
       }
@@ -153,6 +194,59 @@ public class ProductDefaultsHandler implements NeoHandler {
     // body already corrected (so the generic "first combo option" fallback never fires for
     // uOM/taxCategory, and a Service product can never persist as stocked/returnable).
     return null;
+  }
+
+  /**
+   * ETP-5676: reads and removes {@link #DIRECTIVE_SKIP_PRICES_SEED} from a write body.
+   *
+   * <p>For a caller that sends its own prices in the same request — the products import writes a
+   * sales and a purchase price op right after the product op. Seeding zero rows first only for
+   * {@code ProductPriceHandler} to find and overwrite them doubled every price write, and cost a
+   * flush plus core's price observer per row.
+   *
+   * <p>Two forms. An array of price list version ids — what the import sends: the versions the
+   * same request prices — skips a direction only when the version the seed would use for it is
+   * listed. Once a user clears the default flag on a direction, the caller (selector order) and
+   * {@link PriceListVersionResolver} (org before {@code *}) can fall back to different lists, so
+   * this is the form that cannot leave the server's default tariff without a row. {@code true} skips both directions unconditionally.
+   *
+   * @param body the request body, mutated in place
+   * @return the listed version ids, {@link #SKIP_ALL_TARIFFS} alone for {@code true}, or an empty
+   *     set when the seed must run as usual
+   */
+  static Set<String> consumeSkipPricesSeed(JSONObject body) {
+    if (body == null || !body.has(DIRECTIVE_SKIP_PRICES_SEED)) {
+      return Set.of();
+    }
+    Object raw = body.opt(DIRECTIVE_SKIP_PRICES_SEED);
+    body.remove(DIRECTIVE_SKIP_PRICES_SEED);
+    if (raw instanceof JSONArray) {
+      JSONArray ids = (JSONArray) raw;
+      Set<String> listed = new java.util.HashSet<>();
+      for (int i = 0; i < ids.length(); i++) {
+        String id = StringUtils.trimToNull(ids.optString(i, null));
+        if (id != null && !SKIP_ALL_TARIFFS.equals(id)) {
+          listed.add(id);
+        }
+      }
+      return listed;
+    }
+    return Boolean.TRUE.equals(raw) || "true".equals(raw) ? Set.of(SKIP_ALL_TARIFFS) : Set.of();
+  }
+
+  /**
+   * ETP-5676: published to agents by {@code etendo_schema(view:"create")} and accepted by the MCP
+   * write verbs without being reported as an unknown field.
+   */
+  @Override
+  public Map<String, String> createDirectives() {
+    return Map.of(DIRECTIVE_SKIP_PRICES_SEED,
+        "Optional. An array of price list version ids this same request (e.g. the same "
+            + "etendo_batch) prices the product on: the new product is not given the zero-priced row "
+            + "on a default sales/purchase tariff whose version is in the list — your price op "
+            + "writes it instead. A default tariff not in the list is still seeded. true skips "
+            + "both unconditionally (only when you price both default tariffs yourself). Create "
+            + "only: accepted and ignored on etendo_update.");
   }
 
   /**
@@ -200,7 +294,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       return injectDefaults(context);
     }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      if (METHOD_POST.equals(context.getHttpMethod())) {
+      if (METHOD_POST.equals(context.getHttpMethod()) && !skipsAllTariffs(context)) {
         seedDefaultPrices(context);
       }
       return annotateCostPresence(context, hideSystemCategoryProducts(context));
@@ -233,6 +327,10 @@ public class ProductDefaultsHandler implements NeoHandler {
     // flag absent — and an absent flag means "has a cost", so the banner stayed hidden until the
     // user reloaded the page. Only a GET list is excluded, where this would be one count per row.
     if (METHOD_GET.equals(context.getHttpMethod()) && !context.isReadById()) {
+      return filtered;
+    }
+    // ETP-5676: a batch sent with _onlyReturnIds reads only the id; the flag is for the form.
+    if (context.isIdsOnlyResponse()) {
       return filtered;
     }
     NeoResponse target = filtered != null ? filtered : context.getPreviousResult();
@@ -300,7 +398,8 @@ public class ProductDefaultsHandler implements NeoHandler {
    * <p>Idempotent by construction — it skips any tariff the product is already priced on. That
    * matters beyond retries: the products import posts its own price for the same tariff in the
    * same {@code /batch} call, and {@code ProductPriceHandler} turns that second write into an
-   * update of the row seeded here rather than a duplicate.
+   * update of the row seeded here rather than a duplicate. ETP-5676: such a caller should send
+   * {@link #DIRECTIVE_SKIP_PRICES_SEED} instead, so the price is written once.
    *
    * @param context the CRUD POST context whose previous result carries the created product
    */
@@ -329,6 +428,17 @@ public class ProductDefaultsHandler implements NeoHandler {
     }
   }
 
+  /** The {@link #DIRECTIVE_SKIP_PRICES_SEED} the pre-hook kept for this operation; empty if none. */
+  @SuppressWarnings("unchecked")
+  private static Set<String> skippedTariffs(NeoContext context) {
+    Object kept = context.getAttribute(ATTR_SKIP_PRICES_SEED);
+    return kept instanceof Set ? (Set<String>) kept : Set.of();
+  }
+
+  private static boolean skipsAllTariffs(NeoContext context) {
+    return skippedTariffs(context).contains(SKIP_ALL_TARIFFS);
+  }
+
   /**
    * Creates the zero-priced row for one direction, unless the product already has one there.
    *
@@ -338,11 +448,14 @@ public class ProductDefaultsHandler implements NeoHandler {
    */
   private void seedPriceOnDefaultTariff(NeoContext context, Product product,
       boolean salesPriceList) {
-    String versionId = PriceListVersionResolver.resolveDefaultVersionId(context.getObContext(),
-        salesPriceList);
+    String versionId = resolveDefaultVersionId(context.getObContext(), salesPriceList);
     if (StringUtils.isBlank(versionId)) {
       log.debug("No default {} price list configured; product {} gets no seeded price",
           salesPriceList ? "sales" : "purchase", product.getId());
+      return;
+    }
+    if (skippedTariffs(context).contains(versionId)) {
+      // ETP-5676: the same request prices this very version itself.
       return;
     }
     if (ProductHandlerUtils.findExistingPrice(product.getId(), versionId) != null) {
@@ -366,6 +479,22 @@ public class ProductDefaultsHandler implements NeoHandler {
     price.setListPrice(BigDecimal.ZERO);
     price.setPriceLimit(BigDecimal.ZERO);
     OBDal.getInstance().save(price);
+  }
+
+  /**
+   * The default tariff version for one direction, resolved once per batch request (ETP-5676).
+   * Keyed by client and current organisation — the two inputs
+   * {@link PriceListVersionResolver#resolveDefaultVersionId} reads from the context.
+   */
+  private static String resolveDefaultVersionId(OBContext obContext, boolean salesPriceList) {
+    String clientId = obContext != null && obContext.getCurrentClient() != null
+        ? obContext.getCurrentClient().getId() : null;
+    String orgId = obContext != null && obContext.getCurrentOrganization() != null
+        ? obContext.getCurrentOrganization().getId() : null;
+    return NeoBatchScope.memoize(
+        ProductDefaultsHandler.class.getName() + "|priceListVersion|" + salesPriceList + "|"
+            + clientId + "|" + orgId,
+        () -> PriceListVersionResolver.resolveDefaultVersionId(obContext, salesPriceList));
   }
 
   /**
@@ -406,6 +535,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       }
       overwriteDefault(defaults, FIELD_UOM, UOM.class, clientId);
       overwriteDefault(defaults, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+      injectTypeTaxCategory(defaults, context, clientId);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("product afterHandle: failed to inject uOM/taxCategory default", e);
@@ -509,17 +639,175 @@ public class ProductDefaultsHandler implements NeoHandler {
   }
 
   /**
+   * Whether {@code body[key]} still needs a value from this handler: it is blank, or it holds a
+   * fallback placeholder the mandatory-defaults pass wrote (ETP-5680, MCP create — the pass runs
+   * before this pre-hook there, and the router forwards the placeholder keys on the context). A
+   * value the caller sent is never a placeholder, so an explicit selection keeps winning.
+   */
+  private static boolean isMissing(JSONObject body, String key, NeoContext context) {
+    if (!body.has(key) || StringUtils.isBlank(body.optString(key, null))) {
+      return true;
+    }
+    return context != null && context.getFallbackDefaults().contains(key);
+  }
+
+  /**
    * Injects the resolved default id into {@code body[propertyName]} only when the caller did not
-   * already provide a value for it — an explicit user selection always wins.
+   * already provide a value for it — an explicit user selection always wins. A fallback
+   * placeholder counts as not provided and is replaced; with no default to offer it is kept.
    */
   private void injectIfMissing(JSONObject body, String propertyName,
-      Class<? extends BaseOBObject> entityClass, String clientId) throws JSONException {
-    if (body.has(propertyName) && StringUtils.isNotBlank(body.optString(propertyName, null))) {
+      Class<? extends BaseOBObject> entityClass, String clientId, NeoContext context)
+      throws JSONException {
+    if (!isMissing(body, propertyName, context)) {
       return;
     }
     String defaultId = resolveDefaultId(entityClass, clientId);
     if (defaultId != null) {
       body.put(propertyName, defaultId);
+    }
+  }
+
+  /**
+   * ETP-5680: tax category name for a product type — Service pairs with the services rate, every
+   * other type (Item, Resource, Expense) with the general one. {@code null} for a blank type.
+   */
+  static String taxCategoryNameForType(String productType) {
+    if (StringUtils.isBlank(productType)) {
+      return null;
+    }
+    return "S".equals(productType.trim()) ? TAX_CATEGORY_NAME_SERVICE : TAX_CATEGORY_NAME_GOODS;
+  }
+
+  /**
+   * ETP-5680: create-time fill of {@code taxCategory}. An explicit value always wins; otherwise the
+   * category matching the body's {@code productType} by name, falling back to the IsDefault row
+   * when the body has no type or the tenant lacks the named category. Create only — a PATCH never
+   * recalculates the category.
+   */
+  private void injectTaxCategoryIfMissing(JSONObject body, String clientId, NeoContext context)
+      throws JSONException {
+    if (!isMissing(body, FIELD_TAX_CATEGORY, context)) {
+      return;
+    }
+    String typeId = resolveTaxCategoryIdForType(body.optString(FIELD_PRODUCT_TYPE, null), clientId);
+    if (typeId != null) {
+      body.put(FIELD_TAX_CATEGORY, typeId);
+      return;
+    }
+    injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId, context);
+  }
+
+  /**
+   * ETP-5680: makes the {@code /defaults} payload consistent with the product type.
+   *
+   * <ul>
+   *   <li>With a valid {@code productType} request parameter (the form, or an agent's
+   *       {@code recordContext}, asking for a given type): {@code defaults.productType} becomes the
+   *       requested type, and when the tenant has the type's named category {@code taxCategory}
+   *       (+ {@code $_identifier}) becomes it too, with {@link #DEFAULT_KEY_TYPE_TAX_CATEGORY}
+   *       carrying the same id for the UI. Without that category {@code taxCategory} is left as it
+   *       is and no {@code typeTaxCategory} is added (the UI's "no match" signal).
+   *       {@code productType} is a List reference, so the generic resolver adds no
+   *       {@code productType$_identifier}; one found is removed rather than left stale.</li>
+   *   <li>Without it (a new form opening): the type is the one the payload itself defaults to
+   *       ({@code defaults.productType}, Item), and {@code taxCategory} is overwritten with that
+   *       type's category, so a new Item starts as "IVA Normal" rather than as whatever row is
+   *       flagged IsDefault. A tenant without the named category keeps the IsDefault value.</li>
+   * </ul>
+   * A copy of {@code taxCategory} from these defaults into a create is therefore always the
+   * category of the type the same payload reports.
+   */
+  private void injectTypeTaxCategory(JSONObject defaults, NeoContext context, String clientId)
+      throws JSONException {
+    String requested = requestedProductType(context);
+    boolean typeRequested = requested != null && PRODUCT_TYPES.contains(requested);
+    if (typeRequested) {
+      defaults.put(FIELD_PRODUCT_TYPE, requested);
+      defaults.remove(FIELD_PRODUCT_TYPE + IDENTIFIER_SUFFIX);
+    }
+    String productType = typeRequested ? requested
+        : StringUtils.trimToNull(defaults.optString(FIELD_PRODUCT_TYPE, null));
+    String id = resolveTaxCategoryIdForType(productType, clientId);
+    if (id == null) {
+      return;
+    }
+    String identifier = null;
+    BaseOBObject obj = OBDal.getInstance().get(TaxCategory.class, id);
+    if (obj != null) {
+      identifier = obj.getIdentifier();
+    }
+    putCategory(defaults, FIELD_TAX_CATEGORY, id, identifier);
+    if (typeRequested) {
+      putCategory(defaults, DEFAULT_KEY_TYPE_TAX_CATEGORY, id, identifier);
+    }
+  }
+
+  private static void putCategory(JSONObject defaults, String key, String id, String identifier)
+      throws JSONException {
+    defaults.put(key, id);
+    if (identifier != null) {
+      defaults.put(key + IDENTIFIER_SUFFIX, identifier);
+    }
+  }
+
+  /**
+   * The {@code productType} query parameter of a {@code /defaults} call. Read from the hook
+   * context's query map, which {@code NeoSubEndpointDispatcher} now fills from the request; the
+   * servlet request is only a last-resort fallback, because on the live REST path
+   * {@code RequestContext.get().getRequest()} did not carry the parameter.
+   */
+  static String requestedProductType(NeoContext context) {
+    Map<String, String> params = context.getQueryParams();
+    String fromContext = params != null ? StringUtils.trimToNull(params.get(PARAM_PRODUCT_TYPE)) : null;
+    if (fromContext != null) {
+      return fromContext;
+    }
+    try {
+      if (RequestContext.get() == null || RequestContext.get().getRequest() == null) {
+        return null;
+      }
+      return StringUtils.trimToNull(
+          RequestContext.get().getRequest().getParameter(PARAM_PRODUCT_TYPE));
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  /**
+   * ETP-5680: id of the tax category named for {@code productType} in the client (then the System
+   * client), or {@code null} when the type is blank or no such active category exists.
+   */
+  String resolveTaxCategoryIdForType(String productType, String clientId) {
+    String name = taxCategoryNameForType(productType);
+    if (name == null) {
+      return null;
+    }
+    if (StringUtils.isNotBlank(clientId)) {
+      String own = queryTaxCategoryIdByName(name, clientId);
+      if (own != null) {
+        return own;
+      }
+    }
+    return queryTaxCategoryIdByName(name, SYSTEM_CLIENT_ID);
+  }
+
+  String queryTaxCategoryIdByName(String name, String clientId) {
+    try {
+      OBContext.setAdminMode(true);
+      OBCriteria<TaxCategory> crit = OBDal.getInstance().createCriteria(TaxCategory.class);
+      crit.add(Restrictions.eq("client.id", clientId));
+      crit.add(Restrictions.eq(TaxCategory.PROPERTY_NAME, name));
+      crit.add(Restrictions.eq("active", true));
+      crit.setMaxResults(1);
+      TaxCategory found = (TaxCategory) crit.uniqueResult();
+      return found != null ? found.getId() : null;
+    } catch (Exception e) {
+      log.debug("Could not resolve tax category '{}' / client {}: {}", name, clientId,
+          e.getMessage());
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -538,7 +826,7 @@ public class ProductDefaultsHandler implements NeoHandler {
     defaults.put(propertyName, defaultId);
     BaseOBObject obj = OBDal.getInstance().get(entityClass, defaultId);
     if (obj != null) {
-      defaults.put(propertyName + "$_identifier", obj.getIdentifier());
+      defaults.put(propertyName + IDENTIFIER_SUFFIX, obj.getIdentifier());
     }
   }
 
@@ -551,6 +839,15 @@ public class ProductDefaultsHandler implements NeoHandler {
    *         row marked as default
    */
   String resolveDefaultId(Class<? extends BaseOBObject> entityClass, String clientId) {
+    // ETP-5676: once per batch request and client — every product of an import asks the same.
+    return NeoBatchScope.memoize(
+        ProductDefaultsHandler.class.getName() + "|default|" + entityClass.getName() + "|"
+            + clientId,
+        () -> resolveDefaultIdUncached(entityClass, clientId));
+  }
+
+  private String resolveDefaultIdUncached(Class<? extends BaseOBObject> entityClass,
+      String clientId) {
     if (StringUtils.isNotBlank(clientId)) {
       String ownDefault = queryDefaultId(entityClass, clientId);
       if (ownDefault != null) {

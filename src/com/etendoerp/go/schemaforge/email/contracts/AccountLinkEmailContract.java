@@ -50,6 +50,8 @@ final class AccountLinkEmailContract implements EmailContract {
   private static final String CONTENT_TEMPLATE = "custom";
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
+  /** The one-time login link of a signup API account (ETP-5847), relative to the app base. */
+  private static final String LOGIN_LINK_PATH = "onboarding?loginToken=";
 
   private final String name;
   private final EmailContractDataResolver dataResolver;
@@ -224,6 +226,15 @@ final class AccountLinkEmailContract implements EmailContract {
     String baseUrl = PublicUrlResolver.resolveConfiguredAppBaseUrl();
     if (baseUrl == null) {
       return null;
+    }
+    // ETP-5847: an account the signup API created has no password, so its ready mail carries its
+    // one-time login link instead of the fixed path. Only that shape, on this app, is taken from
+    // the command: any other link is ignored, so a caller can never point the button elsewhere.
+    String given = EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_LINK);
+    String loginLinkPrefix = PublicUrlResolver.appendPath(baseUrl, LOGIN_LINK_PATH);
+    if (given != null && loginLinkPrefix != null && given.startsWith(loginLinkPrefix)
+        && given.length() > loginLinkPrefix.length()) {
+      return given;
     }
     return PublicUrlResolver.appendPath(baseUrl, configuredLinkPath);
   }

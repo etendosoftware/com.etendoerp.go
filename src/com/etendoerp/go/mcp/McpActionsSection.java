@@ -22,6 +22,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -32,6 +33,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 
 /**
  * The {@code actions} section of {@code MCP_CONFIG}: which of an entity's actions the MCP must not
@@ -45,7 +47,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *     "redirect": { "aPRMAddpayment": "registerPayment" },
  *     "values":   { "aPRMProcessPayment": ["P"] },
  *     "reason":   "PIS needs a person to authorize at the bank",
- *     "redirectReason": "the classic Add Payment button is not the Etendo payment flow"
+ *     "redirectReason": "the classic Add Payment button is not the Etendo payment flow",
+ *     "reasons":  { "posted": "a blind toggle; use the post and unpost actions" }
  *   }
  * }
  * </pre>
@@ -69,6 +72,20 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *   <li>{@code reason} — mandatory; it reaches the agent in the refusal.</li>
  *   <li>{@code redirectReason} — optional: the reason a redirected button gives, when it is not the
  *       one the hidden actions give. Defaults to {@code reason}.</li>
+ *   <li>{@code reasons} — optional {@code action → reason} (ETP-5692): the reason ONE hidden or
+ *       redirected action gives, in place of the section-wide {@code reason} /
+ *       {@code redirectReason}. For a section that hides actions for unrelated causes — the invoice
+ *       headers hide the PIS actions (SCA) and the {@code posted} toggle (use post / unpost) — so
+ *       an agent refused one of them is not handed the other's explanation. Each key must name an
+ *       action of {@code hidden} or {@code redirect}.</li>
+ *   <li>{@code availableWhen} — optional {@code action → {property: [values]}} (ETP-5714): the
+ *       record states in which the action applies (every property must match; a value prefixed
+ *       with {@code !} excludes it). Rendered in {@code etendo_schema view:"actions"} and, given a
+ *       record id, judged there as {@code availableNow}. <b>Advisory</b>: it never refuses a
+ *       call. Needs no {@code reason}, since nothing is withheld.</li>
+ *   <li>{@code valuesByStatus} — optional {@code action → {property, values:{status:[values]}}}
+ *       (ETP-5714): for a list-backed button such as {@code documentAction}, which of its values
+ *       apply in each status. Advisory, like {@code availableWhen}.</li>
  *   <li>{@code REPLACE}, entity level. Fails closed: an unusable {@code MCP_CONFIG} refuses every
  *       action through {@code etendo_action}.</li>
  * </ul>
@@ -85,9 +102,13 @@ final class McpActionsSection {
   static final String KEY_REASON = "reason";
   static final String KEY_REDIRECT_REASON = "redirectReason";
   static final String KEY_VALUES = "values";
+  static final String KEY_REASONS = "reasons";
+  static final String KEY_AVAILABLE_WHEN = NeoActionAvailability.KEY_AVAILABLE_WHEN;
+  static final String KEY_VALUES_BY_STATUS = NeoActionAvailability.KEY_VALUES_BY_STATUS;
 
   private static final Set<String> ALLOWED_KEYS =
-      Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON, KEY_VALUES);
+      Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON, KEY_VALUES, KEY_REASONS,
+          KEY_AVAILABLE_WHEN, KEY_VALUES_BY_STATUS);
 
   /**
    * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
@@ -120,22 +141,80 @@ final class McpActionsSection {
    */
   static List<String> validate(JSONObject body) {
     List<String> problems = new ArrayList<>();
-    if (!body.has(KEY_HIDDEN) && !body.has(KEY_REDIRECT) && !body.has(KEY_VALUES)) {
-      problems.add("names no action — declare " + KEY_HIDDEN + ", " + KEY_REDIRECT + " or "
-          + KEY_VALUES + ", or remove the section");
+    boolean withholds = body.has(KEY_HIDDEN) || body.has(KEY_REDIRECT) || body.has(KEY_VALUES);
+    boolean describes = body.has(KEY_AVAILABLE_WHEN) || body.has(KEY_VALUES_BY_STATUS);
+    if (!withholds && !describes) {
+      problems.add("names no action — declare " + KEY_HIDDEN + ", " + KEY_REDIRECT + ", "
+          + KEY_VALUES + ", " + KEY_AVAILABLE_WHEN + " or " + KEY_VALUES_BY_STATUS
+          + ", or remove the section");
     }
+    validateAvailability(body, problems);
     validateValues(body, problems);
     validateHidden(body, problems);
     validateRedirect(body, problems);
+    validateReasons(body, problems);
     if (body.has(KEY_REDIRECT_REASON)
         && !(body.opt(KEY_REDIRECT_REASON) instanceof String
             && StringUtils.isNotBlank(body.optString(KEY_REDIRECT_REASON)))) {
       problems.add(KEY_REDIRECT_REASON + " must be a non-blank string when present");
     }
-    if (StringUtils.isBlank(body.optString(KEY_REASON, null))) {
+    // A section that only describes when an action applies withholds nothing, so it has nothing
+    // to justify (ETP-5714).
+    if ((!describes || withholds) && StringUtils.isBlank(body.optString(KEY_REASON, null))) {
       problems.add(KEY_REASON + " is required, so every hidden or redirected action is auditable");
     }
     return problems;
+  }
+
+  /** {@code availableWhen} / {@code valuesByStatus}: objects keyed by action, well-formed each. */
+  private static void validateAvailability(JSONObject body, List<String> problems) {
+    JSONObject when = objectOrNull(body, KEY_AVAILABLE_WHEN, problems);
+    JSONObject byStatus = objectOrNull(body, KEY_VALUES_BY_STATUS, problems);
+    Set<String> actions = new LinkedHashSet<>();
+    addKeys(actions, when);
+    addKeys(actions, byStatus);
+    for (String action : actions) {
+      validateAvailabilityOf(action, entryOf(when, action, KEY_AVAILABLE_WHEN, problems),
+          entryOf(byStatus, action, KEY_VALUES_BY_STATUS, problems), problems);
+    }
+  }
+
+  /** The object declared for {@code action} in {@code section}, or {@code null} (reported if malformed). */
+  private static JSONObject entryOf(JSONObject section, String action, String sectionName,
+      List<String> problems) {
+    if (section == null || !section.has(action)) {
+      return null;
+    }
+    JSONObject entry = section.optJSONObject(action);
+    if (entry == null) {
+      problems.add(sectionName + "." + action + " must be an object");
+    }
+    return entry;
+  }
+
+  private static void validateAvailabilityOf(String action, JSONObject when, JSONObject byStatus,
+      List<String> problems) {
+    for (String problem : NeoActionAvailability.problemsOf(when, byStatus)) {
+      problems.add(action + ": " + problem);
+    }
+  }
+
+  private static JSONObject objectOrNull(JSONObject body, String key, List<String> problems) {
+    if (!body.has(key)) {
+      return null;
+    }
+    JSONObject value = body.optJSONObject(key);
+    if (value == null || value.length() == 0) {
+      problems.add(key + " must be a non-empty object keyed by action name");
+      return null;
+    }
+    return value;
+  }
+
+  private static void addKeys(Set<String> into, JSONObject from) {
+    for (Iterator<?> it = from == null ? Collections.emptyIterator() : from.keys(); it.hasNext();) {
+      into.add(String.valueOf(it.next()));
+    }
   }
 
   private static void validateHidden(JSONObject body, List<String> problems) {
@@ -169,6 +248,34 @@ final class McpActionsSection {
       Object target = redirect.opt(key);
       if (!(target instanceof String) || StringUtils.isBlank((String) target)) {
         problems.add(KEY_REDIRECT + "." + key + " must name the action to use instead");
+      }
+    }
+  }
+
+  /**
+   * {@code reasons}: a non-empty object whose every key is an action the section hides or
+   * redirects, and whose every value is a non-blank reason. A reason for an action the section
+   * does not refuse would never be read, which is a typo rather than a choice.
+   */
+  private static void validateReasons(JSONObject body, List<String> problems) {
+    if (!body.has(KEY_REASONS)) {
+      return;
+    }
+    JSONObject reasons = body.optJSONObject(KEY_REASONS);
+    if (reasons == null || reasons.length() == 0) {
+      problems.add(KEY_REASONS + " must be a non-empty object {action: reason}");
+      return;
+    }
+    Set<String> refused = parseHidden(body);
+    refused.addAll(parseRedirect(body).keySet());
+    for (Iterator<?> it = reasons.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      Object reason = reasons.opt(key);
+      if (!(reason instanceof String) || StringUtils.isBlank((String) reason)) {
+        problems.add(KEY_REASONS + "." + key + " must be a non-blank reason");
+      } else if (!refused.contains(key)) {
+        problems.add(KEY_REASONS + "." + key + " names no action of " + KEY_HIDDEN + " or "
+            + KEY_REDIRECT);
       }
     }
   }
@@ -209,20 +316,39 @@ final class McpActionsSection {
     private final String reason;
     private final String redirectReason;
     private final boolean unusable;
+    /** {@code action → reason} overrides (ETP-5692); empty when the section declares none. */
+    private final Map<String, String> reasons;
+    /** {@code action → availability} (ETP-5714); empty when the section declares none. */
+    private final Map<String, NeoActionAvailability> availability;
 
     private View(Set<String> hidden, Map<String, String> redirect, String reason,
         String redirectReason, boolean unusable) {
-      this(hidden, redirect, Collections.emptyMap(), reason, redirectReason, unusable);
+      this(hidden, redirect, Collections.emptyMap(), reason, redirectReason, unusable,
+          Collections.emptyMap(), Collections.emptyMap());
     }
 
+    @SuppressWarnings("java:S107") // the section's resolved parts; a holder would only rename them
     private View(Set<String> hidden, Map<String, String> redirect,
-        Map<String, Set<String>> values, String reason, String redirectReason, boolean unusable) {
+        Map<String, Set<String>> values, String reason, String redirectReason, boolean unusable,
+        Map<String, String> reasons, Map<String, NeoActionAvailability> availability) {
       this.hidden = hidden;
       this.redirect = redirect;
       this.values = values;
       this.reason = reason;
       this.redirectReason = redirectReason;
       this.unusable = unusable;
+      this.reasons = reasons;
+      this.availability = availability;
+    }
+
+    /**
+     * The availability this section declares for {@code action} (ETP-5714).
+     *
+     * @param action the action, under the name it was matched by
+     * @return the declaration, or {@code null} when the section declares none for it
+     */
+    NeoActionAvailability availabilityOf(String action) {
+      return action == null ? null : availability.get(action);
     }
 
     /**
@@ -233,9 +359,66 @@ final class McpActionsSection {
       return action == null ? null : values.get(action);
     }
 
+    /**
+     * The reason {@code action} is refused (ETP-5692): its own entry in {@code reasons}, else the
+     * section-wide {@code reason}.
+     *
+     * @param action the refused action, under the name it was matched by
+     * @return the reason, never {@code null} when the section is configured
+     */
+    String reasonOf(String action) {
+      String own = action == null ? null : reasons.get(action);
+      return own != null ? own : reason;
+    }
+
+    /**
+     * The reason the redirected {@code action} gives (ETP-5692): its own entry in {@code reasons},
+     * else {@link #getRedirectReason()}.
+     *
+     * @param action the redirected button, under the name it was matched by
+     * @return the reason
+     */
+    String redirectReasonOf(String action) {
+      String own = action == null ? null : reasons.get(action);
+      return own != null ? own : getRedirectReason();
+    }
+
     /** @return the reason a redirected button gives: {@code redirectReason}, else {@code reason} */
     String getRedirectReason() {
       return redirectReason != null ? redirectReason : reason;
+    }
+
+    /**
+     * The hidden or redirected name this section spells differently from {@code action}
+     * (ETP-5714): the same letters once case and separators are ignored, so
+     * {@code cancelAndReplace} finds {@code Cancelandreplace} and {@code rmPickFromReceipt} finds
+     * {@code RM_Pickfromreceipt}. Without it an agent that guessed the camelCase name got a bare
+     * "Action not found" instead of the configured reason.
+     *
+     * @param action the action as typed
+     * @return the configured name, or {@code null} when none matches
+     */
+    String configuredNameLike(String action) {
+      String wanted = normalized(action);
+      if (wanted.isEmpty()) {
+        return null;
+      }
+      for (String name : hidden) {
+        if (normalized(name).equals(wanted)) {
+          return name;
+        }
+      }
+      for (String name : redirect.keySet()) {
+        if (normalized(name).equals(wanted)) {
+          return name;
+        }
+      }
+      return null;
+    }
+
+    /** Lower case with everything but letters and digits removed: the spelling-insensitive key. */
+    private static String normalized(String name) {
+      return name == null ? "" : name.replaceAll("[^A-Za-z0-9]", "").toLowerCase(Locale.ROOT);
     }
 
     /** @return whether the MCP must not offer or run {@code action} */
@@ -280,33 +463,90 @@ final class McpActionsSection {
     if (body == null) {
       return View.NONE;
     }
+    return new View(parseHidden(body), parseRedirect(body), parseValues(body),
+        StringUtils.trim(body.optString(KEY_REASON, "")),
+        StringUtils.trimToNull(body.optString(KEY_REDIRECT_REASON, null)), false,
+        parseReasons(body), parseAvailability(body));
+  }
+
+  /** {@code availableWhen} + {@code valuesByStatus}, merged per action; empty when absent. */
+  private static Map<String, NeoActionAvailability> parseAvailability(JSONObject body) {
+    JSONObject when = body.optJSONObject(KEY_AVAILABLE_WHEN);
+    JSONObject byStatus = body.optJSONObject(KEY_VALUES_BY_STATUS);
+    Set<String> actions = new LinkedHashSet<>();
+    addKeys(actions, when);
+    addKeys(actions, byStatus);
+    Map<String, NeoActionAvailability> out = new LinkedHashMap<>();
+    for (String action : actions) {
+      out.put(action, NeoActionAvailability.fromJson(
+          when == null ? null : when.optJSONObject(action),
+          byStatus == null ? null : byStatus.optJSONObject(action)));
+    }
+    return Collections.unmodifiableMap(out);
+  }
+
+  /** {@code hidden}: the action names, in declaration order; empty when absent. */
+  private static Set<String> parseHidden(JSONObject body) {
     Set<String> hidden = new LinkedHashSet<>();
     JSONArray names = body.optJSONArray(KEY_HIDDEN);
     for (int i = 0; names != null && i < names.length(); i++) {
       hidden.add(names.optString(i));
     }
+    return hidden;
+  }
+
+  /** {@code redirect}: {@code button → action}, in declaration order; empty when absent. */
+  private static Map<String, String> parseRedirect(JSONObject body) {
     Map<String, String> redirect = new LinkedHashMap<>();
     JSONObject targets = body.optJSONObject(KEY_REDIRECT);
-    if (targets != null) {
-      for (Iterator<?> it = targets.keys(); it.hasNext();) {
-        String key = String.valueOf(it.next());
-        redirect.put(key, targets.optString(key));
-      }
+    if (targets == null) {
+      return redirect;
     }
+    for (Iterator<?> it = targets.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      redirect.put(key, targets.optString(key));
+    }
+    return redirect;
+  }
+
+  /** {@code values}: {@code button → allowed values}, each set unmodifiable; empty when absent. */
+  private static Map<String, Set<String>> parseValues(JSONObject body) {
     Map<String, Set<String>> values = new LinkedHashMap<>();
     JSONObject narrowed = body.optJSONObject(KEY_VALUES);
-    if (narrowed != null) {
-      for (Iterator<?> it = narrowed.keys(); it.hasNext();) {
+    if (narrowed == null) {
+      return values;
+    }
+    for (Iterator<?> it = narrowed.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      values.put(key, Collections.unmodifiableSet(parseAllowedValues(narrowed.optJSONArray(key))));
+    }
+    return values;
+  }
+
+  private static Set<String> parseAllowedValues(JSONArray list) {
+    Set<String> allowed = new LinkedHashSet<>();
+    for (int i = 0; list != null && i < list.length(); i++) {
+      allowed.add(list.optString(i));
+    }
+    return allowed;
+  }
+
+  /**
+   * {@code reasons} (ETP-5692): {@code action → reason}, trimmed, blank entries dropped;
+   * unmodifiable, empty when absent.
+   */
+  private static Map<String, String> parseReasons(JSONObject body) {
+    Map<String, String> reasons = new LinkedHashMap<>();
+    JSONObject ownReasons = body.optJSONObject(KEY_REASONS);
+    if (ownReasons != null) {
+      for (Iterator<?> it = ownReasons.keys(); it.hasNext();) {
         String key = String.valueOf(it.next());
-        Set<String> allowed = new LinkedHashSet<>();
-        JSONArray list = narrowed.optJSONArray(key);
-        for (int i = 0; list != null && i < list.length(); i++) {
-          allowed.add(list.optString(i));
+        String reason = StringUtils.trimToNull(ownReasons.optString(key, null));
+        if (reason != null) {
+          reasons.put(key, reason);
         }
-        values.put(key, Collections.unmodifiableSet(allowed));
       }
     }
-    return new View(hidden, redirect, values, StringUtils.trim(body.optString(KEY_REASON, "")),
-        StringUtils.trimToNull(body.optString(KEY_REDIRECT_REASON, null)), false);
+    return Collections.unmodifiableMap(reasons);
   }
 }

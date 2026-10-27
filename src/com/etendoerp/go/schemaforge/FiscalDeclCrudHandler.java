@@ -38,6 +38,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
 class FiscalDeclCrudHandler {
@@ -207,39 +208,80 @@ class FiscalDeclCrudHandler {
    * "35068-mensaje"}) is recommended before touching this pattern again. */
   private static final Pattern AEAT_ERROR_PATTERN = Pattern.compile("^(\\S+)\\s*-\\s*(.+)$");
 
-  private static final String PROPERTY_CLIENT = "client";
-  private static final String PROPERTY_ORGANIZATION = "organization";
+  static final String PROPERTY_CLIENT = "client";
+  static final String PROPERTY_ORGANIZATION = "organization";
   private static final String PROPERTY_CREATED_BY = "createdBy";
   private static final String PROPERTY_UPDATED = "updated";
   private static final String PROPERTY_UPDATED_BY = "updatedBy";
   private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
   private static final String MODEL_KEY         = "model";
   private static final String PERIOD_KEY        = "period";
-  private static final String STATUS_KEY        = "status";
+  static final String STATUS_KEY        = "status";
   private static final String FILE_NAME_KEY     = "fileName";
   private static final String FILE_EXTERNAL_KEY = "fileExternal";
   private static final String PARAM_CLIENT_ID   = "clientId";
   private static final String PARAM_ORG_ID      = "orgId";
-  private static final String MANUAL_DATA_KEY   = "manualData";
+  static final String MANUAL_DATA_KEY   = "manualData";
+  /**
+   * JSON key for the {@code manualData.identification} nested object, and the two boolean-ish
+   * corrective/ordinaria flags it carries (303's {@code rectificativa}, 349's {@code
+   * sustitutiva}) — ETP-5725 (reopened QA review, Sonar java:S1192): each literal was duplicated
+   * 3-4 times across {@link FiscalDeclCorrectiveConsistencySupport} and
+   * {@link FiscalDeclReactivationSupport} before this fix. Package-private: both support classes
+   * read them directly off {@code FiscalDeclCrudHandler}.
+   */
+  static final String IDENTIFICATION_KEY = "identification";
+  static final String RECTIFICATIVA_KEY  = "rectificativa";
+  static final String SUSTITUTIVA_KEY    = "sustitutiva";
   private static final String SUBMISSION_METHOD_KEY = "submissionMethod";
   private static final String SUBMITTED_SNAPSHOT_KEY = "submittedSnapshot";
-  private static final String CODE_KEY          = "code";
-  private static final String MESSAGE_KEY       = "message";
+  static final String CODE_KEY          = "code";
+  static final String MESSAGE_KEY       = "message";
   private static final String SEVERITY_KEY      = "severity";
   private static final String MISSING_ID_PARAM  = "Missing param: id";
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
 
-  private final NeoServlet servlet;
+  /**
+   * Package-private (not {@code private}): {@link FiscalDeclCorrectiveConsistencySupport},
+   * {@link FiscalDeclReactivationSupport} and {@link FiscalDeclManualDataValidationSupport} all
+   * call {@code owner.servlet.sendError(...)} directly, the same access pattern
+   * {@code Fiscal303SubmissionSupport} already uses against {@code Fiscal303BoxesHandler}'s own
+   * (there, {@code protected}) {@code servlet} field.
+   */
+  final NeoServlet servlet;
   /**
    * ETP-5438 submission snapshot handling for this table (transition, lookup, parsing) —
    * extracted to {@link FiscalSubmittedSnapshotSupport} to keep this class under the SonarQube
    * {@code java:S1448} method-count threshold.
    */
   final FiscalSubmittedSnapshotSupport snapshots;
+  /**
+   * ETP-5725 (reopened QA review, Sonar java:S1448) — this class had grown to 46 methods (limit
+   * 35) across this ticket's several rounds, mixing the core CRUD flow with 3 cohesive-but-large
+   * guard clusters. Extracted the same way {@link #snapshots} already was, and the same way
+   * {@code Fiscal349BoxesHandler} splits off {@code Fiscal349ViesSupport}/
+   * {@code Fiscal349GenerateSupport}: one {@code *Support} class per cluster, each holding a
+   * reference back to this class (the {@code owner}) for the primitives (
+   * {@link #naturalKeyQuery}, {@link #parseManualData}, {@link #extractIdentification}, {@link
+   * #getRelatedId}, {@link #asString}/{@link #asLong}, {@link #servlet}) it still needs — none of
+   * those primitives moved, since all three clusters (and the methods staying on this class)
+   * share them.
+   */
+  final FiscalDeclCorrectiveConsistencySupport correctiveConsistencySupport;
+  /** See {@link #correctiveConsistencySupport}'s own javadoc for the extraction rationale. */
+  final FiscalDeclReactivationSupport reactivationSupport;
+  /** See {@link #correctiveConsistencySupport}'s own javadoc for the extraction rationale. */
+  final FiscalDeclManualDataValidationSupport manualDataValidationSupport;
+  /** The per-model single-ordinary rule (ETP-5716); same extraction rationale. */
+  final FiscalDeclSingleOrdinarySupport singleOrdinarySupport;
 
   FiscalDeclCrudHandler(NeoServlet servlet) {
     this.servlet = servlet;
     this.snapshots = new FiscalSubmittedSnapshotSupport(this, servlet);
+    this.correctiveConsistencySupport = new FiscalDeclCorrectiveConsistencySupport(this);
+    this.reactivationSupport = new FiscalDeclReactivationSupport(this, correctiveConsistencySupport);
+    this.manualDataValidationSupport = new FiscalDeclManualDataValidationSupport(this);
+    this.singleOrdinarySupport = new FiscalDeclSingleOrdinarySupport(this);
   }
 
   void handleDeclarations(String method, HttpServletRequest request,
@@ -296,11 +338,38 @@ class FiscalDeclCrudHandler {
     // exists — a non-draft (ready/submitted/...) existing declaration is the intended
     // corrective/rectificativa case (ETP-5187) and must keep working exactly as before, via
     // resolveNextDeclSeq below, untouched by this check.
+    if (singleOrdinarySupport.rejectDuplicateOrdinary(clientId, orgId, model, year, period,
+        requestedDeclType, response)) {
+      return;
+    }
     if (hasDraftDeclaration(clientId, orgId, model, year, period)) {
       servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
           "A draft declaration already exists for this period — complete or delete it before "
               + "creating a new one.");
       return;
+    }
+
+    // ETP-5725 (reopened QA review, BUG-1) — a declaration can be created with any status
+    // directly via POST, not only draft. The PUT-path consistency guard deliberately bails out
+    // once the previous status is already submitted-family (re-presentation is a different,
+    // already-blocked case — see its own javadoc), so a declaration created directly in a
+    // submitted-family status can never have this rule enforced on it afterward by any PUT
+    // either: it starts out already submitted from its very first write. POST never accepts
+    // manual data or identification at creation time, so a freshly created row can never read as
+    // corrective — the corrective-without-ordinaria direction of the rule is structurally
+    // impossible to hit via POST, not merely unchecked. The mirror rule, only one presented
+    // ordinaria per period, is not structurally impossible though, and is exactly what QA
+    // demonstrated: a direct POST creating a declaration already submitted for a period that
+    // already has a presented ordinaria sibling bypassed it entirely, with no later guard able to
+    // catch it. The exclude-id argument below is passed as null since this row does not exist yet
+    // and there is nothing of its own to exclude from the sibling search.
+    if (SUBMITTED_STATUSES.contains(status)) {
+      String violation = correctiveConsistencySupport.checkCorrectiveConsistency(clientId, orgId,
+          model, year, period, null, false);
+      if (violation != null) {
+        servlet.sendError(response, HttpServletResponse.SC_CONFLICT, violation + ": (new)");
+        return;
+      }
     }
 
     // ETP-5187 — a 2nd (or later) declaration for the same model/year/period used to 500 on
@@ -369,7 +438,7 @@ class FiscalDeclCrudHandler {
    * {@code " = :year and "}, {@code " = :period"}) is defined exactly once instead of copy-pasted
    * across the 3 call sites.
    */
-  private static OBQuery<BaseOBObject> naturalKeyQuery(String clientId, String orgId,
+  static OBQuery<BaseOBObject> naturalKeyQuery(String clientId, String orgId,
       String model, long year, String period) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
         "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
@@ -470,19 +539,26 @@ class FiscalDeclCrudHandler {
       return;
     }
     JSONObject body = readJsonBody(request);
-    if (rejectTelematicReactivation(decl, body, id, response)) {
+    String previousStatus = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    if (reactivationSupport.rejectTelematicReactivation(decl, body, id, response)) {
+      return;
+    }
+    if (reactivationSupport.rejectReactivationWithSibling(decl, body, previousStatus, id, response)) {
       return;
     }
     if (rejectRepresentation(decl, body, id, response)) {
       return;
     }
-    if (rejectNegativeManualBoxes(body, id, response)) {
+    if (correctiveConsistencySupport.rejectCorrectiveConsistencyViolation(decl, body,
+        previousStatus, id, response)) {
       return;
     }
-    if (rejectOversizedIdentificationFields(body, id, response)) {
+    if (manualDataValidationSupport.rejectNegativeManualBoxes(body, id, response)) {
       return;
     }
-    String previousStatus = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    if (manualDataValidationSupport.rejectOversizedIdentificationFields(body, id, response)) {
+      return;
+    }
     String newStatus = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : null;
     if (newStatus != null
         && !snapshots.applyTransition(decl, previousStatus, newStatus, id, response)) {
@@ -500,34 +576,6 @@ class FiscalDeclCrudHandler {
   }
 
   /**
-   * Guards "Reactivar declaración" (ETP-5338), which reverts a presented declaration back to
-   * draft via this same PUT path ({@code status: "draft"}). Defense in depth, mirroring
-   * {@link #handleDeclDelete}'s draft-only guard: the frontend already hides the Reactivar action
-   * for {@code aeat_telematic} declarations ({@code FmRowActions.jsx} / {@code FmListPage.jsx}),
-   * but this is what actually prevents one from being reopened regardless of what the client
-   * sends — reactivating a declaration that was genuinely filed with the AEAT would desync this
-   * table from what Hacienda has on record, which is unrecoverable from here.
-   *
-   * @return {@code true} if the PUT was rejected (a 409 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectTelematicReactivation(BaseOBObject decl, JSONObject body, String id,
-      HttpServletResponse response) throws Exception {
-    boolean hasStatus = body.has(STATUS_KEY);
-    String status = hasStatus ? body.getString(STATUS_KEY) : null;
-    if (!hasStatus || !DEFAULT_STATUS.equals(status)) {
-      return false;
-    }
-    String currentSubmissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
-    if (!SUBMISSION_METHOD_AEAT_TELEMATIC.equals(currentSubmissionMethod)) {
-      return false;
-    }
-    servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
-        "Cannot reactivate a declaration filed via AEAT telematic submission: " + id);
-    return true;
-  }
-
-  /**
    * Blocks re-presenting a declaration that is already in a {@link #SUBMITTED_STATUSES} status
    * (ETP-5438) — "block re-presentation once already submitted". Defense in depth: the frontend
    * already hides "Registrar/Presentar" once {@code isSubmitted} ({@code FmModel303Page.jsx} /
@@ -537,7 +585,8 @@ class FiscalDeclCrudHandler {
    * <p>Only fires when BOTH the current status and the incoming one are in
    * {@link #SUBMITTED_STATUSES} — a transition INTO the submitted family from {@code draft}/
    * {@code ready} (the normal, first-time presentation) is unaffected, and so is the existing
-   * "Reactivar declaración" transition BACK to {@code draft} ({@link #rejectTelematicReactivation}
+   * "Reactivar declaración" transition BACK to {@code draft} ({@link
+   * FiscalDeclReactivationSupport#rejectTelematicReactivation}
    * already guards that one on its own, narrower, terms). Deliberately model-agnostic — the same
    * {@code ETGO_Fiscal_Decl} table and PUT path serve both Modelo 303 and Modelo 349, and nothing
    * about "you cannot re-present an already-presented declaration" is specific to either.
@@ -561,134 +610,21 @@ class FiscalDeclCrudHandler {
     return true;
   }
 
-  // ETP-5393 Bug C — boxes the classic AEAT303Report engine hard-rejects when negative:
-  // box 111 "Rectificación – Importe" (AEAT303Report2024.java:276-278,
-  // @AEAT303_Negative_Not_Allowed_For_111@) and box 77 "IVA a la importación liquidado por la
-  // Aduana pendiente de ingreso" (AEAT303Report2015.java:149-162,
-  // @AEAT303_Negative_IVA_IMPORT_ADUANA@). The GO previsualización's manualOverrides had no
-  // equivalent server-side check at all — unlike setManualDataIfPresent's tolerant handling of a
-  // malformed manualData blob, a negative value here is a real business-rule violation the caller
-  // must be told about, not silently swallowed.
-  //
-  // ETP-5438 (AEAT spec audit) — boxes 70, 78, 109 and 110 are ALSO declared "Num" (numérico sin
-  // signo / unsigned) in the official Modelo 303 "Diseño de registro" (DR303e26v101 v1.01, the
-  // spec bundled with this ticket), exactly like 111 and 77 — the same class of bug ETP-5393 Bug C
-  // fixed for those two, just not caught at the time because the audit that found it (casilla-by-
-  // casilla cross-check of every editable box's AEAT type against this guard's coverage) hadn't
-  // been done yet. Added to the SAME set/mechanism rather than a parallel one, per the AEAT type
-  // legend confirmed in the spec's own "Nota" footer on every page: "1. Los campos deben ser A
-  // (Alfabético) An (Alfanumérico), Num (Numérico sin signo) o N (Numérico con signo)."
-  private static final java.util.Set<String> NEGATIVE_NOT_ALLOWED_BOX_KEYS =
-      java.util.Set.of("111", "77", "70", "78", "109", "110");
-
-  /**
-   * Rejects a PUT whose {@code manualData.manualOverrides} sets box 111 or box 77 to a negative
-   * value — see {@link #NEGATIVE_NOT_ALLOWED_BOX_KEYS}. A missing/malformed {@code manualData} or
-   * {@code manualOverrides} is not this method's concern (left to {@link #setManualDataIfPresent}'s
-   * existing tolerant handling); this only fires when one of the two watched boxes is present and
-   * parses to a negative number.
-   *
-   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectNegativeManualBoxes(JSONObject body, String id, HttpServletResponse response)
-      throws IOException {
-    if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
-      return false;
-    }
-    JSONObject manualData = body.optJSONObject(MANUAL_DATA_KEY);
-    JSONObject overrides = manualData != null ? manualData.optJSONObject("manualOverrides") : null;
-    if (overrides == null) {
-      return false;
-    }
-    for (String boxKey : NEGATIVE_NOT_ALLOWED_BOX_KEYS) {
-      if (!overrides.has(boxKey) || overrides.isNull(boxKey)) {
-        continue;
-      }
-      double value = overrides.optDouble(boxKey, 0d);
-      if (!Double.isNaN(value) && value < 0) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Box " + boxKey + " does not accept negative values: " + id);
-        return true;
-      }
-    }
-    return false;
-  }
-
   /**
    * Reads {@code manualData.identification} out of a PUT body, or {@code null} if
-   * {@code manualData} (or {@code identification} within it) is absent/malformed — used by
-   * {@link #rejectOversizedIdentificationFields} below, the ETP-5438 sibling of
-   * {@link #rejectNegativeManualBoxes}'s own {@code manualOverrides} read.
+   * {@code manualData} (or {@code identification} within it) is absent/malformed. Package-private
+   * (not {@code private}): used both by {@link FiscalDeclManualDataValidationSupport
+   * #rejectOversizedIdentificationFields} and, indirectly, by {@link
+   * FiscalDeclCorrectiveConsistencySupport#isEffectivelyCorrective} — a true cross-cluster
+   * primitive, kept here rather than duplicated or forced into either {@code *Support} class.
    */
-  private JSONObject extractIdentification(JSONObject body) {
+  JSONObject extractIdentification(JSONObject body) {
     if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
       return null;
     }
     JSONObject manualData = body.optJSONObject(MANUAL_DATA_KEY);
-    return manualData != null ? manualData.optJSONObject("identification") : null;
+    return manualData != null ? manualData.optJSONObject(IDENTIFICATION_KEY) : null;
   }
-
-  // ETP-5438 (AEAT spec audit) — max lengths for the alphanumeric ("An") identification fields,
-  // read straight off the official Modelo 303 "Diseño de registro" (DR303e26v101 v1.01): the
-  // DID page for the 6 bank_* fields (SWIFT-BIC 11, IBAN 34 — "Nota 6: Para el IBAN español
-  // deberá empezar por ES y únicamente se usan las primeras 24 posiciones", Bank name 70, Bank
-  // address 35, City 30, Country code 2) and page 3 for nro_justificante (13, "Número
-  // justificante identificativo de la autoliquidación anterior"). Same rationale as
-  // NEGATIVE_NOT_ALLOWED_BOX_KEYS above: the classic AEAT engine's fixed-width record slots make
-  // an oversized value a real business-rule violation, not a cosmetic nit — better to reject it
-  // here, where the user can still fix it, than have it silently truncated (or rejected outright)
-  // at file-generation time.
-  private static final java.util.Map<String, Integer> IDENTIFICATION_MAX_LENGTHS = buildIdentificationMaxLengths();
-
-  private static java.util.Map<String, Integer> buildIdentificationMaxLengths() {
-    java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
-    m.put("bank_iban", 34);
-    m.put("bank_swift_bic", 11);
-    m.put("bank_nombre", 70);
-    m.put("bank_direccion", 35);
-    m.put("bank_ciudad", 30);
-    m.put("bank_pais", 2);
-    m.put("nro_justificante", 13);
-    return java.util.Collections.unmodifiableMap(m);
-  }
-
-  /**
-   * Rejects a PUT whose {@code manualData.identification} carries a value longer than its AEAT
-   * fixed-width slot (ETP-5438) — see {@link #IDENTIFICATION_MAX_LENGTHS}. A missing/malformed
-   * {@code manualData}/{@code identification}, or a field simply absent from the payload, is not
-   * this method's concern (same tolerant precedent as {@link #rejectNegativeManualBoxes}).
-   *
-   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectOversizedIdentificationFields(JSONObject body, String id,
-      HttpServletResponse response) throws IOException {
-    JSONObject identification = extractIdentification(body);
-    if (identification == null) {
-      return false;
-    }
-    for (java.util.Map.Entry<String, Integer> entry : IDENTIFICATION_MAX_LENGTHS.entrySet()) {
-      String key = entry.getKey();
-      if (!identification.has(key) || identification.isNull(key)) {
-        continue;
-      }
-      String value = identification.optString(key, "");
-      if (value.length() > entry.getValue()) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Field " + key + " exceeds its max length of " + entry.getValue() + " characters: " + id);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // ETP-5438 (AEAT spec audit) — bank_sepa ("Devolución - Marca SEPA") is also declared a
-  // single-digit Num field on the DID page restricted to a 4-value enum (spec's own "Nota 2:
-  // Devolución marca SEPA" table: 0 Vacía, 1 Cuenta España, 2 Unión Europea SEPA, 3 Resto
-  // Países) in the same audit that found the gaps above. That fix (a `rejectInvalidBankSepa`
-  // guard here, paired with a `type: 'select'` conversion in fm303Layouts.js) was reverted from
-  // this ticket — it is being handled under a separate ticket instead. Do not re-add it here.
 
   /**
    * Applies every scalar (non-{@code manualData}) optional field {@link #handleDeclPut} accepts —
@@ -874,27 +810,28 @@ class FiscalDeclCrudHandler {
     if (decl == null) {
       return;
     }
-    JSONArray arr = new JSONArray();
-    for (BaseOBObject inc : queryIncidents(id)) {
-      JSONObject o = new JSONObject();
-      o.put(CODE_KEY,     asString(inc.get(PROPERTY_INCIDENT_CODE)));
-      o.put(MESSAGE_KEY,  asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
-      o.put(SEVERITY_KEY, resolveSeverity(inc));
-      arr.put(o);
-    }
     JSONObject out = new JSONObject();
-    out.put("data", arr);
+    out.put("data", incidentsJson(id));
     response.getWriter().write(out.toString());
   }
 
   /**
-   * Reads the persisted {@code severity} value, defaulting to {@link #SEVERITY_BLOCK} for any row
-   * that predates this column (blank/null) — preserves the pre-ETP-4456 behavior for old rows
-   * rather than surfacing an empty string to the frontend.
+   * The persisted incidents of {@code declId} in the read shape of {@link #handleIncidents}:
+   * {@code [{code, message, severity[, params][, action]}]}. A structured message
+   * ({@link FiscalDeclIncidentMessages#structuredMessage}) is unfolded: {@code message} is its
+   * text and its {@code params}/{@code action} are returned alongside; a plain message (an AEAT answer) is
+   * returned as-is.
    */
-  private static String resolveSeverity(BaseOBObject inc) {
-    String severity = asString(inc.get(PROPERTY_INCIDENT_SEVERITY));
-    return StringUtils.isNotBlank(severity) ? severity : SEVERITY_BLOCK;
+  JSONArray incidentsJson(String declId) throws JSONException {
+    JSONArray arr = new JSONArray();
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      JSONObject o = new JSONObject();
+      o.put(CODE_KEY,     asString(inc.get(PROPERTY_INCIDENT_CODE)));
+      FiscalDeclIncidentMessages.putMessageFields(o, asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
+      o.put(SEVERITY_KEY, FiscalDeclIncidentMessages.resolveSeverity(inc));
+      arr.put(o);
+    }
+    return arr;
   }
 
   /** All {@code ETGO_Fiscal_Decl_Incident} rows for {@code declId}, oldest first. */
@@ -953,8 +890,59 @@ class FiscalDeclCrudHandler {
     for (BaseOBObject inc : queryIncidents(declId)) {
       OBDal.getInstance().remove(inc);
     }
-    insertIncidents(decl, errors, SEVERITY_BLOCK);
-    insertIncidents(decl, warnings, SEVERITY_WARN);
+    insertIncidents(decl, errors, SEVERITY_BLOCK, "");
+    insertIncidents(decl, warnings, SEVERITY_WARN, "");
+  }
+
+  /**
+   * Code prefix of the incidents a model stores from an AEAT answer when it must tell them apart
+   * from its own rule incidents (ETP-5716, Modelo 390): {@code "AEAT-" + <AEAT code>}. Such rows
+   * are informative — they never block a new filing attempt (the retry is what fixes them); only
+   * the model's own blocking rules do. Modelo 303 does not use it (its AEAT incidents keep the raw
+   * AEAT code, and nothing gates its filing on stored incidents).
+   */
+  static final String AEAT_INCIDENT_CODE_PREFIX = "AEAT-";
+
+  /**
+   * Replaces ONLY the AEAT-origin incidents ({@link #AEAT_INCIDENT_CODE_PREFIX}) of {@code decl}
+   * with {@code errors} ({@link #SEVERITY_BLOCK}) and {@code warnings} ({@link #SEVERITY_WARN}),
+   * coded {@code AEAT-<code>} — the model's own rule incidents are kept. Called on every AEAT
+   * attempt (validation and production), so a clean answer leaves no AEAT incident. Does not
+   * commit (same single-transaction contract as {@link #replaceIncidentsNoCommit}).
+   */
+  void replaceAeatIncidentsNoCommit(BaseOBObject decl, List<String> errors, List<String> warnings) {
+    String declId = String.valueOf(decl.getId());
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      if (asString(inc.get(PROPERTY_INCIDENT_CODE)).startsWith(AEAT_INCIDENT_CODE_PREFIX)) {
+        OBDal.getInstance().remove(inc);
+      }
+    }
+    insertIncidents(decl, errors, SEVERITY_BLOCK, AEAT_INCIDENT_CODE_PREFIX);
+    insertIncidents(decl, warnings, SEVERITY_WARN, AEAT_INCIDENT_CODE_PREFIX);
+  }
+
+  /**
+   * One incident a model computes itself: code, severity and its
+   * {@link FiscalDeclIncidentMessages#structuredMessage}.
+   */
+  record RuleIncidentRow(String code, String severity, String message) {
+  }
+
+  /**
+   * Replaces the incidents a model computes itself (every row whose code is NOT
+   * {@link #AEAT_INCIDENT_CODE_PREFIX}) with {@code rows} — the mirror of
+   * {@link #replaceAeatIncidentsNoCommit}: the last AEAT answer is kept. Does not commit.
+   */
+  void replaceRuleIncidentsNoCommit(BaseOBObject decl, List<RuleIncidentRow> rows) {
+    String declId = String.valueOf(decl.getId());
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      if (!asString(inc.get(PROPERTY_INCIDENT_CODE)).startsWith(AEAT_INCIDENT_CODE_PREFIX)) {
+        OBDal.getInstance().remove(inc);
+      }
+    }
+    for (RuleIncidentRow row : rows) {
+      insertIncident(decl, row.code(), row.message(), row.severity());
+    }
   }
 
   /**
@@ -964,20 +952,25 @@ class FiscalDeclCrudHandler {
    * (the caller is responsible for the delete step), so calling it twice with different severities
    * accumulates rather than replaces.
    */
-  private void insertIncidents(BaseOBObject decl, List<String> rawEntries, String severity) {
+  private void insertIncidents(BaseOBObject decl, List<String> rawEntries, String severity,
+      String codePrefix) {
     for (String raw : new LinkedHashSet<>(rawEntries)) {
       String[] parsed = splitAeatError(raw);
-      BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
-      inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
-      inc.set(PROPERTY_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
-      inc.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
-      inc.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
-      inc.set(PROPERTY_INCIDENT_DECL, decl);
-      inc.set(PROPERTY_INCIDENT_CODE, parsed[0]);
-      inc.set(PROPERTY_INCIDENT_MESSAGE, parsed[1]);
-      inc.set(PROPERTY_INCIDENT_SEVERITY, severity);
-      OBDal.getInstance().save(inc);
+      insertIncident(decl, codePrefix + parsed[0], parsed[1], severity);
     }
+  }
+
+  private void insertIncident(BaseOBObject decl, String code, String message, String severity) {
+    BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
+    inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
+    inc.set(PROPERTY_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
+    inc.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
+    inc.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
+    inc.set(PROPERTY_INCIDENT_DECL, decl);
+    inc.set(PROPERTY_INCIDENT_CODE, code);
+    inc.set(PROPERTY_INCIDENT_MESSAGE, message);
+    inc.set(PROPERTY_INCIDENT_SEVERITY, severity);
+    OBDal.getInstance().save(inc);
   }
 
   /**
@@ -1038,7 +1031,7 @@ class FiscalDeclCrudHandler {
    * {@code decl.get(...)} that returned something other than a String would already have failed
    * earlier, in {@link #asString}, not in this parse step.
    */
-  private static JSONObject parseManualData(BaseOBObject decl) {
+  static JSONObject parseManualData(BaseOBObject decl) {
     String raw = asString(decl.get(PROPERTY_MANUAL_DATA));
     try {
       return StringUtils.isNotBlank(raw) ? new JSONObject(raw) : new JSONObject();
@@ -1047,7 +1040,7 @@ class FiscalDeclCrudHandler {
     }
   }
 
-  private static String getRelatedId(BaseOBObject decl, String property) {
+  static String getRelatedId(BaseOBObject decl, String property) {
     Object related = decl.get(property);
     return related instanceof BaseOBObject && ((BaseOBObject) related).getId() != null
         ? String.valueOf(((BaseOBObject) related).getId()) : "";
@@ -1064,12 +1057,23 @@ class FiscalDeclCrudHandler {
     return 0;
   }
 
+  /**
+   * Same contract as {@link #asInt} but for {@link #PROPERTY_FISCAL_YEAR}, which
+   * {@link #naturalKeyQuery} expects as a {@code long} (matching {@code handleDeclPost}'s own
+   * {@code body.getLong("year")} read) — added for the ETP-5725 reopened-QA natural-key lookups
+   * ({@link FiscalDeclReactivationSupport#rejectReactivationWithSibling}, {@link
+   * FiscalDeclCorrectiveConsistencySupport#rejectCorrectiveConsistencyViolation}).
+   */
+  static long asLong(Object value) {
+    return value instanceof Number ? ((Number) value).longValue() : 0L;
+  }
+
   private JSONObject readJsonBody(HttpServletRequest request) throws Exception {
     StringBuilder sb = new StringBuilder();
     try (BufferedReader reader = request.getReader()) {
       String line;
       while ((line = reader.readLine()) != null) sb.append(line);
     }
-    return new JSONObject(sb.toString());
+    return BoundedJsonParser.parseObject(sb.toString());
   }
 }

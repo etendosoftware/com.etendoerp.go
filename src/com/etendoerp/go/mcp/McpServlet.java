@@ -20,7 +20,6 @@ package com.etendoerp.go.mcp;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,20 +38,24 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.auth.EffectiveClientResolver;
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
-import com.etendoerp.go.payment.EnvironmentAccessPolicy;
-import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 
 /**
  * MCP (Model Context Protocol) servlet implementing Streamable HTTP transport.
@@ -76,32 +79,29 @@ public class McpServlet extends HttpServlet {
   private static final long serialVersionUID = 1L;
   private static final Logger log = LogManager.getLogger(McpServlet.class);
 
-  private static final String SERVER_NAME = "etendo-mcp";
-  private static final String SERVER_VERSION = "1.0.0";
-  /** Human-readable name clients may show instead of {@link #SERVER_NAME} (MCP 2025-11-25). */
-  private static final String SERVER_TITLE = "Etendo MCP";
-  private static final String SERVER_WEBSITE_URL = "https://app.etendo.ai";
-  /** {@code Implementation.description} (MCP 2025-11-25). */
-  static final String SERVER_DESCRIPTION = "Etendo ERP for agents: read and write documents, "
-      + "master data and processes, and run reports, within the permissions of your role.";
-  /**
-   * Public, unauthenticated icon advertised in {@code serverInfo.icons} (MCP 2025-11-25, SEP-973).
-   * Same file for every environment, so a fixed production URL is fine. Clients that predate the
-   * field ignore it.
-   */
-  private static final String SERVER_ICON_URL = "https://app.etendo.ai/favicon.png";
-  private static final String SERVER_ICON_MIME_TYPE = "image/png";
-  private static final String SERVER_ICON_SIZES = "513x513";
-
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
+  /** JSON-RPC 2.0: the body is not valid JSON. */
+  static final int JSON_RPC_PARSE_ERROR = -32700;
   /** JSON-RPC 2.0: the method does not exist or is not available. */
   static final int JSON_RPC_METHOD_NOT_FOUND = -32601;
   /** JSON-RPC 2.0: internal JSON-RPC error. */
   static final int JSON_RPC_INTERNAL_ERROR = -32603;
+  /** What a log line prints for a client that named itself nowhere. */
+  private static final String UNKNOWN_CLIENT = "unknown";
+  /** Message prefix of a JSON-RPC "method not found". */
+  private static final String METHOD_NOT_FOUND_PREFIX = "Method not found: ";
+  /** The legacy-era liveness method, removed by MCP 2026-07-28. */
+  private static final String PING = "ping";
   /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
   static final String META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
   /** The handshake method: the one request that carries no {@code MCP-Protocol-Version}. */
   private static final String INITIALIZE = "initialize";
+  /**
+   * The 503 answer when the tenant of a credential cannot be judged: its role lookup or the
+   * environment access check failed (ETP-5047). Retryable, so it says so.
+   */
+  private static final String ENVIRONMENT_UNVERIFIED =
+      "The environment of this credential could not be verified; retry later";
   /** The only JSON-RPC method that produces a telemetry row (B1). */
   private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
@@ -109,33 +109,26 @@ public class McpServlet extends HttpServlet {
   private static final String LEGACY_JWT_FALLBACK_SCOPES = String.join(" ",
       ApiScopes.READ, ApiScopes.WRITE, ApiScopes.PROCESS, ApiScopes.REPORT);
 
+  /**
+   * The commercial access check (ETP-5047). An instance field rather than a static so a test can
+   * substitute it by reflection.
+   */
+  private transient EnvironmentAccessGuard environmentAccessGuard = new EnvironmentAccessGuard();
+
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
 
-  // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
-  private static final int SC_PAYMENT_REQUIRED = 402;
-
-  private final transient TenantEnvironmentLifecycleService lifecycleService;
-
-  /** Production wiring: the tenant lifecycle policy every environment surface shares. */
-  public McpServlet() {
-    this(new TenantEnvironmentLifecycleService());
-  }
-
-  /**
-   * Wiring with an explicit lifecycle service, for tests.
-   *
-   * @param lifecycleService answers the commercial access decision for a client
-   */
-  McpServlet(TenantEnvironmentLifecycleService lifecycleService) {
-    this.lifecycleService = lifecycleService;
-  }
+  // ETP-5270 — package-visible so tests can swap the database-backed role lookups for a fake.
+  GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
+    // Mcp-Method / Mcp-Name: the mirror headers every 2026-07-28 POST carries (ETP-5640).
+    // Mcp-Session-Id stays for the legacy era's browser clients.
     CorsUtils.apply(request, response, "GET, POST, OPTIONS",
         "Content-Type, Authorization, Accept, Mcp-Session-Id, " + McpProtocolVersion.HEADER
+            + ", " + McpRequestEra.HEADER_METHOD + ", " + McpRequestEra.HEADER_NAME
             + ", X-Go-CSRF, X-Go-Account",
         "Mcp-Session-Id, WWW-Authenticate", false);
   }
@@ -162,11 +155,37 @@ public class McpServlet extends HttpServlet {
     setCorsHeaders(request, response);
 
     // Authenticate via OAuth2 Bearer token
-    AuthIdentity identity = authenticate(request, response);
-    if (identity == null) {
+    AuthIdentity authenticated = authenticate(request, response);
+    if (authenticated == null) {
       return; // Response already sent by authenticate()
     }
-    if (refuseCommerciallyBlocked(request, response, identity)) {
+    // ETP-5047 — the tenant the call acts on, resolved once: the guard below judges it, and
+    // McpSessionManager.executeInContext builds the call's context with the same value. A failed
+    // role lookup refuses the call: falling back to "0" would be allowed unjudged.
+    AuthIdentity identity;
+    try {
+      identity = authenticated.withClientId(EffectiveClientResolver.effectiveClientId(
+          authenticated.clientId, authenticated.roleId));
+    } catch (EffectiveClientResolver.ResolutionException e) {
+      log.warn("Refusing MCP request of user {}: {}", authenticated.userId, e.getMessage(), e);
+      sendJsonError(request, response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+          ENVIRONMENT_UNVERIFIED);
+      return;
+    }
+    boolean accessAllowed;
+    try {
+      accessAllowed = isEnvironmentAccessAllowed(response, identity);
+    } catch (RuntimeException e) {
+      // ETP-5047 — the guard could not decide (e.g. its lifecycle lookup hit a DB error). Fail
+      // closed, with the same JSON 503 as a failed role lookup: an escaped exception would reach
+      // the client as Tomcat's HTML 500, and the request must not run unjudged.
+      log.warn("Refusing MCP request of user {} into client {}: the environment access check "
+          + "failed", identity.userId, identity.clientId, e);
+      sendJsonError(request, response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+          ENVIRONMENT_UNVERIFIED);
+      return;
+    }
+    if (!accessAllowed) {
       return; // 402 already sent
     }
 
@@ -179,11 +198,22 @@ public class McpServlet extends HttpServlet {
     JSONObject callParams = null;
     String toolName = null;
     String method = null;
+    McpRequestEra.Classification era = McpRequestEra.Classification.legacy();
+
+    JSONObject rpcMessage;
+    try {
+      rpcMessage = BoundedJsonParser.parseObject(body);
+    } catch (MalformedJsonException e) {
+      // The client's error, not ours: JSON-RPC parse error, and no id can be read from the body.
+      // Answered before any telemetry thread-local is bound, so there is nothing to clear.
+      writeRpcError(response, null, JSON_RPC_PARSE_ERROR, "Parse error",
+          HttpServletResponse.SC_BAD_REQUEST, null);
+      return;
+    }
 
     McpUsageTelemetry.setCurrentSessionKey(
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     try {
-      JSONObject rpcMessage = new JSONObject(body);
       method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
       callParams = rpcMessage.optJSONObject("params");
@@ -193,16 +223,13 @@ public class McpServlet extends HttpServlet {
 
       log.debug("MCP request: method={}, id={}", method, id);
 
-      if (!INITIALIZE.equals(method)) {
-        // ETP-5639: validated, never refused — see McpProtocolVersion for the lenient policy.
-        McpProtocolVersion.forRequest(request.getHeader(McpProtocolVersion.HEADER),
-            McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey())
-                .getProtocolVersion(),
-            clientNameFor(callParams));
+      era = McpRequestEra.forRequest(request, method, callParams);
+      if (!admit(request, response, identity, id, method, callParams, era)) {
+        return; // 400 already written
       }
 
       // Dispatch the method
-      JSONObject result = dispatchMethod(identity, method, callParams, response);
+      JSONObject result = dispatchMethod(identity, method, callParams, response, era.isModern());
 
       // Notifications (no id) don't get a response body: 202 Accepted (Streamable HTTP,
       // MCP 2025-03-26 onwards).
@@ -215,7 +242,8 @@ public class McpServlet extends HttpServlet {
       JSONObject rpcResponse = new JSONObject();
       rpcResponse.put("jsonrpc", "2.0");
       rpcResponse.put("id", id);
-      rpcResponse.put("result", result != null ? result : new JSONObject());
+      JSONObject answer = result != null ? result : new JSONObject();
+      rpcResponse.put("result", era.isModern() ? McpModernResults.decorate(method, answer) : answer);
 
       String rendered = rpcResponse.toString();
       response.setStatus(HttpServletResponse.SC_OK);
@@ -223,30 +251,25 @@ public class McpServlet extends HttpServlet {
 
       // AFTER the business transaction has been committed and closed by McpSessionManager, and
       // after the caller already has its answer: nothing below can affect either.
-      recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
-          toolName, callParams, result, null);
+      recordToolCall(identity, new McpCallObservation(McpUsageTelemetry.currentSessionKey(), body,
+          rendered, startedAtNanos), toolName, callParams, result, null);
 
-    } catch (McpMethodNotFoundException e) {
-      // A client asking for something we do not offer — chiefly 2026-07-28 clients probing with
-      // server/discover before falling back to initialize. Not a server failure: one WARN line, no
-      // stack trace, and the same -32601 as before. No telemetry row: only tools/call has a tool
-      // name, and an unknown method is never one.
-      log.warn("MCP client called unsupported method '{}' (client={}) session={}", method,
-          clientNameFor(callParams), McpUsageTelemetry.sessionForLog());
-      writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, e.getMessage());
+    } catch (McpResourceNotFoundException | McpMethodNotFoundException e) {
+      answerClientRefusal(response, body, method, callParams, era, e);
     } catch (Exception e) {
       log.error("Error processing MCP message: {} session={}", e.getMessage(),
           McpUsageTelemetry.sessionForLog(), e);
 
       String rendered = writeRpcError(response, body, JSON_RPC_INTERNAL_ERROR, e.getMessage());
       if (rendered != null) {
-        recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
-            toolName, callParams, null, McpConstants.ERROR_SERVER);
+        recordToolCall(identity, new McpCallObservation(McpUsageTelemetry.currentSessionKey(),
+            body, rendered, startedAtNanos), toolName, callParams, null, McpConstants.ERROR_SERVER);
       }
     } finally {
       // Servlet threads are pooled: a leaked session key would attribute one client's calls to
       // another client's session — and a leaked tenant would attribute it to another company.
       McpUsageTelemetry.clearCurrentSessionKey();
+      McpUsageTelemetry.clearCurrentClient();
       McpUsageTelemetry.clearCurrentTenant();
     }
   }
@@ -259,16 +282,145 @@ public class McpServlet extends HttpServlet {
    */
   private String writeRpcError(HttpServletResponse response, String body, int code,
       String message) throws IOException {
+    return writeRpcError(response, body, code, message, HttpServletResponse.SC_OK, null);
+  }
+
+  /**
+   * Same as {@link #writeRpcError(HttpServletResponse, String, int, String)}, with the HTTP status
+   * and the error's {@code data}: the modern era answers its protocol errors with {@code 400} /
+   * {@code 404}, because a dual-era client reads the status and body to tell a modern server from a
+   * legacy one (ETP-5640).
+   *
+   * @param data the error {@code data}, or {@code null} for none
+   */
+  private String writeRpcError(HttpServletResponse response, String body, int code,
+      String message, int httpStatus, JSONObject data) throws IOException {
     try {
-      Object rpcId = new JSONObject(body).opt("id");
-      String rendered = buildJsonRpcError(rpcId, code, message).toString();
-      response.setStatus(HttpServletResponse.SC_OK);
+      Object rpcId = requestId(body);
+      JSONObject error = ProtocolErrorAdapters.buildJsonRpcError(rpcId, code, message);
+      if (data != null) {
+        error.getJSONObject("error").put("data", data);
+      }
+      String rendered = error.toString();
+      response.setStatus(httpStatus);
       response.getWriter().write(rendered);
       return rendered;
     } catch (Exception ex) {
       response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
       response.getWriter().write("{\"error\":\"Internal server error\"}");
       return null;
+    }
+  }
+
+  /**
+   * The JSON-RPC id of the request in {@code body}, or {@code null} when there is none to read —
+   * no body, or one that is not a parseable JSON object.
+   */
+  private static Object requestId(String body) {
+    if (body == null) {
+      return null;
+    }
+    try {
+      return BoundedJsonParser.parseObject(body).opt("id");
+    } catch (MalformedJsonException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Admit a request under its era (ETP-5640): refuse a malformed modern one, bind the modern
+   * telemetry of an accepted one, and run the legacy version check on a legacy one.
+   *
+   * <p>The modern telemetry is bound only once the request is accepted, so a refused request opens
+   * no derived session.</p>
+   *
+   * @return {@code false} when the request was refused and the {@code 400} already written
+   */
+  private boolean admit(HttpServletRequest request, HttpServletResponse response,
+      AuthIdentity identity, Object id, String method, JSONObject params,
+      McpRequestEra.Classification era) throws IOException, JSONException {
+    if (era.isModern() && refuseModern(response, id, method, params, era)) {
+      return false;
+    }
+    McpUsageTelemetry.bindModernCaller(identity.userId, identity.clientId, identity.roleId,
+        params, era);
+    // After binding, so the line carries the derived session and correlates with the calls.
+    reportServedWithout(method, params, era);
+    if (!era.isModern() && !INITIALIZE.equals(method)) {
+      // ETP-5639: validated, never refused — see McpProtocolVersion for the lenient policy.
+      McpProtocolVersion.forRequest(request.getHeader(McpProtocolVersion.HEADER),
+          McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey())
+              .getProtocolVersion(),
+          clientNameFor(params));
+    }
+    return true;
+  }
+
+  /**
+   * Answer a request the client got wrong, not the server: a missing resource or an unknown
+   * method. One WARN line, no stack trace, no telemetry row (only {@code tools/call} has a tool
+   * name). The modern era answers with the codes and statuses MCP 2026-07-28 gives them — a missing
+   * resource {@code -32602}, an unknown method {@code 404}; the legacy era keeps what it always
+   * answered ({@code -32603} and {@code 200}).
+   */
+  private void answerClientRefusal(HttpServletResponse response, String body, String method,
+      JSONObject params, McpRequestEra.Classification era, Exception refusal) throws IOException {
+    String client = clientNameFor(params);
+    if (refusal instanceof McpResourceNotFoundException) {
+      log.warn("MCP client read a missing resource: {} (client={}) session={}",
+          McpRequestEra.printable(refusal.getMessage()), client,
+          McpUsageTelemetry.sessionForLog());
+      writeRpcError(response, body,
+          era.isModern() ? McpRequestEra.INVALID_PARAMS : JSON_RPC_INTERNAL_ERROR,
+          refusal.getMessage());
+      return;
+    }
+    // Also server/discover while the modern era is switched off.
+    log.warn("MCP client called unsupported method '{}' (client={}) session={}",
+        McpRequestEra.printable(method), client, McpUsageTelemetry.sessionForLog());
+    writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, refusal.getMessage(),
+        era.isModern() ? HttpServletResponse.SC_NOT_FOUND : HttpServletResponse.SC_OK, null);
+  }
+
+  /**
+   * Refuse a malformed modern request. Runs before any derived session is bound, so a refused
+   * request never opens one.
+   *
+   * @return {@code true} when the request was refused and the {@code 400} already written
+   */
+  private boolean refuseModern(HttpServletResponse response, Object id, String method,
+      JSONObject params, McpRequestEra.Classification era) throws IOException, JSONException {
+    McpRequestEra.Refusal refusal = era.refusal();
+    if (refusal == null) {
+      return false;
+    }
+    String client = clientNameFor(params);
+    for (String issue : era.issues()) {
+      log.warn("MCP modern request refused without: {} (method={}, client={})", issue, method,
+          client);
+    }
+    log.warn("MCP modern request refused ({}): {} (method={}, client={}) session={}",
+        refusal.code(), refusal.message(), method, client, McpUsageTelemetry.sessionForLog());
+    JSONObject error = ProtocolErrorAdapters.buildJsonRpcError(id, refusal.code(),
+        refusal.message());
+    if (refusal.data() != null) {
+      error.getJSONObject("error").put("data", refusal.data());
+    }
+    response.setStatus(refusal.httpStatus());
+    response.getWriter().write(error.toString());
+    return true;
+  }
+
+  /** One WARN per piece a served modern request left out (lenient mode). */
+  private static void reportServedWithout(String method, JSONObject params,
+      McpRequestEra.Classification era) {
+    if (!era.isModern() || era.issues().isEmpty()) {
+      return;
+    }
+    String client = clientNameFor(params);
+    for (String issue : era.issues()) {
+      log.warn("MCP modern request served without: {} (method={}, client={}) session={}", issue,
+          method, client, McpUsageTelemetry.sessionForLog());
     }
   }
 
@@ -287,13 +439,14 @@ public class McpServlet extends HttpServlet {
     String fromSession =
         McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey()).getName();
     if (StringUtils.isNotBlank(fromSession)) {
-      return fromSession;
+      return McpRequestEra.printable(fromSession);
     }
-    JSONObject meta = params != null ? params.optJSONObject("_meta") : null;
+    JSONObject meta = params != null ? params.optJSONObject(McpModernResults.META) : null;
     JSONObject clientInfo = meta != null ? meta.optJSONObject(META_CLIENT_INFO) : null;
     String fromMeta = clientInfo != null ? StringUtils.trimToNull(clientInfo.optString("name"))
         : null;
-    return fromMeta != null ? fromMeta : "unknown";
+    // Self-reported and logged: never let it carry a line break into a log line.
+    return fromMeta != null ? McpRequestEra.printable(fromMeta) : UNKNOWN_CLIENT;
   }
 
   // ── Telemetry (Track B1) ────────────────────────────────────────────────
@@ -333,7 +486,7 @@ public class McpServlet extends HttpServlet {
       }
       JSONObject arguments = params != null ? params.optJSONObject("arguments") : null;
       String sessionKey = call.sessionKey();
-      McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientInfo(sessionKey);
+      McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientFor(sessionKey);
 
       boolean failed = forcedErrorCode != null || McpUsageTelemetry.isError(result);
       String errorCode = errorCodeToRecord(forcedErrorCode, failed, result);
@@ -499,21 +652,30 @@ public class McpServlet extends HttpServlet {
     }
 
     // Fallback: try JWT token
+    com.auth0.jwt.interfaces.DecodedJWT jwt;
     try {
-      com.auth0.jwt.interfaces.DecodedJWT jwt =
-          com.smf.securewebservices.utils.SecureWebServicesUtils.decodeToken(bearerToken);
-      return new AuthIdentity(
-          jwt.getClaim("user").asString(),
-          jwt.getClaim("role").asString(),
-          jwt.getClaim("client").asString(),
-          jwt.getClaim("organization").asString(),
-          LEGACY_JWT_FALLBACK_SCOPES);
+      jwt = com.smf.securewebservices.utils.SecureWebServicesUtils.decodeToken(bearerToken);
     } catch (Exception e) {
       log.warn("Both OAuth2 and JWT authentication failed for MCP request");
       sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
           "Invalid or expired token (OAuth2 and JWT both failed)");
       return null;
     }
+    AuthIdentity identity = new AuthIdentity(
+        jwt.getClaim("user").asString(),
+        jwt.getClaim("role").asString(),
+        jwt.getClaim("client").asString(),
+        jwt.getClaim("organization").asString(),
+        LEGACY_JWT_FALLBACK_SCOPES);
+    // ETP-5270 — the role claim is the role at login; refuse it once an admin has revoked it.
+    try {
+      sessionRoleReconciler.requireHeldRole(identity.userId, identity.roleId, identity.clientId);
+    } catch (SessionRoleRevokedException e) {
+      log.warn("Unauthorized MCP request: {}", e.getMessage());
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return null;
+    }
+    return identity;
   }
 
   /**
@@ -577,43 +739,44 @@ public class McpServlet extends HttpServlet {
           "Session has no environment selected");
       return null;
     }
+    // ETP-5270 — the same rebind EnvironmentRequestAuthenticator runs for every other surface
+    // (ETP-5395): a role an admin revoked since the session entered must not reach the tools.
+    // Rebinds `session` in place, so the identity below reads the role the user holds now.
+    try {
+      sessionRoleReconciler.reconcile(session);
+    } catch (SessionRoleRevokedException e) {
+      log.warn("Unauthorized MCP request: {}", e.getMessage());
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return null;
+    }
     return new AuthIdentity(session.getUserId(), session.getRoleId(), session.getCtxClientId(),
         session.getCtxOrgId(), LEGACY_JWT_FALLBACK_SCOPES);
   }
 
   /**
-   * Refuse an environment whose commercial access is cut (ETP-5642).
+   * ETP-5047 — refuses an MCP request into a tenant whose commercial access was cut off (demo
+   * trial expired, subscription grace elapsed), exactly as NEO does: HTTP 402 with the shared
+   * {@link EnvironmentAccessGuard} error body — a plain HTTP error, deliberately not a JSON-RPC
+   * error object, so an MCP client sees the same status NEO answers. Before this, MCP was the one
+   * tenant entry point that never asked, so an agent kept reading and writing a blocked tenant's
+   * data. Every credential scheme (OAuth2, legacy JWT, cookie session) reaches it with the
+   * EFFECTIVE tenant ({@link EffectiveClientResolver#effectiveClientId}): a wildcard token's
+   * {@code "0"} is already resolved to its role's client, since asking about System would allow.
+   * The guard owns the decision and the kill switch; it runs as system because MCP has no
+   * {@code OBContext} of its own at this point.
    *
-   * <p>NEO, Copilot and the account endpoints answer 402 once a demo trial expires or a
-   * subscription's grace elapses, but this servlet resolves its identity on its own and never
-   * asked: an MCP client kept reading and writing the blocked tenant through every scheme. The
-   * check runs once, after {@link #authenticate} and before any method dispatch, so it covers the
-   * cookie session, OAuth2 and legacy JWT alike — and {@code initialize}/{@code tools/list} too:
-   * a tool catalog for an environment that cannot be used is of no use to the client.
-   *
-   * <p>The answer is an HTTP 402 rather than an in-band tool error, with NEO's exact wording, so a
-   * client stops instead of retrying and the SPA recognizes the same decision. The decision is
-   * evaluated on the effective client — a credential carrying the System wildcard runs under its
-   * role's client — so the check sees exactly the tenant the call would touch. A null decision is
-   * a tenant that predates lifecycle metadata: the controlled legacy transition, not a refusal,
-   * exactly as in {@code EnvironmentRequestAuthenticator}.
-   *
-   * @return true when the request was refused and the response already written
+   * @return true when the request may proceed
    */
-  private boolean refuseCommerciallyBlocked(HttpServletRequest request,
-      HttpServletResponse response, AuthIdentity identity) throws IOException {
-    String clientId = McpSessionManager.resolveEffectiveClientId(identity.clientId,
-        identity.roleId);
-    EnvironmentAccessPolicy.Decision decision =
-        lifecycleService.evaluateAccess(clientId, true, Instant.now());
-    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
-      return false;
+  private boolean isEnvironmentAccessAllowed(HttpServletResponse response, AuthIdentity identity)
+      throws IOException {
+    EnvironmentAccessGuard.Denial denial =
+        environmentAccessGuard.checkAsSystem(identity.clientId, "mcp");
+    if (denial == null) {
+      return true;
     }
-    log.warn("Refused MCP request: environment {} is commercially blocked ({})", clientId,
-        decision);
-    sendJsonError(request, response, SC_PAYMENT_REQUIRED,
-        EnvironmentRequestAuthenticator.MSG_ACCESS_PREFIX + decision.name());
-    return true;
+    // The guard already logged the refusal (ETP-5047: one line, whichever surface refused).
+    denial.writeTo(response);
+    return false;
   }
 
   // ── JSON-RPC method dispatch ────────────────────────────────────────────
@@ -622,15 +785,25 @@ public class McpServlet extends HttpServlet {
    * Route a JSON-RPC method to its handler.
    */
   private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params,
-      HttpServletResponse response) throws Exception {
+      HttpServletResponse response, boolean modern) throws Exception {
+    if (modern && PING.equals(method)) {
+      // Removed by MCP 2026-07-28: a modern client gets the modern "method not found".
+      throw new McpMethodNotFoundException(METHOD_NOT_FOUND_PREFIX + method);
+    }
     switch (method) {
       case INITIALIZE:
         return handleInitialize(params, response);
       case "initialized":
       case "notifications/initialized":
         return null;
-      case "ping":
+      case PING:
         return new JSONObject();
+      case McpRequestEra.SERVER_DISCOVER:
+        if (!modern) {
+          // Only reachable with the modern era switched off: answer exactly as before it existed.
+          throw new McpMethodNotFoundException(METHOD_NOT_FOUND_PREFIX + method);
+        }
+        return McpModernResults.discover();
       case "tools/list":
         return handleToolsList(identity);
       case TOOLS_CALL:
@@ -640,7 +813,7 @@ public class McpServlet extends HttpServlet {
       case "resources/read":
         return handleResourcesRead(identity, params);
       default:
-        throw new McpMethodNotFoundException("Method not found: " + method);
+        throw new McpMethodNotFoundException(METHOD_NOT_FOUND_PREFIX + method);
     }
   }
 
@@ -670,32 +843,8 @@ public class McpServlet extends HttpServlet {
 
     JSONObject result = new JSONObject();
     result.put("protocolVersion", negotiated);
-
-    JSONObject capabilities = new JSONObject();
-
-    JSONObject toolsCap = new JSONObject();
-    toolsCap.put("listChanged", false);
-    capabilities.put("tools", toolsCap);
-
-    JSONObject resourcesCap = new JSONObject();
-    resourcesCap.put("listChanged", false);
-    capabilities.put("resources", resourcesCap);
-
-    result.put("capabilities", capabilities);
-
-    JSONObject serverInfo = new JSONObject();
-    serverInfo.put("name", SERVER_NAME);
-    serverInfo.put("version", SERVER_VERSION);
-    serverInfo.put("title", SERVER_TITLE);
-    serverInfo.put("websiteUrl", SERVER_WEBSITE_URL);
-    serverInfo.put("description", SERVER_DESCRIPTION);
-    JSONObject icon = new JSONObject();
-    icon.put("src", SERVER_ICON_URL);
-    icon.put("mimeType", SERVER_ICON_MIME_TYPE);
-    icon.put("sizes", new JSONArray().put(SERVER_ICON_SIZES));
-    serverInfo.put("icons", new JSONArray().put(icon));
-    result.put("serverInfo", serverInfo);
-
+    result.put("capabilities", McpModernResults.capabilities());
+    result.put("serverInfo", McpModernResults.serverInfo());
     return result;
   }
 
@@ -817,7 +966,20 @@ public class McpServlet extends HttpServlet {
           OBContext.setAdminMode(true);
           try {
             McpResourceProvider provider = new McpResourceProvider();
-            JSONObject resourceContent = provider.readResource(uri);
+            JSONObject resourceContent;
+            try {
+              resourceContent = provider.readResource(uri);
+            } catch (org.openbravo.base.exception.OBSecurityException e) {
+              // An unknown spec and a spec the role cannot see: one answer, so the error does not
+              // reveal which specs exist (ETP-5640).
+              throw new McpResourceNotFoundException(uri, e);
+            } catch (McpRoutingException e) {
+              // An unknown entity in etendo://specs/{spec}/{entity}: missing, not a server failure.
+              if (McpConstants.ERROR_NOT_FOUND.equals(e.getErrorCode())) {
+                throw new McpResourceNotFoundException(uri, e);
+              }
+              throw e;
+            }
 
             JSONObject result = new JSONObject();
             JSONArray contents = new JSONArray();
@@ -833,12 +995,6 @@ public class McpServlet extends HttpServlet {
             OBContext.restorePreviousMode();
           }
         });
-  }
-
-  // ── JSON-RPC error builder ──────────────────────────────────────────────
-
-  private JSONObject buildJsonRpcError(Object id, int code, String message) throws JSONException {
-    return ProtocolErrorAdapters.buildJsonRpcError(id, code, message);
   }
 
   // ── Utility methods ─────────────────────────────────────────────────────
@@ -928,6 +1084,12 @@ public class McpServlet extends HttpServlet {
       this.clientId = clientId;
       this.orgId = orgId;
       this.scopes = scopes;
+    }
+
+    /** The same identity acting on {@code effectiveClientId}; {@code this} when it is unchanged. */
+    AuthIdentity withClientId(String effectiveClientId) {
+      return StringUtils.equals(clientId, effectiveClientId) ? this
+          : new AuthIdentity(userId, roleId, effectiveClientId, orgId, scopes);
     }
   }
 

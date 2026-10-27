@@ -23,6 +23,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -37,28 +39,47 @@ import java.io.ByteArrayInputStream;
 import java.io.StringReader;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 import javax.servlet.ReadListener;
 import javax.servlet.ServletInputStream;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.businessUtility.Preferences;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 
 /**
  * Unit tests for attachment and built-in endpoint routing in
  * {@link NeoBuiltInEndpointHandler}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoBuiltInEndpointHandler
  */
 public class NeoBuiltInEndpointHandlerTest {
 
@@ -191,6 +212,20 @@ public class NeoBuiltInEndpointHandlerTest {
     assertNull(description);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
         contains("Invalid JSON body"));
+  }
+
+  /**
+   * Verifies that a body which breaks jettison itself (StackOverflowError / OutOfMemoryError,
+   * never seen by a catch (Exception)) is still a 400 and never reaches the parser.
+   */
+  @Test
+  public void readDescriptionFromBodySendsBadRequestForParserBreakingJson() throws Exception {
+    for (String body : (Iterable<String>) BoundedJsonParserTest.stackBreakingBodies()::iterator) {
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      assertNull(readDescription(body, response));
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
+          contains("Invalid JSON body"));
+    }
   }
 
   /**
@@ -409,6 +444,56 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
+   * A preset body the client sent malformed is a 400 logged at WARN — not an ERROR with a stack
+   * trace — and nothing is persisted or flushed. Runs the real {@link NeoFiltersService}.
+   */
+  @Test
+  public void handleFiltersPutMalformedBodyIsBadRequestLoggedAtWarn() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    OBDal dal = mock(OBDal.class);
+    List<Level> levels = new ArrayList<>();
+    Logger serviceLogger = (Logger) LogManager.getLogger(NeoFiltersService.class);
+    AbstractAppender capture = new AbstractAppender("capture-filters-preset", null, null, true,
+        org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY) {
+      @Override
+      public void append(LogEvent event) {
+        levels.add(event.getLevel());
+      }
+    };
+    capture.start();
+    serviceLogger.addAppender(capture);
+
+    try (MockedStatic<NeoRequestBodyParser> bodyParserMock = Mockito.mockStatic(NeoRequestBodyParser.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<Preferences> prefMock = Mockito.mockStatic(Preferences.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+
+      bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn("{\"x\":[");
+      ctxMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+      prefMock.when(() -> Preferences.getPreferenceValue(anyString(), anyBoolean(), (Client) any(),
+          (Organization) any(), (User) any(), (Role) any(), (Window) any())).thenReturn("{}");
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("filters", "sales-order", "my-preset"),
+          "PUT", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+      verify(servlet, never()).writeResponse(any(), any());
+      verify(dal, never()).flush();
+      prefMock.verify(() -> Preferences.setPreferenceValue(anyString(), anyString(), anyBoolean(),
+          (Client) any(), (Organization) any(), (User) any(), (Role) any(), (Window) any(),
+          (VariablesSecureApp) any()), never());
+    } finally {
+      serviceLogger.removeAppender(capture);
+      capture.stop();
+    }
+
+    assertEquals(List.of(Level.WARN), levels);
+  }
+
+  /**
    * Verifies DELETE mutation flow for filter presets.
    */
   @Test
@@ -462,7 +547,7 @@ public class NeoBuiltInEndpointHandlerTest {
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "GET")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "GET")).thenReturn(true);
       catalogMock.when(NeoFiscalModelsCatalogService::getActiveModels).thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
@@ -486,7 +571,7 @@ public class NeoBuiltInEndpointHandlerTest {
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "GET")).thenReturn(false);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "GET")).thenReturn(false);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
           "GET", request, response);
@@ -515,7 +600,7 @@ public class NeoBuiltInEndpointHandlerTest {
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
 
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "PUT")).thenReturn(true);
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
           .thenReturn("{\"303\":true,\"349\":false}");
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -543,7 +628,7 @@ public class NeoBuiltInEndpointHandlerTest {
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(false);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "PUT")).thenReturn(false);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
           "PUT", request, response);
@@ -570,7 +655,7 @@ public class NeoBuiltInEndpointHandlerTest {
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
 
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "PUT")).thenReturn(true);
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn("not-json");
       catalogMock.when(() -> NeoFiscalModelsCatalogService.saveActiveModels("not-json"))
           .thenThrow(new IllegalArgumentException("Invalid JSON body"));
@@ -594,7 +679,7 @@ public class NeoBuiltInEndpointHandlerTest {
 
     try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "DELETE")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "DELETE")).thenReturn(true);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
           "DELETE", request, response);
@@ -838,14 +923,14 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletResponse response = mock(HttpServletResponse.class);
     when(request.getPathInfo()).thenReturn("/attachments/file/ATT123");
 
-    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class);
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
              NeoAttachmentAuthorizer.class)) {
       handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "GET", request, response);
 
-      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleDownload("ATT123", response));
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownload("ATT123", response));
       authorizerMock.verifyNoInteractions();
     }
   }
@@ -868,16 +953,21 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
-   * Verifies ZIP download delegation for attachments record endpoint.
+   * Verifies ZIP download delegation for attachments record endpoint: with no {@code ids}
+   * query parameter the route must still ask for the whole record, which it does by
+   * passing {@code null} through to the subset-aware overload (ETP-5526). Asserting the
+   * {@code null} explicitly is what keeps "no selection means everything" a pinned
+   * contract rather than an accident of argument order.
    */
   @Test
   public void handleAttachmentsZipGetDelegatesToDownloadAll() throws Exception {
     HttpServletRequest request = mock(HttpServletRequest.class);
     HttpServletResponse response = mock(HttpServletResponse.class);
     when(request.getPathInfo()).thenReturn("/attachments/c_order/100/zip");
+    when(request.getParameter("ids")).thenReturn((String) null);
 
-    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class);
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
              NeoAttachmentAuthorizer.class)) {
@@ -885,7 +975,35 @@ public class NeoBuiltInEndpointHandlerTest {
           "GET", request, response);
 
       assertTrue(handled);
-      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleDownloadAll("c_order", "100", response));
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownloadAll(
+          "c_order", "100", (String) null, response));
+    }
+  }
+
+  /**
+   * ETP-5526 — the other half of the same seam: when the Attachments tab's selection bar
+   * sends {@code ?ids=...}, the route hands the raw parameter to the helper verbatim. It
+   * must not parse, split, trim or validate it here — the ownership check that makes the
+   * subset safe lives in the helper, and a dispatcher that pre-digested the parameter
+   * could quietly bypass it.
+   */
+  @Test
+  public void handleAttachmentsZipGetPassesTheIdsParameterThrough() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/100/zip");
+    when(request.getParameter("ids")).thenReturn("ATT-A,ATT-B");
+
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownloadAll(
+          "c_order", "100", "ATT-A,ATT-B", response));
     }
   }
 
@@ -1012,8 +1130,8 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletResponse response = mock(HttpServletResponse.class);
     when(request.getPathInfo()).thenReturn("/attachments/file/ATT123");
 
-    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class);
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
              NeoAttachmentAuthorizer.class)) {
@@ -1021,7 +1139,7 @@ public class NeoBuiltInEndpointHandlerTest {
           "GET", request, response);
 
       assertTrue(handled);
-      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleDownload("ATT123", response));
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownload("ATT123", response));
     }
   }
 

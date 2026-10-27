@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -38,6 +39,12 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.client.kernel.RequestContext;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.gl.GLJournal;
 
 /**
  * Unit tests for {@link GlJournalHeaderHandler}.
@@ -50,6 +57,8 @@ import org.openbravo.client.kernel.RequestContext;
  *   <li>Early-exit in {@code runDocumentAction()} when the record id is absent (400).</li>
  *   <li>ETP-5611: {@code inpdocaction} set on the request for CO and RE; date mirror; schema
  *       currency on POST and DEFAULTS.</li>
+ *   <li>ETP-5793: another tenant's journal (PATCH date mirror) and accounting schema (currency) are
+ *       treated as unknown.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GlJournalHeaderHandler
@@ -100,30 +109,146 @@ public class GlJournalHeaderHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
+  // ETP-5669: the process defaults a missing inpdocaction to CO, so the document-action button
+  // must never fall through to the generic executor with no (or another) docAction.
+
   @Test
-  public void handleIgnoresActionWithNullBody() {
-    // ACTION + correct fieldName but body is null → isCompleteAction returns false.
+  public void documentActionWithNullBodyIsRefused() {
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
         .fieldName("documentAction")
         .httpMethod("POST")
         .requestBody(null)
         .build();
-    assertNull(handler.handle(ctx));
+    assertEquals(422, handler.handle(ctx).getHttpStatus());
   }
 
   @Test
-  public void handleIgnoresActionWhenDocActionIsNotCO() throws Exception {
-    // ACTION + documentAction field, body says "PO" (post) not "CO" → not a complete-action.
+  public void documentActionWithBlankDocActionIsRefused() throws Exception {
     JSONObject body = new JSONObject();
-    body.put("documentAction", "PO");
-    NeoContext ctx = NeoContext.builder()
+    body.put("docAction", "");
+    assertEquals(422, handler.handle(actionContext("documentAction", body)).getHttpStatus());
+  }
+
+  @Test
+  public void documentActionWithAnotherDocActionIsRefused() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("documentAction", "VO");
+    NeoResponse response = handler.handle(actionContext("documentAction", body));
+    assertEquals(422, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("docAction 'VO' is not allowed"));
+  }
+
+  @Test
+  public void dbColumnSpellingIsRefusedWithoutDocAction() {
+    // REST /action/DocAction with no docAction used to reach the generic executor.
+    assertEquals(422, handler.handle(actionContext("DocAction", new JSONObject())).getHttpStatus());
+  }
+
+  @Test
+  public void dbColumnSpellingIsHandledLikeTheFieldName() throws Exception {
+    RequestContext rc = requestContextWithRequest();
+    JSONObject body = new JSONObject();
+    body.put("docAction", "RE");
+    try (MockedStatic<RequestContext> rcMock = mockStatic(RequestContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      rcMock.when(RequestContext::get).thenReturn(rc);
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenThrow(new RuntimeException("stop before the process runs"));
+      NeoContext ctx = NeoContext.builder()
+          .endpointType(NeoEndpointType.ACTION)
+          .fieldName("DocAction")
+          .httpMethod("POST")
+          .requestBody(body)
+          .recordId("GL-JOURNAL-001")
+          .build();
+      handler.handle(ctx);
+    }
+    verify(rc).setRequestParameter("inpdocaction", "RE");
+  }
+
+  // ETP-5669: the MCP action surface — documentAction (CO/RE only), post, unpost.
+
+  @Test
+  public void declaresDocumentActionPostAndUnpost() {
+    assertEquals(java.util.List.of("documentAction", "post", "unpost"),
+        new java.util.ArrayList<>(handler.actionContracts().keySet()));
+    assertTrue(handler.actionContracts().get("post").getDescription().contains("Completing does not post"));
+  }
+
+  @Test
+  public void documentActionContractAcceptsOnlyCoAndRe() throws Exception {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        handler.actionContracts();
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "documentAction", new JSONObject().put("docAction", "RE")));
+    assertEquals(422, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "documentAction", new JSONObject().put("docAction", "VO")).getHttpStatus());
+    assertEquals(422, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "documentAction", new JSONObject()).getHttpStatus());
+  }
+
+  // ETP-5669: CO refuses a journal whose stored period does not contain its accounting date.
+
+  private static org.openbravo.model.financialmgmt.gl.GLJournal journalIn(String periodName,
+      String start, String end, String dateAcct) throws Exception {
+    java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd");
+    org.openbravo.model.financialmgmt.calendar.Period period =
+        mock(org.openbravo.model.financialmgmt.calendar.Period.class);
+    when(period.getName()).thenReturn(periodName);
+    when(period.getStartingDate()).thenReturn(iso.parse(start));
+    when(period.getEndingDate()).thenReturn(iso.parse(end));
+    org.openbravo.model.financialmgmt.gl.GLJournal journal =
+        mock(org.openbravo.model.financialmgmt.gl.GLJournal.class);
+    when(journal.getPeriod()).thenReturn(period);
+    when(journal.getAccountingDate()).thenReturn(iso.parse(dateAcct));
+    return journal;
+  }
+
+  @Test
+  public void periodMismatchNamesThePeriodAndTheDateUnderItsOwnKey() throws Exception {
+    NeoResponse response = GlJournalHeaderHandler.periodMismatch(
+        journalIn("Apr-26", "2026-04-01", "2026-04-30", "2026-06-20"));
+    assertEquals(422, response.getHttpStatus());
+    JSONObject body = response.getBody();
+    assertTrue(body.getString("message").contains("Apr-26"));
+    assertTrue(body.getString("message").contains("2026-06-20"));
+    assertEquals("[\"ETGO_GLJournalPeriodMismatch\"]", body.getJSONArray("messageKeys").toString());
+    assertEquals("Apr-26", body.getJSONObject("messageParams").getString("period"));
+    // Not re-tagged as a "period not open" refusal (that one sends the user to the calendar).
+    NeoResponse.identifyPeriodRefusal(response);
+    assertEquals("[\"ETGO_GLJournalPeriodMismatch\"]", body.getJSONArray("messageKeys").toString());
+  }
+
+  @Test
+  public void periodMismatchIsNullWhenThePeriodContainsTheDate() throws Exception {
+    assertNull(GlJournalHeaderHandler.periodMismatch(
+        journalIn("Jun-26", "2026-06-01", "2026-06-30", "2026-06-30")));
+    assertNull(GlJournalHeaderHandler.periodMismatch(null));
+  }
+
+  @Test
+  public void completeWithAMismatchedPeriodNeverRunsTheProcess() throws Exception {
+    GlJournalHeaderHandler spyHandler = spy(new GlJournalHeaderHandler());
+    doReturn(journalIn("Apr-26", "2026-04-01", "2026-04-30", "2026-06-20"))
+        .when(spyHandler).loadJournal("GL-JOURNAL-001");
+    RequestContext rc = requestContextWithRequest();
+    try (MockedStatic<RequestContext> rcMock = mockStatic(RequestContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      rcMock.when(RequestContext::get).thenReturn(rc);
+      assertEquals(422, spyHandler.handle(docActionContext("CO")).getHttpStatus());
+      neoMock.verify(() -> NeoDefaultsService.buildVariablesSecureApp(any()), never());
+    }
+  }
+
+  private static NeoContext actionContext(String fieldName, JSONObject body) {
+    return NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
-        .fieldName("documentAction")
+        .fieldName(fieldName)
         .httpMethod("POST")
         .requestBody(body)
+        .recordId("GL-JOURNAL-001")
         .build();
-    assertNull(handler.handle(ctx));
   }
 
   // ─── completeJournal(): missing record id → 400 ──────────────────────────
@@ -205,23 +330,15 @@ public class GlJournalHeaderHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
-  // ─── isCompleteAction(): fieldValues present with non-CO docAction ─────────
+  // ─── resolveDocAction(): fieldValues present with non-CO/RE docAction ──────
 
   @Test
-  public void handleActionWithFieldValuesDocActionNotCO() throws Exception {
-    // isCompleteAction() ternary true-branch: fieldValues present but docAction ≠ CO → false.
-    // httpMethod=GET so handle() short-circuits before any DB call.
+  public void handleActionWithFieldValuesDocActionNotCoOrReIsRefused() throws Exception {
     JSONObject fieldValues = new JSONObject();
     fieldValues.put("documentAction", "VD");
     JSONObject body = new JSONObject();
     body.put("fieldValues", fieldValues);
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName("documentAction")
-        .httpMethod("GET")
-        .requestBody(body)
-        .build();
-    assertNull(handler.handle(ctx));
+    assertEquals(422, handler.handle(actionContext("documentAction", body)).getHttpStatus());
   }
 
   // ─── completeJournal(): exception path → 500 ─────────────────────────────
@@ -462,6 +579,90 @@ public class GlJournalHeaderHandlerTest {
     body.put("accountingDate", "2026-09-30");
     h.handle(patchContext("GL-1", body));
     verify(j, never()).setDocumentDate(any());
+  }
+
+  // ETP-5793: the real loadJournal / resolveSchemaCurrency, not the seams, decide the tenant.
+
+  private static Client client(String id) {
+    Client c = mock(Client.class);
+    when(c.getId()).thenReturn(id);
+    return c;
+  }
+
+  /** An OBContext whose role reads client {@code OWN} only (plus the system client). */
+  private static OBContext ownTenantContext() {
+    OBContext ctx = mock(OBContext.class);
+    when(ctx.getReadableClients()).thenReturn(new String[] { "OWN", "0" });
+    when(ctx.getReadableOrganizations()).thenReturn(new String[] { "0" });
+    return ctx;
+  }
+
+  private static GLJournal draftJournalOf(String clientId) {
+    GLJournal j = journal(false);
+    Client c = client(clientId);
+    when(j.getClient()).thenReturn(c);
+    return j;
+  }
+
+  @Test
+  public void patchNeverTouchesAnotherTenantsJournal() throws Exception {
+    GLJournal foreign = draftJournalOf("OTHER");
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(GLJournal.class, "GL-F")).thenReturn(foreign);
+    OBContext ctx = ownTenantContext();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      JSONObject body = new JSONObject();
+      body.put("accountingDate", "2026-09-30");
+      assertNull(new GlJournalHeaderHandler().handle(patchContext("GL-F", body)));
+    }
+    verify(foreign, never()).setDocumentDate(any());
+  }
+
+  @Test
+  public void patchStillWritesTheOwnTenantsJournal() throws Exception {
+    GLJournal own = draftJournalOf("OWN");
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(GLJournal.class, "GL-1")).thenReturn(own);
+    OBContext ctx = ownTenantContext();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      JSONObject body = new JSONObject();
+      body.put("accountingDate", "2026-09-30");
+      new GlJournalHeaderHandler().handle(patchContext("GL-1", body));
+    }
+    verify(own).setDocumentDate(new java.text.SimpleDateFormat("yyyy-MM-dd").parse("2026-09-30"));
+  }
+
+  @Test
+  public void anotherTenantsSchemaYieldsNoCurrency() {
+    Currency eur = mock(Currency.class);
+    when(eur.getId()).thenReturn("EUR-ID");
+    when(eur.getISOCode()).thenReturn("EUR");
+    AcctSchema own = mock(AcctSchema.class);
+    Client ownClient = client("OWN");
+    when(own.getClient()).thenReturn(ownClient);
+    when(own.getCurrency()).thenReturn(eur);
+    AcctSchema foreign = mock(AcctSchema.class);
+    Client otherClient = client("OTHER");
+    when(foreign.getClient()).thenReturn(otherClient);
+    when(foreign.getCurrency()).thenReturn(eur);
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(AcctSchema.class, "SCHEMA-OWN")).thenReturn(own);
+    when(dal.get(AcctSchema.class, "SCHEMA-FOREIGN")).thenReturn(foreign);
+    OBContext ctx = ownTenantContext();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      GlJournalHeaderHandler h = new GlJournalHeaderHandler();
+      assertEquals(0, h.resolveSchemaCurrency("SCHEMA-FOREIGN").length);
+      assertEquals("EUR-ID", h.resolveSchemaCurrency("SCHEMA-OWN")[0]);
+    }
   }
 
   @Test

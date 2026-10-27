@@ -45,9 +45,12 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -63,6 +66,7 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * <b>what context each selector call is given</b>.
  *
  * @covers com.etendoerp.go.mcp.McpFkResolver
+ * @covers com.etendoerp.go.schemaforge.NeoReferenceOwnership
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -129,6 +133,7 @@ class McpFkResolverTest {
     private static final String KEY = "currency";
     private static final String UUID_ID = "95E2A8B50A254B2AAE6774B8C2F28120";
     private static final String LEGACY_ID = "102";
+    private static final String OTHER_ID = "A2A2A8B50A254B2AAE6774B8C2F28120";
     private static final String TARGET_ENTITY = "Currency";
 
     private Entity dalEntity;
@@ -207,6 +212,44 @@ class McpFkResolverTest {
         // Untouched: it was already the id, which is exactly what etendo_defaults hands back.
         assertEquals(LEGACY_ID, body.getString(KEY));
         selector.verifyNoInteractions();
+      }
+    }
+
+    /**
+     * ETP-5785: the id probe only counts the caller's own (or System) rows. A legacy id of another
+     * tenant used to report "exists" and skip the name path, while a missing id reached it and
+     * answered not_found — an existence oracle. Both now end in the same not_found.
+     */
+    @Test
+    @DisplayName("a legacy id of another tenant is answered exactly like a missing one")
+    void foreignLegacyIdIsIndistinguishableFromAMissingOne() throws Exception {
+      String foreignId = "201";
+      String missingId = "202";
+      FIN_FinancialAccount foreignRow = mock(FIN_FinancialAccount.class);
+      Client otherClient = mock(Client.class);
+      when(otherClient.getId()).thenReturn("client-other");
+      when(foreignRow.getClient()).thenReturn(otherClient);
+      when(obDalInstance.<BaseOBObject>get(TARGET_ENTITY, foreignId)).thenReturn(foreignRow);
+      OBContext context = mock(OBContext.class);
+      when(context.getReadableClients()).thenReturn(new String[] {"client-own", "0"});
+      Column column = mock(Column.class);
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        obContext.when(OBContext::getOBContext).thenReturn(context);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
+            anyInt(), anyInt(), any())).thenReturn(selectorHits());
+
+        JSONObject foreign = McpFkResolver.resolveFkNames(bodyWith(foreignId), dalEntity, adTab,
+            Map.of(), log);
+        JSONObject missing = McpFkResolver.resolveFkNames(bodyWith(missingId), dalEntity, adTab,
+            Map.of(), log);
+
+        assertNotNull(foreign);
+        assertEquals(missing.toString(), foreign.toString().replace(foreignId, missingId));
       }
     }
 
@@ -347,6 +390,78 @@ class McpFkResolverTest {
         JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
         assertEquals(McpConstants.ERROR_AMBIGUOUS_FK, error.getString(McpConstants.KEY_ERROR));
         assertTrue(error.getString(McpConstants.KEY_DETAIL).contains("id or its exact label"));
+      }
+    }
+
+    /**
+     * ETP-5703 repro: a custom-HQL selector (the product selector) returns one row per joined child,
+     * so a single product came back twice and was reported ambiguous against itself.
+     */
+    @Test
+    @DisplayName("one record returned as several rows resolves to it instead of ambiguous_fk")
+    void duplicateRowsOfOneRecordResolve() throws Exception {
+      JSONObject body = bodyWith("Agua");
+      Column column = mock(Column.class);
+      NeoResponse twoRowsOneRecord = labelledHits(UUID_ID, "Agua", UUID_ID, "Agua");
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("Agua"),
+            anyInt(), anyInt(), any())).thenReturn(twoRowsOneRecord);
+
+        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertEquals(UUID_ID, body.getString(KEY));
+      }
+    }
+
+    /**
+     * ETP-5703: "agua" against "Agua" and "Agua con gas" names one record exactly (ignoring case),
+     * so the AMBIGUOUS outcome resolves to it instead of answering ambiguous_fk.
+     */
+    @Test
+    @DisplayName("a case-insensitive exact label among several hits resolves to that record")
+    void caseInsensitiveExactLabelResolvesAmbiguousHits() throws Exception {
+      JSONObject body = bodyWith("agua");
+      Column column = mock(Column.class);
+      NeoResponse hits = labelledHits(UUID_ID, "Agua", OTHER_ID, "Agua con gas");
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("agua"),
+            anyInt(), anyInt(), any())).thenReturn(hits);
+
+        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertEquals(UUID_ID, body.getString(KEY));
+      }
+    }
+
+    /**
+     * The case-insensitive preference only picks a record when exactly one DISTINCT record is shown
+     * by that name, and only through its display keys (label, _identifier, searchKey, value) —
+     * another string column that happens to equal the value never decides.
+     */
+    @Test
+    @DisplayName("ignore-case label match: distinct records sharing it stay ambiguous; display keys only")
+    void ignoreCaseLabelMatchNeedsOneRecordAndADisplayKey() throws Exception {
+      JSONArray twoRecordsOneLabel = new JSONArray()
+          .put(new JSONObject().put("id", UUID_ID).put("label", "Agua"))
+          .put(new JSONObject().put("id", OTHER_ID).put("label", "AGUA"));
+      JSONArray onlyInOtherColumn = new JSONArray()
+          .put(new JSONObject().put("id", UUID_ID).put("label", "Agua mineral")
+              .put("description", "agua"))
+          .put(new JSONObject().put("id", OTHER_ID).put("label", "Agua con gas"));
+
+      assertNull(McpFkResolver.uniqueLabelMatchIgnoreCase(twoRecordsOneLabel, "agua"));
+      assertNull(McpFkResolver.uniqueLabelMatchIgnoreCase(onlyInOtherColumn, "agua"));
+      for (String displayKey : new String[] {"_identifier", "searchKey", "value"}) {
+        JSONArray items = new JSONArray()
+            .put(new JSONObject().put("id", UUID_ID).put(displayKey, "AGUA"))
+            .put(new JSONObject().put("id", OTHER_ID).put(displayKey, "Agua con gas"));
+        assertEquals(UUID_ID, McpFkResolver.uniqueLabelMatchIgnoreCase(items, "agua"), displayKey);
       }
     }
 

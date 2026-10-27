@@ -190,17 +190,37 @@ class TransactionalAuthEmailSender {
   }
 
   boolean sendEnvironmentReady(Account account, String clientId, String language) {
+    return sendEnvironmentReady(account, clientId, language,
+        EtendoGoAuthLinkBuilder.dashboardLink(), clientId);
+  }
+
+  /**
+   * ETP-5847: the same ready mail with a given link, the one-time login link of an account the
+   * signup API created, in place of the dashboard (which would ask a passwordless account for a
+   * password it does not have).
+   *
+   * <p>Each link is a mail of its own. Keyed on the client alone, as the dashboard mail is, a
+   * second link would be answered {@code DUPLICATE} and never sent, while it had already replaced
+   * the link in the inbox: the user would only ever have a dead link.
+   */
+  boolean sendEnvironmentReady(Account account, String clientId, String language, String link) {
+    String recordId = link == null ? clientId
+        : clientId + ":" + AccountRegistrationService.hashAuthToken(link);
+    return sendEnvironmentReady(account, clientId, language, link, recordId);
+  }
+
+  private boolean sendEnvironmentReady(Account account, String clientId, String language,
+      String link, String recordId) {
     if (account == null) {
       return false;
     }
     try {
       JSONObject body = baseCommand(account, clientId);
       addLanguageField(body, language);
-      String dashboardLink = EtendoGoAuthLinkBuilder.dashboardLink();
-      if (dashboardLink != null) {
-        body.put(EmailContractCommandSupport.FIELD_LINK, dashboardLink);
+      if (link != null) {
+        body.put(EmailContractCommandSupport.FIELD_LINK, link);
       }
-      body.put(EmailContractCommandSupport.FIELD_RECORD_ID, clientId);
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID, recordId);
       return sendBestEffort(CONTRACT_ENVIRONMENT_READY, body);
     } catch (JSONException e) {
       log.warn("Could not build environment-ready email command", e);
@@ -312,11 +332,11 @@ class TransactionalAuthEmailSender {
   /**
    * Notifies that a way of signing in was removed from an account.
    *
-   * <p>ETP-5115. Deliberately does not name which one. The copy is one catalog entry and naming the
-   * method would mean interpolating it, which this contract shape does not carry — and the value of
-   * the notice does not depend on it: what the owner needs to know is that the ways into their
-   * account changed without them, and the remedy is the same either way. Naming it would be an
-   * improvement, not a prerequisite.
+   * <p>ETP-5115. Deliberately does not name which one. The copy is one message catalog entry and
+   * naming the method would mean interpolating it, which this contract shape does not carry — and
+   * the value of the notice does not depend on it: what the owner needs to know is that the ways
+   * into their account changed without them, and the remedy is the same either way. Naming it
+   * would be an improvement, not a prerequisite.
    *
    * @param account the account a method was removed from
    * @return whether the email was accepted for delivery

@@ -27,6 +27,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import javax.servlet.ServletException;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -55,10 +57,12 @@ import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.CallProcess;
 import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.service.db.DalBaseProcess;
+import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Service for executing AD_Process definitions via the Neo headless API.
@@ -79,6 +83,7 @@ public class NeoProcessService {
   private static final Logger log = LogManager.getLogger(NeoProcessService.class);
 
   /** UIPattern value for OBUIAPP (Standard) processes. */
+  private static final String PROCESS_NAME_PREFIX = "Process ";
   private static final String UI_PATTERN_STANDARD = "S";
 
   public static final String MESSAGE = "message";
@@ -113,25 +118,25 @@ public class NeoProcessService {
   }
 
   /**
-   * Resolve a human-readable failure message from an exception caught around a
-   * reflective process invocation.
+   * ETP-5782: the answer for a process that threw rather than reporting its failure. Classified
+   * like every other NEO failure — a trigger refusal or an AD-message-keyed refusal raised inside
+   * the process is a 422 with its translated message; a fault stays a 500 whose message is
+   * sanitized (it used to forward the raw message, SQL included) — and rolled back, so nothing the
+   * process wrote before throwing is committed by the request.
    *
-   * <p>Reflection ({@link Method#invoke}) wraps any exception thrown by the invoked
-   * business logic in an {@link InvocationTargetException} whose own
-   * {@code getMessage()} always returns {@code null} -- the real message lives on
-   * {@code getCause()}. Without this unwrap, a bare exception with no message
-   * (e.g. a {@link NullPointerException}) surfaces to the caller as the literal,
-   * undiagnosable string "Process execution failed: null".
+   * <p>Reflection ({@link Method#invoke}) wraps whatever the process threw in an
+   * {@link InvocationTargetException} whose own message is always {@code null}, so it is unwrapped
+   * first: the classification and the message belong to the cause.
    *
-   * @param e the exception caught around the process invocation
-   * @return the cause's message, or its simple class name if the message is null
+   * @param e     the exception thrown by the process
+   * @param where the process, for the log line
+   * @return the error response
    */
-  private static String resolveFailureMessage(Throwable e) {
+  private static NeoResponse processFailure(Exception e, String where) {
     Throwable cause = (e instanceof InvocationTargetException && e.getCause() != null)
         ? e.getCause()
         : e;
-    String msg = cause.getMessage();
-    return msg != null ? msg : cause.getClass().getSimpleName();
+    return NeoErrorResponses.fromException(cause, "POST", where, PROCESS_EXECUTION_FAILED_PREFIX);
   }
 
   /**
@@ -168,9 +173,7 @@ public class NeoProcessService {
       }
 
     } catch (Exception e) {
-      log.error("Error executing process {}", process.getName(), e);
-      result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
+      result = processFailure(e, PROCESS_NAME_PREFIX + process.getName());
     }
     // Normalize at the single exit point: every early-return guard clause above
     // (access denied, missing mandatory param, unmet precondition) and every
@@ -566,9 +569,7 @@ public class NeoProcessService {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error executing OBUIAPP process {}", obuiappProcess.getName(), e);
-      result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
+      result = processFailure(e, "OBUIAPP process " + obuiappProcess.getName());
     }
     return NeoResponse.ensureTopLevelMessage(result);
   }
@@ -599,9 +600,7 @@ public class NeoProcessService {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error executing OBUIAPP action handler {}", className, e);
-      result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
+      result = processFailure(e, "OBUIAPP action handler " + className);
     }
     return NeoResponse.ensureTopLevelMessage(result);
   }
@@ -779,17 +778,10 @@ public class NeoProcessService {
           "Process class is not a DalBaseProcess: " + processClass.getName());
     }
 
-    // Build a ProcessBundle using the Map-based constructor
-    Map<String, Object> bundleMap = new HashMap<>();
-    bundleMap.put(ProcessBundle.FIELD_PROCESS_ID, process.getId());
-    ProcessBundle bundle = new ProcessBundle(bundleMap);
+    ProcessBundle bundle = newClassicBundle(process.getId(), buildBundleParams(params));
 
-    // Set the process parameters
-    bundle.setParams(buildBundleParams(params));
-
-    // Invoke protected doExecute directly via reflection.
-    // We bypass DalBaseProcess.execute() because it requires a
-    // ProcessContext with VariablesSecureApp (HTTP session-based).
+    // Invoke protected doExecute directly via reflection: DalBaseProcess.execute() would also
+    // commit, close and restore the context, which NEO manages itself.
     // OBContext is already set by the caller (admin mode).
     Method doExecuteMethod = DalBaseProcess.class
         .getDeclaredMethod("doExecute", ProcessBundle.class);
@@ -799,6 +791,20 @@ public class NeoProcessService {
     // Read the result from the bundle
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, process);
+  }
+
+  /**
+   * ETP-5669 — a classic bundle with a {@code ProcessContext} and a connection: many
+   * {@code DalBaseProcess}es call {@code bundle.getContext()} / {@code getConnection()} and NPE'd
+   * on the bare map-built bundle. {@code init} resets the params, so they are set after it.
+   * Package-private seam for unit tests.
+   */
+  static ProcessBundle newClassicBundle(String processId, Map<String, Object> params)
+      throws ServletException {
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
+    ProcessBundle bundle = new ProcessBundle(processId, vars).init(new DalConnectionProvider(false));
+    bundle.setParams(params);
+    return bundle;
   }
 
   /**
@@ -851,12 +857,16 @@ public class NeoProcessService {
       }
 
       // For DocAction processes: set the action on the document before calling
-      String docAction = params.optString("docAction", null);
-      if (docAction != null && !docAction.isBlank()) {
-        String tabId = params.optString(INP_TAB_ID, null);
-        if (tabId != null) {
-          setDocAction(tabId, recordId, docAction);
+      String docAction = DocActionResolution.requestedDocAction(params);
+      String tabId = params.optString(INP_TAB_ID, null);
+      boolean docActionOnRecord = docAction != null && tabId != null;
+      if (docActionOnRecord) {
+        // ETP-5783 — a document already in the status this action leads to has nothing to run.
+        NeoResponse alreadyApplied = DocActionIdempotency.alreadyApplied(tabId, recordId, docAction);
+        if (alreadyApplied != null) {
+          return alreadyApplied;
         }
+        setDocAction(tabId, recordId, docAction);
       }
 
       // Build parameters map for CallProcess (excludes internal context keys)
@@ -866,7 +876,7 @@ public class NeoProcessService {
       while (keys.hasNext()) {
         String key = keys.next();
         if (RECORD_ID.equals(key) || INP_RECORD_ID.equals(key)
-            || INP_TAB_ID.equals(key) || "docAction".equals(key)) {
+            || INP_TAB_ID.equals(key) || PARAM_DOC_ACTION.equals(key)) {
           continue;
         }
         if (procParams == null) {
@@ -881,21 +891,22 @@ public class NeoProcessService {
       // Refresh to get the result written by the procedure
       OBDal.getInstance().getSession().refresh(pInstance);
 
-      return translatePInstanceResult(pInstance, process);
+      NeoResponse result = translatePInstanceResult(pInstance, process);
+      // ETP-5783 — a concurrent request may have reached the target status first, which made this
+      // run refuse it; re-read the status once and report that as the success it is.
+      return docActionOnRecord
+          ? DocActionIdempotency.orAlreadyApplied(result, tabId, recordId, docAction)
+          : result;
     }
   }
 
   private static void setDocAction(String tabId, String recordId, String docAction) {
     try {
-      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-      if (tab != null && tab.getTable() != null) {
-        String dalEntityName = tab.getTable().getName();
-        BaseOBObject rec = OBDal.getInstance().get(dalEntityName, recordId);
-        if (rec != null && rec.getEntity().hasProperty("documentAction")) {
-          rec.set("documentAction", docAction);
-          OBDal.getInstance().save(rec);
-          OBDal.getInstance().flush();
-        }
+      BaseOBObject rec = DocActionResolution.loadDocActionRecord(tabId, recordId);
+      if (rec != null) {
+        rec.set(DocActionResolution.PROPERTY_DOCUMENT_ACTION, docAction);
+        OBDal.getInstance().save(rec);
+        OBDal.getInstance().flush();
       }
     } catch (Exception e) {
       log.warn("Could not set docAction on record: {}", e.getMessage());
@@ -929,7 +940,7 @@ public class NeoProcessService {
       if (!messageKeys.isEmpty()) {
         result.put(MESSAGE_KEYS, new JSONArray(messageKeys));
       }
-      return new NeoResponse(400, result);
+      return NeoErrorResponses.businessRuleRefusal(result, messageKeys);
     }
 
     // Success
@@ -938,10 +949,11 @@ public class NeoProcessService {
       result.put(MESSAGE, errorMsg.replaceFirst("@SUCCESS=", ""));
     } else {
       result.put(MESSAGE,
-          "Process " + process.getName() + " executed successfully");
+          PROCESS_NAME_PREFIX + process.getName() + " executed successfully");
     }
     return NeoResponse.ok(result);
   }
+
 
   private static final class RequestContextScope implements AutoCloseable {
     private final VariablesSecureApp previous;
@@ -1113,6 +1125,14 @@ public class NeoProcessService {
           safeParseTranslation(StringUtils.defaultString(error.getMessage())));
 
       if (ERROR.equalsIgnoreCase(error.getType())) {
+        // ETP-5577 — a classic process hands its error over already translated (ProcessInvoiceUtil,
+        // FIN_AddPaymentFromJournal), so a period refusal is recognised from its text: the SPA
+        // keys the "open the period" way out, and its own wording, on this identity.
+        List<String> periodKeys = NeoMessageTranslator.recognizeMessageKeys(
+            error.getMessage(), NeoMessageTranslator.PERIOD_REFUSAL_KEYS);
+        if (!periodKeys.isEmpty()) {
+          result.put(MESSAGE_KEYS, new JSONArray(periodKeys));
+        }
         return new NeoResponse(400, result);
       }
       return NeoResponse.ok(result);
@@ -1124,7 +1144,7 @@ public class NeoProcessService {
     } else {
       result.put(STATUS, SUCCESS);
       result.put(MESSAGE,
-          "Process " + process.getName() + " executed successfully");
+          PROCESS_NAME_PREFIX + process.getName() + " executed successfully");
     }
 
     return NeoResponse.ok(result);

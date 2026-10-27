@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import java.util.Iterator;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -212,5 +213,45 @@ final class McpDefaultsView {
     }
     out.put(KEY_UNRESOLVED_FIELDS, unresolved);
     return out;
+  }
+
+  /** Most {@code recordContext} entries {@code etendo_defaults} forwards to the hooks. */
+  static final int MAX_RECORD_CONTEXT_ENTRIES = 32;
+  /** Longest {@code recordContext} value, in characters, {@code etendo_defaults} forwards. */
+  static final int MAX_RECORD_CONTEXT_VALUE_LENGTH = 256;
+  /** Query-param names {@code recordContext} can never override: the tool's own arguments. */
+  private static final Set<String> RESERVED_DEFAULTS_PARAMS = Set.of(
+      McpConstants.PARAM_PARENT_ID, McpConstants.PARAM_ASSET_ID, PARAM_VIEW,
+      McpConstants.PARAM_SPEC, McpConstants.PARAM_ENTITY);
+
+  /**
+   * ETP-5680: copies the scalar entries of {@code etendo_defaults}' {@code recordContext} (the
+   * current values of the record being drafted, e.g. its type) into the query params the
+   * {@code DEFAULTS} hooks read through {@code NeoContext#getQueryParams()}, as the REST
+   * {@code /defaults?key=value} form does. The tool's own arguments always win; nulls, objects and
+   * arrays are ignored; at most {@link #MAX_RECORD_CONTEXT_ENTRIES} entries of at most
+   * {@link #MAX_RECORD_CONTEXT_VALUE_LENGTH} characters are taken. The generic defaults resolver
+   * does not read query params, so only a customization that asks for a key sees it.
+   */
+  static void copyRecordContext(JSONObject recordContext, Map<String, String> queryParams) {
+    if (recordContext == null) {
+      return;
+    }
+    int copied = 0;
+    Iterator<?> keys = recordContext.keys();
+    while (keys.hasNext() && copied < MAX_RECORD_CONTEXT_ENTRIES) {
+      String key = String.valueOf(keys.next());
+      Object value = recordContext.opt(key);
+      boolean scalar = value instanceof String || value instanceof Number
+          || value instanceof Boolean;
+      if (!scalar || RESERVED_DEFAULTS_PARAMS.contains(key)) {
+        continue;
+      }
+      String text = String.valueOf(value);
+      if (text.length() <= MAX_RECORD_CONTEXT_VALUE_LENGTH && !queryParams.containsKey(key)) {
+        queryParams.put(key, text);
+        copied++;
+      }
+    }
   }
 }

@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -30,6 +31,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
@@ -173,8 +175,12 @@ final class MultiDocumentInvoiceSupport {
    * @param lineOverrides
    *     caller-supplied quantity caps per line
    * @param pendingQtyMap
-   *     pre-computed uninvoiced qty MAGNITUDE per {@code M_InOutLine_ID}; a line absent from
-   *     the map is treated as fully pending (falls back to its own movement quantity)
+   *     pre-computed uninvoiced qty MAGNITUDE per {@code M_InOutLine_ID}. A NON-NULL map is
+   *     authoritative: a line absent from it has nothing pending and is skipped (the pending
+   *     queries omit lines with pending &lt;= 0, so falling back to the movement quantity would
+   *     re-invoice an already-invoiced line, ETP-5709). {@code null} means "no pending
+   *     information was computed" and is the only case that falls back to the line's own
+   *     movement quantity (the backward-compatible 3-arg seam of the sales handler)
    * @return quantity to invoice (sign matches the line), or {@code null} to skip this line
    */
   static BigDecimal resolveInOutLineQty(ShipmentInOutLine line, boolean hasOverrides,
@@ -188,7 +194,9 @@ final class MultiDocumentInvoiceSupport {
     }
     int sign = movementQty.signum();
     BigDecimal movementQtyAbs = movementQty.abs();
-    BigDecimal pendingQtyAbs = pendingQtyMap.getOrDefault(line.getId(), movementQtyAbs).min(movementQtyAbs);
+    BigDecimal pendingQtyAbs = pendingQtyMap == null
+        ? movementQtyAbs
+        : pendingQtyMap.getOrDefault(line.getId(), BigDecimal.ZERO).min(movementQtyAbs);
     if (pendingQtyAbs.compareTo(BigDecimal.ZERO) <= 0) {
       return null; // already fully invoiced
     }
@@ -199,6 +207,97 @@ final class MultiDocumentInvoiceSupport {
       return null;
     }
     return sign < 0 ? qtyAbs.negate() : qtyAbs;
+  }
+
+  /**
+   * Refuses explicit per-line quantities that exceed what is still pending (ETP-5709). An agent
+   * (or any API caller) must learn that its request cannot be honoured, so nothing is silently
+   * capped: a quantity is accepted only when it has the SAME sign as the line's movement and its
+   * magnitude does not exceed the pending magnitude. A line absent from {@code pendingQtyMap}
+   * has nothing pending, so any explicit quantity for it is refused too.
+   *
+   * <p>Line ids in {@code overrides} that belong to none of {@code docs} are ignored here, as
+   * they always were: they select nothing.
+   *
+   * @param docs
+   *     the source shipments/receipts the overrides refer to
+   * @param overrides
+   *     explicit quantity per {@code M_InOutLine_ID}; empty means nothing to validate
+   * @param pendingQtyMap
+   *     uninvoiced qty MAGNITUDE per line (lines with nothing pending are absent), merged across
+   *     {@code docs}; must come from the throwing computation so a DB failure is not read as
+   *     "nothing pending"
+   * @param errFormat
+   *     message with three {@code %s}: the line description, the requested quantity and the
+   *     pending quantity (signed like the line)
+   * @throws OBException
+   *     naming the first offending line and the quantity still pending
+   */
+  static void requireOverridesWithinPending(List<ShipmentInOut> docs,
+      Map<String, BigDecimal> overrides, Map<String, BigDecimal> pendingQtyMap, String errFormat) {
+    if (overrides == null || overrides.isEmpty()) {
+      return;
+    }
+    for (ShipmentInOut doc : docs) {
+      for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
+        BigDecimal requested = overrides.get(line.getId());
+        if (requested != null) {
+          requireWithinPending(doc, line, requested, pendingQtyMap, errFormat);
+        }
+      }
+    }
+  }
+
+  private static void requireWithinPending(ShipmentInOut doc, ShipmentInOutLine line,
+      BigDecimal requested, Map<String, BigDecimal> pendingQtyMap, String errFormat) {
+    BigDecimal movement = line.getMovementQuantity();
+    int sign = movement == null ? 0 : movement.signum();
+    BigDecimal pendingAbs = pendingQtyMap.getOrDefault(line.getId(), BigDecimal.ZERO);
+    if (movement != null) {
+      pendingAbs = pendingAbs.min(movement.abs());
+    }
+    if (isOverridePending(requested, sign, pendingAbs)) {
+      return;
+    }
+    BigDecimal pendingSigned = sign < 0 ? pendingAbs.negate() : pendingAbs;
+    throw new OBException(String.format(errFormat, describeLine(doc, line),
+        requested.toPlainString(), pendingSigned.toPlainString()));
+  }
+
+  /** True when {@code requested} has the line's sign and does not exceed the pending magnitude. */
+  private static boolean isOverridePending(BigDecimal requested, int sign, BigDecimal pendingAbs) {
+    return sign != 0 && requested.signum() == sign && requested.abs().compareTo(pendingAbs) <= 0;
+  }
+
+  private static String describeLine(ShipmentInOut doc, ShipmentInOutLine line) {
+    return doc.getDocumentNo() + " line " + line.getLineNo() + " (" + line.getId() + ")";
+  }
+
+  /**
+   * Refuses a request whose {@code lines} array carries entries but none survived parsing
+   * (zero, blank or malformed quantity, missing line id). The parsers drop such entries, which
+   * leaves an EMPTY override map, and an empty map means "no explicit lines: invoice everything
+   * pending" — so a caller that asked for specific quantities and made a mistake would get the
+   * whole document invoiced instead of an error (ETP-5709).
+   *
+   * @param body
+   *     the request body; may be {@code null}
+   * @param linesKey
+   *     the body key of the array (always {@code lines})
+   * @param parsedOverrides
+   *     what the handler's parser produced from {@code body}
+   * @param errMessage
+   *     the message of the 400
+   */
+  static void requireParsedLines(JSONObject body, String linesKey,
+      Map<String, BigDecimal> parsedOverrides, String errMessage) {
+    if (body == null || !parsedOverrides.isEmpty()) {
+      return;
+    }
+    JSONArray lines = body.optJSONArray(linesKey);
+    if (lines != null && lines.length() > 0) {
+      throw new OBException(errMessage);
+    }
   }
 
   /**
@@ -240,6 +339,67 @@ final class MultiDocumentInvoiceSupport {
       }
     }
     return selectedLines;
+  }
+
+  /**
+   * Builds the order-line entry that invoices ONE movement (shipment/receipt) line at a given
+   * quantity (ETP-5709): {@code {id: orderLineId, orderedQuantity, shipmentInOutLine: lineId}},
+   * plus {@code orderQuantity} / {@code operativeQuantity} / {@code operativeUOM} scaled to the
+   * invoiced fraction of the line when it carries them, mirroring what the native process builds
+   * for such an entry itself ({@code CreateInvoiceLinesFromProcess#getInOutLineJson}).
+   *
+   * <p>Why the entry must name its movement line: the native process replaces an order-line entry
+   * WITHOUT a {@code shipmentInOutLine} that has related movement lines by ALL of them at their
+   * full uninvoiced quantity, silently discarding the quantity sent here (a receipt lowered to 3,
+   * {@code lines [{rl, 1}]} still invoiced 3, and the other receipts of the same order line were
+   * dragged in). An entry that names it is used as is. One entry PER movement line, never one per
+   * order line: the native process creates one invoice line per entry.
+   *
+   * @param orderLineId
+   *     the order line the invoice line is priced from
+   * @param line
+   *     the movement line being invoiced
+   * @param qty
+   *     the quantity to invoice, signed like the line
+   */
+  static JSONObject buildOrderLineEntryForInOutLine(String orderLineId, ShipmentInOutLine line,
+      BigDecimal qty) throws JSONException {
+    JSONObject entry = new JSONObject();
+    entry.put("id", orderLineId);
+    entry.put("orderedQuantity", qty.toPlainString());
+    entry.put("shipmentInOutLine", line.getId());
+    BigDecimal movement = line.getMovementQuantity();
+    if (movement != null && movement.signum() != 0) {
+      BigDecimal ratio = qty.divide(movement, MathContext.DECIMAL128);
+      if (line.getOrderQuantity() != null) {
+        entry.put("orderQuantity", scaled(line.getOrderQuantity(), ratio));
+      }
+      if (line.getOperativeQuantity() != null) {
+        entry.put("operativeQuantity", scaled(line.getOperativeQuantity(), ratio));
+      }
+    }
+    if (line.getOperativeUOM() != null) {
+      entry.put("operativeUOM", line.getOperativeUOM().getId());
+    }
+    return entry;
+  }
+
+  private static String scaled(BigDecimal value, BigDecimal ratio) {
+    return value.multiply(ratio, MathContext.DECIMAL128).stripTrailingZeros().toPlainString();
+  }
+
+  /**
+   * Gives {@code qty} the sign of {@code line}'s movement quantity. The pending-quantity queries
+   * are magnitude-only, so a quantity seeded from them is positive even for a negative
+   * (return-style) line; an entry that names its movement line is used as is by the native process
+   * (it no longer re-derives the quantity), so the sign has to be right here.
+   */
+  static BigDecimal signedLikeLine(ShipmentInOutLine line, BigDecimal qty) {
+    BigDecimal movement = line.getMovementQuantity();
+    if (qty == null || movement == null || movement.signum() == 0) {
+      return qty;
+    }
+    return movement.signum() < 0 ? qty.abs().negate() : qty.abs();
   }
 
   /**

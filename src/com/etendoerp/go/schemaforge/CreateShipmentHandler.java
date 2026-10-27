@@ -35,6 +35,9 @@ import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
+import com.etendoerp.go.schemaforge.util.DocumentStatusGuard;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * NeoHandler that creates a Goods Shipment (ShipmentInOut) in Draft status
  * from a Sales Order. Invoked as an ACTION endpoint via:
@@ -46,6 +49,25 @@ public class CreateShipmentHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(CreateShipmentHandler.class);
   private static final String ACTION_NAME = "createShipment";
   private static final String SPEC_SALES_ORDER = "sales-order";
+
+  /**
+   * What an agent reads about {@code createShipment} on a sales order (ETP-5709). The MCP
+   * publishes it and judges the call against it (no parameters); REST and the SPA do not
+   * validate against it.
+   */
+  static final NeoActionContract CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Creates a goods shipment in DRAFT (not completed) from the lines of this sales order that "
+          + "are still pending delivery, and returns 201 with {id, documentNo}. Precondition: the "
+          + "order is completed (status CO), otherwise 400 naming its status. It is independent "
+          + "of createDraftInvoice: an order can be shipped without being invoiced, invoiced "
+          + "without being shipped, or both. Typical sequence for an order: documentAction "
+          + "(confirm) -> createShipment -> createDraftInvoice. Quantities already covered by a "
+          + "shipment, including a draft one, are not duplicated: when nothing is pending the "
+          + "call answers 400 (naming the draft shipment when one covers everything) instead of "
+          + "creating another shipment. Complete the shipment afterwards with documentAction "
+          + "(docAction CO) on the goods-shipment spec.")
+      .withIdDescription("the id of the sales order to ship")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -79,9 +101,13 @@ public class CreateShipmentHandler implements NeoHandler {
         // OBDal.save(shipment) left an empty, orphaned shipment behind whenever the
         // order had zero pending lines (Hibernate flushes the managed header on
         // commit regardless of the 400 this method returns).
+        DocumentStatusGuard.requireCompleted(order.getDocumentNo(), order.getDocumentStatus(),
+            "El pedido %s no está completado (estado %s): complétalo antes de crear el albarán");
         InOutLineFromOrderFactory.PendingLinesResult result =
-            InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order,
-                "No hay líneas pendientes de entrega en este pedido", this::findDefaultLocator);
+            InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order, true,
+                "No hay líneas pendientes de entrega en este pedido",
+                "Todo lo pendiente de este pedido ya está en el albarán borrador %s",
+                this::findDefaultLocator);
 
         ShipmentInOut shipment = createShipmentHeader(order);
         OBDal.getInstance().save(shipment);

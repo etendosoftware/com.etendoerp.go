@@ -22,10 +22,10 @@ import javax.inject.Named;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -124,7 +124,8 @@ public class OrganizationInformationHandler implements NeoHandler {
     if (recordId != null) {
       OBContext.setAdminMode(true);
       try {
-        Organization organization = OBDal.getInstance().get(Organization.class, recordId);
+        // ETP-5793: another tenant's org falls back to the session one, like an unknown id.
+        Organization organization = NeoActionRecordGuard.loadOwned(Organization.class, recordId);
         if (organization != null) {
           return organization;
         }

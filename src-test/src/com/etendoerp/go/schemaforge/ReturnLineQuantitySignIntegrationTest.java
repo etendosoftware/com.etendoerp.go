@@ -80,6 +80,10 @@ import org.openbravo.service.db.CallStoredProcedure;
  * org.openbravo.test.inventoryStatus.InventoryStatusTest}), reusing the SAME QA Testing
  * client/org and "Spain East warehouse" (has exactly one default AND active locator, "M01")
  * those two tests already validated works for this stored procedure.
+ *
+ * @covers com.etendoerp.go.schemaforge.ReturnLineQuantityPolicy
+ * @covers com.etendoerp.go.schemaforge.CreatePurchaseReturnHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnInvoiceSupport
  */
 public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
 
@@ -126,6 +130,28 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
     }
   }
 
+  // ── ReturnInvoiceSupport HQL against the real model ───────────────────────
+
+  /**
+   * The price lookups of the rectificativa swallow any exception, but a bad property path
+   * ({@code il.invoice.created} instead of {@code creationDate}) leaves the Hibernate transaction
+   * rollback-only and the completion then rolls the whole draft back. Mocks never run the HQL,
+   * so parse it here, through the very strings the lookups execute, against the DAL model.
+   */
+  @Test
+  public void returnInvoicePriceLookupHqlResolvesAgainstTheRealModel() {
+    // The assertion is "createQuery does not throw": Hibernate resolves every property path eagerly.
+    org.hibernate.Session session = OBDal.getInstance().getSession();
+    for (String field : new String[] {"unitPrice", "listPrice"}) {
+      for (boolean constrained : new boolean[] {false, true}) {
+        session.createQuery(ReturnInvoiceSupport.sourceInvoiceLinePriceHql(field, constrained),
+            BigDecimal.class);
+      }
+      session.createQuery(ReturnInvoiceSupport.priceListPriceHql(
+          field.equals("unitPrice") ? "standardPrice" : field), BigDecimal.class);
+    }
+  }
+
   // ── Scenario 1: full sales return, no invoice ─────────────────────────────
 
   @Test
@@ -153,7 +179,7 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
   /**
    * The invoice option must be irrelevant to the stock math. Builds a minimal, real, persisted
    * {@link Invoice}/{@link InvoiceLine} linked to the source shipment line via {@code
-   * goodsShipmentLine} (the same FK {@link ReturnShipmentUtils#findSourceInvoice} reads) BEFORE
+   * goodsShipmentLine} (the same FK {@link ReturnInvoiceSupport#findSourceInvoice} reads) BEFORE
    * the return exists, then asserts the return posts identically to scenario 1.
    *
    * <p>Deliberately does NOT go through the full {@code createReturnInvoice} action (needs
@@ -178,7 +204,7 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
     OBDal.getInstance().refresh(shipmentLine);
 
     DocumentType invDocType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-        shipment.getOrganization().getId(), "ARI", true, false, false);
+        shipment.getClient(), shipment.getOrganization().getId(), "ARI", true, false, false);
     assertNotNull("test fixture requires an active, non-return AR Invoice doc type",
         invDocType);
     Invoice invoice = buildMinimalInvoiceHeader(shipment, invDocType, "ETP5313S2INV");
@@ -269,6 +295,7 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
     ShipmentInOut receipt = cloneDraftReceiptHeader("ETP5313S5RCP");
     ShipmentInOutLine receiptLine = addReceiptLine(receipt, product, new BigDecimal("30"));
     completeInOut(receipt);
+    OBDal.getInstance().refresh(receipt);
     OBDal.getInstance().refresh(receiptLine);
 
     JSONObject requestBody = new JSONObject().put("lines", new JSONArray().put(
@@ -482,7 +509,7 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
 
   /**
    * Minimal, real, persisted {@link InvoiceLine} linked to {@code sourceLine} via {@code
-   * goodsShipmentLine} — the same FK {@link ReturnShipmentUtils#findSourceInvoice} reads.
+   * goodsShipmentLine} — the same FK {@link ReturnInvoiceSupport#findSourceInvoice} reads.
    * Deliberately does NOT go through {@code CreateDraftInvoiceHandler#createShipmentInvoiceLine}
    * (a CDI-injected dependency this plain-{@code new} test double avoids); it only satisfies the
    * DB's own NOT NULL columns (see {@code c_invoiceline}'s schema) plus the FK this scenario

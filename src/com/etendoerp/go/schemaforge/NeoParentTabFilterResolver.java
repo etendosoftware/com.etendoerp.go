@@ -46,8 +46,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * filter constrains this child tab, given the parent record?" — and none of them touch
  * {@code NeoCrudHandler}'s own instance state ({@code servlet}, {@code telemetryService}). Two
  * independent call sites in {@code NeoCrudHandler} share this logic: the ordinary list GET's where
- * clause ({@code applyWhereClause}) and the {@code ?_distinct=} fetch's predicate list
- * ({@code buildDistinctPredicates}).
+ * clause ({@code applyWhereClause}) and, since ETP-5561, the {@code ?_distinct=} fetch, which
+ * builds its filtered set through the same {@code buildDalParams}.
  *
  * <p>Moved verbatim — signatures, order of operations, exception handling and logging are
  * unchanged from their previous home in {@code NeoCrudHandler}.</p>
@@ -106,8 +106,18 @@ public final class NeoParentTabFilterResolver {
    *   <li>Any other token → matched against parent entity property column names</li>
    *   <li>Fallback → {@code parentId}</li>
    * </ol>
+   *
+   * @param adTab
+   *     the child tab whose where clause is being resolved
+   * @param tabWhere
+   *     the tab's HQL where clause, containing one or more {@code @token@} placeholders
+   * @param parentId
+   *     the parent record's id, used as the fallback for any token that cannot be resolved
+   *     against the parent record
+   * @return {@code tabWhere} with every {@code @token@} placeholder replaced by its resolved
+   *     value
    */
-  static String resolveTabWhereTokens(Tab adTab, String tabWhere, String parentId) {
+  public static String resolveTabWhereTokens(Tab adTab, String tabWhere, String parentId) {
     Tab parentTab = null;
     BaseOBObject parentRecord = null;
     Entity parentEntity = null;
@@ -210,8 +220,15 @@ public final class NeoParentTabFilterResolver {
 
   /**
    * Resolves the HQL filter expression that constrains child tab records by parent record ID.
+   *
+   * @param childTab
+   *     the child tab whose records are being filtered by parent
+   * @param parentId
+   *     the parent record's id
+   * @return the HQL filter expression, or {@code null} when it cannot be built or resolving it
+   *     throws
    */
-  static String resolveParentFilter(Tab childTab, String parentId) {
+  public static String resolveParentFilter(Tab childTab, String parentId) {
     try {
       NeoTypeCoercionHelper.ParentFilter parentFilter =
           NeoTypeCoercionHelper.buildParentWhereClause(childTab, parentId);

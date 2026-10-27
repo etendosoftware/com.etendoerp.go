@@ -24,9 +24,10 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
 import com.smf.securewebservices.SWSConfig;
@@ -53,7 +54,8 @@ public class NeoServlet extends HttpBaseServlet {
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
   private static final String METHOD_PUT = "PUT";
-  private static final String DOCUMENT_DOWNLOAD_PREFIX = "/document-download/";
+  private static final String DOCUMENT_DOWNLOAD_PREFIX =
+      DocumentDownloadTokenService.DOWNLOAD_PATH;
   /** Unauthenticated one-shot MCP image-upload endpoint (ETP-5184); the token is the credential. */
   private static final String IMAGE_UPLOAD_PREFIX = NeoImageHelper.UPLOAD_TICKET_PATH;
   static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
@@ -102,6 +104,12 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.debug("Could not stop the usage event writer on servlet destroy.", e);
     }
+    try {
+      // ETP-5677: the batch job workers and their heartbeat are daemon threads of this webapp.
+      BatchJobService.shutdownInstance();
+    } catch (RuntimeException e) {
+      log.debug("Could not stop the batch job threads on servlet destroy.", e);
+    }
     super.destroy();
   }
 
@@ -133,35 +141,15 @@ public class NeoServlet extends HttpBaseServlet {
       try {
         super.service(request, response);
       } catch (Exception e) {
-        log.error("Error in NeoServlet.service", e);
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+        writeResponse(response, NeoErrorResponses.fromException(e, request.getMethod(),
+            "NeoServlet.service", null));
       }
     }
   }
 
   private void processRequest(HttpServletRequest request, HttpServletResponse response,
       String method) throws IOException {
-    // Readiness probe: no auth required, used by ALB health check
-    if ("GET".equals(method) && "/health/ready".equals(request.getPathInfo())) {
-      handleReadinessCheck(response);
-      return;
-    }
-
-    // Download links are intentionally unauthenticated: the signed, expiring token carries the
-    // record/client scope and NeoDocumentDownloadService validates it before serving any file.
-    if ("GET".equals(method) && isDocumentDownloadPath(request.getPathInfo())) {
-      handleDocumentDownload(request, response);
-      return;
-    }
-
-    // ETP-5184: the MCP image-upload ticket is intentionally unauthenticated, on the same basis as
-    // the download links above — the single-use, 10-minute, 192-bit token IS the credential, and it
-    // carries the client/org/user of the MCP session it was issued to. It has to be: the point of
-    // the ticket is that whoever holds the FILE (a shell running curl, a person with a browser)
-    // uploads it directly, so the bytes never pass through the model's context. NeoImageHelper
-    // validates the token, the size and the magic bytes before anything is stored.
-    if (METHOD_PUT.equals(method) && isImageUploadTicketPath(request.getPathInfo())) {
-      handleImageUploadTicket(request, response, method);
+    if (handleUnauthenticatedRoute(request, response, method)) {
       return;
     }
 
@@ -184,12 +172,62 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
+    } catch (MalformedJsonException e) {
+      // A body or JSON parameter the client sent could not be parsed: its error, not ours.
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
     } catch (Exception e) {
-      log.error("Error processing NEO request: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+      // ETP-5782: classified by what the exception is (a refused access is a 403, a trigger
+      // refusal a 422, a lost connection a 503…), logged once, rolled back; anything unrecognised
+      // stays a sanitized 500.
+      writeResponse(response, NeoErrorResponses.fromException(e, method,
+          "NEO " + method + " request", null));
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The routes that are answered BEFORE authentication, each credentialed by something other than a
+   * session: the readiness probe (none), the signed download link and the two upload links (the
+   * token in the path). Extracted from {@code processRequest} (ETP-5715, when the attachment link
+   * became the fourth) so that method stays readable; the order and the answers are unchanged.
+   *
+   * @return {@code true} when the request was one of them and has been answered
+   */
+  private boolean handleUnauthenticatedRoute(HttpServletRequest request,
+      HttpServletResponse response, String method) throws IOException {
+    // Readiness probe: no auth required, used by ALB health check
+    if ("GET".equals(method) && "/health/ready".equals(request.getPathInfo())) {
+      handleReadinessCheck(response);
+      return true;
+    }
+
+    // Download links are intentionally unauthenticated: the signed, expiring token carries the
+    // record/client scope and NeoDocumentDownloadService validates it before serving any file.
+    if ("GET".equals(method) && isDocumentDownloadPath(request.getPathInfo())) {
+      handleDocumentDownload(request, response);
+      return true;
+    }
+
+    // ETP-5184: the MCP image-upload ticket is intentionally unauthenticated, on the same basis as
+    // the download links above — the single-use, 10-minute, 192-bit token IS the credential, and it
+    // carries the client/org/user of the MCP session it was issued to. It has to be: the point of
+    // the ticket is that whoever holds the FILE (a shell running curl, a person with a browser)
+    // uploads it directly, so the bytes never pass through the model's context. NeoImageHelper
+    // validates the token, the size and the magic bytes before anything is stored.
+    if (METHOD_PUT.equals(method) && isImageUploadTicketPath(request.getPathInfo())) {
+      handleImageUploadTicket(request, response, method);
+      return true;
+    }
+
+    // ETP-5715: the MCP attachment-upload link, unauthenticated on the same basis as the image one
+    // above. The token is the credential; the upload then runs as the MCP session that issued it
+    // (NeoAttachmentUploadEndpoint re-authorizes the document), not as an administrator.
+    if (METHOD_PUT.equals(method) && NeoAttachmentUploadEndpoint.matches(request.getPathInfo())) {
+      NeoAttachmentUploadEndpoint.handle(request, response);
+      return true;
+    }
+    return false;
   }
 
   private boolean isImageUploadTicketPath(String pathInfo) {
@@ -286,6 +324,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
       throws IOException {
+    NeoResponse.identifyPeriodRefusal(neoResponse);
     if (neoResponse == null) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;

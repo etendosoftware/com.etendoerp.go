@@ -26,7 +26,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import javax.servlet.http.HttpServletResponse;
+
+
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -40,12 +44,16 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.NeoErrorClassifier;
+import com.etendoerp.go.schemaforge.NeoErrorResponses;
+import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
+import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
 
 /**
  * Request-body preparation and DAL-response classification helpers extracted from
@@ -61,6 +69,8 @@ import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
  * rather than an arbitrary one: no field carried along, no constructor needed.
  */
 final class McpWriteRequestSupport {
+
+  private static final Logger LOG = LogManager.getLogger(McpWriteRequestSupport.class);
 
   private static final String FK_ZERO = "0";
   /** Target entity name → whether it holds a record with id "0". See {@link #isExistingZeroRecord}. */
@@ -193,6 +203,10 @@ final class McpWriteRequestSupport {
     McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
     // ETP-5368: resolved once for the whole body rather than per unresolved key — it is a DB read.
     Set<String> virtualFieldNames = virtualFieldNames(sfEntity);
+    // ETP-5676: request options the entity's customization reads and strips in its pre-hook. Not
+    // properties, so they would otherwise be reported unknown while being honoured. Resolved only
+    // when an unresolved key turns up: it is a customization lookup most writes never need.
+    Set<String> directiveNames = null;
     JSONObject mapped = new JSONObject();
 
     Iterator<String> keys = fields.keys();
@@ -217,15 +231,35 @@ final class McpWriteRequestSupport {
         // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
         // not properties of this one - but etendo_schema now publishes them and the handler writes
         // them, and a key the schema advertises must not come back labelled unrecognised.
-        if (!McpConstants.PARAM_PARENT_ID.equals(key) && !virtualFieldNames.contains(key)) {
-          unknown.add(key);
-        }
+        directiveNames = reportIfUnknown(key, sfEntity, virtualFieldNames, directiveNames,
+            unknown);
       } else {
         applyWriteGates(gate, key, mappedKey, value, sfEntity, dalEntity);
       }
       mapped.put(mappedKey, value);
     }
     return mapped;
+  }
+
+  /**
+   * Adds an unresolved key to {@code unknown} unless the write tools or the entity declare it:
+   * {@code parentId}, a wrapper's virtual field, or a create directive of its customization.
+   *
+   * @param directiveNames the create directives resolved so far, or {@code null} when not yet
+   *                       resolved
+   * @return the create directives, resolved on first need so most writes never look them up
+   */
+  private static Set<String> reportIfUnknown(String key, SFEntity sfEntity,
+      Set<String> virtualFieldNames, Set<String> directiveNames, Set<String> unknown) {
+    if (McpConstants.PARAM_PARENT_ID.equals(key) || virtualFieldNames.contains(key)) {
+      return directiveNames;
+    }
+    Set<String> resolved = directiveNames != null ? directiveNames
+        : McpServerResolvedFields.createDirectives(sfEntity).keySet();
+    if (!resolved.contains(key)) {
+      unknown.add(key);
+    }
+    return resolved;
   }
 
   /**
@@ -414,12 +448,13 @@ final class McpWriteRequestSupport {
     }
     try {
       body.put("supersededDefaults", superseded);
-      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept and a "
-          + "callout had resolved a different one from this record's own context (the business "
-          + "partner's configuration, for one). That is correct if the value was chosen "
-          + "deliberately. If you copied it from etendo_defaults, it was a generic default resolved "
-          + "before this record had a business partner: omit that field and let the server resolve "
-          + "it, or send the value under \"callout\" instead.");
+      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept; "
+          + "\"callout\" is only what a callout would have set from this record's own context. "
+          + "You can ignore it when the callout value is 0 or empty, or when the field is governed "
+          + "by another rule. If you copied the value from "
+          + "etendo_defaults and it differs from a meaningful callout value, it was a generic "
+          + "default resolved before this record had its context: send the callout value instead, "
+          + "or confirm the one you sent was deliberate.");
     } catch (JSONException ignored) {
       // Same reasoning as reportUnknownFields: the record is written and correct as far as the
       // caller asked; losing a diagnostic must never turn a successful create into a failure.
@@ -507,6 +542,93 @@ final class McpWriteRequestSupport {
       }
     }
     return missing;
+  }
+
+  /**
+   * ETP-5726: refuses an {@code etendo_update} that CLEARS a field AD declares mandatory.
+   *
+   * <p>The update path never runs {@link #validateMandatoryFields} (that pre-check is about what a
+   * create omitted), so a mandatory column whose database constraint is nullable — AD says
+   * mandatory, the table says {@code NULL} — could be saved empty by sending {@code null}; the
+   * screen never offers that, because its mandatory inputs cannot be emptied. Only the keys the
+   * caller actually SENT are inspected: a sparse update that does not mention the field leaves the
+   * stored value alone and is never refused here.
+   *
+   * <p>Structural only, like {@link #validateMandatoryFields}: it reads the AD mandatory flag and
+   * the key names, never an entity or a business property. The primary key, the audit/system
+   * columns and the fields the wrapper policy resolves on the server are skipped (the same
+   * exclusions the create pre-check applies); read-only and excluded fields never reach this
+   * point, they are refused earlier by the write gates of the field mapping.
+   *
+   * @param body          the mapped update body, every key of which is the caller's own
+   * @param adTab         the entity's AD tab, whose table columns are walked
+   * @param dalEntity     the DAL entity of that table
+   * @param systemColumns upper-cased system/audit column names that are never checked
+   * @param selectorRefs  AD_Reference ids of foreign-key selectors, for the {@code type} of each item
+   * @param sfEntity      the Schema Forge entity, consulted for the server-resolved field names;
+   *                      may be {@code null}
+   * @param langCode      the user's language, for the field label; blank falls back to the AD name
+   * @return the 422 {@code validation_error} envelope naming each cleared field, or {@code null}
+   *         when none was cleared
+   */
+  static JSONObject rejectClearedMandatoryFields(JSONObject body, Tab adTab, Entity dalEntity,
+      Set<String> systemColumns, Set<String> selectorRefs, SFEntity sfEntity, String langCode)
+      throws JSONException {
+    if (body == null || dalEntity == null) {
+      return null;
+    }
+    Set<String> serverResolved = NeoSelectorPolicy.serverResolvedFieldNames(sfEntity);
+    Map<String, String[]> labels = null;
+    JSONArray cleared = new JSONArray();
+    for (Column col : adTab.getTable().getADColumnList()) {
+      Property prop = McpToolRouterSupport.resolveMandatoryProperty(adTab, dalEntity, col,
+          systemColumns);
+      if (prop == null || serverResolved.contains(prop.getName()) || !body.has(prop.getName())
+          || !McpToolRouterSupport.isMandatoryValueMissing(body, prop.getName())) {
+        continue;
+      }
+      if (labels == null) {
+        labels = McpSchemaFieldBuilder.loadFieldLabels(adTab, langCode);
+      }
+      try {
+        JSONObject info = McpToolRouterSupport.buildMissingFieldInfo(col, prop.getName(),
+            selectorRefs);
+        String[] label = labels.get(col.getDBColumnName().toUpperCase());
+        if (label != null && StringUtils.isNotBlank(label[0])) {
+          info.put("label", label[0]);
+        }
+        cleared.put(info);
+      } catch (Exception e) {
+        LOG.warn("Error building cleared field info for column {}: {}", col.getDBColumnName(),
+            e.getMessage());
+      }
+    }
+    return cleared.length() == 0 ? null : buildClearedMandatoryError(cleared);
+  }
+
+  /** The 422 for {@link #rejectClearedMandatoryFields}: same envelope as the create pre-check. */
+  private static JSONObject buildClearedMandatoryError(JSONArray cleared) throws JSONException {
+    StringBuilder names = new StringBuilder();
+    for (int i = 0; i < cleared.length(); i++) {
+      JSONObject item = cleared.getJSONObject(i);
+      if (i > 0) {
+        names.append(", ");
+      }
+      names.append(item.getString("name"));
+      String label = item.optString("label", "");
+      if (!label.isEmpty() && !label.equals(item.getString("name"))) {
+        names.append(" (").append(label).append(")");
+      }
+    }
+    JSONObject error = new JSONObject();
+    error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+    error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+    error.put(McpConstants.KEY_DETAIL, "Required fields cannot be cleared: " + names);
+    error.put(McpConstants.KEY_MISSING_FIELDS, cleared);
+    error.put(McpConstants.KEY_HINT, "These fields are required: send a value for them, or leave them out of "
+        + "the update to keep the stored one");
+    error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return error;
   }
 
   /**
@@ -775,6 +897,30 @@ final class McpWriteRequestSupport {
   }
 
   /**
+   * Refuse a write whose request references a row of another tenant (ETP-5785).
+   *
+   * <p>The check itself is {@link NeoReferenceOwnership}, shared with the REST CRUD path. Its
+   * refusal is the body core returns for a reference that names no row, so it is turned into the
+   * agent's answer by {@link #checkJsonServiceError(JSONObject, String, Set)} — the same envelope a
+   * genuinely missing id produces, which is what keeps the two indistinguishable.</p>
+   *
+   * @param adTab                the tab being written
+   * @param fields               the body keyed by DAL property name, holding only what the caller
+   *                             sent; {@code null} to check the parent alone
+   * @param parentId             the parent id of a child create, or {@code null}
+   * @param callerProvidedFields the caller's own field names, for the envelope's hint
+   * @return the 422 validation envelope, or {@code null} when every reference is acceptable
+   * @throws JSONException if the envelope cannot be built
+   */
+  static JSONObject refuseUnownedReferences(Tab adTab, JSONObject fields, String parentId,
+      Set<String> callerProvidedFields) throws JSONException {
+    String refusal = NeoReferenceOwnership.refuseUnownedReferences(adTab, fields, parentId);
+    return refusal == null ? null
+        : checkJsonServiceError(new JSONObject(refusal), McpConstants.SEE_ALSO_WRITING,
+            callerProvidedFields);
+  }
+
+  /**
    * Check if a DefaultJsonDataService response contains an error.
    *
    * <p>Returns the IMP-5 envelope describing it, or {@code null} when the response is not a failure.
@@ -822,12 +968,55 @@ final class McpWriteRequestSupport {
           ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
               .optString(McpConstants.KEY_MESSAGE, "Operation failed")
           : "Operation failed";
-      return buildDalFailureEnvelope(message, seeAlso);
+      JSONObject classified = buildClassifiedDalFailure(innerResponse, message, seeAlso);
+      return classified != null ? classified : buildDalFailureEnvelope(message, seeAlso);
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+      if (NeoValidationErrorResponseBuilder.isUnknownReference(
+          innerResponse.optJSONObject(JsonConstants.RESPONSE_ERRORS))) {
+        // ETP-5782: core's message names the entity class and echoes the id, and would tell a
+        // missing id apart from another tenant's. The same generic answer REST gives, as MCP's 422.
+        JSONObject envelope = McpToolResponses.classifiedEnvelope(
+            HttpServletResponse.SC_BAD_REQUEST, NeoErrorClassifier.CODE_UNKNOWN_REFERENCE,
+            NeoErrorClassifier.MSG_UNKNOWN_REFERENCE, null);
+        envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+        return envelope;
+      }
       return buildDalValidationEnvelope(innerResponse, seeAlso, callerProvidedFields);
     }
     return null;
+  }
+
+  /**
+   * ETP-5782: the envelope for a write failure NEO's write service captured and classified (a
+   * trigger refusal, a row still in use, a deadlock, a lost connection…), or {@code null} to keep
+   * the existing handling — for a failure that was not captured, for the stale-record and
+   * duplicate-key wordings handled by {@link #buildDalFailureEnvelope}, and for a failure classified
+   * as a server fault, which keeps this channel's existing answer (declared in
+   * {@code neo-headless.md} §4.12.9).
+   */
+  private static JSONObject buildClassifiedDalFailure(JSONObject innerResponse, String message,
+      String seeAlso) throws JSONException {
+    JSONObject classification = NeoErrorResponses.classificationOf(innerResponse);
+    if (classification == null || NeoErrorSanitizer.isStaleRecordMessage(message)
+        || NeoErrorSanitizer.isDuplicateKeyMessage(message)) {
+      return null;
+    }
+    int status = classification.optInt(McpConstants.KEY_STATUS,
+        McpConstants.STATUS_SERVER_ERROR);
+    if (status >= McpConstants.STATUS_SERVER_ERROR && status != 503) {
+      return null;
+    }
+    List<String> keys = new ArrayList<>();
+    JSONArray rawKeys = classification.optJSONArray("messageKeys");
+    for (int i = 0; rawKeys != null && i < rawKeys.length(); i++) {
+      keys.add(rawKeys.optString(i));
+    }
+    JSONObject envelope = McpToolResponses.classifiedEnvelope(status,
+        classification.optString("code", NeoErrorClassifier.CODE_SERVER_ERROR),
+        classification.optString(McpConstants.KEY_MESSAGE, null), keys);
+    envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+    return envelope;
   }
 
   /**
