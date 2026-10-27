@@ -193,6 +193,18 @@ class SupportUserManagementLockoutTest {
   }
 
   @Test
+  void actionsOnUserAndContactAreRefusedOnlyInSupportSession() {
+    NeoContext asSupport = NeoContext.builder().endpointType(NeoEndpointType.ACTION).httpMethod("POST")
+        .recordId(TARGET).fieldName("grantPortalAccess").obContext(context(SUPPORT_USER)).build();
+    NeoContext asOther = NeoContext.builder().endpointType(NeoEndpointType.ACTION).httpMethod("POST")
+        .recordId(TARGET).fieldName("grantPortalAccess").obContext(context(TARGET)).build();
+    assertEquals(403, new UserRoleAssignmentHandler().handle(asSupport).getHttpStatus());
+    assertEquals(403, new ContactHandler().handle(asSupport).getHttpStatus());
+    assertEquals(null, new UserRoleAssignmentHandler().handle(asOther));
+    assertEquals(null, new ContactHandler().handle(asOther));
+  }
+
+  @Test
   void roleServiceRefusesSupportCaller() {
     UserRoleCompositionService service = new UserRoleCompositionService();
     Role callerRole = role();

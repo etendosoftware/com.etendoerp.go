@@ -29,6 +29,7 @@ import org.openbravo.base.exception.OBException;
 
 import com.etendoerp.go.schemaforge.AbstractPersonNameHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.supportaccess.SupportAccessGuard;
 import com.etendoerp.go.supportaccess.SupportUserExclusion;
@@ -132,6 +133,10 @@ public class ContactHandler extends AbstractPersonNameHandler {
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
+    if (ctx.getEndpointType() == NeoEndpointType.ACTION
+        && SupportAccessGuard.isActingSupportUser(ctx.getObContext())) {
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
     String method = ctx.getHttpMethod();
     boolean isWrite = METHOD_POST.equals(method) || "PATCH".equals(method) || "PUT".equals(method);
     if (!isWrite) {

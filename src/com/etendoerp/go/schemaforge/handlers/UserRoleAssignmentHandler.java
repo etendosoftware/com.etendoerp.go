@@ -287,6 +287,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    */
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (context.getEndpointType() == NeoEndpointType.ACTION
+        && SupportAccessGuard.isActingSupportUser(context.getObContext())) {
+      // ETP-5351 (Vigia M): grantPortalAccess adds a role and resets the password.
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
     if (context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }
