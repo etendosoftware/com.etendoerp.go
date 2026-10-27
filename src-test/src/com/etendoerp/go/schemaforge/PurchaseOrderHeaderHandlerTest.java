@@ -56,6 +56,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
@@ -69,6 +70,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.CreateGoodsReceiptHandler
  * @covers com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.PartnerLocationDefaults
  */
 public class PurchaseOrderHeaderHandlerTest {
 
@@ -668,6 +670,33 @@ public class PurchaseOrderHeaderHandlerTest {
     java.util.Set<String> declared = new PurchaseOrderHeaderHandler().responseEnrichedFields();
     for (String key : java.util.List.of("hasLinkedDocuments", "needsPrimaryDoc", "needsInvoiceDoc")) {
       org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
+  }
+
+  /**
+   * ETP-5881: a public API create that names only the vendor answered 400 for
+   * {@code partnerAddress}. With a single address, the pre-hook fills it and the bill-to with it,
+   * as on sales orders (ETP-5703).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testHandleCreateWithSingleLocationFillsPartnerAndInvoiceAddress() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      OBCriteria<Location> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Location.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new PurchaseOrderHeaderHandler().handle(NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD).requestBody(body).build()));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+      assertEquals("loc-1", body.getString("invoiceAddress"));
     }
   }
 }

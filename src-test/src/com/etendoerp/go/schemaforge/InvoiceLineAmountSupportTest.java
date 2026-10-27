@@ -24,10 +24,21 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.util.stream.Stream;
 
+import java.util.Date;
+import org.openbravo.financial.FinancialUtils;
+import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.pricing.pricelist.PriceList;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -553,6 +564,108 @@ class InvoiceLineAmountSupportTest {
       assertNull(response, label);
       assertAmount(label, unitPrice, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
     }
+  }
+
+  // ── ETP-5881: a line sent without a price takes the invoice price list's ──
+
+  static Stream<Arguments> createWithoutPrice() {
+    return Stream.of(
+        Arguments.of("only product, quantity and parent → catalog price",
+            "{\"product\":\"P1\",\"parentId\":\"I1\",\"invoicedQuantity\":2}", "12", "12"),
+        Arguments.of("MCP-style invoice key", "{\"product\":\"P1\",\"invoice\":\"I1\"}", "12",
+            "12"),
+        Arguments.of("unitPrice 0 counts as not sent",
+            "{\"product\":\"P1\",\"parentId\":\"I1\",\"unitPrice\":0}", "12", "12"),
+        Arguments.of("the caller's price wins",
+            "{\"product\":\"P1\",\"parentId\":\"I1\",\"unitPrice\":9}", "9", null),
+        Arguments.of("an explicit gross price wins",
+            "{\"product\":\"P1\",\"parentId\":\"I1\",\"grossUnitPrice\":14}", null, null),
+        Arguments.of("no product → untouched", "{\"parentId\":\"I1\"}", null, null));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("createWithoutPrice")
+  void setPriceFromPriceListOnCreate(String label, String body, String expectedUnit,
+      String expectedList) throws Exception {
+    JSONObject json = new JSONObject(body);
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Invoice invoice = mock(Invoice.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Date invoiceDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Invoice.class, "I1")).thenReturn(invoice);
+    when(invoice.getInvoiceDate()).thenReturn(invoiceDate);
+    when(invoice.getPriceList()).thenReturn(priceList);
+    when(invoice.isSalesTransaction()).thenReturn(Boolean.TRUE);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(price.getListPrice()).thenReturn(new BigDecimal("12"));
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("12"));
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("lines")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(json).build();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(invoiceDate),
+          anyBoolean(), eq(priceList), eq(false))).thenReturn(price);
+
+      InvoiceLineAmountSupport.setPriceFromPriceListOnCreate(ctx);
+    }
+
+    assertAmount(label, expectedUnit, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, expectedUnit != null && expectedList != null ? expectedList : null, json,
+        InvoiceLineAmountSupport.FIELD_LIST_PRICE);
+  }
+
+  @Test
+  void setPriceFromPriceListOnCreateAbstainsOnATaxIncludedList() throws Exception {
+    JSONObject json = new JSONObject("{\"product\":\"P1\",\"parentId\":\"I1\"}");
+    OBDal dal = mock(OBDal.class);
+    Invoice invoice = mock(Invoice.class);
+    PriceList priceList = mock(PriceList.class);
+    when(dal.get(Product.class, "P1")).thenReturn(mock(Product.class));
+    when(dal.get(Invoice.class, "I1")).thenReturn(invoice);
+    when(invoice.getInvoiceDate()).thenReturn(new Date());
+    when(invoice.getPriceList()).thenReturn(priceList);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.TRUE);
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("lines")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(json).build();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLineAmountSupport.setPriceFromPriceListOnCreate(ctx);
+    }
+
+    assertAmount("tax-included list", null, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
+  }
+
+  /** ETP-5881: the client's listPrice is the price; the price list is not applied to it. */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("clientListPrice")
+  void setPriceFromPriceListOnCreateUsesTheClientListPrice(String label, String extra,
+      String expectedUnit) throws Exception {
+    JSONObject json = new JSONObject(extra);
+    json.put("product", "P1").put("parentId", "I1");
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("lines")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(json).build();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      InvoiceLineAmountSupport.setPriceFromPriceListOnCreate(ctx);
+      dalMock.verifyNoInteractions();
+    }
+    assertAmount(label, expectedUnit, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
+  }
+
+  static Stream<Arguments> clientListPrice() {
+    return Stream.of(
+        Arguments.of("list 20, no discount", "{\"listPrice\":20}", "20"),
+        Arguments.of("list 20, discount 10", "{\"listPrice\":20,\"etgoDiscount\":10}", "18"),
+        Arguments.of("unitPrice 0 counts as not sent", "{\"listPrice\":20,\"unitPrice\":0}",
+            "20"),
+        Arguments.of("the caller's unitPrice wins", "{\"listPrice\":20,\"unitPrice\":15}", "15"),
+        Arguments.of("discount out of range → untouched", "{\"listPrice\":20,\"etgoDiscount\":120}",
+            null));
   }
 
   // ── ETP-5710 point 2: taxableAmount (TaxBaseAmt) is the final net, after the discount ──

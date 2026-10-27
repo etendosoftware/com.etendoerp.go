@@ -83,6 +83,7 @@ import org.openbravo.service.db.CallStoredProcedure;
  *
  * @covers com.etendoerp.go.schemaforge.ReturnLineQuantityPolicy
  * @covers com.etendoerp.go.schemaforge.CreatePurchaseReturnHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnInvoiceSupport
  */
 public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
 
@@ -126,6 +127,28 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
     // stack (see GoodsReceiptNoStockCompletionIntegrationTest's tearDown for the same need).
     while (OBContext.getOBContext() != null && OBContext.getOBContext().isInAdministratorMode()) {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  // ── ReturnInvoiceSupport HQL against the real model ───────────────────────
+
+  /**
+   * The price lookups of the rectificativa swallow any exception, but a bad property path
+   * ({@code il.invoice.created} instead of {@code creationDate}) leaves the Hibernate transaction
+   * rollback-only and the completion then rolls the whole draft back. Mocks never run the HQL,
+   * so parse it here, through the very strings the lookups execute, against the DAL model.
+   */
+  @Test
+  public void returnInvoicePriceLookupHqlResolvesAgainstTheRealModel() {
+    // The assertion is "createQuery does not throw": Hibernate resolves every property path eagerly.
+    org.hibernate.Session session = OBDal.getInstance().getSession();
+    for (String field : new String[] {"unitPrice", "listPrice"}) {
+      for (boolean constrained : new boolean[] {false, true}) {
+        session.createQuery(ReturnInvoiceSupport.sourceInvoiceLinePriceHql(field, constrained),
+            BigDecimal.class);
+      }
+      session.createQuery(ReturnInvoiceSupport.priceListPriceHql(
+          field.equals("unitPrice") ? "standardPrice" : field), BigDecimal.class);
     }
   }
 

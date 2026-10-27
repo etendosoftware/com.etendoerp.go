@@ -200,8 +200,8 @@ OAuth2 tokens (MCP clients, API keys, `client_credentials`) carry these scopes:
 | Scope | Grants |
 |-------|--------|
 | `etendo:read` | REST `GET`/`HEAD`; MCP read tools and resources |
-| `etendo:write` | REST writes; MCP write tools (`etendo_create`, `etendo_update`, `etendo_delete`, `etendo_action`, image upload) |
-| `etendo:process` | MCP per-spec process tools |
+| `etendo:write` | REST writes **except** action routes and process specs (below); MCP write tools (`etendo_create`, `etendo_update`, `etendo_delete`, image upload) |
+| `etendo:process` | REST action routes `POST /{spec}/{entity}/{id}/action/{name}` and `POST` on a process spec; MCP `etendo_action` and per-spec process tools (ETP-5783: same scope as the REST action route) |
 | `etendo:report` | MCP `generate_*` report tools |
 | `etendo:*` | everything above |
 
@@ -232,6 +232,21 @@ scopes keep working unchanged; nothing in the database is rewritten.
   can be dropped once no active client, token or API key stores a `neo:` scope
   (`SELECT count(*) FROM etgo_oauth2_client WHERE scopes LIKE '%neo:%'`, ignoring the internal
   `neo:public-api-*` markers below, and the same on `etgo_oauth2_token`).
+
+**Scope rule on REST (ETP-5783).** The check is decided by the request's structure, never by a
+name. `GET`/`HEAD` need `etendo:read`. A non-read request needs `etendo:process` when its path is a
+NEO action route (`/{spec}/{entity}/{recordId}/action/{name}`, parsed by the same
+`NeoServletSupport.parsePath` the servlet dispatches with — `NeoActionPath`), and `etendo:write`
+otherwise; a key holding only `etendo:write` can no longer complete, void or close a document. A
+`POST` on a process spec (`specType = 'P'`) is recognised by its spec row, not its path, so it needs
+`etendo:write` at the door (the authenticator keeps the token's scopes on the request) **and**
+`etendo:process` in `NeoRequestRouter.handleProcessSpecRequest`. `POST /sws/neo/batch` runs
+create operations only and never an action, so it stays `etendo:write`. Cookie sessions and legacy
+JWTs (the SPA) are never narrowed by scope: RBAC decides, as before. A scope failure answers **403**
+`{"error":{"status":403,"message":"Insufficient scope: this request requires etendo:process"}}`
+with `WWW-Authenticate: Bearer error="insufficient_scope"` (RFC 6750 §3.1) — no longer `401`, which
+clients read as "your token expired" and discard. A token with no usable identity claims stays 401.
+MCP's own scope failures are unchanged (tool errors from `McpAuthorizationService`); what changed is that `etendo_action` is now process-tier there too, so the REST action route, process specs and MCP `etendo_action` all require `etendo:process` (parity, §4.12.9). MCP clients registered by default hold `etendo:*` and keep working; a client registered with only `etendo:write` loses `etendo_action` until `etendo:process` is added.
 
 The MCP tool names follow a different rule: the old `neo_<x>` names are refused with a pointer to
 the new name, not accepted (see *MCP tool names* at the start of §4.12).
@@ -735,10 +750,15 @@ Both use the flat `status`/`error`/`detail`/`hint`/`seeAlso` error envelope (sam
 same entity, and the two need opposite remedies. The MCP surface documents the same contract to
 agent callers (`McpConstants.ERROR_STALE_RECORD`, `ToolRegistry`'s tool descriptions).
 
-The comparison (`NeoRecordVersion.isStale`) deliberately mirrors core's own optimistic-locking
-check (`JsonToDataConverter#areDatesEqual`, millisecond-insensitive — Postgres keeps microseconds
-on the column while the wire value is formatted to the second) rather than reinventing the
-tolerance. Core's check exists already but is silently skipped whenever the request omits the
+The comparison (`NeoRecordVersion.isStale`) depends on the precision of the token the caller
+echoes. NEO emits `updated` with milliseconds (`NeoDateFormat.toAuditToken`, e.g.
+`2026-10-22T16:54:16.581-03:00`) on every CRUD write response and on the `GET` of one record
+(`NeoAuditTokenRefresh` re-stamps what core serialises to the second). A token with milliseconds
+is compared to the millisecond, so two writes inside the same second still conflict; the public
+API's `ETag` is that same token. A token without them (a list row, an older client) keeps core's
+own tolerance (`JsonToDataConverter#areDatesEqual`, millisecond-insensitive). Core's reader cannot
+parse fractional seconds, so after NEO's check every write path hands core the token without them
+(`NeoRecordVersion.forCore`); core's own check then runs to the second, as before. Core's check exists already but is silently skipped whenever the request omits the
 `updated` key entirely — which every write used to do, because `NeoFieldFilter#filterWriteRequest`
 stripped `updated` from every outgoing write before this existed. It answers `false` ("not stale")
 for anything it cannot evaluate (blank token, non-`Traceable` entity, unparseable value), which lets
@@ -1058,6 +1078,238 @@ is detached.
 When the batch closes it logs one line with the hits and misses per namespace (owning class +
 lookup name), e.g. `[NEO-PERF] batch memo BatchService|spec hits=39 misses=1, BatchService|entity
 hits=36 misses=4, …`; nothing is logged for a batch that memoized nothing.
+
+#### 4.3.8 Error classification — a refused request is a 4xx with a readable message (ETP-5782)
+
+> Numbered 4.3.8 because ETP-5785 adds its own 4.3.7 (reference ownership).
+
+A trigger, DB function or AD-keyed check that **refuses** a write is the caller's to fix, so NEO
+answers it as a 4xx with the rule's own translated sentence — not as `500 "Error processing
+request"`. Every NEO funnel decides the status in one place, `NeoErrorClassifier`, and builds the
+answer in one place, `NeoErrorResponses`:
+
+| funnel | entry point |
+|---|---|
+| generic CRUD, thrown (`NeoCrudHandler.handleDefault`) | `NeoErrorResponses.fromException` |
+| generic CRUD, swallowed by core's JSON write service (status `-1`) | `NeoBatchJsonDataService` keeps the throwable → `writeFailure` → `checkJsonServiceResponse` |
+| customizations (`NeoServletSupport.handleWithDefaultStep`) | `fromException`, prefix `Hook handler error: ` on a 5xx only |
+| processes and OBUIAPP actions (`NeoProcessService`) | `fromException`, prefix `Process execution failed: ` on a 5xx only |
+| `/sws/neo/batch` (outer loop, preprocessor) | `fromException`, prefix `Batch failed: ` / `Failed to preprocess operation 'x': ` |
+| the servlet's own catch-all (`NeoServlet`) | `fromException` |
+| MCP (`McpToolResponses.buildUnexpectedErrorBody`, `McpWriteRequestSupport.checkJsonServiceError`) | same classification, MCP envelope (§4.12.9) |
+
+**Classified by what failed, never by its text.** The decision reads the exception: its type, the
+SQLState of the last `SQLException` in the cause chain (causes and `getNextException`), and whether
+it carries an AD message key. The message text is only displayed, never matched.
+
+| what failed | status | `error.code` | `error.message` |
+|---|---|---|---|
+| `RAISE_APPLICATION_ERROR` in a trigger/function (SQLState `P0001`) | `422` | `business_rule` | the rule's message, translated (`@20502@` → *"Cannot change business partner or price list if there are lines."*) |
+| an exception carrying an AD message key: `MessageKeyedException`, or an `OBException` chain whose message is `@Key@` tokens | `422` | `business_rule` | translated |
+| unique violation (`23505`) | `409` | `duplicate_key` | the existing duplicate-key wording (unchanged) |
+| not-null violation (`23502`), Hibernate `PropertyValueException` | `400` | `missing_required_value` | generic |
+| FK violation (`23503`) on a `DELETE` | `409` | `record_in_use` | translated constraint or `ForeignKeyViolation` AD message, generic if unavailable |
+| FK violation on any other verb, Hibernate `TransientObjectException`, an unknown id in the body (core's import-set error keyed `id`, recognised by its fixed `New object … refered to but not present in the import set` template — core's body has no category, and `id` alone also carries invalid property paths) | `400` | `unknown_reference` | generic, **byte-identical for a missing and a foreign id** |
+| check violation (`23514`), data exception (class `22`) | `422` | `invalid_value` | translated constraint or AD message, generic if unavailable |
+| `OBSecurityException` / `SecurityException` | `403` | `forbidden` | generic |
+| deadlock (`40P01`), serialization failure (`40001`) | `409` | `retryable_conflict` | generic — retry |
+| statement timeout (`57014`), connection (class `08`), resources (class `53`), shutdown (`57P0x`) | `503` | `service_unavailable` | generic — retry later |
+| anything else (a plain `OBException` without a key, NPE, unknown SQLState, …) | `500` | `server_error` | sanitized: no SQL, no row dump, no object references |
+
+The body keeps the nested REST shape, plus `code` and, when the failure named them, the AD message
+keys:
+
+```json
+{"error":{"message":"Cannot change business partner or price list if there are lines.",
+          "status":422,"code":"business_rule","messageKeys":["20502"]}}
+```
+
+Rules every funnel follows:
+
+- **The rollback covers only uncommitted work.** The session is rolled back before answering
+  (unless `/batch` owns the transaction, which rolls back the whole set itself). The request filter
+  commits whatever the session holds when the servlet answers without throwing, so a refusal
+  answered without this rollback could still persist the half-done write. What was already
+  committed stays: outside a batch the default write commits before `afterHandle` runs, and a
+  process may commit internally.
+- **A failure after the main write committed is not a refusal.** An exception thrown by
+  `afterHandle` (REST `NeoServletSupport.runPostHookAfterCommit`, MCP `McpHookExecutor.runPostHook`)
+  is answered by `NeoErrorResponses.afterCommitFailure` as before ETP-5782: `500 server_error`,
+  sanitized message, and on a write `error.hint` = *"The record may already be saved. Read it
+  before re-sending the request."* (MCP: `hint` in the envelope). Classifying it as a 4xx would
+  invite the caller to correct and re-send a write that already happened. Inside `/batch` nothing
+  is committed yet, so there it is classified as usual. A customization or process that commits
+  internally *before* throwing is not detectable structurally; its refusal is still classified.
+- **One log line per refusal.** A 4xx logs one `WARN` with the class and keys, no stack trace. A 5xx
+  logs `ERROR` with the stack trace.
+- **Translation in the request's language.** `NeoMessageTranslator.translateDbMessage` translates
+  through core's `translateError` with the `OBContext` language, after the rollback so it reads
+  `AD_Message` on a usable session. Inside `/batch` the refusal is translated again once the batch
+  has rolled back (`retranslateBatchFailure`), since the aborted transaction could not read it.
+
+Known limits, deliberate:
+
+- **An uncaptured core failure stays 500.** Only a failure whose throwable NEO's write service kept
+  is classified; a failure body that reaches NEO as prose alone is answered as before rather than
+  guessed from its text. `NeoBatchJsonDataService` now serves single writes too (it commits them as
+  core does) so the REST and MCP writes are captured. Both copied `update` and `remove` bodies,
+  including their helpers, must be compared with core on every upgrade. Customizations can
+  dispatch additional writes, including deletes, inside a batch.
+- **A plain `OBException` stays 500.** A core event handler that throws
+  `new OBException(OBMessageUtils.messageBD(key))` hands over already-translated prose with no key;
+  it is not classified until it throws with its key.
+- **No `field` key yet.** Naming the offending field is deferred until it is combined with
+  ETP-5785's reference ownership.
+- **The gateway** still maps NEO's 422/503 to 502 until ETP-5369.
+- **Period/process refusal split.** A captured period refusal keeps REST 400; a thrown keyed or
+  P0001 refusal is 422, and so is a process whose `AD_PInstance` reports failure
+  (`Result = 0`, ETP-5783, §4.3.9). Class-backed and OBUIAPP process refusals keep 400. See the
+  declared divergence in §4.12.9.
+- **SPA follow-up required before delivery.** Localize generic errors by `error.code`:
+  `business_rule`, `unknown_reference`, `record_in_use`, `invalid_value`,
+  `missing_required_value`, `forbidden`, `retryable_conflict`, `service_unavailable` and
+  `stale_record`. Backend AD translations preserve acronyms and multiline text. The separate
+  SPA PR and live stateless MCP translation check remain pending.
+
+#### 4.3.7 A write never references another tenant's row (ETP-5785)
+
+**Update and delete targets.** Before customization hooks, optimistic-version reads or persistence,
+REST `PUT`/`PATCH`/`DELETE` and MCP `etendo_update`/`etendo_delete` call
+`NeoActionRecordGuard.writeRefusalFor`. REST does so from `NeoWritePreflight`; MCP calls the same
+guard before resolving write fields. A missing target and a target outside the caller's write
+scope both produce `404 Record not found`, without returning record data. A missing session, an
+unresolved DAL model or an ownership lookup failure also refuses the write.
+
+Target write scope requires the record's client to equal the current client and its organization,
+when present, to belong to the caller's writable organizations. Readable System (`0`) records may
+be referenced by tenant records, but that readability does not grant permission to update or
+delete them. Tables without a client are writable through this guard only from the System client.
+Existing entity method and role gates still apply. MCP updates also reject blank `updated` values
+and the literal string `"null"` with the existing `422` missing-argument envelope; these values
+cannot disable optimistic locking.
+
+The rules below concern references supplied by the caller, separately from the target record.
+
+**References do not write secondary records.** Scalar FK values and direct `reference.id` keys
+remain supported, including System references. An object reference must contain an `id`, may carry
+inert metadata such as `_identifier` and a matching `_entityName`, and must not request creation or
+set mutable DAL properties. Nested creates, entity-name overrides, arrays supplied as references,
+and paths beyond a direct `reference.id` (for example `reference.name` or `a.b.id`) are refused
+before hooks with the existing validation envelope (REST 400 / MCP 422). Update the related record
+through its own resource instead. This restriction prevents core's JSON converter from turning a
+reference into a secondary write performed in admin mode.
+
+Core resolves a foreign-key value of a write body with a bare `OBDal.get` (`JsonToDataConverter`),
+which applies no client filter, and `OBInterceptor` skips its referenced-organization check on
+insert. The parent of a child create was read the same way (`NeoParentValuesLoader`). With
+credentials of tenant A and a UUID of tenant B, a caller could attach A's order line to B's order or
+point A's records at B's price list, tax, partner or user.
+
+`NeoReferenceOwnership.refuseUnownedReferences(adTab, requestFields, parentId)` closes it on every
+write channel that persists through NEO, and on every one it runs **before the entity's
+customization is dispatched** — a customization's `handle()` may persist on its own
+(`ContactsLocationAddressHandler` writes the address under the partner named by `parentId`), so a
+check inside the default CRUD step came too late:
+
+| channel | where it runs |
+|---|---|
+| REST `POST`/`PUT`/`PATCH` `/sws/neo/{spec}/{entity}` | `NeoWritePreflight.refusalFor`, called from `NeoCrudHandler.dispatchCrudRequestInternal` before `handleWithHooks` (with or without a customization) |
+| REST `/sws/neo/batch` and MCP `etendo_batch` | `NeoWritePreflight.refusalFor`, called from `BatchService.createRecord` before `handleWithHooks` |
+| MCP `etendo_create` | `parentId` right after `requireApplicableParent`; the fields right after FK-by-name resolution (`McpFkResolver`), before defaults, the injectors and the customization pre-hook |
+| MCP `etendo_update` | right after FK-by-name resolution, before the customization pre-hook |
+
+Each write is checked exactly once: the default CRUD step (`handleDefault`) does not repeat it.
+There is no single persistence point the three channels share below core — MCP `etendo_create` /
+`etendo_update` persist through their own pipeline — so the check is one implementation called from
+those pre-dispatch points, not copies. `NeoWritePreflight` is the place for any further REST write
+check that must hold whatever a customization does.
+
+On REST, `NeoWritePreflight` reads the body without modifying it: API keys are resolved to DAL
+property names on a copy (`NeoFieldFilter.resolveWritablePropName`), a `{"data":{…}}` wrapper is
+read inside, the server-owned `client`/`organization` keys (dropped by every write path) are left
+out, and a field sent under both its API key and its DAL name is checked in both spellings.
+`parentId` comes from the body or the query string (`?parentId=`, the REST UI shape); when both are
+present and differ, both are checked.
+
+**What is checked.** Only what the request set: the body as the caller sent it (before any
+server-derived value is added) and `parentId`. A body key is a reference when the
+DAL model says so — a non-primitive, non-one-to-many property, reached directly or through a dotted
+path the way core reads it (`a.id` sets `a`, so `a`'s referenced property decides the lookup;
+`a.b` walks `a`), or an id-only nested object with an `id`, string or number (core reads it with `getString`) —
+and its target entity is client-enabled or is the client entity. No entity, table or property is named. Skipped
+without a lookup: shared reference data (not client-enabled), blank / `"null"` values, the `"0"`
+sentinel, an unsubstituted batch `$ref:`, and placeholder literals no id can match (an unresolved
+`@Token@` AD default, a `<…>` sequence preview). `parentId` is checked against the parent tab's
+entity; a header ignores `parentId`, so it is not checked there.
+
+**What is accepted.** A row whose client is the caller's or System (`0`), as decided by
+`TenantOwnership.loadOwnedByClient` (readable clients; the organization is not judged — see below).
+
+**The refusal.** A row of another tenant and a row that does not exist get the same answer: the body
+core's `DefaultJsonDataService` returns for an unknown reference
+(`RPCREQUEST_STATUS_VALIDATION_ERROR`, one error keyed `id`:
+`New object <Entity>(null)  (key: <id>_<Entity>) refered to but not present in the import set`). Each
+channel maps it with its existing mapper — REST and batch: **400** through
+`NeoValidationErrorResponseBuilder`;
+MCP: the **422** `validation_error` envelope with `fieldErrors.id` — so nothing tells the caller that
+the id exists elsewhere. Nothing is written: the check runs before the write and, in a batch, the
+failure rolls back the whole set. The server log keeps one WARN naming the target entity, never the
+id. A missing id is now refused at this point too, before defaults or callouts run, so its answer
+no longer depends on how far the write got.
+
+A lookup that fails (an id the target's key type cannot hold) is refused the same way — fail closed,
+never a different error.
+
+**Cost.** One lookup per distinct reference the request sets, never one per foreign key of the
+entity. A reference by id is an `OBDal.get`; the row lands in the session's first-level cache, where
+core's own resolution of the same id finds it later. A reference by a non-id property (rare) is a
+query of its own, the one core uses, and every match must be acceptable.
+
+**Defence in depth.** `NeoParentValuesLoader` treats a parent of another tenant as missing, so its
+values never reach defaults — on the create path and on `GET /defaults?parentId=` alike.
+`ContactsLocationAddressHandler` loads the parent partner and a reused address through
+`TenantOwnership.loadOwnedByClient`, answering another tenant's row exactly like a missing one.
+MCP FK-by-name resolution (`McpFkResolver`) only treats a value as an existing id when it is a row of
+the caller's client or of System; another tenant's legacy id falls through to the name path and ends
+in the same `not_found` a missing id gets.
+
+**Out of scope.** Organization-level references within the same tenant (a row of an organization
+outside the role's tree) are not judged here; that is an organization-access question, not a tenant
+leak. The target record of an update or delete is not a reference and is not checked by this rule.
+
+Tests: `NeoReferenceOwnershipTest` (structural detection, dedup, paths, nested and numeric ids,
+parent, skipped values, fail-closed lookups, identical answers), `NeoWritePreflightTest` (DAL-keyed
+copy, untouched body, parent sources), the pre-dispatch cases of `NeoCrudHandlerTest` and
+`BatchServiceRobustnessTest`, the `loadOwnedByClient` cases of `TenantOwnershipTest`, the foreign
+legacy id case of `McpFkResolverTest`, and the two-tenant `NeoReferenceOwnershipIntegrationTest`
+(REST and batch, through customizations, nothing written).
+
+#### 4.3.9 Document actions over REST: refusal and idempotency (ETP-5783)
+
+`POST /sws/neo/{spec}/{entity}/{id}/action/documentAction` with `{"docAction":"CO"}` runs the
+document's DB procedure. Scope: see §4.1.1. (Numbered 4.3.9 because §4.3.8 is ETP-5782's error
+classification.)
+
+- **A refusal by the document's rules is `422`.** When the procedure reports an error result
+  (`AD_PInstance.Result = 0`: no lines, a closed period, an unreconciled payment ...) the answer is
+  `422` with the translated message and the AD message keys, in the nested envelope of §4.3.8
+  *and* the flat fields the SPA has always read:
+  `{"status":"error","message":"...","messageKeys":["..."],"error":{"status":422,"code":"business_rule","message":"...","messageKeys":["..."]}}`.
+  A malformed request keeps its status: no record id `400`, unknown action `404`, no process access
+  `403`. Class-backed and OBUIAPP processes still answer their refusals `400`.
+- **Asking for the status a document already has is a success.** `CO`, `VO` and `CL` on a record
+  whose document status is already that value answer
+  `200 {"status":"success","message":"<ETGO_DocActionAlreadyApplied>","alreadyApplied":true}` and
+  the procedure is **not** called, so a retry after a timeout is safe. Only these three are
+  decided: they lead to the status of the same code; the others (`RE` leads to draft although `RE`
+  is also a status, "Reversed") run the procedure as before, as does any other status, a missing
+  record, or any lookup that fails. The status column is found structurally: the single active List
+  column of the record's table whose reference list holds both the draft status (`DR`) and the target
+  status (the action's own list never holds `DR`); two candidates count as ambiguous.
+  `DocActionIdempotency`.
+- Both changes live in `NeoProcessService.executeDbProcedure`, which MCP (`etendo_action`) also
+  reaches, so both channels behave the same; MCP reads `status >= 400` and the flat body, so the
+  422 needs no change there.
 
 ### 4.4 Selectors (FK Dropdowns)
 
@@ -2220,7 +2472,7 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
   `message:"Not a report generator; '<spec>' serves named actions through etendo_action (entity
   <entity>)."`, plus `actionEntity`, `actions[]` and `actionsHint`. Three-way: a report generator
   gets `callable:true` + `reportTool`; a spec with neither keeps `not_configured_for_report_generation`.
-- **Scope.** `etendo_action` is registered only for write-capable tokens (`etendo:write` / `etendo:*`, or their deprecated `neo:` aliases), so a
+- **Scope.** `etendo_action` is registered and authorized only for process-capable tokens (`etendo:process` / `etendo:*`, or their deprecated `neo:` aliases; ETP-5783 — it was write-tier before, which let a write-only key complete a document), so a
   read-only token cannot call the read helpers (`pendingLines`, `candidates`, `autoMatch`) either.
 - **Schema.** For an entity whose handler declares actions, `etendo_schema` returns the action catalog
   whatever `view` is asked (`McpActionsView.buildDeclaredResponse`): each entry is
@@ -3798,6 +4050,12 @@ this fix.
 
 #### 4.12.9 `etendo_batch` is on again, and what still differs (ETP-5335 → ETP-5415)
 
+> **Scope parity for actions (ETP-5783).** Running a document action or a process needs
+> `etendo:process` on every channel: the REST action route (by path), `POST` on a process spec (by
+> spec type) and MCP `etendo_action` (`McpAuthorizationService.requiredScopeFor`; the tool is
+> also published only to process-capable tokens). `etendo:write` alone no longer completes a
+> document through any of them. See §4.1.1.
+
 `McpConstants.batchToolEnabled()` returns `true`. The tool is published in `tools/list`
 (`ToolRegistry`) and routable by name (`McpToolRouter.route`).
 
@@ -3866,11 +4124,16 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 |---|---|---|---|
 | header defaults filled only by a customization pre-hook (ETP-5703, ETP-5710) — `partnerAddress` of the **sales order, sales quotation** and goods receipt headers | filled when the partner has exactly one matching location | **not filled**: `validateMandatoryFields` runs before the pre-hook and answers the `missingFields` 422 | the **invoice** headers (sales and purchase) no longer diverge: they implement `NeoHandler#resolveServerCreateFields`, run before the pre-check. The other headers have not adopted the hook yet — a follow-up, one `resolveServerCreateFields` override each calling their existing default |
 | `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation, sales invoice and purchase invoice lines (ETP-5528, ETP-5710, §4.12.20, §4.12.31) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales and purchase invoice lines (`SalesInvoiceLineHandler` / `PurchaseInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`; purchase since ETP-5710). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order lines still do not get it (measured 2026-09-30: purchase order line gross 0; the purchase invoice line 0 / 0 of that measurement is fixed by ETP-5710). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
+| error classification (ETP-5782) — period and process refusals | captured period refusals keep REST `400`; process failures reported through `AD_PInstance` are `422` (§4.3.9) | thrown keyed or P0001 refusals are `422` | existing funnel divergence preserved for periods; status does not depend on translated prose (§4.3.8). |
+| error classification (ETP-5782) — `unknown_reference`, `missing_required_value` | REST `400` | MCP `422 validation_error`, same `code` | MCP answers every rejected value as 422 already (§4.3.1.1); the class travels in `code`, so a caller branches on it on either channel. Declared in `McpToolResponses.classifiedEnvelope`. |
+| error classification (ETP-5782) — a captured write failure classified `500` | REST `500 server_error`, sanitized | MCP keeps its existing write answer (`422`) | the MCP write path answered every DAL failure 422 before ETP-5782; only the classified 4xx/503 changed it. A 500-class failure keeps the old answer rather than turn a 422 into a 500 for agents. |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
+| reference ownership (ETP-5785, §4.3.7) | checked before FK-name resolution (parent), defaults, the injectors and the customization | checked in `BatchService.createRecord`, after `preprocessBatchOperation` and before the customization | a foreign or missing reference is refused on both and nothing is written. In batch, the preprocessor's injectors (`McpLinePriceInjector`, `McpBillToInjector`) run first and may read the referenced parent or partner, because the preprocessor is also where FK names become ids, which the check needs. What they read never reaches the response, but a refusal the preprocessor raises on that read is answered instead of the unknown-reference body |
 | `user` create — invitation (ETP-4830, declared by ETP-5194) | invitation committed by the post-hook | same, but mid-batch | the invitation's `commitAndClose()` commits every earlier operation of the batch, so a later failure answers `atomic: false` (§4.12.4.1). Same behaviour on REST `/batch`; declared, not changed. The ETP-5194 email correction is an update, which batch does not perform |
 | line creation of receipts, shipments and invoices (ETP-5713) | the lines CRUD, which is what the SPA's "Add from ..." modals post one line at a time: **not capped** by the server (the modal limits the quantity client-side), invoice-line `salesOrderLine` / `goodsShipmentLine` and header `salesOrder` refused as `read_only_field` on MCP | `etendo_batch` reaches the same CRUD: same refusals, same lack of cap | the declared import actions (`importOrderLines`, `importReceiptLines`, `importShipmentLines`, §4.12.34) are the MCP way to create linked lines: capped by what is pending (drafts included), linked, one transaction. They are served by the same delegates on REST and MCP, so the two channels agree on them; what differs is the CRUD line create, which the actions deliberately do not reuse |
 | availability, `etendo_schema` `id`, entity-name case, message-key hints (ETP-5714) | **not applicable**: the actions view, `availableNow` and the hints are MCP surfaces (`McpActionsView`, `McpToolRouter`); REST has no equivalent view and answers its own bodies | MCP only | declared, not a bug: availability is advisory and never judged by any channel, so a REST call and an MCP call to the same action are refused or served identically by the same handler. The costing retry (409 `costNotCalculated`) is NOT a divergence: it comes from `DocumentPostingService.handleAction`, shared by REST and MCP |
+| a second factura rectificativa of a return (ETP-5712) | **refused 409** `returnInvoiceAlreadyExists` when the return already has a non-voided one; the button is also hidden on screen (`hasReturnInvoice`), so the SPA never sends the flag | the same 409; **`allowDuplicate:true` is declared in the `createReturnInvoice` contract** and creates a second one on purpose (e.g. one per origin invoice) | an MCP-only capability the screen does not offer, kept deliberately (ETP-5381 said a return may legitimately have more than one). Strict: only a JSON boolean `true` (a string or number is 422). See §4.12.33 |
 | the grid price (`listPrice`) of an agent-written order line (ETP-5714) | explicit price → `listPrice` 0 (`OrderLineDiscountSupport`; 17 of 73 order lines in 3 days of local data) | same | declared, not fixed: the invoice-line side now aligns the list price on create, update and every native copy, so an invoice created or imported from such an order shows the price; the order line itself still shows 0,00 until its own helper gets the same rule |
 | document exchange rate on a create whose currency or reference date the create cascade derives (ETP-5840) | MCP `etendo_create` runs the defaults before the pre-hook, so the pre-hook decides and refuses (422, nothing saved) | `/batch` and `etendo_batch`: the post-hook refuses and the batch rolls back (nothing saved). **REST single** `POST` without `currency` or the reference date: the CRUD service has already committed when the post-hook knows them, so the document is created without a rate and the response carries the save text as a `warning` in `messages`; its next save is refused until it has one. The SPA always sends both, so it never takes this path | declared |
 | document actions over several documents (ETP-5715) | one document per call (`etendo_action`), one transaction, the call's own answer | `etendo_batch` is **create-only and atomic**; it has no ACTION surface | **`etendo_action_batch` is neither: per-document, NOT atomic, capped at 50 ids**, one result per document. Each document runs the `etendo_action` path in its own transaction (commit on success, rollback and a clean session on failure) and the batch carries on after a failure. REST has no equivalent call: the SPA's list toolbar posts one request per record. **Aligned with the SPA (bulk bar, row kebab, form kebab) and the same in single `etendo_action`:** reactivating a *posted* **invoice** un-posts it first (`preUnpostActions`), by per-entity opt-in (`NeoHandler#unpostBeforeReactivate`: goods documents, returns and journals do not, as in the SPA), §4.12.36. In `etendo_action` the un-post is committed in its own transaction before the reactivation, which REST/the SPA do as two requests; amortization's SPA un-posts but the module declares no `unpost` for it, so the MCP does not. **Not aligned, on purpose:** concurrency, the client-side `rowFilter` omission, and the SPA clone dialog stopping at the first failure. Declared in §4.12.36 |
@@ -4208,8 +4471,9 @@ behaviour is unchanged. Channels as noted per field:
   `serverResolvedCreateFields()`: that would make `etendo_schema(view:"create")` list it as optional
   while the default can abstain and the field is still required. The sales-order / quotation /
   goods-receipt headers below do **not** have the hook yet and still diverge (§4.12.9).
-- **Sales order and sales quotation headers** (`SalesOrderHeaderHandler`,
-  `SalesQuotationHeaderHandler`; not the purchase order) — the same create default for
+- **Sales order, sales quotation and purchase order headers** (`SalesOrderHeaderHandler`,
+  `SalesQuotationHeaderHandler`, and since ETP-5881 `PurchaseOrderHeaderHandler`, which left a
+  public API create without the vendor's address) — the same create default for
   `partnerAddress`, with the location flag the column's own AD validation rule requires:
   `C_Order.C_BPartner_Location_ID` uses "C_BPartner Location - Ship To" (`IsShipTo='Y'`), the invoice
   uses "… - Bill To" (`IsBillTo='Y'`). Only when that fills `partnerAddress` is `invoiceAddress`
@@ -4367,7 +4631,7 @@ refuses CO first with its own plain key `ETGO_GLJournalPeriodMismatch` and `mess
 `NeoHandler#filterAliases` is applied by MCP `etendo_list` only. A filter on an aliased property
 (for the order headers: `invoiceStatus`, `deliveryStatus`, `deliveryStatusPurchase`) is evaluated on
 `coalesce(<stored twin>, <virtual>)` there, and the response carries a `filterAliases` note
-(§4.12.32). The REST list does **not** consult the aliases: a `criteria=` on the virtual column still
+(§4.12.32; it names the stored twin only when the spec exposes it). The REST list does **not** consult the aliases: a `criteria=` on the virtual column still
 matches the raw SQLLogic value. That is deliberate, not an oversight — the SPA's generated order
 lists already show and filter the stored columns (`EM_ETGO_*_Status`), so no REST caller filters
 on the virtual one, and rewriting the REST criteria builder for a filter nobody sends would add risk
@@ -8807,7 +9071,14 @@ steps below in this order — both customizations call the single entry point
    sends the product callout's value, which is the same one. Without it `etendo_create` persisted
    `PriceStd 0`, or, with an explicit `unitPrice 20`, 20 (the defaults cascade copies `priceActual`
    into `inppricestd`). The parent is `salesOrder` on `etendo_create`, `parentId` on REST and batch.
-   `unitPrice` is never touched.
+   **`unitPrice` (ETP-5881):** a line sent with no price of its own — `unitPrice` and
+   `grossUnitPrice` each absent or 0 — takes the standard price of that same price-list entry as
+   `unitPrice` (and the entry's `listPrice` when it has a non-zero one and the body has none), through
+   the shared `LinePriceListSupport`. A body that carries a non-zero `listPrice` (the one price the public API exposes as writable) and no price gets `unitPrice = listPrice × (1 − discount/100)` instead and the price list is not applied, as the form does when "Precio" is edited (all four line kinds, sales and purchase). REST single and REST batch run no product callout at that point
+   (the SPA gets the price from it), so such a line used to persist price 0 and net 0; MCP already had
+   the price from `McpLinePriceInjector`, which this does not change, and a non-zero `unitPrice` /
+   `grossUnitPrice` in the body is never replaced. Tax-included lists and products with no price in
+   the list abstain, as the injector does.
    **`listPrice`** (`listPriceFromStandard`, QA reopen CP-8) is editable on both entities, so it is
    filled in one state only — the one the form itself corrects: the price list entry has list
    price 0 and a non-zero standard price, the body's `listPrice` is absent or 0, and the body's
@@ -9719,8 +9990,9 @@ newly required header would loop it forever. A mismatch is always refused.
 (`GoFeatureFlags.FLAG_MCP_MODERN_ERA_DISABLED`), environment level, never per account (clients cache
 the era per origin, and one origin serves every tenant). `true` restores the pre-ETP-5640
 behaviour: `server/discover` gets `200` + `-32601`, `_meta` is ignored, everything is legacy. Unset,
-`false` or an unreachable control plane keep the server dual-era. Live within one ConfigCat poll
-where ConfigCat is configured; a restart where the flag comes from
+`false` or an unreachable control plane keep the server dual-era. Live without a restart on a hosted
+control plane (Datadog Feature Flags, or ConfigCat where it is still the selected arm — see
+`docs/feature-flags-and-tenant-upgrade.md` §1); a restart where the flag comes from
 `etendo.go.flags.mcp-modern-era-disabled`. A client that already cached "modern" keeps working
 after a rollback, because tool calls never needed `initialize`.
 
@@ -9757,6 +10029,7 @@ guard in a shared service):
 | purchase invoice line customization | `PurchaseInvoiceLineHandler` — `@NeoExtension(spec = "purchase-invoice", entity = "lines")`, extends `InvoiceLineHandler`, no `@Named` |
 | sales invoice line customization (since ETP-5528; now also discount + update) | `SalesInvoiceLineHandler` |
 | price + amounts (net, gross, `taxableAmount`), create and update | `InvoiceLineAmountSupport.deriveAmountsOnWrite` (shared by both) |
+| price from the price list on a create sent without one (ETP-5881; sales and purchase invoice, every channel) | `SalesInvoiceLineHandler` → `InvoiceLineAmountSupport.setPriceFromPriceListOnCreate` → `LinePriceListSupport` (shared with the order lines). The parent invoice's price list at the invoice date, as the product callout gives the SPA; REST single/batch ran no callout and persisted price 0. A non-zero `unitPrice`/`grossUnitPrice` is never replaced; tax-included lists abstain. `PurchaseInvoiceLineHandler` calls it too. Purchase-order lines have their own `PurchaseOrderLineHandler` (`@NeoExtension(spec = "purchase-order", entity = "lines")`) that takes the order's purchase price list through `OrderLineDiscountSupport.setStandardPriceOnCreate`, as the sales lines do: the unit price of a line sent without one, and always the standard price (`PriceStd`, which REST/MCP left at 0); the sales order discount/amount rules are not applied to them |
 | completion guard | `InvoiceCompletionLineGuard`, called first by `PurchaseInvoiceHeaderHandler` and `SalesInvoiceHeaderHandler` |
 
 **Precedence between the annotation and the row's qualifier.** The row `purchase-invoice/lines` keeps
@@ -9973,8 +10246,9 @@ against `coalesce(<target>, <virtual>)`:
   the fallback is the virtual value, `0` for a lineless order — what `afterHandle` displays too.
 - **A target that is not a property of the entity fails the read** (500), rather than quietly
   filtering on the raw value. It is a customization bug, not a caller mistake.
-- **The target is not checked against the spec's excluded fields.** It is declared by the server,
-  and the condition only compares the value the caller is already shown.
+- **The target is not checked against the spec's excluded fields** for the evaluation. It is
+  declared by the server, and the condition only compares the value the caller is already shown.
+  The exclusion only decides whether the note may *name* the target (see Transparency below).
 - A named `status` filter is never aliased: it is a hand-authored fragment, not a property.
 - **The target must have the filtered property's type** (both primitive with the same Java type,
   or both references); the value is formatted for the filtered property. A mismatch fails the
@@ -9993,6 +10267,26 @@ against `coalesce(<target>, <virtual>)`:
   "reason": "The filter on deliveryStatus was evaluated on eTGODeliveryStatus, which holds the value this list shows for deliveryStatus."
 }]
 ```
+
+**The note names only a field the caller can filter on.** `evaluatedOn` is emitted only when the
+target is filterable in the spec being read — the same rule that answers a filter key with 422
+`unknown_filter_field`: a target whose `ETGO_SF_FIELD` row is excluded (after any MCP_CONFIG override;
+`McpQuerySupport.excludedPropertyNames`)
+is not named. The entry is still emitted, because the caller must know the filter was redirected,
+but without `evaluatedOn` and with a reason that does not name the target. Canonical case: the
+purchase order excludes `eTGODeliveryStatus`, so `{"deliveryStatus":{"lt":100}}` there answers
+
+```json
+"filterAliases": [{
+  "filter": "deliveryStatus",
+  "reason": "The filter on deliveryStatus was evaluated on the stored value this list shows for deliveryStatus; the field holding that value is not exposed by this spec."
+}]
+```
+
+(the mirror case is `deliveryStatusPurchase` on the sales order, whose `eTGODelivStatusPurchase`
+is excluded). Naming it would invite a retry the spec refuses with 422 and disclose a field the
+spec was curated to hide. The evaluation itself is unchanged — `coalesce(<target>, <virtual>)`
+either way.
 
 **The order headers' mapping** (`AbstractOrderHeaderHandler#filterAliases`, inherited by the sales
 order, purchase order and sales quotation handlers):
@@ -10145,13 +10439,27 @@ the SPA's two calls. An agent that confirmed and stopped believed the refund was
 - The `FLOW` text carried by every return action's description repeats it, and so do both spec agent prompts
   (`agent-prompts/*/spec.md`, mirrored in `ETGO_SF_SPEC.AGENT_PROMPT`).
 
-**Duplicates are allowed, and reported.** ETP-5381 removed the duplicate guard on purpose (a return can legitimately
-have more than one rectificativa); that stays. What changes is that it can no longer happen unseen:
-`createReturnInvoice`'s description tells the agent to check `hasReturnInvoice` (`rectifiableInvoices`) /
-`returnInvoices` (header GET) first, and the answer lists `previousReturnInvoices`: the non-voided invoices the return
-had BEFORE this call, from the same query as `returnInvoices` / `hasReturnInvoice`
-(`ReturnShipmentUtils.fetchPreviousReturnInvoices`; unlike the enrichment it propagates a failure, answering 400, so a
-failed lookup is never read as "first one").
+**One factura rectificativa per return, unless `allowDuplicate:true`.** The screen offers *Crear Factura Rectificativa*
+only while the return is `CO` and has no non-voided invoice (`hasReturnInvoice`), and hides the button the moment one
+is created; so the screen allows exactly ONE per return. ETP-5381 had removed the server-side guard (a return can
+legitimately have more than one, for example one per origin invoice) and left that rule to the client; an agent has no
+button to hide, and refunded the same return twice (-44.00 for 2 returned units). Since ETP-5712 the action enforces it
+for every channel, in `ReturnInvoiceSupport.refuseIfAlreadyInvoiced`, BEFORE anything is written (and before the price
+probe):
+- the return has at least one **non-voided** invoice (`ReturnShipmentUtils.fetchPreviousReturnInvoices`, the same query
+  as `returnInvoices` / `hasReturnInvoice`; a VOIDED one does not count, it propagates a failure as 400 so a failed lookup
+  is never read as "first one") and the body does not carry `allowDuplicate:true` -> **409**
+  `{error:{status:409, code:"returnInvoiceAlreadyExists", message:"A rectificative invoice already exists for this
+  return document.", hint, previousReturnInvoices:[{id, documentNo, documentStatus}]}}`. Nothing is created. `message` is
+  the exact legacy sentence `backendErrors.js` already maps to `backendError.returnInvoiceAlreadyExists`; do not reword it.
+- `allowDuplicate` is **strict**: only the JSON boolean `true` lifts the refusal. `"true"`, `1`, `null` or any other
+  non-boolean is a **422** (it never fails open, and never reads as true); absent or `false` keeps the refusal.
+- with `allowDuplicate:true` it behaves as before: another one is created and the answer lists, in
+  `previousReturnInvoices`, the non-voided ones the return had BEFORE this call.
+- `allowDuplicate` is declared (optional boolean) in the `createReturnInvoice` contract of both headers, so it is not an
+  unknown parameter (422) on MCP.
+- the first rectificativa of a return is unaffected. The SPA never sends the flag, so for it only a stale-screen race
+  changes: a clean 409 instead of a silent duplicate.
 
 **Response (200).** `{id, documentNo, documentStatus}` as before, plus:
 
@@ -10169,17 +10477,29 @@ The invoice is left COMPLETED (decision kept from ETP-5381). The SPA carries `gr
 today, so there is nothing to format; a future display of it must go through `formatCurrency`.
 
 **Zero-amount guard.** `ReturnInvoiceSupport.refuseIfUnpriced` refuses with **422** `error.code
-returnInvoiceWithoutAmount` when ANY product line with a quantity would end at a unit price of 0, instead of
-creating and confirming a rectificativa of 0. It judges per line (one unpriced product among priced ones still
-refunds the wrong amount), the same stance as `InvoiceCompletionLineGuard` (ETP-5710), and it runs BEFORE the first
-`save`: it probes each line with the very sources `buildAndSaveInvoiceLine` uses (order line / source invoice line via
-`createShipmentInvoiceLine`, then the source invoice line, then the price list `standardPrice`) on a transient line,
-so a refusal persists nothing. Probe and line build share ONE resolver (`resolveLinePricing`), so they cannot drift. A deliberately free product therefore
-cannot be refunded through this action. Shape:
+returnInvoiceWithoutAmount` when ANY product line with a quantity has **no price source at all**, instead of
+creating and confirming a rectificativa of 0 because nothing priced it. It judges per line (one unpriced product among
+priced ones still refunds the wrong amount), the same stance as `InvoiceCompletionLineGuard` (ETP-5710), and it runs
+BEFORE the first `save`: it probes each line with the very sources `buildAndSaveInvoiceLine` uses, on a transient
+line, so a refusal persists nothing. Probe and line build share ONE resolver (`resolveLinePricing`), so they cannot
+drift. Resolution order: the handler's line (`createShipmentInvoiceLine`: order line, else a linked invoice line),
+then the price of the **completed invoice line being rectified**, then the price list `standardPrice`.
+
+A line counts as priced (`PricedLine.priceFound`) when it ends at a non-zero price, **or at the price of the source
+invoice line even if that price is 0**: a deliberately free product was invoiced at 0 and is refunded at 0 (the core
+`InvoiceFromShipmentActionHandler` does the same). A 0 that only the order line or the price list yields is NOT a
+price: with no invoice line behind it the line is still refused, so a missing price is never mistaken for a free one
+(ETP-5712 point 7; before it, a free product could not be refunded by any path, the SPA included). When `originInvoices`
+(or the auto-detected invoice) is known, the source-line lookup is restricted to THOSE invoices, so what is credited is
+literally what was invoiced; without them it takes the latest completed invoice line of the shipment line. A non-zero
+price from the order line still wins over the invoice line, so every amount that was already working is unchanged.
+Shape:
 `{error:{status:422, code:"returnInvoiceWithoutAmount", message:"The corrective invoice (factura rectificativa) cannot
-be created: no price could be found for Agua, Sal, so it would be confirmed with a zero amount. Set a price for those
-products (on the invoice being rectified or in its price list) and try again.", products:["Agua","Sal"]}}`. The SPA
-maps the sentence in `backendErrors.js` (`backendError.returnInvoiceWithoutAmount`).
+be created: no price source was found for Agua, Sal (not on the invoice being rectified, nor on its order line, nor in
+the price list), so it would be confirmed with a zero amount. Give those products a price in the price list, or
+rectify an invoice that has them.", products:["Agua","Sal"]}}`. The SPA maps the sentence in `backendErrors.js`
+(`backendError.returnInvoiceWithoutAmount`). The code and the `products` list are the contract; the sentence is only
+matched by the SPA translator, so change it there too.
 
 **The other refusals** (unchanged status codes): not completed 400, no product lines 400, no origin invoice
 **400** with `ERR_RECTIFIED_INVOICE_REQUIRED`, whose text now says what happened and what to do: `This return has no
@@ -10193,9 +10513,9 @@ to. Invoice the original document first, or pass originInvoices with the id of a
 headers (`MCP_CONFIG.actions.redirect` + a per-button `reasons` entry, next to the ETP-5711 Pick/Edit redirect in the
 same JSON); see the redirect table of §4.12.1.3 (rows for both return entities).
 
-**Channels.** REST, `etendo_batch` and MCP reach the same handlers through `NeoExtensionDispatcher`: no new
-divergence to declare in §4.12.9. The contracts and the redirects only affect what the MCP publishes; REST and the SPA
-still call the handlers as before.
+**Channels.** REST, `etendo_batch` and MCP reach the same handlers through `NeoExtensionDispatcher`, so the 409 applies to
+all of them. The contracts and the redirects only affect what the MCP publishes; REST and the SPA still call the
+handlers as before. The one capability the screen does not offer, `allowDuplicate:true`, is declared in §4.12.9.
 
 **Deployment.** `MCP_CONFIG` and `AGENT_PROMPT` are data rows (`ETGO_SF_ENTITY`, `ETGO_SF_SPEC`), shipped by the module's
 sourcedata XML; a database that already holds the ETP-5711 values gets the new ones through that sourcedata
@@ -10394,7 +10714,8 @@ that matters (the lines CRUD is uncapped, the actions are) is declared in the §
 **The defect.** `etendo_schema(view:"actions")` published the catalogue with no sense of time. An agent could not tell
 that completing is for drafts only, that a completed goods document can be neither reactivated nor voided through MCP
 and is corrected with a return, which `documentAction` value applies to the document in front of it, or that creating the
-factura rectificativa a second time is not refused and duplicates it; it learned each rule from a refusal (or did the
+factura rectificativa a second time is not refused and duplicates it (since ETP-5712 it is refused with a 409 unless
+`allowDuplicate:true`, see §4.12.33); it learned each rule from a refusal (or did the
 wrong thing). Other gaps found alongside: the full view called `documentAction` of a goods receipt `invokable:false` while
 the actions view listed its contract as invokable; the response keys the headers inject (`invoiceStatus`, `linkedReturns`,
 `hasLinkedDocuments`...) were reported in `unknownFields`; a post right after completing a goods document failed with a
@@ -10454,7 +10775,7 @@ verdict. Shared code names no entity; the handlers' customizations declare their
 | Document | Declared (static `availableWhen` unless noted) |
 |---|---|
 | goods receipt, goods shipment, return to vendor, customer return | `documentAction` (contract): `DR` only, `valuesByStatus` `DR` → CO, `CO` → none, with the "corrected with a return" note; a `docAction` outside `CO` answers 422 with that sentence as `hint`. `importOrderLines` / `importReceiptLines` / `importShipmentLines` and their `available*` lists: `DR` (the `id` is the draft target; ETP-5713). `createPurchaseInvoice`, `createDraftInvoice`, `createPurchaseReturn`, `createReturn`, `rectifiableInvoices`, `createReturnInvoice`: `CO`. `cloneRecord`: any state |
-| return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again would NOT be refused and would create a second one"), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
+| return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again is refused with 409 `returnInvoiceAlreadyExists` and creates nothing, unless `allowDuplicate:true` is passed"), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
 | purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, VO, `CO` → RC, RE. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified). `RE` on a posted **invoice** un-posts it first, in `etendo_action` and in `etendo_action_batch` — invoice-only, by opt-in (`NeoHandler#unpostBeforeReactivate`, §4.12.36); when RE is ruled out nothing is un-posted |
 | purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`. `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order) |
 
