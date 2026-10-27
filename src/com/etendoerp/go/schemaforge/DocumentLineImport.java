@@ -295,11 +295,28 @@ final class DocumentLineImport {
    */
   static Map<String, BigDecimal> plan(Map<String, BigDecimal> requested,
       Map<String, String> documentLines, Map<String, BigDecimal> pending) {
+    return plan(requested, documentLines, pending, null, null);
+  }
+
+  /**
+   * {@link #plan(Map, Map, Map)} for a request that names several source documents: the
+   * {@code importNothingPending} and {@code importLineNotInDocument} refusals name the source
+   * ({@code sourceName}, e.g. {@code "order 1000123"}, in place of "this / the source document")
+   * and carry {@code sourceKeys} as extra keys, so the caller knows which document failed.
+   *
+   * @param sourceName the source as the message names it, or {@code null} for the generic wording
+   * @param sourceKeys extra keys of those two refusals (e.g. {@code orderId}, {@code documentNo}),
+   *                   or {@code null}
+   */
+  static Map<String, BigDecimal> plan(Map<String, BigDecimal> requested,
+      Map<String, String> documentLines, Map<String, BigDecimal> pending, String sourceName,
+      Map<String, Object> sourceKeys) {
     Map<String, BigDecimal> planned = new LinkedHashMap<>();
     if (requested == null || requested.isEmpty()) {
       if (pending.isEmpty()) {
-        throw refusal(ERROR_NOTHING_PENDING,
-            "Nothing is left to import from this document: every line is already covered");
+        throw new ImportRefusal(SC_UNPROCESSABLE, ERROR_NOTHING_PENDING, "Nothing is left to "
+            + "import from " + (sourceName == null ? "this document" : sourceName)
+            + ": every line is already covered", sourceKeys);
       }
       planned.putAll(pending);
       return planned;
@@ -307,8 +324,9 @@ final class DocumentLineImport {
     for (Map.Entry<String, BigDecimal> entry : requested.entrySet()) {
       String id = entry.getKey();
       if (!documentLines.containsKey(id)) {
-        throw refusal(ERROR_LINE_NOT_IN_DOCUMENT,
-            "Line " + id + " is not a line of the source document");
+        throw new ImportRefusal(SC_UNPROCESSABLE, ERROR_LINE_NOT_IN_DOCUMENT, "Line " + id
+            + " is not a line of " + (sourceName == null ? "the source document" : sourceName),
+            sourceKeys);
       }
       BigDecimal available = pending.getOrDefault(id, BigDecimal.ZERO);
       if (!fits(entry.getValue(), available)) {

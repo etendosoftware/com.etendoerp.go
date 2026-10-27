@@ -73,8 +73,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * {@code carryGlobalDiscount} true (the default) the header's {@code etgoTotalDiscount} takes the
  * orders' {@code etgoTotalDiscount} when every selected order has the same positive percentage and,
  * judged on the invoice BEFORE the call, the invoice already had that percentage or had no total
- * discount AND no lines (the total-discount line does not count). No positive discount among the
- * orders means nothing to carry. Any other case is a conflict ({@link #discountConflict}) and
+ * discount AND no lines (the total-discount line does not count). Orders and invoice all without a
+ * discount means nothing to carry. Any other case is a conflict ({@link #discountConflict}),
+ * including an invoice with a total discount and orders without one, and
  * answers 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} before anything is written, so the caller
  * can ask the user and resend with {@code carryGlobalDiscount:false}: the lines are imported and
  * the header's total discount is not touched. The lines always keep their own line discount. The
@@ -157,10 +158,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "carryGlobalDiscount true (the default) the invoice's total discount takes the "
             + "orders' global discount when ALL selected orders have the same positive % and, "
             + "before this call, the invoice had that same % or had neither a total discount nor "
-            + "lines. When no selected order has a global discount there is nothing to carry. "
-            + "Otherwise it answers 422 " + ERROR_GLOBAL_DISCOUNT_CONFLICT + " and creates "
-            + "NOTHING: the orders have different % (0 counts as different), the invoice already "
-            + "has another total discount, or it already has lines and no total discount; ask the "
+            + "lines (a total-discount line does not count). When neither the orders nor the "
+            + "invoice have a discount there is nothing to carry. Otherwise it answers 422 "
+            + ERROR_GLOBAL_DISCOUNT_CONFLICT + " and creates NOTHING: the orders have different % "
+            + "(0 counts as different), the invoice already has another total discount (also when "
+            + "the orders have none), or it already has lines and no total discount; ask the "
             + "user, and to import anyway resend the same call with carryGlobalDiscount:false "
             + "(lines keep their own line discount, the invoice's total discount is not touched). "
             + "The order's invoiced quantity only moves when the invoice is "
@@ -301,8 +303,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     lockOrderLines(lineIds);
     for (OrderImport item : imports) {
       refreshOrderLines(item.linesById.values());
+      Map<String, Object> source = new LinkedHashMap<>();
+      source.put(PARAM_ORDER_ID, item.order.getId());
+      source.put("documentNo", item.order.getDocumentNo());
       item.planned = DocumentLineImport.plan(item.requested, item.documentLines,
-          pendingToInvoice(item.order, item.sales));
+          pendingToInvoice(item.order, item.sales), "order " + item.order.getDocumentNo(),
+          source);
     }
     return imports;
   }
@@ -555,37 +561,39 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   // ---------------------------------------------------------------------------
 
   /**
-   * The % to set on the invoice's total discount, or {@code null} when no selected order has a
-   * positive global discount. Judged on the invoice as it is BEFORE this call's lines exist.
+   * The % to set on the invoice's total discount, or {@code null} when there is nothing to carry
+   * (the selected orders have no global discount). Judged on the invoice as it is BEFORE this
+   * call's lines exist.
    *
-   * @throws DocumentLineImport.ImportRefusal 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} when it
-   *         cannot be carried
+   * @throws DocumentLineImport.ImportRefusal 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} when the
+   *         popup would warn instead of offering the carry
    */
   private BigDecimal globalDiscountToCarry(Invoice invoice, List<OrderImport> imports)
       throws JSONException {
-    List<BigDecimal> discounts = new ArrayList<>();
-    for (OrderImport item : imports) {
-      discounts.add(item.order.getEtgoTotalDiscount());
-    }
-    BigDecimal common = firstPositive(discounts);
-    if (common == null) {
-      return null;
-    }
+    List<BigDecimal> discounts = orderDiscounts(imports);
     boolean hadLines = hasProductLines(invoice);
     String conflict = discountConflict(discounts, invoice.getEtgoTotalDiscount(), hadLines);
     if (conflict != null) {
       throw discountConflictRefusal(conflict, imports, invoice.getEtgoTotalDiscount(), hadLines);
     }
-    return common;
+    return firstPositive(discounts);
   }
 
   /**
-   * Which popup conflict applies, or {@code null} when the discount can be carried (or there is
-   * nothing to carry): (a) {@value #CONFLICT_ORDERS_DIFFER} when the orders do not all have the
-   * same positive % (0 or none counts as different), (b) {@value #CONFLICT_INVOICE_OTHER_DISCOUNT}
-   * when the invoice already has another total discount, (c)
-   * {@value #CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT} when it has lines and no total discount:
-   * carrying it would discount those lines too. Checked in that order.
+   * Which popup warning applies, or {@code null} when there is none. Mirrors
+   * {@code resolveOrderGlobalDiscount} ({@code orderGlobalDiscountRule.js}) step by step, every %
+   * normalised by {@link #normalizedPercent} (null, zero or negative as 0):
+   * <ol>
+   *   <li>the orders do not all have the same % (0 counts as a %) →
+   *       {@value #CONFLICT_ORDERS_DIFFER};</li>
+   *   <li>orders and invoice all at 0 → {@code null}: nothing to carry, whatever the lines;</li>
+   *   <li>the invoice has a % other than the orders' one, orders at 0 included →
+   *       {@value #CONFLICT_INVOICE_OTHER_DISCOUNT};</li>
+   *   <li>the invoice has no % but already had lines →
+   *       {@value #CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT}: carrying the orders' % would discount
+   *       those lines too;</li>
+   *   <li>otherwise {@code null}: the orders' % is carried (or the invoice already holds it).</li>
+   * </ol>
    *
    * @param orderDiscounts  the global discount of each selected order, {@code null} as 0
    * @param invoiceDiscount the invoice's total discount before the call, {@code null} as 0
@@ -593,20 +601,46 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    */
   static String discountConflict(List<BigDecimal> orderDiscounts, BigDecimal invoiceDiscount,
       boolean hadLines) {
-    BigDecimal common = firstPositive(orderDiscounts);
+    BigDecimal common = commonPercent(orderDiscounts);
     if (common == null) {
+      return CONFLICT_ORDERS_DIFFER;
+    }
+    BigDecimal current = normalizedPercent(invoiceDiscount);
+    if (common.signum() == 0 && current.signum() == 0) {
       return null;
     }
-    for (BigDecimal discount : orderDiscounts) {
-      if (orZero(discount).compareTo(common) != 0) {
-        return CONFLICT_ORDERS_DIFFER;
+    if (current.signum() > 0 && current.compareTo(common) != 0) {
+      return CONFLICT_INVOICE_OTHER_DISCOUNT;
+    }
+    return current.signum() == 0 && hadLines ? CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT : null;
+  }
+
+  /** The normalised % every order shares (0 for none or no orders), {@code null} if mixed. */
+  private static BigDecimal commonPercent(List<BigDecimal> values) {
+    BigDecimal common = null;
+    for (BigDecimal value : values) {
+      BigDecimal pct = normalizedPercent(value);
+      if (common == null) {
+        common = pct;
+      } else if (common.compareTo(pct) != 0) {
+        return null;
       }
     }
-    BigDecimal current = orZero(invoiceDiscount);
-    if (current.signum() != 0) {
-      return current.compareTo(common) == 0 ? null : CONFLICT_INVOICE_OTHER_DISCOUNT;
+    return common == null ? BigDecimal.ZERO : common;
+  }
+
+  /** As the popup's {@code normalizeGlobalDiscountPct}: null or not positive is 0, 4 decimals. */
+  static BigDecimal normalizedPercent(BigDecimal value) {
+    return value == null || value.signum() <= 0 ? BigDecimal.ZERO
+        : value.setScale(4, java.math.RoundingMode.HALF_UP);
+  }
+
+  private static List<BigDecimal> orderDiscounts(List<OrderImport> imports) {
+    List<BigDecimal> discounts = new ArrayList<>();
+    for (OrderImport item : imports) {
+      discounts.add(item.order.getEtgoTotalDiscount());
     }
-    return hadLines ? CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT : null;
+    return discounts;
   }
 
   private static BigDecimal firstPositive(List<BigDecimal> values) {
@@ -640,10 +674,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     extra.put(PARAM_ORDERS, orders);
     extra.put("invoice", new JSONObject().put("totalDiscount", orZero(invoiceDiscount))
         .put("hadLines", hadLines));
-    extra.put("hint", "Nothing was imported. Ask the user whether to import these lines without "
-        + "carrying the global discount. To import anyway, resend the same call with "
-        + PARAM_CARRY_DISCOUNT + ":false: every line keeps its own line discount and the "
-        + "invoice's total discount is left unchanged.");
+    extra.put("hint", "Nothing was imported. Tell the user this conflict and ask whether to import "
+        + "anyway. Only if they agree, resend the same call with " + PARAM_CARRY_DISCOUNT
+        + ":false: every line keeps its own line discount, no order's global discount is carried "
+        + "and the invoice's total discount is left unchanged (an existing one also applies to "
+        + "the imported lines).");
     return new DocumentLineImport.ImportRefusal(DocumentLineImport.SC_UNPROCESSABLE,
         ERROR_GLOBAL_DISCOUNT_CONFLICT, conflictMessage(conflict, imports, invoiceDiscount),
         extra);
@@ -651,21 +686,20 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
 
   private static String conflictMessage(String conflict, List<OrderImport> imports,
       BigDecimal invoiceDiscount) {
-    List<BigDecimal> discounts = new ArrayList<>();
-    for (OrderImport item : imports) {
-      discounts.add(item.order.getEtgoTotalDiscount());
-    }
-    String orderPct = percent(firstPositive(discounts));
     if (CONFLICT_ORDERS_DIFFER.equals(conflict)) {
       return "The selected orders have different global discounts (0% counts as different): "
           + "no single total discount can be carried to the invoice";
     }
+    BigDecimal common = commonPercent(orderDiscounts(imports));
     if (CONFLICT_INVOICE_OTHER_DISCOUNT.equals(conflict)) {
-      return "The invoice already has a total discount of " + percent(invoiceDiscount)
-          + ", different from the orders' " + orderPct;
+      String orders = common == null || common.signum() == 0
+          ? "the selected orders have no global discount"
+          : "different from the orders' " + percent(common);
+      return "The invoice already has a total discount of " + percent(invoiceDiscount) + ", "
+          + orders + ": it is kept and also applies to the imported lines";
     }
     return "The invoice already has lines and no total discount: carrying the orders' "
-        + orderPct + " would discount those lines too";
+        + percent(common) + " would discount those lines too";
   }
 
   private static String percent(BigDecimal value) {

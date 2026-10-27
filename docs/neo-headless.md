@@ -10243,8 +10243,8 @@ caller knows its id. Return orders and return documents are never listed.
 | `importNoStorageBin` | a stockable line was planned but the target's warehouse has no active bin (receipt / shipment) |
 | `importInvalidLine` | an entry of `lines` is not understood (422). As a **400**: a required id (`orderId`, `receiptId`, `shipmentId`) is missing; `importOrderLines` into an invoice gets `orders` next to `orderId` or top-level `lines`, an `orders` that is not an array, is empty or has more than 50 entries, an entry without `orderId`, the same order twice, or a `carryGlobalDiscount` that is not a boolean. A key sent as JSON `null` counts as absent (MCP clients fill optional parameters with null) |
 | `importDocumentNotFound` | the target or the source does not exist **for the caller's client** (**404**): a document of another client answers exactly like a missing one (admin mode reads across clients, so the delegates check `OBContext.getCurrentClient()` and the discovery queries filter by it) |
-| `importLineNotInDocument` | a `sourceLineId` that is not a line of the source |
-| `importNothingPending` | no `lines` and nothing left to import (names the covering drafts when that is why) |
+| `importLineNotInDocument` | a `sourceLineId` that is not a line of the source. `importOrderLines` into an invoice names the order (`Line X is not a line of order 1000123`) and adds extra keys `orderId`, `documentNo`, since one call can carry several orders |
+| `importNothingPending` | no `lines` and nothing left to import (names the covering drafts when that is why). `importOrderLines` into an invoice names the order and adds `orderId`, `documentNo`, as above |
 | `importQuantityExceedsPending` | more than what is pending of a line; extra keys `product`, `requested`, `pending`, `sourceLineId` |
 | `importQuantityNotHonoured` | order / receipt to invoice only: the native process created other quantities than planned; everything is rolled back |
 | `globalDiscountConflict` | `importOrderLines` into an invoice with `carryGlobalDiscount` true (the default) when the orders' global discount cannot be carried (see *Header link*); extra keys `conflict`, `orders:[{orderId, documentNo, globalDiscount}]`, `invoice:{totalDiscount, hadLines}`, `hint` |
@@ -10349,19 +10349,23 @@ found by their lines (`OrderInvoiceListSupport.listInvoices`). `salesOrder` / `h
 response above): a header that links order X while the lines come only from order Y answers `headerLinked:false,
 salesOrder:X`. For an
 invoice imported from orders, the header's `etgoTotalDiscount` (always a %, never an amount) follows the popup's rule
-(ETP-5828, `ImportOrderLinesIntoInvoiceHandler.discountConflict`), judged on the invoice as it was BEFORE the call
-(neither the `ETGO_DTO` total-discount line nor an inactive line counts as a line):
+(ETP-5828, `ImportOrderLinesIntoInvoiceHandler.discountConflict` mirrors `resolveOrderGlobalDiscount` in the SPA's
+`orderGlobalDiscountRule.js` step by step), judged on the invoice as it was BEFORE the call. Every % is normalised the
+same way (null, zero or negative is 0; 4 decimals). A line is any active line other than the `ETGO_DTO` total-discount
+line (a line without product counts):
 
 | Selected orders / invoice before the call | `carryGlobalDiscount` true (default) | `false` |
 |---|---|---|
-| no selected order has a positive % | nothing to carry, header untouched, import goes through | same |
-| all the same positive %, invoice with no total discount and no lines | header takes that % | header untouched |
-| all the same positive %, invoice already at that % | header keeps it | header untouched |
-| (a) `ordersDiffer`: the orders' % differ (0 % or none counts as different) | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
-| (b) `invoiceHasOtherDiscount`: the invoice already has another % | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
-| (c) `invoiceHasLinesWithoutDiscount`: lines and no total discount | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
+| Step | Selected orders / invoice before the call | `carryGlobalDiscount` true (default) | `false` |
+|---|---|---|---|
+| 1 | (a) `ordersDiffer`: the orders' % differ (0 % or none counts as a %, so 10 % + 0 % differ) | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
+| 2 | orders all at 0 % and invoice at 0 %, with or without lines | nothing to carry, header untouched, import goes through | same |
+| 3 | (b) `invoiceHasOtherDiscount`: the invoice has a % other than the orders' one, **orders at 0 % included** | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched (its % also applies to the new lines) |
+| 4 | (c) `invoiceHasLinesWithoutDiscount`: invoice at 0 % with lines, orders at one positive % | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
+| 5 | orders at one positive %, invoice at 0 % without lines | header takes that % | header untouched |
+| 5 | orders at one positive %, invoice already at that % | header keeps it | header untouched |
 
-The cases are checked in that order and the first that applies is reported. The import itself is never forbidden: the
+The steps run in that order and the first that applies decides. The import itself is never forbidden: the
 422 is the popup's orange warning, and its `hint` tells the agent to ask the user and, to import anyway, resend the same
 call with `carryGlobalDiscount:false`. Every line always keeps its own line discount. Example:
 
@@ -10371,11 +10375,15 @@ call with `carryGlobalDiscount:false`. Every line always keeps its own line disc
   "conflict":"invoiceHasLinesWithoutDiscount",
   "orders":[{"orderId":"A1B2…","documentNo":"1000123","globalDiscount":10}],
   "invoice":{"totalDiscount":0,"hadLines":true},
-  "hint":"Nothing was imported. Ask the user whether to import these lines without carrying the global discount. To import anyway, resend the same call with carryGlobalDiscount:false: every line keeps its own line discount and the invoice's total discount is left unchanged."}}
+  "hint":"Nothing was imported. Tell the user this conflict and ask whether to import anyway. Only if they agree, resend the same call with carryGlobalDiscount:false: every line keeps its own line discount, no order's global discount is carried and the invoice's total discount is left unchanged (an existing one also applies to the imported lines)."}}
 ```
 
-Before ETP-5828 the action took one order per call and silently left the header unchanged in cases (b) and (c); a
-single-order call now answers the 422 in those cases unless it sends `carryGlobalDiscount:false`. The discount line
+With orders at 0 % and an invoice at 5 % the message reads `The invoice already has a total discount of 5%, the
+selected orders have no global discount: it is kept and also applies to the imported lines`.
+
+Before ETP-5828 the action took one order per call and silently left the header unchanged in cases (b) and (c), and
+(b) was never raised for orders without a discount; a single-order call now answers the 422 in those cases unless it
+sends `carryGlobalDiscount:false`. The discount line
 itself is materialised when the invoice is completed. A receipt / shipment imported into an invoice does NOT carry the order's `etgoTotalDiscount`
 (only the order import does), as in the window.
 
