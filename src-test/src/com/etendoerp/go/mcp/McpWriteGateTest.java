@@ -18,6 +18,7 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.anyString;
@@ -34,6 +35,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Stream;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -1183,6 +1185,136 @@ class McpWriteGateTest {
       assertEquals("deliveryStatus", note.getString("filter"));
       assertEquals("eTGODeliveryStatus", note.getString("evaluatedOn"));
       assertTrue(note.getString("reason").contains("eTGODeliveryStatus"), note.toString());
+    }
+
+    /**
+     * The twin is named whenever the spec does not exclude it: an uncurated column (no
+     * {@code ETGO_SF_FIELD} row) and a row that says {@code ISINCLUDED = 'Y'} are both filterable,
+     * so the note may point the caller at them.
+     *
+     * @param curated whether the twin carries an included field row, rather than none at all
+     */
+    @ParameterizedTest(name = "twin has an included row: {0}")
+    @ValueSource(booleans = { true, false })
+    @DisplayName("an alias target the spec exposes is named in the note")
+    void exposedAliasTargetIsNamed(boolean curated) throws Exception {
+      declareStatusTwins();
+      if (curated) {
+        curate("EM_ETGO_Delivery_Status", Boolean.TRUE, Boolean.FALSE, null, null);
+      }
+
+      java.util.Map<String, String> applied = filterOnDeliveryStatus();
+      JSONObject note = noteFor(applied);
+
+      assertEquals(java.util.Map.of("deliveryStatus", "eTGODeliveryStatus"), applied);
+      assertEquals("deliveryStatus", note.getString("filter"));
+      assertEquals("eTGODeliveryStatus", note.getString("evaluatedOn"));
+      assertEquals("The filter on deliveryStatus was evaluated on eTGODeliveryStatus, which holds"
+          + " the value this list shows for deliveryStatus.", note.getString("reason"));
+    }
+
+    /**
+     * The canonical purchase-order case: the spec excludes the stored twin. The evaluation is
+     * unchanged — still {@code coalesce(<twin>, <virtual>)} — but the note must not name a field
+     * the caller would be refused with 422 for filtering on, so {@code applied} records a
+     * {@code null} target and the entry carries no {@code evaluatedOn}.
+     */
+    @Test
+    @DisplayName("an alias target the spec excludes is evaluated but never named")
+    void excludedAliasTargetIsEvaluatedButNotNamed() throws Exception {
+      declareStatusTwins();
+      curate("EM_ETGO_Delivery_Status", Boolean.FALSE, Boolean.FALSE, null, null);
+      java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
+
+      String where = McpQuerySupport.buildWhereFromFilters(
+          fields("deliveryStatus", new JSONObject().put("lt", 100)), adTab, specEntity(),
+          java.util.Map.of("deliveryStatus", "eTGODeliveryStatus"), applied, null);
+
+      assertEquals("coalesce(e.eTGODeliveryStatus, e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY
+          + ".deliveryStatus) < 100", where);
+      assertEquals(1, applied.size(), applied.toString());
+      assertTrue(applied.containsKey("deliveryStatus"), applied.toString());
+      assertNull(applied.get("deliveryStatus"), applied.toString());
+
+      JSONObject note = noteFor(applied);
+      assertEquals("deliveryStatus", note.getString("filter"));
+      assertFalse(note.has("evaluatedOn"), note.toString());
+      String reason = note.getString("reason");
+      assertFalse(reason.contains("eTGODeliveryStatus"), reason);
+      assertEquals("The filter on deliveryStatus was evaluated on the stored value this list shows"
+          + " for deliveryStatus; the field holding that value is not exposed by this spec.",
+          reason);
+    }
+
+    /**
+     * The exclusion is the one {@code excludedPropertyNames} resolves, MCP_CONFIG included: a twin
+     * whose row says {@code ISINCLUDED = 'N'} but whose entity reclaims it with
+     * {@code fields.included:true} is filterable, so the note names it.
+     */
+    @Test
+    @DisplayName("an excluded alias target reclaimed by MCP_CONFIG is named again")
+    void reclaimedAliasTargetIsNamed() throws Exception {
+      declareStatusTwins();
+      curate("EM_ETGO_Delivery_Status", Boolean.FALSE, Boolean.FALSE, null,
+          "{\"fields\":{\"included\":true,\"reason\":\"alias fixture\"}}");
+
+      java.util.Map<String, String> applied = filterOnDeliveryStatus();
+
+      assertEquals(java.util.Map.of("deliveryStatus", "eTGODeliveryStatus"), applied);
+      assertEquals("eTGODeliveryStatus", noteFor(applied).getString("evaluatedOn"));
+    }
+
+    @Test
+    @DisplayName("a named and an unnamed alias are both reported, in order, each in its shape")
+    void mixedAliasesAreReportedInOrder() throws Exception {
+      java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
+      applied.put("deliveryStatus", "eTGODeliveryStatus");
+      applied.put("invoiceStatus", null);
+      JSONObject body = new JSONObject();
+
+      McpQuerySupport.attachFilterAliases(body, applied);
+
+      JSONArray notes = body.getJSONArray(McpQuerySupport.KEY_FILTER_ALIASES);
+      assertEquals(2, notes.length(), notes.toString());
+      JSONObject named = notes.getJSONObject(0);
+      assertEquals("deliveryStatus", named.getString("filter"));
+      assertEquals("eTGODeliveryStatus", named.getString("evaluatedOn"));
+      JSONObject unnamed = notes.getJSONObject(1);
+      assertEquals("invoiceStatus", unnamed.getString("filter"));
+      assertFalse(unnamed.has("evaluatedOn"), unnamed.toString());
+      assertTrue(unnamed.getString("reason").contains("not exposed by this spec"),
+          unnamed.toString());
+    }
+
+    @Test
+    @DisplayName("a null or empty applied map adds no filterAliases key")
+    void noAppliedAliasAddsNoNote() throws Exception {
+      JSONObject fromNull = new JSONObject();
+      JSONObject fromEmpty = new JSONObject();
+
+      McpQuerySupport.attachFilterAliases(fromNull, null);
+      McpQuerySupport.attachFilterAliases(fromEmpty, new java.util.LinkedHashMap<>());
+
+      assertFalse(fromNull.has(McpQuerySupport.KEY_FILTER_ALIASES), fromNull.toString());
+      assertFalse(fromEmpty.has(McpQuerySupport.KEY_FILTER_ALIASES), fromEmpty.toString());
+    }
+
+    /** Filter {@code deliveryStatus < 100} with the order headers' alias; returns what applied. */
+    private java.util.Map<String, String> filterOnDeliveryStatus() throws Exception {
+      java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
+      McpQuerySupport.buildWhereFromFilters(fields("deliveryStatus", new JSONObject().put("lt", 100)),
+          adTab, specEntity(), java.util.Map.of("deliveryStatus", "eTGODeliveryStatus"), applied,
+          null);
+      return applied;
+    }
+
+    /** The single {@code filterAliases} entry {@code attachFilterAliases} builds from applied. */
+    private JSONObject noteFor(java.util.Map<String, String> applied) throws Exception {
+      JSONObject body = new JSONObject();
+      McpQuerySupport.attachFilterAliases(body, applied);
+      JSONArray notes = body.getJSONArray(McpQuerySupport.KEY_FILTER_ALIASES);
+      assertEquals(1, notes.length(), notes.toString());
+      return notes.getJSONObject(0);
     }
 
     /**

@@ -60,6 +60,12 @@ sourceSets {
 * Declare Java dependencies using 'implementation'
 * Ex: implementation "com.sun.mail:javax.mail:1.6.2"
 */
+/**
+ * ETP-5751 — the single place the Datadog version is pinned. dd-openfeature (below) and the
+ * dd-java-agent baked into the runtime image MUST be the same version; see the dependency comment.
+ */
+ext.ddJavaAgentVersion = '1.66.0'
+
 dependencies {
     implementation('com.etendoerp:openapi:[3.0.0,)')
     implementation('com.etendoerp:webhookevents:[3.0.0,)')
@@ -77,9 +83,9 @@ dependencies {
     implementation('com.etendoerp:payment.removal:[3.0.0,)')
     implementation('com.google.api-client:google-api-client:2.8.1')
     // Feature flags: OpenFeature is the application-facing API. GoFeatureFlags.createProvider() is
-    // the single registration point that chooses the control plane — ConfigCat when an SDK key is
-    // configured, the local properties-backed provider otherwise. See
-    // docs/feature-flags-and-tenant-upgrade.md.
+    // the single registration point that chooses the control plane — Datadog when switched on and
+    // dd-java-agent is loaded, else ConfigCat when an SDK key is configured, else the local
+    // properties-backed provider. See docs/feature-flags-and-tenant-upgrade.md.
     implementation('dev.openfeature:sdk:1.20.1')
     // ETP-5267 — hosted control plane, so a flag can be flipped without a Tomcat restart. Pinned
     // rather than '0.1.+': this is a 0.x artifact with no API stability guarantee, and 0.1.1 is the
@@ -89,6 +95,13 @@ dependencies {
     // build; gson, slf4j-api and commons-codec are already deployed at HIGHER versions, which
     // Gradle's highest-wins resolution keeps, so nothing is double-bundled.
     implementation('dev.openfeature.contrib.providers:configcat:0.1.1')
+    // ETP-5751 — Datadog Feature Flags provider. It is only a bridge: the flag configuration is
+    // fetched by dd-java-agent, which must be loaded with -javaagent (GoFeatureFlags skips this arm
+    // when it is not). VERSION LOCK: this MUST equal the dd-java-agent version baked into the
+    // runtime image — the provider talks to the agent's internal bootstrap classes, which carry no
+    // compatibility guarantee across versions. deploy-staging.yml passes ddJavaAgentVersion to
+    // .github/docker/Dockerfile.runtime, whose pinned DD_JAVA_AGENT_SHA256 must be updated with it. Its only transitive dependency is dev.openfeature:sdk 1.20.1.
+    implementation("com.datadoghq:dd-openfeature:${ddJavaAgentVersion}")
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
     compileOnly 'org.apache.commons:commons-lang3:3.12.0'
     // ETP-4997 — xlsx export (NeoXlsxExportWriter). compileOnly, not implementation: POI is
@@ -175,6 +188,11 @@ def isolatedDalTests = [
         // ETP-5894: same symptom in the merge-block cut; the class and the receipt path it runs keep
         // setAdminMode() balanced, so the leak comes from an earlier class in the worker.
         '**/GoodsReceiptWarehouseSwitchReanchorIntegrationTest.class',
+        // ETP-5953: same symptom in the merge-block cut. Traced this time: NeoDefaultsServiceTest
+        // and NeoProcessServiceTest reach OBContext.setAdminMode() with no DAL, which pushes and
+        // then throws before the production try/finally, so the push leaks in the worker. Both
+        // now clear the stack after each test; the isolation keeps any other leaker away from it.
+        '**/NeoReferenceOwnershipIntegrationTest.class',
 ]
 
 def isolatedDalTestClasses = [
@@ -194,6 +212,7 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.DocumentListTotalsIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest',
         'com.etendoerp.go.schemaforge.GoodsReceiptWarehouseSwitchReanchorIntegrationTest',
+        'com.etendoerp.go.schemaforge.NeoReferenceOwnershipIntegrationTest',
 ]
 
 def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->

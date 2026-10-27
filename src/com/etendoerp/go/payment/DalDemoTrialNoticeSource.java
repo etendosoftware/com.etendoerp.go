@@ -32,6 +32,7 @@ import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
@@ -65,6 +66,7 @@ public class DalDemoTrialNoticeSource implements DemoTrialNoticeSource {
 
   private final TenantEnvironmentLifecycleService lifecycleService;
   private final Supplier<DemoTrialNoticePlanner> planner;
+  private final OnboardingPeriodControlService periodControlService;
 
   /**
    * Creates a source with the instance's lifecycle and reminder thresholds. The thresholds are
@@ -72,13 +74,52 @@ public class DalDemoTrialNoticeSource implements DemoTrialNoticeSource {
    * including in tests that never reach it, and a changed threshold applies without a restart.
    */
   public DalDemoTrialNoticeSource() {
-    this(new TenantEnvironmentLifecycleService(), DemoTrialNoticePlanner::fromConfiguration);
+    this(new TenantEnvironmentLifecycleService(), DemoTrialNoticePlanner::fromConfiguration,
+        new OnboardingPeriodControlService());
   }
 
   DalDemoTrialNoticeSource(TenantEnvironmentLifecycleService lifecycleService,
       Supplier<DemoTrialNoticePlanner> planner) {
+    this(lifecycleService, planner, new OnboardingPeriodControlService());
+  }
+
+  DalDemoTrialNoticeSource(TenantEnvironmentLifecycleService lifecycleService,
+      Supplier<DemoTrialNoticePlanner> planner, OnboardingPeriodControlService periodControlService) {
     this.lifecycleService = lifecycleService;
     this.planner = planner;
+    this.periodControlService = periodControlService;
+  }
+
+  /**
+   * A frozen trial is owed nothing: its snapshot's trial start moves with the clock, and the notice
+   * is deduplicated on that start, so planning it would send the same reminder every day. Its
+   * periods are opened through the end the trial shows, by the owner's default role and
+   * organization, the context the onboarding opened them with.
+   */
+  @Override
+  public boolean keepFrozenTrial(String clientId, Instant now) {
+    Integer frozenDays = lifecycleService.frozenTrialDays(clientId);
+    if (frozenDays == null) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      String ownerUserId = OwnerSupport.findOwnerUserId(clientId);
+      User owner = ownerUserId == null ? null : OBDal.getInstance().get(User.class, ownerUserId);
+      if (owner == null || owner.getDefaultRole() == null || owner.getDefaultOrganization() == null) {
+        log.warn("Frozen demo {} has no owner with a default role and organization; its periods "
+            + "are not kept open", clientId);
+        return true;
+      }
+      int trialDays = lifecycleService.configuration().getTrialDays();
+      periodControlService.openDemoTrialWindow(clientId, owner.getDefaultOrganization().getId(),
+          owner.getId(), owner.getDefaultRole().getId(),
+          TenantEnvironmentLifecycleService.frozenTrialStart(now, frozenDays, trialDays), trialDays);
+      OBDal.getInstance().commitAndClose();
+      return true;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   @Override

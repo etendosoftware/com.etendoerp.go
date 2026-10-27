@@ -127,6 +127,8 @@ public class PurchaseInvoiceLineHandler extends InvoiceLineHandler {
     if (response != null) {
       return response;
     }
+    // Before the amounts: a line sent without a price takes the price list's (ETP-5881).
+    InvoiceLineAmountSupport.setPriceFromPriceListOnCreate(context);
     return InvoiceLineAmountSupport.deriveAmountsOnWrite(context);
   }
 

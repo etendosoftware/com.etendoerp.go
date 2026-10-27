@@ -30,11 +30,13 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.logging.log4j.Level;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -74,6 +76,23 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   private static final Instant PERIOD_START = Instant.parse("2026-11-01T00:00:00Z");
   private static final Instant PERIOD_END = Instant.parse("2026-12-01T00:00:00Z");
   private static final Instant ENDED_AT = Instant.parse("2026-11-15T09:00:00Z");
+
+  /**
+   * Loads the Openbravo properties once, before any test mocks {@code OBProvider} statically.
+   *
+   * <p>The ETP-5847 frozen-demo path calls {@code configuration()} inside {@code resolve()}, so it
+   * reads runtime properties under {@link Fixture#run}'s static {@code OBProvider} mock. If that
+   * is the first {@code OBPropertiesProvider} read in the JVM, the properties load but
+   * {@code OBConfigFileProvider.getInstance()} resolves through the mocked provider, returns
+   * {@code null}, and the NPE is swallowed by {@code ConfigPropertyReader}: the file location is
+   * never set and every {@code OBBaseTest} forked into the same JVM afterwards fails in
+   * {@code initializeDisabledTestCases} ({@code Paths.get(null)}). Reading them here, with the real
+   * provider, sets the location before any mock is active.</p>
+   */
+  @BeforeClass
+  public static void loadOpenbravoPropertiesBeforeAnyStaticMock() {
+    OBPropertiesProvider.getInstance().getOpenbravoProperties();
+  }
 
   private final TenantPlanService tenantPlanService = mock(TenantPlanService.class);
   private final TenantEnvironmentLifecycleService service =
@@ -626,6 +645,76 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED,
         fixture.run(() -> service.resolve(CLIENT_ID)).getSubscriptionStatus());
+  }
+
+  // ===================== ETP-5847: a frozen demo trial =====================
+
+  private static final Instant LONG_AGO = Instant.parse("2025-01-01T00:00:00Z");
+
+  /** A demo whose real trial ended long ago, frozen (or not) at {@code frozenDays}. */
+  private TenantEnvironmentLifecycleService.EnvironmentSnapshot resolveDemoFrozenAt(
+      String frozenDays) {
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE,
+            LONG_AGO.toString());
+    if (frozenDays != null) {
+      fixture.withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE,
+          frozenDays);
+    }
+    return fixture.run(() -> service.resolve(freshClientId()));
+  }
+
+  private long daysLeft(TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot) {
+    return new EnvironmentAccessPolicy().remainingTrialDays(snapshot.toPolicyEnvironment(),
+        Instant.now(), service.configuration());
+  }
+
+  private EnvironmentAccessPolicy.Decision access(
+      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot) {
+    return new EnvironmentAccessPolicy().evaluate(snapshot.toPolicyEnvironment(), true,
+        snapshot.getSubscriptionStatus(), Instant.now(), service.configuration());
+  }
+
+  @Test
+  public void aFrozenDemoAlwaysShowsItsFrozenDaysAndIsNeverExpired() {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = resolveDemoFrozenAt("14");
+
+    assertEquals(14L, daysLeft(snapshot));
+    assertEquals(EnvironmentAccessPolicy.Decision.ALLOWED, access(snapshot));
+  }
+
+  @Test
+  public void theFrozenValueIsTheDaysLeftNotTheTrialLength() {
+    assertEquals(3L, daysLeft(resolveDemoFrozenAt("3")));
+  }
+
+  @Test
+  public void withoutThePreferenceTheStoredStartStillDecides() {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = resolveDemoFrozenAt(null);
+
+    assertEquals(LONG_AGO, snapshot.getTrialStartedAt());
+    assertEquals(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED, access(snapshot));
+  }
+
+  @Test
+  public void aValueThatIsNotAWholeNumberOfDaysIsIgnored() {
+    assertEquals(LONG_AGO, resolveDemoFrozenAt("catorce").getTrialStartedAt());
+    assertEquals(LONG_AGO, resolveDemoFrozenAt("-1").getTrialStartedAt());
+  }
+
+  @Test
+  public void freezingTheTrialWritesNothing() {
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE,
+            LONG_AGO.toString())
+        .withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE, "14");
+
+    fixture.run(() -> service.resolve(freshClientId()));
+
+    assertTrue("the stored trial start is kept, so unfreezing resumes it: "
+        + fixture.savedPreferenceAttributes, fixture.savedPreferenceAttributes.isEmpty());
   }
 
   // ===================== review fix B1: any row makes the tenant productive =====================

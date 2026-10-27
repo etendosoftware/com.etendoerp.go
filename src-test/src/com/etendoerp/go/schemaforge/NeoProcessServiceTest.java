@@ -40,6 +40,7 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.InOrder;
 import org.mockito.MockedConstruction;
@@ -70,6 +71,18 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * @covers com.etendoerp.go.schemaforge.NeoProcessService
  */
 public class NeoProcessServiceTest {
+
+  /**
+   * ETP-5953: without a DAL, {@code OBContext.setAdminMode()} pushes onto its thread-local stack
+   * and only then throws (no session factory), so the production {@code try/finally} that would
+   * restore it is never entered. The production code is balanced; the push leaks only here, and a
+   * later DB-backed class in the same worker running as a non-admin user then fails OBBaseTest's
+   * admin-mode check (NeoReferenceOwnershipIntegrationTest in the merge-block cut).
+   */
+  @After
+  public void clearAdminModeLeakedWithoutDal() {
+    OBContext.clearAdminModeStack();
+  }
 
   // ===================== executeProcess =====================
 
@@ -174,6 +187,105 @@ public class NeoProcessServiceTest {
 
       NeoResponse resp = NeoProcessService.executeProcess(process, new JSONObject());
       assertEquals(500, resp.getHttpStatus());
+    }
+  }
+
+  // ===================== DocAction procedure: idempotency and refusal (ETP-5783) =====================
+
+  private static Process docActionProcedure() {
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-1");
+    when(process.getName()).thenReturn("Post");
+    when(process.getUIPattern()).thenReturn(null);
+    when(process.getJavaClassName()).thenReturn(null);
+    when(process.getProcedure()).thenReturn("C_Order_Post");
+    when(process.getADProcessParameterList()).thenReturn(Collections.emptyList());
+    when(process.getADModelImplementationList()).thenReturn(Collections.emptyList());
+    return process;
+  }
+
+  private static JSONObject docActionParams(String action) throws Exception {
+    return new JSONObject().put("recordId", "rec-1").put("inpTabId", "tab-1")
+        .put("docAction", action);
+  }
+
+  /** A document already in the requested status answers 200 alreadyApplied; the procedure never runs. */
+  @Test
+  public void executeProcessAnAlreadyAppliedDocActionNeverCallsTheProcedure() throws Exception {
+    NeoResponse applied = NeoResponse.ok(new JSONObject().put("status", "success")
+        .put("alreadyApplied", true));
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoProcessPreconditionService> preconditions =
+             mockStatic(NeoProcessPreconditionService.class);
+         MockedStatic<DocActionIdempotency> idempotency = mockStatic(DocActionIdempotency.class);
+         MockedStatic<org.openbravo.service.db.CallProcess> callProcess =
+             mockStatic(org.openbravo.service.db.CallProcess.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);
+      idempotency.when(() -> DocActionIdempotency.alreadyApplied("tab-1", "rec-1", "CO"))
+          .thenReturn(applied);
+
+      NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
+          docActionParams("CO"));
+
+      assertEquals(200, resp.getHttpStatus());
+      assertTrue(resp.getBody().getBoolean("alreadyApplied"));
+      callProcess.verifyNoInteractions();
+    }
+  }
+
+  /** Any other status runs the procedure exactly as before, and its refusal is a 422 business_rule. */
+  @Test
+  public void executeProcessARefusedDocActionIs422BusinessRule() throws Exception {
+    org.openbravo.model.ad.process.ProcessInstance pInstance =
+        mock(org.openbravo.model.ad.process.ProcessInstance.class);
+    when(pInstance.getResult()).thenReturn(0L);
+    when(pInstance.getErrorMsg()).thenReturn("@ERROR=Document has no lines");
+    org.hibernate.Session session = mock(org.hibernate.Session.class);
+    OBDal dal = mock(OBDal.class);
+    when(dal.getSession()).thenReturn(session);
+    org.openbravo.service.db.CallProcess cp = mock(org.openbravo.service.db.CallProcess.class);
+    when(cp.call(any(Process.class), anyString(), any())).thenReturn(pInstance);
+
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoProcessPreconditionService> preconditions =
+             mockStatic(NeoProcessPreconditionService.class);
+         MockedStatic<DocActionIdempotency> idempotency = mockStatic(DocActionIdempotency.class);
+         MockedStatic<DocActionResolution> resolution = mockStatic(DocActionResolution.class);
+         MockedStatic<org.openbravo.service.db.CallProcess> callProcess =
+             mockStatic(org.openbravo.service.db.CallProcess.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      callProcess.when(org.openbravo.service.db.CallProcess::getInstance).thenReturn(cp);
+      resolution.when(() -> DocActionResolution.requestedDocAction(any())).thenReturn("CO");
+      // The refusal re-read runs for real: no record to re-read, so the 422 stands.
+      idempotency.when(() -> DocActionIdempotency.orAlreadyApplied(any(), any(), any(), any()))
+          .thenCallRealMethod();
+
+      NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
+          docActionParams("CO"));
+
+      assertEquals(422, resp.getHttpStatus());
+      assertEquals("Document has no lines", resp.getBody().getString("message"));
+      assertEquals("business_rule", resp.getBody().getJSONObject("error").getString("code"));
+    }
+  }
+
+  /** A malformed request (no record id) is still a 400, not a business rule. */
+  @Test
+  public void executeProcessADocActionWithoutARecordIdStaysA400() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoProcessPreconditionService> preconditions =
+             mockStatic(NeoProcessPreconditionService.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);
+
+      NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
+          new JSONObject().put("docAction", "CO"));
+
+      assertEquals(400, resp.getHttpStatus());
     }
   }
 
@@ -559,6 +671,54 @@ public class NeoProcessServiceTest {
 
     String result = NeoProcessService.resolveModelImplementationClass(process);
     assertNull(result);
+  }
+
+  // ===================== thrown failures (ETP-5782) =====================
+
+  /** Runs executeObuiappClass with the handler lookup throwing {@code failure}. */
+  private NeoResponse obuiappClassThatThrows(RuntimeException failure, OBDal dal) {
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obdal = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+            mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msg =
+            mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+      obdal.when(OBDal::getInstance).thenReturn(dal);
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstanceFromStaticBeanManager(any()))
+          .thenThrow(failure);
+      OBError translated = new OBError();
+      translated.setMessage("Cannot change business partner or price list if there are lines.");
+      msg.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.translateError(any(), any(),
+          any(), anyString())).thenReturn(translated);
+      return NeoProcessService.executeObuiappClass("java.lang.String", "P1", new JSONObject());
+    }
+  }
+
+  @Test
+  public void aKeyedRefusalThrownByAProcessIsA422AndRollsBack() throws Exception {
+    OBDal dal = mock(OBDal.class);
+
+    NeoResponse resp = obuiappClassThatThrows(
+        new org.openbravo.base.exception.OBException("@20502@"), dal);
+
+    assertEquals(422, resp.getHttpStatus());
+    JSONObject error = resp.getBody().getJSONObject("error");
+    assertEquals("business_rule", error.getString("code"));
+    assertEquals("Cannot change business partner or price list if there are lines.",
+        error.getString("message"));
+    org.mockito.Mockito.verify(dal).rollbackAndClose();
+  }
+
+  @Test
+  public void aSqlFaultThrownByAProcessIsA500WithoutSql() throws Exception {
+    NeoResponse resp = obuiappClassThatThrows(new org.hibernate.exception.GenericJDBCException(
+        "could not execute", new java.sql.SQLException(
+            "ERROR: relation \"secret_table\" does not exist", "42P01")), mock(OBDal.class));
+
+    assertEquals(500, resp.getHttpStatus());
+    String message = resp.getBody().getJSONObject("error").getString("message");
+    assertTrue(message, message.startsWith("Process execution failed: "));
+    assertFalse(message, message.contains("secret_table"));
   }
 
   // ===================== translateClassicResult =====================

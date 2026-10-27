@@ -35,9 +35,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  * factura rectificativa, and the keys the headers add to a GET that no spec field backs.
  *
  * <p>Shared by {@link ReturnToVendorShipmentHeaderHandler} and
- * {@link ReturnMaterialReceiptHeaderHandler}, which call it explicitly. Advisory only: a second
- * {@code createReturnInvoice} is still NOT refused (the answer lists
- * {@code previousReturnInvoices} instead), so this is the one place that warns before the call.</p>
+ * {@link ReturnMaterialReceiptHeaderHandler}, which call it explicitly. Advisory only: it warns
+ * before the call; the refusal itself (409 {@code returnInvoiceAlreadyExists}, unless
+ * {@code allowDuplicate:true}) lives in {@link ReturnInvoiceSupport#refuseIfAlreadyInvoiced}.</p>
  */
 final class ReturnDocumentAvailability {
 
@@ -93,8 +93,10 @@ final class ReturnDocumentAvailability {
         docNos.append(i == 0 ? "" : ", ").append(previous.optJSONObject(i).optString("documentNo"));
       }
       return Map.of(ACTION_CREATE_RETURN_INVOICE, "This return already has a factura "
-          + "rectificativa (" + docNos + "); calling it again would NOT be refused and would "
-          + "create a second one.");
+          + "rectificativa (" + docNos + "); calling it again is refused with 409 "
+          + ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS
+          + " and creates nothing, unless "
+          + ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE + ":true is passed.");
     } catch (OBException e) {
       log.debug("Could not read the rectificativas of return {}: {}", inout.getId(), e.getMessage());
       return Collections.emptyMap();
