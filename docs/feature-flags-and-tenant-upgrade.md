@@ -179,6 +179,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
 | `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
+| `contact-category-type` | `etendo.go.flags.contact-category-type` | `ETGO_FLAG_CONTACT_CATEGORY_TYPE` | absent ⇒ **`false`** (pre-ETP-5791 contact behaviour) |
 | `billing-reconciliation-schedule` | `etendo.go.flags.billing-reconciliation-schedule` | `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | `structured-address-for-sepa` | `etendo.go.flags.structured-address-for-sepa` | `ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA` | absent ⇒ **`false`** (legacy single-line address; TTL 2026-11-15 — SEPA 2025 rulebooks ban unstructured addresses in SEPA remittance files from that date, per [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24)) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
@@ -527,6 +528,24 @@ To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local
 `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
 ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
 when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
+
+### `contact-category-type` (ETP-5791) — backend-only, environment level
+
+Turns on contact types driven by the contact category: a category (`C_BP_Group`) must declare
+Customer and/or Vendor/Creditor, a new contact inherits them unless the request sends them, a
+contact cannot be saved with no type, and moving a contact to another category re-inherits both.
+Unset or `false` (the default) keeps the pre-ETP-5791 behaviour: the contact and contact-category
+customizations return `null` and the default CRUD runs. Only behaviour is gated — the new
+`EM_ETGO_ISCUSTOMER`/`EM_ETGO_ISVENDOR` columns, AD metadata, `ETGO_SF_FIELD` rows and
+reference/sample data ship unconditionally. Environment level (account-less context), always read
+through `ContactTypeRules.isEnabled()`. Nothing in the browser reads it. Full reference:
+[`neo-headless.md`](neo-headless.md) §5.3.6.
+
+It also decides a new tenant's default contact category: on, the onboarding makes
+"Cliente/Proveedor" the default (`OnboardingDefaultContactCategoryService`, read at hand-over, so
+pool tenants built while it was off still get it when claimed); off, the dataset's "Cliente" stays
+default. Tenants created while it was off are never revisited. See
+[`onboarding-flow.md`](onboarding-flow.md) "Default contact category".
 
 ### `billing-reconciliation-schedule` (ETP-5048) — backend-only, strictly off by default
 

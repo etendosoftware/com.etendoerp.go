@@ -1986,6 +1986,7 @@
 <!--0413CD38691141389048A15892E75C1E-->  <JAVA_QUALIFIER><![CDATA[customer]]></JAVA_QUALIFIER>
 <!--0413CD38691141389048A15892E75C1E-->  <SEQNO><![CDATA[110]]></SEQNO>
 <!--0413CD38691141389048A15892E75C1E-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--0413CD38691141389048A15892E75C1E-->  <AGENT_PROMPT><![CDATA[Whether the contact is a customer. Always send it, together with vendor, on create: read the contact's business partner category (the one you send in businessPartnerCategory, or the business-partner-category record with default true when you send none) and send customer = its etgoIscustomer and vendor = its etgoIsvendor, unless the user explicitly asked for a different type, in which case send what the user asked. Do not rely on the server to fill it from the category: depending on the server configuration an omitted value may get the column default (customer true) instead. On update, when you change businessPartnerCategory, send customer and vendor matching the new category in the same request unless the user asked otherwise. A contact should end up with customer or vendor true; if the category sets neither, ask the user which type the contact is.]]></AGENT_PROMPT>
 <!--0413CD38691141389048A15892E75C1E-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--0413CD38691141389048A15892E75C1E--></ETGO_SF_FIELD>
 
@@ -54364,6 +54365,23 @@
 <!--87D12DEFD9B7409EBA37A63E1CA0856B-->  <SEQNO><![CDATA[320]]></SEQNO>
 <!--87D12DEFD9B7409EBA37A63E1CA0856B--></ETGO_SF_FIELD>
 
+<!--87D69424BBD7405B9AC5A3E8B2354821--><ETGO_SF_FIELD>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <ETGO_SF_FIELD_ID><![CDATA[87D69424BBD7405B9AC5A3E8B2354821]]></ETGO_SF_FIELD_ID>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <ETGO_SF_ENTITY_ID><![CDATA[2DA72D34D4544B71AA4ED75E8F6A9107]]></ETGO_SF_ENTITY_ID>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <AD_COLUMN_ID><![CDATA[21C77AF9602040C083412FF4029F0D15]]></AD_COLUMN_ID>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <ISREADONLY><![CDATA[N]]></ISREADONLY>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <JAVA_QUALIFIER><![CDATA[etgoIscustomer]]></JAVA_QUALIFIER>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <SEQNO><![CDATA[60]]></SEQNO>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <AGENT_PROMPT><![CDATA[Whether contacts of this category are customers. Contacts created in this category are expected to take it as their customer flag, so set it on every category whose contacts are customers. At least one of etgoIscustomer and etgoIsvendor should be true: both default to false, so on create set the one(s) that match the category instead of omitting both.]]></AGENT_PROMPT>
+<!--87D69424BBD7405B9AC5A3E8B2354821-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--87D69424BBD7405B9AC5A3E8B2354821--></ETGO_SF_FIELD>
+
 <!--87DA7056BF094C34971F04B257C3755A--><ETGO_SF_FIELD>
 <!--87DA7056BF094C34971F04B257C3755A-->  <ETGO_SF_FIELD_ID><![CDATA[87DA7056BF094C34971F04B257C3755A]]></ETGO_SF_FIELD_ID>
 <!--87DA7056BF094C34971F04B257C3755A-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -62275,6 +62293,23 @@
 <!--9B934494CC484434912152B25DC6A124-->  <VISIBILITY><![CDATA[discarded]]></VISIBILITY>
 <!--9B934494CC484434912152B25DC6A124-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--9B934494CC484434912152B25DC6A124--></ETGO_SF_FIELD>
+
+<!--9B9ED1B2D49B49228B3F0F33F17366E7--><ETGO_SF_FIELD>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <ETGO_SF_FIELD_ID><![CDATA[9B9ED1B2D49B49228B3F0F33F17366E7]]></ETGO_SF_FIELD_ID>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <ETGO_SF_ENTITY_ID><![CDATA[2DA72D34D4544B71AA4ED75E8F6A9107]]></ETGO_SF_ENTITY_ID>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <AD_COLUMN_ID><![CDATA[C091859BC595424B8AFB1D7C4CA242C3]]></AD_COLUMN_ID>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <ISREADONLY><![CDATA[N]]></ISREADONLY>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <JAVA_QUALIFIER><![CDATA[etgoIsvendor]]></JAVA_QUALIFIER>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <SEQNO><![CDATA[70]]></SEQNO>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <AGENT_PROMPT><![CDATA[Whether contacts of this category are vendors/creditors. Contacts created in this category are expected to take it as their vendor flag, so set it on every category whose contacts are vendors or creditors. At least one of etgoIscustomer and etgoIsvendor should be true: both default to false, so on create set the one(s) that match the category instead of omitting both.]]></AGENT_PROMPT>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--9B9ED1B2D49B49228B3F0F33F17366E7--></ETGO_SF_FIELD>
 
 <!--9BA5651DCA3C4F269067E6534D1DFBCB--><ETGO_SF_FIELD>
 <!--9BA5651DCA3C4F269067E6534D1DFBCB-->  <ETGO_SF_FIELD_ID><![CDATA[9BA5651DCA3C4F269067E6534D1DFBCB]]></ETGO_SF_FIELD_ID>
@@ -83068,7 +83103,9 @@
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <JAVA_QUALIFIER><![CDATA[vendor]]></JAVA_QUALIFIER>
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <SEQNO><![CDATA[100]]></SEQNO>
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <AGENT_PROMPT><![CDATA[Whether the contact is a vendor/creditor. Always send it, together with customer, on create: read the contact's business partner category (the one you send in businessPartnerCategory, or the business-partner-category record with default true when you send none) and send vendor = its etgoIsvendor and customer = its etgoIscustomer, unless the user explicitly asked for a different type, in which case send what the user asked. Do not rely on the server to fill it from the category: depending on the server configuration an omitted value may get the column default (vendor false) instead, so a vendor would be saved as a customer. On update, when you change businessPartnerCategory, send customer and vendor matching the new category in the same request unless the user asked otherwise. A contact should end up with customer or vendor true; if the category sets neither, ask the user which type the contact is.]]></AGENT_PROMPT>
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <MCP_CONFIG><![CDATA[{"fields":{"userRequired":false,"reason":"C_BPartner.IsVendor is mandatory with no AD default, so the structural rule marks it userRequired, but BusinessPartnerHandler inherits it from the business partner category when a create omits it (ETP-5791). The agent should normally not send it."}}]]></MCP_CONFIG>
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF--></ETGO_SF_FIELD>
 
 <!--D1BE8B9391B0470DB29219B6FC7EE8CA--><ETGO_SF_FIELD>

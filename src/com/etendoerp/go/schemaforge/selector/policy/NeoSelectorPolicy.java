@@ -65,6 +65,21 @@ public final class NeoSelectorPolicy {
   }
 
   /**
+   * Resolve the organization-tree predicates of an entity's dictionary where clause once per
+   * request, instead of once per row (ETP-5707).
+   *
+   * @param entityName target DAL entity name of the selector
+   * @param alias HQL alias of the selector entity
+   * @param hql dictionary where clause with its context placeholders bound to named parameters
+   * @param params the named parameters of {@code hql}
+   * @return the rewritten clause and parameters, or {@code null} when no policy applies
+   */
+  public static OrgTreeWhereSelectorPolicy.Rewrite resolveOrgTreeWhere(String entityName,
+      String alias, String hql, Map<String, Object> params) {
+    return OrgTreeWhereSelectorPolicy.rewrite(entityName, alias, hql, params);
+  }
+
+  /**
    * Resolve a virtual selector column exposed by a wrapper entity.
    *
    * @param entity source Schema Forge entity

@@ -25,6 +25,7 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.BatchJobService;
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.NeoWriteChannel;
 
 /**
  * The asynchronous batch tools of the MCP surface (ETP-5677): {@code etendo_batch} with
@@ -79,6 +80,8 @@ final class McpBatchJobTools {
       boolean onlyReturnIds, boolean skipCallouts,
       BatchService.OperationPreprocessor preprocessor) throws JSONException {
     OBContext.setAdminMode();
+    // ETP-5791: the row runs on a job worker thread, outside McpServlet; label its writes as MCP.
+    String previousChannel = NeoWriteChannel.enter(NeoWriteChannel.MCP);
     try {
       JSONObject result = batchService.executeBatch(rowOps, preprocessor, onlyReturnIds,
           skipCallouts);
@@ -87,6 +90,7 @@ final class McpBatchJobTools {
       }
       return result;
     } finally {
+      NeoWriteChannel.restore(previousChannel);
       OBContext.restorePreviousMode();
     }
   }
