@@ -557,6 +557,7 @@ class McpConfigSourcedataTest {
 
   private static final String PURCHASE_ORDER_HEADER_ID = "F1775FF66155444992AC0B1E38CFA3BB";
   private static final String SALES_ORDER_HEADER_ID = "3B006BDF3E704510B38D814A703AD8A1";
+  private static final String SALES_QUOTATION_HEADER_ID = "41A35A9AC111442F86CE1A6296997DCD";
 
   /**
    * ETP-5714: the classic buttons of an order that have no MCP equivalent are hidden WITH a reason,
@@ -568,11 +569,17 @@ class McpConfigSourcedataTest {
     JSONObject purchase = payloadOf(PURCHASE_ORDER_HEADER_ID).getJSONObject(McpActionsSection.NAME);
     JSONObject sales = payloadOf(SALES_ORDER_HEADER_ID).getJSONObject(McpActionsSection.NAME);
 
-    assertEquals(Set.of("RM_Pickfromreceipt", "Cancelandreplace", "Confirmcancelandreplace"),
-        setOf(purchase.getJSONArray(McpActionsSection.KEY_HIDDEN)));
-    assertEquals(Set.of("Cancelandreplace", "Confirmcancelandreplace"),
-        setOf(sales.getJSONArray(McpActionsSection.KEY_HIDDEN)));
-    for (JSONObject actions : List.of(purchase, sales)) {
+    JSONObject quotation = payloadOf(SALES_QUOTATION_HEADER_ID).getJSONObject(McpActionsSection.NAME);
+
+    // ETP-5714 follow-up: no Etendo GO screen renders Create Lines From (Create_POLines) or Pick
+    // from Receipt, so no order or quotation tab leaves them invokable
+    assertEquals(Set.of("RM_Pickfromreceipt", "Cancelandreplace", "Confirmcancelandreplace",
+        "Create_POLines"), setOf(purchase.getJSONArray(McpActionsSection.KEY_HIDDEN)));
+    assertEquals(Set.of("Cancelandreplace", "Confirmcancelandreplace", "Create_POLines",
+        "RM_Pickfromreceipt"), setOf(sales.getJSONArray(McpActionsSection.KEY_HIDDEN)));
+    assertEquals(Set.of("Create_POLines", "RM_Pickfromreceipt", "Cancelandreplace",
+        "Confirmcancelandreplace"), setOf(quotation.getJSONArray(McpActionsSection.KEY_HIDDEN)));
+    for (JSONObject actions : List.of(purchase, sales, quotation)) {
       for (String hidden : setOf(actions.getJSONArray(McpActionsSection.KEY_HIDDEN))) {
         assertFalse(actions.getJSONObject(McpActionsSection.KEY_REASONS).optString(hidden, "")
             .isBlank(), "a reason for " + hidden);
@@ -581,12 +588,14 @@ class McpConfigSourcedataTest {
     }
     assertResolvesCleanly(PURCHASE_ORDER_HEADER_ID);
     assertResolvesCleanly(SALES_ORDER_HEADER_ID);
+    assertResolvesCleanly(SALES_QUOTATION_HEADER_ID);
   }
 
   /**
    * ETP-5714: the {@code documentAction} values per status follow core's
    * {@code ActionButtonUtility.docAction} (the real DocAction transitions), not the AD list: an
-   * invoice offers CO on a draft and RC/RE once completed, an order CO/VO/PR on a draft and CL/RE
+   * invoice offers CO on a draft and only RE once completed (the screen's Reactivate; no reversal, RC removed
+   * in the QA follow-up), an order CO/VO/PR on a draft and CL/RE
    * once completed. Advisory data, so its content is asserted here.
    */
   @Test
@@ -604,7 +613,15 @@ class McpConfigSourcedataTest {
     for (String id : INVOICE_HEADERS) {
       JSONObject values = valuesByStatusOf(id);
       assertEquals(Set.of("CO"), setOf(values.getJSONArray("DR")), id);
-      assertEquals(Set.of("RC", "RE"), setOf(values.getJSONArray("CO")), id);
+      assertEquals(Set.of("RE"), setOf(values.getJSONArray("CO")), id);
+      for (String status : List.of("DR", "IP", "CO")) {
+        assertFalse(setOf(values.getJSONArray(status)).contains("VO"),
+            id + ": VO is not offered from " + status);
+      }
+      JSONObject actions = payloadOf(id).getJSONObject(McpActionsSection.NAME);
+      // enforced, not advisory: the DocAction allow-list is exactly what the screen sends
+      assertEquals(Set.of("CO", "RE"), setOf(actions.getJSONObject(McpActionsSection.KEY_VALUES)
+          .getJSONArray("DocAction")), id);
       assertEquals(0, values.getJSONArray("VO").length(), id);
       assertResolvesCleanly(id);
     }
@@ -622,6 +639,21 @@ class McpConfigSourcedataTest {
       "09BD7884E7014713A0AD1D2A3395875E", "475953DD812E497BA2131716ABECFC26",
       "02A76D8B4EC842529A537DC56AF0F996", "F4EFD42F68D2437196B06278BBDB33B9",
       "6E4047EE1CD34DEC95D575599A2930A6", "E0AD89F210BD4687AF397206F0735FB5");
+
+  @Test
+  @DisplayName("the invoice spec prompts and documentAction prompts no longer advertise RC (void by reversal)")
+  void invoicePromptsDoNotAdvertiseReversal() throws IOException {
+    for (String file : List.of("ETGO_SF_SPEC.xml", "ETGO_SF_FIELD.xml")) {
+      String xml = new String(Files.readAllBytes(sourcedataDir().resolve(file)),
+          StandardCharsets.UTF_8);
+      assertFalse(xml.contains("void by reversal"), file);
+      assertFalse(xml.contains("reverse completed ones with RC"), file);
+      assertFalse(xml.contains("RC reverses it"), file);
+      assertFalse(xml.contains("VO applies"), file);
+      assertFalse(xml.contains("cannot be voided"), file);
+      assertFalse(xml.contains("there is no void or reversal"), file);
+    }
+  }
 
   @Test
   @DisplayName("the document window prompts explain documentAction, availability and the costing retry")
@@ -871,8 +903,8 @@ class McpConfigSourcedataTest {
     Set<String> reasoned = new TreeSet<>(PURCHASE_ORDER_BUTTON_COLUMNS);
     reasoned.addAll(hidden);
     assertEquals(reasoned, keysOf(actions.getJSONObject(McpActionsSection.KEY_REASONS)));
-    assertEquals(Set.of("RM_Pickfromreceipt", "Cancelandreplace", "Confirmcancelandreplace"),
-        hidden);
+    assertEquals(Set.of("RM_Pickfromreceipt", "Cancelandreplace", "Confirmcancelandreplace",
+        "Create_POLines"), hidden);
   }
 
   @Test
