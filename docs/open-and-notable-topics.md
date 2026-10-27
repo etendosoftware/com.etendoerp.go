@@ -1108,16 +1108,26 @@ schema_forge checkout is absent.
 **Ticket:** accepted as designed (Martin Taal, 2026-10-24); no ticket. Owner of the check ETP-5051.
 
 The NEO write check (`NeoQuotaWriteGate`, `neo-headless.md` §4.16) runs after an insert, on the
-row just created, and refuses it only when that row matches the resource's HQL restriction. Three
-ways to consume a resource never pass through it:
+row just created, and refuses it only when that row matches the resource's HQL restriction. The
+NEO actions that create documents run the same check through `NeoQuotaCreateCheck` (below). Three
+ways to consume a resource never pass through either:
 
 - **Growth through a state change.** `POSTED_SALES_INVOICES` counts `e.posted = 'Y'`, and an
   invoice is created unposted, so it never matches at create time: a `block` quota on it is never
   refused, however far over the tenant is. Posting is a process, not a NEO create.
-- **A customization that creates the row itself.** A `NeoHandler`/`@NeoExtension` whose `handle()`
-  returns its own response skips the default create, and the check with it.
-- **Rows created by processes**, imports or the Classic UI. The check sits on the NEO write path
-  only; there is no DAL observer, by decision.
+- **A customization that creates the row itself without calling `NeoQuotaCreateCheck`.** A
+  `NeoHandler`/`@NeoExtension` whose `handle()` returns its own response skips the default create
+  and the gate with it; its rows are checked only when it calls `NeoQuotaCreateCheck`
+  (`requireAllowedDocument(header)`, or `requireAllowed(entity, ids)` for rows added to an existing
+  document), whose `Refused` `NeoExtensionDispatcher` maps to the gate's 403 `QUOTA_EXCEEDED` with
+  the action rolled back. The NEO actions that create documents do — invoice, shipment and receipt
+  generation, returns and return invoices, follow-up documents, clone, quotation conversion and the
+  line imports, return line imports included (`plan-quotas.md` §2 lists them). Still unchecked: the
+  discount lines `TotalDiscountService` adds while a document is saved (deliberately), and any new
+  customization that creates rows and forgets the call — nothing detects the omission.
+- **Rows created by processes** or the Classic UI. The check sits on the NEO write path only; there
+  is no DAL observer, by decision. The SPA's CSV/XLSX import is not among them: it writes through
+  `/sws/neo/batch` and is refused, only with a generic row message (§5.18, ETP-5911).
 
 Such quotas are still measured and reported: on every environment of `GET /sws/go/environments`
 (`quotas`, WARN and DENY only — what the SPA's quota banner reads, because core's

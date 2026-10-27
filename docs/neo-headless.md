@@ -5082,7 +5082,8 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   batch job row refused with `QUOTA_EXCEEDED` reports `safeToResend:false`: it was rolled back, but
   a resend is refused again until the quota changes. A `QUOTA_CHECK_FAILED` row keeps the normal
   rule (`safeToResend:true` for a proven rollback): nothing was saved and the check may pass. A customization whose `handle()` creates the row itself and
-  short-circuits the default create is not checked by the gate; nor are rows created by processes.
+  short-circuits the default create is not checked by the gate — only when it calls
+  `NeoQuotaCreateCheck` (next item); rows created by processes are not checked at all.
 - **NEO actions that create documents (ETP-5051).** The creating actions call
   `NeoQuotaCreateCheck` right after they saved the new header (and its lines) and **before**
   anything irreversible — before an invoice completion that commits (`ProcessInvoiceUtil`), before
