@@ -6555,6 +6555,7 @@
 <!--0F194EC2806948B1A85278FC132EEC40-->  <JAVA_QUALIFIER><![CDATA[invoice]]></JAVA_QUALIFIER>
 <!--0F194EC2806948B1A85278FC132EEC40-->  <SEQNO><![CDATA[300]]></SEQNO>
 <!--0F194EC2806948B1A85278FC132EEC40-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
+<!--0F194EC2806948B1A85278FC132EEC40-->  <AGENT_PROMPT><![CDATA[Legacy column, always empty: a receipt can be invoiced by several invoices and an invoice can cover several receipts, so nothing fills it. Whether the receipt is invoiced is invoiceStatus (0-100); which invoices cover it is linkedInvoices, on etendo_list and etendo_get.]]></AGENT_PROMPT>
 <!--0F194EC2806948B1A85278FC132EEC40-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--0F194EC2806948B1A85278FC132EEC40--></ETGO_SF_FIELD>
 
@@ -25335,6 +25336,7 @@
 <!--3E175AFAF060499CA8F8585A7E163309-->  <JAVA_QUALIFIER><![CDATA[invoice]]></JAVA_QUALIFIER>
 <!--3E175AFAF060499CA8F8585A7E163309-->  <SEQNO><![CDATA[300]]></SEQNO>
 <!--3E175AFAF060499CA8F8585A7E163309-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
+<!--3E175AFAF060499CA8F8585A7E163309-->  <AGENT_PROMPT><![CDATA[Legacy column, always empty: a shipment can be invoiced by several invoices and an invoice can cover several shipments, so nothing fills it. Whether the shipment is invoiced is invoiceStatus (0-100); which invoices cover it is linkedInvoices, on etendo_list and etendo_get.]]></AGENT_PROMPT>
 <!--3E175AFAF060499CA8F8585A7E163309-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--3E175AFAF060499CA8F8585A7E163309--></ETGO_SF_FIELD>
 

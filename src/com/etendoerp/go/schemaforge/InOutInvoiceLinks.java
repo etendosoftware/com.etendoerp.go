@@ -16,9 +16,20 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
+
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
 
 /**
  * The one definition of "which shipment/receipt lines are linked to which invoice lines", shared
@@ -230,5 +241,86 @@ final class InOutInvoiceLinks {
       ps.setString(idx++, value);
     }
     return idx;
+  }
+
+  /**
+   * ETP-5852: the {@code linkedInvoices} of a whole page of shipments or receipts in ONE query —
+   * the same three arms as {@link #linkedInvoiceIdsSql} and the same invoice filter as the
+   * single-record enrichment, keyed by movement. Movements with no invoice get an empty array.
+   *
+   * @param matchTable {@link MatchTable#SALES} for shipments, {@link MatchTable#PURCHASE} for
+   *                   receipts
+   * @param inOutIds   the page's {@code M_InOut} ids; empty answers an empty map
+   * @return movement id → its invoices ({@code id, documentNo, grandTotalAmount,
+   *         documentStatus, currency$_identifier}), in {@code inOutIds} order
+   */
+  // The SQL is built from a fixed enum literal and "?" placeholders; every value is bound.
+  @SuppressWarnings("java:S2077")
+  static Map<String, JSONArray> linkedInvoicesByInOut(MatchTable matchTable, List<String> inOutIds)
+      throws SQLException, JSONException {
+    Map<String, JSONArray> byInOut = new LinkedHashMap<>();
+    if (inOutIds == null || inOutIds.isEmpty()) {
+      return byInOut;
+    }
+    for (String id : inOutIds) {
+      byInOut.put(id, new JSONArray());
+    }
+    String in = String.join(",", Collections.nCopies(inOutIds.size(), "?"));
+    String sql = "SELECT DISTINCT lk.m_inout_id, i.c_invoice_id, i.documentno, i.grandtotal, "
+        + "i.docstatus, cur.iso_code FROM ("
+        + "SELECT sil.m_inout_id, il.c_invoice_id FROM m_inoutline sil "
+        + "JOIN c_invoiceline il ON il.m_inoutline_id = sil.m_inoutline_id "
+        + "WHERE sil.m_inout_id IN (" + in + ") AND sil.isactive = 'Y' "
+        + "UNION "
+        + "SELECT sil.m_inout_id, il.c_invoice_id FROM m_inoutline sil "
+        + "JOIN " + matchTable.tableName() + " mt ON mt.m_inoutline_id = sil.m_inoutline_id "
+        + "JOIN c_invoiceline il ON il.c_invoiceline_id = mt.c_invoiceline_id "
+        + "WHERE sil.m_inout_id IN (" + in + ") AND sil.isactive = 'Y' "
+        + "UNION "
+        + "SELECT sil.m_inout_id, il.c_invoice_id FROM m_inoutline sil "
+        + "JOIN c_invoiceline il ON il.c_orderline_id = sil.c_orderline_id "
+        + "WHERE sil.m_inout_id IN (" + in + ") AND sil.isactive = 'Y' "
+        + "AND sil.c_orderline_id IS NOT NULL) lk "
+        + "JOIN c_invoice i ON i.c_invoice_id = lk.c_invoice_id "
+        + "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id "
+        + "WHERE i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL') "
+        + "ORDER BY lk.m_inout_id, i.documentno";
+    try (PreparedStatement ps = OBDal.getReadOnlyInstance().getConnection().prepareStatement(sql)) {
+      int idx = 1;
+      for (int arm = 0; arm < LINKED_INVOICES_PARAMS; arm++) {
+        for (String id : inOutIds) {
+          ps.setString(idx++, id);
+        }
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONArray invoices = byInOut.get(rs.getString(1));
+          if (invoices == null) {
+            continue;
+          }
+          JSONObject inv = new JSONObject();
+          inv.put("id", rs.getString(2));
+          inv.put("documentNo", rs.getString(3));
+          BigDecimal total = rs.getBigDecimal(4);
+          inv.put("grandTotalAmount", total != null ? total : JSONObject.NULL);
+          inv.put("documentStatus", rs.getString(5));
+          inv.put("currency$_identifier", rs.getString(6));
+          invoices.put(inv);
+        }
+      }
+    }
+    return byInOut;
+  }
+
+  /** Writes each row's {@code linkedInvoices} from {@link #linkedInvoicesByInOut}'s map. */
+  static void putLinkedInvoices(JSONArray rows, Map<String, JSONArray> byInOut)
+      throws JSONException {
+    for (int i = 0; i < rows.length(); i++) {
+      JSONObject row = rows.optJSONObject(i);
+      JSONArray invoices = row == null ? null : byInOut.get(row.optString("id", ""));
+      if (invoices != null) {
+        row.put("linkedInvoices", invoices);
+      }
+    }
   }
 }

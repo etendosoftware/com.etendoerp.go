@@ -1532,6 +1532,13 @@ public class McpToolRouter {
       throw McpRoutingException.schemaViewRequired(view);
     }
 
+    // ETP-5852: the keys the entity's customization adds to every record it reads
+    // (NeoHandler#responseEnrichedFields: a shipment's linkedInvoices, invoiceStatus, ...) are
+    // published as read-only fields. They came back on every read but the schema never named
+    // them, so an agent could not know they existed and its fields:[…] here called them unknown.
+    fieldsArray = McpSchemaFieldBuilder.withEnrichedReadFields(fieldsArray,
+        McpServerResolvedFields.enrichedOnRead(sfEntity));
+
     // IMP-12: fields:[…] — an explicit whitelist, for an agent that already knows what it wants.
     // Unmatched names are echoed back rather than dropped in silence (cf. IMP-18).
     Set<String> requestedFields = McpFieldProjection.parseFields(

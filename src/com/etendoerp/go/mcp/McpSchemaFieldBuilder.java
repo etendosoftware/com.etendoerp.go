@@ -1040,4 +1040,44 @@ final class McpSchemaFieldBuilder {
     viaObj.put("note", via.note);
     fieldObj.put("writableVia", viaObj);
   }
+
+  /**
+   * ETP-5852: appends one read-only entry per key the entity's customization adds to the records
+   * it reads ({@code NeoHandler#responseEnrichedFields}), unless a field of that name is already
+   * published. Shape: {@code {name, type:"computed", readOnly:true, visibility:"readOnly",
+   * computedOnRead:true, description}}.
+   *
+   * @param fields   the schema's fields; not modified
+   * @param enriched the customization's enriched keys; empty answers {@code fields}
+   * @return the fields plus the enriched entries
+   */
+  static JSONArray withEnrichedReadFields(JSONArray fields, java.util.Set<String> enriched)
+      throws JSONException {
+    if (enriched == null || enriched.isEmpty()) {
+      return fields;
+    }
+    java.util.Set<String> present = new java.util.HashSet<>();
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject f = fields.optJSONObject(i);
+      if (f != null) {
+        present.add(f.optString("name", ""));
+      }
+    }
+    JSONArray all = new JSONArray(fields.toString());
+    for (String name : new java.util.TreeSet<>(enriched)) {
+      if (present.contains(name)) {
+        continue;
+      }
+      JSONObject f = new JSONObject();
+      f.put("name", name);
+      f.put("type", "computed");
+      f.put(KEY_READ_ONLY, true);
+      f.put("visibility", VISIBILITY_READ_ONLY);
+      f.put("computedOnRead", true);
+      f.put("description", "Computed by the server when the record is read — not a stored column,"
+          + " so it cannot be sent or used as a filter.");
+      all.put(f);
+    }
+    return all;
+  }
 }
