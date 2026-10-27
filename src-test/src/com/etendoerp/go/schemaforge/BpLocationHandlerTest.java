@@ -120,6 +120,20 @@ class BpLocationHandlerTest {
   @Nested
   class Create {
 
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
+
     @Test
     void missingMandatoryFieldsReturns400() throws Exception {
       JSONObject body = new JSONObject();
@@ -187,6 +201,20 @@ class BpLocationHandlerTest {
 
   @Nested
   class Update {
+
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
 
     @Test
     void notFoundReturns404() {
@@ -273,6 +301,20 @@ class BpLocationHandlerTest {
   @Nested
   class PersistAfterHandle {
 
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
+
     @Test
     void nonCrudEndpointReturnsNull() {
       NeoContext ctx = NeoContext.builder()
@@ -350,6 +392,20 @@ class BpLocationHandlerTest {
 
   @Nested
   class GetEnrichment {
+
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
 
     @Test
     void enrichesEveryRowWithStructuredFields() throws Exception {

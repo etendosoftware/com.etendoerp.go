@@ -315,8 +315,11 @@ public class AddressVirtualSelectorPolicyTest {
     columns.put("EM_OBSEPA_BldgNm", "oBSEPABuildingName");
 
     try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
-         MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+         MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class);
+         MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
       stubLocationColumns(dal, models, columns);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
 
       List<Column> resolved = AddressVirtualSelectorPolicy.resolveVirtualColumns(
           entityOnTable(WRAPPER_TABLE));

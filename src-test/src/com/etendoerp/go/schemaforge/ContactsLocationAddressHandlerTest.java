@@ -280,12 +280,14 @@ class ContactsLocationAddressHandlerTest {
     body.put("country", "ES");
     // streetName, buildingNumber and cityName intentionally omitted
 
-    NeoContext ctx = buildContext("POST", null, body, params);
-    NeoResponse response = handler.handle(ctx);
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
 
-    assertNotNull(response);
-    assertEquals(400, response.getHttpStatus());
-    verify(obDal, never()).save(any());
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      verify(obDal, never()).save(any());
+    }
   }
 
   /**
@@ -307,13 +309,15 @@ class ContactsLocationAddressHandlerTest {
     // EM_OBSEPA_BldgNm is VARCHAR(35) — 36 chars overflows it.
     body.put("buildingName", "A".repeat(36));
 
-    NeoContext ctx = buildContext("POST", null, body, params);
-    NeoResponse response = handler.handle(ctx);
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
 
-    assertNotNull(response);
-    assertEquals(400, response.getHttpStatus());
-    verify(obDal, never()).save(any());
-    verify(obDal, never()).flush();
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).flush();
+    }
   }
 
   // ── ETP-5806: structured-address-for-sepa flag OFF ─────────────────────
@@ -512,19 +516,21 @@ class ContactsLocationAddressHandlerTest {
     body.put("shipToAddress", "Y");
     body.put("invoiceToAddress", "N");
 
-    NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
-    NeoResponse response = handler.handle(ctx);
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+      NeoResponse response = handler.handle(ctx);
 
-    assertNotNull(response);
-    assertEquals(200, response.getHttpStatus());
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
 
-    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
-    assertEquals(1, data.length());
-    assertEquals("bpl-id", data.getJSONObject(0).getString("id"));
-    // ETP-5806 — streetName non-blank always recomputes the lines; the raw "456 Oak Ave" the
-    // caller also sent (as a legacy free-text Address1 might already hold) is never stored as-is.
-    verify(geoLoc).setAddressLine1("Calle Mayor, 7");
-    verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
+      JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(1, data.length());
+      assertEquals("bpl-id", data.getJSONObject(0).getString("id"));
+      // ETP-5806 — streetName non-blank always recomputes the lines; the raw "456 Oak Ave" the
+      // caller also sent (as a legacy free-text Address1 might already hold) is never stored as-is.
+      verify(geoLoc).setAddressLine1("Calle Mayor, 7");
+      verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
+    }
   }
 
   /**
@@ -651,12 +657,14 @@ class ContactsLocationAddressHandlerTest {
     body.put("cityName", "Madrid");
     body.put("country", "ES");
 
-    NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
-    NeoResponse response = handler.handle(ctx);
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+      NeoResponse response = handler.handle(ctx);
 
-    assertNotNull(response);
-    assertEquals(400, response.getHttpStatus());
-    verify(obDal, never()).flush();
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      verify(obDal, never()).flush();
+    }
   }
 
   // ── handle() exception path ─────────────────────────────────────────────

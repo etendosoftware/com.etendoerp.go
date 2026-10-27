@@ -1881,7 +1881,8 @@ public class EtendoGoJwtServletCoverageTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
 
     try (var ctxMock = mockStatic(OBContext.class);
-         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
       stubAuthenticatedAccount(dalMock);
 
       servlet.doPost(req, resp.response);
@@ -1934,7 +1935,8 @@ public class EtendoGoJwtServletCoverageTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
 
     try (var ctxMock = mockStatic(OBContext.class);
-         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
       stubAuthenticatedAccount(dalMock);
 
       servlet.doPost(req, resp.response);

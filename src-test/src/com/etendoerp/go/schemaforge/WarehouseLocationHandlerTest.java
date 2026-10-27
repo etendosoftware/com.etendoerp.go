@@ -247,37 +247,39 @@ class WarehouseLocationHandlerTest {
     body.put("country", "country-id");
     body.put("region", "region-id");
 
-    NeoResponse r = handler.handle(buildContext("POST", null, body));
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
 
-    assertNotNull(r);
-    assertEquals(201, r.getHttpStatus());
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
 
-    verify(geoLoc).setClient(client);
-    verify(geoLoc).setOrganization(organization);
-    verify(geoLoc).setActive(Boolean.TRUE);
-    verify(geoLoc).setOBSEPAStreetName("Gran Via");
-    verify(geoLoc).setOBSEPABuildingNumber("45");
-    verify(geoLoc).setOBSEPABuildingName("Torre A");
-    // ETP-5806 — composed from street+number+name, NOT the raw addressLine1/addressLine2 sent.
-    verify(geoLoc).setAddressLine1("Gran Via, 45 - Torre A");
-    verify(geoLoc).setAddressLine2(isNull());
-    verify(geoLoc, never()).setAddressLine1("123 Main St");
-    verify(geoLoc).setCityName("Springfield");
-    verify(geoLoc).setPostalCode("62704");
-    verify(geoLoc).setCountry(country);
-    verify(geoLoc).setRegion(region);
-    verify(obDal).save(geoLoc);
-    verify(obDal).flush();
-    obContextStaticMock.verify(() -> OBContext.setAdminMode(true));
-    obContextStaticMock.verify(OBContext::restorePreviousMode);
+      verify(geoLoc).setClient(client);
+      verify(geoLoc).setOrganization(organization);
+      verify(geoLoc).setActive(Boolean.TRUE);
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Torre A");
+      // ETP-5806 — composed from street+number+name, NOT the raw addressLine1/addressLine2 sent.
+      verify(geoLoc).setAddressLine1("Gran Via, 45 - Torre A");
+      verify(geoLoc).setAddressLine2(isNull());
+      verify(geoLoc, never()).setAddressLine1("123 Main St");
+      verify(geoLoc).setCityName("Springfield");
+      verify(geoLoc).setPostalCode("62704");
+      verify(geoLoc).setCountry(country);
+      verify(geoLoc).setRegion(region);
+      verify(obDal).save(geoLoc);
+      verify(obDal).flush();
+      obContextStaticMock.verify(() -> OBContext.setAdminMode(true));
+      obContextStaticMock.verify(OBContext::restorePreviousMode);
 
-    JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-    assertEquals("geo-1", rec.getString("id"));
-    assertEquals("Springfield, 123 Main St", rec.getString("name"));
-    assertEquals("country-id", rec.getString("country"));
-    assertEquals("España", rec.getString("country$_identifier"));
-    assertEquals("region-id", rec.getString("region"));
-    assertEquals("Catalonia", rec.getString("region$_identifier"));
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("geo-1", rec.getString("id"));
+      assertEquals("Springfield, 123 Main St", rec.getString("name"));
+      assertEquals("country-id", rec.getString("country"));
+      assertEquals("España", rec.getString("country$_identifier"));
+      assertEquals("region-id", rec.getString("region"));
+      assertEquals("Catalonia", rec.getString("region$_identifier"));
+    }
   }
 
   /**
@@ -381,12 +383,14 @@ class WarehouseLocationHandlerTest {
     // EM_OBSEPA_BldgNm is VARCHAR(35) — 36 chars overflows it.
     body.put("buildingName", "A".repeat(36));
 
-    NeoResponse r = handler.handle(buildContext("POST", null, body));
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
 
-    assertNotNull(r);
-    assertEquals(400, r.getHttpStatus());
-    verify(obDal, never()).save(any());
-    verify(obDal, never()).flush();
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).flush();
+    }
   }
 
   /**
@@ -410,13 +414,15 @@ class WarehouseLocationHandlerTest {
     body.put("addressLine2", "RAW LINE 2 — SHOULD BE IGNORED");
     body.put("postalCode", "null");
 
-    NeoResponse r = handler.handle(buildContext("POST", null, body));
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
 
-    assertEquals(201, r.getHttpStatus());
-    verify(geoLoc).setAddressLine1("Gran Via, 45");
-    verify(geoLoc).setAddressLine2(isNull());
-    verify(geoLoc, never()).setAddressLine1("RAW LINE — SHOULD BE IGNORED");
-    verify(geoLoc).setPostalCode(isNull());
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc).setAddressLine1("Gran Via, 45");
+      verify(geoLoc).setAddressLine2(isNull());
+      verify(geoLoc, never()).setAddressLine1("RAW LINE — SHOULD BE IGNORED");
+      verify(geoLoc).setPostalCode(isNull());
+    }
   }
 
   /**
@@ -553,17 +559,19 @@ class WarehouseLocationHandlerTest {
     // whatever addressLine1 geoLoc already had before this update.
     body.put("addressLine1", "456 Oak Ave");
 
-    NeoResponse r = handler.handle(buildContext("PUT", "geo-upd", body));
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("PUT", "geo-upd", body));
 
-    assertNotNull(r);
-    assertEquals(200, r.getHttpStatus());
-    verify(geoLoc).setAddressLine1("Calle Mayor, 7");
-    verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
-    verify(obDal, never()).save(any());
-    verify(obDal).flush();
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      verify(geoLoc).setAddressLine1("Calle Mayor, 7");
+      verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
+      verify(obDal, never()).save(any());
+      verify(obDal).flush();
 
-    JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-    assertEquals("geo-upd", rec.getString("id"));
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("geo-upd", rec.getString("id"));
+    }
   }
 
   /**
@@ -674,11 +682,13 @@ class WarehouseLocationHandlerTest {
     body.put("cityName", "Madrid");
     body.put("country", "country-any");
 
-    NeoResponse r = handler.handle(buildContext("PUT", "geo-upd-5", body));
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("PUT", "geo-upd-5", body));
 
-    assertNotNull(r);
-    assertEquals(400, r.getHttpStatus());
-    verify(obDal, never()).flush();
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+      verify(obDal, never()).flush();
+    }
   }
 
   // ── handleGetById ─────────────────────────────────────────────────────────
