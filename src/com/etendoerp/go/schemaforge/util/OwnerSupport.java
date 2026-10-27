@@ -163,7 +163,7 @@ public final class OwnerSupport {
     NativeQuery<?> update = session.createNativeQuery(
         "UPDATE ad_user SET " + COLUMN_IS_OWNER + " = 'Y' "
             + "WHERE ad_user_id = :userId AND ad_client_id = :clientId "
-            + "AND " + COLUMN_IS_SUPPORT + " = 'N' AND NOT EXISTS ("
+            + "AND COALESCE(" + COLUMN_IS_SUPPORT + ", 'N') = 'N' AND NOT EXISTS ("
             + "SELECT 1 FROM ad_user u2 WHERE u2.ad_client_id = :clientId AND u2."
             + COLUMN_IS_OWNER + " = 'Y')");
     update.setParameter("userId", userId);

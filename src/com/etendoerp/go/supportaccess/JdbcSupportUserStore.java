@@ -47,7 +47,7 @@ public class JdbcSupportUserStore implements SupportUserStore {
       + "JOIN ad_user_roles ur ON ur.ad_user_id = u.ad_user_id AND ur.isactive = 'Y' "
       + "JOIN ad_org o ON o.ad_org_id = u.default_ad_org_id AND o.isactive = 'Y' "
       + "WHERE u.ad_client_id = ? AND ur.ad_role_id = ? AND u.isactive = 'Y' "
-      + "AND u.em_etgo_is_support = 'N' AND u.default_ad_org_id <> ? "
+      + "AND COALESCE(u.em_etgo_is_support, 'N') = 'N' AND u.default_ad_org_id <> ? "
       + "ORDER BY CASE WHEN u.em_etgo_is_owner = 'Y' THEN 0 ELSE 1 END, u.created LIMIT 1";
 
   private static final String FIRST_ORG_SQL = "SELECT o.ad_org_id, (SELECT w.m_warehouse_id "
