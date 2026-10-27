@@ -11232,8 +11232,11 @@ SQL end to end again.
 
 **ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
 already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`
-(`AbstractInvoiceHeaderHandler#enrichRectifyingInvoices`, wired next to `enrichOriginInvoice` in both
-`SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler`): the rectificativa(s) that rectify THIS
+(`rectificationLinks.enrichRectifyingInvoices`, wired next to `rectificationLinks.enrichOriginInvoice` in
+both `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler` — both methods live on the
+`InvoiceRectificationLinkSupport` collaborator, the `rectificationLinks` field on
+`AbstractInvoiceHeaderHandler`, extracted the way `followUp`/`FollowUpSupport` already was, to keep the
+abstract handler from growing (java:S1448)): the rectificativa(s) that rectify THIS
 invoice, read from `C_Invoice_Reverse` in the opposite direction. Before this field existed, the ORIGINAL
 invoice's own "Rectificaciones" tab and "Documentos relacionados" card always rendered empty — only a
 rectificativa could show anything, via `originInvoices`.
