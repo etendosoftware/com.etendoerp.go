@@ -3260,6 +3260,58 @@ that is still linked to Salt Edge remains blocked from deletion.
 `MCP_CONFIG.actions.hidden`, §4.12.6): they need the account holder to authenticate at the bank
 (SCA), which an agent cannot do. The `reason` of `MCP_CONFIG` names the two actions.
 
+##### 4.12.1.9 The country of a financial account — required on create, refused in the caller's language (ETP-5473)
+
+`FinancialAccountHandler` enforces on every channel (REST single, `/batch`, MCP) what the SPA's
+account forms enforce: on **create** `country` is mandatory for every type (Bank, Cash, Card); on
+**update** clearing it is refused on a Bank account that keeps an IBAN. The IBAN is never used to
+derive a country.
+
+**Refusals the handler answers.** Two `AD_MESSAGE`s of this module, built with **400** (on MCP the
+nested `error` is flattened into the tool envelope, `messageKeys` included, as for any handler
+refusal). The `es_ES` text is the SPA's own `backendError.countryRequired` / `countryIban` copy
+verbatim, so an MCP caller and the UI read the same sentence:
+
+| Key (`error.messageKeys[0]`) | When | `en_US` | `es_ES` |
+|---|---|---|---|
+| `ETGO_FinAccCountryRequired` | create without `country`, or with `null` / blank | Country is required | El país es obligatorio |
+| `ETGO_FinAccIbanRequiresCountry` | update of a Bank account whose effective IBAN is non-blank and whose effective country is empty | A bank account with an IBAN must have a country. | Se necesita el País para una cuenta IBAN. |
+
+**A country id that does not resolve never reaches the handler in practice.** The ETP-5785 write
+preflight refuses it first, before any customization runs:
+
+- REST (single and `/batch`) and MCP `etendo_create` / `etendo_update` / `etendo_batch`:
+  `NeoWritePreflight` → `NeoReferenceOwnership` answer `unknown_reference`, *"A referenced record
+  does not exist or is not accessible."* — **400** on REST, **422** on MCP (`McpToolResponses.classifiedEnvelope`
+  maps REST's 400 classes to the MCP `validation_error` status).
+- MCP, a `country` value that is not an id at all (a name): `McpFkResolver` answers **422**
+  `not_found` before the write.
+
+Both are shared refusals and stay in **English** for now: localizing them is cross-cutting (every
+entity, every reference) and is left to the separate MCP-messages ticket. The handler's own
+`ETGO_FinAccInvalidCountry` (**400**, `en_US` "Invalid country", `es_ES` "País no válido", same
+`NeoMessageText` resolution and `messageKeys`) is only a **defensive fallback**, reached when the
+preflight fails open (no session, a tab without a table).
+
+Body: `{"error":{"status":400,"message":<text in the request language>,"messageKeys":[<key>]}}`.
+Until the ETP-5473 QA reject the handler's refusals were fixed English literals the SPA matched by text, so a REST
+or MCP caller working in Spanish read English. They are now resolved by `NeoMessageText`, in the
+order described under **Document exchange rate (ETP-5840)** (§4.12.9): translated
+`AD_MESSAGE_TRL` → `messages/neo_hints_<lang>.properties` → `AD_MESSAGE` base → English catalog →
+key. The SPA maps the key (`backendErrors.js` `BACKEND_ERROR_KEY_MAP` in `etendo_schema_forge`) and
+keeps the English texts only as an exact-match fallback for an older backend, so the prose is no
+longer a wire contract. The other IBAN-pair texts (`The IBAN is too short.`, prefix / length /
+checksum mismatches) are still fixed English matched by the SPA; this change does not touch them.
+
+**What `etendo_schema` advertises.** AD does not mark `C_Country_ID` mandatory on
+`FIN_Financial_Account`, and the DEFAULTS post-hook suggests the organization's country, so
+`view:"create"` used to list `country` as `optional` with `serverDefaulted:true` — and the agent's
+first create without it was refused. The handler now declares
+`NeoHandler#callerRequiredCreateFields()` = `{country}` (§4.12.22): `etendo_schema` flags it
+`userRequired:true` in every view and lists it under `required` in `view:"create"`, never
+`serverDefaulted`. `etendo_defaults` still answers the suggested country — a form may prefill it —
+but the schema no longer claims the server fills it.
+
 #### 4.12.2 `etendo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
@@ -4558,14 +4610,18 @@ Save: `messageKeys: ["ETGO_ExchangeRateMissingOnSave", <ETGO_RateRefDate*>]`, `m
 referenceDate: <ETGO_RateRefDate*>}`. Completion: `messageKeys: ["ETGO_ExchangeRateMissingOnComplete"]`,
 `messageParams: {orgCurrency, documentCurrency}`. The date in the prose is `dd/MM/yyyy` in every language (the story's acceptance text). The text never names a property or a key.
 
-**Where the text comes from (scoped to these messages only).** `com.etendoerp.go` is not a
+**Where the text comes from (scoped to the keys that opt in).** `com.etendoerp.go` is not a
 translation module, so `export.database` never exports its `AD_MESSAGE_TRL` (see the ETP-5175 note in
-§5). `DocumentRateMessages.text` therefore resolves, in the request language: (1) an
-`AD_MESSAGE_TRL` row with `IsTranslated = 'Y'`, (2) the versioned
-`messages/neo_hints_<lang>.properties` catalog (`NeoHints.catalogText`, no English fallback), (3) the
-`AD_MESSAGE` base text. `AD_MESSAGE` uses `%0..%n`, the catalog `{0}..{n}` — keep the English
-catalog text equal to the `MSGTEXT`. Only the five `ETGO_ExchangeRate*`/`ETGO_RateRefDate*` keys use
-this; every other `AD_MESSAGE` of the module is still resolved by `OBMessageUtils.messageBD`.
+§5). `NeoMessageText.text` (which `DocumentRateMessages.text` delegates to since ETP-5473) therefore
+resolves, in the request language (`NeoLanguage.currentCode()`): (1) an `AD_MESSAGE_TRL` row with
+`IsTranslated = 'Y'`, (2) the versioned `messages/neo_hints_<lang>.properties` catalog
+(`NeoHints.catalogText`), (3) the `AD_MESSAGE` base text, (4) the English catalog — so the text
+survives an environment whose `AD_MESSAGE` row is not imported yet — (5) the key. `AD_MESSAGE` uses
+`%0..%n`, the catalog `{0}..{n}` — keep the English catalog text equal to the `MSGTEXT`.
+`NeoMessageText.error(status, key, args…)` builds the usual `{"error":{status,message}}` body and
+adds `messageKeys: [key]`. Only the five `ETGO_ExchangeRate*`/`ETGO_RateRefDate*` keys and the three
+`ETGO_FinAcc*` country refusals (§4.12.1.9) use this; every other `AD_MESSAGE` of the module is
+still resolved by `OBMessageUtils.messageBD`.
 
 ##### REST `/sws/neo/batch` is unaffected
 
@@ -5650,7 +5706,7 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
     ```
     `messageKeys` follow composition order: `InvalidAccount`, then `ETGO_InvalidAccountBpAndGroup` **or** `ETGO_InvalidAccountBpOnly`, then `ETGO_InvalidAccountMissingBpGroupAccounts` and/or `ETGO_InvalidAccountMissingProductAccounts` when those addenda fire. `messageParams` holds `bpName`, `bpGroup` (absent for BP-only), `missingBpGroupAccounts` / `missingProductAccounts` (present only when non-empty). Accounts are **stable codes, never labels**: `nonInvoicedReceipts`, `customerReceivablesNo`, `vendorLiability`, `customerPrepayment`, `vendorPrepayment`, `productExpense`, `invoicePriceVariance` (the `code` of each `BP_GROUP_ACCOUNT_COLUMNS` / `PRODUCT_ACCOUNT_COLUMNS` entry). When the Business Partner cannot be resolved, `messageKeys = ["InvalidAccount"]` and there are no params — the SPA composer is gated on params and falls back to the prose.
   - **The prose stays** (same composition, backend-localized) for clients that do not render from the identity: MCP, older SPA builds. Its English `AD_MESSAGE` text moved to GO terminology: `(Contact: @bpName@, Contact Category: @bpGroup@)`, `(Contact: @bpName@)`, `Please review the following accounts of the Contact Category: @missingAccounts@.`, `Please review the following accounts of the Product: @missingAccounts@.` The `es_ES` `AD_MESSAGE_TRL` rows already in production are `ISTRANSLATED='Y'`, so `update.database` does not refresh them: in a Spanish session the backend prose may still say "Grupo de Terceros". Accepted on purpose (no data-fix): every SPA path QA exercises renders from the identity. The rendering side is documented in `etendo_schema_forge/docs/i18n-guide.md` (Backend Error Translation, mechanism 3).
-- **Backend Spanish prose without `AD_MESSAGE_TRL` (ETP-5840).** For the document exchange-rate refusals (`ETGO_ExchangeRateMissingOnSave`, `ETGO_ExchangeRateMissingOnComplete`, `ETGO_RateRefDate*`) the MCP and REST clients also need the sentence itself in the user's language, so `DocumentRateMessages.text` resolves (1) an `AD_MESSAGE_TRL` row with `IsTranslated = 'Y'`, (2) the versioned `messages/neo_hints_<lang>.properties` catalog (the `NeoHints` loader, `catalogText`, no English fallback), (3) the `AD_MESSAGE` base text — and every refusal still carries `messageKeys` + `messageParams` so the SPA renders from the identity, as above. Scoped to those keys only: no other message of the module changes how it is resolved. Details in §4.12 "Document exchange rate (ETP-5840)".
+- **Backend Spanish prose without `AD_MESSAGE_TRL` (ETP-5840, ETP-5473).** For the document exchange-rate refusals (`ETGO_ExchangeRateMissingOnSave`, `ETGO_ExchangeRateMissingOnComplete`, `ETGO_RateRefDate*`) and the financial-account country refusals (`ETGO_FinAccCountryRequired`, `ETGO_FinAccInvalidCountry`, `ETGO_FinAccIbanRequiresCountry`, §4.12.1.9) the MCP and REST clients also need the sentence itself in the user's language, so `NeoMessageText.text` resolves (1) an `AD_MESSAGE_TRL` row with `IsTranslated = 'Y'`, (2) the versioned `messages/neo_hints_<lang>.properties` catalog (the `NeoHints` loader, `catalogText`), (3) the `AD_MESSAGE` base text, (4) the English catalog, (5) the key — and every refusal still carries `messageKeys` (plus `messageParams` where the text interpolates) so the SPA renders from the identity, as above. Scoped to those keys only: no other message of the module changes how it is resolved. Details in §4.12 "Document exchange rate (ETP-5840)".
 
 **Real-world example — `DocumentPostingService` M_Inventory / M_Internal_Consumption not-calculated-cost pre-check (ETP-5360, ETP-5445):** unlike the `InvalidAccount` enrichment above, which reacts to a failed `acct.post()`, this is a GATE that runs **before** `acct.post()` is ever called: `post(adTableId, recordId, conn)` first calls `isUncalculatedCost(adTableId, recordId)` and, if it returns `true`, short-circuits with `OBMessageUtils.messageBD("NotCalculatedCost")` (`AD_MESSAGE_ID = B6CDB7D04FD249579A48D26C0ED48F45` in core's `AD_MESSAGE.xml`) — a clean, correctly-localized, no-params message — without ever touching `AcctServer`. Scoped ONLY to `M_Inventory` (Physical Inventory, ETP-5360) and `M_Internal_Consumption` (Internal Consumption, ETP-5445) by table name, not generalized to other document types. Why a gate is needed at all: core's `DocInventory#createFact` throws a bare, message-less `IllegalStateException` when a line's `MaterialTransaction.isCostCalculated()` is false, which falls into `AcctServer.createFacts`'s generic `catch (Exception e)` (only `OBException` is special-cased there), so the specific `STATUS_NotCalculatedCost` core would otherwise set — and the correctly-localized message that status implies — never survives to `errorMessageOf`. Core's `DocInternalConsumption#validateCostCalculation` has the identical set-status-then-throw shape, so ETP-5445 resolves `InternalConsumption → InternalConsumptionLine` and reuses the same per-line `MaterialTransaction` scan (the shared private helper `hasUncalculatedTransaction`). Rather than patch `AcctServer`'s status/message propagation (core, out of scope), the pre-check avoids the swallowed exception entirely by never calling `acct.post()` in the first place. **Fails open**, not closed: a lookup error (table/record not resolvable, or any exception while walking `InventoryCount → InventoryCountLine → MaterialTransaction` or `InternalConsumption → InternalConsumptionLine → MaterialTransaction`) is logged at `warn` and returns `false`, letting the post proceed to the normal `AcctServer` path — deliberate, so a lookup bug degrades to the pre-ETP-5360 generic error path instead of blocking a post that would otherwise have succeeded. Because this lives inside the shared `post()` method rather than in a window-specific handler, it transparently covers every caller of that method, not just the Physical Inventory window's own `post`/`unpost` action: `NotPostedDocumentsHandler`'s `post` and `bulk-post` actions (§ `not-posted-documents` above) call the same `postingService.post(tableId, recordId)` and so get the same clean message for an M_Inventory or M_Internal_Consumption row surfaced there, with no extra wiring. The SPA maps both the `en_US` and the `es_ES` text of `NotCalculatedCost` to its own actionable `backendError.costNotCalculated` copy (`tools/app-shell/src/lib/backendErrors.js` in `etendo_schema_forge`), so the user never sees the raw core sentence on either window.
 
@@ -9512,6 +9568,15 @@ wrapper fields. A new generic extension point lets the customization say so:
   it — their pre-hook already runs before the create — so a customization usually implements it by
   delegating to the same helper its `handle()` uses. First user: the invoice headers'
   `partnerAddress` default.
+- `NeoHandler#callerRequiredCreateFields()` (ETP-5473) — the opposite declaration: DAL property
+  names the customization's pre-hook **refuses a create without**, although AD does not mark the
+  column mandatory or `etendo_defaults` answers a value for it (a suggestion for a form, not a
+  server fill). `McpServerResolvedFields.callerRequiredOnCreate` reads it through the same
+  `resolveOnly` (CREATE surface); `etendo_schema` flags the names `userRequired:true` on the field
+  array every view is built from, and removes them from the server-resolved set **after** the
+  union above, so `view:"create"` lists them under `required`, never `serverDefaulted`. It only
+  declares what the pre-hook already enforces — it adds no check. First user:
+  `FinancialAccountHandler` (`country`, §4.12.1.9).
 - `SalesQuotationLineHandler` and `SalesOrderLineHandler` both declare
   `OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS` = `tax`, `lineNetAmount` (ETP-5528, QA
   observation: the create view listed `lineNetAmount` as required although every create without it

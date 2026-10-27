@@ -35,6 +35,7 @@ import static org.mockito.Mockito.when;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
@@ -48,14 +49,18 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+
 /**
  * Unit tests for the ETP-5473 country rule of {@link FinancialAccountHandler}: the backend now
  * enforces exactly what the SPA's account forms enforce.
  *
  * <ul>
  *   <li>Create, every type (Bank, Cash, Card): {@code country} missing, {@code null} or blank is
- *       "Country is required"; an id that does not resolve is "Invalid country". The country is
- *       never derived from the IBAN.</li>
+ *       "Country is required"; an id that does not resolve is "Invalid country" (in production the
+ *       ETP-5785 write preflight answers an unresolvable id first with {@code unknown_reference};
+ *       this handler's refusal is the fallback for when it fails open, and these tests stub
+ *       {@code loadCountry} to reach it). The country is never derived from the IBAN.</li>
  *   <li>Update: a body touching neither {@code iBAN} nor {@code country} skips the check (no
  *       account load). A non-blank country must resolve. Clearing the country is allowed on Cash,
  *       Card and on a Bank account whose effective IBAN is blank — the body then carries JSON
@@ -68,6 +73,13 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * are scoped to a single case. Same spy-and-stub strategy as the sibling classes: the DAL-bound
  * seams ({@code loadCurrency}, {@code nameExists}, {@code loadCountry}, {@code loadAccount},
  * {@code listMatchingAlgorithms}) are stubbed so no database or live OBContext is needed.
+ *
+ * <p>The three refusals are {@code AD_MESSAGE}s answered in the request language and published in
+ * {@code error.messageKeys} (QA reject of ETP-5473: REST/MCP answered English to a Spanish user).
+ * Without a request language or a database they resolve to the English catalog text, which is what
+ * the matrix cases assert; {@link #countryRefusalsFollowTheRequestLanguage} covers Spanish.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountHandlerCountryTest {
@@ -84,6 +96,11 @@ public class FinancialAccountHandlerCountryTest {
   private static final String MSG_COUNTRY_REQUIRED = "Country is required";
   private static final String MSG_INVALID_COUNTRY = "Invalid country";
   private static final String MSG_IBAN_REQUIRES_COUNTRY = "A bank account with an IBAN must have a country.";
+  /** English text → the AD_MESSAGE key the refusal must publish in {@code error.messageKeys}. */
+  private static final Map<String, String> KEY_BY_TEXT = Map.of(
+      MSG_COUNTRY_REQUIRED, FinancialAccountHandler.MSG_COUNTRY_REQUIRED,
+      MSG_INVALID_COUNTRY, FinancialAccountHandler.MSG_INVALID_COUNTRY,
+      MSG_IBAN_REQUIRES_COUNTRY, FinancialAccountCountrySupport.MSG_IBAN_REQUIRES_COUNTRY);
 
   private static final List<String> ALL_TYPES = Arrays.asList("B", "C", "CA");
 
@@ -181,6 +198,86 @@ public class FinancialAccountHandlerCountryTest {
     assertNotNull(label + ": expected a 400, got pass-through", response);
     assertEquals(label, 400, response.getHttpStatus());
     assertEquals(label, expectedMessage, errorMessage(response));
+    String key = KEY_BY_TEXT.get(expectedMessage);
+    if (key != null) {
+      assertEquals(label + ": messageKeys", key, response.getBody().getJSONObject("error")
+          .getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
+    }
+  }
+
+  /**
+   * Runs {@code body} with {@code language} as the request language and no usable database, so
+   * every text comes from the versioned {@code neo_hints_<lang>} catalog.
+   */
+  private static NeoResponse inLanguage(String language, ThrowingSupplier body) throws Exception {
+    OBDal dal = mock(OBDal.class);
+    when(dal.getConnection()).thenThrow(new IllegalStateException("no database in this test"));
+    try (MockedStatic<NeoLanguage> lang = mockStatic(NeoLanguage.class);
+         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      lang.when(NeoLanguage::currentCode).thenReturn(language);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      return body.get();
+    }
+  }
+
+  @FunctionalInterface
+  private interface ThrowingSupplier {
+    NeoResponse get() throws Exception;
+  }
+
+  // ── request language (QA reject, ETP-5473) ───────────────────────────────
+
+  /**
+   * The three country refusals answer in the request language — Spanish for es_ES, English for
+   * en_US — keep their 400 and always name their AD_MESSAGE in {@code messageKeys}, so a REST/MCP
+   * caller reads its own language and the SPA can map by identity. The Spanish texts are the SPA's
+   * es_ES {@code backendError.*} copy, so MCP and the UI say the same thing.
+   */
+  @Test
+  public void countryRefusalsFollowTheRequestLanguage() throws Exception {
+    Object[][] cases = {
+        // language, scenario, expected text
+        { "es_ES", "required", "El pa\u00eds es obligatorio" },
+        { "es_ES", "invalid", "Pa\u00eds no v\u00e1lido" },
+        { "es_ES", "ibanWithoutCountry", "Se necesita el Pa\u00eds para una cuenta IBAN." },
+        { "en_US", "required", MSG_COUNTRY_REQUIRED },
+        { "en_US", "invalid", MSG_INVALID_COUNTRY },
+        { "en_US", "ibanWithoutCountry", MSG_IBAN_REQUIRES_COUNTRY },
+    };
+    Map<String, String> keyByScenario = Map.of(
+        "required", FinancialAccountHandler.MSG_COUNTRY_REQUIRED,
+        "invalid", FinancialAccountHandler.MSG_INVALID_COUNTRY,
+        "ibanWithoutCountry", FinancialAccountCountrySupport.MSG_IBAN_REQUIRES_COUNTRY);
+    for (Object[] c : cases) {
+      String language = (String) c[0];
+      String scenario = (String) c[1];
+      String label = language + "/" + scenario;
+      NeoResponse response = inLanguage(language, () -> refuse(scenario));
+
+      assertNotNull(label, response);
+      assertEquals(label, 400, response.getHttpStatus());
+      JSONObject error = response.getBody().getJSONObject("error");
+      assertEquals(label, c[2], error.getString("message"));
+      assertEquals(label, keyByScenario.get(scenario),
+          error.getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
+    }
+  }
+
+  /** Drives the handler into one of the three country refusals. */
+  private NeoResponse refuse(String scenario) throws Exception {
+    if ("required".equals(scenario)) {
+      JSONObject body = createBody("B");
+      body.remove(FIELD_COUNTRY);
+      return newCreateHandler().validateAndEnrichCreate(body);
+    }
+    if ("invalid".equals(scenario)) {
+      return newCreateHandler()
+          .validateAndEnrichCreate(createBody("C").put(FIELD_COUNTRY, UNKNOWN_COUNTRY_ID));
+    }
+    FinancialAccountHandler handler = newHandler();
+    storedAccount(handler, "B", ES_IBAN, spain());
+    return handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_COUNTRY, JSONObject.NULL));
   }
 
   // ── create ────────────────────────────────────────────────────────────────
