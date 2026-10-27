@@ -23,6 +23,11 @@ import java.util.Locale;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.session.GoSessionRecord;
@@ -138,6 +143,73 @@ public final class SupportAccessGuard {
   public static boolean isSupportUser(String userId, String clientId) {
     return userId != null && StringUtils.isNotBlank(clientId)
         && userId.equals(supportUserIdFor(clientId));
+  }
+
+  /**
+   * Whether the user behind the context is its client's "Soporte Etendo" user. The central
+   * check of the user-management lockout: a support session never creates users, changes their
+   * email, username or default role, assigns or removes their roles, or invites anyone.
+   *
+   * @param context an OB context, may be null
+   * @return {@code true} when the acting user is the current client's support user
+   */
+  public static boolean isActingSupportUser(OBContext context) {
+    return context != null && context.getUser() != null && context.getCurrentClient() != null
+        && isSupportUser(context.getUser().getId(), context.getCurrentClient().getId());
+  }
+
+  /**
+   * Whether {@code callerUserId}, acting with {@code callerRole}, is that role's client's
+   * support user.
+   *
+   * @param callerUserId the acting {@code AD_User_ID}, may be null
+   * @param callerRole   the acting role, may be null
+   * @return {@code true} when the caller is the support user of the role's client
+   */
+  public static boolean isActingSupportUser(String callerUserId, Role callerRole) {
+    return callerRole != null && callerRole.getClient() != null
+        && isSupportUser(callerUserId, callerRole.getClient().getId());
+  }
+
+  /**
+   * Whether a PUT/PATCH body CHANGES a field that grants or redirects access to the tenant:
+   * {@code email}, {@code username} or {@code defaultRole}, compared with the stored user. A field
+   * that is absent or equal (trimmed; email and username ignoring case; null equals blank) is not
+   * a change, so a form that resends the whole record keeps working. Fails closed: an unknown
+   * user counts as a change.
+   *
+   * @param body   a request body, may be null
+   * @param userId the {@code AD_User_ID} being written, may be null
+   * @return {@code true} when any access-bearing field differs from the stored value
+   */
+  public static boolean changesAccessFields(JSONObject body, String userId) {
+    if (body == null || !(body.has("email") || body.has("username") || body.has("defaultRole"))) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      User user = userId == null ? null : OBDal.getInstance().get(User.class, userId);
+      return user == null
+          || differs(body, "email", user.getEmail(), true)
+          || differs(body, "username", user.getUsername(), true)
+          || differs(body, "defaultRole",
+              user.getDefaultRole() == null ? null : user.getDefaultRole().getId(), false);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static boolean differs(JSONObject body, String field, String current,
+      boolean ignoreCase) {
+    if (!body.has(field)) {
+      return false;
+    }
+    Object raw = body.opt(field);
+    String incoming = raw instanceof JSONObject ? ((JSONObject) raw).optString("id", null)
+        : (raw == null || JSONObject.NULL.equals(raw) ? null : raw.toString());
+    String a = StringUtils.trimToEmpty(incoming);
+    String b = StringUtils.trimToEmpty(current);
+    return ignoreCase ? !a.equalsIgnoreCase(b) : !a.equals(b);
   }
 
   /**

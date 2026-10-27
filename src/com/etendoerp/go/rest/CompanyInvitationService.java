@@ -201,6 +201,12 @@ public class CompanyInvitationService {
     return status;
   }
 
+  /** ETP-5351: the support user never invites (an invitation is persistent access). */
+  private static boolean isSupportInviter(InviterContext inviter) {
+    return inviter.user != null
+        && SupportAccessGuard.isSupportUser(inviter.user.getId(), inviter.client.getId());
+  }
+
   private static InviterContext resolveInviterFromContext(OBContext obContext) {
     return obContext == null ? null
         : new InviterContext(obContext.getCurrentClient(), obContext.getCurrentOrganization(),
@@ -232,6 +238,10 @@ public class CompanyInvitationService {
     if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
       return errorResponse(403, "FORBIDDEN",
           "Inviter does not have company administration permissions");
+    }
+    if (isSupportInviter(inviter)) {
+      return errorResponse(403, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
+          SupportAccessGuard.MESSAGE_FORBIDDEN);
     }
 
     Organization invitationOrganization = inviter.org != null ? inviter.org
@@ -333,6 +343,10 @@ public class CompanyInvitationService {
     if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
       return errorResponse(403, "FORBIDDEN",
           "Inviter does not have company administration permissions");
+    }
+    if (isSupportInviter(inviter)) {
+      return errorResponse(403, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
+          SupportAccessGuard.MESSAGE_FORBIDDEN);
     }
     if (StringUtils.isBlank(userId)) {
       return errorResponse(400, "MISSING_USER_ID", "AD_User_ID is required");

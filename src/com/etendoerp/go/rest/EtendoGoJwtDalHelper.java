@@ -585,8 +585,11 @@ final class EtendoGoJwtDalHelper {
             + " and (user.email = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
-            + "and user.active = true");
+            + "and user.active = true and user.id <> :" + SupportUserExclusion.HQL_PARAM);
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    // ETP-5351: the support user is never paired with a GO account.
+    query.setNamedParameter(SupportUserExclusion.HQL_PARAM,
+        StringUtils.defaultString(SupportUserExclusion.supportUserIdOrNull(clientId)));
     query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
     query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
@@ -605,7 +608,11 @@ final class EtendoGoJwtDalHelper {
     query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.list();
+    List<User> users = new ArrayList<>(query.list());
+    // ETP-5351: the support user is never paired with a GO account (id derived per client).
+    users.removeIf(u -> u.getClient() != null
+        && SupportAccessGuard.isSupportUser(u.getId(), u.getClient().getId()));
+    return users;
   }
 
   static List<Organization> findNonStarOrganizations(String clientId) {

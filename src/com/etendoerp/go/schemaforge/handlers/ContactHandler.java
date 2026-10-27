@@ -30,6 +30,7 @@ import org.openbravo.base.exception.OBException;
 import com.etendoerp.go.schemaforge.AbstractPersonNameHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
@@ -136,7 +137,13 @@ public class ContactHandler extends AbstractPersonNameHandler {
     if (!isWrite) {
       return null;
     }
+    // ETP-5351 (Vigia H1): a contact is an AD_User row; a support session may not create one nor
+    // write email/username/defaultRole on any (that pairs it with a GO account). Other fields stay.
     JSONObject body = ctx.getRequestBody();
+    if (SupportAccessGuard.isActingSupportUser(ctx.getObContext())
+        && (METHOD_POST.equals(method) || SupportAccessGuard.changesAccessFields(body, ctx.getRecordId()))) {
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
     if (body == null) {
       return null;
     }

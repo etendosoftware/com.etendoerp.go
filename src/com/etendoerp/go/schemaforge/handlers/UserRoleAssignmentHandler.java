@@ -291,6 +291,10 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       return null;
     }
     String method = context.getHttpMethod();
+    NeoResponse supportLockout = rejectSupportUserManagement(context);
+    if (supportLockout != null) {
+      return supportLockout;
+    }
     if (METHOD_POST.equalsIgnoreCase(method)) {
       return handleCreate(context);
     }
@@ -303,6 +307,28 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       NeoResponse supportGuard = rejectSupportSessionOnAdmin(context, resolveDeleteTarget(context),
           true);
       return supportGuard != null ? supportGuard : rejectDangerousDelete(context);
+    }
+    return null;
+  }
+
+  /**
+   * ETP-5351 (Vigia H1) — a support session may not create a user, nor write the fields that
+   * grant or redirect access to the tenant ({@code email}, {@code username}, {@code defaultRole})
+   * on any user, so it cannot leave persistent access behind. Everything else it edits is unchanged.
+   *
+   * @param context the request
+   * @return a 403 when refused, {@code null} to continue
+   */
+  private static NeoResponse rejectSupportUserManagement(NeoContext context) {
+    if (!SupportAccessGuard.isActingSupportUser(context.getObContext())) {
+      return null;
+    }
+    String method = context.getHttpMethod();
+    boolean write = METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method);
+    if (METHOD_POST.equalsIgnoreCase(method)
+        || (write && SupportAccessGuard.changesAccessFields(context.getRequestBody(),
+            context.getRecordId()))) {
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
     }
     return null;
   }

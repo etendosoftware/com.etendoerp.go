@@ -332,6 +332,10 @@ public class UserRoleCompositionService {
     if (templateRoleIds == null) {
       throw new OBException("Missing template role id list for role composition");
     }
+    // ETP-5351: a support session never composes roles onto anyone.
+    if (SupportAccessGuard.isActingSupportUser(callerUserId, callerRole)) {
+      throw new OBException("A support session cannot assign roles: " + userId);
+    }
     writeLock.acquire(userId);
     User user = OBDal.getInstance().get(User.class, userId);
     if (user == null) {
@@ -1176,6 +1180,10 @@ public class UserRoleCompositionService {
     if (StringUtils.isBlank(targetUserId)) {
       throw new OBException("Missing user id for admin promotion");
     }
+    // ETP-5351: a support session never grants the admin role (persistent access).
+    if (SupportAccessGuard.isActingSupportUser(callerUserId, callerRole)) {
+      throw new OBException("A support session cannot promote to Admin: " + targetUserId);
+    }
     // ETP-5278 — first, before any read of the target user (see UserRoleWriteLock).
     writeLock.acquire(targetUserId);
     if (!callerIsOwnerOrAdmin(callerUserId)) {
@@ -1301,8 +1309,7 @@ public class UserRoleCompositionService {
       throw new OBException("Missing user id for admin demotion");
     }
     // ETP-5351 (T5): a support session never takes the admin role away from anyone.
-    if (callerRole != null && callerRole.getClient() != null
-        && SupportAccessGuard.isSupportUser(callerUserId, callerRole.getClient().getId())) {
+    if (SupportAccessGuard.isActingSupportUser(callerUserId, callerRole)) {
       throw new OBException("A support session cannot demote an Admin: " + targetUserId);
     }
     writeLock.acquire(targetUserId);
