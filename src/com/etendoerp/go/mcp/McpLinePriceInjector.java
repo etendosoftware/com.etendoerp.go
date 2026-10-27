@@ -72,6 +72,8 @@ final class McpLinePriceInjector {
   private static final String FIELD_PRODUCT = "product";
   private static final String FIELD_UNIT_PRICE = "unitPrice";
   private static final String FIELD_LIST_PRICE = "listPrice";
+  private static final String FIELD_DISCOUNT = "discount";
+  private static final java.math.BigDecimal HUNDRED = java.math.BigDecimal.valueOf(100);
   private static final String FIELD_PRICE_LIMIT = "priceLimit";
   private static final String PROP_PRICE_LIST = "priceList";
   private static final String PROP_SALES_TRANSACTION = "salesTransaction";
@@ -91,8 +93,8 @@ final class McpLinePriceInjector {
 
   /**
    * Resolves and writes {@code unitPrice}, {@code listPrice} and {@code priceLimit} when the agent
-   * did not supply a price of its own; when it supplied only {@code unitPrice}, writes the list
-   * side ({@code listPrice}, {@code priceLimit}) and keeps the agent's price (ETP-5852).
+   * did not supply a price of its own. A price the agent sent is handled by
+   * {@link #applyAgentPrice} instead (ETP-5727, in ETP-5852).
    *
    * <p>Abstains — leaving the body untouched — whenever the price cannot be established with
    * certainty: no product, no resolvable parent document, no price list on it, or no price for the
@@ -133,6 +135,9 @@ final class McpLinePriceInjector {
   static void injectIfMissing(JSONObject body, Entity dalEntity, SFEntity sfEntity,
       String resolvedParentId, Set<String> agentProvided, Logger log) {
     try {
+      if (applyAgentPrice(body, dalEntity, agentProvided)) {
+        return;
+      }
       if (!isEligible(body, dalEntity, agentProvided)) {
         return;
       }
@@ -163,8 +168,7 @@ final class McpLinePriceInjector {
             parent.getEntityName());
         return;
       }
-      boolean keepUnitPrice = agentProvided != null && agentProvided.contains(FIELD_UNIT_PRICE);
-      applyResolvedPrice(body, dalEntity, parent, priceList, documentDate, keepUnitPrice, log);
+      applyResolvedPrice(body, dalEntity, parent, priceList, documentDate, log);
     } catch (Exception e) {
       // Never fail a create over a convenience default: without this the agent keeps the
       // pre-existing behaviour, with it the whole write would 500.
@@ -197,14 +201,50 @@ final class McpLinePriceInjector {
     if (agentProvided != null && agentProvided.contains(FIELD_LIST_PRICE)) {
       return false;
     }
-    // ETP-5852: an agent that sent only its unitPrice still gets the tariff's list price (and
-    // price limit), as the form shows it when the product is picked; its unitPrice is kept. Before,
-    // the injector abstained and the line kept listPrice 0, so the price the agent negotiated below
-    // the tariff carried no discount at all.
-    if (agentProvided != null && agentProvided.contains(FIELD_UNIT_PRICE)) {
-      return true;
-    }
     return !hasNonZeroPrice(body);
+  }
+
+  /**
+   * ETP-5727 (in ETP-5852): the price an agent sends is the form's "Precio" — the line's list price
+   * — and the net {@code unitPrice} follows from it and the discount, exactly as the form computes
+   * it. So a body with the agent's {@code unitPrice} and no {@code listPrice} gets
+   * {@code listPrice = unitPrice} and {@code unitPrice = listPrice × (1 − discount / 100)}. Before,
+   * the tariff became the list price and the discount was derived against it (price 20 on a tariff
+   * of 5 read as −300 %), and a price sent with a discount kept the full price (10 × 50 at 5 % gave
+   * 500 instead of 475).
+   *
+   * @return {@code true} when the agent priced the line itself, so the tariff is not consulted
+   */
+  static boolean applyAgentPrice(JSONObject body, Entity dalEntity, Set<String> agentProvided)
+      throws JSONException {
+    if (body == null || dalEntity == null || agentProvided == null
+        || !agentProvided.contains(FIELD_UNIT_PRICE) || agentProvided.contains(FIELD_LIST_PRICE)
+        || !dalEntity.hasProperty(FIELD_UNIT_PRICE) || !dalEntity.hasProperty(FIELD_LIST_PRICE)) {
+      return false;
+    }
+    java.math.BigDecimal price = decimalOrNull(body.opt(FIELD_UNIT_PRICE));
+    if (price == null || price.signum() == 0) {
+      return false;
+    }
+    java.math.BigDecimal discount = decimalOrNull(body.opt(FIELD_DISCOUNT));
+    if (discount == null || discount.signum() < 0 || discount.compareTo(HUNDRED) > 0) {
+      discount = java.math.BigDecimal.ZERO;
+    }
+    body.put(FIELD_LIST_PRICE, price);
+    body.put(FIELD_UNIT_PRICE, price.multiply(HUNDRED.subtract(discount))
+        .divide(HUNDRED, 6, java.math.RoundingMode.HALF_UP).stripTrailingZeros());
+    return true;
+  }
+
+  private static java.math.BigDecimal decimalOrNull(Object value) {
+    if (value == null || JSONObject.NULL.equals(value)) {
+      return null;
+    }
+    try {
+      return new java.math.BigDecimal(String.valueOf(value).trim());
+    } catch (NumberFormatException e) {
+      return null;
+    }
   }
 
   /**
@@ -291,8 +331,7 @@ final class McpLinePriceInjector {
    * {@code OBException} and defaulting to zero.
    */
   private static void applyResolvedPrice(JSONObject body, Entity lineEntity, BaseOBObject parent,
-      PriceList priceList, Date documentDate, boolean keepUnitPrice, Logger log)
-      throws JSONException {
+      PriceList priceList, Date documentDate, Logger log) throws JSONException {
     Product product = OBDal.getInstance()
         .get(Product.class, body.optString(FIELD_PRODUCT, ""));
     if (product == null) {
@@ -306,10 +345,7 @@ final class McpLinePriceInjector {
           product.getIdentifier(), priceList.getIdentifier(), documentDate);
       return;
     }
-    // ETP-5852: the agent's own unitPrice is never replaced; only the list side is filled.
-    if (!keepUnitPrice) {
-      putIfDeclared(body, lineEntity, FIELD_UNIT_PRICE, productPrice.getStandardPrice());
-    }
+    putIfDeclared(body, lineEntity, FIELD_UNIT_PRICE, productPrice.getStandardPrice());
     putIfDeclared(body, lineEntity, FIELD_LIST_PRICE, productPrice.getListPrice());
     putIfDeclared(body, lineEntity, FIELD_PRICE_LIMIT, productPrice.getPriceLimit());
     log.debug("[MCP-LINE-PRICE] Resolved {} from list {}: unitPrice={} listPrice={}",

@@ -328,22 +328,37 @@ class McpLinePriceInjectorTest {
     assertAbstainedBeforeAnyLoad(body);
   }
 
-  @Test
-  @DisplayName("An agent's own unitPrice is kept, and the tariff's list side is still filled")
-  void keepsTheAgentUnitPriceAndFillsTheListSide() throws Exception {
-    withResolvedScope();
-    parentDocument("priceList", priceList(false), "orderDate", date(2026, 9, 7),
-        "salesTransaction", Boolean.TRUE);
-    withProduct();
-    withResolvedPrice("12.50", "15.00", "10.00");
-    JSONObject body = body(UNIT_PRICE, new BigDecimal("13.50"));
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> agentPrices() {
+    return java.util.stream.Stream.of(
+        // CO-08: 10 × 50 at 5 % is 475 — the discount applies to the price the agent sent.
+        org.junit.jupiter.params.provider.Arguments.of("50", "5", "50", "47.5"),
+        // CO-09: a price with no discount is the form's Precio — no tariff, no derived discount.
+        org.junit.jupiter.params.provider.Arguments.of("20", null, "20", "20"),
+        org.junit.jupiter.params.provider.Arguments.of("12", "100", "12", "0"),
+        // A discount outside 0..100 is left to the line's own validation; the price stays whole.
+        org.junit.jupiter.params.provider.Arguments.of("20", "150", "20", "20"));
+  }
 
-    McpLinePriceInjector.injectIfMissing(body, commercialLineEntity(), sfEntity(),
-        Set.of(UNIT_PRICE), log);
+  /**
+   * ETP-5727 (in ETP-5852): the agent's price is the form's "Precio" (listPrice); the net
+   * unitPrice follows from it and the discount, and the tariff is not consulted.
+   */
+  @org.junit.jupiter.params.ParameterizedTest(name = "price {0} discount {1}")
+  @org.junit.jupiter.params.provider.MethodSource("agentPrices")
+  void theAgentPriceIsTheListPrice(String price, String discount, String list, String unit)
+      throws Exception {
+    JSONObject body = body(UNIT_PRICE, new BigDecimal(price));
+    java.util.Set<String> sent = new java.util.HashSet<>(Set.of(UNIT_PRICE));
+    if (discount != null) {
+      body.put("discount", new BigDecimal(discount));
+      sent.add("discount");
+    }
 
-    assertEquals("13.50", body.get(UNIT_PRICE).toString(), "the agent's price wins");
-    assertEquals("15.00", body.get(LIST_PRICE).toString());
-    assertEquals("10.00", body.get(PRICE_LIMIT).toString());
+    McpLinePriceInjector.injectIfMissing(body, commercialLineEntity(), sfEntity(), sent, log);
+
+    assertEquals(0, new BigDecimal(list).compareTo(new BigDecimal(body.get(LIST_PRICE).toString())));
+    assertEquals(0, new BigDecimal(unit).compareTo(new BigDecimal(body.get(UNIT_PRICE).toString())));
+    assertFalse(body.has(PRICE_LIMIT), "the tariff is not consulted");
   }
 
   @Test
