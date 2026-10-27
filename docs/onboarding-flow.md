@@ -588,7 +588,7 @@ one. **Off by default** — with flag `onboarding-tenant-pool` off (see
 
 | Setting | Property / env | Default |
 |---|---|---|
-| switch | flag `onboarding-tenant-pool` (`etendo.go.flags.onboarding-tenant-pool` / `ETGO_FLAG_ONBOARDING_TENANT_POOL`, or ConfigCat) | off |
+| switch | flag `onboarding-tenant-pool` (`etendo.go.flags.onboarding-tenant-pool` / `ETGO_FLAG_ONBOARDING_TENANT_POOL`, or the hosted control plane — Datadog / ConfigCat) | off |
 | pool size (READY tenants kept) | `etendo.go.onboarding.pool.size` / `ETGO_ONBOARDING_POOL_SIZE` | 3 (clamped 0–20) |
 | max age of a READY tenant | `etendo.go.onboarding.pool.maxAgeHours` / `ETGO_ONBOARDING_POOL_MAX_AGE_HOURS` | 168 |
 | provisioning lease | `etendo.go.onboarding.pool.leaseMinutes` / `ETGO_ONBOARDING_POOL_LEASE_MINUTES` | 60 |

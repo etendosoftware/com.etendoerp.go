@@ -28,6 +28,7 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.ScopeRefusal;
 import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -88,6 +89,14 @@ class NeoAuthenticator {
       log.debug("NEO request context unavailable: {}", outcome.getMessage());
     } else {
       log.warn("Unauthorized NEO request: {}", outcome.getMessage());
+    }
+    if (outcome.getStatus() == EnvironmentAuthOutcome.Status.INSUFFICIENT_SCOPE) {
+      // ETP-5783 — RFC 6750 §3.1: a valid token that lacks the scope is a 403 naming the error, so
+      // a client keeps the token instead of discarding it as expired.
+      servlet.writeResponse(response,
+          NeoResponse.error(outcome.getHttpStatus(), outcome.getMessage())
+              .withHeader(ScopeRefusal.CHALLENGE_HEADER, ScopeRefusal.CHALLENGE_VALUE));
+      return false;
     }
     servlet.sendError(response, outcome.getHttpStatus(), outcome.getMessage());
     return false;

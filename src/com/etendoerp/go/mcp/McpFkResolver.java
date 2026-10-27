@@ -32,10 +32,10 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 
@@ -397,23 +397,25 @@ final class McpFkResolver {
   /**
    * Probe {@code value} as a record id of the FK's target entity (IMP-15).
    * <p>
-   * Uses {@code OBDal#get(String, Object)} rather than {@code exists}, so the tenant's read-access
-   * rules still apply: an id in a table this role cannot read reports {@code false} and falls
-   * through to the name path, exactly as before this probe existed. Any exception (unreadable
-   * entity, id type the target's PK cannot hold) is deliberately swallowed to the same effect —
-   * the worst case of this method is the pre-IMP-15 behaviour, never a new failure mode.
+   * Only a row of the caller's client or of System counts (ETP-5785, through
+   * {@link NeoReferenceOwnership#isOwnedByCallerClient}). The probe runs in admin mode with a bare
+   * id lookup, which applies no client filter of its own, so before that a legacy id of another
+   * tenant reported {@code true} here and {@code false} for a missing one — two different answers
+   * further on, an existence oracle. Now both fall through to the name path and end in the same
+   * {@code not_found}. A lookup failure (an id type the target's key cannot hold) also reports
+   * {@code false}: the worst case is the pre-IMP-15 behaviour, never a new failure mode.
    *
-   * @return {@code true} when a record with that id exists and is readable
+   * @return {@code true} when a record with that id exists and belongs to the caller's client or
+   *         to System
    */
   private static boolean existsAsRecordId(Property prop, String value, Logger log) {
     String targetEntity = prop.getTargetEntity().getName();
-    try {
-      return OBDal.getInstance().get(targetEntity, value) != null;
-    } catch (Exception e) {
-      log.debug("FK id probe for '{}' on {} failed, falling back to the name path: {}", value,
-          targetEntity, e.getMessage());
-      return false;
+    boolean owned = NeoReferenceOwnership.isOwnedByCallerClient(targetEntity, value);
+    if (!owned) {
+      log.debug("FK id probe for '{}' on {} found no row of the caller; trying it as a name",
+          value, targetEntity);
     }
+    return owned;
   }
 
   private static JSONObject buildNotFoundError(String field, String search) throws JSONException {

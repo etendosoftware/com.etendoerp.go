@@ -44,3 +44,6 @@ sonar-results.md
 ${env:CATALINA_BASE}/
 .oguard/**
 oguard**
+
+# Python bytecode left by the pre-push script tests
+__pycache__/

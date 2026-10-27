@@ -60,6 +60,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Result;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.ocr.OcrDocType;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Address;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.AddressState;
@@ -67,6 +68,7 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.Candidate;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Duplicates;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Party;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
+import com.etendoerp.go.schemaforge.ocr.OcrReviewAssembler;
 
 /**
  * The purchase-invoice lookups of the OCR review: each one must reach the SAME server code the
@@ -76,6 +78,7 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
  *
  * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceOcrLookups
  * @covers com.etendoerp.go.schemaforge.OcrLookupsRegistry
+ * @covers com.etendoerp.go.schemaforge.ocr.OcrProductMatch
  */
 @DisplayName("ETP-5715 — PurchaseInvoiceOcrLookups")
 class PurchaseInvoiceOcrLookupsTest {
@@ -390,6 +393,56 @@ class PurchaseInvoiceOcrLookupsTest {
       assertTrue(found.get(0).isEmpty());
       assertTrue(found.get(1).isEmpty());
       assertEquals("P1", found.get(2).get(0).id());
+    }
+
+    private JSONObject simRow(String id, String name, String percent) throws Exception {
+      return new JSONObject().put("id", id).put("name", name).put("similarity_percent", percent)
+          .put("text_similarity_percent", "80.0000%").put("exact_match", false);
+    }
+
+    /** The product decision the review raises for one line whose similarity search answers rows. */
+    private JSONObject reviewedProduct(JSONArray rows) throws Exception {
+      simMock.when(() -> NeoSimSearchEndpoint.searchTerm(anyString(), anyString(), anyInt(),
+          anyString())).thenReturn(new JSONObject().put("data", rows));
+      OcrDocType type = new OcrDocType("purchase-invoice", "SimpleOcrTool", "purchase-invoice", "q",
+          new JSONObject(), List.of("vendor_name"));
+      JSONObject extraction = new JSONObject().put("line_items", new JSONArray().put(new JSONObject()
+          .put("description", "Servicios web").put("quantity", 1).put("unit_price", 1)));
+      JSONArray decisions = new OcrReviewAssembler(type, lookups).assemble("STAGED1", extraction, null)
+          .getJSONArray("pendingDecisions");
+      for (int i = 0; i < decisions.length(); i++) {
+        if ("line_0_product".equals(decisions.getJSONObject(i).getString("id"))) {
+          return decisions.getJSONObject(i);
+        }
+      }
+      throw new AssertionError("the review must raise line_0_product");
+    }
+
+    @Test
+    @DisplayName("the % of a real 96.7000% row is stripped, so the single top >= 90 is auto-matched")
+    void percentSuffixIsStrippedAndSingleTopAutoMatches() throws Exception {
+      JSONArray rows = new JSONArray().put(simRow("P1", "Servicio webs", "96.7000%"));
+
+      assertEquals("96.7000", stripped(rows));
+
+      JSONObject product = reviewedProduct(rows);
+      assertEquals("auto_matched", product.getString("state"));
+      assertEquals("P1", product.getJSONObject("match").getString("id"));
+    }
+
+    @Test
+    @DisplayName("a tie of two 96.7000% rows is only suggested: the first row")
+    void tieOfPercentRowsIsSuggested() throws Exception {
+      JSONObject product = reviewedProduct(new JSONArray()
+          .put(simRow("P1", "Servicio webs", "96.7000%")).put(simRow("P2", "Servicio web", "96.7000%")));
+      assertEquals("suggested", product.getString("state"));
+      assertEquals("P1", product.getJSONObject("suggestion").getString("id"));
+    }
+
+    private String stripped(JSONArray rows) throws Exception {
+      simMock.when(() -> NeoSimSearchEndpoint.searchTerm(anyString(), anyString(), anyInt(),
+          anyString())).thenReturn(new JSONObject().put("data", rows));
+      return lookups.productCandidates(List.of("Servicios web")).get(0).get(0).similarity();
     }
   }
 
