@@ -69,6 +69,7 @@ The current execution classes remain in `com.etendoerp.go.schemaforge` to avoid 
 | `OAuth2AuthorizationCodeSupport` | Authorization-code payload construction and JWT-backed user context extraction. |
 | `OAuth2ClientPolicy` | Client policy validation that does not require servlet state, including redirect URI safety/registration and scope validation. |
 | `OAuth2Utils` | Token, secret, and hashing helpers. |
+| `PublicApiKeyStore` | Persistence and role checks of the self-service API key lifecycle: the key through DAL, its tokens through SQL. |
 | `OAuth2Filter` | Servlet filter integration for OAuth2-protected requests. |
 
 New OAuth2 validation rules should prefer `OAuth2ClientPolicy` when they are pure policy decisions. Endpoint parsing/rendering should prefer a support class instead of increasing `OAuth2Servlet` method count or cognitive complexity.
@@ -85,10 +86,12 @@ client contract:
 | `POST /oauth2/api-keys/{id}/rotate` | Replace the hash and return a plaintext secret once; revoke existing tokens |
 | `POST /oauth2/api-keys/{id}/revoke-tokens` | Idempotently revoke active tokens without returning credential data |
 
-`OAuth2Servlet` derives `client`, `organization`, `user`, and `role` from the authenticated JWT and
-validates the active role through DAL entities before any operation. Persistence and ownership
-queries use the generated `OAuth2Client`/`OAuth2Token` entities through `OBDal`; callers cannot
-submit AD identity or internal scope IDs. The only accepted capabilities are
+`OAuth2Servlet` derives `client`, `organization`, `user`, and `role` from the authenticated session
+and validates the active role through DAL entities before any operation (`PublicApiKeyStore`).
+The key and its ownership queries use the generated `OAuth2Client` entity through `OBDal`. Its
+tokens are revoked and deleted by SQL: they are inserted with the tenant organization on the
+System-level `ETGO_OAUTH2_TOKEN`, which the DAL refuses to flush (ETP-5781). Callers cannot submit
+AD identity or internal scope IDs. The only accepted capabilities are
 `public-api:read`, `public-api:write`, and `public-api:process`, mapped server-side to the internal
 OAuth scopes after checking the active role's access. Public credentials also carry the private
 server-managed `neo:public-api-key` scope marker, keeping them separate from legacy administrative
@@ -98,7 +101,8 @@ from a private owner-organization scope marker and owner predicates. OAuth2 toke
 resolution derives the operational client from the token organization.
 
 The active-key limit is the named `PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER` constant (10),
-and active names are unique case-insensitively per user/tenant/organization. Secrets are hashed at
+and active names are unique case-insensitively per user/tenant/organization; both rules also apply
+when a key is reactivated. Secrets are hashed at
 rest, never included in list/update/error/audit payloads, and are returned only by create or rotate.
 Opaque `client_credentials` tokens are accepted by NeoServlet through the existing
 `OAuth2Filter.validateToken` fallback; a healthy local deployment is still required for an

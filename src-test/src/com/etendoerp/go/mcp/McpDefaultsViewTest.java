@@ -21,7 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -253,6 +255,70 @@ class McpDefaultsViewTest {
       assertFalse(McpDefaultsView.isUnresolvedValue("0"));
       assertFalse(McpDefaultsView.isUnresolvedValue(Boolean.FALSE));
       assertFalse(McpDefaultsView.isUnresolvedValue(0));
+    }
+  }
+
+  @Nested
+  @DisplayName("copyRecordContext (ETP-5680)")
+  class CopyRecordContext {
+
+    @Test
+    @DisplayName("scalars become query params as strings, as REST /defaults?key=value gives")
+    void scalarsBecomeQueryParams() throws JSONException {
+      Map<String, String> params = new HashMap<>();
+
+      McpDefaultsView.copyRecordContext(new JSONObject()
+          .put("productType", "S").put("qty", 3).put("active", true), params);
+
+      assertEquals("S", params.get("productType"));
+      assertEquals("3", params.get("qty"));
+      assertEquals("true", params.get("active"));
+    }
+
+    @Test
+    @DisplayName("the tool's own arguments win; null, object and array entries are skipped")
+    void reservedKeysWinAndNonScalarsAreIgnored() throws JSONException {
+      Map<String, String> params = new HashMap<>();
+      params.put("parentId", "REAL");
+
+      McpDefaultsView.copyRecordContext(new JSONObject()
+          .put("parentId", "FAKE").put("assetId", "A").put("view", "minimal")
+          .put("spec", "x").put("entity", "y")
+          .put("nested", new JSONObject().put("a", 1)).put("list", new JSONArray().put(1))
+          .put("nothing", JSONObject.NULL).put("productType", "I"), params);
+
+      assertEquals("REAL", params.get("parentId"));
+      for (String reserved : new String[] { "assetId", "view", "spec", "entity", "nested", "list",
+          "nothing" }) {
+        assertFalse(params.containsKey(reserved), reserved);
+      }
+      assertEquals("I", params.get("productType"));
+    }
+
+    @Test
+    @DisplayName("at most 32 entries and 256 characters per value; a null context is a no-op")
+    void capsEntriesAndValueLength() throws JSONException {
+      JSONObject big = new JSONObject();
+      for (int i = 0; i < 50; i++) {
+        big.put("k" + i, "v");
+      }
+      Map<String, String> params = new HashMap<>();
+      McpDefaultsView.copyRecordContext(big, params);
+      assertEquals(McpDefaultsView.MAX_RECORD_CONTEXT_ENTRIES, params.size());
+
+      Map<String, String> longValue = new HashMap<>();
+      McpDefaultsView.copyRecordContext(new JSONObject().put("tooLong",
+          "x".repeat(McpDefaultsView.MAX_RECORD_CONTEXT_VALUE_LENGTH + 1)), longValue);
+      assertFalse(longValue.containsKey("tooLong"));
+
+      Map<String, String> untouched = new HashMap<>();
+      McpDefaultsView.copyRecordContext(null, untouched);
+      assertTrue(untouched.isEmpty());
+
+      Map<String, String> fits = new HashMap<>();
+      McpDefaultsView.copyRecordContext(new JSONObject().put("justFits",
+          "x".repeat(McpDefaultsView.MAX_RECORD_CONTEXT_VALUE_LENGTH)), fits);
+      assertEquals(McpDefaultsView.MAX_RECORD_CONTEXT_VALUE_LENGTH, fits.get("justFits").length());
     }
   }
 }

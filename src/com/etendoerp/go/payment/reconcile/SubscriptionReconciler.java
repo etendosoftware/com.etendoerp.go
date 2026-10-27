@@ -408,7 +408,7 @@ final class SubscriptionReconciler {
   }
 
   /**
-   * The R37 adoption step (register §2.4): an open row without a recorded price, amount or
+   * The R37 adoption step (register §2.3): an open row without a recorded price, amount or
    * currency gets them from the subscription's first item price, only where they are NULL.
    */
   private void fillMissingPrice(SubscriptionCandidate candidate, Subscription row,

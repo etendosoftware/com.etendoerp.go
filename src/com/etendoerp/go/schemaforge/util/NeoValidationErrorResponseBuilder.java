@@ -25,6 +25,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.NeoErrorClassifier;
+import com.etendoerp.go.schemaforge.NeoErrorResponses;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -69,6 +71,11 @@ public final class NeoValidationErrorResponseBuilder {
     if (errors == null || errors.length() == 0) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Validation failed");
     }
+    if (isUnknownReference(errors)) {
+      return NeoErrorResponses.toResponse(HttpServletResponse.SC_BAD_REQUEST,
+          NeoErrorClassifier.CODE_UNKNOWN_REFERENCE, NeoErrorClassifier.MSG_UNKNOWN_REFERENCE,
+          null);
+    }
     String rawMsg = "Validation failed";
     Iterator<String> keys = errors.keys();
     if (keys.hasNext()) {
@@ -80,5 +87,25 @@ public final class NeoValidationErrorResponseBuilder {
     return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
         NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
             NeoListReferenceError.enrich(translated))));
+  }
+
+  /**
+   * ETP-5782: whether the conversion errors report a reference that resolves to no row.
+   *
+   * <p>Core does not carry a conversion-error category in this legacy body. Its id property
+   * also carries invalid property paths, so id alone is insufficient. Match only the fixed
+   * unresolved-import template emitted by JsonToDataConverter and the ownership preflight.
+   * This compatibility adapter does not classify SQL exceptions by message text.
+   *
+   * @param errors core's {@code response.errors} map
+   * @return whether it reports an unknown reference
+   */
+  public static boolean isUnknownReference(JSONObject errors) {
+    if (errors == null) {
+      return false;
+    }
+    String message = errors.optString(JsonConstants.ID, "");
+    return message.startsWith("New object ") && message.contains(" (key: ")
+        && message.endsWith(") refered to but not present in the import set");
   }
 }

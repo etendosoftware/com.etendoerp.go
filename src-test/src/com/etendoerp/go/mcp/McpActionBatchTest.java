@@ -235,7 +235,10 @@ class McpActionBatchTest {
     assertEquals("server_error", bad.getJSONObject("error").getString("error"));
     assertTrue(results.getJSONObject(2).getBoolean("ok"));
     // the session is rolled back and closed BEFORE the next document runs
-    assertEquals(List.of("run:a", "commit", "run:b", "rollback", "run:c", "commit"), events);
+    // ETP-5782: classifying an unexpected failure rolls back too; on the already-closed session the
+    // second rollback is a no-op, and the batch's own one still runs BEFORE the next document.
+    assertEquals(List.of("run:a", "commit", "run:b", "rollback", "rollback", "run:c", "commit"),
+        events);
   }
 
   @Test
@@ -338,7 +341,9 @@ class McpActionBatchTest {
     JSONArray results = body(content).getJSONArray("results");
     assertFalse(results.getJSONObject(0).getBoolean("ok"));
     assertTrue(results.getJSONObject(1).getBoolean("ok"));
-    assertEquals(List.of("run:a", "rollback", "run:b", "commit"), events);
+    // ETP-5782: classifying an unexpected failure rolls back too; on the already-closed session the
+    // second rollback is a no-op, and the batch's own one still runs BEFORE the next document.
+    assertEquals(List.of("run:a", "rollback", "rollback", "run:b", "commit"), events);
   }
 
   // ── session and context ──────────────────────────────────────────────

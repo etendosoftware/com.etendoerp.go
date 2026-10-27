@@ -126,8 +126,9 @@ public class YearAccountingHandlerTest {
   public void listReturnsAggregatedRowsScopedToYear() throws Exception {
     YearAccountingHandler handler = new YearAccountingHandler();
 
-    Object[] row1 = { "fact-1", "20000000", "R", new BigDecimal("100.00"), BigDecimal.ZERO, "Year close" };
-    Object[] row2 = { "fact-2", "43000000", "C", null, new BigDecimal("50.00"), null };
+    Object[] row1 = { "fact-1", "20000000", "R", new BigDecimal("100.00"), BigDecimal.ZERO, "Year close",
+        "Profit and loss", "EUR" };
+    Object[] row2 = { "fact-2", "43000000", "C", null, new BigDecimal("50.00"), null, null, null };
     List<Object[]> rows = Arrays.asList(row1, row2);
 
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
@@ -156,10 +157,14 @@ public class YearAccountingHandlerTest {
       assertEquals("100.00", data.getJSONObject(0).getString("debit"));
       assertEquals("0", data.getJSONObject(0).getString("credit"));
       assertEquals("Year close", data.getJSONObject(0).getString("description"));
+      assertEquals("Profit and loss", data.getJSONObject(0).getString("accountName"));
+      assertEquals("EUR", data.getJSONObject(0).getString("currency$_identifier"));
       // null description/debit are defensively coerced, not left as JSON null
       assertEquals("", data.getJSONObject(1).getString("description"));
       assertEquals("0", data.getJSONObject(1).getString("debit"));
       assertEquals("50.00", data.getJSONObject(1).getString("credit"));
+      assertEquals("", data.getJSONObject(1).getString("accountName"));
+      assertEquals("", data.getJSONObject(1).getString("currency$_identifier"));
     }
   }
 
@@ -198,6 +203,9 @@ public class YearAccountingHandlerTest {
       ArgumentCaptor<String> hqlCaptor = ArgumentCaptor.forClass(String.class);
       verify(session).createQuery(hqlCaptor.capture());
       assertTrue("HQL should filter on fa.type", hqlCaptor.getValue().contains("fa.type in (:closingTypes)"));
+      // Sums are per accounting schema: amounts of two schemas (two currencies) never add up.
+      assertTrue("HQL should group by accounting schema",
+          hqlCaptor.getValue().contains("group by fa.accountingSchema.id"));
 
       @SuppressWarnings("unchecked")
       ArgumentCaptor<List<String>> typesCaptor = ArgumentCaptor.forClass(List.class);

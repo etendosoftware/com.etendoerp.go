@@ -320,17 +320,18 @@ check_target_conflicts "$TARGET_BRANCH"
 #
 # A skipped step is REPORTED but never blocks the push; the commit stays valid.
 # ----------------------------------------------------------------------------
-RUN_STEP1=0; RUN_STEP2=0; RUN_STEP3=0
+RUN_STEP1=0; RUN_STEP2=0; RUN_STEP3=0; RUN_SCRIPTS=0
 if [ -n "$BASE_REF" ] && CHANGED_FILES="$(git diff --name-only "$BASE_REF"...HEAD 2>/dev/null)"; then
   CHECKS="$(printf '%s\n' "$CHANGED_FILES" | relevance_checks)"
   case " $CHECKS " in *" xml "*)      RUN_STEP1=1 ;; esac
   case " $CHECKS " in *" junit "*)    RUN_STEP2=1 ;; esac
   case " $CHECKS " in *" coverage "*) RUN_STEP3=1 ;; esac
+  case " $CHECKS " in *" scripts "*)  RUN_SCRIPTS=1 ;; esac
   n_files="$(printf '%s\n' "$CHANGED_FILES" | grep -Evc '^[[:space:]]*$' || true)"
   _p() { [ "$1" = "1" ] && printf run || printf skip; }
-  echo "==> Relevance: ${n_files} changed file(s) vs ${BASE_REF} → [1 XML]=$(_p $RUN_STEP1) · [1b Sonar issues]=$(_p $RUN_STEP2) · [2 JUnit]=$(_p $RUN_STEP2) · [3 Sonar]=$(_p $RUN_STEP3)"
+  echo "==> Relevance: ${n_files} changed file(s) vs ${BASE_REF} → [0 Script tests]=$(_p $RUN_SCRIPTS) · [1 XML]=$(_p $RUN_STEP1) · [1b Sonar issues]=$(_p $RUN_STEP2) · [2 JUnit]=$(_p $RUN_STEP2) · [3 Sonar]=$(_p $RUN_STEP3)"
 else
-  RUN_STEP1=1; RUN_STEP2=1; RUN_STEP3=1
+  RUN_STEP1=1; RUN_STEP2=1; RUN_STEP3=1; RUN_SCRIPTS=1
   echo "==> Relevance: no reliable change set (base='${BASE_REF:-none}') → running ALL steps."
 fi
 
@@ -386,6 +387,13 @@ if [ "$RUN_TEST_RULES" = "1" ]; then
 else
   skip_step "0" "Unit/integration test split"
   skip_step "0" "Test hygiene (@covers, naming)"
+fi
+# The scripts' and hook libraries' own unit tests, the ones CI's unit-test-classification.yml runs:
+# seconds, so a change to scripts/ or .github/ runs them instead of goTestUnit and Sonar.
+if [ "$RUN_SCRIPTS" = "1" ]; then
+  run_convention_check "Script tests" "python3 -m unittest discover -s scripts"
+else
+  skip_step "0" "Script tests"
 fi
 
 # 1. Validate sourcedata XML record order + constraints (mirrors CI's

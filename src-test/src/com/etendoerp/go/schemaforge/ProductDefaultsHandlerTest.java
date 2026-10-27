@@ -1870,7 +1870,8 @@ public class ProductDefaultsHandlerTest {
           .build();
       JSONObject d = handler.afterHandle(withType).getBody().getJSONObject("defaults");
       assertEquals("tax-services", d.getString("typeTaxCategory"));
-      assertEquals(TAX_CLIENT_DEFAULT, d.getString("taxCategory"));
+      assertEquals("tax-services", d.getString("taxCategory"));
+      assertEquals("S", d.getString("productType"));
 
       // Name missing for this type (goods) -> key absent, UI leaves the field untouched.
       NeoContext missing = NeoContext.builder()
@@ -1882,6 +1883,7 @@ public class ProductDefaultsHandlerTest {
           .build();
       JSONObject d2 = handler.afterHandle(missing).getBody().getJSONObject("defaults");
       assertFalse(d2.has("typeTaxCategory"));
+      assertEquals(TAX_CLIENT_DEFAULT, d2.getString("taxCategory"));
 
       // No productType parameter -> key absent.
       JSONObject d3 = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
@@ -1963,6 +1965,162 @@ public class ProductDefaultsHandlerTest {
           NeoResponse.ok(new JSONObject().put("defaults", new JSONObject().put("productType", "I")))))
           .getBody().getJSONObject("defaults");
       assertEquals(TAX_CLIENT_DEFAULT, initial.getString("taxCategory"));
+    }
+  }
+
+  // ── ETP-5680 via MCP: fallback placeholders cede to the type's category ──
+
+  private static NeoContext postCtxWithPlaceholders(JSONObject body, String... placeholders) {
+    NeoContext ctx = postCtx(body, obContextWithClient(CLIENT1));
+    for (String key : placeholders) {
+      ctx.addFallbackDefault(key);
+    }
+    return ctx;
+  }
+
+  @Test
+  public void testPlaceholderTaxCategoryIsReplacedByTheTypesCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject service = new JSONObject().put("productType", "S").put("taxCategory", "first-combo");
+    handler.handle(postCtxWithPlaceholders(service, "taxCategory"));
+    assertEquals("tax-services", service.getString("taxCategory"));
+
+    JSONObject item = new JSONObject().put("productType", "I").put("taxCategory", "first-combo");
+    handler.handle(postCtxWithPlaceholders(item, "taxCategory"));
+    assertEquals("tax-goods", item.getString("taxCategory"));
+  }
+
+  @Test
+  public void testExplicitTaxCategoryIsNeverAPlaceholder() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    // Only uOM was a placeholder; the caller chose taxCategory (Exento), so it is kept.
+    JSONObject body = new JSONObject().put("productType", "S").put("taxCategory", "exento")
+        .put("uOM", "first-uom");
+    handler.handle(postCtxWithPlaceholders(body, "uOM"));
+    assertEquals("exento", body.getString("taxCategory"));
+  }
+
+  @Test
+  public void testPlaceholderTaxCategoryFallsBackToIsDefaultThenIsKept() throws Exception {
+    ProductDefaultsHandler lacking = handlerWithTypeTaxCategories(null, null);
+    JSONObject body = new JSONObject().put("productType", "S").put("taxCategory", "first-combo");
+    lacking.handle(postCtxWithPlaceholders(body, "taxCategory"));
+    assertEquals(TAX_CLIENT_DEFAULT, body.getString("taxCategory"));
+
+    ProductDefaultsHandler noDefaultAnywhere = spy(new ProductDefaultsHandler());
+    doReturn(null).when(noDefaultAnywhere).queryDefaultId(any(), anyString());
+    doReturn(null).when(noDefaultAnywhere).queryTaxCategoryIdByName(anyString(), anyString());
+    JSONObject kept = new JSONObject().put("productType", "S").put("taxCategory", "first-combo");
+    noDefaultAnywhere.handle(postCtxWithPlaceholders(kept, "taxCategory"));
+    assertEquals("first-combo", kept.getString("taxCategory"));
+  }
+
+  @Test
+  public void testPlaceholderUomIsReplacedByTheIsDefaultUnit() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject body = new JSONObject().put("productType", "I").put("uOM", "first-uom");
+    handler.handle(postCtxWithPlaceholders(body, "uOM"));
+    assertEquals(UOM_CLIENT_DEFAULT, body.getString("uOM"));
+
+    JSONObject chosen = new JSONObject().put("productType", "I").put("uOM", "my-uom");
+    handler.handle(postCtxWithPlaceholders(chosen));
+    assertEquals("my-uom", chosen.getString("uOM"));
+  }
+
+  @Test
+  public void testEmptyPlaceholderSetBehavesLikeRest() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject body = new JSONObject().put("productType", "S").put("taxCategory", "present");
+    handler.handle(postCtx(body, obContextWithClient(CLIENT1)));
+    assertEquals("present", body.getString("taxCategory"));
+
+    JSONObject missing = new JSONObject().put("productType", "S");
+    handler.handle(postCtx(missing, obContextWithClient(CLIENT1)));
+    assertEquals("tax-services", missing.getString("taxCategory"));
+  }
+
+  private static NeoContext defaultsCtxAsking(String productType, JSONObject defaults) throws Exception {
+    NeoContext.Builder builder = NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+        .obContext(obContextWithClient(CLIENT1))
+        .previousResult(NeoResponse.ok(new JSONObject().put("defaults", defaults)));
+    if (productType != null) {
+      builder.queryParams(Map.of("productType", productType));
+    }
+    return builder.build();
+  }
+
+  private static JSONObject genericDefaults() throws Exception {
+    return new JSONObject().put("productType", "I").put("productType$_identifier", "Item")
+        .put("taxCategory", "generic-first");
+  }
+
+  /** A copy of taxCategory from the defaults of a type must be that type's category. */
+  @Test
+  public void testDefaultsOfARequestedTypeAreConsistentWithThatType() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      JSONObject service = handler.afterHandle(defaultsCtxAsking("S", genericDefaults()))
+          .getBody().getJSONObject("defaults");
+      assertEquals("S", service.getString("productType"));
+      assertFalse(service.has("productType$_identifier"));
+      assertEquals("tax-services", service.getString("taxCategory"));
+      assertEquals("tax-services", service.getString("typeTaxCategory"));
+
+      JSONObject item = handler.afterHandle(defaultsCtxAsking("I", genericDefaults()))
+          .getBody().getJSONObject("defaults");
+      assertEquals("I", item.getString("productType"));
+      assertEquals("tax-goods", item.getString("taxCategory"));
+      assertEquals("tax-goods", item.getString("typeTaxCategory"));
+    }
+  }
+
+  /** No named category for the requested type: taxCategory stays, no typeTaxCategory, type follows. */
+  @Test
+  public void testDefaultsOfARequestedTypeWithoutItsNamedCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, "tax-goods");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      JSONObject service = handler.afterHandle(defaultsCtxAsking("S", genericDefaults()))
+          .getBody().getJSONObject("defaults");
+      assertEquals("S", service.getString("productType"));
+      assertEquals(TAX_CLIENT_DEFAULT, service.getString("taxCategory"));
+      assertFalse(service.has("typeTaxCategory"));
+    }
+  }
+
+  /** Without a requested type, and for an unknown one, the payload keeps asking for Item. */
+  @Test
+  public void testDefaultsWithoutAValidRequestedTypeStayOnItem() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      for (String asked : new String[] { null, "ZZ" }) {
+        JSONObject d = handler.afterHandle(defaultsCtxAsking(asked, genericDefaults()))
+            .getBody().getJSONObject("defaults");
+        assertEquals("I", d.getString("productType"));
+        assertEquals("Item", d.getString("productType$_identifier"));
+        assertEquals("tax-goods", d.getString("taxCategory"));
+        assertFalse(d.has("typeTaxCategory"));
+      }
     }
   }
 }

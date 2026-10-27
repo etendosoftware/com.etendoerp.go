@@ -168,7 +168,7 @@ public class HostedCheckoutService {
    * @param clientName requested environment name
    * @param origin public application origin for return URLs
    * @param planKey plan catalog key of the plan being bought; blank asks for the legacy fallback
-   * @return checkout request id, URL, mode and price id
+   * @return checkout request id, URL and mode (never the provider price id)
    * @throws PlanNotAvailableException when the key names no active plan catalog row, or asks for
    *     the legacy plan while the legacy price fallback is inactive
    * @throws CheckoutNotConfiguredException when checkout has no credentials, or the plan carries
@@ -197,7 +197,7 @@ public class HostedCheckoutService {
    * @param origin public application origin for return URLs
    * @param planKey plan catalog key of the plan being bought; blank asks for the legacy fallback
    * @param options demo source, transfer selection and pre-provider callback
-   * @return checkout request id, URL, mode and price id
+   * @return checkout request id, URL and mode (never the provider price id)
    * @throws PlanNotAvailableException when the key names no active plan catalog row, or asks for
    *     the legacy plan while the legacy price fallback is inactive
    * @throws CheckoutNotConfiguredException when checkout has no credentials, or the plan carries
@@ -332,8 +332,7 @@ public class HostedCheckoutService {
         if (originalMode.isEmpty()) {
           throw new IOException("Stripe returned an existing session without its checkout mode");
         }
-        return buildResult(requestId, existing.optString("url", ""),
-            checkoutRequestStore.findStripePriceId(requestId), originalMode);
+        return buildResult(requestId, existing.optString("url", ""), originalMode);
       }
       if ("complete".equals(sessionStatus)) {
         return buildCompletedResult(requestId, existing);
@@ -405,7 +404,8 @@ public class HostedCheckoutService {
     result.put(REQUEST_ID_FIELD, requestId);
     result.put("checkoutUrl", providerUrl);
     result.put("mode", mode);
-    result.put("priceId", price.getId());
+    // ETP-5049: no provider price id in a browser-facing answer. The browser names a plan, never a
+    // price; the charged price id stays on the request row (STRIPE_PRICE_ID) for the server.
     return result;
   }
 
@@ -423,7 +423,7 @@ public class HostedCheckoutService {
     return response.json();
   }
 
-  private JSONObject buildResult(String requestId, String checkoutUrl, String priceId, String mode)
+  private JSONObject buildResult(String requestId, String checkoutUrl, String mode)
       throws JSONException {
     if (checkoutUrl == null || checkoutUrl.isEmpty()) {
       throw new IllegalStateException("The checkout provider returned no session URL");
@@ -432,7 +432,6 @@ public class HostedCheckoutService {
     result.put(REQUEST_ID_FIELD, requestId);
     result.put("checkoutUrl", checkoutUrl);
     result.put("mode", mode);
-    if (priceId != null) result.put("priceId", priceId);
     return result;
   }
 

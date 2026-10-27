@@ -38,10 +38,14 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.InOrder;
@@ -52,10 +56,16 @@ import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.PlanQuota;
+import com.etendoerp.go.schemaforge.data.Subscription;
 
 /**
  * Unit tests for {@code GET /sws/go/billing/subscription} and
@@ -66,6 +76,12 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * caller sends. Every request here therefore carries a foreign id in its query string, its
  * parameters, every header and its body, and the tests assert the provider was reached with the
  * account's id and never with the injected one.
+ *
+ * <p>Since ETP-5049 the page also carries the plan catalog view of the subscription
+ * ({@code planKey}, {@code planName}, {@code planQuotas}) and a {@code graceEndsAt} decided by
+ * {@link EnvironmentAccessPolicy#graceEndsAt}, the rule the access policy cuts access on.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletBillingSubscriptionTest {
 
@@ -171,6 +187,23 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
 
     assertTrue(body.isNull("graceEndsAt"));
     assertEquals(0, body.getInt("graceDaysRemaining"));
+    // No grace window to compute, so the grace setting is not even read.
+    verify(fixture.lifecycle, never()).configuration();
+  }
+
+  /** A broken grace setting only matters to a subscription that has a grace window. */
+  @Test
+  public void unreadableGraceConfigurationDoesNotBreakACurrentSubscription() throws Exception {
+    Fixture fixture = subscribedFixture(snapshot(
+        EnvironmentAccessPolicy.SubscriptionStatus.CURRENT,
+        Instant.now().plus(3, ChronoUnit.DAYS)));
+    when(fixture.lifecycle.configuration())
+        .thenThrow(new IllegalStateException("Invalid grace configuration"));
+
+    ResponseCapture resp = get(fixture, VALID_TOKEN);
+
+    assertEquals(200, resp.status);
+    assertTrue(resp.json().isNull("graceEndsAt"));
   }
 
   @Test
@@ -200,6 +233,113 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     assertEquals(0, body.getInt("graceDaysRemaining"));
     assertTrue(body.isNull("clientId"));
     verify(fixture.lifecycle, never()).resolve(anyString());
+    // No environment, no subscription row to read a plan from.
+    assertTrue(body.isNull("planKey"));
+    assertTrue(body.isNull("planName"));
+    assertEquals(0, body.getJSONArray("planQuotas").length());
+    verifyNoInteractions(fixture.subscriptionService, fixture.planCatalog);
+  }
+
+  // ===================== plan catalog view (ETP-5049) =====================
+
+  /** No ETGO_SUBSCRIPTION row: no plan key, never an invented "free" one, and nothing included. */
+  @Test
+  public void tenantWithoutSubscriptionRowProjectsNullPlanAndNoQuotas() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    when(fixture.subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.empty());
+
+    JSONObject body = get(fixture, VALID_TOKEN).json();
+
+    assertTrue(body.has("planKey"));
+    assertTrue(body.isNull("planKey"));
+    assertTrue(body.has("planName"));
+    assertTrue(body.isNull("planName"));
+    assertEquals(0, body.getJSONArray("planQuotas").length());
+    // The live Stripe product name is unaffected.
+    assertEquals("Productive", body.getString("plan"));
+    verifyNoInteractions(fixture.planCatalog);
+  }
+
+  /** A plan with no quota rows is unlimited: an empty list beside a real plan key. */
+  @Test
+  public void planWithoutQuotasProjectsItsKeyAndAnEmptyQuotaList() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    Plan plan = plan("productive-monthly", "Productive monthly", "month");
+    givenSubscriptionPlan(fixture, plan);
+    when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(Collections.emptyList());
+
+    JSONObject body = get(fixture, VALID_TOKEN).json();
+
+    assertEquals("productive-monthly", body.getString("planKey"));
+    assertEquals("Productive monthly", body.getString("planName"));
+    assertEquals(0, body.getJSONArray("planQuotas").length());
+    verify(fixture.planCatalog).listActiveQuotas(plan);
+  }
+
+  @Test
+  public void planQuotasAreProjectedInCatalogOrderWithEveryField() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    Plan plan = plan("productive-yearly", "Productive yearly", "year");
+    givenSubscriptionPlan(fixture, plan);
+    // listActiveQuotas orders by resource search key; the response keeps that order.
+    PlanQuota documents = quota(resource("documents", "Documents", "documents"), 500L, "block",
+        400L);
+    PlanQuota storage = quota(resource("storage", "Storage", null), 10L, "warn", null);
+    PlanQuota users = quota(resource("users", "Users", "users"), 3L, "off", 2L);
+    when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(List.of(documents, storage, users));
+
+    JSONArray quotas = get(fixture, VALID_TOKEN).json().getJSONArray("planQuotas");
+
+    assertEquals(3, quotas.length());
+    assertEquals("documents", quotas.getJSONObject(0).getString("resourceKey"));
+    assertEquals("storage", quotas.getJSONObject(1).getString("resourceKey"));
+    assertEquals("users", quotas.getJSONObject(2).getString("resourceKey"));
+
+    JSONObject first = quotas.getJSONObject(0);
+    assertEquals("Documents", first.getString("resourceName"));
+    assertEquals("documents", first.getString("unitLabel"));
+    assertEquals(500L, first.getLong("includedQty"));
+    assertEquals("block", first.getString("enforcementMode"));
+    assertEquals(400L, first.getLong("warningThreshold"));
+    // The plan's billing interval is the quota's consumption window.
+    assertEquals("year", first.getString("period"));
+
+    // Null unit label and warning threshold pass through as JSON null, not as a default.
+    JSONObject second = quotas.getJSONObject(1);
+    assertTrue(second.has("unitLabel"));
+    assertTrue(second.isNull("unitLabel"));
+    assertTrue(second.has("warningThreshold"));
+    assertTrue(second.isNull("warningThreshold"));
+
+    // An "off" quota is informational and still listed: it is part of what the plan includes.
+    assertEquals("off", quotas.getJSONObject(2).getString("enforcementMode"));
+    assertEquals(3L, quotas.getJSONObject(2).getLong("includedQty"));
+  }
+
+  @Test
+  public void planWithoutBillingIntervalProjectsANullQuotaPeriod() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    Plan plan = plan("legacy-productive", "Productive (legacy)", " ");
+    givenSubscriptionPlan(fixture, plan);
+    PlanQuota users = quota(resource("users", "Users", "users"), 3L, "block", null);
+    when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(List.of(users));
+
+    JSONObject quota = get(fixture, VALID_TOKEN).json().getJSONArray("planQuotas")
+        .getJSONObject(0);
+
+    assertTrue(quota.has("period"));
+    assertTrue(quota.isNull("period"));
+  }
+
+  @Test
+  public void subscriptionPlanIsReadForTheEnvironmentOfTheAccountsPurchase() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    givenSubscriptionPlan(fixture, plan("productive-monthly", "Productive", "month"));
+
+    get(fixture, VALID_TOKEN);
+
+    verify(fixture.subscriptionService).findLatest(CLIENT_ID);
+    verify(fixture.subscriptionService, never()).findLatest(FOREIGN_SUBSCRIPTION);
   }
 
   @Test
@@ -426,6 +566,8 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     final StripeCustomerPortalService portalService = mock(StripeCustomerPortalService.class);
     final TenantEnvironmentLifecycleService lifecycle =
         mock(TenantEnvironmentLifecycleService.class);
+    final SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    final PlanCatalogService planCatalog = mock(PlanCatalogService.class);
     final Account account = mock(Account.class);
     final OBDal dal = mock(OBDal.class);
     final StripeCustomerPortalService.SubscriptionDetail live =
@@ -435,6 +577,8 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
       servlet.checkoutRequestStore = requestStore;
       servlet.stripeCustomerPortalService = portalService;
       servlet.tenantEnvironmentLifecycleService = lifecycle;
+      servlet.subscriptionService = subscriptionService;
+      servlet.planCatalogService = planCatalog;
       when(account.getId()).thenReturn(ACCOUNT_ID);
       when(account.getEmail()).thenReturn(ACCOUNT_EMAIL);
       when(lifecycle.configuration())
@@ -479,6 +623,38 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
       when(purchase.getCreatedClient()).thenReturn(client);
     }
     return purchase;
+  }
+
+  private static void givenSubscriptionPlan(Fixture fixture, Plan plan) {
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getPlan()).thenReturn(plan);
+    when(fixture.subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.of(subscription));
+  }
+
+  private static Plan plan(String key, String name, String billingInterval) {
+    Plan plan = mock(Plan.class);
+    when(plan.getSearchKey()).thenReturn(key);
+    when(plan.getName()).thenReturn(name);
+    when(plan.getBillingInterval()).thenReturn(billingInterval);
+    return plan;
+  }
+
+  private static BillingResource resource(String key, String name, String unitLabel) {
+    BillingResource resource = mock(BillingResource.class);
+    when(resource.getSearchKey()).thenReturn(key);
+    when(resource.getName()).thenReturn(name);
+    when(resource.getUnitLabel()).thenReturn(unitLabel);
+    return resource;
+  }
+
+  private static PlanQuota quota(BillingResource resource, Long includedQty,
+      String enforcementMode, Long warningThreshold) {
+    PlanQuota quota = mock(PlanQuota.class);
+    when(quota.getBillingResource()).thenReturn(resource);
+    when(quota.getIncludedQty()).thenReturn(includedQty);
+    when(quota.getEnforcementMode()).thenReturn(enforcementMode);
+    when(quota.getWarningThreshold()).thenReturn(warningThreshold);
+    return quota;
   }
 
   private static TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot(
