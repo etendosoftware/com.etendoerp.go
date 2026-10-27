@@ -381,8 +381,7 @@ public class McpResourceProvider {
       // Callable report: drop the not-configured status/message, the NEO handler serves it.
       reportResult.remove("status");
       reportResult.remove("message");
-      String qualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
-      reportResult.put("reportHandler", qualifier);
+      reportResult.put("reportHandler", NeoReportCallability.reportHandlerName(spec));
     }
     reportResult.put(FIELD_DESCRIPTION, spec.getDescription());
     return reportResult;

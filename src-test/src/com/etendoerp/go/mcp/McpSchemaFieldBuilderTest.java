@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -41,6 +43,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -56,6 +59,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -338,6 +342,36 @@ class McpSchemaFieldBuilderTest {
           new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
           entity, "Bad_Col");
       assertEquals("Bad_Col", result);
+    }
+
+    /**
+     * ETP-5806 naming unification: the 3 structured SEPA columns publish the name every handler
+     * agrees on in its own JSON ({@code streetName}/{@code buildingNumber}/{@code buildingName}),
+     * never the raw Hibernate property codegen produced for the column
+     * ({@code oBSEPAStreetName}/...). Checked BEFORE the DAL lookup — a non-null entity whose
+     * {@code getPropertyByColumnName} would answer something else must still be overridden.
+     */
+    @Test
+    void structuredAddressColumnIsOverriddenBeforeTheDalLookup() throws Exception {
+      org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+      Property rawProp = mock(Property.class);
+      when(rawProp.getName()).thenReturn("oBSEPAStreetName");
+      when(entity.getPropertyByColumnName("EM_OBSEPA_StrtNm")).thenReturn(rawProp);
+
+      String result = (String) invokeStatic("resolvePropertyName",
+          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
+          entity, "EM_OBSEPA_StrtNm");
+
+      assertEquals("streetName", result);
+    }
+
+    @Test
+    void structuredAddressColumnIsOverriddenEvenWithANullEntity() throws Exception {
+      String result = (String) invokeStatic("resolvePropertyName",
+          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
+          null, "EM_OBSEPA_BldgNb");
+
+      assertEquals("buildingNumber", result);
     }
   }
 
@@ -821,6 +855,42 @@ class McpSchemaFieldBuilderTest {
           java.util.Set.of(), metadata()));
       assertFalse(include(column("col-button", "ad_org_id", true, "28"),
           java.util.Set.of("AD_ORG_ID"), metadata()));
+    }
+
+    /**
+     * ETP-5806 — the 3 structured SEPA address columns are gated behind
+     * {@code structured-address-for-sepa}: excluded while it is off, whatever the spec/system-column
+     * checks would otherwise decide, stubbed directly so the assertion is independent of the local
+     * {@code Openbravo.properties} toggle.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb", "EM_OBSEPA_BldgNm" })
+    @DisplayName("a structured SEPA address column is excluded when the flag is off")
+    void structuredAddressColumnExcludedWhenFlagOff(String dbColumnName) throws Exception {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+        assertFalse(include(column("col-sepa", dbColumnName, true, null),
+            java.util.Set.of(), metadata()));
+      }
+    }
+
+    /**
+     * ETP-5806 — with the flag on, the same 3 columns are published exactly like any other
+     * exposed, non-system column.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb", "EM_OBSEPA_BldgNm" })
+    @DisplayName("a structured SEPA address column is published when the flag is on")
+    void structuredAddressColumnPublishedWhenFlagOn(String dbColumnName) throws Exception {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+
+        assertTrue(include(column("col-sepa", dbColumnName, true, null),
+            java.util.Set.of(), metadata()));
+      }
     }
   }
 

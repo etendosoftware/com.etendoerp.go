@@ -30,6 +30,7 @@ import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.auth.ScopeRefusal;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
@@ -146,10 +147,13 @@ class NeoRequestRouter {
           "Access denied to spec for current role");
       return;
     }
-    // NEO-native handler dispatch (single-segment handlers such as aging-receivable).
-    String reportHandlerQualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
-    if (reportHandlerQualifier != null
-        && dispatchReportHandler(reportHandlerQualifier, pathInfo, method, request, response)) {
+    // NEO-native handler dispatch (single-segment handlers such as aging-receivable). The
+    // dispatcher resolves the @NeoExtension first; the qualifier, when the entity still has one,
+    // is only its fallback — so an entity bound by annotation alone dispatches too.
+    SFEntity reportEntity = NeoReportCallability.resolveReportEntity(spec);
+    if (reportEntity != null
+        && dispatchReportHandler(reportEntity.getJavaQualifier(), pathInfo, method, request,
+            response)) {
       return;
     }
     // No NEO-native report handler: Jasper/AD_Process report execution has been removed.

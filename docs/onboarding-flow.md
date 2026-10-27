@@ -15,6 +15,18 @@ transactional email best-effort. Email delivery failure is audited by the
 transactional email safety store and does not roll back the already committed
 environment.
 
+### Pre-tenant capability bootstrap (ETP-5806)
+
+`GET /sws/go/session`'s response includes a `capabilities` object (`EtendoGoJwtServlet#buildSessionCapabilities`)
+alongside the environment/role-list payload, for backend-only flags that must be known before any
+tenant or role exists — the signup wizard runs ahead of both, so it cannot use the role-scoped
+`capabilities` map `SFWindowAccessMap` serves elsewhere (§8c of `docs/neo-headless.md`). Today it
+carries a single key, `structuredAddressForSepa` (`GoFeatureFlags.isEnabled(FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ...)`,
+environment-wide, no per-account targeting), which the wizard's Company step reads to decide
+whether to render the structured Street/Number/Building Name/City block or the legacy single
+address field. Add future onboarding-time backend-only flags to this same object rather than
+inventing a second capabilities endpoint.
+
 Client resolution never uses the company name (ETP-5548). The classic path
 creates the client under a **provisioning name** (`ProvisioningClientName`,
 `PEND-<32 hex>`: the checkout `requestId` without hyphens for a paid attempt,
@@ -330,6 +342,23 @@ invoice. Runs under the admin user's execution context.
 Step 7. Wires the org's fiscal/address information collected on the signup
 form (country, fiscal ID, address) onto the newly created `AD_Org`/legal
 entity.
+
+**Structured address block (ETP-5806), gated behind `structured-address-for-sepa`.** This
+backend-only flag (TTL 2026-11-15, see "Pre-tenant capability bootstrap" in the Overview above and
+`docs/feature-flags-and-tenant-upgrade.md` §1) controls
+whether the signup wizard's Company step collects Street/Number/Building Name/City instead of a
+single free-text address line. **While off** (default pre-launch), `address` is the only field
+read and `createLocation` populates `Address1` from it exactly as before this ticket — the 3
+structured fields are never read even if a stale client still sends them. **While on**, the wizard
+also sends `streetName`/`buildingNumber`/`buildingName`/`city`; `streetName`/`buildingNumber`/`city`
+are mandatory together **only once the user has started filling the block in**
+(`EtendoGoJwtServlet#validateStructuredAddressBlock`) — a blank block is still accepted, matching
+the step's minimalist, fully-optional-address design. `OnboardingOrgInfoService#createLocation`
+then prioritizes the structured fields over the legacy `address` when both are present, computing
+`addressLine1`/`addressLine2` via `StructuredAddressComposer` (the same algorithm every other
+address popup uses) and persisting the 3 raw columns alongside them. `OnboardingWarehouseAddressService`
+copies the 3 structured columns too, when it mirrors the org's fiscal address onto the default
+warehouse — see `OnboardingWarehouseAddressService`'s `copyLocationFields`.
 
 ### `OnboardingCostingScheduleService`
 Step 8 (ETP-5190; cadence lowered to 30 s by ETP-5370). **Non-fatal**, like

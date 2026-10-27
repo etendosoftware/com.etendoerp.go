@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -46,6 +47,8 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
+
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 
 /**
  * ETP-5234 for {@link ContactsLocationAddressHandler}: the two create modes.
@@ -235,6 +238,11 @@ class ContactsLocationAddressCreateModesTest {
       when(obDal.get(Country.class, "ghost-country")).thenReturn(null);
 
       JSONObject body = new JSONObject();
+      // ETP-5806 — streetName/buildingNumber/cityName must be present so this body clears the
+      // mandatory-fields check and reaches the country-resolution one being tested here.
+      body.put("streetName", "Juan B. Justo");
+      body.put("buildingNumber", "595");
+      body.put("cityName", "Río Cuarto");
       body.put("country", "ghost-country");
       body.put("addressLine1", "Juan B. Justo 595");
 
@@ -263,6 +271,55 @@ class ContactsLocationAddressCreateModesTest {
           "the refusal has to name the missing field: " + response.getBody());
       // Refused before the parent is even fetched: nothing about the request is servable.
       verify(obDal, never()).get(BusinessPartner.class, BP_ID);
+    }
+
+    /**
+     * ETP-5806 — streetName/buildingNumber/cityName are mandatory for Mode B, the same
+     * product decision as country, stricter than Classic (where the SEPA fields are optional).
+     */
+    @Test
+    @DisplayName("missing streetName/buildingNumber/cityName is a 400 naming each one")
+    void missingStructuredAddressFieldsIsA400() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("country", COUNTRY_ID);
+      // streetName, buildingNumber and cityName intentionally omitted
+
+      try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+        NeoResponse response = handler.handle(post(body));
+
+        assertEquals(400, response.getHttpStatus());
+        String message = response.getBody().toString();
+        assertTrue(message.contains("streetName"), message);
+        assertTrue(message.contains("buildingNumber"), message);
+        assertTrue(message.contains("cityName"), message);
+        verify(obDal, never()).get(BusinessPartner.class, BP_ID);
+      }
+    }
+
+    /**
+     * ETP-5806 follow-up (the production 500 bug): a structured field longer than its DB column
+     * is a clean 400 before the write is attempted, never a raw data-truncation SQL exception.
+     */
+    @Test
+    @DisplayName("a structured field exceeding its DB column length is a 400, not a raw SQL error")
+    void anOversizedStructuredFieldIsA400() throws Exception {
+      stubBusinessPartner();
+
+      JSONObject body = new JSONObject();
+      body.put("streetName", "Juan B. Justo");
+      body.put("buildingNumber", "595");
+      body.put("cityName", "Río Cuarto");
+      body.put("country", COUNTRY_ID);
+      // EM_OBSEPA_BldgNm is VARCHAR(35) — 36 chars overflows it.
+      body.put("buildingName", "A".repeat(36));
+
+      try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+        NeoResponse response = handler.handle(post(body));
+
+        assertEquals(400, response.getHttpStatus());
+        assertTrue(response.getBody().toString().contains("buildingName"), response.getBody().toString());
+        verify(obDal, never()).save(any());
+      }
     }
   }
 
@@ -305,6 +362,14 @@ class ContactsLocationAddressCreateModesTest {
   }
 
   // ── helpers ─────────────────────────────────────────────────────────────
+
+  /** Stubs {@link GoFeatureFlags#isEnabled} for the {@code structured-address-for-sepa} flag only. */
+  private MockedStatic<GoFeatureFlags> mockStructuredAddressFlag(boolean enabled) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(enabled);
+    return flags;
+  }
 
   private void stubBusinessPartner() {
     BusinessPartner bp = mock(BusinessPartner.class);

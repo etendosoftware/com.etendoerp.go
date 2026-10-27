@@ -308,6 +308,9 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   }
 
   ComputeResult computeBoxes(String orgId, int year, String period) throws Exception {
+    // Every caller passes resolveEffectiveOrg(): the session org, or the first leaf org of the
+    // session client found by a client-scoped criteria.
+    // tenant-ok: orgId never comes from the request (see above), it is the session's own org
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
 
     boolean quarterly = period.startsWith("T");

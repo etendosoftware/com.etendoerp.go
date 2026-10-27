@@ -62,6 +62,17 @@ public final class OnboardingFieldLimits {
   /** {@code C_LOCATION.ADDRESS1} is NVARCHAR(60). */
   public static final int ADDRESS = 60;
 
+  /** {@code C_LOCATION.CITY} (the free-text city, DAL property {@code cityName}) is NVARCHAR(60). */
+  public static final int CITY = 60;
+
+  /**
+   * ETP-5806 — the onboarding company step's structured address fields (Street/Number/Building
+   * Name) are NOT re-declared here: their length is validated via
+   * {@code StructuredAddressComposer#fieldsExceedingMaxLength}, the single source of truth
+   * already used by the Contacts/Warehouse address handlers. City IS declared here ({@link #CITY})
+   * because it is not part of that composer's 3 SEPA fields.
+   */
+
   /**
    * A field that exceeded its limit. {@code field} is the JSON key the client sent, so the UI can
    * point at the right input.

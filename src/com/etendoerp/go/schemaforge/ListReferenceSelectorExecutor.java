@@ -56,6 +56,8 @@ final class ListReferenceSelectorExecutor {
     OBCriteria<org.openbravo.model.ad.domain.List> dataCrit = buildCriteria(listRef.getId(),
         valRuleSql, search);
     dataCrit.addOrderBy(org.openbravo.model.ad.domain.List.PROPERTY_SEQUENCENUMBER, true);
+    // ETP-5903 — equal sequence numbers must not let a row sit on two pages or on none.
+    dataCrit.addOrderBy(org.openbravo.model.ad.domain.List.PROPERTY_ID, true);
     dataCrit.setFirstResult(offset);
     dataCrit.setMaxResults(limit);
 
