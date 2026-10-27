@@ -6777,10 +6777,14 @@ envelope, before anything is resolved from it. That check is stricter than the r
 also requires the org to be in the role's readable organizations, because the tax report SQL binds
 `ad_org_id` straight from the request. An omitted `orgId` still defaults to the session
 organization, `"0"` included. Before the fix, an MCP call without `currencyId` answered with the
-ledger currency of another tenant's org. `Fiscal303BoxesHandler` takes no org from the request
-(`resolveEffectiveOrg()`), so it only carries a `tenant-ok` justification. Years, accounting schemas and journals are `OrganizationEnabled`,
-so `loadOwned` also requires their organization to be readable by the role: one of the caller's
-own client in an organization outside the role's access now answers as unknown too.
+ledger currency of another tenant's org. The Modelo 303, 349 and 390 handlers and their
+submission, incidents and sources supports take no org from the request: every org lookup uses the
+`resolveEffectiveOrg()` org of the session. A declaration they load by request `declId` is answered
+404 by `belongsTo` / `isOwned390` unless it is of the session client and org. So their bare lookups
+only carry a `tenant-ok` justification, and `TenantIsolationPolicyTest` guards them too. Years,
+accounting schemas and journals are `OrganizationEnabled`, so `loadOwned` also requires their
+organization to be readable by the role: one of the caller's own client in an organization outside
+the role's access now answers as unknown too.
 
 The same change scopes three other request ids:
 - `GlJournalHeaderHandler`: the journal its PATCH pre-hook loads by URL id to mirror

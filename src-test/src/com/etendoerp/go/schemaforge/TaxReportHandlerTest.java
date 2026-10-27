@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -156,7 +157,7 @@ class TaxReportHandlerTest {
     NeoResponse response = handler.handle(buildPostContext(body));
 
     assertEquals(403, response.getHttpStatus());
-    verify(connection, org.mockito.Mockito.never()).prepareStatement(anyString());
+    verify(connection, never()).prepareStatement(anyString());
   }
 
   // ---- Helper methods -------------------------------------------------------
@@ -775,7 +776,7 @@ class TaxReportHandlerTest {
     assertEquals(foreign, unknown, "an unknown org must be indistinguishable from a foreign one");
     assertEquals(foreign, unreadable,
         "an own-client org the role cannot read must be indistinguishable from a foreign one");
-    verify(connection, org.mockito.Mockito.never()).prepareStatement(anyString());
+    verify(connection, never()).prepareStatement(anyString());
   }
 
   /**
@@ -868,8 +869,8 @@ class TaxReportHandlerTest {
 
     assertEquals(400, response.getHttpStatus());
     assertFalse(response.getBody().toString().contains("foreign-curr"));
-    verify(foreignOrg, org.mockito.Mockito.never()).getGeneralLedger();
-    verify(obDal, org.mockito.Mockito.never()).createQuery(eq(AcctSchema.class), anyString());
+    verify(foreignOrg, never()).getGeneralLedger();
+    verify(obDal, never()).createQuery(eq(AcctSchema.class), anyString());
   }
 
   /** A context without a readable-organization set fails closed for a request {@code orgId}. */
@@ -886,7 +887,7 @@ class TaxReportHandlerTest {
 
     assertEquals(400, response.getHttpStatus());
     assertEquals("organization_not_resolved", response.getBody().getString("error"));
-    verify(connection, org.mockito.Mockito.never()).prepareStatement(anyString());
+    verify(connection, never()).prepareStatement(anyString());
   }
 
   // ---- dateType=invoice uses dateinvoiced -----------------------------------
