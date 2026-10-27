@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -226,9 +227,7 @@ class NeoGridViewsService {
 
   private static void rejectUnknownKeys(JSONObject object, String... allowed) throws JSONException {
     Set<String> allowedKeys = new HashSet<>();
-    for (String key : allowed) {
-      allowedKeys.add(key);
-    }
+    Collections.addAll(allowedKeys, allowed);
     Iterator<?> keys = object.keys();
     while (keys.hasNext()) {
       if (!allowedKeys.contains(keys.next())) {
