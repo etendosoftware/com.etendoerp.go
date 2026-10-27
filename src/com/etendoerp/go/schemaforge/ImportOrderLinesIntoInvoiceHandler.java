@@ -27,7 +27,6 @@ import java.util.Map;
 import java.util.Set;
 
 import javax.inject.Named;
-import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -74,11 +73,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * orders' {@code etgoTotalDiscount} when every selected order has the same positive percentage and,
  * judged on the invoice BEFORE the call, the invoice already had that percentage or had no total
  * discount AND no lines (the total-discount line does not count). Orders and invoice all without a
- * discount means nothing to carry. Any other case is a conflict ({@link #discountConflict}),
- * including an invoice with a total discount and orders without one, and
- * answers 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} before anything is written, so the caller
- * can ask the user and resend with {@code carryGlobalDiscount:false}: the lines are imported and
- * the header's total discount is not touched. The lines always keep their own line discount. The
+ * discount means nothing to carry. Any other case is a conflict
+ * ({@link InvoiceGlobalDiscountRule#discountConflict}), including an invoice with a total discount
+ * and orders without one, and answers 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} before anything
+ * is written, so the caller can ask the user and resend with {@code carryGlobalDiscount:false}: the
+ * lines are imported and the header's total discount is not touched. The lines always keep their own line discount. The
  * discount line itself is materialised when the invoice is completed, as always.
  */
 @Named("importOrderLinesIntoInvoiceHandler")
@@ -88,22 +87,25 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String ACTION_AVAILABLE_LINES = "availableOrderLines";
   static final String ACTION_IMPORT = "importOrderLines";
 
-  /** The orders' global discount cannot be carried to the invoice; nothing was imported. */
-  static final String ERROR_GLOBAL_DISCOUNT_CONFLICT = "globalDiscountConflict";
-  /** Conflict (a): the selected orders do not share one positive % (0 counts as different). */
-  static final String CONFLICT_ORDERS_DIFFER = "ordersDiffer";
-  /** Conflict (b): the invoice already has a total discount of another %. */
-  static final String CONFLICT_INVOICE_OTHER_DISCOUNT = "invoiceHasOtherDiscount";
-  /** Conflict (c): the invoice already has lines and no total discount. */
-  static final String CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT = "invoiceHasLinesWithoutDiscount";
+  /** See {@link InvoiceGlobalDiscountRule#ERROR_GLOBAL_DISCOUNT_CONFLICT}. */
+  static final String ERROR_GLOBAL_DISCOUNT_CONFLICT =
+      InvoiceGlobalDiscountRule.ERROR_GLOBAL_DISCOUNT_CONFLICT;
+  /** See {@link InvoiceGlobalDiscountRule#CONFLICT_ORDERS_DIFFER}. */
+  static final String CONFLICT_ORDERS_DIFFER = InvoiceGlobalDiscountRule.CONFLICT_ORDERS_DIFFER;
+  /** See {@link InvoiceGlobalDiscountRule#CONFLICT_INVOICE_OTHER_DISCOUNT}. */
+  static final String CONFLICT_INVOICE_OTHER_DISCOUNT =
+      InvoiceGlobalDiscountRule.CONFLICT_INVOICE_OTHER_DISCOUNT;
+  /** See {@link InvoiceGlobalDiscountRule#CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT}. */
+  static final String CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT =
+      InvoiceGlobalDiscountRule.CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT;
 
-  private static final String PARAM_ORDER_ID = "orderId";
-  private static final String PARAM_ORDERS = "orders";
-  private static final String PARAM_CARRY_DISCOUNT = "carryGlobalDiscount";
+  private static final String PARAM_ORDER_ID = OrderImportRequest.PARAM_ORDER_ID;
+  private static final String PARAM_ORDERS = OrderImportRequest.PARAM_ORDERS;
+  private static final String PARAM_CARRY_DISCOUNT = OrderImportRequest.PARAM_CARRY_DISCOUNT;
   private static final Set<String> ACTIONS =
       Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES, ACTION_IMPORT);
   private static final int MAX_CANDIDATES = 200;
-  private static final int MAX_ORDERS = 50;
+  private static final int MAX_ORDERS = OrderImportRequest.MAX_ORDERS;
 
   /**
    * The three contracts of the invoice this delegate is injected in, in flow order.
@@ -225,17 +227,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   // importOrderLines
   // ---------------------------------------------------------------------------
 
-  /** One order of the request: its id and its {@code lines} (empty = everything pending). */
-  static final class OrderRequest {
-    final String orderId;
-    final Map<String, BigDecimal> requested;
-
-    OrderRequest(String orderId, Map<String, BigDecimal> requested) {
-      this.orderId = orderId;
-      this.requested = requested;
-    }
-  }
-
   /** One order being imported: the order, its lines, what will be created and how. */
   static final class OrderImport {
     final Order order;
@@ -263,12 +254,16 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    */
   private NeoResponse importLines(Invoice invoice, JSONObject body)
       throws SQLException, JSONException {
-    List<OrderRequest> requests = parseOrderRequests(body);
-    boolean carryDiscount = parseCarryDiscount(body);
+    List<OrderImportRequest> requests = OrderImportRequest.parseOrderRequests(body);
+    boolean carryDiscount = OrderImportRequest.parseCarryDiscount(body);
     List<OrderImport> imports = planImports(invoice, requests);
     // Decided before the movement lines are locked and read, and BEFORE the lines of this call
     // exist: they must not count as "the invoice had lines".
-    BigDecimal discount = carryDiscount ? globalDiscountToCarry(invoice, imports) : null;
+    List<Order> orders = new ArrayList<>();
+    for (OrderImport item : imports) {
+      orders.add(item.order);
+    }
+    BigDecimal discount = carryDiscount ? InvoiceGlobalDiscountRule.toCarry(invoice, orders) : null;
     for (OrderImport item : imports) {
       item.batches = buildBatches(item.linesById, item.planned, item.sales);
     }
@@ -280,7 +275,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
           line -> line.getSalesOrderLine(),
           (call, lines) -> unmarkRemainder(batches, call, lines)));
     }
-    applyGlobalDiscount(invoice, discount);
+    InvoiceGlobalDiscountRule.apply(invoice, discount);
     return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
         : invoice.getSalesOrder().getId());
   }
@@ -290,11 +285,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    * ascending pass, and the cap is read AFTER the lock: a line loaded before it may carry the
    * invoiced quantity from before another import completed.
    */
-  private List<OrderImport> planImports(Invoice invoice, List<OrderRequest> requests)
+  private List<OrderImport> planImports(Invoice invoice, List<OrderImportRequest> requests)
       throws SQLException {
     List<OrderImport> imports = new ArrayList<>();
     Set<String> lineIds = new java.util.LinkedHashSet<>();
-    for (OrderRequest request : requests) {
+    for (OrderImportRequest request : requests) {
       OrderImport item = new OrderImport(requireSourceOrder(invoice, request.orderId),
           request.requested);
       lineIds.addAll(item.linesById.keySet());
@@ -311,69 +306,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
           source);
     }
     return imports;
-  }
-
-  /**
-   * The orders of the request: {@code orders:[{orderId, lines?}]}, or the single
-   * {@code orderId} + {@code lines} of the original shape; a key sent as JSON null counts as
-   * absent (MCP clients fill optional parameters with null). Mixing both, an empty or oversized
-   * {@code orders}, an entry without {@code orderId} or the same order twice is a 400.
-   */
-  static List<OrderRequest> parseOrderRequests(JSONObject body) {
-    if (!present(body, PARAM_ORDERS)) {
-      return List.of(new OrderRequest(requireParam(body, PARAM_ORDER_ID),
-          DocumentLineImport.parseRequestedLines(body)));
-    }
-    JSONArray orders = body.optJSONArray(PARAM_ORDERS);
-    if (orders == null || orders.length() == 0 || orders.length() > MAX_ORDERS) {
-      throw badRequest(PARAM_ORDERS + " must be a list of 1 to " + MAX_ORDERS
-          + " entries {orderId, lines?}");
-    }
-    if (present(body, PARAM_ORDER_ID) || present(body, DocumentLineImport.KEY_LINES)) {
-      throw badRequest("Send either orderId (+ lines) or orders, not both: the lines of each "
-          + "order go inside its orders entry");
-    }
-    List<OrderRequest> requests = new ArrayList<>();
-    Set<String> seen = new java.util.HashSet<>();
-    for (int i = 0; i < orders.length(); i++) {
-      JSONObject entry = orders.optJSONObject(i);
-      String orderId = DocumentLineImport.text(entry, PARAM_ORDER_ID);
-      if (orderId == null) {
-        throw badRequest(PARAM_ORDERS + "[" + i + "] needs an orderId");
-      }
-      if (!seen.add(orderId)) {
-        throw badRequest("Order " + orderId + " is listed twice in " + PARAM_ORDERS
-            + ": put all its lines in one entry");
-      }
-      requests.add(new OrderRequest(orderId, DocumentLineImport.parseRequestedLines(entry)));
-    }
-    return requests;
-  }
-
-  /** Whether {@code key} carries a value: a key sent as JSON null counts as absent. */
-  private static boolean present(JSONObject body, String key) {
-    return body != null && body.has(key) && !body.isNull(key);
-  }
-
-  /** {@code carryGlobalDiscount}: absent or null is {@code true}; a non-boolean is a 400. */
-  static boolean parseCarryDiscount(JSONObject body) {
-    Object value = body == null ? null : body.opt(PARAM_CARRY_DISCOUNT);
-    if (value == null || JSONObject.NULL.equals(value)) {
-      return true;
-    }
-    if (value instanceof Boolean) {
-      return (Boolean) value;
-    }
-    String text = String.valueOf(value).trim();
-    if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
-      return Boolean.parseBoolean(text);
-    }
-    throw badRequest(PARAM_CARRY_DISCOUNT + " must be true or false");
-  }
-
-  private static DocumentLineImport.ImportRefusal badRequest(String message) {
-    return new DocumentLineImport.ImportRefusal(HttpServletResponse.SC_BAD_REQUEST,
-        DocumentLineImport.ERROR_INVALID_LINE, message, null);
   }
 
   // ---------------------------------------------------------------------------
@@ -554,178 +486,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         && orderLine.getProduct().getId().equals(movement.getProduct().getId())
         && orderLine.getUOM() != null && movement.getUOM() != null
         && orderLine.getUOM().getId().equals(movement.getUOM().getId());
-  }
-
-  // ---------------------------------------------------------------------------
-  // Global discount
-  // ---------------------------------------------------------------------------
-
-  /**
-   * The % to set on the invoice's total discount, or {@code null} when there is nothing to carry
-   * (the selected orders have no global discount). Judged on the invoice as it is BEFORE this
-   * call's lines exist.
-   *
-   * @throws DocumentLineImport.ImportRefusal 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} when the
-   *         popup would warn instead of offering the carry
-   */
-  private BigDecimal globalDiscountToCarry(Invoice invoice, List<OrderImport> imports)
-      throws JSONException {
-    List<BigDecimal> discounts = orderDiscounts(imports);
-    boolean hadLines = hasProductLines(invoice);
-    String conflict = discountConflict(discounts, invoice.getEtgoTotalDiscount(), hadLines);
-    if (conflict != null) {
-      throw discountConflictRefusal(conflict, imports, invoice.getEtgoTotalDiscount(), hadLines);
-    }
-    return firstPositive(discounts);
-  }
-
-  /**
-   * Which popup warning applies, or {@code null} when there is none. Mirrors
-   * {@code resolveOrderGlobalDiscount} ({@code orderGlobalDiscountRule.js}) step by step, every %
-   * normalised by {@link #normalizedPercent} (null, zero or negative as 0):
-   * <ol>
-   *   <li>the orders do not all have the same % (0 counts as a %) →
-   *       {@value #CONFLICT_ORDERS_DIFFER};</li>
-   *   <li>orders and invoice all at 0 → {@code null}: nothing to carry, whatever the lines;</li>
-   *   <li>the invoice has a % other than the orders' one, orders at 0 included →
-   *       {@value #CONFLICT_INVOICE_OTHER_DISCOUNT};</li>
-   *   <li>the invoice has no % but already had lines →
-   *       {@value #CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT}: carrying the orders' % would discount
-   *       those lines too;</li>
-   *   <li>otherwise {@code null}: the orders' % is carried (or the invoice already holds it).</li>
-   * </ol>
-   *
-   * @param orderDiscounts  the global discount of each selected order, {@code null} as 0
-   * @param invoiceDiscount the invoice's total discount before the call, {@code null} as 0
-   * @param hadLines        whether the invoice had lines (other than the discount line) before
-   */
-  static String discountConflict(List<BigDecimal> orderDiscounts, BigDecimal invoiceDiscount,
-      boolean hadLines) {
-    BigDecimal common = commonPercent(orderDiscounts);
-    if (common == null) {
-      return CONFLICT_ORDERS_DIFFER;
-    }
-    BigDecimal current = normalizedPercent(invoiceDiscount);
-    if (common.signum() == 0 && current.signum() == 0) {
-      return null;
-    }
-    if (current.signum() > 0 && current.compareTo(common) != 0) {
-      return CONFLICT_INVOICE_OTHER_DISCOUNT;
-    }
-    return current.signum() == 0 && hadLines ? CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT : null;
-  }
-
-  /** The normalised % every order shares (0 for none or no orders), {@code null} if mixed. */
-  private static BigDecimal commonPercent(List<BigDecimal> values) {
-    BigDecimal common = null;
-    for (BigDecimal value : values) {
-      BigDecimal pct = normalizedPercent(value);
-      if (common == null) {
-        common = pct;
-      } else if (common.compareTo(pct) != 0) {
-        return null;
-      }
-    }
-    return common == null ? BigDecimal.ZERO : common;
-  }
-
-  /** As the popup's {@code normalizeGlobalDiscountPct}: null or not positive is 0, 4 decimals. */
-  static BigDecimal normalizedPercent(BigDecimal value) {
-    return value == null || value.signum() <= 0 ? BigDecimal.ZERO
-        : value.setScale(4, java.math.RoundingMode.HALF_UP);
-  }
-
-  private static List<BigDecimal> orderDiscounts(List<OrderImport> imports) {
-    List<BigDecimal> discounts = new ArrayList<>();
-    for (OrderImport item : imports) {
-      discounts.add(item.order.getEtgoTotalDiscount());
-    }
-    return discounts;
-  }
-
-  private static BigDecimal firstPositive(List<BigDecimal> values) {
-    for (BigDecimal value : values) {
-      if (value != null && value.signum() > 0) {
-        return value;
-      }
-    }
-    return null;
-  }
-
-  private static BigDecimal orZero(BigDecimal value) {
-    return value == null ? BigDecimal.ZERO : value;
-  }
-
-  /**
-   * The 422 the caller turns into a question to the user: each order's %, the invoice's state
-   * before the call, the case, and how to import anyway.
-   */
-  static DocumentLineImport.ImportRefusal discountConflictRefusal(String conflict,
-      List<OrderImport> imports, BigDecimal invoiceDiscount, boolean hadLines)
-      throws JSONException {
-    JSONArray orders = new JSONArray();
-    for (OrderImport item : imports) {
-      orders.put(new JSONObject().put(PARAM_ORDER_ID, item.order.getId())
-          .put("documentNo", item.order.getDocumentNo())
-          .put("globalDiscount", orZero(item.order.getEtgoTotalDiscount())));
-    }
-    Map<String, Object> extra = new LinkedHashMap<>();
-    extra.put("conflict", conflict);
-    extra.put(PARAM_ORDERS, orders);
-    extra.put("invoice", new JSONObject().put("totalDiscount", orZero(invoiceDiscount))
-        .put("hadLines", hadLines));
-    extra.put("hint", "Nothing was imported. Tell the user this conflict and ask whether to import "
-        + "anyway. Only if they agree, resend the same call with " + PARAM_CARRY_DISCOUNT
-        + ":false: every line keeps its own line discount, no order's global discount is carried "
-        + "and the invoice's total discount is left unchanged (an existing one also applies to "
-        + "the imported lines).");
-    return new DocumentLineImport.ImportRefusal(DocumentLineImport.SC_UNPROCESSABLE,
-        ERROR_GLOBAL_DISCOUNT_CONFLICT, conflictMessage(conflict, imports, invoiceDiscount),
-        extra);
-  }
-
-  private static String conflictMessage(String conflict, List<OrderImport> imports,
-      BigDecimal invoiceDiscount) {
-    if (CONFLICT_ORDERS_DIFFER.equals(conflict)) {
-      return "The selected orders have different global discounts (0% counts as different): "
-          + "no single total discount can be carried to the invoice";
-    }
-    BigDecimal common = commonPercent(orderDiscounts(imports));
-    if (CONFLICT_INVOICE_OTHER_DISCOUNT.equals(conflict)) {
-      String orders = common == null || common.signum() == 0
-          ? "the selected orders have no global discount"
-          : "different from the orders' " + percent(common);
-      return "The invoice already has a total discount of " + percent(invoiceDiscount) + ", "
-          + orders + ": it is kept and also applies to the imported lines";
-    }
-    return "The invoice already has lines and no total discount: carrying the orders' "
-        + percent(common) + " would discount those lines too";
-  }
-
-  private static String percent(BigDecimal value) {
-    BigDecimal stripped = orZero(value).stripTrailingZeros();
-    return (stripped.scale() < 0 ? stripped.setScale(0) : stripped).toPlainString() + "%";
-  }
-
-  /** Sets the carried % on the header; {@code null} leaves the header untouched. */
-  private void applyGlobalDiscount(Invoice invoice, BigDecimal discount) {
-    if (discount == null) {
-      return;
-    }
-    invoice.setEtgoTotalDiscount(discount);
-    OBDal.getInstance().save(invoice);
-    OBDal.getInstance().flush();
-  }
-
-  /** Whether the invoice holds an active line other than the total-discount line. */
-  static boolean hasProductLines(Invoice invoice) {
-    for (InvoiceLine line : invoice.getInvoiceLineList()) {
-      if (!Boolean.FALSE.equals(line.isActive()) && (line.getProduct() == null
-          || !TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(line.getProduct().getId()))) {
-        return true;
-      }
-    }
-    return false;
   }
 
   // ---------------------------------------------------------------------------

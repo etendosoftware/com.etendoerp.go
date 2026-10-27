@@ -4603,7 +4603,7 @@ behaviour is unchanged. Channels as noted per field:
 ##### Orders of an invoice resolved from its lines — `linkedOrders` (ETP-5828)
 
 Both invoice headers inject `linkedOrders` on the **detail GET only** (same placement and contract as
-`linkedShipments` / `linkedReceipts`), from `AbstractInvoiceHeaderHandler#enrichLinkedOrders`: the
+`linkedShipments` / `linkedReceipts`), from `InvoiceDetailEnrichment#enrichLinkedOrders`: the
 DISTINCT orders reached through the invoice's own lines (`C_InvoiceLine.C_OrderLine_ID →
 C_OrderLine.C_Order_ID`), active lines only, excluding the `ETGO_DTO` total-discount line
 (`TotalDiscountService.DISCOUNT_PRODUCT_ID`), ordered by `DateOrdered`, `DocumentNo`. The header's

@@ -339,11 +339,11 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichLinkedReceipts(rec, context.getRecordId());
-        enrichLinkedOrders(rec, context.getRecordId()); // ETP-5828
+        InvoiceDetailEnrichment.enrichLinkedOrders(rec, context.getRecordId()); // ETP-5828
         enrichOriginInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
-        enrichHasRectifications(rec, context.getRecordId());
+        InvoiceDetailEnrichment.enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());

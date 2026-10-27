@@ -318,11 +318,11 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         enrichOriginInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
-        enrichTbaiConfigActive(rec);
-        enrichHasRectifications(rec, context.getRecordId());
+        InvoiceDetailEnrichment.enrichTbaiConfigActive(rec);
+        InvoiceDetailEnrichment.enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
-        enrichLinkedOrders(rec, context.getRecordId()); // ETP-5828
+        InvoiceDetailEnrichment.enrichLinkedOrders(rec, context.getRecordId()); // ETP-5828
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
