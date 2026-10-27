@@ -121,6 +121,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  */
 public class BatchService {
 
+  private static final String KEY_ERROR = "error";
   private static final Logger log = LogManager.getLogger(BatchService.class);
 
   /**
@@ -147,16 +148,30 @@ public class BatchService {
   }
 
   /**
-   * The write path the current thread must use: the deferred-commit one while a batch owns the
-   * transaction, core's self-committing one otherwise. Single decision point — callers such as
-   * {@link NeoCrudHandler} ask for "the current service" and never branch themselves.
+   * Whether a batch owns the current thread's transaction: writes defer their commit to it, and a
+   * failure must not roll back or close the session under it (the batch rolls back the whole set).
    *
-   * @return the {@link DefaultJsonDataService} appropriate for the current thread
+   * @return {@code true} between {@link #beginCallerOwnedTransaction()} and
+   *         {@link #endCallerOwnedTransaction()}
    */
-  static DefaultJsonDataService currentJsonService() {
-    return Boolean.TRUE.equals(CALLER_OWNS_TRANSACTION.get())
-        ? NeoBatchJsonDataService.deferredCommitInstance()
-        : DefaultJsonDataService.getInstance();
+  static boolean callerOwnsTransaction() {
+    return Boolean.TRUE.equals(CALLER_OWNS_TRANSACTION.get());
+  }
+
+  /**
+   * The write path every NEO write uses: {@link NeoBatchJsonDataService}, which defers its commit
+   * while a batch owns the transaction and commits like core otherwise. Single decision point —
+   * callers such as {@link NeoCrudHandler} ask for "the current service" and never branch
+   * themselves.
+   *
+   * <p>Since ETP-5782 a single write goes through it too, not through core's service: it is the
+   * only write path that still holds the exception when a write fails, which is what lets the
+   * failure be classified by what it is rather than by its translated text.
+   *
+   * @return the {@link DefaultJsonDataService} for the current thread
+   */
+  public static DefaultJsonDataService currentJsonService() {
+    return NeoBatchJsonDataService.deferredCommitInstance();
   }
 
   /**
@@ -283,7 +298,7 @@ public class BatchService {
 
     int status = HttpServletResponse.SC_OK;
     if (!result.optBoolean(FIELD_COMMITTED, false)) {
-      JSONObject error = result.optJSONObject("error");
+      JSONObject error = result.optJSONObject(KEY_ERROR);
       if (error != null) {
         status = error.optInt("status", HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
       } else {
@@ -461,6 +476,9 @@ public class BatchService {
             tracker, preprocessor);
         if (failure != null) {
           rollbackQuietly();
+          // ETP-5782: a refusal classified mid-batch could not be translated on the batch's
+          // aborted session; now that it is rolled back, AD message keys resolve.
+          NeoErrorResponses.retranslateBatchFailure(failure);
           return failure;
         }
       }
@@ -478,12 +496,18 @@ public class BatchService {
       ok.put("operations", opResults);
       return ok;
     } catch (Exception e) {
-      log.error("[BATCH] unexpected failure", e);
       if (!commitAttempted) {
         rollbackQuietly();
       }
-      return failureBody(-1, null, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Batch failed: " + e.getMessage(), null, tracker.durable());
+      // ETP-5782: classified like any NEO failure (a deferred trigger refusing the commit is a 422,
+      // a customization's keyed refusal too); the session is already rolled back, so the
+      // classification's own rollback is skipped (the batch still owns the transaction) and the
+      // translation reads AD_Message on a usable session. A 5xx message is sanitized: it used to
+      // forward e.getMessage() verbatim.
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST", "[BATCH] batch",
+          "Batch failed: ");
+      return failureBody(-1, null, classified.getHttpStatus(), errorMessageOf(classified),
+          refusalDetail(classified), tracker.durable());
     } finally {
       // Nested so the transaction claim is released whatever closing the scope does: a claim left
       // on the pooled thread would stop the next, unrelated request from ever committing.
@@ -593,11 +617,30 @@ public class BatchService {
     try {
       return preprocessor.preprocess(op);
     } catch (Exception e) {
-      log.error("[BATCH] preprocessor failed on op '{}' (index {})", op.opId(), op.index(), e);
-      return failureBody(op.index(), op.opId(), HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to preprocess operation '" + op.opId() + "': " + e.getMessage(), null,
-          tracker.durable());
+      // ETP-5782: classified, and a 5xx message sanitized (it used to forward e.getMessage()).
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST",
+          "[BATCH] preprocessor on op '" + op.opId() + "' (index " + op.index() + ")",
+          "Failed to preprocess operation '" + op.opId() + "': ");
+      return failureBody(op.index(), op.opId(), classified.getHttpStatus(),
+          errorMessageOf(classified), refusalDetail(classified), tracker.durable());
     }
+  }
+
+  /**
+   * The body of a classified refusal, as the failure's {@code detail} so its {@code code} and
+   * {@code messageKeys} reach the caller; {@code null} for a 5xx, whose failure carried no detail.
+   */
+  private static JSONObject refusalDetail(NeoResponse classified) {
+    return classified.getHttpStatus() < HttpServletResponse.SC_INTERNAL_SERVER_ERROR
+        ? classified.getBody()
+        : null;
+  }
+
+  /** The {@code error.message} of a NEO error response, or {@code null}. */
+  private static String errorMessageOf(NeoResponse response) {
+    JSONObject body = response.getBody();
+    JSONObject error = body != null ? body.optJSONObject(KEY_ERROR) : null;
+    return error != null ? error.optString("message", null) : null;
   }
 
   /**
@@ -755,7 +798,7 @@ public class BatchService {
     if (detail != null) {
       error.put("detail", detail);
     }
-    body.put("error", error);
+    body.put(KEY_ERROR, error);
     return body;
   }
 
@@ -935,6 +978,11 @@ public class BatchService {
     // customization, and returning to handleDefault here would have made the annotation work on
     // every path except batch. handleWithHooks falls back to handleDefault itself when nothing
     // resolves, so the generic behaviour for a genuinely uncustomised entity is unchanged.
+    // ETP-5785: same pre-dispatch check as a single REST write, before the customization runs.
+    NeoResponse refusal = NeoWritePreflight.refusalFor(ctx);
+    if (refusal != null) {
+      return refusal;
+    }
     return NeoServletSupport.handleWithHooks(sfEntity.getJavaQualifier(), ctx, crudHandler,
         NeoExtensionChannel.REST_BATCH);
   }

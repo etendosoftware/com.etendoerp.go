@@ -285,25 +285,38 @@ class NeoRecordVersionDiagnosticsTest {
    *       {@code normalizeZoneDesignator} leaves it ALONE: rewriting the {@code Z} here would
    *       manufacture {@code 2026-09-10+00:00}, which still does not parse, and would move the
    *       reported failure away from the malformed value that caused it.</li>
-   *   <li>the millisecond shapes — {@code new Date().toISOString()} in JavaScript, i.e. what a
-   *       hand-rolled JS or MCP client emits. {@code yyyy-MM-dd'T'HH:mm:ssZZZZZ} carries no
-   *       millisecond field, so these parse neither with a zone nor without one, before or after
-   *       this change. Pinned as the CURRENT answer, not a desirable one: core's own comparison
-   *       zeroes milliseconds anyway, so discarding them would cost nothing semantically.</li>
    * </ul>
    */
   @ParameterizedTest
   @ValueSource(strings = {
       "2026-08-28T12:30:15+02",
       "2026-09-10",
-      "2026-09-10Z",
-      "2026-08-28T12:30:15.123Z",
-      "2026-08-28T12:30:15.123+02:00",
-      "2026-08-28T12:30:15.123" })
+      "2026-09-10Z" })
   @DisplayName("a token core's parser cannot consume is not a conflict and does not throw")
   void unconsumableTokensAreNotStale(String clientValue) {
     storedUpdatedIs(at("UTC", Calendar.AUGUST, 28, 12, 30, 15));
     assertFalse(NeoRecordVersion.isStale(ENTITY, RECORD_ID, clientValue));
+  }
+
+  /**
+   * The audit token carries milliseconds, so two writes inside the same second still conflict. A
+   * token without them, from an older client or a list read, keeps core's to-the-second tolerance.
+   */
+  @Test
+  @DisplayName("a token with milliseconds is compared to the millisecond, one without to the second")
+  void millisecondTokensAreComparedToTheMillisecond() {
+    storedUpdatedIs(new Date(at("UTC", Calendar.AUGUST, 28, 12, 30, 15).getTime() + 581));
+    assertFalse(NeoRecordVersion.isStale(ENTITY, RECORD_ID, "2026-08-28T12:30:15.581Z"));
+    assertFalse(NeoRecordVersion.isStale(ENTITY, RECORD_ID, "2026-08-28T14:30:15.581+02:00"));
+    assertTrue(NeoRecordVersion.isStale(ENTITY, RECORD_ID, "2026-08-28T12:30:15.123Z"));
+    assertFalse(NeoRecordVersion.isStale(ENTITY, RECORD_ID, "2026-08-28T12:30:15Z"));
+  }
+
+  @Test
+  @DisplayName("core is handed the token without its fraction")
+  void forCoreDropsTheFraction() {
+    assertEquals("2026-08-28T12:30:15+02:00", NeoRecordVersion.forCore("2026-08-28T12:30:15.581+02:00"));
+    assertEquals("2026-08-28T12:30:15+02:00", NeoRecordVersion.forCore("2026-08-28T12:30:15+02:00"));
   }
 
   // ---------------------------------------------------------------------------------------------

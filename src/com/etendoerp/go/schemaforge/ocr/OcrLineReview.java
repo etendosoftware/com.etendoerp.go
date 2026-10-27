@@ -35,10 +35,10 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.TaxAnswer;
  * The lines part of the review (ETP-5715): for each line, which product it is and which tax it takes,
  * the two things the application's lines review settles.
  *
- * <p><b>Products</b> come from the similarity search ({@link OcrProductMatch}): one same-name product
- * is an {@code auto_matched} proposal, anything else is only a suggestion, and nothing similar is
- * {@code none}. Each line also offers {@code skip}, because the server rejects a line without a
- * product.</p>
+ * <p><b>Products</b> come from the similarity search ({@link OcrProductMatch}): one same-name product,
+ * or the single highest candidate at 90% similarity or more, is an {@code auto_matched} proposal;
+ * anything else is only a suggestion, and nothing similar is {@code none}. Each line also offers
+ * {@code skip}, because the server rejects a line without a product.</p>
  *
  * <p><b>Taxes</b> are never searched by label. A printed rate is resolved by the server's
  * default-tax rule for the vendor's address (one lookup per distinct rate); a line with no printed

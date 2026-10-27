@@ -63,7 +63,7 @@ class HubSpotSyncServiceTest {
   private static PendingEvent pending(String id, String account, String type, int attempts,
       Instant nextAttemptAt) {
     return new PendingEvent(id, account, type, "C-" + account, null, attempts, nextAttemptAt,
-        account + "@empresa.es", "Name");
+        account + "@empresa.es", "Name", null);
   }
 
   @Test

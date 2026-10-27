@@ -41,7 +41,7 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 /**
  * Unit tests for the optimistic-locking guards {@code NeoCrudHandler} gained in ETP-5073 / DOC-04:
  * {@code validateUpdateRequest} (the 400 for an update that carries no {@code updated}),
- * {@code detectStaleRecord} and {@code buildStaleRecordResponse} (the 409 for one that carries a
+ * {@code detectStaleRecord} and {@code NeoErrorResponses.staleRecord} (the 409 for one that carries a
  * stale value).
  *
  * <p>All three are private, so they are reached by reflection — the same approach
@@ -51,6 +51,7 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
  * is covered by {@code NeoRecordVersionTest}.
  *
  * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
+ * @covers com.etendoerp.go.schemaforge.NeoErrorResponses
  */
 class NeoCrudHandlerStaleRecordTest {
 
@@ -105,12 +106,6 @@ class NeoCrudHandlerStaleRecordTest {
     return (NeoResponse) method.invoke(handler, context, dalEntityName);
   }
 
-  private NeoResponse invokeBuildStaleRecordResponse(String message) throws Exception {
-    Method method = NeoCrudHandler.class.getDeclaredMethod("buildStaleRecordResponse",
-        String.class);
-    method.setAccessible(true);
-    return (NeoResponse) method.invoke(handler, message);
-  }
 
   /**
    * The case that matters most for not breaking every existing caller: a well-formed update must
@@ -277,7 +272,7 @@ class NeoCrudHandlerStaleRecordTest {
   @Test
   @DisplayName("the 409 body carries the discriminator, the message, and the remedy")
   void staleRecordResponseShape() throws Exception {
-    NeoResponse response = invokeBuildStaleRecordResponse("Somebody else changed this record.");
+    NeoResponse response = NeoErrorResponses.staleRecord("Somebody else changed this record.");
 
     assertEquals(HttpServletResponse.SC_CONFLICT, response.getHttpStatus());
     JSONObject body = response.getBody();

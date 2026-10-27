@@ -52,6 +52,8 @@ import org.junit.jupiter.api.Test;
  * </ul>
  *
  * @covers com.etendoerp.go.mcp.McpBillToInjector
+ * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpHookExecutor
  */
 @DisplayName("ETP-5335 — every MCP write path derives the bill-to, in the right order")
 class McpBillToInjectorCallSiteTest {
@@ -90,6 +92,34 @@ class McpBillToInjectorCallSiteTest {
         "handleCreate derives the bill-to after validateMandatoryFields, so the create is already"
             + " refused for BillTo_ID — the exact defect ETP-5335 fixes, and a field view:\"create\""
             + " never offered the agent. Move the injectIfMissing call before the mandatory check.");
+  }
+
+  /**
+   * ETP-5680: the placeholder keys the mandatory-defaults pass recorded must be copied onto the
+   * pre-hook's context after the last injector ran and before the customization is dispatched.
+   * Earlier, the key set is still growing; later, the entity's pre-hook has already decided.
+   */
+  @Test
+  @DisplayName("etendo_create forwards the fallback placeholders after the injectors, before dispatch")
+  void createPathForwardsPlaceholdersBeforeDispatch() {
+    String body = routerMethod("handleCreate");
+
+    int injector = indexOfOrFail(body, INJECTOR_CALL, "handleCreate",
+        "McpBillToInjector.injectIfMissing(...)");
+    int forward = indexOfOrFail(body,
+        Pattern.compile("McpHookExecutor\\s*\\.\\s*forwardFallbackDefaults\\s*\\("), "handleCreate",
+        "McpHookExecutor.forwardFallbackDefaults(ctx, hookCtx)");
+    int dispatch = indexOfOrFail(body,
+        Pattern.compile("NeoExtensionDispatcher\\s*\\.\\s*dispatch\\s*\\("), "handleCreate",
+        "NeoExtensionDispatcher.dispatch(customizationRequest)");
+
+    assertTrue(injector < forward,
+        "handleCreate forwards the placeholders before the injectors ran. Move the"
+            + " McpHookExecutor.forwardFallbackDefaults call after them.");
+    assertTrue(forward < dispatch,
+        "handleCreate dispatches the pre-hook before forwarding the placeholders, so the entity"
+            + " cannot tell a placeholder from a chosen value. Move"
+            + " McpHookExecutor.forwardFallbackDefaults before NeoExtensionDispatcher.dispatch.");
   }
 
   /**

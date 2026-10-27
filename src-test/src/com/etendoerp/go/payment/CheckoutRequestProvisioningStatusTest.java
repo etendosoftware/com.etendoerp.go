@@ -89,6 +89,17 @@ public class CheckoutRequestProvisioningStatusTest {
         ProvisioningFailureReason.codeOf(persisted));
   }
 
+  /** No code is no deterministic failure: a null or blank code reads as retryable, never NPE. */
+  @Test
+  public void aMissingFailureCodeReadsAsRetryable() {
+    assertTrue(ProvisioningFailureReason.isRetryableCode(null));
+    assertTrue(ProvisioningFailureReason.isRetryableCode("  "));
+    assertTrue(ProvisioningFailureReason.isRetryable(null));
+    assertTrue(ProvisioningFailureReason.isRetryable(""));
+    assertFalse(ProvisioningFailureReason.isRetryableCode(
+        ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE));
+  }
+
   @Test
   public void failureWithoutCodeReadsAsGenericRetryableFailure() {
     assertEquals(ProvisioningFailureReason.CODE_PROVISIONING_FAILED,
