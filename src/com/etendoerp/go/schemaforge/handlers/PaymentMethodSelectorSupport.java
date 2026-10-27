@@ -328,6 +328,8 @@ public final class PaymentMethodSelectorSupport {
 
       OBCriteria<FIN_PaymentMethod> dataCriteria = buildPaymentMethodCriteria(direction, search);
       dataCriteria.addOrderBy(FIN_PaymentMethod.PROPERTY_NAME, true);
+      // ETP-5903 — equal names must not let a row sit on two pages or on none.
+      dataCriteria.addOrderBy(FIN_PaymentMethod.PROPERTY_ID, true);
       dataCriteria.setMaxResults(limit);
       dataCriteria.setFirstResult(offset);
       List<FIN_PaymentMethod> rows = dataCriteria.list();
