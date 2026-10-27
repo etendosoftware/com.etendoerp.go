@@ -10559,10 +10559,12 @@ identically to sales and purchase invoices (shared `C_Invoice`/`C_Invoice_Revers
 name in the guard itself) and on every channel (`completeInvoiceIfNeeded` runs before `handle()` dispatches
 to the channel-specific response building), so no divergence to declare here either. **Same-currency
 comparison only** (product decision): a QA finding briefly had this guard converting each
-rectificativa's total to its origin's currency before summing, but the product owner confirmed a
+rectificativa's total to its origin's currency before summing — which also meant reading every
+rectificativa as a DAL entity instead of one aggregate query — but the product owner confirmed a
 rectificativa is never meant to carry a different currency than its origin — that is a functional
 misuse the UI should prevent at the source, not a case this guard needs to reconcile numerically, so
-the conversion logic was reverted.
+both the conversion logic and the per-row entity reads were reverted; the guard is plain aggregate
+SQL end to end again.
 
 **ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
 already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`
