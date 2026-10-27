@@ -98,7 +98,7 @@ class McpSchemaReportActionsTest {
         .thenThrow(new GenericPathReached());
 
     NeoHandler plain = context -> null;
-    lookup = mockStatic(NeoHandlerLookup.class);
+    lookup = mockStatic(NeoHandlerLookup.class, Mockito.CALLS_REAL_METHODS);
     lookup.when(() -> NeoHandlerLookup.byQualifierQuietly(REC_Q))
         .thenReturn(new ReconciliationHandler());
     lookup.when(() -> NeoHandlerLookup.byQualifierQuietly(PLAIN_Q)).thenReturn(plain);

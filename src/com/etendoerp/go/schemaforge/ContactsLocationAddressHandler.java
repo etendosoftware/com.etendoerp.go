@@ -163,15 +163,17 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return rejected;
     }
 
-    // Capture the pre-save key before any OBDal save
-    String preSaveKey = queryBPKey(bpId);
-
     OBContext.setAdminMode(true);
     try {
-      BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpId);
+      // ETP-5785: the partner comes from the request, so it must be the caller's (or System's).
+      // Another tenant's partner gets the very answer a missing one gets. NeoWritePreflight already
+      // refuses it before this handler runs; this is defence in depth for any other caller.
+      BusinessPartner bp = TenantOwnership.loadOwnedByClient(BusinessPartner.class, bpId);
       if (bp == null) {
         return NeoResponse.error(404, "Business Partner not found: " + bpId);
       }
+      // Capture the pre-save key before any OBDal save — only once the partner is known to be ours.
+      String preSaveKey = queryBPKey(bpId);
 
       org.openbravo.model.common.geography.Location geoLoc;
       // The country fed to checkAndAutoSetTaxKey below: what the request said on create, or
@@ -183,8 +185,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         // may already be linked to other Business Partners, and running it through
         // applyGeoLocFields would silently overwrite it with whatever partial address this one
         // caller happened to send.
-        geoLoc = OBDal.getInstance()
-            .get(org.openbravo.model.common.geography.Location.class, locationAddressId);
+        // ETP-5785: same rule for the reused address: another tenant's is answered as missing.
+        geoLoc = TenantOwnership.loadOwnedByClient(
+            org.openbravo.model.common.geography.Location.class, locationAddressId);
         if (geoLoc == null) {
           return NeoResponse.error(400, "Invalid locationAddress: " + locationAddressId);
         }

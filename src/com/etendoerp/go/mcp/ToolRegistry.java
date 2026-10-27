@@ -293,6 +293,9 @@ public class ToolRegistry {
         tools.add(buildJobStatusTool());
         tools.add(buildJobCancelTool());
       }
+    }
+    // ETP-5783: published under the scope its call requires (etendo:process), not under write.
+    if (permissions.canProcess) {
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
       tools.add(McpActionBatch.definition(
           ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));

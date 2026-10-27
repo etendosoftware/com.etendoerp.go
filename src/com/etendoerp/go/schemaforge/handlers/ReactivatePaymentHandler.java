@@ -26,8 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import javax.inject.Named;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -69,9 +67,15 @@ import com.etendoerp.psd2.bank.integration.data.PisPayment;
 
 /**
  * Shared {@code NeoHandler} for the payment Reactivate, Confirm, and Remove actions, used
- * by both the payment-in (cobros) and payment-out (pagos) windows. Any payment header
- * entity that registers {@code JAVA_QUALIFIER = 'payment-reactivate'} on its
- * {@code ETGO_SF_ENTITY} record routes through this handler.
+ * by both the payment-in (cobros) and payment-out (pagos) windows.
+ *
+ * <p><b>Binding.</b> The behaviour lives here; the {@code (spec, entity)} binding lives in the two
+ * concrete subclasses, {@link PaymentInReactivateHandler} ({@code payment-in/finPayment}) and
+ * {@link PaymentOutReactivateHandler} ({@code payment-out/header}), each carrying its own
+ * {@link com.etendoerp.go.schemaforge.NeoExtension} because the annotation is not repeatable (the
+ * same shape {@code SalesOrderLineHandler}/{@code SalesQuotationLineHandler} use). Neither
+ * ETGO_SF_ENTITY row carries a {@code Java_Qualifier} and this class has no {@code @Named}
+ * (ETP-5588), so nothing binds this class itself. See {@code neo-headless.md} §5.3.a.
  *
  * <p><b>Reactivate ({@code etprReactivatePayment}):</b> The backing process
  * {@code com.etendoerp.payment.removal.handler.ReactivatePayment} requires a mandatory
@@ -131,13 +135,10 @@ import com.etendoerp.psd2.bank.integration.data.PisPayment;
  * three multi-currency extras {@code accountCurrency} / {@code conversionRate} /
  * {@code financialTransactionAmount} — see {@link #injectMultiCurrencyExtras}.
  *
- * <p>{@code @Named} only — never a normal CDI scope. {@code lookupHandler()} reads the
- * {@code @Named} annotation off the concrete handler class; a normal-scoped bean would be a
- * Weld client proxy whose subclass does not carry the (non-{@code @Inherited}) {@code @Named},
- * so the handler would be silently skipped. {@code @Named}-only defaults to {@code @Dependent}
- * (no proxy).
+ * <p>Never give this class or its subclasses a normal CDI scope: they are {@code @Dependent}
+ * beans (bean discovery mode {@code all}), so every resolution gets a fresh instance and no Weld
+ * client proxy hides the class from {@code NeoExtensionIndex}.
  */
-@Named("payment-reactivate")
 public class ReactivatePaymentHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReactivatePaymentHandler.class);

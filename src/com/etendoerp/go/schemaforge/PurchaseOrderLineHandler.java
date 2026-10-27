@@ -18,13 +18,15 @@
 package com.etendoerp.go.schemaforge;
 
 /**
- * Customization of purchase-order/lines (ETP-5852): the behaviour lives in
+ * Customization of purchase-order/lines (ETP-5881, ETP-5852): the behaviour lives in
  * {@link OrderLineCustomization}; this class only binds it to the entity.
  *
- * <p>Until ETP-5852 purchase lines stayed on the plain {@link OrderLineHandler}: a {@code discount}
- * sent on create or update was stored but never turned into a price, and a line created with an
- * explicit {@code unitPrice} kept {@code listPrice = 0}, so no later discount had a base. Production
- * agents reported both. The form applies the same rules on purchase lines as on sales lines.
+ * <p>ETP-5881 created it to price a new purchase line from the order's price list
+ * ({@link OrderLineDiscountSupport#setStandardPriceOnCreate}) and kept the other order line rules
+ * off. ETP-5852 extends it to all of them, as on sales lines: production agents reported a
+ * {@code discount} on a purchase line that was stored but never turned into a price, and a line
+ * created with an explicit {@code unitPrice} that kept {@code listPrice = 0}, so no discount had a
+ * base. The purchase form applies the same discount and amount rules as the sales one.
  *
  * <p><b>Binding.</b> Same as {@link SalesOrderLineHandler}: resolved by {@link NeoExtension} ahead
  * of the row's {@code Java_Qualifier}, which stays {@code orderLineHandler} for the readers that

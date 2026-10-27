@@ -39,6 +39,7 @@ import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoExtensionResult;
 import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoErrorResponses;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -260,7 +261,7 @@ final class McpHookExecutor {
     // the REST paths use. The two are not equivalent (see NeoExtensionDispatcher); keeping the
     // channel's own resolver is what makes this step a routing change and not a resolution change.
     NeoExtensionResult result = NeoExtensionDispatcher.dispatch(request
-        .post(resolveEntityHandler(sfEntity))
+        .post(NeoHandlerLookup.forEntity(sfEntity))
         .withPreviousResult(NeoResponse.ok(responseJson)));
     NeoResponse response = result.response();
     if (response == null) {
@@ -273,20 +274,6 @@ final class McpHookExecutor {
     }
     return new ReadHookOutcome(
         response.getBody() != null ? response.getBody() : responseJson, null);
-  }
-
-  /**
-   * Resolve the {@link NeoHandler} registered for the entity's Java_Qualifier.
-   *
-   * <p>Delegates to {@link NeoHandlerLookup}, where the CDI lookup was moved (ETP-4793 / IMP-19)
-   * so {@code schemaforge} code — the report-callability gate — can ask a handler what it
-   * supports without depending on this package.</p>
-   *
-   * @return the matching handler, or {@code null} when the entity declares no
-   *         qualifier or no matching {@code @Named} handler is deployed
-   */
-  static NeoHandler resolveEntityHandler(SFEntity sfEntity) {
-    return NeoHandlerLookup.byQualifier(sfEntity.getJavaQualifier());
   }
 
   /**
@@ -594,8 +581,17 @@ final class McpHookExecutor {
    */
   static JSONObject runPostHook(NeoExtensionRequest request, JSONObject responseJson)
       throws JSONException {
-    NeoExtensionResult result = NeoExtensionDispatcher.dispatch(
-        request.withPreviousResult(NeoResponse.ok(responseJson)));
+    NeoExtensionResult result;
+    try {
+      result = NeoExtensionDispatcher.dispatch(
+          request.withPreviousResult(NeoResponse.ok(responseJson)));
+    } catch (RuntimeException e) {
+      // ETP-5782: the write before this post-hook is committed, so its failure must not read as a
+      // refusal to correct and re-send — the agent would repeat the write. Same answer as REST.
+      return neoResponseToMcpResult(NeoErrorResponses.afterCommitFailure(e,
+          request.context() != null ? request.context().getHttpMethod() : null,
+          "MCP afterHandle", null));
+    }
     if (result.outcome() == NeoExtensionOutcome.NO_CUSTOMIZATION) {
       return null;
     }

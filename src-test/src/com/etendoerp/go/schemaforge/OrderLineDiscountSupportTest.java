@@ -790,4 +790,157 @@ class OrderLineDiscountSupportTest {
 
     assertTrue(!json.has("discount"));
   }
+
+  // ── ETP-5881: a line sent without a price takes the price list's, on every channel ──
+
+  static Stream<Arguments> createWithoutPrice() {
+    return Stream.of(
+        Arguments.of("REST: only product, quantity and parent → catalog price",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"orderedQuantity\":2}", "12", "12", "12"),
+        Arguments.of("unitPrice 0 counts as not sent",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":0}", "12", "12", "12"),
+        Arguments.of("the caller's price wins (list price left as sent)",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":9}", "9", null, "12"),
+        Arguments.of("an explicit gross price wins",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"grossUnitPrice\":14}", null, null,
+            "12"));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("createWithoutPrice")
+  void setStandardPriceOnCreatePricesALineSentWithoutPrice(String label, String body,
+      String expectedUnit, String expectedList, String expectedStd) throws Exception {
+    JSONObject json = new JSONObject(body);
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.isSalesTransaction()).thenReturn(Boolean.TRUE);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(price.getListPrice()).thenReturn(new BigDecimal("12"));
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("12"));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
+          anyBoolean(), eq(priceList), eq(false))).thenReturn(price);
+
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+
+    assertAmount(label, expectedUnit, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, expectedStd, json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
+    assertAmount(label, expectedUnit != null && expectedList != null ? expectedList : null, json,
+        OrderLineDiscountSupport.FIELD_LIST_PRICE);
+  }
+
+  @org.junit.jupiter.api.Test
+  void setStandardPriceOnCreatePricesAPurchaseLineFromThePurchaseList() throws Exception {
+    JSONObject json = new JSONObject("{\"product\":\"P1\",\"parentId\":\"O1\"}");
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.isSalesTransaction()).thenReturn(Boolean.FALSE);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(price.getListPrice()).thenReturn(new BigDecimal("7"));
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("6"));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
+          eq(false), eq(priceList), eq(false))).thenReturn(price);
+
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+
+    assertAmount("purchase", "6", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount("purchase", "7", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+    assertAmount("purchase", "6", json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
+  }
+
+  /** A 100% discount on the client's list price is a price of 0, not a missing price. */
+  @org.junit.jupiter.api.Test
+  void setStandardPriceOnCreateKeepsAFullDiscountAtZero() throws Exception {
+    JSONObject json = new JSONObject(
+        "{\"product\":\"P1\",\"parentId\":\"O1\",\"listPrice\":20,\"discount\":100}");
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.isSalesTransaction()).thenReturn(Boolean.TRUE);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(price.getListPrice()).thenReturn(new BigDecimal("15"));
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("12"));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
+          eq(true), eq(priceList), eq(false))).thenReturn(price);
+
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+
+    assertAmount("full discount", "0", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount("full discount", "20", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+    assertAmount("full discount", "12", json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
+  }
+
+  @org.junit.jupiter.api.Test
+  void setStandardPriceOnCreateKeepsTheCallersPrice() throws Exception {
+    JSONObject json = new JSONObject(
+        "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":9}");
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+    assertAmount("kept", "9", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+  }
+
+  static Stream<Arguments> clientListPrice() {
+    return Stream.of(
+        Arguments.of("list 20, no discount", "{\"listPrice\":20}", "20"),
+        Arguments.of("list 20, discount 10", "{\"listPrice\":20,\"discount\":10}", "18"),
+        Arguments.of("unitPrice 0 counts as not sent", "{\"listPrice\":20,\"unitPrice\":0}",
+            "20"),
+        Arguments.of("the caller's unitPrice wins", "{\"listPrice\":20,\"unitPrice\":15}", "15"),
+        Arguments.of("an explicit gross price wins", "{\"listPrice\":20,\"grossUnitPrice\":24}",
+            null));
+  }
+
+  /** ETP-5881: the client's listPrice is the price; the price list is not applied to it. */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("clientListPrice")
+  void setStandardPriceOnCreateUsesTheClientListPrice(String label, String extra, String expectedUnit)
+      throws Exception {
+    JSONObject json = new JSONObject(extra);
+    json.put("product", "P1").put("parentId", "O1");
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+    assertAmount(label, expectedUnit, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, "20", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+  }
 }

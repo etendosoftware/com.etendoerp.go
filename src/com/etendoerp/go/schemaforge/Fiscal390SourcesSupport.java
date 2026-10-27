@@ -206,6 +206,7 @@ final class Fiscal390SourcesSupport {
 
   /** The classic-backed {@link LineEngine} of exercise {@code year}. */
   LineEngine classicLineEngine(String orgId, int year) {
+    // tenant-ok: orgId is dispatch's resolveEffectiveOrg() (session org), never the request
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
     if (org == null) {
       throw new OBException("Organization not found: " + orgId);

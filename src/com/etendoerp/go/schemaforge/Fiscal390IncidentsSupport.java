@@ -85,6 +85,7 @@ class Fiscal390IncidentsSupport {
           "Missing required param: id");
       return;
     }
+    // tenant-ok: request declId, but isOwned390() below 404s another client/org's declaration
     FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, declId);
     if (!owner.submissionSupport().isOwned390(decl, year)) {
       owner.servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
@@ -179,6 +180,7 @@ class Fiscal390IncidentsSupport {
       f.substituteFlag = Boolean.TRUE.equals(flag) || "Y".equals(flag);
       f.formerStatement = identification.optString("formerStatement", null);
     }
+    // tenant-ok: orgId is dispatch's resolveEffectiveOrg() (session org), never the request
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
     if (org != null) {
       loadOrganization(f, org);
@@ -285,6 +287,7 @@ class Fiscal390IncidentsSupport {
     try {
       List<Period> periods = owner.resolvePeriods(orgId, year, AbstractFiscalHandler.ANNUAL_PERIOD);
       Map<String, Date> range = AEAT390Utility.getPeriodStartEndDates(periods);
+      // tenant-ok: orgId is dispatch's resolveEffectiveOrg() (session org), never the request
       Organization org = OBDal.getInstance().get(Organization.class, orgId);
       Set<String> orgIds = OBContext.getOBContext()
           .getOrganizationStructureProvider(org.getClient().getId())

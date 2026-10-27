@@ -38,8 +38,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 
 /**
- * One pass of the demo trial notices: only owed notices are sent, and one environment failing
- * never stops the others.
+ * One pass of the demo trial notices: only owed notices are sent, a frozen trial (ETP-5847) is
+ * owed none, and one environment failing never stops the others.
  *
  * @covers com.etendoerp.go.payment.DemoTrialNoticeService
  */
@@ -108,6 +108,33 @@ public class DemoTrialNoticeServiceTest {
     assertEquals(1, result.getSent());
   }
 
+  @Test
+  public void aFrozenTrialIsOwedNoNoticeAndIsCountedApart() throws Exception {
+    FakeSource source = new FakeSource("frozen", "owed").owing("frozen", "owed").frozen("frozen");
+    FakeSender sender = new FakeSender().answer("owed", TransactionalEmailService.STATUS_SENT, 200);
+
+    DemoTrialNoticeService.Result result = new DemoTrialNoticeService(source, sender).run(NOW);
+
+    assertEquals(Arrays.asList("owed"), sender.sentTo);
+    assertEquals(Arrays.asList("frozen"), source.keptFrozen);
+    assertEquals(1, result.getFrozen());
+    assertEquals(1, result.getSent());
+    assertTrue(result.toString().contains("1 frozen"));
+  }
+
+  @Test
+  public void aFailureLookingAfterAFrozenTrialIsRecordedAndTheRunGoesOn() throws Exception {
+    FakeSource source = new FakeSource("frozen", "owed").owing("owed").frozen("frozen")
+        .failingOn("frozen");
+    FakeSender sender = new FakeSender().answer("owed", TransactionalEmailService.STATUS_SENT, 200);
+
+    DemoTrialNoticeService.Result result = new DemoTrialNoticeService(source, sender).run(NOW);
+
+    assertEquals(1, result.getFailed());
+    assertEquals(1, result.getSent());
+    assertEquals(1, sender.discards);
+  }
+
   private static NeoResponse response(int httpStatus, String status) throws JSONException {
     JSONObject data = new JSONObject().put("status", status).put("message", "detail");
     return new NeoResponse(httpStatus,
@@ -118,6 +145,8 @@ public class DemoTrialNoticeServiceTest {
     private final List<String> candidates;
     private final Set<String> owing = new HashSet<>();
     private final Set<String> failing = new HashSet<>();
+    private final Set<String> frozen = new HashSet<>();
+    private final List<String> keptFrozen = new ArrayList<>();
 
     FakeSource(String... candidates) {
       this.candidates = Arrays.asList(candidates);
@@ -126,6 +155,23 @@ public class DemoTrialNoticeServiceTest {
     FakeSource owing(String... clientIds) {
       owing.addAll(Arrays.asList(clientIds));
       return this;
+    }
+
+    FakeSource frozen(String... clientIds) {
+      frozen.addAll(Arrays.asList(clientIds));
+      return this;
+    }
+
+    @Override
+    public boolean keepFrozenTrial(String clientId, Instant now) {
+      if (!frozen.contains(clientId)) {
+        return false;
+      }
+      if (failing.contains(clientId)) {
+        throw new IllegalStateException("cannot open the periods of " + clientId);
+      }
+      keptFrozen.add(clientId);
+      return true;
     }
 
     FakeSource failingOn(String clientId) {

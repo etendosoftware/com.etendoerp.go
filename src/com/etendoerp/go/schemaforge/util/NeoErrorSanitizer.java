@@ -47,7 +47,7 @@ public final class NeoErrorSanitizer {
    * — it must satisfy that same regex or the import UI would misclassify it as a
    * genuine failure instead of a skippable duplicate.</p>
    */
-  static final String DUPLICATE_KEY_ERROR = "A record with this value already exists. This value must be unique.";
+  public static final String DUPLICATE_KEY_ERROR = "A record with this value already exists. This value must be unique.";
 
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
 

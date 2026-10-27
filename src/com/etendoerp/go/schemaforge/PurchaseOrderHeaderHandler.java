@@ -28,6 +28,8 @@ import org.openbravo.model.common.order.Order;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.model.common.businesspartner.Location;
+import org.openbravo.model.common.order.Order;
 import java.util.Set;
 
 /**
@@ -127,10 +129,16 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
-    // ETP-5852: the vendor's only address (and its bill-to) on a create without one, as the form
-    // selects it; purchase orders had no fill at all, on any channel.
+    // ETP-5881 / ETP-5852: a create that names a vendor but no address (REST, the public API and
+    // MCP; the SPA always sends one) gets the vendor's only address and its bill-to, as on sales
+    // orders (ETP-5703). MCP also runs it before its mandatory check (resolveServerCreateFields).
     AbstractOrderHeaderHandler.fillPartnerLocations(context);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
+    // ETP-5726: MCP only — a draft order's currency may not leave its price list in another one.
+    NeoResponse currencyRefusal = OrderCurrencyPriceListGuard.refuseCurrencyOutsidePriceList(context);
+    if (currencyRefusal != null) {
+      return currencyRefusal;
+    }
     // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
     // with side effects runs.
     NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);
