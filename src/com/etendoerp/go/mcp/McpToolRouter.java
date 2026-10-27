@@ -566,6 +566,15 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-5852 (M-51): a record outside the spec's own tab filter is not a record of this spec,
+    // as etendo_list already treats it — a purchase invoice id read through sales-invoice/header
+    // is not a sales invoice. Core's read by id ignores the tab filter, so it is judged here,
+    // before any customization or the generic read sees the id.
+    JSONObject outOfScope = McpSpecScope.refusalFor(specName, entityName, sfEntity.getADTab(),
+        recordId);
+    if (outOfScope != null) {
+      return wrapAsErrorContent(outOfScope);
+    }
 
     // ETP-5405 + ETP-5415 (D13): see the twin call in handleList. recordId is what lets a
     // customization tell a single-record read from a list, exactly as it does in the post phase.
