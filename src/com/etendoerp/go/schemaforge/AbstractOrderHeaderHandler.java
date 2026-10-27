@@ -493,7 +493,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
     syncLineCurrenciesOnCurrencyPatch(context);
     if (!"GET".equals(context.getHttpMethod())) {
-      return null;
+      return context.isMcpOrigin() && "PUT".equals(context.getHttpMethod())
+          ? applyTotalDiscountToUpdate(context) : null;
     }
     NeoResponse previousResult = context.getPreviousResult();
     if (previousResult == null || previousResult.getBody() == null) {
@@ -528,6 +529,36 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       log.error("Error post-processing order header GET response (id={})", context.getRecordId(), e);
       return null;
     }
+  }
+
+  /**
+   * ETP-5727 (in ETP-5852): the record an MCP update answers with shows the same
+   * {@code grandTotalAmount} a read shows right after it — with the draft's pending total discount
+   * applied (see {@link #applyTotalDiscountToRecord}). Before, the update answered the undiscounted
+   * total and only the next read showed the discounted one. MCP only: the SPA reads the record
+   * again after saving.
+   *
+   * @return always {@code null}: the response body is patched in place
+   */
+  private NeoResponse applyTotalDiscountToUpdate(NeoContext context) {
+    NeoResponse previous = context.getPreviousResult();
+    JSONObject wrapper = previous == null || previous.getBody() == null ? null
+        : previous.getBody().optJSONObject("response");
+    JSONArray data = wrapper == null ? null : wrapper.optJSONArray("data");
+    if (data == null || data.length() == 0) {
+      return null;
+    }
+    try {
+      // Patched in place and declined (null): the MCP caller goes on shaping this same body
+      // (flatten, {data:{…}}, url), which a replacement response would skip.
+      for (int i = 0; i < data.length(); i++) {
+        applyTotalDiscountToRecord(data.getJSONObject(i));
+      }
+    } catch (Exception e) {
+      log.error("Error applying the total discount to an update response (id={})",
+          context.getRecordId(), e);
+    }
+    return null;
   }
 
   /**

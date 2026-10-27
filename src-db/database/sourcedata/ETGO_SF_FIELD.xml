@@ -52082,6 +52082,7 @@
 <!--82437857400A4C1A84DE083DAFF822C7-->  <JAVA_QUALIFIER><![CDATA[etgoTotalDiscount]]></JAVA_QUALIFIER>
 <!--82437857400A4C1A84DE083DAFF822C7-->  <SEQNO><![CDATA[920]]></SEQNO>
 <!--82437857400A4C1A84DE083DAFF822C7-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--82437857400A4C1A84DE083DAFF822C7-->  <AGENT_PROMPT><![CDATA[Whole-document discount, in percent. It applies to the grand total with tax: grandTotalAmount = line totals with tax x (1 - etgoTotalDiscount / 100). While the document is a draft the discount shows only on grandTotalAmount (also in the etendo_update answer); summedLineAmount and the lines do not change. On Complete it becomes one negative discount line per tax group, proportional to that group's net amount.]]></AGENT_PROMPT>
 <!--82437857400A4C1A84DE083DAFF822C7-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--82437857400A4C1A84DE083DAFF822C7--></ETGO_SF_FIELD>
 
@@ -57021,6 +57022,7 @@
 <!--8E5F5DD4AFEE44B39E97124847B27B86-->  <JAVA_QUALIFIER><![CDATA[etgoTotalDiscount]]></JAVA_QUALIFIER>
 <!--8E5F5DD4AFEE44B39E97124847B27B86-->  <SEQNO><![CDATA[920]]></SEQNO>
 <!--8E5F5DD4AFEE44B39E97124847B27B86-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--8E5F5DD4AFEE44B39E97124847B27B86-->  <AGENT_PROMPT><![CDATA[Whole-document discount, in percent. It applies to the grand total with tax: grandTotalAmount = line totals with tax x (1 - etgoTotalDiscount / 100). While the document is a draft the discount shows only on grandTotalAmount (also in the etendo_update answer); summedLineAmount and the lines do not change. On Complete it becomes one negative discount line per tax group, proportional to that group's net amount.]]></AGENT_PROMPT>
 <!--8E5F5DD4AFEE44B39E97124847B27B86-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--8E5F5DD4AFEE44B39E97124847B27B86--></ETGO_SF_FIELD>
 
@@ -65418,6 +65420,7 @@
 <!--A3F2A5BA473B46D182C898D5D26F3BC7-->  <JAVA_QUALIFIER><![CDATA[etgoTotalDiscount]]></JAVA_QUALIFIER>
 <!--A3F2A5BA473B46D182C898D5D26F3BC7-->  <SEQNO><![CDATA[920]]></SEQNO>
 <!--A3F2A5BA473B46D182C898D5D26F3BC7-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--A3F2A5BA473B46D182C898D5D26F3BC7-->  <AGENT_PROMPT><![CDATA[Whole-document discount, in percent. It applies to the grand total with tax: grandTotalAmount = line totals with tax x (1 - etgoTotalDiscount / 100). While the document is a draft the discount shows only on grandTotalAmount (also in the etendo_update answer); summedLineAmount and the lines do not change. On Complete it becomes one negative discount line per tax group, proportional to that group's net amount.]]></AGENT_PROMPT>
 <!--A3F2A5BA473B46D182C898D5D26F3BC7-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--A3F2A5BA473B46D182C898D5D26F3BC7--></ETGO_SF_FIELD>
 
