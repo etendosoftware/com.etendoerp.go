@@ -198,6 +198,7 @@ com.etendoerp.go.schemaforge.util.NeoTrlTest
 com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelperTest
 com.etendoerp.go.schemaforge.util.OwnerSupportTest
 com.etendoerp.go.schemaforge.util.RoleAccessMatrixTest
+com.etendoerp.go.schemaforge.webhooks.McpFeedbackTriageWebhooksIntegrationTest
 com.etendoerp.go.schemaforge.webhooks.PopulateSpecHelperTest
 com.etendoerp.go.schemaforge.webhooks.SFAssignUserRolesTest
 com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypassTest

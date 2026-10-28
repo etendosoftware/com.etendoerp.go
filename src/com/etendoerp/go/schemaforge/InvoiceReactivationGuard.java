@@ -102,7 +102,7 @@ public final class InvoiceReactivationGuard {
     }
     try {
       Block block = computeBlock(invoiceId);
-      return block == null ? null : reject(block.fiscalSystem, block.rectificativaDocNos);
+      return block == null ? null : reject(block.fiscalSystems, block.rectificativaDocNos);
     } catch (JSONException e) {
       log.warn("Could not evaluate the reactivation guard for invoice {}: {}", invoiceId,
           e.getMessage());
@@ -131,15 +131,15 @@ public final class InvoiceReactivationGuard {
       if (invoice == null || !Boolean.TRUE.equals(invoice.isProcessed())) {
         return null;
       }
-      String fiscalSystem = fiscallyAcceptedSystem(invoice);
-      if (fiscalSystem == null) {
+      List<String> fiscalSystems = fiscallyAcceptedSystems(invoice);
+      if (fiscalSystems.isEmpty()) {
         return null;
       }
       List<String> rectificativaDocNos = completedRectificativaDocNos(invoiceId);
       if (rectificativaDocNos.isEmpty()) {
         return null;
       }
-      return new Block(fiscalSystem, rectificativaDocNos);
+      return new Block(fiscalSystems, rectificativaDocNos);
     } catch (RuntimeException e) {
       log.warn("Could not evaluate the reactivation guard for invoice {}: {}", invoiceId,
           e.getMessage());
@@ -147,13 +147,25 @@ public final class InvoiceReactivationGuard {
     }
   }
 
-  /** The reason a reactivation would be refused: which fiscal system, and which rectificativa(s). */
+  /**
+   * The reason a reactivation would be refused: which fiscal system(s) accepted the invoice —
+   * every one of them (ETP-5745 CP-9), raw in {@link #fiscalSystems} and also comma-joined in
+   * {@link #fiscalSystem} for the GET-only {@code reactivationBlockedFiscalSystem} signal
+   * ({@link #enrichReactivationBlock}) — and which rectificativa(s).
+   *
+   * <p>{@code reject()} uses the raw list, not the joined string: {@code messageParams.fiscalSystem}
+   * must stay a real array (like {@code rectificativas} already is) so the frontend can apply a
+   * locale-aware conjunction ("SII y TicketBAI") instead of a flat comma join — see
+   * {@code translateInvoiceReactivateFiscalRectified} in {@code backendErrors.js}.
+   */
   static final class Block {
     final String fiscalSystem;
+    final List<String> fiscalSystems;
     final List<String> rectificativaDocNos;
 
-    Block(String fiscalSystem, List<String> rectificativaDocNos) {
-      this.fiscalSystem = fiscalSystem;
+    Block(List<String> fiscalSystems, List<String> rectificativaDocNos) {
+      this.fiscalSystems = fiscalSystems;
+      this.fiscalSystem = String.join(", ", fiscalSystems);
       this.rectificativaDocNos = rectificativaDocNos;
     }
   }
@@ -165,6 +177,14 @@ public final class InvoiceReactivationGuard {
    * button can skip its pre-unpost step entirely instead of un-posting a reactivation it already
    * knows will be refused.
    *
+   * <p>{@code reactivationBlockedFiscalSystem} is a real {@code JSONArray} (ETP-5745, matching
+   * {@code reject()}'s own {@code messageParams.fiscalSystem}), NOT the comma-joined
+   * {@link Block#fiscalSystem} — both of this field's SPA consumers
+   * ({@code DetailMoreActionsMenu.jsx}'s pre-unpost check, {@code useInvoiceWindow.js}'s bulk-bar
+   * row preview) build the SAME translated sentence the live 422 shows, and need the identical
+   * locale-aware conjunction join ({@code joinWithConjunction} in {@code backendErrors.js}) to stay
+   * consistent with it — a backend-side comma join can't know the SPA's active locale.
+   *
    * @param rec the invoice record JSON object; modified in-place
    * @param invoiceId the primary key of the invoice being enriched
    */
@@ -172,7 +192,7 @@ public final class InvoiceReactivationGuard {
     Block block = computeBlock(invoiceId);
     rec.put("reactivationBlocked", block != null);
     if (block != null) {
-      rec.put("reactivationBlockedFiscalSystem", block.fiscalSystem);
+      rec.put("reactivationBlockedFiscalSystem", new JSONArray(block.fiscalSystems));
       rec.put("reactivationBlockedRectificativas", new JSONArray(block.rectificativaDocNos));
     }
   }
@@ -209,34 +229,37 @@ public final class InvoiceReactivationGuard {
   }
 
   /**
-   * The human-readable name of the fiscal system that accepted this invoice, or {@code null} when
-   * none of the three has an accepted status. Reading all three stored columns is cheap and
-   * harmless even for a system the org never configured (the column then simply stays blank).
+   * EVERY fiscal system that accepted this invoice, in a stable order (SII, Verifactu,
+   * TicketBAI), or an empty list when none has an accepted status. Reading all three stored
+   * columns is cheap and harmless even for a system the org never configured (the column then
+   * simply stays blank).
    *
-   * <p><b>Precedence when more than one system is simultaneously accepted</b> (e.g. an org
-   * migrating between fiscal systems momentarily has both columns set): the if/else-if chain
-   * below deterministically picks SII first, then Verifactu, then TicketBAI. This is a
-   * documentation clarification only — the order itself is unchanged.
+   * <p><b>ETP-5745 CP-9 fix:</b> an invoice accepted by more than one fiscal system at once (an
+   * org migrating between systems, or one simply running two in parallel) used to be reported as
+   * accepted by SII alone — the former if/else-if chain stopped at the first match, so a user
+   * reactivating an invoice that both SII AND TicketBAI had accepted only ever saw "SII" in the
+   * refusal message. Every accepted system is now collected and joined (see {@link #reject}).
    */
-  private static String fiscallyAcceptedSystem(Invoice invoice) {
+  private static List<String> fiscallyAcceptedSystems(Invoice invoice) {
+    List<String> systems = new ArrayList<>();
     String sii = invoice.getAeatsiiEstado();
     if (SII_ACCEPTED_CORRECT.equals(sii) || SII_ACCEPTED_WITH_ERRORS.equals(sii)) {
-      return "SII";
+      systems.add("SII");
     }
     String verifactu = invoice.getEtvfacInvoiceStatus();
     if (VERIFACTU_ACCEPTED.equals(verifactu) || VERIFACTU_ACCEPTED_WITH_ERRORS.equals(verifactu)) {
-      return "Verifactu";
+      systems.add("Verifactu");
     }
     String tbai = invoice.getETGOTbaiStatus();
     if (TBAI_ACCEPTED_RECEIVED.equals(tbai)) {
-      return "TicketBAI";
+      systems.add("TicketBAI");
     }
-    return null;
+    return systems;
   }
 
   /**
    * The document numbers of every COMPLETED rectificativa linked back to {@code invoiceId} via
-   * {@code C_Invoice_Reverse} — the same table {@link AbstractInvoiceHeaderHandler#enrichOriginInvoice}
+   * {@code C_Invoice_Reverse} — the same table {@link InvoiceRectificationLinkSupport#enrichOriginInvoice}
    * reads, in the opposite direction: here {@code invoiceId} is the ORIGIN
    * ({@code reversed_c_invoice_id}), and the rows returned are its rectificativa(s)
    * ({@code c_invoice_id}). A rectificativa still in draft is deliberately excluded by the
@@ -278,19 +301,25 @@ public final class InvoiceReactivationGuard {
    * also protects an ACTION-endpoint document action, not a CRUD field update (which is
    * {@link CompletedInvoiceWriteFence}'s {@code error}-wrapped shape instead).
    */
-  private static NeoResponse reject(String fiscalSystem, List<String> rectificativaDocNos)
+  private static NeoResponse reject(List<String> fiscalSystems, List<String> rectificativaDocNos)
       throws JSONException {
+    // Plain English fallback only (never shown when the SPA's locale-aware translation runs) —
+    // a straight comma join is fine here, there is no template/locale concern for this one string.
+    String fiscalSystemList = String.join(", ", fiscalSystems);
     String rectificativaList = String.join(", ", rectificativaDocNos);
     String plural = rectificativaDocNos.size() > 1 ? "invoices" : "invoice";
     String message = "This invoice cannot be reactivated because it has already been accepted by "
-        + fiscalSystem + " and is rectified by " + plural + " " + rectificativaList + ".";
+        + fiscalSystemList + " and is rectified by " + plural + " " + rectificativaList + ".";
 
     JSONObject body = new JSONObject();
     body.put("success", false);
     body.put("message", message);
     body.put("messageKeys", new JSONArray(List.of(MSG_REACTIVATE_FISCAL_RECTIFIED)));
     JSONObject messageParams = new JSONObject();
-    messageParams.put("fiscalSystem", fiscalSystem);
+    // A real JSONArray, not pre-joined — ETP-5745: lets the frontend apply a locale-aware
+    // conjunction ("SII y TicketBAI") instead of the generic comma join every other array-valued
+    // messageParam gets (see translateInvoiceReactivateFiscalRectified in backendErrors.js).
+    messageParams.put("fiscalSystem", new JSONArray(fiscalSystems));
     messageParams.put("rectificativas", new JSONArray(rectificativaDocNos));
     body.put("messageParams", messageParams);
     return NeoResponse.error(NeoActionContract.SC_UNPROCESSABLE, body);

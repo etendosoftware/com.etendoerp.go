@@ -61,6 +61,7 @@ import org.openbravo.test.base.OBBaseTest;
  * GET-response enrichment ({@code enrichOriginInvoice}) surfaces BOTH origins.
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceRectificationLinkSupport
  */
 public class AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest extends OBBaseTest {
 
@@ -88,15 +89,15 @@ public class AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest extends OB
     }
 
     public void callCapture(NeoContext ctx) {
-      captureOriginInvoice(ctx);
+      rectificationLinks.captureOriginInvoice(ctx);
     }
 
     public void callPersist(NeoContext ctx) {
-      persistOriginInvoice(ctx);
+      rectificationLinks.persistOriginInvoice(ctx);
     }
 
     public void callEnrich(JSONObject rec, String id) throws Exception {
-      enrichOriginInvoice(rec, id);
+      rectificationLinks.enrichOriginInvoice(rec, id);
     }
   }
 
