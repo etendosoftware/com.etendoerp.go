@@ -4045,6 +4045,15 @@ DB column name (upper-cased), consulted identically for any entity that happens 
 the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
 per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
 
+**Update semantics and concurrency (ETP-6012).** `ContactsLocationAddressHandler` serves `PUT` and
+`PATCH` itself, so the default CRUD's stale-record check never runs for this entity; the handler
+runs it instead, against `C_BPartner_Location.Updated`, whenever the body carries `updated` (the
+public API always sends it, from `If-Match`; the UI form may not), and refuses a mismatch with the
+same 409 `stale_record`. `PUT` replaces the whole address (an omitted address field is cleared);
+`PATCH` first fills every address field it omits with the stored value. An address-only edit
+touches only `C_Location`, so the handler bumps `C_BPartner_Location.Updated` on every update, and
+the create/update response carries the new `updated` token, so the caller gets a fresh ETag.
+
 **Pending DB update — confirmed still outstanding.** The field-level `AGENT_PROMPT` on
 `ETGO_SF_FIELD` for `C_Location_ID` still has not been updated in the database to mention the 3
 structured fields, the mandatory-together rule, or `bp-location`'s separate handler-owned path (no

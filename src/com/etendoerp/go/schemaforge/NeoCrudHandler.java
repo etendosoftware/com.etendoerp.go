@@ -744,7 +744,7 @@ class NeoCrudHandler {
    * user-facing wording belongs to the client's own locale files, which is where it is already
    * translated.
    */
-  private static final String STALE_RECORD_MESSAGE =
+  static final String STALE_RECORD_MESSAGE =
       "This record was modified by someone else after you read it. Your changes were not saved.";
 
   /**
