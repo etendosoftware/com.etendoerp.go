@@ -80,13 +80,9 @@ final class NeoWritePreflight {
    * @return the response to send instead of dispatching, or {@code null}
    */
   static NeoResponse refusalFor(NeoContext context) {
-    if (context != null && ("PUT".equals(context.getHttpMethod())
-        || "PATCH".equals(context.getHttpMethod()) || "DELETE".equals(context.getHttpMethod()))) {
-      NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(
-          context.getSfEntity(), context.getRecordId());
-      if (targetRefusal != null) {
-        return targetRefusal;
-      }
+    NeoResponse targetRefusal = targetRecordRefusal(context);
+    if (targetRefusal != null) {
+      return targetRefusal;
     }
     if (context == null || !isCreateOrUpdate(context.getHttpMethod())
         || OBContext.getOBContext() == null) {
@@ -100,6 +96,40 @@ final class NeoWritePreflight {
     String bodyParent = bodyParentId(context.getRequestBody());
     String queryParent = queryParentId(context.getQueryParams());
     List<JSONObject> fieldSets = dalKeyedCopies(context, adTab);
+    String refusal = ownershipRefusalFor(adTab, fieldSets, bodyParent, queryParent);
+    if (refusal != null) {
+      return toResponse(refusal);
+    }
+    return activenessRefusalFor(adTab, fieldSets);
+  }
+
+  /**
+   * The refusal for a PUT/PATCH/DELETE targeting a record {@link NeoActionRecordGuard} blocks, or
+   * {@code null} to proceed with the rest of the preflight.
+   *
+   * @param context the CRUD request context, possibly {@code null}
+   * @return the response to send instead of dispatching, or {@code null}
+   */
+  private static NeoResponse targetRecordRefusal(NeoContext context) {
+    if (context == null || !("PUT".equals(context.getHttpMethod())
+        || "PATCH".equals(context.getHttpMethod()) || "DELETE".equals(context.getHttpMethod()))) {
+      return null;
+    }
+    return NeoActionRecordGuard.writeRefusalFor(context.getSfEntity(), context.getRecordId());
+  }
+
+  /**
+   * The {@link NeoReferenceOwnership} refusal message for the given field sets and parents, or
+   * {@code null} when every reference the request sets belongs to the caller's client or System.
+   *
+   * @param adTab the AD tab the write targets
+   * @param fieldSets the DAL-keyed copies of the request body, caller-only fields
+   * @param bodyParent the {@code parentId} read from the request body, or {@code null}
+   * @param queryParent the {@code parentId} read from the query string, or {@code null}
+   * @return the ownership refusal message, or {@code null} to proceed
+   */
+  private static String ownershipRefusalFor(Tab adTab, List<JSONObject> fieldSets,
+      String bodyParent, String queryParent) {
     String refusal = NeoReferenceOwnership.refuseUnownedReferences(adTab, fieldSets.get(0),
         bodyParent != null ? bodyParent : queryParent);
     for (int i = 1; refusal == null && i < fieldSets.size(); i++) {
@@ -110,12 +140,21 @@ final class NeoWritePreflight {
       // A customization may read either; both must be the caller's.
       refusal = NeoReferenceOwnership.refuseUnownedReferences(adTab, null, queryParent);
     }
-    if (refusal != null) {
-      return toResponse(refusal);
-    }
-    // ETP-5802: every reference the request SETS must not point at an inactive row. Checked on
-    // the same DAL-keyed, caller-only field sets as ownership above — an update that never touches
-    // an already-inactive reference elsewhere on the record is not re-validated (CP-6).
+    return refusal;
+  }
+
+  /**
+   * The {@link NeoReferenceActiveness} refusal (ETP-5802) for the first field set whose reference
+   * points at an inactive row, or {@code null} when none does.
+   *
+   * <p>Checked on the same DAL-keyed, caller-only field sets as ownership above — an update that
+   * never touches an already-inactive reference elsewhere on the record is not re-validated (CP-6).
+   *
+   * @param adTab the AD tab the write targets
+   * @param fieldSets the DAL-keyed copies of the request body, caller-only fields
+   * @return the response to send instead of dispatching, or {@code null} to proceed
+   */
+  private static NeoResponse activenessRefusalFor(Tab adTab, List<JSONObject> fieldSets) {
     for (JSONObject fieldSet : fieldSets) {
       NeoReferenceActiveness.InactiveReference inactive =
           NeoReferenceActiveness.findInactiveReference(adTab, fieldSet);

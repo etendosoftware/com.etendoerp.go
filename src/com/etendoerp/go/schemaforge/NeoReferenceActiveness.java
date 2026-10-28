@@ -191,12 +191,20 @@ public final class NeoReferenceActiveness {
       this.targetEntityName = targetEntityName;
     }
 
-    /** The DAL property name the write request set — the key to report back to the caller. */
+    /**
+     * The DAL property name the write request set — the key to report back to the caller.
+     *
+     * @return the DAL property name the write request set
+     */
     public String fieldName() {
       return fieldName;
     }
 
-    /** The DAL entity name of the inactive row the field pointed at, for the refusal message. */
+    /**
+     * The DAL entity name of the inactive row the field pointed at, for the refusal message.
+     *
+     * @return the DAL entity name of the inactive row the field pointed at
+     */
     public String targetEntityName() {
       return targetEntityName;
     }
