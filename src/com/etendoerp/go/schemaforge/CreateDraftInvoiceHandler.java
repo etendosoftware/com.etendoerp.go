@@ -946,6 +946,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
 
+    // ETP-6002: on the sales side the shipment lines are planned with the one shared rule BEFORE
+    // the lines exist (the pending counts drafts, this invoice's new lines included afterwards).
+    // Chosen by direction (IsSOTrx), never by window; purchase keeps the MAX backfill below.
+    Map<String, List<OrderLineMovementAllocation.Allocation>> shipmentPlan =
+        Boolean.TRUE.equals(order.isSalesTransaction())
+            ? InvoiceLineLinker.planSalesShipmentLines(selectedLines)
+            : null;
+
     // Delegate line creation to native Etendo process — handles taxes, gross prices, IVA-included, etc.
     // UpdatePricesAndAmounts (a CreateLinesFromProcessHook) reads getInvoice().getPriceList() and
     // getInvoice().getCurrency() off this already-saved invoice, so the override above is picked
@@ -967,7 +975,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // ETP-5714: a source line without a list price gives a copied line the form would not store
     getSupport().alignLineListPrices(invoice, null);
 
-    InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
+    if (shipmentPlan != null) {
+      InvoiceLineLinker.linkSalesInvoiceLinesToPlannedShipments(invoice, shipmentPlan);
+    } else {
+      InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
+    }
 
     OBDal.getInstance().getSession().refresh(invoice);
     invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);

@@ -79,8 +79,10 @@ class InvoiceRectificationLinkSupport {
    * {@code NeoCrudHandler#executePostCreate}.
    *
    * <p>ETP-4919: {@code originInvoices} (a JSON array of invoice ids) is the current shape sent
-   * by the "Import from Source Invoice" popup — a rectificativa can be linked to more than one
-   * source invoice across separate import runs. {@code originInvoice} (a single id) is kept as a
+   * by the purchase "Import from Source Invoice" popup — a rectificativa can be linked to more
+   * than one source invoice across separate import runs. The sales popup no longer sends it: a
+   * sales rectificative is linked by its line creates (ETP-6002,
+   * {@link SalesRectificativeLineLinkSupport}). {@code originInvoice} (a single id) is kept as a
    * backward-compatible alias: if present, its id is folded into the same captured set. Both
    * keys may be present at once; ids are de-duplicated.
    *
@@ -202,13 +204,32 @@ class InvoiceRectificationLinkSupport {
       log.warn("Cannot create reverse link: invoice={} origin={}", invoiceId, originInvoiceId);
       return;
     }
+    ensureReverseLink(invoice, origin);
+  }
+
+  /**
+   * Saves a {@code C_Invoice_Reverse} row tying {@code invoice} (the rectificative) to
+   * {@code origin} (the invoice it rectifies) unless that exact pair already exists. The one
+   * dedupe-then-create of the link, shared by the header PATCH ({@link #persistOriginInvoice}), the
+   * line create of a sales rectificative ({@link SalesRectificativeLineLinkSupport}, ETP-6002) and
+   * the invoice created from a return document
+   * ({@link ReturnInvoiceSupport#linkRectifiedInvoices}).
+   *
+   * <p>Does not flush: the caller decides when {@code C_INVOICE_REVERSE_TRG} runs, and so where its
+   * refusal (processed invoice, different business partner) surfaces.
+   *
+   * @param invoice the rectificative invoice, never {@code null}
+   * @param origin  the invoice it rectifies, never {@code null}
+   * @return {@code true} when a new row was saved, {@code false} when the pair already existed
+   */
+  static boolean ensureReverseLink(Invoice invoice, Invoice origin) {
     List<ReversedInvoice> existing = OBDal.getInstance()
         .createCriteria(ReversedInvoice.class)
         .add(Restrictions.eq(ReversedInvoice.PROPERTY_INVOICE, invoice))
         .add(Restrictions.eq(ReversedInvoice.PROPERTY_REVERSEDINVOICE, origin))
         .list();
     if (!existing.isEmpty()) {
-      return;
+      return false;
     }
     ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
     link.setClient(invoice.getClient());
@@ -216,6 +237,7 @@ class InvoiceRectificationLinkSupport {
     link.setInvoice(invoice);
     link.setReversedInvoice(origin);
     OBDal.getInstance().save(link);
+    return true;
   }
 
   // ---------------------------------------------------------------------------

@@ -16,9 +16,21 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 /**
@@ -69,11 +81,110 @@ final class InvoiceLineLinker {
   }
 
   /**
+   * SALES "create invoice from order" (ETP-6002): plans, BEFORE the invoice lines exist, which
+   * shipment lines each plain order-line entry of the native selection would take under the one
+   * rule ({@link OrderLineMovementAllocation}: oldest pending completed shipment line first, split
+   * over the next ones). Computed before the native process runs because the pending quantity
+   * counts draft invoices: afterwards the invoice's own new lines would hold every shipment line
+   * and nothing would look pending. Entries already bound to a movement line
+   * ({@code shipmentInOutLine}) are left out.
+   *
+   * @param selectedLines the native selection, {@code [{id: orderLineId, orderedQuantity, ...}]}
+   * @return order line id → its allocations, oldest first; order lines with none are absent
+   */
+  static Map<String, List<OrderLineMovementAllocation.Allocation>> planSalesShipmentLines(
+      JSONArray selectedLines) {
+    Map<String, List<OrderLineMovementAllocation.Allocation>> plan = new LinkedHashMap<>();
+    if (selectedLines == null) {
+      return plan;
+    }
+    for (int i = 0; i < selectedLines.length(); i++) {
+      JSONObject entry = selectedLines.optJSONObject(i);
+      if (entry == null || entry.has(SHIPMENT_INOUT_LINE)) {
+        continue;
+      }
+      String orderLineId = entry.optString("id", null);
+      BigDecimal quantity = quantityOf(entry.optString(ORDERED_QUANTITY, null));
+      OrderLine orderLine = orderLineId == null ? null
+          : OBDal.getInstance().get(OrderLine.class, orderLineId);
+      List<OrderLineMovementAllocation.Allocation> allocations =
+          OrderLineMovementAllocation.allocateOrderLine(orderLine, quantity);
+      if (!allocations.isEmpty()) {
+        plan.put(orderLineId, allocations);
+      }
+    }
+    return plan;
+  }
+
+  /**
+   * SALES counterpart of {@link #linkInvoiceLinesToExistingInouts}: links each line of
+   * {@code invoice} that has an order line and no shipment line yet to the oldest shipment line
+   * {@link #planSalesShipmentLines} assigned to that order line which no line of this invoice
+   * already points at (the native process may have bound some lines itself). Replaces the
+   * {@code MAX(M_InOutLine_ID)} backfill, which could pick a shipment line another invoice had
+   * already billed. An existing invoice line is never split: a line holding more than the chosen
+   * shipment line's share is still linked to it alone.
+   */
+  static void linkSalesInvoiceLinesToPlannedShipments(Invoice invoice,
+      Map<String, List<OrderLineMovementAllocation.Allocation>> plan) {
+    if (invoice == null || plan == null || plan.isEmpty()) {
+      return;
+    }
+    List<InvoiceLine> lines = invoice.getInvoiceLineList();
+    Set<String> taken = new HashSet<>();
+    for (InvoiceLine line : lines) {
+      if (line.getGoodsShipmentLine() != null) {
+        taken.add(line.getGoodsShipmentLine().getId());
+      }
+    }
+    boolean changed = false;
+    for (InvoiceLine line : lines) {
+      if (line.getGoodsShipmentLine() != null || line.getSalesOrderLine() == null) {
+        continue;
+      }
+      List<OrderLineMovementAllocation.Allocation> allocations =
+          plan.get(line.getSalesOrderLine().getId());
+      if (allocations == null) {
+        continue;
+      }
+      for (OrderLineMovementAllocation.Allocation allocation : allocations) {
+        if (taken.add(allocation.line.getId())) {
+          line.setGoodsShipmentLine(allocation.line);
+          OBDal.getInstance().save(line);
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) {
+      OBDal.getInstance().flush();
+    }
+  }
+
+  private static final String SHIPMENT_INOUT_LINE = "shipmentInOutLine";
+  private static final String ORDERED_QUANTITY = "orderedQuantity";
+
+  private static BigDecimal quantityOf(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return null;
+    }
+    try {
+      return new BigDecimal(raw.trim());
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  /**
    * Backfills the inout link on every draft invoice line of the given invoice
    * whose order line already has at least one shipment/receipt line. Mirrors
    * the lookup that {@code c_invoice_create} performs in classic when an
    * invoice is generated from an order, so the matching tables get populated
    * regardless of which document was created first (invoice or shipment).
+   *
+   * <p>Since ETP-6002 the PURCHASE caller only ({@code CreatePurchaseInvoiceHandler}, unchanged).
+   * The sales "create invoice from order" path uses {@link #planSalesShipmentLines} and
+   * {@link #linkSalesInvoiceLinesToPlannedShipments} instead.
    */
   static void linkInvoiceLinesToExistingInouts(String invoiceId) {
     OBDal.getInstance().getSession()
