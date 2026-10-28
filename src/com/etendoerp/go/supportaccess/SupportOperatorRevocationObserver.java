@@ -32,7 +32,7 @@ import org.openbravo.model.ad.access.UserRoles;
 
 /**
  * ETP-5351 (L2) — cuts an operator's open support accesses the moment they lose the right to hold
- * them: the AD_User is deactivated (deleting one is blocked in practice by the foreign keys of the
+ * them: the AD_User is deactivated or locked (deleting one is blocked in practice by the foreign keys of the
  * access history), the "Soporte Etendo GO" role is removed or
  * deactivated on the user, or the role itself is deactivated. Without it a session outlives the
  * change until its expiry (up to 480 minutes).
@@ -77,10 +77,20 @@ public class SupportOperatorRevocationObserver extends EntityPersistenceEventObs
     }
   }
 
+  /** Deactivated, or (AD_User only) locked: either way the operator can no longer sign in. */
   private boolean turnedInactive(EntityUpdateEvent event) {
-    Property active = event.getTargetInstance().getEntity().getProperty(User.PROPERTY_ACTIVE);
-    return Boolean.TRUE.equals(event.getPreviousState(active))
-        && Boolean.FALSE.equals(event.getCurrentState(active));
+    BaseOBObject target = event.getTargetInstance();
+    Property active = target.getEntity().getProperty(User.PROPERTY_ACTIVE);
+    if (Boolean.TRUE.equals(event.getPreviousState(active))
+        && Boolean.FALSE.equals(event.getCurrentState(active))) {
+      return true;
+    }
+    if (!(target instanceof User)) {
+      return false;
+    }
+    Property locked = target.getEntity().getProperty(User.PROPERTY_LOCKED);
+    return Boolean.FALSE.equals(event.getPreviousState(locked))
+        && Boolean.TRUE.equals(event.getCurrentState(locked));
   }
 
   private void revoke(BaseOBObject target) {

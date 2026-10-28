@@ -193,6 +193,18 @@ class SupportUserManagementLockoutTest {
   }
 
   @Test
+  void userDeleteIsRefusedInSupportSessionAndUnchangedForOthers() throws Exception {
+    assertEquals(403, new UserRoleAssignmentHandler()
+        .handle(request("DELETE", null, context(SUPPORT_USER))).getHttpStatus());
+    // The support lockout itself is package-private in the handlers package.
+    java.lang.reflect.Method lockout = Class
+        .forName("com.etendoerp.go.schemaforge.handlers.UserSupportSessionGuard")
+        .getDeclaredMethod("rejectSupportUserManagement", NeoContext.class);
+    lockout.setAccessible(true);
+    assertEquals(null, lockout.invoke(null, request("DELETE", null, context(TARGET))));
+  }
+
+  @Test
   void contactDeleteIsRefusedInSupportSessionAndUnchangedForOthers() {
     NeoContext asSupport = request("DELETE", null, context(SUPPORT_USER));
     NeoContext asOther = request("DELETE", null, context(TARGET));

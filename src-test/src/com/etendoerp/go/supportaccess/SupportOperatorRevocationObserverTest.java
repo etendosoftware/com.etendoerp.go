@@ -55,6 +55,7 @@ class SupportOperatorRevocationObserverTest {
   private static Entity userRolesEntity;
   private static Entity roleEntity;
   private static Property activeProperty;
+  private static Property lockedProperty;
 
   private SupportAccessService service;
   private SupportOperatorRevocationObserver observer;
@@ -68,6 +69,8 @@ class SupportOperatorRevocationObserverTest {
     userRolesEntity = mock(Entity.class);
     roleEntity = mock(Entity.class);
     activeProperty = mock(Property.class);
+    lockedProperty = mock(Property.class);
+    when(userEntity.getProperty(User.PROPERTY_LOCKED)).thenReturn(lockedProperty);
     for (Entity entity : new Entity[] { userEntity, userRolesEntity, roleEntity }) {
       when(entity.getProperty(User.PROPERTY_ACTIVE)).thenReturn(activeProperty);
     }
@@ -149,6 +152,13 @@ class SupportOperatorRevocationObserverTest {
     return event;
   }
 
+  private static EntityUpdateEvent updateLocked(BaseOBObject target, Object before, Object after) {
+    EntityUpdateEvent event = update(target, true, true);
+    when(event.getPreviousState(lockedProperty)).thenReturn(before);
+    when(event.getCurrentState(lockedProperty)).thenReturn(after);
+    return event;
+  }
+
   private static EntityDeleteEvent delete(BaseOBObject target) {
     EntityDeleteEvent event = mock(EntityDeleteEvent.class);
     when(event.getTargetInstance()).thenReturn(target);
@@ -181,6 +191,27 @@ class SupportOperatorRevocationObserverTest {
   @Test
   void userStillActiveDoesNotRevoke() {
     observer.onUpdate(update(user(OPERATOR), true, true));
+
+    verify(service, never()).revokeAllOf(any(), any());
+  }
+
+  @Test
+  void userLockedRevokesThatOperator() {
+    observer.onUpdate(updateLocked(user(OPERATOR), false, true));
+
+    verify(service).revokeAllOf(OPERATOR, ACTOR);
+  }
+
+  @Test
+  void userAlreadyLockedDoesNotRevoke() {
+    observer.onUpdate(updateLocked(user(OPERATOR), true, true));
+
+    verify(service, never()).revokeAllOf(any(), any());
+  }
+
+  @Test
+  void userUnlockedDoesNotRevoke() {
+    observer.onUpdate(updateLocked(user(OPERATOR), true, false));
 
     verify(service, never()).revokeAllOf(any(), any());
   }
