@@ -135,6 +135,12 @@ class NeoPseudoSpecDispatcher {
       case "usage":
         return dispatchUsage(method, request, response);
 
+      // ETP-5988: the printable template choice of an organization per document type:
+      //   GET|PUT /sws/neo/doctemplateconfig. Isolation and the admin rule live in
+      //   NeoDocTemplateConfigEndpoint; this branch only routes the verbs it serves.
+      case "doctemplateconfig":
+        return dispatchDocTemplateConfig(method, request, response);
+
       // Etendo GO's own webhooks, reached through NEO's own JWT auth instead of the Webhooks
       // module's per-role SMFWHE_DEFINEDWEBHOOK_ROLE grant table (wiped by update.database — see
       // NeoGoWebhookBridge's class javadoc for the full rationale). A fixed, explicit allow-list,
@@ -301,6 +307,17 @@ class NeoPseudoSpecDispatcher {
       return true;
     }
     servlet.writeResponse(response, usageEventEndpoint.handle(request));
+    return true;
+  }
+
+  private boolean dispatchDocTemplateConfig(String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method) && !"PUT".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Doctemplateconfig endpoint supports GET and PUT");
+      return true;
+    }
+    servlet.writeResponse(response, new NeoDocTemplateConfigEndpoint().handle(request));
     return true;
   }
 

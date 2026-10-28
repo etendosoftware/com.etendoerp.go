@@ -2299,6 +2299,61 @@ specs — not a replacement for this one).
 
 ---
 
+### 4.13 Document Template Configuration — `doctemplateconfig` (ETP-5988)
+
+The printable template an organization uses for each document type: variant, logo and footer.
+Persisted in `ETGO_DOC_TEMPLATE_CONFIG` (entity `ETGO_Doc_Template_Config`), one row per
+`(client, organization, document type)` — the unique index `ETGO_DOCTPLCFG_ORG_TYPE_UQ` enforces it.
+Consumed by the UI that edits it (T5) and the renderer that reads it (T6).
+
+```
+GET /sws/neo/doctemplateconfig?docType=<type>[&orgId=<org>]
+GET /sws/neo/doctemplateconfig[?orgId=<org>]
+PUT /sws/neo/doctemplateconfig      {"orgId"?, "docType", "variant"?, "logo"?, "footerText"?}
+Authorization: Bearer {token}
+```
+
+**Contract.** A configuration is `{orgId, docType, variant, logo, footerText, configured}`.
+
+| Field | Values |
+|---|---|
+| `docType` | `sales-invoice`, `sales-order`, `sales-quotation`, `purchase-order`, `goods-shipment`, `payment-in`, `return-material-receipt`, `return-to-vendor-shipment` (the spec names of the `print-*` printables) |
+| `variant` | `classic` (default), `compact`, `modern` — also a CHECK on the table |
+| `logo` | `null`, an absolute `https://` URL (≤ 2000 chars) or a `data:image/(png\|jpeg\|webp);base64,…` URI (≤ 512 KiB). SVG, `http:` and any other scheme are refused: the renderer embeds it in a page that can run script |
+| `footerText` | `null` or text ≤ 500 chars, no control characters except line breaks. Stored as typed; **escaping is the renderer's job** |
+| `configured` | `true` for a saved row; `false` when the defaults are served |
+
+- `GET ?docType=` answers one configuration, or the defaults (`classic`, no logo, no footer,
+  `configured:false`) with `200` when none was saved — a consumer never branches on a 404.
+- `GET` without `docType` answers `{orgId, configs:[…]}` with the organization's saved ones only.
+- `PUT` creates or updates the row of the organization and type and answers it. A key left out keeps
+  what was saved (a new row starts from the defaults); `null` or a blank string clears the logo or
+  the footer.
+
+**Isolation and permissions.** `orgId` defaults to the caller's organization.
+
+| Case | Status |
+|---|---|
+| no or invalid bearer token | `401` (NEO authentication) |
+| `GET` of an organization the role does not read | `403` |
+| `PUT` by a caller who is not an administrator or client administrator | `403` |
+| `PUT` into an organization the role cannot write | `403` |
+| organization `0` (*), unknown `docType`, invalid variant, logo or footer, malformed body | `400` |
+| body over ~576 KiB | `413` |
+| any other verb | `405` |
+
+The `403` is the same whether or not the organization exists. The client always comes from the
+caller's context, never from the request. There is **no fallback to a parent organization**: an
+organization with no row gets the defaults. Not exposed over MCP.
+
+> **Why the checks are explicit.** `NeoServlet` runs every request in `OBContext.setAdminMode()`, and
+> in admin mode the DAL applies neither the readable/writable organization filters nor the entity
+> access check. Every query of `DocTemplateConfigStore` therefore names the client and the
+> organization, and `DocTemplateConfigAccess` asks the caller's own readable/writable sets.
+
+Code: `NeoDocTemplateConfigEndpoint`, `DocTemplateConfigSupport`, `DocTemplateConfigStore`,
+`DocTemplateConfigAccess`, routed by a `doctemplateconfig` case in `NeoPseudoSpecDispatcher`.
+
 ### 4.12 MCP Tool Ergonomics (Wave 3 — ETP-4601)
 
 The MCP tool layer (`/sws/mcp`, with `/mcp` as the WebMCP-friendly alias, routed by
