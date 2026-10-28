@@ -283,6 +283,24 @@ class SupportAccessServiceTest {
   // ------------------------------------------------------------------ end
 
   @Test
+  void revokeAllOfClosesOnlyThatOperatorsAccessAndCutsItsSessions() {
+    IssuedSupportTicket issued = issue();
+    service.redeem(issued.getTicket());
+    store.liveSessions.put(issued.getAccessId(), clock.instant().plus(Duration.ofHours(1)));
+
+    assertEquals(0, service.revokeAllOf(OTHER_OPERATOR, OTHER_OPERATOR), "someone else's access");
+    assertTrue(store.rows.get(issued.getAccessId()).getEndedAt() == null);
+
+    assertEquals(1, service.revokeAllOf(OPERATOR, OTHER_OPERATOR));
+
+    SupportAccessRecord row = store.rows.get(issued.getAccessId());
+    assertEquals(SupportEndReason.REVOKED.getCode(), row.getEndReason());
+    assertEquals(OTHER_OPERATOR, row.getEndedByUserId());
+    assertFalse(store.liveSessions.containsKey(issued.getAccessId()));
+    assertEquals(0, service.revokeAllOf(null, OTHER_OPERATOR), "nothing left open");
+  }
+
+  @Test
   void revokeClosesTheAccessRecordsWhoAndRevokesItsSessions() {
     IssuedSupportTicket issued = issue();
     service.redeem(issued.getTicket());

@@ -127,6 +127,16 @@ public class JdbcSupportAccessStore implements SupportAccessStore {
       + "SET is_revoked = 'Y', updated = now(), updatedby = '0' "
       + "WHERE etgo_support_access_id = ? AND is_revoked = 'N'";
 
+  private static final String CLOSE_OF_OPERATOR_SQL = UPDATE_ACCESS
+      + "SET ended_at = ?, end_reason = ?, ended_by_user_id = ?, updated = now(), updatedby = ? "
+      + "WHERE ended_at IS NULL AND (?::text IS NULL OR operator_user_id = ?)";
+
+  private static final String REVOKE_SESSIONS_OF_OPERATOR_SQL = "UPDATE etgo_go_session "
+      + "SET is_revoked = 'Y', updated = now(), updatedby = '0' "
+      + "WHERE is_revoked = 'N' AND etgo_support_access_id IN ("
+      + "SELECT a.etgo_support_access_id FROM etgo_support_access a "
+      + "WHERE a.ended_at IS NOT NULL AND (?::text IS NULL OR a.operator_user_id = ?))";
+
   private static final String CLIENT_NAME_SQL = "SELECT name FROM ad_client WHERE ad_client_id = ?";
 
   @Override
@@ -287,6 +297,28 @@ public class JdbcSupportAccessStore implements SupportAccessStore {
         ps.setString(1, accessId);
         return ps.executeUpdate();
       }
+    });
+  }
+
+  @Override
+  public int revokeOpenAccessesOf(String operatorUserId, String endedByUserId, Instant now) {
+    return OBDal.getInstance().getSession().doReturningWork(connection -> {
+      int closed;
+      try (PreparedStatement ps = connection.prepareStatement(CLOSE_OF_OPERATOR_SQL)) {
+        ps.setTimestamp(1, toTimestamp(now));
+        ps.setString(2, SupportEndReason.REVOKED.getCode());
+        ps.setString(3, endedByUserId);
+        ps.setString(4, endedByUserId);
+        ps.setString(5, operatorUserId);
+        ps.setString(6, operatorUserId);
+        closed = ps.executeUpdate();
+      }
+      try (PreparedStatement ps = connection.prepareStatement(REVOKE_SESSIONS_OF_OPERATOR_SQL)) {
+        ps.setString(1, operatorUserId);
+        ps.setString(2, operatorUserId);
+        ps.executeUpdate();
+      }
+      return closed;
     });
   }
 
