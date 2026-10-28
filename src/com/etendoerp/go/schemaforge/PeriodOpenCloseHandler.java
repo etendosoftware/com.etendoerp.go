@@ -21,8 +21,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import javax.inject.Named;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
@@ -49,11 +47,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>Returns the translated process result.</li>
  * </ol>
  *
- * <p>Registered via {@code JAVA_QUALIFIER = 'period-openclose'} on the
- * {@code periodControl} ETGO_SF_ENTITY record for the
- * {@code open-close-period-control} spec.
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5588): the ETGO_SF_ENTITY row carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface — REST single and batch,
+ * MCP, callout, actions, field filter — reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("period-openclose")
+@NeoExtension(spec = "open-close-period-control", entity = "periodControl")
 public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
 
   private static final Logger log = LogManager.getLogger(PeriodOpenCloseHandler.class);

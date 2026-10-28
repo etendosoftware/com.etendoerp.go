@@ -150,7 +150,10 @@ final class McpToolResponses {
     if (messageKeys != null && !messageKeys.isEmpty()) {
       envelope.put("messageKeys", new JSONArray(messageKeys));
     }
-    envelope.put(McpConstants.KEY_HINT, hintFor(code));
+    // ETP-5714: a hint keyed by the AD message (e.g. 20501, "Documento ya procesado") is more
+    // specific than the one for the class of failure, so it wins.
+    String keyed = McpMessageKeyHints.hintFor(messageKeys);
+    envelope.put(McpConstants.KEY_HINT, keyed != null ? keyed : hintFor(code));
     return envelope;
   }
 

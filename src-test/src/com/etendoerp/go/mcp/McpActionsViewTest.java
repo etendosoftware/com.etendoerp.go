@@ -524,6 +524,51 @@ class McpActionsViewTest {
     }
   }
 
+  // ── ETP-5714: what MCP_CONFIG withholds is reported, not silently omitted ──
+
+  @Nested
+  @DisplayName("withheldActions (ETP-5714)")
+  class Withheld {
+
+    private JSONObject catalogue(McpActionsSection.View config) throws JSONException {
+      JSONObject kept = buttonField("completeAction", "Complete");
+      JSONObject hidden = buttonField("cancelAction", "Cancel and Replace");
+      hidden.put("column", "Cancelandreplace");
+      return McpActionsView.buildResponse("sales-order", "header",
+          new JSONArray().put(kept).put(hidden), Map.of(), config, Collections.emptySet(), null);
+    }
+
+    @Test
+    @DisplayName("every hidden action is listed with its reason, and is neither counted nor invokable")
+    void hiddenActionsAreListedWithTheirReason() throws JSONException {
+      McpActionsSection.View config = withAvailability("{\"actions\":{\"hidden\":"
+          + "[\"Cancelandreplace\",\"RM_Pickfromreceipt\"],\"reason\":\"No screen.\","
+          + "\"reasons\":{\"RM_Pickfromreceipt\":\"Pick from Receipt has no screen.\"}}}");
+
+      JSONObject response = catalogue(config);
+
+      JSONArray withheld = response.getJSONArray(McpActionsView.KEY_WITHHELD_ACTIONS);
+      assertEquals(2, withheld.length());
+      assertEquals("Cancelandreplace", withheld.getJSONObject(0).getString("action"));
+      assertEquals("No screen.", withheld.getJSONObject(0).getString("reason"));
+      assertEquals("RM_Pickfromreceipt", withheld.getJSONObject(1).getString("action"));
+      assertEquals("Pick from Receipt has no screen.",
+          withheld.getJSONObject(1).getString("reason"));
+      assertEquals(1, response.getInt("actionCount"), "the hidden button is not in the catalogue");
+      assertEquals(1, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
+    }
+
+    @Test
+    @DisplayName("no hidden action, or no configuration, leaves the response without the key")
+    void noHiddenActionAddsNothing() throws JSONException {
+      McpActionsSection.View onlyAvailability = withAvailability("{\"actions\":"
+          + "{\"availableWhen\":{\"completeAction\":{\"documentStatus\":[\"DR\"]}}}}");
+
+      assertFalse(catalogue(onlyAvailability).has(McpActionsView.KEY_WITHHELD_ACTIONS));
+      assertFalse(catalogue(null).has(McpActionsView.KEY_WITHHELD_ACTIONS));
+    }
+  }
+
   // ── ETP-5714: the record must be visible to the caller's role ─────────────
 
   @Nested

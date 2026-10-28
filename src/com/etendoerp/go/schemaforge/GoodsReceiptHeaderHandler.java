@@ -37,6 +37,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -140,6 +141,16 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     return RESPONSE_ENRICHED_FIELDS;
   }
 
+  /**
+   * {@inheritDoc} The invoice action does not apply once nothing is left to invoice or a draft
+   * invoice already covers it (ETP-5714).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return InOutInvoiceAvailability.unavailable(subject,
+        CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT.getName(), "goods receipt");
+  }
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -148,6 +159,10 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     mirrorAccountingDate(context);
+    NeoResponse unpostRefusal = GoodsPostingContracts.checkUnpost(context);
+    if (unpostRefusal != null) {
+      return unpostRefusal;
+    }
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;

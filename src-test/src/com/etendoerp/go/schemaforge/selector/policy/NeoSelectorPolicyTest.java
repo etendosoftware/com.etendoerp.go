@@ -86,4 +86,18 @@ public class NeoSelectorPolicyTest {
         NeoSelectorPolicy.publishedNameOverride("EM_OBSEPA_StrtNm"));
     assertNull(NeoSelectorPolicy.publishedNameOverride("C_Region_ID"));
   }
+
+  /**
+   * ETP-5707 — {@code resolveOrgTreeWhere} delegates to {@link OrgTreeWhereSelectorPolicy}, which
+   * answers {@code null} (no rewrite) for an entity it does not handle, without touching the DB.
+   */
+  @Test
+  public void resolveOrgTreeWhereDelegatesAndIgnoresOtherEntities() {
+    Map<String, Object> params = new HashMap<>();
+    params.put("p0", "ORG");
+    params.put("p1", "CLIENT");
+
+    assertNull(NeoSelectorPolicy.resolveOrgTreeWhere("Product", "e",
+        "AD_ORG_ISINNATURALTREE(e.orgwarehouse, :p0, :p1)='Y'", params));
+  }
 }

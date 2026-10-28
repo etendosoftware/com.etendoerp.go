@@ -450,7 +450,11 @@ final class DemoDataTransferEntityCopier {
     if (existing != null) return existing;
     Category copy = OBProvider.getInstance().get(Category.class);
     copy.setClient(target); copy.setOrganization(targetOrg);
-    DemoDataTransferReflection.copy(source, copy, "Name", SEARCH_KEY_PROPERTY, DESCRIPTION_PROPERTY);
+    // ETP-5791: the contact types the category defines (EM_Etgo_Iscustomer / EM_Etgo_Isvendor)
+    // travel with it — they drive the type of every contact later created in it, and a copy left at
+    // the column default (neither) would no longer pass the category's own validation on edit.
+    DemoDataTransferReflection.copy(source, copy, "Name", SEARCH_KEY_PROPERTY, DESCRIPTION_PROPERTY,
+        "EtgoIscustomer", "EtgoIsvendor");
     OBDal.getInstance().save(copy);
     return copy;
   }

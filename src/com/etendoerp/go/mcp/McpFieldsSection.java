@@ -37,6 +37,7 @@ import org.codehaus.jettison.json.JSONObject;
  *     "included":         true,
  *     "readOnly":         false,
  *     "businessCritical": true,
+ *     "userRequired":     false,
  *     "reason":           "C_Location's ETGO_SF_FIELD rows carry no visibility ..."
  *   }
  * }
@@ -98,6 +99,11 @@ final class McpFieldsSection {
   static final String KEY_INCLUDED = "included";
   static final String KEY_READ_ONLY = "readOnly";
   static final String KEY_BUSINESS_CRITICAL = "businessCritical";
+  /**
+   * Overrides the {@code userRequired} flag {@code etendo_schema} derives for the field (ETP-5791).
+   * Same name as the descriptor key it replaces, {@link McpSchemaFieldBuilder#KEY_USER_REQUIRED}.
+   */
+  static final String KEY_USER_REQUIRED = McpSchemaFieldBuilder.KEY_USER_REQUIRED;
   static final String KEY_REASON = "reason";
 
   /**
@@ -112,10 +118,10 @@ final class McpFieldsSection {
 
   /** The keys that must hold a JSON boolean when present. */
   private static final List<String> BOOLEAN_KEYS =
-      List.of(KEY_INCLUDED, KEY_READ_ONLY, KEY_BUSINESS_CRITICAL);
+      List.of(KEY_INCLUDED, KEY_READ_ONLY, KEY_BUSINESS_CRITICAL, KEY_USER_REQUIRED);
 
-  private static final Set<String> ALLOWED_KEYS =
-      Set.of(KEY_VISIBILITY, KEY_INCLUDED, KEY_READ_ONLY, KEY_BUSINESS_CRITICAL, KEY_REASON);
+  private static final Set<String> ALLOWED_KEYS = Set.of(KEY_VISIBILITY, KEY_INCLUDED,
+      KEY_READ_ONLY, KEY_BUSINESS_CRITICAL, KEY_USER_REQUIRED, KEY_REASON);
 
   /**
    * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
@@ -152,7 +158,7 @@ final class McpFieldsSection {
     if (body.length() == 0) {
       problems.add("the '" + NAME + "' section is empty - remove it, or set at least one of "
           + KEY_VISIBILITY + "/" + KEY_INCLUDED + "/" + KEY_READ_ONLY + "/" + KEY_BUSINESS_CRITICAL
-          + " plus " + KEY_REASON);
+          + "/" + KEY_USER_REQUIRED + " plus " + KEY_REASON);
       return problems;
     }
     validateVisibility(body, problems);
@@ -191,7 +197,8 @@ final class McpFieldsSection {
   }
 
   /**
-   * {@code readOnly} and {@code businessCritical} must be JSON booleans.
+   * {@code included}, {@code readOnly}, {@code businessCritical} and {@code userRequired} must be
+   * JSON booleans.
    *
    * <p>{@code "false"} as a string is the dangerous case: {@code optBoolean} would read the quoted
    * form the same way in some JSON libraries and the opposite way in others, and this section's
@@ -295,6 +302,35 @@ final class McpFieldsSection {
    */
   static Optional<Boolean> businessCritical(JSONObject body) {
     return booleanAt(body, KEY_BUSINESS_CRITICAL);
+  }
+
+  /**
+   * The declared {@code userRequired} flag — whether {@code etendo_schema} tells the agent it MUST
+   * supply this field on a create, and so whether {@code view:"create"} lists it under
+   * {@code required} or {@code optional}.
+   *
+   * <p><b>Why an override (ETP-5791).</b> {@code McpSchemaFieldBuilder} derives the flag
+   * structurally: editable, mandatory in AD, and no AD default. That rule cannot see a value a
+   * customization supplies in its pre-hook — {@code C_BPartner.IsVendor} is mandatory with no AD
+   * default, so the schema demanded it on every contact create, while the contact's customization
+   * inherits it from the business partner category whenever it is omitted. Declaring
+   * {@code userRequired:false} on that field tells the agent the truth without naming the entity in
+   * shared code. It works in both directions: {@code true} promotes a field the structural rule
+   * misses.</p>
+   *
+   * <p><b>It changes the advice, never the contract.</b> The raw {@code required} key (AD's NOT
+   * NULL) is left as it is, and nothing here relaxes a check on write: if neither the agent nor a
+   * customization ends up supplying the value, the write is refused exactly as before. A
+   * precondition requirement ({@code ETGO_SF_ENTITY.preconditions}) is applied after this override
+   * and can still force {@code userRequired:true} — an explicit business rule outranks it. Meant for
+   * the field level; at entity or spec level it would set the flag on every field of the scope.</p>
+   *
+   * @param body the section body, may be {@code null}
+   * @return {@link Boolean#TRUE}/{@link Boolean#FALSE} as configured, or
+   *         {@link Optional#empty()} when the key is absent — which leaves the derived flag standing
+   */
+  static Optional<Boolean> userRequired(JSONObject body) {
+    return booleanAt(body, KEY_USER_REQUIRED);
   }
 
   /**

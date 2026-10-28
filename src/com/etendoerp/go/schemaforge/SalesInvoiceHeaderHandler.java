@@ -27,7 +27,6 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import org.openbravo.model.common.invoice.Invoice;
 
@@ -74,8 +73,13 @@ import org.openbravo.base.structure.BaseOBObject;
  *       {@link InvoicePendingResolver} + {@link InOutFollowUpCreator} ({@code SALES}): the draft
  *       goods shipment for the still-pending quantities (ETP-5576)</li>
  * </ul>
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5588): the ETGO_SF_ENTITY row carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface — REST single and batch,
+ * MCP, callout, actions, field filter — reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("salesInvoiceHeaderHandler")
+@NeoExtension(spec = "sales-invoice", entity = "header")
 public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(SalesInvoiceHeaderHandler.class);
@@ -196,7 +200,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (rateRefusal != null) {
       return rateRefusal;
     }
-    captureOriginInvoice(context);
+    rectificationLinks.captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
       return siiAuthError;
@@ -278,7 +282,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     // C_Invoice_Reverse, same mechanism shared through AbstractInvoiceHeaderHandler.
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-      persistOriginInvoice(context);
+      rectificationLinks.persistOriginInvoice(context);
       persistSiiAuthorizationno(context);
     }
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
@@ -311,13 +315,15 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
-        enrichOriginInvoice(rec, context.getRecordId());
+        rectificationLinks.enrichOriginInvoice(rec, context.getRecordId());
+        rectificationLinks.enrichRectifyingInvoices(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichTbaiConfigActive(rec);
-        enrichHasRectifications(rec, context.getRecordId());
+        rectificationLinks.enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
+        InvoiceDetailEnrichment.enrichLinkedOrders(rec, context.getRecordId()); // ETP-5828
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }

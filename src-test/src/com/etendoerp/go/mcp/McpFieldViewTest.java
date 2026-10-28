@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.AfterEach;
@@ -30,6 +31,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -402,6 +405,35 @@ class McpFieldViewTest {
       assertEquals("editable", McpFieldView.of(sfField).getVisibility());
       assertTrue(McpFieldView.of(field("editable", Boolean.TRUE, Boolean.FALSE, null,
           "{not json", null)).isEditable(), "the raw row still stands");
+    }
+
+    /**
+     * {@code userRequired} has no {@code SFField} column to fall back to, so the view reports only
+     * what the override states: a configured {@code true}/{@code false} as such, and empty when the
+     * section omits the key or there is no section at all — empty is what leaves the schema
+     * builder's derived flag standing (ETP-5791).
+     */
+    @ParameterizedTest(name = "{0}")
+    @CsvSource(delimiter = '|', value = {
+        "field-level false     | \"userRequired\":false     | false",
+        "field-level true      | \"userRequired\":true      | true",
+        "key absent            | \"businessCritical\":true  | -",
+        "no fields section     | -                          | -",
+    })
+    @DisplayName("the userRequired override is reported as stated, empty when unstated")
+    void userRequiredOverrideIsReportedAsStated(String scenario, String keys, String expected) {
+      String fieldConfig = "-".equals(keys) ? null : fieldsSection(keys);
+      SFField sfField = field("editable", Boolean.TRUE, Boolean.FALSE, null, null, fieldConfig);
+      Optional<Boolean> expectedOverride =
+          "-".equals(expected) ? Optional.empty() : Optional.of(Boolean.valueOf(expected));
+
+      assertEquals(expectedOverride, McpFieldView.of(sfField).getUserRequiredOverride());
+    }
+
+    @Test
+    @DisplayName("a null SFField reports no userRequired override")
+    void nullFieldHasNoUserRequiredOverride() {
+      assertEquals(Optional.empty(), McpFieldView.of(null).getUserRequiredOverride());
     }
 
     @Test

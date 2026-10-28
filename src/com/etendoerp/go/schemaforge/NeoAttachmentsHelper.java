@@ -23,6 +23,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
@@ -277,6 +280,51 @@ public final class NeoAttachmentsHelper {
       getAttachManager().delete(previous);
     }
     setMainFlag(attachment.getId(), true);
+  }
+
+  /** Width of {@code C_File.C_DataType_ID}; a longer value would make the UPDATE fail. */
+  private static final int DATA_TYPE_MAX_LENGTH = 32;
+
+  /**
+   * Overwrites the stored data type (MIME) of an attachment with a native UPDATE, never through
+   * the DAL entity: a dirty {@code ADAttachment} is checked for write access at flush time, which
+   * happens at request commit outside any caller's try/catch, and would roll the upload back
+   * (same reason {@link #setMainFlag} is native SQL).
+   *
+   * <p>Best-effort and safe for the surrounding transaction: the statement runs inside a
+   * savepoint, so a failure (PostgreSQL would otherwise abort the whole transaction) is rolled
+   * back to it and only logged.</p>
+   *
+   * <p>The {@code Attachment} entity already loaded in the session keeps the stale value until
+   * the session is cleared or the row refreshed: it is not dirty, so nothing flushes it back.</p>
+   *
+   * @return {@code true} when the data type was written
+   */
+  static boolean updateDataType(String attachmentId, String dataType) {
+    if (attachmentId == null || dataType == null || dataType.isEmpty()
+        || dataType.length() > DATA_TYPE_MAX_LENGTH) {
+      return false;
+    }
+    try {
+      return OBDal.getInstance().getSession().doReturningWork(connection -> {
+        Savepoint savepoint = connection.setSavepoint();
+        try (PreparedStatement ps = connection.prepareStatement(
+            "UPDATE C_File SET C_DataType_ID = ? WHERE C_File_ID = ?")) {
+          ps.setString(1, dataType);
+          ps.setString(2, attachmentId);
+          boolean updated = ps.executeUpdate() == 1;
+          connection.releaseSavepoint(savepoint);
+          return updated;
+        } catch (SQLException e) {
+          connection.rollback(savepoint);
+          log.warn("Could not update the data type of attachment {}", attachmentId, e);
+          return false;
+        }
+      });
+    } catch (RuntimeException e) {
+      log.warn("Could not update the data type of attachment {}", attachmentId, e);
+      return false;
+    }
   }
 
   private static void setMainFlag(String attachmentId, boolean value) {

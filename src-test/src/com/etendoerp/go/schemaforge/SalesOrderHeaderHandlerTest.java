@@ -1178,7 +1178,7 @@ public class SalesOrderHeaderHandlerTest {
     String invoice = contracts.get("createDraftInvoice").getDescription();
     assertTrue("must warn that the invoice is completed despite the name",
         invoice.contains("COMPLETES") && invoice.contains("despite the name"));
-    assertEquals(List.of("lines"), contracts.get("createDraftInvoice").getParams().stream()
+    assertEquals(List.of("lines", "allowDuplicate"), contracts.get("createDraftInvoice").getParams().stream()
         .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
   }
 
@@ -1191,6 +1191,11 @@ public class SalesOrderHeaderHandlerTest {
     }
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice", new JSONObject().put("lines",
         new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2")))));
+    // ETP-5714: allowDuplicate is a declared optional boolean; a string is refused before anything runs
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice",
+        new JSONObject().put("allowDuplicate", true)));
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "createDraftInvoice", new JSONObject().put("allowDuplicate", "true")).getHttpStatus());
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
         "createShipment", new JSONObject().put("warehouseId", "W1")).getHttpStatus());
   }
