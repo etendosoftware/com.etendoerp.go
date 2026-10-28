@@ -443,15 +443,11 @@ final class OrderLineDiscountSupport {
       deriveAmountsOnUpdate(ctx, storedLine);
     }
     if (sentAmountInput || repriced) {
-      carryStoredAmountInputs(ctx, storedLine);
+      storedLine.carryAmountInputsInto(ctx);
     }
     deriveAmountsOnCreate(ctx);
   }
 
-  /** {@link #completeAmountInputsOnUpdate(NeoContext, StoredLine)} reading the line on its own. */
-  static void completeAmountInputsOnUpdate(NeoContext ctx) {
-    completeAmountInputsOnUpdate(ctx, new StoredLine(ctx));
-  }
 
   /**
    * Carries into a sparse update the amount inputs it does not send — quantity, price, gross price
@@ -471,40 +467,9 @@ final class OrderLineDiscountSupport {
    *
    * @param ctx the pre-hook context; its request body is mutated in place
    */
-  static void completeAmountInputsOnUpdate(NeoContext ctx, StoredLine storedLine) {
+  static void completeAmountInputsOnUpdate(NeoContext ctx) {
     if (ctx != null && changesAmountInput(ctx.getRequestBody())) {
-      carryStoredAmountInputs(ctx, storedLine);
-    }
-  }
-
-  /** Writes into an update's body the stored line's amount inputs it lacks. Never throws. */
-  private static void carryStoredAmountInputs(NeoContext ctx, StoredLine storedLine) {
-    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
-        || !isUpdate(ctx.getHttpMethod())) {
-      return;
-    }
-    JSONObject body = ctx.getRequestBody();
-    if (body == null) {
-      return;
-    }
-    try {
-      JSONObject formState = storedLine.get();
-      if (formState == null) {
-        return;
-      }
-      // A new net price makes the stored gross price stale, and the gross derivation prefers it.
-      // Read before the loop: the loop itself carries the stored unitPrice into the body.
-      boolean sentUnitPrice = body.has(FIELD_UNIT_PRICE);
-      for (String input : AMOUNT_INPUTS) {
-        boolean staleGrossPrice = sentUnitPrice && FIELD_GROSS_UNIT_PRICE.equals(input);
-        if (!staleGrossPrice && !body.has(input) && formState.has(input)
-            && !formState.isNull(input)) {
-          body.put(input, formState.get(input));
-        }
-      }
-    } catch (Exception e) {
-      log.warn("[ORDER-LINE-AMOUNTS] Could not complete the amount inputs on {} {}: {}",
-          ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
+      new StoredLine(ctx).carryAmountInputsInto(ctx);
     }
   }
 
@@ -835,6 +800,37 @@ final class OrderLineDiscountSupport {
         read = true;
       }
       return formState;
+    }
+
+    /** Writes into an update's body the stored line's amount inputs it lacks. Never throws. */
+    void carryAmountInputsInto(NeoContext ctx) {
+      if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+          || !isUpdate(ctx.getHttpMethod())) {
+        return;
+      }
+      JSONObject body = ctx.getRequestBody();
+      if (body == null) {
+        return;
+      }
+      try {
+        JSONObject stored = get();
+        if (stored == null) {
+          return;
+        }
+        // A new net price makes the stored gross price stale, and the gross derivation prefers it.
+        // Read before the loop: the loop itself carries the stored unitPrice into the body.
+        boolean sentUnitPrice = body.has(FIELD_UNIT_PRICE);
+        for (String input : AMOUNT_INPUTS) {
+          boolean staleGrossPrice = sentUnitPrice && FIELD_GROSS_UNIT_PRICE.equals(input);
+          if (!staleGrossPrice && !body.has(input) && stored.has(input)
+              && !stored.isNull(input)) {
+            body.put(input, stored.get(input));
+          }
+        }
+      } catch (Exception e) {
+        log.warn("[ORDER-LINE-AMOUNTS] Could not complete the amount inputs on {} {}: {}",
+            ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
+      }
     }
 
     /** Drops the cached overlay, so the next {@link #get} reads the line again. */
