@@ -16,10 +16,13 @@
  */
 package com.etendoerp.go.schemaforge.selector.policy;
 
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.openbravo.model.ad.datamodel.Column;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -38,7 +41,33 @@ public final class NeoSelectorPolicy {
           new InvoiceLineTaxSifSelectorPolicy(), new ProductSystemCategorySelectorPolicy()));
 
 
+  private static final List<SelectorSearchPolicy> SEARCH_POLICIES =
+      List.of(new InvoiceLineTaxSifSelectorPolicy());
+
   private NeoSelectorPolicy() {
+  }
+
+  /**
+   * Ids the search term also matches, beyond the display column (ETP-5948). Empty for a blank
+   * term or when no {@link SelectorSearchPolicy} applies.
+   *
+   * @param meta resolved selector metadata
+   * @param contextParams validated selector context parameters
+   * @param search the raw search term
+   * @return the matching record ids, never {@code null}
+   */
+  public static Set<String> resolveSearchMatchIds(SelectorMeta meta,
+      Map<String, String> contextParams, String search) {
+    if (StringUtils.isBlank(search) || meta == null) {
+      return Collections.emptySet();
+    }
+    Set<String> ids = new LinkedHashSet<>();
+    for (SelectorSearchPolicy policy : SEARCH_POLICIES) {
+      if (policy.supports(meta, contextParams)) {
+        ids.addAll(policy.searchMatchIds(meta, contextParams, search));
+      }
+    }
+    return ids;
   }
 
   /**

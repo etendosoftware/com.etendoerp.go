@@ -31,7 +31,7 @@ Selector code is intentionally split by responsibility. `NeoSelectorService` rem
 |---|---|---|
 | `com.etendoerp.go.schemaforge` selector execution | Request orchestration, selector query execution, response shaping, and legacy package-private execution helpers. | `NeoSelectorService`, `SelectorQueryBuilder`, `SelectorQueryExecutor`, `ComboReferenceSelectorExecutor`, `ListReferenceSelectorExecutor`, `SelectorAuxResolver`, `NeoSelectorExecutionHelper`, `SelectorResponseSupport` |
 | `com.etendoerp.go.schemaforge.selector.meta` | AD/OBUISEL metadata discovery and normalized selector descriptors. This package should not perform query execution. | `SelectorMeta`, `RichFieldMeta`, `AuxFieldMeta`, `ObuiselFieldLists`, `SelectorContextResolver`, `SelectorDescriptorBuilder`, `SelectorDescriptorResolver` |
-| `com.etendoerp.go.schemaforge.selector.policy` | Selector-specific policy SPI, policy registry, reference overrides, context-derived filters, virtual-column policies, and response enrichments. | `SelectorContextPolicy`, `SelectorEnrichmentPolicy`, `SelectorPolicyRegistry`, `NeoSelectorPolicy`, `ContextParamSelectorPolicy`, `ProductPriceSelectorPolicy`, `ReferenceOverrideSelectorPolicy`, `AddressVirtualSelectorPolicy`, `PostingAccountCombinationSelectorPolicy` |
+| `com.etendoerp.go.schemaforge.selector.policy` | Selector-specific policy SPI, policy registry, reference overrides, context-derived filters, virtual-column policies, and response enrichments. | `SelectorContextPolicy`, `SelectorEnrichmentPolicy`, `SelectorSearchPolicy`, `SelectorPolicyRegistry`, `NeoSelectorPolicy`, `ContextParamSelectorPolicy`, `ProductPriceSelectorPolicy`, `ReferenceOverrideSelectorPolicy`, `AddressVirtualSelectorPolicy`, `PostingAccountCombinationSelectorPolicy` |
 
 ### Selector call flow
 
@@ -42,6 +42,7 @@ NeoServlet
       -> SelectorContextResolver (validated context params)
       -> NeoSelectorPolicy / SelectorPolicyRegistry
           -> SelectorContextPolicy implementations (extra HQL filters)
+          -> SelectorSearchPolicy implementations (ids OR'ed into the search, simple selectors only)
       -> SelectorQueryExecutor or reference-specific executor
       -> SelectorResponseSupport
       -> SelectorEnrichmentPolicy implementations (post-query response enrichment)
@@ -52,7 +53,7 @@ NeoServlet
 When adding selector behavior:
 
 1. Metadata shape changes go in `selector.meta`.
-2. Entity-specific filters or enrichments go behind `SelectorContextPolicy` or `SelectorEnrichmentPolicy` in `selector.policy`.
+2. Entity-specific filters, enrichments or search matches go behind `SelectorContextPolicy`, `SelectorEnrichmentPolicy` or `SelectorSearchPolicy` in `selector.policy`. A search policy returns the ids a term matches beyond the display column (e.g. a tax by the rate its picker shows, ETP-5948); they are OR'ed into the search predicate inside every other filter.
 3. Query execution changes stay in the execution classes under `schemaforge` unless they can be fully isolated without expanding public surface area.
 4. Do not add window-specific branches to `NeoSelectorService`; use a policy or a `NeoHandler` where the behavior is tied to one window/entity.
 
