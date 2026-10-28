@@ -575,6 +575,21 @@ final class McpHookExecutor {
    */
   static JSONObject runPostHook(NeoExtensionRequest request, JSONObject responseJson)
       throws JSONException {
+    NeoResponse post = runPostHookResponse(request, responseJson);
+    return post == null ? null : neoResponseToMcpResult(post);
+  }
+
+  /**
+   * Same post phase as {@link #runPostHook(NeoExtensionRequest, JSONObject)}, but hands back the
+   * handler's replacement response itself instead of the MCP result built from it. ETP-5852: the
+   * record writes need it to give a replaced success body the same {@code {data:{…}}} shape and
+   * record link as an unreplaced one; a refusal still goes through
+   * {@link #neoResponseToMcpResult(NeoResponse)}.
+   *
+   * @return the handler's replacement (or the after-commit failure), or {@code null} to keep
+   *     {@code responseJson}
+   */
+  static NeoResponse runPostHookResponse(NeoExtensionRequest request, JSONObject responseJson) {
     NeoExtensionResult result;
     try {
       result = NeoExtensionDispatcher.dispatch(
@@ -582,9 +597,9 @@ final class McpHookExecutor {
     } catch (RuntimeException e) {
       // ETP-5782: the write before this post-hook is committed, so its failure must not read as a
       // refusal to correct and re-send — the agent would repeat the write. Same answer as REST.
-      return neoResponseToMcpResult(NeoErrorResponses.afterCommitFailure(e,
+      return NeoErrorResponses.afterCommitFailure(e,
           request.context() != null ? request.context().getHttpMethod() : null,
-          "MCP afterHandle", null));
+          "MCP afterHandle", null);
     }
     if (result.outcome() == NeoExtensionOutcome.NO_CUSTOMIZATION) {
       return null;
@@ -593,7 +608,7 @@ final class McpHookExecutor {
     NeoResponse post = result.response();
     if (post != null) {
       NeoAuditTokenRefresh.refreshInResponse(ctx, post);
-      return neoResponseToMcpResult(post);
+      return post;
     }
     NeoAuditTokenRefresh.refreshInBody(ctx, responseJson);
     return null;

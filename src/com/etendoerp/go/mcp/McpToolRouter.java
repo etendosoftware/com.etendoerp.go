@@ -991,10 +991,15 @@ public class McpToolRouter {
 
     fieldFilter.filterGetResponse(responseJson);
 
-    JSONObject postHookResult =
-        McpHookExecutor.runPostHook(customizationRequest.post(handler), responseJson);
-    if (postHookResult != null) {
-      return postHookResult;
+    // ETP-5852: a post-hook that replaces the success body (the contact's searchKey, …) goes
+    // through the same shaping below, so the answer is {data:{…}} with its link like any other.
+    NeoResponse postHookResponse =
+        McpHookExecutor.runPostHookResponse(customizationRequest.post(handler), responseJson);
+    if (postHookResponse != null) {
+      if (postHookResponse.getHttpStatus() >= 400) {
+        return McpHookExecutor.neoResponseToMcpResult(postHookResponse);
+      }
+      responseJson = postHookResponse.getBody();
     }
 
     // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
@@ -1183,10 +1188,14 @@ public class McpToolRouter {
 
     fieldFilter.filterGetResponse(responseJson);
 
-    JSONObject postHookResult =
-        McpHookExecutor.runPostHook(extensionRequest.post(handler), responseJson);
-    if (postHookResult != null) {
-      return postHookResult;
+    // ETP-5852: a replaced success body is shaped like an unreplaced one (see handleCreate).
+    NeoResponse postHookResponse =
+        McpHookExecutor.runPostHookResponse(extensionRequest.post(handler), responseJson);
+    if (postHookResponse != null) {
+      if (postHookResponse.getHttpStatus() >= 400) {
+        return McpHookExecutor.neoResponseToMcpResult(postHookResponse);
+      }
+      responseJson = postHookResponse.getBody();
     }
 
     // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
