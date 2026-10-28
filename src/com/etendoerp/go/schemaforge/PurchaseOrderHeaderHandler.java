@@ -116,10 +116,18 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
     return OrderDocumentAvailability.RESPONSE_ENRICHED_FIELDS;
   }
 
-  /** {@inheritDoc} Reactivate is ruled out for an order that has linked documents (ETP-5714). */
+  /** The order's creation actions, for {@link OrderDocumentAvailability} (ETP-5714). */
+  private static final OrderDocumentAvailability.Flow AVAILABILITY_FLOW =
+      new OrderDocumentAvailability.Flow(false, CreateGoodsReceiptHandler.CONTRACT.getName(),
+          CreatePurchaseInvoiceHandler.ORDER_CONTRACT.getName(), false);
+
+  /**
+   * {@inheritDoc} Reactivate is ruled out for an order that has linked documents, and each
+   * creation action when nothing is left to do or a draft already covers it (ETP-5714).
+   */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
-    return OrderDocumentAvailability.unavailable(subject);
+    return OrderDocumentAvailability.unavailable(subject, AVAILABILITY_FLOW);
   }
 
   @Override

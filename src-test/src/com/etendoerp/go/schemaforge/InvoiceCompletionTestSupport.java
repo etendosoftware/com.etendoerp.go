@@ -23,6 +23,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.util.List;
+
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
@@ -65,8 +67,17 @@ final class InvoiceCompletionTestSupport {
     private final MockedStatic<NeoDefaultsService> defaultsMock;
     private final MockedStatic<WeldUtils> weldMock;
     final ProcessInvoiceUtil processInvoiceUtil;
+    private final MockedStatic<OrderInvoiceDuplicateGuard> guardMock;
+    /**
+     * The draft invoice numbers the order-route duplicate guard finds (ETP-5714); the guard's
+     * own refusal and listing stay real, only its DAL lookup is answered from here.
+     */
+    List<String> existingDrafts = List.of();
 
     CompletionMocks(OBDal dal, OBError processResult) {
+      guardMock = Mockito.mockStatic(OrderInvoiceDuplicateGuard.class,
+          invocation -> "draftsOf".equals(invocation.getMethod().getName()) ? existingDrafts
+              : invocation.callRealMethod());
       defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
       weldMock = Mockito.mockStatic(WeldUtils.class);
       processInvoiceUtil = mock(ProcessInvoiceUtil.class);
@@ -84,6 +95,7 @@ final class InvoiceCompletionTestSupport {
     public void close() {
       weldMock.close();
       defaultsMock.close();
+      guardMock.close();
     }
   }
 

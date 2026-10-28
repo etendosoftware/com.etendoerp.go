@@ -286,13 +286,7 @@ final class McpHookExecutor {
   static void resolveServerCreateFields(String specName, String entityName, Tab adTab,
       SFEntity sfEntity, JSONObject body) {
     try {
-      NeoHandler customization = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
-          .qualifier(sfEntity.getJavaQualifier())
-          .specName(specName)
-          .entityName(entityName)
-          .surface(NeoExtensionSurface.CREATE)
-          .channel(NeoExtensionChannel.MCP)
-          .build());
+      NeoHandler customization = NeoHandlerLookup.forEntity(sfEntity);
       if (customization != null) {
         customization.resolveServerCreateFields(
             buildHookContext(specName, entityName, "POST", null, body, adTab, sfEntity));

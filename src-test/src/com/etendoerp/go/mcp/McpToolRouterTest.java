@@ -1507,6 +1507,49 @@ public class McpToolRouterTest {
     assertFalse(body.startsWith("Error executing"));
   }
 
+  // ── handleCreate: what the pre-hook can tell about the agent's choices ─
+
+  /**
+   * {@code etendo_create} fills the mandatory defaults into the body BEFORE it dispatches the
+   * entity's pre-hook, so key presence there no longer says what the agent sent (a contact's
+   * {@code customer=true} is the AD default as often as a choice). The pre-hook must therefore be
+   * handed the key set of {@code userProvided} — the snapshot taken before the defaults pass and
+   * never reassigned — on the very context it is dispatched with. The consumer side (a defaulted
+   * key outside that set is not explicit) is specified in {@code ContactTypeRulesTest}.
+   *
+   * <p>Asserted on the source, as the other {@code handleCreate} call-site guards are
+   * ({@link McpSourceScanner}): reaching the dispatch needs {@code DefaultJsonDataService},
+   * {@code ModelProvider} and an {@code AD_Tab}, which cannot run in a unit test.</p>
+   */
+  @Test
+  public void testCreatePreHookIsHandedTheKeysTheAgentSentBeforeDefaults() {
+    String body = McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate")
+        .replaceAll("\\s+", "");
+
+    int snapshot = indexOrFail(body, "JSONObjectuserProvided=newJSONObject(filteredBody.toString());");
+    int defaults = indexOrFail(body, "NeoMandatoryDefaultsService.injectMandatoryDefaults(");
+    int hookContext = indexOrFail(body, "NeoContexthookCtx=McpHookExecutor.buildHookContext(");
+    int attribute = indexOrFail(body, "hookCtx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS,"
+        + "NeoCrudHelper.snapshotBodyFields(userProvided));");
+    int handedOver = indexOrFail(body, ".context(hookCtx)");
+    int dispatch = indexOrFail(body, "NeoExtensionDispatcher.dispatch(");
+
+    assertTrue("userProvided must be captured before injectMandatoryDefaults fills the body",
+        snapshot < defaults);
+    assertEquals("userProvided must not be reassigned after the snapshot", 1,
+        body.split("userProvided=", -1).length - 1);
+    assertTrue("the client-provided keys must be set on the hook context before it is dispatched",
+        hookContext < attribute && attribute < handedOver && handedOver < dispatch);
+  }
+
+  private static int indexOrFail(String body, String anchor) {
+    int index = body.indexOf(anchor);
+    assertTrue("handleCreate no longer contains " + anchor + " — either the call was dropped or"
+        + " the method was refactored and this guard needs updating", index >= 0);
+    return index;
+  }
+
   // ── classified failures (ETP-5782) ───────────────────────────────────
 
   /** A keyed refusal thrown out of a tool is a business rule the agent can act on, not a fault. */

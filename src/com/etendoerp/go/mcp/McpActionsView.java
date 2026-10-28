@@ -74,6 +74,9 @@ final class McpActionsView {
       + "you can tell the user why. This is advice only: it never blocks a call, and the server "
       + "still validates the call itself.";
 
+  /** Key of the actions {@code MCP_CONFIG.actions.hidden} withholds, each with its reason (ETP-5714). */
+  static final String KEY_WITHHELD_ACTIONS = "withheldActions";
+
   /** Key of the {@code value → reason} object for values of a list-backed action ruled out here. */
   static final String KEY_UNAVAILABLE_VALUES = "unavailableValues";
 
@@ -203,6 +206,7 @@ final class McpActionsView {
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
+    putWithheld(response, config);
     if (hasDeclared) {
       response.put("declaredActionsHint", "Entries carrying 'parameters' are served by this "
           + "window's own logic rather than an AD button: call etendo_action with action = the "
@@ -216,6 +220,26 @@ final class McpActionsView {
       response.put(KEY_AVAILABILITY_HINT, AVAILABILITY_HINT);
     }
     return response;
+  }
+
+  /**
+   * Lists every action {@code MCP_CONFIG.actions.hidden} withholds as {@code {action, reason}}
+   * (ETP-5714). They are not in {@code actions}, so they count neither in {@code actionCount} nor
+   * in {@code invokableCount}, and {@code etendo_action} refuses them. The key is absent when
+   * nothing is hidden, so the response of an entity without the configuration is unchanged.
+   */
+  private static void putWithheld(JSONObject response, McpActionsSection.View config)
+      throws JSONException {
+    if (config == null) {
+      return;
+    }
+    JSONArray withheld = new JSONArray();
+    for (Map.Entry<String, String> entry : config.withheldActions().entrySet()) {
+      withheld.put(new JSONObject().put("action", entry.getKey()).put("reason", entry.getValue()));
+    }
+    if (withheld.length() > 0) {
+      response.put(KEY_WITHHELD_ACTIONS, withheld);
+    }
   }
 
   private static boolean declaresAvailability(JSONArray actions) throws JSONException {
@@ -563,6 +587,7 @@ final class McpActionsView {
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
+    putWithheld(response, config);
     response.put("hint", "Call etendo_action with this spec and entity, id = the record each action "
         + "acts on (its idDescription says which), action = one of the names above and "
         + "parameters matching its schema. Undeclared or mistyped parameters are refused with 422 "

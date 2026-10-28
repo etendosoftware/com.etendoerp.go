@@ -128,7 +128,8 @@ final class SelectorQueryExecutor {
     }
     int totalCount = countQuery.count();
 
-    String dataWhere = whereStr + " ORDER BY e." + meta.displayProperty;
+    // ETP-5903 — the id breaks display ties so a row can never sit on two pages or on none.
+    String dataWhere = whereStr + " ORDER BY e." + meta.displayProperty + ", e.id";
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
@@ -203,7 +204,9 @@ final class SelectorQueryExecutor {
     }
     int totalCount = countQuery.count();
 
-    String dataWhere = effectiveWhere + ORDER_BY + alias + "." + meta.displayProperty;
+    // ETP-5903 — the id breaks display ties so a row can never sit on two pages or on none.
+    String dataWhere = effectiveWhere + ORDER_BY + alias + "." + meta.displayProperty + ", " + alias
+        + ".id";
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
@@ -363,7 +366,8 @@ final class SelectorQueryExecutor {
     bindCustomHqlParams(countQuery, query.params, query.searchParam);
     Long countResult = countQuery.uniqueResult();
     page.totalCount = (countResult != null) ? countResult.intValue() : 0;
-    String dataHql = query.selectPart + query.fromHql + ORDER_BY + query.displayOrder;
+    String dataHql = query.selectPart + query.fromHql + ORDER_BY
+        + rowPageOrder(alias, query.selectPart, query.fromHql, query.displayOrder);
     org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession().createQuery(dataHql);
     bindCustomHqlParams(dataQuery, query.params, query.searchParam);
     dataQuery.setMaxResults(limit);
@@ -508,6 +512,23 @@ final class SelectorQueryExecutor {
           meta.displayProperty, meta.entityName, e.getMessage());
       return false;
     }
+  }
+
+  private static final Pattern DISTINCT_OR_GROUP_BY = Pattern.compile(
+      "\\bDISTINCT\\b|\\bGROUP\\s+BY\\b", Pattern.CASE_INSENSITIVE);
+
+  /**
+   * ORDER BY of the row-paged flow (ETP-5903): the display value, then the alias id as a tiebreaker
+   * so a row can never sit on two pages or on none. Left without the tiebreaker when the HQL has a
+   * DISTINCT or a GROUP BY: PostgreSQL rejects an ORDER BY item that is not in a DISTINCT select list
+   * or not grouped, and a failing query here marks the transaction rollback-only.
+   */
+  static String rowPageOrder(String alias, String selectPart, String fromHql, String displayOrder) {
+    if (DISTINCT_OR_GROUP_BY.matcher(selectPart).find()
+        || DISTINCT_OR_GROUP_BY.matcher(fromHql).find()) {
+      return displayOrder;
+    }
+    return displayOrder + ", " + alias + ".id";
   }
 
   /** The FROM root alias of a custom HQL ({@code from PricingProductPrice pp} → {@code pp}). */

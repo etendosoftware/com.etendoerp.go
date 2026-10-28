@@ -137,17 +137,7 @@ public final class InvoicePostingGate {
         || StringUtils.isBlank(context.getRecordId())) {
       return null;
     }
-    Invoice invoice;
-    OBContext.setAdminMode(true);
-    try {
-      invoice = OBDal.getInstance().get(Invoice.class, context.getRecordId());
-    } catch (RuntimeException e) {
-      log.warn("Could not read invoice {} to gate its unpost: {}", context.getRecordId(),
-          e.getMessage());
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    Invoice invoice = readForGate(context, Invoice.class);
     if (invoice == null) {
       return null;
     }
@@ -171,7 +161,30 @@ public final class InvoicePostingGate {
     }
   }
 
-  private static NeoResponse refusal(String message, String messageKey,
+  /**
+   * Reads the record an unpost gate judges, in admin mode (the caller already passed the role's
+   * access to the action). Shared by the invoice and goods gates.
+   *
+   * @param context the request; its record id is read
+   * @param type    the entity class
+   * @return the record, or {@code null} when it does not exist or cannot be read (the gate then
+   *     fails open and the posting service answers as before)
+   */
+  static <T> T readForGate(NeoContext context, Class<T> type) {
+    OBContext.setAdminMode(true);
+    try {
+      return OBDal.getInstance().get(type, context.getRecordId());
+    } catch (RuntimeException e) {
+      log.warn("Could not read {} {} to gate its unpost: {}", type.getSimpleName(),
+          context.getRecordId(), e.getMessage());
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The flat 422 both posting gates answer ({@link GoodsPostingContracts#checkUnpost} too). */
+  static NeoResponse refusal(String message, String messageKey,
       Map<String, Object> params) throws JSONException {
     JSONObject body = new JSONObject();
     body.put("success", false);

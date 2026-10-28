@@ -2275,7 +2275,7 @@ class McpToolRouterSupportTest {
       assertEquals("business_rule", out.getString("code"));
       assertEquals("Periodo no válido para esta fecha de contabilidad", out.getString("detail"));
       assertEquals("PeriodNotValid", out.getJSONArray("messageKeys").getString(0));
-      assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, out.getString("hint"));
+      assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, out.getString("hint"));
     }
 
     @Test
