@@ -1293,6 +1293,56 @@ copy, untouched body, parent sources), the pre-dispatch cases of `NeoCrudHandler
 legacy id case of `McpFkResolverTest`, and the two-tenant `NeoReferenceOwnershipIntegrationTest`
 (REST and batch, through customizations, nothing written).
 
+#### A write never SETS a reference to an inactive row (ETP-5802)
+
+> Left without a `§4.3.x` number on purpose: `§4.3.6` and `§4.3.7` are each already reused for two
+> unrelated topics in this file (see the cross-references at `§4.3.7`'s own occurrences above and at
+> `§4.12.9`), so the next free slot in sequence is `§4.3.10` — but that would sit here, between
+> `§4.3.7` and `§4.3.9`, out of numeric order, which is worse than unnumbered. Fixing the numbering
+> for real means renumbering the existing duplicates and updating every citing cross-reference
+> (`§4.3.7` is cited from three other places in this file); that is a dedicated cleanup, not a
+> one-line addition to this PR.
+
+External QA (retest "Pasada 2") reproduced `etendo_create` on `product` with `taxCategory` pointing
+at a `FinancialMgmtTaxCategory` row that had just been deactivated (System-level "OLD IVA Normal",
+`828E8E40DD3C4FA6A4F531569D26A6AF`): the write answered status 0, and the response echoed the
+inactive row's own identifier, visually indistinguishable from an active "IVA Normal". Core's
+`JsonToDataConverter` resolves a foreign-key value with a bare `OBDal.get` and never looks at the
+referenced row's `IsActive` flag, on any channel.
+
+`NeoReferenceActiveness.findInactiveReference(adTab, requestFields)` closes it, wired into the same
+pre-dispatch points as `NeoReferenceOwnership` above (§4.3.7), run immediately after it on each
+channel — REST `NeoWritePreflight` (single writes and every `/batch` create), MCP `etendo_create`
+right after FK-by-name resolution, and MCP `etendo_update` right after FK-by-name resolution. REST
+answers **422** `INACTIVE_REFERENCE_VALUE` (`NeoInactiveReferenceResponse`, same flat
+status/error/detail/field/hint/seeAlso shape as `ReadOnlyFieldRejectedException`'s response); MCP
+answers the same **422** envelope with `error: "INACTIVE_REFERENCE_VALUE"`.
+
+**Structure only.** A body key is checked when the DAL model says it is a persisted reference of the
+written entity (same test as `NeoReferenceOwnership.isPersistedReference`) AND its target entity is
+`ActiveEnabled` (`Entity.isActiveEnabled()`) — i.e. the target table declares an `IsActive` column
+at all. A reference to a table with no `IsActive` column (most system/lookup tables — Currency,
+Country, `AD_Reference_List` combos) is structurally exempt, not special-cased. A reference that
+resolves to no row, or to a row of another tenant, is left to `NeoReferenceOwnership`; the two checks
+never disagree about the same value.
+
+**Changed, not merely present (CP-6 regression guard).** The check inspects exactly the `JSONObject`
+it is handed, and both write paths build that object from ONLY the keys the request itself set — the
+REST DAL-keyed copy (`NeoWritePreflight`) and the MCP `filteredBody` (`mapFieldsToDalProperties`,
+which never carries a key the caller did not send). An update that leaves an already-inactive
+reference untouched elsewhere on the record never has that key in the checked object, so it is not
+re-validated and the write proceeds — this is what QA's CP-6 (editing an unrelated field on a record
+that already carries the deactivated tax category) verifies stays working.
+
+**Out of scope.** `parentId` is addressed structurally, not set as an ordinary FK/TableDir value, so
+it is not re-checked for activeness. A reference to a non-active-tracked target is exempt, as is a
+reference that does not resolve to any row (ownership's job).
+
+Tests: `NeoReferenceActivenessTest` (structural detection, active/inactive/unresolvable/sentinel
+values, the not-active-tracked exemption, no-session fail-open), the wiring cases of
+`NeoWritePreflightTest` (422 on an inactive reference, not re-checked once ownership already
+refused).
+
 #### 4.3.9 Document actions over REST: refusal and idempotency (ETP-5783)
 
 `POST /sws/neo/{spec}/{entity}/{id}/action/documentAction` with `{"docAction":"CO"}` runs the
@@ -3663,7 +3713,7 @@ through `NeoHandler#responseEnrichedFields()`, and the MCP unions them into the 
 (from `FollowUpSupport.responseFields()`, only when a flow is registered) and their subtype key. It
 is read by the projection validator only: nothing is filtered, renamed or made writable by it. The
 goods shipment / receipt line handler (`AbstractInOutLineHandler`) declares `invoicedQuantity` and
-`productCode` (`orderQuantity` is a spec field already). The other keys the invoice headers inject on read (`linkedShipments` / `linkedReceipts`, `docTypeLocked`, `isRectificative`, …) are not
+`productCode` (`orderQuantity` is a spec field already). The other keys the invoice headers inject on read (`linkedShipments` / `linkedReceipts`, `linkedOrders`, `docTypeLocked`, `isRectificative`, …) are not
 declared yet and are still reported if requested explicitly.
 
 #### 4.12.6 `MCP_CONFIG` — the MCP's own configuration column (ETP-5184)
@@ -4689,6 +4739,26 @@ behaviour is unchanged. Channels as noted per field:
   flattened record has it at top level); REST puts it at the root of the body. `import-settings` builds
   its body with `okData` (`{"response":{"data":{"saved":true}}}`), so over REST `messages` sits at the
   root next to `response`, not inside it.
+
+##### Orders of an invoice resolved from its lines — `linkedOrders` (ETP-5828)
+
+Both invoice headers inject `linkedOrders` on the **detail GET only** (same placement and contract as
+`linkedShipments` / `linkedReceipts`), from `InvoiceDetailEnrichment#enrichLinkedOrders`: the
+DISTINCT orders reached through the invoice's own lines (`C_InvoiceLine.C_OrderLine_ID →
+C_OrderLine.C_Order_ID`), active lines only, excluding the `ETGO_DTO` total-discount line
+(`TotalDiscountService.DISCOUNT_PRODUCT_ID`), ordered by `DateOrdered`, `DocumentNo`. The header's
+`C_Order_ID` cannot answer this: since ETP-5381 (`InvoiceLineHandler#syncInvoiceOrderReferenceAfterLineSave`,
+Classic's rule) it is blanked when the lines come from more than one order — that rule stays — so an
+invoice built from several orders showed none of them as related documents.
+
+Each entry: `{id, documentNo, documentStatus, grandTotalAmount, currency$_identifier, orderDate, isQuotation}`
+— `currency$_identifier` is the ISO code (what the related-documents chip formats the amount with,
+same key as `listInvoices`), `orderDate` is `yyyy-MM-dd` (absent when null), `isQuotation` is
+`C_DocType.DocSubTypeSO = 'OB'` of the order's target doc type (a sales invoice can come from a
+quotation). An invoice with no order-linked line answers `[]`. Best-effort: on a SQL failure the key
+is absent and a warning is logged. The reverse direction (order → invoices, `listInvoices`,
+`OrderInvoiceListSupport`) already joins through the invoice lines, for sales and purchase alike.
+Not declared in `responseEnrichedFields()`, like the other detail-only keys (§4.12.5).
 
 ##### Document exchange rate (ETP-5840)
 
@@ -10892,8 +10962,14 @@ header-link rule, response). Direction (purchase or sales) is read from the targ
 The `id` of `etendo_action` is always the **draft target** document; discovery needs no `businessPartner` (it is the
 target's).
 
-**Body and answers.** `importOrderLines`: `{orderId, lines?:[{sourceLineId, quantity}]}`; `importReceiptLines`:
-`{receiptId, lines?}`; `importShipmentLines`: `{shipmentId, lines?}`. `lines` omitted or empty imports **everything
+**Body and answers.** `importOrderLines`: `{orderId, lines?:[{sourceLineId, quantity}], carryGlobalDiscount?}` for one
+order, or `{orders:[{orderId, lines?}], carryGlobalDiscount?}` to import several orders in ONE call and ONE transaction,
+as the invoice window's "Add from order" popup does (ETP-5828). The two shapes are exclusive (`orderId` or top-level
+`lines` next to `orders` is a **400**, as are an empty `orders`, more than 50 entries, an entry without `orderId` and the
+same order twice); every order is validated (completed, partner, currency, direction, return), the lines of all of them
+are locked in one ascending pass and every order is planned against its cap **before the first write**, so one refusal on
+any order creates nothing. `carryGlobalDiscount` (default `true`) is described under *Header link* below.
+`importReceiptLines`: `{receiptId, lines?}`; `importShipmentLines`: `{shipmentId, lines?}`. `lines` omitted or empty imports **everything
 still pending**; given, it imports **exactly** those lines (the same line twice is summed; an entry without
 `sourceLineId` or with a missing / zero / non-numeric `quantity` is refused, never skipped). The answer is
 `{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], headerLinked, salesOrder?}}`
@@ -10920,12 +10996,13 @@ caller knows its id. Return orders and return documents are never listed.
 | `importDirectionMismatch` | a sales source into a purchase target or the reverse; a return document or a return ORDER (`DocumentType.isReturn`) is never importable into an invoice; the action of the other side (`importShipmentLines` on a purchase invoice) |
 | `importPriceListRequired` | the target invoice has no price list |
 | `importNoStorageBin` | a stockable line was planned but the target's warehouse has no active bin (receipt / shipment) |
-| `importInvalidLine` | an entry of `lines` is not understood, or a required id (`orderId`, `receiptId`, `shipmentId`) is missing (this one is a **400**) |
+| `importInvalidLine` | an entry of `lines` is not understood (422). As a **400**: a required id (`orderId`, `receiptId`, `shipmentId`) is missing; `importOrderLines` into an invoice gets `orders` next to `orderId` or top-level `lines`, an `orders` that is not an array, is empty or has more than 50 entries, an entry without `orderId`, the same order twice, or a `carryGlobalDiscount` that is not a boolean. A key sent as JSON `null` counts as absent (MCP clients fill optional parameters with null) |
 | `importDocumentNotFound` | the target or the source does not exist **for the caller's client** (**404**): a document of another client answers exactly like a missing one (admin mode reads across clients, so the delegates check `OBContext.getCurrentClient()` and the discovery queries filter by it) |
-| `importLineNotInDocument` | a `sourceLineId` that is not a line of the source |
-| `importNothingPending` | no `lines` and nothing left to import (names the covering drafts when that is why) |
+| `importLineNotInDocument` | a `sourceLineId` that is not a line of the source. `importOrderLines` into an invoice names the order (`Line X is not a line of order 1000123`) and adds extra keys `orderId`, `documentNo`, since one call can carry several orders |
+| `importNothingPending` | no `lines` and nothing left to import (names the covering drafts when that is why). `importOrderLines` into an invoice names the order and adds `orderId`, `documentNo`, as above |
 | `importQuantityExceedsPending` | more than what is pending of a line; extra keys `product`, `requested`, `pending`, `sourceLineId` |
 | `importQuantityNotHonoured` | order / receipt to invoice only: the native process created other quantities than planned; everything is rolled back |
+| `globalDiscountConflict` | `importOrderLines` into an invoice with `carryGlobalDiscount` true (the default) when the orders' global discount cannot be carried (see *Header link*); extra keys `conflict`, `orders:[{orderId, documentNo, globalDiscount}]`, `invoice:{totalDiscount, hadLines}`, `hint` |
 
 Example: `Cannot import 11 of Agua: only 10 is still pending on this line (quantities already in draft documents count as taken).`
 An unforeseen failure is rolled back whole and answers a generic **500** (`An internal error occurred while importing
@@ -11026,9 +11103,41 @@ the native process sets / clears the invoice's order reference (one order: linke
 found by their lines (`OrderInvoiceListSupport.listInvoices`). `salesOrder` / `headerLinked` report the truth (see the
 response above): a header that links order X while the lines come only from order Y answers `headerLinked:false,
 salesOrder:X`. For an
-invoice imported from an order, the header's `etgoTotalDiscount` takes the order's when it is positive and the invoice
-has none yet (or the same one), as the modal's `afterImport` does; the discount line itself is materialised when the
-invoice is completed. A receipt / shipment imported into an invoice does NOT carry the order's `etgoTotalDiscount`
+invoice imported from orders, the header's `etgoTotalDiscount` (always a %, never an amount) follows the popup's rule
+(ETP-5828, `ImportOrderLinesIntoInvoiceHandler.discountConflict` mirrors `resolveOrderGlobalDiscount` in the SPA's
+`orderGlobalDiscountRule.js` step by step), judged on the invoice as it was BEFORE the call. Every % is normalised the
+same way (null, zero or negative is 0; 4 decimals). A line is any active line other than the `ETGO_DTO` total-discount
+line (a line without product counts):
+
+| Step | Selected orders / invoice before the call | `carryGlobalDiscount` true (default) | `false` |
+|---|---|---|---|
+| 1 | (a) `ordersDiffer`: the orders' % differ (0 % or none counts as a %, so 10 % + 0 % differ) | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
+| 2 | orders all at 0 % and invoice at 0 %, with or without lines | nothing to carry, header untouched, import goes through | same |
+| 3 | (b) `invoiceHasOtherDiscount`: the invoice has a % other than the orders' one, **orders at 0 % included** | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched (its % also applies to the new lines) |
+| 4 | (c) `invoiceHasLinesWithoutDiscount`: invoice at 0 % with lines, orders at one positive % | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
+| 5 | orders at one positive %, invoice at 0 % without lines | header takes that % | header untouched |
+| 5 | orders at one positive %, invoice already at that % | header keeps it | header untouched |
+
+The steps run in that order and the first that applies decides. The import itself is never forbidden: the
+422 is the popup's orange warning, and its `hint` tells the agent to ask the user and, to import anyway, resend the same
+call with `carryGlobalDiscount:false`. Every line always keeps its own line discount. Example:
+
+```json
+{"error":{"status":422,"code":"globalDiscountConflict",
+  "message":"The invoice already has lines and no total discount: carrying the orders' 10% would discount those lines too",
+  "conflict":"invoiceHasLinesWithoutDiscount",
+  "orders":[{"orderId":"A1B2…","documentNo":"1000123","globalDiscount":10}],
+  "invoice":{"totalDiscount":0,"hadLines":true},
+  "hint":"Nothing was imported. Tell the user this conflict and ask whether to import anyway. Only if they agree, resend the same call with carryGlobalDiscount:false: every line keeps its own line discount, no order's global discount is carried and the invoice's total discount is left unchanged (an existing one also applies to the imported lines)."}}
+```
+
+With orders at 0 % and an invoice at 5 % the message reads `The invoice already has a total discount of 5%, the
+selected orders have no global discount: it is kept and also applies to the imported lines`.
+
+Before ETP-5828 the action took one order per call and silently left the header unchanged in cases (b) and (c), and
+(b) was never raised for orders without a discount; a single-order call now answers the 422 in those cases unless it
+sends `carryGlobalDiscount:false`. The discount line
+itself is materialised when the invoice is completed. A receipt / shipment imported into an invoice does NOT carry the order's `etgoTotalDiscount`
 (only the order import does), as in the window.
 
 **Over-delivered order lines (receipt / shipment import).** `InOutLineFromOrderFactory.pendingQuantityFor` computes
