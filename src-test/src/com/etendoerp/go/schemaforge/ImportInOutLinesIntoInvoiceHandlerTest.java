@@ -78,6 +78,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * NEGATIVE, against the same pending computation, whichever sign the return stored.
  *
  * @covers com.etendoerp.go.schemaforge.ImportInOutLinesIntoInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnLineCredit
  */
 public class ImportInOutLinesIntoInvoiceHandlerTest {
 

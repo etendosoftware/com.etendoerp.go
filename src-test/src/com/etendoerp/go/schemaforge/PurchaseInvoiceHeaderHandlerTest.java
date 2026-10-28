@@ -1816,7 +1816,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
   public void handle_routesTheImportsByTheKindOfInvoice() throws Exception {
     ImportOrderLinesIntoInvoiceHandler orders = mock(ImportOrderLinesIntoInvoiceHandler.class);
     ImportInOutLinesIntoInvoiceHandler receipts = mock(ImportInOutLinesIntoInvoiceHandler.class);
-    PurchaseInvoiceHeaderHandler handler = purchaseWithImportDelegates(orders, receipts);
+    PurchaseInvoiceHeaderHandler purchaseHeader = purchaseWithImportDelegates(orders, receipts);
     AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
@@ -1838,7 +1838,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
       NeoContext orderCtx = NeoContext.builder().httpMethod("POST")
           .endpointType(NeoEndpointType.ACTION).fieldName("importOrderLines").recordId("i1")
           .build();
-      NeoResponse refused = handler.handle(orderCtx);
+      NeoResponse refused = purchaseHeader.handle(orderCtx);
 
       assertEquals("a rectificative takes no order import", 422, refused.getHttpStatus());
       assertEquals("importNotAvailableOnRectificative",
@@ -1850,7 +1850,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
           .endpointType(NeoEndpointType.ACTION).fieldName("importReturnLines").recordId("i1")
           .build();
       assertEquals("a normal invoice takes no return import", "importRequiresRectificative",
-          handler.handle(returnCtx).getBody().getJSONObject("error").getString("code"));
+          purchaseHeader.handle(returnCtx).getBody().getJSONObject("error").getString("code"));
       assertNotNull("the policy travels on the request",
           returnCtx.getAttribute(RectificativeImportPolicy.ATTRIBUTE));
     } finally {

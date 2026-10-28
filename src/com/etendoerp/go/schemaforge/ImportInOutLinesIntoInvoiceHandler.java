@@ -39,7 +39,6 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -97,6 +96,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
 
   /** Joins the steps of the flow sentence of a contract. */
   private static final String THEN = ", then ";
+  private static final String DOCUMENT = "Document ";
   private static final String PARAM_RECEIPT_ID = "receiptId";
   private static final String PARAM_SHIPMENT_ID = "shipmentId";
   private static final String PARAM_RETURN_ID = "returnId";
@@ -343,7 +343,9 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     List<DocumentLineImport.ImportedLine> created = createLines(invoice, selected,
         ShipmentInOutLine.class, planned, line -> line.getGoodsShipmentLine());
     if (returns) {
-      clearReferencePrices(invoice, created);
+      Set<String> createdIds = new java.util.HashSet<>();
+      created.forEach(line -> createdIds.add(line.id));
+      ReturnLineCredit.clearReferencePrices(invoice, createdIds);
     }
     return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
         : invoice.getSalesOrder().getId());
@@ -371,28 +373,6 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   }
 
   /**
-   * The native process stores the price list's standard price and price limit on a line it prices
-   * from the price list; the return modal's body carries neither, so the screen stores 0 in both.
-   * Cleared on the NEW lines only, in the same transaction; {@code priceactual}, {@code pricelist}
-   * and every amount are left as the process set them.
-   */
-  private void clearReferencePrices(Invoice invoice,
-      List<DocumentLineImport.ImportedLine> created) {
-    Set<String> ids = new java.util.HashSet<>();
-    for (DocumentLineImport.ImportedLine line : created) {
-      ids.add(line.id);
-    }
-    for (InvoiceLine line : invoice.getInvoiceLineList()) {
-      if (ids.contains(line.getId())) {
-        line.setStandardPrice(BigDecimal.ZERO);
-        line.setPriceLimit(BigDecimal.ZERO);
-        saveLine(line);
-      }
-    }
-    flushLines();
-  }
-
-  /**
    * What a return line can still be credited, as a POSITIVE magnitude, computed as the modal of the
    * invoice's side does (ETP-5876), whichever sign the return stored:
    * <ul>
@@ -408,43 +388,12 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    */
   private Map<String, BigDecimal> returnPending(Invoice invoice, ShipmentInOut source,
       Map<String, ShipmentInOutLine> lines, RectificativeImportPolicy policy) {
-    Map<String, BigDecimal> pending = new LinkedHashMap<>();
     boolean presenceOnly = policy.capsReturnsByPresence();
-    Set<String> inTarget = movementLineIdsOf(invoice);
     Map<String, BigDecimal> credited = presenceOnly ? Map.of() : creditedQuantities(source.getId());
     Set<String> blocked = presenceOnly ? Set.of()
         : blockedOrderLines(source.getId(), invoice.getId());
-    for (Map.Entry<String, ShipmentInOutLine> entry : lines.entrySet()) {
-      ShipmentInOutLine line = entry.getValue();
-      BigDecimal movement = line.getMovementQuantity();
-      if (movement == null || movement.signum() == 0) {
-        continue;
-      }
-      BigDecimal left = movement.abs();
-      if (presenceOnly) {
-        left = inTarget.contains(entry.getKey()) ? BigDecimal.ZERO : left;
-      } else if (line.getSalesOrderLine() != null
-          && blocked.contains(line.getSalesOrderLine().getId())) {
-        left = BigDecimal.ZERO;
-      } else {
-        left = left.subtract(credited.getOrDefault(entry.getKey(), BigDecimal.ZERO));
-      }
-      if (left.signum() > 0) {
-        pending.put(entry.getKey(), left);
-      }
-    }
-    return pending;
-  }
-
-  /** The movement lines this invoice already holds an active line for. */
-  private static Set<String> movementLineIdsOf(Invoice invoice) {
-    Set<String> ids = new java.util.HashSet<>();
-    for (InvoiceLine line : invoice.getInvoiceLineList()) {
-      if (line.isActive() && line.getGoodsShipmentLine() != null) {
-        ids.add(line.getGoodsShipmentLine().getId());
-      }
-    }
-    return ids;
+    return ReturnLineCredit.pending(lines, ReturnLineCredit.movementLineIdsOf(invoice),
+        presenceOnly, credited, blocked);
   }
 
   /**
@@ -570,6 +519,17 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
 
   private ShipmentInOut requireSource(Invoice invoice, String sourceId, boolean returns,
       RectificativeImportPolicy policy) {
+    ShipmentInOut source = requireCommonSource(invoice, sourceId);
+    if (returns) {
+      requireReturnRules(invoice, source, policy);
+    } else {
+      requireStandardRules(invoice, source);
+    }
+    return source;
+  }
+
+  /** What every source must satisfy: exists for the caller, completed, same side and partner. */
+  private ShipmentInOut requireCommonSource(Invoice invoice, String sourceId) {
     ShipmentInOut source = loadSource(sourceId);
     if (source == null) {
       throw DocumentLineImport.notFound("Document", sourceId);
@@ -582,33 +542,40 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         invoice.getBusinessPartner() == null ? null : invoice.getBusinessPartner().getId(),
         source.getBusinessPartner() == null ? null : source.getBusinessPartner().getId(),
         source.getDocumentNo());
-    if (!returns) {
-      DocumentLineImport.requireSameCurrency(
-          invoice.getCurrency() == null ? null : invoice.getCurrency().getId(),
-          source.getEtgoCurrency() == null ? null : source.getEtgoCurrency().getId(),
-          source.getDocumentNo());
-    }
-    if (returns && !isReturn(source)) {
-      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_SOURCE_NOT_RETURN,
-          "Document " + source.getDocumentNo() + " is not a return: " + ACTION_AVAILABLE_RETURNS
-              + " lists the returns a rectificative invoice can take lines from");
-    }
-    if (returns && returnCurrencyMismatch(invoice, source, policy)) {
-      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_CURRENCY_MISMATCH, "Document "
-          + source.getDocumentNo() + " is in another currency than the document it is imported "
-          + "into");
-    }
-    if (returns && isInvoicedInFull(source)) {
-      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_NOTHING_PENDING,
-          "Return " + source.getDocumentNo() + " is already invoiced in full: it is not offered");
-    }
-    if (!returns && isReturn(source)) {
+    return source;
+  }
+
+  /** A shipment or receipt: same currency, and never a return. */
+  private void requireStandardRules(Invoice invoice, ShipmentInOut source) {
+    DocumentLineImport.requireSameCurrency(
+        invoice.getCurrency() == null ? null : invoice.getCurrency().getId(),
+        source.getEtgoCurrency() == null ? null : source.getEtgoCurrency().getId(),
+        source.getDocumentNo());
+    if (isReturn(source)) {
       throw DocumentLineImport.refusal(DocumentLineImport.ERROR_DIRECTION_MISMATCH,
-          "Document " + source.getDocumentNo() + " is a return: it is credited through a "
+          DOCUMENT + source.getDocumentNo() + " is a return: it is credited through a "
               + "rectificative invoice (" + ACTION_IMPORT_RETURN_LINES + " or "
               + "createReturnInvoice on the return), not imported here");
     }
-    return source;
+  }
+
+  /** A return: it is one, in the invoice's currency where the side compares it, not yet in full. */
+  private void requireReturnRules(Invoice invoice, ShipmentInOut source,
+      RectificativeImportPolicy policy) {
+    if (!isReturn(source)) {
+      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_SOURCE_NOT_RETURN,
+          DOCUMENT + source.getDocumentNo() + " is not a return: " + ACTION_AVAILABLE_RETURNS
+              + " lists the returns a rectificative invoice can take lines from");
+    }
+    if (returnCurrencyMismatch(invoice, source, policy)) {
+      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_CURRENCY_MISMATCH, DOCUMENT
+          + source.getDocumentNo() + " is in another currency than the document it is imported "
+          + "into");
+    }
+    if (isInvoicedInFull(source)) {
+      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_NOTHING_PENDING,
+          "Return " + source.getDocumentNo() + " is already invoiced in full: it is not offered");
+    }
   }
 
   private static boolean isReturn(ShipmentInOut doc) {
@@ -659,14 +626,6 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       query.setParameter("cur", currencyId);
     }
     return new ArrayList<>(query.list());
-  }
-
-  protected void saveLine(InvoiceLine line) {
-    OBDal.getInstance().save(line);
-  }
-
-  protected void flushLines() {
-    OBDal.getInstance().flush();
   }
 
   /**
