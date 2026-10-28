@@ -709,6 +709,47 @@ class OrderLineDiscountSupportTest {
     verify(dal, times(0)).get(OrderLine.class, LINE_ID);
   }
 
+  /** Through {@code applyLineRules}: a patch with no amount input carries nothing into the body. */
+  @Test
+  void applyLineRulesCarriesNoAmountInputIntoAnUpdateWithoutOne() throws Exception {
+    JSONObject json = new JSONObject("{\"description\":\"x\"}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals(1, json.length());
+    assertFalse(json.has(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertFalse(json.has(OrderLineDiscountSupport.FIELD_TAX));
+  }
+
+  /**
+   * ETP-6012: a patch that sends only {@code discount} sends no amount input itself, but it
+   * reprices the line, so the stored quantity and tax are carried for the save's gross derivation.
+   */
+  @Test
+  void aDiscountOnlyUpdateCarriesTheStoredQuantityAndTax() throws Exception {
+    JSONObject json = new JSONObject("{\"discount\":10}");
+    OBDal dal = mock(OBDal.class);
+    Tab tab = mock(Tab.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE);
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class);
+        MockedStatic<NeoTypeCoercionHelper> coercion = mockStatic(NeoTypeCoercionHelper.class)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", json, tab));
+
+      cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(any(), any(),
+          any(), any(), any(), any(), any()), times(1));
+    }
+
+    assertEquals(10, json.getInt(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertEquals(TAX_ID, json.getString(OrderLineDiscountSupport.FIELD_TAX));
+    assertEquals(10, json.getInt(OrderLineDiscountSupport.FIELD_DISCOUNT));
+  }
+
   // ── CP-9: an update of the price alone derives the discount ───────────
 
   /** Stored: list 300, discount 20, price 240, qty 5. */

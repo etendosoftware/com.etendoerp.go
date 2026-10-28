@@ -594,6 +594,70 @@ class ContactsLocationAddressHandlerTest {
     }
   }
 
+  /** The update response carries the two address flags as JSON booleans, false included. */
+  @Test
+  void updateResponseCarriesTheAddressFlagsAsBooleans() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    when(bpLoc.isShipToAddress()).thenReturn(Boolean.TRUE);
+    when(bpLoc.isInvoiceToAddress()).thenReturn(Boolean.FALSE);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      JSONObject rec = response.getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0);
+      assertTrue(rec.getBoolean("shipToAddress"));
+      assertFalse(rec.getBoolean("invoiceToAddress"));
+    }
+  }
+
+  /** A write whose `updated` still matches the stored row is not refused and writes the field. */
+  @Test
+  void aCurrentUpdatedTokenLetsThePatchProceed() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+    body.put("updated", "2026-10-28T10:00:00.000-03:00");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false);
+        MockedStatic<NeoRecordVersion> version = mockStatic(NeoRecordVersion.class)) {
+      version.when(() -> NeoRecordVersion.isStale(anyString(), eq("bpl-id"),
+          eq("2026-10-28T10:00:00.000-03:00"), any())).thenReturn(false);
+
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setPostalCode("28002");
+    }
+  }
+
+  /** A region the body sends (by id or by name) is the caller's: the stored one is not merged in. */
+  @Test
+  void mergeKeepsTheStoredRegionOutWhenTheBodySendsOne() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    Region region = mockRegion("Madrid", "client-id");
+    when(region.getId()).thenReturn("region-es");
+    when(geoLoc.getRegion()).thenReturn(region);
+    JSONObject byId = new JSONObject().put("region", "region-other");
+    JSONObject byName = new JSONObject().put("regionName", "Valencia");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      ContactsLocationAddressHandler.mergeStoredAddress(byId, geoLoc);
+      ContactsLocationAddressHandler.mergeStoredAddress(byName, geoLoc);
+    }
+
+    assertEquals("region-other", byId.getString("region"));
+    assertFalse(byId.has("regionName"));
+    assertEquals("Valencia", byName.getString("regionName"));
+    assertFalse(byName.has("region"));
+    assertEquals("Madrid", byId.getString("cityName"));
+  }
+
   // ── handleUpdate ────────────────────────────────────────────────────────
 
   /**
