@@ -96,7 +96,7 @@ final class McpToolAnnotations {
 
   /**
    * Tools that reach parties outside the system (ETP-5715): the email send delivers a message to
-   * third parties, and the document extraction sends the user's PDF to an external, paid AI model;
+   * third parties, and the document extraction sends the user's document to an external, paid AI model;
    * clients use the hint to decide how to ask for approval — the extraction is read-only for the ERP
    * but is not free and is not local. The attachment tools hand links to the user and reach nobody
    * else, so they stay closed-world.
