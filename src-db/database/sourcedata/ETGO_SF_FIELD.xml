@@ -8862,6 +8862,7 @@
 <!--1501CAD8284F40929832554F0AB1DA42-->  <JAVA_QUALIFIER><![CDATA[tax]]></JAVA_QUALIFIER>
 <!--1501CAD8284F40929832554F0AB1DA42-->  <SEQNO><![CDATA[180]]></SEQNO>
 <!--1501CAD8284F40929832554F0AB1DA42-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--1501CAD8284F40929832554F0AB1DA42-->  <AGENT_PROMPT><![CDATA[Normally omit it: the server picks the tax from the product's tax category and the customer's tax category (a customer under 'Recargo de Equivalencia' gets the tax with the surcharge), as the form does. To see or change the options for this line, call etendo_selectors for 'tax' with recordContext {product, businessPartner, invoiceDate} — not the tax/tax catalogue, which lists every rate, including inactive and future ones.]]></AGENT_PROMPT>
 <!--1501CAD8284F40929832554F0AB1DA42-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--1501CAD8284F40929832554F0AB1DA42--></ETGO_SF_FIELD>
 
@@ -22615,6 +22616,7 @@
 <!--36F0301468CF4040AF26BED96A8E36F0-->  <JAVA_QUALIFIER><![CDATA[accountingDate]]></JAVA_QUALIFIER>
 <!--36F0301468CF4040AF26BED96A8E36F0-->  <SEQNO><![CDATA[170]]></SEQNO>
 <!--36F0301468CF4040AF26BED96A8E36F0-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--36F0301468CF4040AF26BED96A8E36F0-->  <AGENT_PROMPT><![CDATA[The date the invoice is posted to the ledger; it must fall in an open period. If omitted it follows the invoice date (today when that was omitted too).]]></AGENT_PROMPT>
 <!--36F0301468CF4040AF26BED96A8E36F0-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--36F0301468CF4040AF26BED96A8E36F0--></ETGO_SF_FIELD>
 
@@ -33115,6 +33117,7 @@
 <!--51943932AFD34E9BA3F2BA9CD07C21DD-->  <JAVA_QUALIFIER><![CDATA[salesOrderLine]]></JAVA_QUALIFIER>
 <!--51943932AFD34E9BA3F2BA9CD07C21DD-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--51943932AFD34E9BA3F2BA9CD07C21DD-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--51943932AFD34E9BA3F2BA9CD07C21DD-->  <AGENT_PROMPT><![CDATA[The purchase order line this receipt line receives. A receipt line has no price of its own: the price is on this order line (read it in purchase-order/lines). An invoice created from the receipt takes its prices from these order lines.]]></AGENT_PROMPT>
 <!--51943932AFD34E9BA3F2BA9CD07C21DD-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--51943932AFD34E9BA3F2BA9CD07C21DD--></ETGO_SF_FIELD>
 
@@ -34826,6 +34829,7 @@
 <!--562F3289B4964EA9ABF3D184A3EFC919-->  <JAVA_QUALIFIER><![CDATA[accountingDate]]></JAVA_QUALIFIER>
 <!--562F3289B4964EA9ABF3D184A3EFC919-->  <SEQNO><![CDATA[170]]></SEQNO>
 <!--562F3289B4964EA9ABF3D184A3EFC919-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--562F3289B4964EA9ABF3D184A3EFC919-->  <AGENT_PROMPT><![CDATA[The date the invoice is posted to the ledger; it must fall in an open period. If omitted it follows the invoice date (today when that was omitted too).]]></AGENT_PROMPT>
 <!--562F3289B4964EA9ABF3D184A3EFC919-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--562F3289B4964EA9ABF3D184A3EFC919--></ETGO_SF_FIELD>
 
@@ -48329,6 +48333,7 @@
 <!--7710A924D2B84010BE9FECC070B055EF-->  <JAVA_QUALIFIER><![CDATA[invoiceDate]]></JAVA_QUALIFIER>
 <!--7710A924D2B84010BE9FECC070B055EF-->  <SEQNO><![CDATA[150]]></SEQNO>
 <!--7710A924D2B84010BE9FECC070B055EF-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--7710A924D2B84010BE9FECC070B055EF-->  <AGENT_PROMPT><![CDATA[The invoice date. If omitted the server proposes today, as the form does. When the user names a date, or the invoice copies an earlier document, send that date explicitly.]]></AGENT_PROMPT>
 <!--7710A924D2B84010BE9FECC070B055EF-->  <ISBUSINESSCRITICAL><![CDATA[Y]]></ISBUSINESSCRITICAL>
 <!--7710A924D2B84010BE9FECC070B055EF--></ETGO_SF_FIELD>
 
@@ -50675,6 +50680,7 @@
 <!--7E4076F80454430DA5D72E54CC0D234C-->  <JAVA_QUALIFIER><![CDATA[orderDate]]></JAVA_QUALIFIER>
 <!--7E4076F80454430DA5D72E54CC0D234C-->  <SEQNO><![CDATA[160]]></SEQNO>
 <!--7E4076F80454430DA5D72E54CC0D234C-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--7E4076F80454430DA5D72E54CC0D234C-->  <AGENT_PROMPT><![CDATA[The order date. If omitted the server proposes today, as the form does; send the date the user gives when it is another one.]]></AGENT_PROMPT>
 <!--7E4076F80454430DA5D72E54CC0D234C-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--7E4076F80454430DA5D72E54CC0D234C--></ETGO_SF_FIELD>
 
@@ -53351,6 +53357,7 @@
 <!--85705F63FE844295B7C6C74D3BE2768A-->  <JAVA_QUALIFIER><![CDATA[tax]]></JAVA_QUALIFIER>
 <!--85705F63FE844295B7C6C74D3BE2768A-->  <SEQNO><![CDATA[290]]></SEQNO>
 <!--85705F63FE844295B7C6C74D3BE2768A-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--85705F63FE844295B7C6C74D3BE2768A-->  <AGENT_PROMPT><![CDATA[Normally omit it: the server picks the tax from the product's tax category and the supplier's tax category, as the form does. To see or change the options for this line, call etendo_selectors for 'tax' with recordContext {product, businessPartner, orderDate} — not the tax/tax catalogue.]]></AGENT_PROMPT>
 <!--85705F63FE844295B7C6C74D3BE2768A-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--85705F63FE844295B7C6C74D3BE2768A--></ETGO_SF_FIELD>
 
@@ -82544,6 +82551,7 @@
 <!--CFB21CE8620F45D9B91244F1BB5E2373-->  <JAVA_QUALIFIER><![CDATA[salesOrderLine]]></JAVA_QUALIFIER>
 <!--CFB21CE8620F45D9B91244F1BB5E2373-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--CFB21CE8620F45D9B91244F1BB5E2373-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
+<!--CFB21CE8620F45D9B91244F1BB5E2373-->  <AGENT_PROMPT><![CDATA[The sales order line this shipment line delivers. A shipment line has no price of its own: the price is on this order line (read it in sales-order/lines). An invoice created from the shipment takes its prices from these order lines.]]></AGENT_PROMPT>
 <!--CFB21CE8620F45D9B91244F1BB5E2373-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--CFB21CE8620F45D9B91244F1BB5E2373--></ETGO_SF_FIELD>
 
@@ -82887,6 +82895,7 @@
 <!--D0B1C844ED0447C2910BFDF4369EC362-->  <JAVA_QUALIFIER><![CDATA[tax]]></JAVA_QUALIFIER>
 <!--D0B1C844ED0447C2910BFDF4369EC362-->  <SEQNO><![CDATA[290]]></SEQNO>
 <!--D0B1C844ED0447C2910BFDF4369EC362-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--D0B1C844ED0447C2910BFDF4369EC362-->  <AGENT_PROMPT><![CDATA[Normally omit it: the server picks the tax from the product's tax category and the customer's tax category (a customer under 'Recargo de Equivalencia' gets the tax with the surcharge), as the form does. To see or change the options for this line, call etendo_selectors for 'tax' with recordContext {product, businessPartner, orderDate} — not the tax/tax catalogue.]]></AGENT_PROMPT>
 <!--D0B1C844ED0447C2910BFDF4369EC362-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--D0B1C844ED0447C2910BFDF4369EC362--></ETGO_SF_FIELD>
 
@@ -85989,6 +85998,7 @@
 <!--D8DE645A3F4F49E8AD47A7F1B8087B0E-->  <JAVA_QUALIFIER><![CDATA[invoiceDate]]></JAVA_QUALIFIER>
 <!--D8DE645A3F4F49E8AD47A7F1B8087B0E-->  <SEQNO><![CDATA[150]]></SEQNO>
 <!--D8DE645A3F4F49E8AD47A7F1B8087B0E-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--D8DE645A3F4F49E8AD47A7F1B8087B0E-->  <AGENT_PROMPT><![CDATA[The date printed on the supplier's invoice. If omitted the server proposes today, as the form does — send the supplier document's own date when registering it.]]></AGENT_PROMPT>
 <!--D8DE645A3F4F49E8AD47A7F1B8087B0E-->  <ISBUSINESSCRITICAL><![CDATA[Y]]></ISBUSINESSCRITICAL>
 <!--D8DE645A3F4F49E8AD47A7F1B8087B0E--></ETGO_SF_FIELD>
 
@@ -88513,6 +88523,7 @@
 <!--DEFD612039604F1F89C75421C7B17353-->  <JAVA_QUALIFIER><![CDATA[tax]]></JAVA_QUALIFIER>
 <!--DEFD612039604F1F89C75421C7B17353-->  <SEQNO><![CDATA[180]]></SEQNO>
 <!--DEFD612039604F1F89C75421C7B17353-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--DEFD612039604F1F89C75421C7B17353-->  <AGENT_PROMPT><![CDATA[Normally omit it: the server picks the tax from the product's tax category and the supplier's tax category, as the form does. To see or change the options for this line, call etendo_selectors for 'tax' with recordContext {product, businessPartner, invoiceDate} — not the tax/tax catalogue, which lists every rate, including inactive and future ones.]]></AGENT_PROMPT>
 <!--DEFD612039604F1F89C75421C7B17353-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--DEFD612039604F1F89C75421C7B17353--></ETGO_SF_FIELD>
 
@@ -88953,6 +88964,7 @@
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <JAVA_QUALIFIER><![CDATA[orderDate]]></JAVA_QUALIFIER>
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <SEQNO><![CDATA[160]]></SEQNO>
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <AGENT_PROMPT><![CDATA[The order date. If omitted the server proposes today, as the form does; send the date the user gives when it is another one.]]></AGENT_PROMPT>
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3--></ETGO_SF_FIELD>
 

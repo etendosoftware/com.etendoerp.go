@@ -429,7 +429,9 @@ public class ToolRegistry {
         "List all available Etendo API specs the current user can access. "
             + "Returns spec names, types, entities, and available HTTP methods. "
             + "Use this first to discover what specs and entities are available. "
-            + "Pass spec to get only that spec's entities, parent links and actions.",
+            + "Pass spec to get only that spec's entities, parent links and actions. "
+            + "The answer is always complete, never paged: count is the number of specs returned. "
+            + "If your client shows it cut, call it again with spec for the one you need.",
         schema);
   }
 
@@ -588,7 +590,8 @@ public class ToolRegistry {
         + "VAT (invoice totallines) of completed/closed sales and purchase invoices dated in the "
         + "period; netProfit = revenue - expenses; pendingInvoices = completed sales invoices "
         + "still unpaid, counted now whatever their date. trend = % change against the previous "
-        + "period of the same length (0 with hasPrevious:false when there is none).");
+        + "period of the same length. With hasPrevious:false there is no previous period to "
+        + "compare with and trend is 0 as a placeholder, not a change: do not report it.");
     desc.put(McpConstants.WIDGET_REVENUE_TREND, "Revenue series (parallel labels/values arrays): "
         + "NET sales without VAT of completed/closed invoices per bucket — months by default (the "
         + "rolling last 12 months), days for mtd/last30d, weeks for last90d.");

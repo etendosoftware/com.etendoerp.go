@@ -57,6 +57,7 @@
 <!--051AFABD08C64E17B6E0E764262091B5-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--051AFABD08C64E17B6E0E764262091B5-->  <JAVA_QUALIFIER><![CDATA[goodsShipmentLineHandler]]></JAVA_QUALIFIER>
 <!--051AFABD08C64E17B6E0E764262091B5-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--051AFABD08C64E17B6E0E764262091B5-->  <AGENT_PROMPT><![CDATA[Lots, serial numbers and expiry dates are not handled in Etendo GO yet: a shipment line cannot carry them. Tell the user they cannot be recorded here.]]></AGENT_PROMPT>
 <!--051AFABD08C64E17B6E0E764262091B5--></ETGO_SF_ENTITY>
 
 <!--0571ECCC0B7B4044BFA5FB6A8B26501D--><ETGO_SF_ENTITY>
@@ -461,7 +462,7 @@
 <!--1343B4002EE14A9896594655770261ED-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--1343B4002EE14A9896594655770261ED-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--1343B4002EE14A9896594655770261ED-->  <SEQNO><![CDATA[80]]></SEQNO>
-<!--1343B4002EE14A9896594655770261ED-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
+<!--1343B4002EE14A9896594655770261ED-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"},"parent":{"allParents":true,"reason":"Agents look for installments by due date across invoices (what falls due this week, what is overdue); allParents keeps them to installments of purchase invoices, one row per installment with its invoice."}}]]></MCP_CONFIG>
 <!--1343B4002EE14A9896594655770261ED--></ETGO_SF_ENTITY>
 
 <!--13A91DF2974D4D1FB24E6E026C04BB66--><ETGO_SF_ENTITY>
@@ -911,7 +912,7 @@
 <!--28A6378134714F1E8D3C0869C1C77438-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--28A6378134714F1E8D3C0869C1C77438-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--28A6378134714F1E8D3C0869C1C77438-->  <SEQNO><![CDATA[80]]></SEQNO>
-<!--28A6378134714F1E8D3C0869C1C77438-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
+<!--28A6378134714F1E8D3C0869C1C77438-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"},"parent":{"allParents":true,"reason":"Agents look for installments by due date across invoices (what falls due this week, what is overdue); allParents keeps them to installments of sales invoices, one row per installment with its invoice."}}]]></MCP_CONFIG>
 <!--28A6378134714F1E8D3C0869C1C77438--></ETGO_SF_ENTITY>
 
 <!--28F9B00E6D8F4E489D5EF594423072C8--><ETGO_SF_ENTITY>
@@ -1733,6 +1734,7 @@
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <JAVA_QUALIFIER><![CDATA[taxSifOverrideHandler]]></JAVA_QUALIFIER>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <AGENT_PROMPT><![CDATA[The catalogue of every tax rate of the tenant, including inactive and future ones and the variants with surcharge or for specific business partner tax categories. To know which tax applies to an order or invoice line, do not pick from here: omit tax on the line and the server resolves it, or call etendo_selectors for 'tax' on that line entity with recordContext {product, businessPartner, date}.]]></AGENT_PROMPT>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4--></ETGO_SF_ENTITY>
 
 <!--4BBCDE8093FF45F0B7A7CF07538A8CC0--><ETGO_SF_ENTITY>
@@ -2943,6 +2945,7 @@
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <JAVA_QUALIFIER><![CDATA[productDefaultsHandler]]></JAVA_QUALIFIER>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--7973D68DD39E4F4C8D759A3007A27D56-->  <AGENT_PROMPT><![CDATA[A product's name is not unique: two products can share it. Identify one by its searchKey (code) or id. When several match what the user said, do not pick one: show them (name, searchKey, prices) and ask. If the user cannot tell, suggest — for them to confirm — the one used in that contact's most recent order or invoice (etendo_list on sales-order/header filtered by businessPartner, newest first, then its lines).]]></AGENT_PROMPT>
 <!--7973D68DD39E4F4C8D759A3007A27D56--></ETGO_SF_ENTITY>
 
 <!--7ACF14A002FC4C66B993576581225D63--><ETGO_SF_ENTITY>
@@ -5195,6 +5198,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <JAVA_QUALIFIER><![CDATA[year-close]]></JAVA_QUALIFIER>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <AGENT_PROMPT><![CDATA[To know whether a date falls in an open period, do not walk the calendar: call etendo_list on spec 'open-close-period-control', entity 'periodControl', with filters {startingDate:{lte:<date>}, endingDate:{gte:<date>}}; its status says whether the period is open (O).]]></AGENT_PROMPT>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67--></ETGO_SF_ENTITY>
 
 <!--E891228C65744C9CBBABE36F715D0E4E--><ETGO_SF_ENTITY>
@@ -5431,6 +5435,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F25F57EA043045CD8E34377220D5BF36-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F25F57EA043045CD8E34377220D5BF36-->  <JAVA_QUALIFIER><![CDATA[goodsReceiptLineHandler]]></JAVA_QUALIFIER>
 <!--F25F57EA043045CD8E34377220D5BF36-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--F25F57EA043045CD8E34377220D5BF36-->  <AGENT_PROMPT><![CDATA[Lots, serial numbers and expiry dates are not handled in Etendo GO yet: a receipt line cannot carry them. Tell the user they cannot be recorded here.]]></AGENT_PROMPT>
 <!--F25F57EA043045CD8E34377220D5BF36--></ETGO_SF_ENTITY>
 
 <!--F3599546C06B4ECAAC2063F34243BA6C--><ETGO_SF_ENTITY>
