@@ -74,7 +74,10 @@ final class SalesInvoiceShipmentLineResolver {
    * @param context             the pre-hook context of the line create
    * @param sourceInvoiceLineId the {@code sourceInvoiceLineId} the request carried (read before
    *                            the parent handler removed it), or {@code null}
-   * @throws OBException when the body cannot be written
+   * @throws OBException when the body cannot be written. A failure READING the pending quantities
+   *     ({@link NeoInvoiceSupport#computePendingQtyPerLineOrThrow}) is not caught either, on purpose:
+   *     the line create fails loudly (a 500) instead of being saved unlinked as if nothing were
+   *     pending — a silent NULL would hide the shipment from the invoice for good.
    */
   static void bindPendingShipmentLineOnCreate(NeoContext context, String sourceInvoiceLineId) {
     if (context == null || !NeoEndpointType.CRUD.equals(context.getEndpointType())

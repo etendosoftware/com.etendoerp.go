@@ -2343,6 +2343,78 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
+  /**
+   * The shipment link of the new lines is chosen by direction ({@code IsSOTrx}), never by window:
+   * a sales order plans its shipment lines with the shared rule BEFORE the native process creates
+   * the lines (afterwards the invoice's own draft lines would hold every shipment line), then links
+   * the lines to that plan; a purchase order keeps the {@code MAX(M_InOutLine_ID)} backfill.
+   */
+  @Test
+  public void testCreateFromOrderLinksShipmentLinesByPlanOnSalesAndByBackfillOnPurchase()
+      throws Exception {
+    for (boolean sales : new boolean[] { true, false }) {
+      String label = sales ? "sales order" : "purchase order";
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class);
+          MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class)) {
+        OBDal dal = mock(OBDal.class);
+        Session session = mock(Session.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        Order order = mockOrderWithHeaderData();
+        when(order.isSalesTransaction()).thenReturn(sales);
+        when(dal.get(eq(Order.class), eq("order-dir"))).thenReturn(order);
+        when(dal.getSession()).thenReturn(session);
+
+        OBProvider provider = mock(OBProvider.class);
+        Invoice invoice = mock(Invoice.class);
+        when(invoice.getId()).thenReturn("invoice-dir");
+        obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+        when(provider.get(Invoice.class)).thenReturn(invoice);
+        OBContext obCtx = mock(OBContext.class);
+        obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+        List<String> calls = new java.util.ArrayList<>();
+        CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+        Mockito.doAnswer(inv -> {
+          calls.add("native");
+          return 0;
+        }).when(process).createInvoiceLinesFromDocumentLines(any(), any(), any());
+        weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+            .thenReturn(process);
+        Map<String, List<OrderLineMovementAllocation.Allocation>> plan = new HashMap<>();
+        linker.when(() -> InvoiceLineLinker.planSalesShipmentLines(any())).thenAnswer(inv -> {
+          calls.add("plan");
+          return plan;
+        });
+
+        CreateFromOrderHandler handler = new CreateFromOrderHandler();
+        handler.resolvedDocType = mock(DocumentType.class);
+        handler.selectedLines = new JSONArray().put(new JSONObject()
+            .put("id", "ol-1")
+            .put("orderedQuantity", "2"));
+        JSONArray selection = handler.selectedLines;
+
+        handler.createFromOrder("order-dir", Collections.emptyMap(), null);
+
+        if (sales) {
+          assertEquals(label, Arrays.asList("plan", "native"), calls);
+          linker.verify(() -> InvoiceLineLinker.planSalesShipmentLines(selection));
+          linker.verify(() -> InvoiceLineLinker.linkSalesInvoiceLinesToPlannedShipments(invoice, plan));
+          linker.verify(() -> InvoiceLineLinker.linkInvoiceLinesToExistingInouts(anyString()),
+              Mockito.never());
+        } else {
+          assertEquals(label, Collections.singletonList("native"), calls);
+          linker.verify(() -> InvoiceLineLinker.linkInvoiceLinesToExistingInouts("invoice-dir"));
+          linker.verify(() -> InvoiceLineLinker.planSalesShipmentLines(any()), Mockito.never());
+          linker.verify(() -> InvoiceLineLinker.linkSalesInvoiceLinesToPlannedShipments(any(), any()),
+              Mockito.never());
+        }
+      }
+    }
+  }
+
   // ─── applyPriceListOverride (ETP-4028) — exercised via createFromOrder ─────
   //
   // applyPriceListOverride() itself is private, so it is exercised through the
