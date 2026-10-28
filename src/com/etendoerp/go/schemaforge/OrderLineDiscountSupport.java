@@ -492,8 +492,13 @@ final class OrderLineDiscountSupport {
       if (formState == null) {
         return;
       }
+      // A new net price makes the stored gross price stale, and the gross derivation prefers it.
+      // Read before the loop: the loop itself carries the stored unitPrice into the body.
+      boolean sentUnitPrice = body.has(FIELD_UNIT_PRICE);
       for (String input : AMOUNT_INPUTS) {
-        if (!body.has(input) && formState.has(input) && !formState.isNull(input)) {
+        boolean staleGrossPrice = sentUnitPrice && FIELD_GROSS_UNIT_PRICE.equals(input);
+        if (!staleGrossPrice && !body.has(input) && formState.has(input)
+            && !formState.isNull(input)) {
           body.put(input, formState.get(input));
         }
       }

@@ -150,7 +150,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return;
       }
       OBCriteria<Country> byCode = OBDal.getInstance().createCriteria(Country.class);
-      byCode.add(Restrictions.eq(Country.PROPERTY_ISOCOUNTRYCODE, value.toUpperCase()));
+      byCode.add(Restrictions.eq(Country.PROPERTY_ISOCOUNTRYCODE, value.toUpperCase(Locale.ROOT)));
       byCode.setMaxResults(1);
       Country country = (Country) byCode.uniqueResult();
       if (country != null) {
@@ -464,12 +464,20 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
     JSONObject stored = new JSONObject();
     putGeoLocFields(stored, geoLoc);
-    boolean sentRegion = body.has(FIELD_REGION) || body.has(FIELD_REGION_NAME);
+    // A stored region belongs to the stored country, and stored structured fields would recompose
+    // the address lines over the ones the caller sent: neither is carried in those cases.
+    String sentCountry = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+    boolean skipRegion = body.has(FIELD_REGION) || body.has(FIELD_REGION_NAME)
+        || (sentCountry != null && !sentCountry.equals(countryIdOf(geoLoc)));
+    boolean skipStructured = body.has(FIELD_ADDRESS_LINE1) || body.has(FIELD_ADDRESS_LINE2);
     for (String key : new String[] { FIELD_ADDRESS_LINE1, FIELD_ADDRESS_LINE2, FIELD_CITY_NAME,
         FIELD_POSTAL_CODE, FIELD_COUNTRY, FIELD_REGION, FIELD_REGION_NAME, FIELD_STREET_NAME,
         FIELD_BUILDING_NUMBER, FIELD_BUILDING_NAME }) {
       boolean regionKey = FIELD_REGION.equals(key) || FIELD_REGION_NAME.equals(key);
-      if (body.has(key) || (regionKey && sentRegion) || !stored.has(key)
+      boolean structuredKey = FIELD_STREET_NAME.equals(key) || FIELD_BUILDING_NUMBER.equals(key)
+          || FIELD_BUILDING_NAME.equals(key);
+      if (body.has(key) || (regionKey && skipRegion) || (structuredKey && skipStructured)
+          || !stored.has(key)
           || stored.isNull(key)) {
         continue;
       }

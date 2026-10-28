@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static com.etendoerp.go.schemaforge.LineAmountTestSupport.assertAmount;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -669,6 +670,29 @@ class OrderLineDiscountSupportTest {
 
     assertEquals("OTHER", json.getString(OrderLineDiscountSupport.FIELD_TAX));
     assertEquals(240, json.getInt(OrderLineDiscountSupport.FIELD_UNIT_PRICE));
+  }
+
+  /**
+   * On a tax-included line the stored gross price would win the gross derivation, so a new net
+   * price must not carry it; a new quantity still does.
+   */
+  @Test
+  void aNewUnitPriceNeverCarriesTheStoredGrossPrice() throws Exception {
+    String taxIncludedLine = "{\"orderedQuantity\":2,\"unitPrice\":10,\"grossUnitPrice\":12.1,"
+        + "\"tax\":\"" + TAX_ID + "\"}";
+    JSONObject priceOnly = new JSONObject("{\"unitPrice\":20}");
+    JSONObject qtyOnly = new JSONObject("{\"orderedQuantity\":3}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, taxIncludedLine)) {
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", priceOnly, null));
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", qtyOnly, null));
+    }
+
+    assertFalse(priceOnly.has(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE));
+    assertEquals(2, priceOnly.getInt(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertEquals(12.1, qtyOnly.getDouble(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE));
   }
 
   @Test

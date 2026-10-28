@@ -497,6 +497,47 @@ class ContactsLocationAddressHandlerTest {
     }
   }
 
+  /** A new country does not carry the stored region, which belongs to the old one. */
+  @Test
+  void mergeSkipsTheStoredRegionWhenTheCountryChanges() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    Region region = mockRegion("Madrid", "client-id");
+    when(region.getId()).thenReturn("region-es");
+    when(geoLoc.getRegion()).thenReturn(region);
+    JSONObject newCountry = new JSONObject().put("country", "AR");
+    JSONObject sameCountry = new JSONObject().put("country", "106");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      ContactsLocationAddressHandler.mergeStoredAddress(newCountry, geoLoc);
+      ContactsLocationAddressHandler.mergeStoredAddress(sameCountry, geoLoc);
+    }
+
+    assertFalse(newCountry.has("region"));
+    assertEquals("Madrid", newCountry.getString("cityName"));
+    assertEquals("region-es", sameCountry.getString("region"));
+  }
+
+  /** Address lines the caller sends are not recomposed from the stored structured fields. */
+  @Test
+  void mergeSkipsTheStoredStructuredFieldsWhenAddressLinesAreSent() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(geoLoc.getOBSEPABuildingNumber()).thenReturn("45");
+    JSONObject lines = new JSONObject().put("addressLine1", "New street 9");
+    JSONObject other = new JSONObject().put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      ContactsLocationAddressHandler.mergeStoredAddress(lines, geoLoc);
+      ContactsLocationAddressHandler.mergeStoredAddress(other, geoLoc);
+    }
+
+    assertFalse(lines.has("streetName"));
+    assertFalse(lines.has("buildingNumber"));
+    assertEquals("Gran Via", other.getString("streetName"));
+  }
+
   /** A PUT keeps its full-replace meaning: an omitted field is cleared, not merged. */
   @Test
   void putStillReplacesTheWholeAddress() throws Exception {

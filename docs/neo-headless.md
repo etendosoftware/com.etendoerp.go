@@ -4050,7 +4050,8 @@ per-entity conditional — if another `EM_`-prefixed column ever needs the same 
 runs it instead, against `C_BPartner_Location.Updated`, whenever the body carries `updated` (the
 public API always sends it, from `If-Match`; the UI form may not), and refuses a mismatch with the
 same 409 `stale_record`. `PUT` replaces the whole address (an omitted address field is cleared);
-`PATCH` first fills every address field it omits with the stored value. An address-only edit
+`PATCH` first fills every address field it omits with the stored value, except the stored region
+when the country changes, and the stored structured fields when it sends an address line. An address-only edit
 touches only `C_Location`, so the handler bumps `C_BPartner_Location.Updated` on every update, and
 the create/update response carries the new `updated` token, so the caller gets a fresh ETag.
 
