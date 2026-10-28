@@ -133,6 +133,10 @@ public class DocumentLineImportTest {
     } catch (ImportRefusal refusal) {
       assertEquals(422, refusal.response().getHttpStatus());
       assertEquals(DocumentLineImport.ERROR_NOTHING_PENDING, refusal.code());
+      JSONObject error = errorOf(refusal);
+      assertTrue("without a source name: the generic wording",
+          error.getString("message").contains("from this document"));
+      assertFalse("without source keys: no extra keys", error.has("orderId"));
     }
   }
 
@@ -195,6 +199,9 @@ public class DocumentLineImportTest {
     } catch (ImportRefusal refusal) {
       assertEquals(DocumentLineImport.ERROR_LINE_NOT_IN_DOCUMENT, refusal.code());
       assertEquals(422, refusal.response().getHttpStatus());
+      JSONObject error = errorOf(refusal);
+      assertTrue(error.getString("message").contains("not a line of the source document"));
+      assertFalse(error.has("orderId"));
     }
   }
 
@@ -410,6 +417,9 @@ public class DocumentLineImportTest {
   public void text_isNullForABlankOrMissingKey() throws Exception {
     assertNull(DocumentLineImport.text(null, "k"));
     assertNull(DocumentLineImport.text(body("{\"k\":\"  \"}"), "k"));
+    assertNull("JSON null is absent, never the text \"null\"",
+        DocumentLineImport.text(body("{\"k\":null}"), "k"));
+    assertNull(DocumentLineImport.text(body("{\"other\":\"v\"}"), "k"));
     assertEquals("v", DocumentLineImport.text(body("{\"k\":\"v\"}"), "k"));
   }
 

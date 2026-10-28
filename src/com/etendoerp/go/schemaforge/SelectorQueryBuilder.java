@@ -27,6 +27,8 @@ import org.apache.logging.log4j.Logger;
 
 import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
+import com.etendoerp.go.schemaforge.selector.policy.OrgTreeWhereSelectorPolicy;
 
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -120,7 +122,8 @@ class SelectorQueryBuilder {
       String search, String validationFilter, String alias, String contextOrganizationId) {
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
-    appendResolvedClause(hql, queryParams, SelectorValidationResolver.resolveObuiselParams(meta.whereClause));
+    appendResolvedClause(hql, queryParams, withOrgTreeResolvedOnce(meta.entityName, alias,
+        SelectorValidationResolver.resolveObuiselParams(meta.whereClause)));
     appendResolvedClause(hql, queryParams, HqlWithParams.of(validationFilter));
     appendResolvedClause(hql, queryParams,
         SelectorOrgFilter.resolveSelectorOrgFilter(meta.entityName, alias, contextOrganizationId));
@@ -130,6 +133,19 @@ class SelectorQueryBuilder {
         ? "as " + alias + " where " + hql
         : "as " + alias;
     return new HqlWithParams(whereClause, queryParams);
+  }
+
+  /**
+   * ETP-5707: the dictionary where clause of some view-backed selectors calls the organization-tree
+   * function once per view row. A selector policy can turn those calls into memberships in the ids
+   * the tree resolves to, evaluated once per request; the rows selected do not change.
+   */
+  private static HqlWithParams withOrgTreeResolvedOnce(String entityName, String alias,
+      HqlWithParams dictionaryWhere) {
+    OrgTreeWhereSelectorPolicy.Rewrite rewrite = NeoSelectorPolicy.resolveOrgTreeWhere(entityName,
+        alias, dictionaryWhere.getHql(), dictionaryWhere.getParams());
+    return rewrite == null ? dictionaryWhere
+        : new HqlWithParams(rewrite.getHql(), rewrite.getParams());
   }
 
 

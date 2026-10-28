@@ -57,6 +57,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * NeoHandler for the {@code user} spec. Three independent concerns share this one class because
@@ -285,42 +287,67 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    */
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (context.getEndpointType() == NeoEndpointType.ACTION
+        && SupportAccessGuard.isActingSupportUser(context.getObContext())) {
+      // ETP-5351 (Vigia M): grantPortalAccess adds a role and resets the password.
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
     if (context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }
     String method = context.getHttpMethod();
+    NeoResponse supportLockout = UserSupportSessionGuard.rejectSupportUserManagement(context);
+    if (supportLockout != null) {
+      return supportLockout;
+    }
     if (METHOD_POST.equalsIgnoreCase(method)) {
       return handleCreate(context);
     }
     if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method)) {
-      return validateUpdate(context);
+      NeoResponse supportGuard = UserSupportSessionGuard.rejectSupportSessionOnAdmin(context, context.getRecordId(),
+          UserSupportSessionGuard.isAdminStrippingUpdate(context.getRequestBody()));
+      return supportGuard != null ? supportGuard : validateUpdate(context);
     }
     if (METHOD_DELETE.equalsIgnoreCase(method)) {
-      return rejectDangerousDelete(context);
+      NeoResponse supportGuard = UserSupportSessionGuard.rejectSupportSessionOnAdmin(context, UserSupportSessionGuard.resolveDeleteTarget(context),
+          true);
+      return supportGuard != null ? supportGuard : rejectDangerousDelete(context);
     }
     return null;
   }
 
   /**
    * The {@code user} list restrictions: contact-only rows are excluded (see {@link
-   * #buildContactOnlyExclusion}, ETP-5019/ETP-5411) and the "Rol" advanced filter is applied (see
-   * {@link #buildRoleFilter}, ETP-5188).
+   * #buildContactOnlyExclusion}, ETP-5019/ETP-5411), the "Rol" advanced filter is applied (see
+   * {@link #buildRoleFilter}, ETP-5188) and the tenant's "Soporte Etendo" user is hidden (ETP-5351,
+   * T6).
    *
-   * <p>ETP-5568: both used to be injected from {@link #handle} as a {@code _neoWhere} query param.
-   * That param was also accepted from the query string, i.e. any caller could append raw HQL to
-   * any list, and it never reached the {@code ?_distinct=} value fetch, which skips the hooks — so
+   * <p>ETP-5568: the first two used to be injected from {@link #handle} as a {@code _neoWhere} query
+   * param. That param was also accepted from the query string, i.e. any caller could append raw HQL
+   * to any list, and it never reached the {@code ?_distinct=} value fetch, which skips the hooks — so
    * the Users filter offered values of the contact-only rows the list hid. As read predicates they
    * are applied by the generic read itself: list, count, paging, {@code ?_distinct=} and MCP
-   * {@code neo_list} all agree.
+   * {@code etendo_list} all agree.</p>
+   *
+   * <p>ETP-5351 (T6): the support-user exclusion is declared explicitly rather than relying on the
+   * contact-only predicate happening to drop it. A read by id is not affected (see {@link
+   * NeoHandler#readPredicates}), so the support user's own record stays readable for the audit
+   * links of the records it touched.</p>
+   *
+   * @param context the read context
+   * @return the HQL predicates over the alias {@code e}
    */
   @Override
   public List<String> readPredicates(NeoContext context) {
+    OBContext obContext = context != null ? context.getObContext() : null;
+    Map<String, String> queryParams = context != null ? context.getQueryParams() : null;
     List<String> predicates = new ArrayList<>();
-    predicates.add(buildContactOnlyExclusion(context.getObContext()));
-    String roleFilter = buildRoleFilter(context.getQueryParams(), context.getObContext());
+    predicates.add(buildContactOnlyExclusion(obContext));
+    String roleFilter = buildRoleFilter(queryParams, obContext);
     if (roleFilter != null) {
       predicates.add(roleFilter);
     }
+    predicates.addAll(SupportUserExclusion.userReadPredicates(obContext));
     return predicates;
   }
 
@@ -858,6 +885,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * javadoc: real access checks read {@code AD_User_Roles}, not the UI-convenience pointer
    * field). {@code false} when {@code targetUser} doesn't currently hold an active client-admin
    * role at all — deactivating it then carries no lockout risk from this angle.
+   *
+   * <p><b>ETP-5351 (T6).</b> The tenant's "Soporte Etendo" user holds the client-admin role too,
+   * but it is not a tenant admin: counting it would let the tenant delete or deactivate its last
+   * real admin while a support user exists. It is dropped from the set before counting, so the
+   * support user is never what keeps a real admin from being "the last one".</p>
    */
   private boolean isLastActiveClientAdmin(User targetUser) {
     Client client = targetUser.getClient();
@@ -877,6 +909,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     for (UserRoles row : activeAdminAssignments) {
       activeAdminUserIds.add(row.getUserContact().getId());
     }
+    SupportUserExclusion.removeFrom(activeAdminUserIds, client.getId());
     return activeAdminUserIds.size() == 1 && activeAdminUserIds.contains(targetUser.getId());
   }
 

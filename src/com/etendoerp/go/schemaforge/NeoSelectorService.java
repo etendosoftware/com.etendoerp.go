@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 
 import org.apache.commons.lang3.StringUtils;
@@ -30,6 +31,7 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoLocatorSelectorHelper;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * Generic dynamic selector service for FK fields.
@@ -405,9 +407,19 @@ public class NeoSelectorService {
         ctxFilterParams.put("finAccPaymentMethodId", finAccPaymentMethodId);
       }
     }
+    if (ctxParamFilter != null && ctxParamFilter.contains(":" + SupportUserExclusion.HQL_PARAM)) {
+      // ETP-5351 (T6): SupportUserSelectorPolicy names the parameter; the id is bound, not inlined.
+      ctxFilterParams.put(SupportUserExclusion.HQL_PARAM, StringUtils.defaultString(
+          SupportUserExclusion.supportUserIdOrNull(SupportUserExclusion.currentClientId())));
+    }
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {
       ctxFilterParams.put("language", language);
+    }
+    // ETP-5948 — ids a selector search policy matches beyond the display column (a tax by its rate)
+    Set<String> searchMatchIds = NeoSelectorPolicy.resolveSearchMatchIds(meta, safeContextParams, search);
+    if (!searchMatchIds.isEmpty()) {
+      ctxFilterParams.put(NeoSelectorExecutionHelper.PARAM_SEARCH_MATCH_IDS, searchMatchIds);
     }
     return SelectorQueryExecutor.execute(
         meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),

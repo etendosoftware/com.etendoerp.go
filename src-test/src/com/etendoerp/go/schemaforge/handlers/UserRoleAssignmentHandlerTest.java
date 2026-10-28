@@ -65,6 +65,7 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * Unit tests for {@link UserRoleAssignmentHandler} — two independent post-hook concerns on the
@@ -134,6 +135,9 @@ public class UserRoleAssignmentHandlerTest {
   /** The contact-only exclusion every user list read carries (ETP-5411). */
   private static final String CONTACT_EXCLUSION =
       "exists (select 1 from ETGO_Invitation i where i.user = e)";
+  /** ETP-5351 (T6) — appended whenever the read has a client: the tenant's support user is hidden. */
+  private static final String SUPPORT_USER_EXCLUSION =
+      "e.id <> '" + SupportAccessGuard.supportUserIdFor(CLIENT_ID) + "'";
 
   /**
    * ETP-4830 — bundles the three collaborators {@link
@@ -504,7 +508,8 @@ public class UserRoleAssignmentHandlerTest {
     }
 
     assertEquals(List.of(
-        "e.id = '" + OWNER_ID + "' or exists (select 1 from ETGO_Invitation i where i.user = e)"),
+        "e.id = '" + OWNER_ID + "' or exists (select 1 from ETGO_Invitation i where i.user = e)",
+        SUPPORT_USER_EXCLUSION),
         predicates);
   }
 
@@ -526,7 +531,7 @@ public class UserRoleAssignmentHandlerTest {
       predicates = handler.readPredicates(listGetContext(new HashMap<>(), obContext));
     }
 
-    assertEquals(List.of(CONTACT_EXCLUSION), predicates);
+    assertEquals(List.of(CONTACT_EXCLUSION, SUPPORT_USER_EXCLUSION), predicates);
   }
 
   @Test

@@ -22,11 +22,9 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
@@ -36,8 +34,6 @@ import org.codehaus.jettison.json.JSONArray;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
@@ -45,7 +41,6 @@ import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.utils.SIIUtils;
 
@@ -78,9 +73,19 @@ public abstract class AbstractInvoiceHeaderHandler {
   // linked back to MORE THAN ONE source invoice (importing from source invoice A, then later
   // from source invoice B, must keep BOTH links). FIELD_ORIGIN_INVOICE is kept as a
   // backward-compatible single-id alias (accepted on input, folded into the id set; emitted on
-  // output as the first linked origin) — see captureOriginInvoice/persistOriginInvoice/
-  // enrichOriginInvoice below.
+  // output as the first linked origin) — see InvoiceRectificationLinkSupport's
+  // captureOriginInvoice/persistOriginInvoice/enrichOriginInvoice (java:S1448, ETP-5745).
   protected static final String FIELD_ORIGIN_INVOICES      = "originInvoices";
+  /**
+   * The reverse of {@link #FIELD_ORIGIN_INVOICES}: the rectificativa(s) that rectify THIS
+   * invoice (ETP-5745 CP-12). {@code C_Invoice_Reverse} is read in the opposite direction here
+   * ({@code reversed_c_invoice_id = invoiceId}, same join {@link InvoiceReactivationGuard} uses
+   * for its own guard query) — without it, the "Rectificaciones" tab and the "Documentos
+   * relacionados" card had no way to show, from the ORIGINAL invoice, which document(s) rectify
+   * it: {@code InvoiceRectificationLinkSupport#enrichOriginInvoice} only ever answers "what does
+   * THIS invoice rectify".
+   */
+  protected static final String FIELD_RECTIFYING_INVOICES  = "rectifyingInvoices";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
   /** {@code C_BPartner_Location_ID}: the invoicing address. */
@@ -96,16 +101,6 @@ public abstract class AbstractInvoiceHeaderHandler {
   static final String FIELD_ETVFAC_INV_TYPE = "etvfacInvType";
   protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
-
-  // ETP-4737: captured by captureOriginInvoice() (called from each subclass's handle(), the
-  // pre-hook) and consumed by persistOriginInvoice() (called from afterHandle(), the post-hook)
-  // — see the capture-site comment on captureOriginInvoice for why this can't just be re-read
-  // from context.getRequestBody() in afterHandle(). Concrete subclasses are @Named-only CDI
-  // beans, defaulting to @Dependent scope, and NeoServletSupport#handleWithHooks calls handle()
-  // then afterHandle() on the SAME handler instance for a given request, so a plain instance
-  // field on this shared base class safely carries state between them.
-  private List<String> pendingOriginInvoiceIds;
-  private boolean originInvoiceCaptured;
 
   // ETP-4783: SII authorization number — same capture/persist pattern as originInvoice.
   // captureAndValidateSiiAuthorization() (called from handle()) validates the SII config and
@@ -185,6 +180,14 @@ public abstract class AbstractInvoiceHeaderHandler {
    * {@code followUp.annotate(dataArr)} on GET.
    */
   protected final FollowUpSupport followUp = new FollowUpSupport(this::followUpFlows);
+
+  /**
+   * The {@code C_Invoice_Reverse} origin/rectifying-invoice relationship (capture, persist, GET
+   * enrichment) — extracted out of this class into its own collaborator (java:S1448, ETP-5745),
+   * exactly like {@link #followUp}. One instance per handler; see
+   * {@link InvoiceRectificationLinkSupport} for the capture/persist state-carrying rationale.
+   */
+  protected final InvoiceRectificationLinkSupport rectificationLinks = new InvoiceRectificationLinkSupport();
 
   /**
    * The keys this header adds to every GET record that are not spec fields: the follow-up
@@ -331,162 +334,11 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Origin invoice persistence
+  // Origin invoice persistence — moved to InvoiceRectificationLinkSupport (java:S1448,
+  // ETP-5745): captureOriginInvoice, persistOriginInvoice and their private helpers now live
+  // on the rectificationLinks collaborator field above. Call them as
+  // rectificationLinks.captureOriginInvoice(context) / rectificationLinks.persistOriginInvoice(context).
   // ---------------------------------------------------------------------------
-
-  /**
-   * Captures and strips {@code originInvoice}/{@code originInvoices} from the raw request body
-   * BEFORE the generic field filter runs, so {@link #persistOriginInvoice} can still use them
-   * later in {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the
-   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDateOnCreate(...)}
-   * call.
-   *
-   * <p>Neither field is a decisions.json/contract field, so
-   * {@code NeoFieldFilter#filterCreateRequest}/{@code filterWriteRequest} would otherwise
-   * silently drop them before {@code afterHandle()} got a chance to read them back from
-   * {@code context.getRequestBody()} — the link was never actually persisted (confirmed via an
-   * empty {@code C_Invoice_Reverse} table) despite {@code persistOriginInvoice} looking correct
-   * in isolation. Same reasoning as the {@code parentId} carve-out at the top of
-   * {@code NeoCrudHandler#executePostCreate}.
-   *
-   * <p>ETP-4919: {@code originInvoices} (a JSON array of invoice ids) is the current shape sent
-   * by the "Import from Source Invoice" popup — a rectificativa can be linked to more than one
-   * source invoice across separate import runs. {@code originInvoice} (a single id) is kept as a
-   * backward-compatible alias: if present, its id is folded into the same captured set. Both
-   * keys may be present at once; ids are de-duplicated.
-   *
-   * @param context
-   *     the current request context
-   */
-  protected void captureOriginInvoice(NeoContext context) {
-    if (!NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-      return;
-    }
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return;
-    }
-    List<String> ids = new ArrayList<>();
-    boolean captured = collectOriginInvoiceIds(body, ids);
-
-    if (captured) {
-      pendingOriginInvoiceIds = ids;
-      originInvoiceCaptured = true;
-    }
-  }
-
-  /**
-   * Reads {@code originInvoices} (array) and/or the legacy singular {@code originInvoice} from
-   * {@code body} into {@code ids} (de-duplicated), removing both keys from {@code body} so the
-   * generic field filter never sees them (see {@link #captureOriginInvoice} javadoc for why).
-   *
-   * @return {@code true} if either key was present in {@code body}
-   */
-  private boolean collectOriginInvoiceIds(JSONObject body, List<String> ids) {
-    boolean captured = false;
-
-    if (body.has(FIELD_ORIGIN_INVOICES)) {
-      captured = true;
-      try {
-        JSONArray arr = body.getJSONArray(FIELD_ORIGIN_INVOICES);
-        for (int i = 0; i < arr.length(); i++) {
-          String id = arr.optString(i, null);
-          if (StringUtils.isNotBlank(id) && !ids.contains(id)) {
-            ids.add(id);
-          }
-        }
-      } catch (Exception e) {
-        log.warn("Could not parse {} array: {}", FIELD_ORIGIN_INVOICES, e.getMessage());
-      }
-      body.remove(FIELD_ORIGIN_INVOICES);
-    }
-
-    if (body.has(FIELD_ORIGIN_INVOICE)) {
-      captured = true;
-      String legacyId = body.optString(FIELD_ORIGIN_INVOICE, null);
-      if (StringUtils.isNotBlank(legacyId) && !ids.contains(legacyId)) {
-        ids.add(legacyId);
-      }
-      body.remove(FIELD_ORIGIN_INVOICE);
-    }
-
-    return captured;
-  }
-
-  /**
-   * Persists the origin-invoice relationship(s) to {@code C_Invoice_Reverse} after a POST or
-   * PUT/PATCH, using the ids {@link #captureOriginInvoice} captured from the raw request body
-   * before the generic field filter stripped them.
-   *
-   * <p>ETP-4919 fix: this NEVER deletes existing links to OTHER origin invoices from prior
-   * import runs — the old delete-then-single-create behavior is exactly why importing from a
-   * second source invoice silently dropped the first link. It only creates a link per captured
-   * id, and only if that exact (invoice, origin) pair doesn't already exist — so re-importing
-   * from the same source invoice twice never produces duplicate rows. When the captured id set
-   * is empty (field absent, or present but blank), this is a no-op: there is no supported way to
-   * unlink an origin invoice through this endpoint.
-   *
-   * @param context
-   *     the current request context
-   */
-  protected void persistOriginInvoice(NeoContext context) {
-    try {
-      if (!originInvoiceCaptured) {
-        return;
-      }
-      List<String> originInvoiceIds = pendingOriginInvoiceIds;
-      if (originInvoiceIds == null || originInvoiceIds.isEmpty()) {
-        return;
-      }
-
-      String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
-      if (StringUtils.isBlank(invoiceId)) {
-        return;
-      }
-
-      OBContext.setAdminMode(true);
-      try {
-        for (String originInvoiceId : originInvoiceIds) {
-          createReverseLinkIfMissing(invoiceId, originInvoiceId);
-        }
-        OBDal.getInstance().flush();
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.warn("Could not persist origin invoice: {}", e.getMessage());
-    }
-  }
-
-  /**
-   * Creates a {@code C_Invoice_Reverse} link from {@code invoiceId} to {@code originInvoiceId}
-   * unless one already exists — the dedupe check that replaces the old unconditional
-   * delete-then-create (ETP-4919), so importing from the same source invoice twice never
-   * produces duplicate rows, and importing from a NEW source invoice never removes the link to a
-   * previously-imported one.
-   */
-  private void createReverseLinkIfMissing(String invoiceId, String originInvoiceId) {
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-    Invoice origin = OBDal.getInstance().get(Invoice.class, originInvoiceId);
-    if (invoice == null || origin == null) {
-      log.warn("Cannot create reverse link: invoice={} origin={}", invoiceId, originInvoiceId);
-      return;
-    }
-    List<ReversedInvoice> existing = OBDal.getInstance()
-        .createCriteria(ReversedInvoice.class)
-        .add(Restrictions.eq(ReversedInvoice.PROPERTY_INVOICE, invoice))
-        .add(Restrictions.eq(ReversedInvoice.PROPERTY_REVERSEDINVOICE, origin))
-        .list();
-    if (!existing.isEmpty()) {
-      return;
-    }
-    ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
-    link.setClient(invoice.getClient());
-    link.setOrganization(invoice.getOrganization());
-    link.setInvoice(invoice);
-    link.setReversedInvoice(origin);
-    OBDal.getInstance().save(link);
-  }
 
   // ---------------------------------------------------------------------------
   // SII authorization (ETP-4783)
@@ -563,7 +415,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    * direct DAL update after the main CRUD write completes (ETP-4783).
    *
    * <p>Must be called from each subclass's {@code afterHandle()} alongside
-   * {@link #persistOriginInvoice(NeoContext)}.
+   * {@code rectificationLinks.persistOriginInvoice(context)}.
    *
    * @param context the current request context
    */
@@ -641,61 +493,10 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
   // GET enrichment (virtual fields)
   // ---------------------------------------------------------------------------
-
-  /**
-   * Injects {@code originInvoices} (a JSON array of {@code {id, documentNo}}, one entry per
-   * linked origin invoice) plus the backward-compatible singular {@code originInvoice}/
-   * {@code originInvoice$_identifier} pair (the FIRST linked origin, or {@code null} when none)
-   * into the record, by querying the {@code C_Invoice_Reverse} table for ALL active links where
-   * this invoice is the reversed one.
-   *
-   * <p>ETP-4919 fix: previously this read only the first matching row ({@code rs.next()} called
-   * once) — a rectificativa linked to more than one source invoice (e.g. two separate "Import
-   * from Source Invoice" runs) silently lost every origin but one on the frontend, even on the
-   * rare occasion the backend link itself did survive. Callers that only need "is there at least
-   * one" can keep reading {@code originInvoice}; {@code RelatedDocuments} now reads
-   * {@code originInvoices} to render one chip per linked origin.
-   *
-   * @param rec
-   *     the invoice record JSON object; modified in-place
-   * @param invoiceId
-   *     the primary key of the invoice being enriched
-   * @throws Exception
-   *     if a JSON or DB operation fails
-   */
-  protected void enrichOriginInvoice(JSONObject rec, String invoiceId) throws Exception {
-    String sql =
-        "SELECT inv.c_invoice_id, inv.documentno "
-        + "FROM c_invoice_reverse r "
-        + "JOIN c_invoice inv ON inv.c_invoice_id = r.reversed_c_invoice_id "
-        + "WHERE r.c_invoice_id = ? AND r.isactive = 'Y' "
-        + "ORDER BY inv.documentno";
-    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
-      ps.setString(1, invoiceId);
-      try (ResultSet rs = ps.executeQuery()) {
-        JSONArray origins = new JSONArray();
-        boolean first = true;
-        while (rs.next()) {
-          String originId = rs.getString(1);
-          String originDocNo = rs.getString(2);
-          origins.put(new JSONObject().put("id", originId).put("documentNo", originDocNo));
-          if (first) {
-            rec.put(FIELD_ORIGIN_INVOICE, originId);
-            rec.put("originInvoice$_identifier", originDocNo);
-            first = false;
-          }
-        }
-        if (first) {
-          // no rows at all
-          rec.put(FIELD_ORIGIN_INVOICE, JSONObject.NULL);
-          rec.put("originInvoice$_identifier", JSONObject.NULL);
-        }
-        rec.put(FIELD_ORIGIN_INVOICES, origins);
-      }
-    } catch (Exception e) {
-      log.warn("Could not enrich origin invoice for {}: {}", invoiceId, e.getMessage());
-    }
-  }
+  //
+  // enrichOriginInvoice, enrichRectifyingInvoices and enrichHasRectifications moved to
+  // InvoiceRectificationLinkSupport (java:S1448, ETP-5745) alongside the capture/persist methods
+  // above — call them as rectificationLinks.enrichOriginInvoice(rec, invoiceId), etc.
 
   /**
    * Injects the invoice subtype virtual field ({@link #getInvoiceSubtypeKey()}) into the record
@@ -771,11 +572,6 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
-   * Injects {@code hasRectifications} (boolean) into the record.
-   * True when the invoice has one or more records in {@code C_Invoice_Reverse}.
-   * Only meaningful in detail view (single record); do not call for list responses.
-   */
-  /**
    * ETP-4783: Injects the synthetic {@code tbaiConfigActive} field into the GET response
    * so the header form's {@code displayLogic} for {@code tbaiReverseinvoicecode} can
    * evaluate it client-side.
@@ -808,28 +604,28 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
   }
 
-    @SuppressWarnings("java:S2077")
-  protected void enrichHasRectifications(JSONObject rec, String invoiceId) throws Exception {
-    if (StringUtils.isBlank(invoiceId)) {
-      rec.put("hasRectifications", false);
-      return;
-    }
-    boolean result = false;
-    try {
-      String sql = "SELECT 1 FROM c_invoice_reverse WHERE c_invoice_id = ? AND isactive = 'Y' LIMIT 1";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, invoiceId);
-        try (ResultSet rs = ps.executeQuery()) {
-          result = rs.next();
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not check hasRectifications for invoice {}: {}", invoiceId, e.getMessage());
-    }
-    rec.put("hasRectifications", result);
-  }
+  /**
+   * Response key of {@link InvoiceDetailEnrichment#enrichLinkedOrders}: the orders reached through
+   * the invoice lines.
+   */
+  protected static final String FIELD_LINKED_ORDERS = "linkedOrders";
 
+  /**
+   * Distinct orders reached through the invoice's own lines ({@code C_InvoiceLine.C_OrderLine_ID}),
+   * excluding the {@code ETGO_DTO} total-discount line. Bound twice: invoice id, discount product.
+   */
+  static final String LINKED_ORDERS_SQL =
+      "SELECT o.c_order_id, o.documentno, o.docstatus, o.grandtotal, cur.iso_code, o.dateordered, "
+          + "  dt.docsubtypeso "
+          + "FROM c_order o "
+          + "LEFT JOIN c_currency cur ON cur.c_currency_id = o.c_currency_id "
+          + "LEFT JOIN c_doctype dt ON dt.c_doctype_id = o.c_doctypetarget_id "
+          + "WHERE o.c_order_id IN ("
+          + "  SELECT ol.c_order_id FROM c_invoiceline il "
+          + "  JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id "
+          + "  WHERE il.c_invoice_id = ? AND il.isactive = 'Y' "
+          + "    AND (il.m_product_id IS NULL OR il.m_product_id <> ?)) "
+          + "ORDER BY o.dateordered, o.documentno";
 
   /**
    * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying
@@ -894,6 +690,13 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static NeoResponse completeInvoiceIfNeeded(NeoContext context) {
     if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
       return null;
+    }
+    // ETP-5745 CP-9: refuse completing a rectificativa that would push the total rectified
+    // against its origin past the origin's own total. Checked here, before the real process
+    // runs, mirroring where validateLineQtyBeforeComplete used to sit.
+    NeoResponse rectificationBlock = RectificationTotalGuard.checkCompletion(context);
+    if (rectificationBlock != null) {
+      return rectificationBlock;
     }
     return InvoiceCompletionService.completeInvoice(context.getRecordId(), context.getObContext());
   }

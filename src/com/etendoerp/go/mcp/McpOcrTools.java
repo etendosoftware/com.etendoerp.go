@@ -18,7 +18,6 @@
 package com.etendoerp.go.mcp;
 
 import java.util.List;
-import java.util.Locale;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -83,10 +82,9 @@ final class McpOcrTools {
   static final String KEY_STAGED_EXPIRES_AT = "stagedDocumentExpiresAt";
   /** Key of the expiry of the reservation, reported by the upload-link answer. */
   static final String KEY_RESERVATION_EXPIRES_AT = "reservationExpiresAt";
-  private static final String PDF_EXTENSION = ".pdf";
   private static final String HINT_RESTAGE =
       "Request a new upload link with " + McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD
-          + " and upload the PDF again.";
+          + " and upload the document again.";
 
   private McpOcrTools() {
   }
@@ -114,11 +112,12 @@ final class McpOcrTools {
   // ── etendo_request_document_extraction_upload ──────────────────────────────
 
   /**
-   * Issues the single-use link a PDF is uploaded to and reserves the staged document it will fill.
+   * Issues the single-use link a document (a PDF or a JPG, PNG or WEBP image) is uploaded to and
+   * reserves the staged document it will fill.
    *
-   * <p>The role must be able to write documents of the spec (that is what the invoice created from the
-   * PDF needs), the spec must support extraction, and the file name must be a safe PDF name: all of it
-   * is checked before the link exists.</p>
+   * <p>The role must be able to write documents of the spec (that is what the invoice created from
+   * the document needs), the spec must support extraction, and the file name must be a safe name
+   * of a readable type: all of it is checked before the link exists.</p>
    */
   static JSONObject requestUpload(JSONObject args) throws JSONException {
     String specName = McpArgumentUtils.optionalString(args, McpConstants.PARAM_SPEC);
@@ -132,7 +131,8 @@ final class McpOcrTools {
     if (problem != null) {
       return McpAttachmentTools.errorEnvelope(McpConstants.STATUS_UNPROCESSABLE,
           McpConstants.ERROR_VALIDATION, problem,
-          "Pass the PDF's file name with its extension, e.g. factura-proveedor.pdf.");
+          "Pass the file name with its extension: a PDF or an image, e.g. factura-proveedor.pdf or "
+              + "factura-proveedor.jpg.");
     }
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity entity = McpAttachmentTools.rootEntityOf(spec, new JSONObject());
@@ -140,13 +140,14 @@ final class McpOcrTools {
     return issue(spec, entity, name);
   }
 
-  /** Why the name cannot be a staged PDF's, or {@code null}: required, safe characters, a {@code .pdf}. */
+  /** Why the name cannot be a staged document's, or {@code null}: required, safe characters, a readable type. */
   private static String fileNameProblem(String name) {
     if (name == null) {
       return "'" + McpAttachmentTools.PARAM_NAME + "' is required.";
     }
-    if (!name.toLowerCase(Locale.ROOT).endsWith(PDF_EXTENSION)) {
-      return "Only a PDF can be read: the file name must end in .pdf.";
+    if (!NeoAttachmentPolicy.isOcrDocument(name)) {
+      return "Only a PDF or an image can be read: the file name must end in one of "
+          + String.join(", ", NeoAttachmentPolicy.ocrExtensions()) + ".";
     }
     String safe = McpAttachmentTools.fileNameProblem(name);
     return safe != null ? safe : NeoAttachmentPolicy.validateMetadata(name, 0L);
@@ -190,24 +191,24 @@ final class McpOcrTools {
     result.put(KEY_RESERVATION_EXPIRES_AT, documents.find(stagedId, session)
         .map(staged -> staged.getExpiresAt().toString()).orElse(null));
     result.put("maxBytes", NeoAttachmentPolicy.MAX_SIZE_MB * 1024L * 1024L);
-    result.put("allowedExtensions", "pdf");
+    result.put("allowedExtensions", String.join(",", NeoAttachmentPolicy.ocrExtensions()));
     result.put(McpConstants.PARAM_SPEC, specName);
     result.put(McpAttachmentTools.PARAM_NAME, name);
     result.put("curlExample", "curl -X PUT --upload-file ./<your-file> \"" + uploadUrl + "\"");
-    result.put(McpConstants.KEY_HINT, "PUT the raw PDF bytes to uploadUrl — no auth header is "
+    result.put(McpConstants.KEY_HINT, "PUT the raw file bytes to uploadUrl — no auth header is "
         + "needed, the URL is the credential, and it works exactly once. The reservation "
-        + "(reservationExpiresAt) lasts 10 minutes until the PDF arrives; once uploaded, the "
+        + "(reservationExpiresAt) lasts 10 minutes until the file arrives; once uploaded, the "
         + "document is kept 60 minutes from the upload, and every extraction response reports the "
         + "real " + KEY_STAGED_EXPIRES_AT + ". Then call "
         + McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT + " with stagedDocumentId. Do not read the file into this conversation. A rejected file (too large, "
-        + "not a PDF) does not burn the link: fix it and PUT it to the same URL.");
+        + "not a PDF or a JPG, PNG or WEBP image) does not burn the link: fix it and PUT it to the same URL.");
     return result;
   }
 
   // ── etendo_extract_invoice_document ────────────────────────────────────────
 
   /**
-   * Reads the staged PDF (once) and answers the supervised review.
+   * Reads the staged document (once) and answers the supervised review.
    *
    * <p>Read-only: nothing is created. The first call per staged document runs the extraction service
    * and caches the result on the document; later calls, with or without {@code vendor_id}, reuse it.</p>
@@ -338,7 +339,7 @@ final class McpOcrTools {
         McpConstants.ERROR_OCR_UNAVAILABLE, "The document reading service is not available right "
             + "now (it did not answer in time or could not be reached).",
         "Nothing was read and nothing was created. Tell the user and try again in a moment: the "
-            + "staged PDF is kept for 60 minutes.");
+            + "staged document is kept for 60 minutes.");
   }
 
   // ── Shared ─────────────────────────────────────────────────────────────────
@@ -361,10 +362,10 @@ final class McpOcrTools {
             + "kept for 60 minutes) or is not yours.", HINT_RESTAGE);
   }
 
-  /** The staged document exists but its PDF has not arrived. */
+  /** The staged document exists but its file has not arrived. */
   static JSONObject notUploaded() throws JSONException {
     return McpAttachmentTools.errorEnvelope(McpConstants.STATUS_CONFLICT,
-        McpConstants.ERROR_NOT_UPLOADED, "The PDF has not been uploaded to this staged document "
+        McpConstants.ERROR_NOT_UPLOADED, "The file has not been uploaded to this staged document "
             + "yet.", "PUT the file to the uploadUrl you were given (it works once, for 10 "
                 + "minutes), then ask again.");
   }

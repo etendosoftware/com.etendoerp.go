@@ -131,6 +131,7 @@ import com.etendoerp.go.onboarding.OnboardingStreamWriter;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
+import com.etendoerp.go.onboarding.OnboardingDefaultContactCategoryService;
 import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -150,6 +151,12 @@ import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.usageevents.SessionLoginUsage;
+import com.etendoerp.go.supportaccess.SupportAccessException;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.supportaccess.SupportAccessService;
+import com.etendoerp.go.supportaccess.SupportHandoffService;
+import com.etendoerp.go.supportaccess.SupportTicketException;
+import com.etendoerp.go.supportaccess.SupportUserProvisioner;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -435,6 +442,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_ONBOARDING_COMPANY_DATA = "/onboarding/company-data";
   private static final String PATH_CALENDAR_REVIEW = "/onboarding/calendar-review";
   private static final String FIELD_COMPANY_DATA = "companyData";
+  /** ETP-5351: the {@code /me} and {@code GET /session} block describing a support session. */
+  private static final String FIELD_SUPPORT_SESSION = "supportSession";
+  private static final String PATH_SUPPORT_HANDOFF = "/session/support-handoff";
+  private static final String ACTION_SUPPORT_HANDOFF = "support handoff";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
@@ -468,6 +479,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
   OnboardingSampleDataService onboardingSampleDataService = new OnboardingSampleDataService();
+  OnboardingDefaultContactCategoryService onboardingDefaultContactCategoryService =
+      new OnboardingDefaultContactCategoryService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
   DevProvisioningFailureFixtureService devProvisioningFailureFixtureService =
       new DevProvisioningFailureFixtureService();
@@ -504,6 +517,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private final GoSessionService goSessionService;
   // Package-visible so tests can swap the database-backed role lookups for a fake.
   GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
+  // ETP-5351 — support access. Package-visible so tests can replace them with mocks.
+  SupportAccessService supportAccessService = new SupportAccessService();
+  SupportHandoffService supportHandoffService;
 
   /**
    * Creates the default servlet wired to the runtime transactional auth email sender.
@@ -540,6 +556,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     this.goSessionService = goSessionService;
     this.stripePriceService = stripePriceService;
     this.companyInvitationService = new CompanyInvitationService(authEmailSender);
+    this.supportHandoffService = new SupportHandoffService(supportAccessService,
+        new SupportUserProvisioner(), goSessionService);
     this.accountRegistration = new AccountRegistrationService(authEmailSender);
   }
 
@@ -704,6 +722,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSessionLink(request, response);
     } else if (isPath(path, "/session/refresh")) {
       handleSessionRefresh(request, response);
+    } else if (isPath(path, PATH_SUPPORT_HANDOFF)) {
+      handleSupportHandoff(request, response);
     } else if (path != null && path.startsWith("/session/sso/")) {
       handleSessionCreateSso(path.substring("/session/sso/".length()), request, response);
     } else {
@@ -2351,7 +2371,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
 
-      if (EtendoGoJwtDalHelper.findActiveAccountByEmail(email) != null) {
+      // ETP-5351: the support account's address is taken even though the lookup hides that account.
+      if (SupportAccessGuard.isSupportEmail(email)
+          || EtendoGoJwtDalHelper.findActiveAccountByEmail(email) != null) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_EMAIL_ALREADY_REGISTERED,
             "Email already registered", "Email already registered");
         return;
@@ -2515,6 +2537,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private Account resolveSsoAccount(EtendoGoSsoAssertion assertion, String sessionToken,
       HttpServletResponse response) throws IOException {
+    // ETP-5351: nobody signs in as the technical support account, whatever the provider asserts.
+    if (SupportAccessGuard.isSupportEmail(assertion.getEmail())) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
+      return null;
+    }
     Account account = EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
         assertion.getProvider(), assertion.getSubject());
     if (account == null) {
@@ -3206,6 +3233,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_EMAIL_VERIFICATION_PENDING,
           EmailVerificationDalHelper.isEmailVerificationPending(account));
       result.put("authMethods", buildAuthMethods(account));
+      result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(authenticated.sessionRecord));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -3301,6 +3329,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           sessionAuth.getRecord().getAccountId());
       if (account == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return null;
+      }
+      // ETP-5351 (T5): a support session keeps the reads and loses every account write
+      // (password, auth methods, invitations, onboarding, billing) — one rule for every endpoint.
+      if (SupportAccessGuard.isSupportSession(sessionAuth.getRecord())
+          && !SupportAccessGuard.isAllowedOnAccountSurface(request.getMethod(),
+              request.getPathInfo())) {
+        writeSupportSessionForbidden(response);
         return null;
       }
       return new AuthenticatedAccount(account, sessionAuth.getRecord());
@@ -4414,8 +4450,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Account account = authenticated.account;
 
       org.codehaus.jettison.json.JSONArray envArray = new org.codehaus.jettison.json.JSONArray();
-      List<User> environmentUsers = new ArrayList<>(
-          EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail()));
+      List<User> environmentUsers = SupportAccessGuard.isSupportSession(
+          authenticated.sessionRecord)
+              ? supportEnvironmentUsers(authenticated.sessionRecord)
+              : new ArrayList<>(
+                  EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail()));
       // One query for every tenant on the page, resolved before the sort rather than inside it.
       // Built per request and passed down as a parameter — never cached in a field or a
       // ThreadLocal, because Tomcat pools request threads and the next request on this thread
@@ -4464,6 +4503,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5351 (T5): a support session is pinned to its tenant, so its only environment is the one
+   * it entered with.
+   */
+  private static List<User> supportEnvironmentUsers(GoSessionRecord sessionRecord) {
+    User supportUser = sessionRecord.getUserId() == null ? null
+        : OBDal.getInstance().get(User.class, sessionRecord.getUserId());
+    List<User> users = new ArrayList<>();
+    if (supportUser != null && supportUser.getClient() != null
+        && supportUser.getClient().getId().equals(sessionRecord.getCtxClientId())) {
+      users.add(supportUser);
+    }
+    return users;
   }
 
   /** One entry per business organization of the user's client, or one without when it has none. */
@@ -5038,6 +5092,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         elapsedMillis(residualStartedAt));
     // Before completeCommittedOnboarding and the sample data, which needs a demo's open periods.
     applyInitialPeriodStateBestEffort(clientId);
+    // ETP-5791: on both paths, after the commit, so the flag is read when the tenant is handed over.
+    applyDefaultContactCategoryBestEffort(clientId);
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
     if (paidUpgrade) {
@@ -5141,6 +5197,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
       log.error("ETP-5577 initial period state failed for client {}", clientId, e);
       EtendoGoDalHelper.rollbackDalChanges("initial period state", e, log);
+    }
+  }
+
+  /**
+   * ETP-5791 — with the {@code contact-category-type} flag on, makes "Cliente/Proveedor" the
+   * tenant's default contact category (see {@link OnboardingDefaultContactCategoryService}). Runs
+   * after the onboarding commit, for a classic and a pooled tenant alike, in its own transaction;
+   * never fails the caller — on any failure only this step rolls back and the tenant keeps the
+   * dataset's "Cliente" default.
+   *
+   * @param clientId the tenant just committed
+   */
+  void applyDefaultContactCategoryBestEffort(String clientId) {
+    try {
+      if (onboardingDefaultContactCategoryService.applyIfEnabled(clientId)) {
+        EtendoGoDalHelper.commitDalChanges("default contact category", log);
+      }
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.warn("ETP-5791 default contact category could not be set for client {}; it keeps the "
+          + "dataset default", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("default contact category", e, log);
     }
   }
 
@@ -5868,6 +5945,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * caller's catch blocks, which would write an error over the answer already sent.
    */
   private static void recordCookieEnvironmentLogin(GoSessionRecord entered, long startNanos) {
+    // ETP-5351: a support entry is not the tenant logging in; it must not move "last login" or the
+    // trial activity signals, so no session.login is recorded for it.
+    if (SupportAccessGuard.isSupportSession(entered)) {
+      return;
+    }
     try {
       SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_COOKIE_LOGIN, entered.getCtxClientId(),
           entered.getCtxOrgId(), entered.getUserId(), entered.getRoleId(),
@@ -6734,6 +6816,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       if (auth.isAuthenticated()) {
         goSessionService.revoke(auth.getRecord());
+        // ETP-5351: the support logout frees the tenant and closes the audit row ('logout').
+        supportAccessService.closeOnLogout(auth.getRecord());
       }
       clearSessionCookies(response);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
@@ -6796,9 +6880,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-      if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(account.getEmail(), userId)) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN,
-            "User does not belong to this account");
+      if (rejectEnvironmentOutsideSession(sessionRecord, account, userId, response)) {
         return;
       }
 
@@ -6869,6 +6951,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Whether {@code /session/environment} must refuse the user: an ordinary session may enter the
+   * account's own environment users; a support session (ETP-5351, T5) only its own support user,
+   * so it can switch organization but never tenant. Writes the refusal.
+   */
+  private boolean rejectEnvironmentOutsideSession(GoSessionRecord sessionRecord, Account account,
+      String userId, HttpServletResponse response) throws IOException {
+    if (SupportAccessGuard.isSupportSession(sessionRecord)) {
+      if (userId.equals(sessionRecord.getUserId())) {
+        return false;
+      }
+      writeSupportSessionForbidden(response);
+      return true;
+    }
+    if (EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(account.getEmail(), userId)) {
+      return false;
+    }
+    writeError(response, HttpServletResponse.SC_FORBIDDEN, "User does not belong to this account");
+    return true;
   }
 
   private static JSONObject findRole(JSONArray roleList, String roleId) throws JSONException {
@@ -7067,6 +7170,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(sessionRecord));
       result.put(FIELD_ROLE_LIST, loadSessionRoleList(sessionRecord));
       result.put(FIELD_CSRF_TOKEN, sessionRecord.getCsrfToken());
+      result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(sessionRecord));
       result.put(FIELD_CAPABILITIES, buildSessionCapabilities());
 
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
@@ -7117,6 +7221,112 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return new JSONArray();
     }
     return EtendoGoJwtSupport.loadRoleListData(sessionRecord.getUserId()).getRoleArray();
+  }
+
+  /**
+   * POST /sws/go/session/support-handoff — ETP-5351 (T4). Body: {@code {"ticket": "..."}}.
+   *
+   * <p>Redeems a one-time support pass issued from Classic and opens a support session already
+   * inside the tenant. Public like {@code POST /session}: the pass is the credential, so there is no
+   * CSRF token to check, but the same Origin allowlist applies. A session cookie the browser still
+   * carries is never reused: it is revoked once the new session exists.</p>
+   *
+   * <p>200: the {@code /session/environment} shape ({@code status, environment, roleList,
+   * csrfToken}) plus {@code account} and {@code supportSession}, and the session cookies. 401:
+   * {@code {"error": "support_ticket_invalid" | "support_ticket_expired" | "support_ticket_used"}}.
+   */
+  private void handleSupportHandoff(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    if (!GoSessionSecurity.isOriginAllowed(request)) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          GoSessionSecurity.MSG_ORIGIN_NOT_ALLOWED);
+      return;
+    }
+    String ticket;
+    try {
+      ticket = readJsonBody(request).optString("ticket", "");
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+    try {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      SupportHandoffService.SupportHandoff handoff = supportHandoffService.open(ticket,
+          request.getHeader(HEADER_USER_AGENT), request.getRemoteAddr());
+      supportHandoffService.retireBrowserSession(extractSessionCookie(request));
+      IssuedGoSession issued = handoff.getSession();
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(issued.getRecord().getAccountId());
+
+      setSessionCookies(response, issued);
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_ACCOUNT, account == null ? JSONObject.NULL : buildAccountJson(account));
+      result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(issued.getRecord()));
+      result.put(FIELD_ROLE_LIST, loadSessionRoleList(issued.getRecord()));
+      result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+      result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(issued.getRecord()));
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (SupportTicketException e) {
+      EtendoGoDalHelper.rollbackDalChanges(ACTION_SUPPORT_HANDOFF, e, log);
+      writeFlatError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getReason().getErrorCode());
+    } catch (SupportAccessException e) {
+      EtendoGoDalHelper.rollbackDalChanges(ACTION_SUPPORT_HANDOFF, e, log);
+      log.error("Support handoff refused: {}", e.getCode());
+      writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, e.getCode(),
+          e.getMessage(), e.getMessage());
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges(ACTION_SUPPORT_HANDOFF, e, log);
+      log.error("Database error during support handoff", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      EtendoGoDalHelper.rollbackDalChanges(ACTION_SUPPORT_HANDOFF, e, log);
+      log.error("JSON error building support handoff response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The {@code supportSession} block for a session, or JSON {@code null} for an ordinary one. */
+  private Object supportSessionBlock(GoSessionRecord sessionRecord) throws JSONException {
+    JSONObject block = supportAccessService.describeSupportSession(sessionRecord);
+    return block == null ? JSONObject.NULL : block;
+  }
+
+  /** ETP-5351: the one refusal every support-session restriction answers with (403). */
+  private void writeSupportSessionForbidden(HttpServletResponse response) throws IOException {
+    writeError(response, HttpServletResponse.SC_FORBIDDEN, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
+        SupportAccessGuard.MESSAGE_FORBIDDEN, SupportAccessGuard.MESSAGE_FORBIDDEN);
+  }
+
+  /** A {@code {"error": "<code>"}} body, the flat contract shape of the support handoff. */
+  private void writeFlatError(HttpServletResponse response, int status, String code)
+      throws IOException {
+    try {
+      JSONObject body = new JSONObject();
+      body.put(FIELD_ERROR, code);
+      writeResponse(response, status, body);
+    } catch (JSONException e) {
+      log.error("JSON error building error response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /** The {@code __Host-go_session} value the request carries, or {@code null}. */
+  private static String extractSessionCookie(HttpServletRequest request) {
+    Cookie[] cookies = request.getCookies();
+    if (cookies == null) {
+      return null;
+    }
+    for (Cookie cookie : cookies) {
+      if (GoSessionSecurity.COOKIE_NAME.equals(cookie.getName())) {
+        return StringUtils.trimToNull(cookie.getValue());
+      }
+    }
+    return null;
   }
 
   /**

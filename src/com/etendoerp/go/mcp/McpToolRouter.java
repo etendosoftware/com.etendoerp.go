@@ -801,6 +801,13 @@ public class McpToolRouter {
       return wrapAsErrorContent(unownedReference);
     }
 
+    // ETP-5802: a reference the agent set must not point at an inactive row. Checked right after
+    // ownership, on the same ids-only body.
+    JSONObject inactiveReference = McpWriteRequestSupport.refuseInactiveReference(adTab, filteredBody);
+    if (inactiveReference != null) {
+      return wrapAsErrorContent(inactiveReference);
+    }
+
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
     // Callouts derive dependent fields (e.g. product → tax, UOM) and may reset them
     // to sentinel "0" even when the user explicitly provided valid values.
@@ -910,6 +917,11 @@ public class McpToolRouter {
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
+    // ETP-5791: injectMandatoryDefaults ran above, so key presence in filteredBody no longer says
+    // what the agent chose. Hand the pre-hook the pre-defaults key set, which REST gets for free
+    // (its pre-hook runs before the defaults pass).
+    hookCtx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS,
+        NeoCrudHelper.snapshotBodyFields(userProvided));
     // ETP-5680: the mandatory-defaults pass above filled some keys with a fallback placeholder
     // (the first combo option, ...). The hook context is a new one, so without this copy the
     // customization could not tell a placeholder from a value the caller chose, and the REST path
@@ -1047,6 +1059,14 @@ public class McpToolRouter {
         filteredBody, null, updateUserProvidedFields);
     if (unownedReference != null) {
       return wrapAsErrorContent(unownedReference);
+    }
+
+    // ETP-5802: same inactive-reference check as handleCreate. filteredBody here carries only the
+    // keys the caller sent (no defaults pass runs on update, per the IMP-16 note below), so a field
+    // the caller does not touch is never re-validated — CP-6 regression guard.
+    JSONObject inactiveReference = McpWriteRequestSupport.refuseInactiveReference(adTab, filteredBody);
+    if (inactiveReference != null) {
+      return wrapAsErrorContent(inactiveReference);
     }
 
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until
@@ -1504,6 +1524,10 @@ public class McpToolRouter {
     McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
         McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, adTab, SELECTOR_REFS));
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
+    // ETP-5473: what the entity's customization refuses a create without, although AD and
+    // etendo_defaults do not say so. Flagged on the full array so every view agrees.
+    Set<String> callerRequired = McpServerResolvedFields.callerRequiredOnCreate(sfEntity);
+    McpServerResolvedFields.markCallerRequired(fieldsArray, callerRequired);
     // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
     // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
     McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
@@ -1556,6 +1580,9 @@ public class McpToolRouter {
       Set<String> serverResolved = new HashSet<>(
           McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity));
       serverResolved.addAll(McpServerResolvedFields.forCreate(sfEntity));
+      // ETP-5473: a value etendo_defaults merely suggests is not one the server fills when the
+      // customization refuses a create without it — those stay required, never serverDefaulted.
+      serverResolved.removeAll(callerRequired);
       JSONObject createView = McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray, serverResolved, isChildEntity,
               entityAgentPrompt);

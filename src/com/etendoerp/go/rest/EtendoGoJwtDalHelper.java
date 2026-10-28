@@ -50,6 +50,8 @@ import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -132,13 +134,22 @@ final class EtendoGoJwtDalHelper {
   private EtendoGoJwtDalHelper() {
   }
 
+  /**
+   * ETP-5351 (T5) — the lookups a credential is checked against (email, legacy token, reset token,
+   * SSO identity) never return the technical support account: it has no way in but a support pass.
+   * Only {@link #findActiveAccountById} returns it, for the sessions it already owns.
+   */
+  private static Account hideSupportAccount(Account account) {
+    return SupportAccessGuard.isSupportAccount(account) ? null : account;
+  }
+
   static Account findActiveAccountByEmail(String email) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
         "as account where lower(account.email) = :" + PARAM_EMAIL + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_EMAIL, email.toLowerCase());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
+    return hideSupportAccount(query.uniqueResult());
   }
 
   static Account findActiveAccountById(String accountId) {
@@ -155,7 +166,7 @@ final class EtendoGoJwtDalHelper {
     query.setNamedParameter(PARAM_TOKEN, token);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
+    return hideSupportAccount(query.uniqueResult());
   }
 
   /** Resolves only an account session token; environment JWTs are rejected for billing mutations. */
@@ -188,7 +199,7 @@ final class EtendoGoJwtDalHelper {
             user.getClient().getId());
         return null;
       }
-      return account;
+      return hideSupportAccount(account);
     } catch (Exception e) {
       log.debug("Bearer token could not be resolved to an account: {}", e.getMessage(), e);
       return null;
@@ -220,7 +231,7 @@ final class EtendoGoJwtDalHelper {
   // The lookup, the legacy-column fallback and the one-off migration all live in
   // AccountIdentityDalHelper; this stays as the name every caller already uses.
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
-    return AccountIdentityDalHelper.findAccountByIdentity(provider, subject);
+    return hideSupportAccount(AccountIdentityDalHelper.findAccountByIdentity(provider, subject));
   }
 
   static Account createAccount(String email, String passwordHash, String name, String sessionToken) {
@@ -464,7 +475,7 @@ final class EtendoGoJwtDalHelper {
     query.setNamedParameter("now", now);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
+    return hideSupportAccount(query.uniqueResult());
   }
 
   static void consumePasswordReset(Account account, String passwordHash, Date changedAt) {
@@ -574,8 +585,11 @@ final class EtendoGoJwtDalHelper {
             + " and (user.email = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
-            + "and user.active = true");
+            + "and user.active = true and user.id <> :" + SupportUserExclusion.HQL_PARAM);
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    // ETP-5351: the support user is never paired with a GO account.
+    query.setNamedParameter(SupportUserExclusion.HQL_PARAM,
+        StringUtils.defaultString(SupportUserExclusion.supportUserIdOrNull(clientId)));
     query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
     query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
@@ -594,7 +608,11 @@ final class EtendoGoJwtDalHelper {
     query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.list();
+    List<User> users = new ArrayList<>(query.list());
+    // ETP-5351: the support user is never paired with a GO account (id derived per client).
+    users.removeIf(u -> u.getClient() != null
+        && SupportAccessGuard.isSupportUser(u.getId(), u.getClient().getId()));
+    return users;
   }
 
   static List<Organization> findNonStarOrganizations(String clientId) {
@@ -840,13 +858,25 @@ final class EtendoGoJwtDalHelper {
     return query.uniqueResult();
   }
 
+  /**
+   * The user-role row of the tenant's provisioning admin (the user a pooled tenant's claim and the
+   * onboarding chain personalize). Never the tenant's "Soporte Etendo" user (ETP-5351, T6): it
+   * also holds the admin role, and personalizing it would hand the support identity to the owner.
+   *
+   * @param clientId the tenant
+   * @return the admin's user-role row, or {@code null} when the tenant has none
+   */
   static UserRoles findClientAdminUserRole(String clientId) {
     OBQuery<UserRoles> query = OBDal.getInstance().createQuery(UserRoles.class,
         "as userrole where userrole.role.client.id = :" + PARAM_CLIENT_ID
             + " and userrole.userContact.id <> :" + PARAM_SYSTEM_USER_ID
+            + " and userrole.userContact.id <> :" + SupportUserExclusion.HQL_PARAM
             + " order by userrole.role.creationDate");
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
     query.setNamedParameter(PARAM_SYSTEM_USER_ID, SYSTEM_USER_ID);
+    // A blank client matches no row anyway; bind a value that never is an id rather than null.
+    query.setNamedParameter(SupportUserExclusion.HQL_PARAM,
+        StringUtils.defaultString(SupportUserExclusion.supportUserIdOrNull(clientId)));
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);

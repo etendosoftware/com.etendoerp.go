@@ -222,7 +222,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (rateRefusal != null) {
       return rateRefusal;
     }
-    captureOriginInvoice(context);
+    rectificationLinks.captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
       return siiAuthError;
@@ -332,7 +332,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       // was silently never persisted for that flow (confirmed empty C_Invoice_Reverse table).
       if (NeoEndpointType.CRUD.equals(context.getEndpointType())
           && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-        persistOriginInvoice(context);
+        rectificationLinks.persistOriginInvoice(context);
         persistSiiAuthorizationno(context);
       }
 
@@ -360,10 +360,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichLinkedReceipts(rec, context.getRecordId());
-        enrichOriginInvoice(rec, context.getRecordId());
+        InvoiceDetailEnrichment.enrichLinkedOrders(rec, context.getRecordId()); // ETP-5828
+        rectificationLinks.enrichOriginInvoice(rec, context.getRecordId());
+        rectificationLinks.enrichRectifyingInvoices(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
-        enrichHasRectifications(rec, context.getRecordId());
+        rectificationLinks.enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
