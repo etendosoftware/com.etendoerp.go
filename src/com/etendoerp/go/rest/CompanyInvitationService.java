@@ -201,12 +201,6 @@ public class CompanyInvitationService {
     return status;
   }
 
-  /** ETP-5351: the support user never invites (an invitation is persistent access). */
-  private static boolean isSupportInviter(InviterContext inviter) {
-    return inviter.user != null
-        && SupportAccessGuard.isSupportUser(inviter.user.getId(), inviter.client.getId());
-  }
-
   private static InviterContext resolveInviterFromContext(OBContext obContext) {
     return obContext == null ? null
         : new InviterContext(obContext.getCurrentClient(), obContext.getCurrentOrganization(),
@@ -235,13 +229,9 @@ public class CompanyInvitationService {
    */
   private JSONObject createInvitationForInviter(InviterContext inviter, String email,
       String appBaseUrl, String language, boolean requireExistingRole) throws JSONException {
-    if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
-      return errorResponse(403, "FORBIDDEN",
-          "Inviter does not have company administration permissions");
-    }
-    if (isSupportInviter(inviter)) {
-      return errorResponse(403, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
-          SupportAccessGuard.MESSAGE_FORBIDDEN);
+    JSONObject inviterError = rejectInviter(inviter);
+    if (inviterError != null) {
+      return inviterError;
     }
 
     Organization invitationOrganization = inviter.org != null ? inviter.org
@@ -393,13 +383,17 @@ public class CompanyInvitationService {
         language);
   }
 
-  /** Error response when the inviter may not resend invitations, or null when allowed. */
+  /**
+   * Error response when the inviter may not invite (no company, or ETP-5351: the support user,
+   * since an invitation is persistent access), or null when allowed.
+   */
   private JSONObject rejectInviter(InviterContext inviter) throws JSONException {
     if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
       return errorResponse(403, "FORBIDDEN",
           "Inviter does not have company administration permissions");
     }
-    if (isSupportInviter(inviter)) {
+    if (inviter.user != null
+        && SupportAccessGuard.isSupportUser(inviter.user.getId(), inviter.client.getId())) {
       return errorResponse(403, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
           SupportAccessGuard.MESSAGE_FORBIDDEN);
     }
