@@ -8,6 +8,7 @@ This document records the package boundaries introduced during the `feature/ETP-
 
 | Package | Responsibility | Change guidance |
 |---|---|---|
+| `com.etendoerp.go.attributes` | Configurable product attributes: value and definition rules, DAL event observers, the tenant write guard and the Product list filter/sort. | Entity-specific attribute logic stays here; shared NEO code only gets generic hooks such as `NeoHandler#listPage`. See `product-attributes.md`. |
 | `com.etendoerp.go.common` | Cross-surface servlet helpers such as CORS, JWT extraction, response writing, and protocol error adapters. | Keep generic HTTP/auth helpers here only when they are reusable across OAuth2, MCP, and NEO surfaces. |
 | `com.etendoerp.go.featureflags` | Backend feature-flag evaluation: the OpenFeature entry point, the provider backing it, and the vendor-neutral targeting context. | Application code must depend only on `GoFeatureFlags` and `FeatureFlagContext`; no OpenFeature type may leak outside this package. The provider is chosen in exactly one method (`GoFeatureFlags.createProvider()`) — keep provider-specific config, scheduling and failure handling inside the provider so a control-plane change stays a one-method swap. See `feature-flags-and-tenant-upgrade.md`. |
 | `com.etendoerp.go.mcp` | MCP servlet, resource provider, tool registry, authorization checks, and tool routing. | MCP-specific protocol behavior belongs here; reusable access logic should delegate to `schemaforge.util`. |
