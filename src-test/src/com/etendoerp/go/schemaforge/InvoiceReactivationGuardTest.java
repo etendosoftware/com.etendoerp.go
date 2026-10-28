@@ -30,6 +30,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -123,6 +124,20 @@ public class InvoiceReactivationGuardTest {
     assertNotNull("expected a refusal", response);
     assertEquals(422, response.getHttpStatus());
     return response.getBody();
+  }
+
+  /**
+   * {@code messageParams.fiscalSystem} is a real {@code JSONArray} (ETP-5745), not a pre-joined
+   * string — see {@code reject()}'s javadoc for why. Comma-joined here purely for assertion
+   * convenience; the frontend's own join behavior (conjunction, not comma) is covered separately.
+   */
+  private static String fiscalSystemOf(JSONObject messageParams) throws Exception {
+    JSONArray systems = messageParams.getJSONArray("fiscalSystem");
+    List<String> values = new ArrayList<>();
+    for (int i = 0; i < systems.length(); i++) {
+      values.add(systems.getString(i));
+    }
+    return String.join(", ", values);
   }
 
   // ---------------------------------------------------------------------------
@@ -246,7 +261,7 @@ public class InvoiceReactivationGuardTest {
     assertEquals(InvoiceReactivationGuard.MSG_REACTIVATE_FISCAL_RECTIFIED,
         body.getJSONArray("messageKeys").getString(0));
     JSONObject messageParams = body.getJSONObject("messageParams");
-    assertEquals("SII", messageParams.getString("fiscalSystem"));
+    assertEquals("SII", fiscalSystemOf(messageParams));
     assertEquals(1, messageParams.getJSONArray("rectificativas").length());
     assertEquals("RECT-001", messageParams.getJSONArray("rectificativas").getString(0));
     assertTrue(body.getString("message").contains("SII"));
@@ -258,23 +273,41 @@ public class InvoiceReactivationGuardTest {
     Invoice invoice = invoice(true);
     when(invoice.getAeatsiiEstado()).thenReturn("AE");
 
-    assertEquals("SII", body(check(reactivateAction(rootBody("RE")), invoice,
-        rectificativaRows("RECT-001"))).getJSONObject("messageParams").getString("fiscalSystem"));
+    assertEquals("SII", fiscalSystemOf(body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-001"))).getJSONObject("messageParams")));
   }
 
   /**
-   * {@code fiscallyAcceptedSystem}'s if/else-if chain deterministically picks SII first when more
-   * than one fiscal system is simultaneously accepted — documented in the production Javadoc,
-   * guarded here.
+   * ETP-5745 CP-9: an invoice accepted by MORE THAN ONE fiscal system at once must name all of
+   * them, not just the first match — the previous if/else-if chain silently dropped every system
+   * after the first (SII) it found, which under-reported the real fiscal exposure to the user.
    */
   @Test
-  public void siiTakesPrecedenceOverVerifactuWhenBothAreSimultaneouslyAccepted() throws Exception {
+  public void everyAcceptedFiscalSystemIsNamedWhenMoreThanOneAccepts() throws Exception {
     Invoice invoice = invoice(true);
     when(invoice.getAeatsiiEstado()).thenReturn("CO");
     when(invoice.getEtvfacInvoiceStatus()).thenReturn("AC");
 
-    assertEquals("SII", body(check(reactivateAction(rootBody("RE")), invoice,
-        rectificativaRows("RECT-004"))).getJSONObject("messageParams").getString("fiscalSystem"));
+    JSONObject body = body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-004")));
+
+    assertEquals("SII, Verifactu", fiscalSystemOf(body.getJSONObject("messageParams")));
+    assertTrue(body.getString("message").contains("SII, Verifactu"));
+  }
+
+  /** All three fiscal systems accepted at once — every one must be named, in the stable order. */
+  @Test
+  public void allThreeFiscalSystemsAreNamedWhenAllAccept() throws Exception {
+    Invoice invoice = invoice(true);
+    when(invoice.getAeatsiiEstado()).thenReturn("CO");
+    when(invoice.getEtvfacInvoiceStatus()).thenReturn("AC");
+    when(invoice.getETGOTbaiStatus()).thenReturn("Recibido");
+
+    JSONObject body = body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-005")));
+
+    assertEquals("SII, Verifactu, TicketBAI",
+        fiscalSystemOf(body.getJSONObject("messageParams")));
   }
 
   @Test
@@ -293,8 +326,8 @@ public class InvoiceReactivationGuardTest {
     Invoice invoice = invoice(true);
     when(invoice.getEtvfacInvoiceStatus()).thenReturn("AC");
 
-    assertEquals("Verifactu", body(check(reactivateAction(rootBody("RE")), invoice,
-        rectificativaRows("RECT-002"))).getJSONObject("messageParams").getString("fiscalSystem"));
+    assertEquals("Verifactu", fiscalSystemOf(body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-002"))).getJSONObject("messageParams")));
   }
 
   @Test
@@ -302,8 +335,8 @@ public class InvoiceReactivationGuardTest {
     Invoice invoice = invoice(true);
     when(invoice.getEtvfacInvoiceStatus()).thenReturn("AE");
 
-    assertEquals("Verifactu", body(check(reactivateAction(rootBody("RE")), invoice,
-        rectificativaRows("RECT-002"))).getJSONObject("messageParams").getString("fiscalSystem"));
+    assertEquals("Verifactu", fiscalSystemOf(body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-002"))).getJSONObject("messageParams")));
   }
 
   @Test
@@ -322,8 +355,8 @@ public class InvoiceReactivationGuardTest {
     Invoice invoice = invoice(true);
     when(invoice.getETGOTbaiStatus()).thenReturn("Recibido");
 
-    assertEquals("TicketBAI", body(check(reactivateAction(rootBody("RE")), invoice,
-        rectificativaRows("RECT-003"))).getJSONObject("messageParams").getString("fiscalSystem"));
+    assertEquals("TicketBAI", fiscalSystemOf(body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-003"))).getJSONObject("messageParams")));
   }
 
   @Test
@@ -434,7 +467,8 @@ public class InvoiceReactivationGuardTest {
     }
 
     assertTrue(rec.getBoolean("reactivationBlocked"));
-    assertEquals("TicketBAI", rec.getString("reactivationBlockedFiscalSystem"));
+    assertEquals(1, rec.getJSONArray("reactivationBlockedFiscalSystem").length());
+    assertEquals("TicketBAI", rec.getJSONArray("reactivationBlockedFiscalSystem").getString(0));
     assertEquals(1, rec.getJSONArray("reactivationBlockedRectificativas").length());
     assertEquals("RECT-009", rec.getJSONArray("reactivationBlockedRectificativas").getString(0));
   }

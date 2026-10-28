@@ -52,6 +52,7 @@ import java.util.Set;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
@@ -93,6 +94,18 @@ import com.etendoerp.sequences.SequenceUtils;
  * @covers com.etendoerp.go.schemaforge.NeoSequencePreviewHelper
  */
 public class NeoDefaultsServiceTest {
+
+  /**
+   * ETP-5953: without a DAL, {@code OBContext.setAdminMode()} pushes onto its thread-local stack
+   * and only then throws (no session factory), so the production {@code try/finally} that would
+   * restore it is never entered. The production code is balanced; the push leaks only here, and a
+   * later DB-backed class in the same worker running as a non-admin user then fails OBBaseTest's
+   * admin-mode check (NeoReferenceOwnershipIntegrationTest in the merge-block cut).
+   */
+  @After
+  public void clearAdminModeLeakedWithoutDal() {
+    OBContext.clearAdminModeStack();
+  }
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -1094,7 +1094,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
     // ETP-4737: persistOriginInvoice now only acts on the value captureOriginInvoice() captured
     // in handle() (the pre-hook) — call it here too so this test actually exercises the persist
     // path instead of vacuously hitting the "not captured" early-return.
-    handler.captureOriginInvoice(ctx);
+    handler.rectificationLinks.captureOriginInvoice(ctx);
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
@@ -1156,7 +1156,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
     // Mirrors the real handle() pre-hook so persistOriginInvoice has a captured value to act on.
-    handler.captureOriginInvoice(ctx);
+    handler.rectificationLinks.captureOriginInvoice(ctx);
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
