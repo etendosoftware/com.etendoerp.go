@@ -11059,8 +11059,6 @@ invoice imported from orders, the header's `etgoTotalDiscount` (always a %, neve
 same way (null, zero or negative is 0; 4 decimals). A line is any active line other than the `ETGO_DTO` total-discount
 line (a line without product counts):
 
-| Selected orders / invoice before the call | `carryGlobalDiscount` true (default) | `false` |
-|---|---|---|
 | Step | Selected orders / invoice before the call | `carryGlobalDiscount` true (default) | `false` |
 |---|---|---|---|
 | 1 | (a) `ordersDiffer`: the orders' % differ (0 % or none counts as a %, so 10 % + 0 % differ) | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
