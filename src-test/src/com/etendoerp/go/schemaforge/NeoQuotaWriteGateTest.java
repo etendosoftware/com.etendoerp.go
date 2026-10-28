@@ -51,6 +51,7 @@ import org.hibernate.exception.GenericJDBCException;
 import org.hibernate.resource.transaction.spi.TransactionStatus;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.payment.TestLogCapture;
@@ -462,6 +463,168 @@ class NeoQuotaWriteGateTest {
 
       verify(dal, times(1)).rollbackAndClose();
       verify(dal, never()).commitAndClose();
+    }
+  }
+
+  /**
+   * ETP-5051 (Alex MAJOR-1) — the transaction branch of the public {@code run(...)}, the one entry
+   * both create channels use. Since ETP-5782 {@link NeoBatchJsonDataService} commits a single write
+   * itself unless the thread is marked caller-owned, so a checked create the gate owns must run
+   * through the deferred-commit service WITH the mark set — then only the gate commits (the row
+   * may stand) or rolls back (refused, or the create threw). Driven through {@code run}, not
+   * {@code runDeferringCommit}: deleting or inverting the ownership branch must turn these red.
+   */
+  @Nested
+  @DisplayName("run(...) decides who ends the transaction")
+  class RunOwnership {
+
+    private MockedStatic<NeoBatchJsonDataService> deferred;
+    private NeoBatchJsonDataService deferredService;
+    private DefaultJsonDataService callerService;
+
+    @BeforeEach
+    void mockDeferredService() {
+      // DefaultJsonDataService's static initialiser asks Weld for its singleton; instrumenting the
+      // services initialises the class, so it must happen with Weld stubbed.
+      try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+          mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+        deferredService = mock(NeoBatchJsonDataService.class);
+        callerService = mock(DefaultJsonDataService.class);
+        deferred = mockStatic(NeoBatchJsonDataService.class);
+      }
+      deferred.when(NeoBatchJsonDataService::deferredCommitInstance).thenReturn(deferredService);
+      assertFalse(BatchService.callerOwnsTransaction(), "no leftover mark from another test");
+    }
+
+    @AfterEach
+    void closeDeferredService() {
+      if (deferred != null) {
+        deferred.close();
+      }
+    }
+
+    /** What the create saw while it ran. */
+    private final class Probe implements NeoQuotaWriteGate.GatedCreate {
+      private final String result;
+      Boolean markedWhileRunning;
+      DefaultJsonDataService serviceUsed;
+
+      Probe(String result) {
+        this.result = result;
+      }
+
+      @Override
+      public String run(DefaultJsonDataService service) {
+        markedWhileRunning = BatchService.callerOwnsTransaction();
+        serviceUsed = service;
+        return result;
+      }
+    }
+
+    @Test
+    @DisplayName("a gate-owned create that passes runs marked, deferred, and is committed once")
+    void aPassingGateOwnedCreateRunsMarkedAndIsCommittedExactlyOnce() throws Exception {
+      when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.of(ENTRY));
+      when(guard.refusalFor(ENTRY, ENTITY, List.of("ROW-1"))).thenReturn(Optional.empty());
+      Probe create = new Probe(created("ROW-1"));
+
+      NeoQuotaWriteGate.Gated gated =
+          NeoQuotaWriteGate.run(ENTITY, callerService, create, guard, false);
+
+      assertTrue(create.markedWhileRunning, "the write path must defer its commit to the gate");
+      assertFalse(BatchService.callerOwnsTransaction(), "the mark is released after the create");
+      org.junit.jupiter.api.Assertions.assertSame(deferredService, create.serviceUsed);
+      assertNull(gated.refusal());
+      assertEquals(create.result, gated.result());
+      verify(dal, times(1)).commitAndClose();
+      verify(dal, never()).rollbackAndClose();
+    }
+
+    @Test
+    @DisplayName("a gate-owned create that is refused is rolled back and never committed")
+    void aRefusedGateOwnedCreateIsRolledBackAndNeverCommitted() throws Exception {
+      when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.of(ENTRY));
+      when(guard.refusalFor(ENTRY, ENTITY, List.of("ROW-1"))).thenReturn(Optional.of(denial()));
+      Probe create = new Probe(created("ROW-1"));
+
+      NeoQuotaWriteGate.Gated gated =
+          NeoQuotaWriteGate.run(ENTITY, callerService, create, guard, false);
+
+      assertTrue(create.markedWhileRunning, "the insert must not have been committed already");
+      assertFalse(BatchService.callerOwnsTransaction());
+      assertNotNull(gated.refusal());
+      assertEquals(403, gated.refusal().getHttpStatus());
+      assertEquals("QUOTA_EXCEEDED",
+          gated.refusal().getBody().getJSONObject("error").getString("code"));
+      verify(dal, times(1)).rollbackAndClose();
+      verify(dal, never()).commitAndClose();
+    }
+
+    @Test
+    @DisplayName("a gate-owned create that throws leaves no mark and commits nothing")
+    void aThrowingGateOwnedCreateLeavesNoMarkAndCommitsNothing() throws Exception {
+      when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.of(ENTRY));
+      boolean[] marked = new boolean[1];
+
+      IllegalStateException thrown = org.junit.jupiter.api.Assertions.assertThrows(
+          IllegalStateException.class, () -> NeoQuotaWriteGate.run(ENTITY, callerService,
+              service -> {
+                marked[0] = BatchService.callerOwnsTransaction();
+                throw new IllegalStateException("add failed");
+              }, guard, false));
+
+      assertEquals("add failed", thrown.getMessage());
+      assertTrue(marked[0], "the create ran marked");
+      assertFalse(BatchService.callerOwnsTransaction(), "the mark is released when it throws");
+      verify(dal, never()).commitAndClose();
+      verify(dal, times(1)).rollbackAndClose();
+      verify(guard, never()).refusalFor(any(), anyString(), any());
+    }
+
+    @Test
+    @DisplayName("inside a batch the gate neither sets nor ends the mark, and never commits")
+    void insideABatchTheGateLeavesTheMarkAndTheTransactionToTheBatch() throws Exception {
+      when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.of(ENTRY));
+      when(guard.refusalFor(ENTRY, ENTITY, List.of("ROW-1"))).thenReturn(Optional.empty());
+
+      // Unmarked thread: the gate must not add a mark of its own.
+      Probe unmarked = new Probe(created("ROW-1"));
+      NeoQuotaWriteGate.run(ENTITY, callerService, unmarked, guard, true);
+      assertFalse(unmarked.markedWhileRunning, "a batch-owned create is not marked by the gate");
+      org.junit.jupiter.api.Assertions.assertSame(callerService, unmarked.serviceUsed);
+
+      // Marked by the batch: the gate must not end the batch's mark.
+      Probe inBatch = new Probe(created("ROW-1"));
+      BatchService.beginCallerOwnedTransaction();
+      try {
+        NeoQuotaWriteGate.run(ENTITY, callerService, inBatch, guard, true);
+        assertTrue(BatchService.callerOwnsTransaction(), "the batch's mark survives the create");
+      } finally {
+        BatchService.endCallerOwnedTransaction();
+      }
+      assertTrue(inBatch.markedWhileRunning);
+
+      verify(dal, never()).commitAndClose();
+      verify(dal, never()).rollbackAndClose();
+      deferred.verify(NeoBatchJsonDataService::deferredCommitInstance, never());
+    }
+
+    @Test
+    @DisplayName("an unchecked create outside a batch runs unmarked and is not committed by the gate")
+    void anUncheckedCreateRunsUnmarkedAndIsNotCommittedByTheGate() throws Exception {
+      when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.empty());
+      Probe create = new Probe(created("ROW-1"));
+
+      NeoQuotaWriteGate.Gated gated =
+          NeoQuotaWriteGate.run(ENTITY, callerService, create, guard, false);
+
+      assertFalse(create.markedWhileRunning, "an unchecked create keeps core's own commit");
+      org.junit.jupiter.api.Assertions.assertSame(callerService, create.serviceUsed);
+      assertNull(gated.refusal());
+      assertEquals(create.result, gated.result());
+      verify(dal, never()).commitAndClose();
+      verify(dal, never()).rollbackAndClose();
+      deferred.verify(NeoBatchJsonDataService::deferredCommitInstance, never());
     }
   }
 
