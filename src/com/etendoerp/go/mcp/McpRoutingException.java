@@ -675,6 +675,54 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The same refusal, also naming {@code allParents} for an entity that may be listed across every
+   * parent (ETP-5852): the agent learns the on-purpose alternative only where it exists.
+   *
+   * @return a copy of this refusal with the alternative in its hint
+   */
+  McpRoutingException offeringAllParents() {
+    McpRoutingException copy = new McpRoutingException(getMessage(), status, errorCode, field,
+        available, (hint == null ? "" : hint + " ")
+            + "To search this entity across every parent instead (for example by product), "
+            + "call etendo_list again with allParents:true and the filters you need.",
+        seeAlso);
+    copy.extras = extras;
+    return copy;
+  }
+
+  /**
+   * {@code allParents:true} sent together with {@code parentId} (ETP-5852).
+   *
+   * @return the exception to throw
+   */
+  static McpRoutingException allParentsWithParent() {
+    return new McpRoutingException(
+        "allParents and parentId contradict each other: parentId reads one parent's records, "
+            + "allParents reads them across every parent. Nothing was read.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
+        McpConstants.PARAM_ALL_PARENTS, List.of(), "Send only one of the two.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * {@code allParents:true} on an entity that is read only through its parent (ETP-5852).
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @return the exception to throw
+   */
+  static McpRoutingException allParentsNotAllowed(String specName, String entityName) {
+    return new McpRoutingException(
+        "'" + entityName + "' of '" + specName + "' cannot be listed across every parent: it is "
+            + "read only through one parent record. Nothing was read.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
+        McpConstants.PARAM_ALL_PARENTS, List.of(),
+        "Drop allParents and pass parentId. etendo_schema says per entity whether "
+            + "allParentsAllowed is true.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
    * A call on a child entity did not name its parent record (ETP-5184).
    *
    * <p>The detail is written for an agent that does not know Etendo's data model: it says why there

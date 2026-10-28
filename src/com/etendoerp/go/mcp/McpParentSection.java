@@ -83,6 +83,13 @@ final class McpParentSection {
   static final String KEY_OPTIONAL_FOR = "optionalFor";
   static final String KEY_REASON = "reason";
   static final String KEY_MODE = "mode";
+  /**
+   * ETP-5852: {@code true} lets {@code etendo_list} read the entity across every parent when the
+   * agent asks for it on purpose ({@code allParents:true}); without that argument the parent stays
+   * required. The list is still scoped to the parent tab's own filter (sales lines of sales orders
+   * only). Needs a {@code reason}.
+   */
+  static final String KEY_ALL_PARENTS = "allParents";
 
   /** {@code mode} value declaring a 1:1 tab over the parent's own table. */
   static final String MODE_SAME_RECORD = "sameRecord";
@@ -127,7 +134,7 @@ final class McpParentSection {
   private static final Set<String> RELAXABLE_VERBS = Set.of(VERB_LIST, VERB_GET);
 
   private static final Set<String> ALLOWED_KEYS =
-      Set.of(KEY_FIELD, KEY_ENTITY, KEY_OPTIONAL_FOR, KEY_REASON, KEY_MODE);
+      Set.of(KEY_FIELD, KEY_ENTITY, KEY_OPTIONAL_FOR, KEY_REASON, KEY_MODE, KEY_ALL_PARENTS);
 
   /**
    * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
@@ -164,6 +171,7 @@ final class McpParentSection {
     List<String> problems = new ArrayList<>();
     validateMode(body, problems);
     validateOptionalFor(body, problems);
+    validateAllParents(body, problems);
     validateBlankStrings(body, problems);
     return problems;
   }
@@ -251,6 +259,34 @@ final class McpParentSection {
       problems.add(KEY_REASON + " is required whenever " + KEY_OPTIONAL_FOR
           + " is set, so the exception is auditable");
     }
+  }
+
+  /** {@code allParents} is a boolean, needs a reason, and only means something on a real child. */
+  private static void validateAllParents(JSONObject body, List<String> problems) {
+    if (!body.has(KEY_ALL_PARENTS)) {
+      return;
+    }
+    if (!(body.opt(KEY_ALL_PARENTS) instanceof Boolean)) {
+      problems.add(KEY_ALL_PARENTS + " must be a boolean");
+      return;
+    }
+    if (StringUtils.isBlank(body.optString(KEY_REASON, null))) {
+      problems.add(KEY_REASON + " is required whenever " + KEY_ALL_PARENTS
+          + " is set, so the exception is auditable");
+    }
+    String mode = body.optString(KEY_MODE, null);
+    if (mode != null) {
+      problems.add(KEY_ALL_PARENTS + " cannot be combined with mode '" + mode
+          + "': it widens the list of a child that is read through its parent");
+    }
+  }
+
+  /**
+   * @param body the section body, may be {@code null}
+   * @return {@code true} when the body lets {@code etendo_list} read across every parent on request
+   */
+  static boolean allowsAllParents(JSONObject body) {
+    return body != null && body.optBoolean(KEY_ALL_PARENTS, false);
   }
 
   /** A key present but blank is a half-finished edit, not a value. */

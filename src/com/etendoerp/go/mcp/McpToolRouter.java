@@ -437,7 +437,14 @@ public class McpToolRouter {
     // order's lines got EVERY order's lines, with nothing in the response to say the scope had
     // been dropped: a confident, wrong answer that reads exactly like a correct one. Worse than a
     // refusal, because the caller then acts on rows belonging to records it never asked about.
-    filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters);
+    // ETP-5852: allParents:true is the explicit, on-purpose read across every parent of an entity
+    // whose MCP_CONFIG allows it; without it the parent gate below stays as it is.
+    boolean allParents = args.optBoolean(McpConstants.PARAM_ALL_PARENTS, false);
+    String allParentsWhere = allParents
+        ? McpAllParents.scopeWhere(specName, entityName, sfEntity, parentId) : null;
+    if (!allParents) {
+      filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters);
+    }
 
     // ETP-5405 + ETP-5415 (D13): the read's PRE phase, which must run before the tab is demanded.
     // A customization that answers here is serving the whole list itself — over REST that has
@@ -518,6 +525,12 @@ public class McpToolRouter {
       params.put(JsonConstants.USE_ALIAS, "true");
     }
 
+    if (StringUtils.isNotBlank(allParentsWhere)) {
+      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
+          params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), allParentsWhere));
+      params.put(JsonConstants.USE_ALIAS, "true");
+    }
+
     String result = jsonService.fetch(params);
     JSONObject responseJson = new JSONObject(result);
 
@@ -556,6 +569,9 @@ public class McpToolRouter {
     // `fields` selects row columns, and this block is not one.
     McpNamedFilters.attachApplied(flat, sfEntity.getNamedFilters(), filters);
     McpQuerySupport.attachFilterAliases(flat, appliedAliases);
+    if (allParents) {
+      McpAllParents.annotate(flat, sfEntity);
+    }
     return wrapAsTextContent(flat);
   }
 
@@ -710,8 +726,9 @@ public class McpToolRouter {
       return filters;
     }
     if (StringUtils.isBlank(parentId)) {
-      throw McpRoutingException.parentRequired(specName, entityName,
+      McpRoutingException refusal = McpRoutingException.parentRequired(specName, entityName,
           scope.getParentEntity(), parentField);
+      throw scope.allowsAllParents() ? refusal.offeringAllParents() : refusal;
     }
     if (parentField == null) {
       // A TAB_WHERE child: the tab's where clause carries the parent placeholder, filled from

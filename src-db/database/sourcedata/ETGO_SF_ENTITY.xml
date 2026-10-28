@@ -4009,6 +4009,7 @@
 <!--B845C674D49D48BF950AE2389C56C49F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--B845C674D49D48BF950AE2389C56C49F-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search sales order lines by product or category across orders (which orders sold X); allParents keeps them to lines of sales orders, never purchase or quotation lines."}}]]></MCP_CONFIG>
 <!--B845C674D49D48BF950AE2389C56C49F--></ETGO_SF_ENTITY>
 
 <!--B898797B8C184821BFE6FD8B1304E943--><ETGO_SF_ENTITY>
@@ -5488,6 +5489,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--F391AE6AB4D742DB8A38A8801BE6D513-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search purchase order lines by product across orders (which orders bought X); allParents keeps them to lines of purchase orders, never sales or return lines."}}]]></MCP_CONFIG>
 <!--F391AE6AB4D742DB8A38A8801BE6D513--></ETGO_SF_ENTITY>
 
 <!--F4A813BF19194F849D6FFEDB15823D12--><ETGO_SF_ENTITY>
@@ -5624,6 +5626,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--FC1B38FFA12545A0B10D3485276F9F9F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--FC1B38FFA12545A0B10D3485276F9F9F-->  <JAVA_QUALIFIER><![CDATA[goodsMovementLineHandler]]></JAVA_QUALIFIER>
 <!--FC1B38FFA12545A0B10D3485276F9F9F-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--FC1B38FFA12545A0B10D3485276F9F9F-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents read a product's movement history across goods movements; allParents keeps them to lines of goods movements."}}]]></MCP_CONFIG>
 <!--FC1B38FFA12545A0B10D3485276F9F9F--></ETGO_SF_ENTITY>
 
 <!--FC23E187207A4AB5A3C67E0F03A88856--><ETGO_SF_ENTITY>

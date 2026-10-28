@@ -53,12 +53,12 @@ class McpParentSectionTest {
   class Declaration {
 
     @Test
-    @DisplayName("declares the five documented keys and replace semantics")
+    @DisplayName("declares the documented keys and replace semantics")
     void declaresKeys() {
       McpConfigSection section = McpParentSection.declaration();
       assertEquals(McpParentSection.NAME, section.getName());
       assertEquals(McpConfigSection.Merge.REPLACE, section.getMerge());
-      assertEquals(Set.of("field", "entity", "optionalFor", "reason", "mode"),
+      assertEquals(Set.of("field", "entity", "optionalFor", "reason", "mode", "allParents"),
           section.getAllowedKeys());
     }
 
@@ -296,6 +296,45 @@ class McpParentSectionTest {
       assertFalse(McpParentSection.isUnparented(body("{}")));
       assertFalse(McpParentSection.isUnparented(body("{\"field\":\"invoice\"}")));
       assertFalse(McpParentSection.isUnparented((JSONObject) null));
+    }
+  }
+
+  /**
+   * ETP-5852: allParents widens a child's list across every parent on request, so it is audited
+   * like optionalFor (a reason) and refused where it contradicts the declared mode.
+   */
+  @Nested
+  @DisplayName("allParents")
+  class AllParents {
+
+    @Test
+    @DisplayName("a boolean with a reason is valid and allows the read across parents")
+    void validWithReason() throws JSONException {
+      JSONObject ok = body("{\"allParents\":true,\"reason\":\"search lines by product\"}");
+      assertTrue(McpParentSection.validate(ok).isEmpty());
+      assertTrue(McpParentSection.allowsAllParents(ok));
+      assertFalse(McpParentSection.allowsAllParents(body("{\"allParents\":false,\"reason\":\"x\"}")));
+      assertFalse(McpParentSection.allowsAllParents(null));
+    }
+
+    @Test
+    @DisplayName("refused without a reason, as a non-boolean, or with a mode")
+    void refusals() throws JSONException {
+      assertEquals(1, McpParentSection.validate(body("{\"allParents\":true}")).size());
+      assertEquals(1, McpParentSection.validate(
+          body("{\"allParents\":\"yes\",\"reason\":\"x\"}")).size());
+      assertFalse(McpParentSection.validate(
+          body("{\"allParents\":true,\"reason\":\"x\",\"mode\":\"sameRecord\"}")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the read across parents keeps the parent tab's filter on the parent alias only")
+    void scopeWhere() {
+      assertEquals("e.salesOrder.id in (select p.id from Order p where p.salesTransaction=true "
+          + "AND p.transactionDocument.return= false)",
+          McpAllParents.scopeWhere("salesOrder", "Order",
+              "e.salesTransaction=true AND e.transactionDocument.return= false"));
+      assertEquals(null, McpAllParents.scopeWhere("movement", "MaterialMgmtMovement", null));
     }
   }
 }

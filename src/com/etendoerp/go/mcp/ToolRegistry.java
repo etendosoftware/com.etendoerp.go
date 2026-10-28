@@ -763,10 +763,16 @@ public class ToolRegistry {
     // scope a list to one parent was a filter on a field name the agent had to work out itself.
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
         "Parent record ID — REQUIRED for a child/line entity (e.g. the order ID when listing that "
-            + "order's lines). A child's records are read through their parent: there is no global "
-            + "list of them. Omit it on a child entity and the call is refused, naming the parent "
-            + "entity to fetch first. Not needed for a spec's top-level entity, and equivalent to "
-            + "filtering on the parent field yourself."));
+            + "order's lines). A child's records are read through their parent. Omit it on a child "
+            + "entity and the call is refused, naming the parent entity to fetch first. Not needed "
+            + "for a spec's top-level entity, and equivalent to filtering on the parent field "
+            + "yourself."));
+    props.put(McpConstants.PARAM_ALL_PARENTS, booleanProp(
+        "Optional, default false. true searches a child entity across EVERY parent instead of "
+            + "one (e.g. the sales order lines of a product, whatever the order) — only on the "
+            + "entities whose etendo_schema shows allParentsAllowed:true; refused elsewhere and "
+            + "together with parentId. The rows stay within this spec (sales-order lines are lines "
+            + "of sales orders only) and each names its parent. Use parentId to read one parent."));
     props.put("limit", numericProp(TYPE_INTEGER, "Maximum number of records to return (default 100)"));
     props.put("offset", numericProp(TYPE_INTEGER, "Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));

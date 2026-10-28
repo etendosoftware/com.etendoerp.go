@@ -68,9 +68,14 @@ final class McpSchemaResponseHints {
     }
     String parent = scope.getParentEntity() == null ? "parent"
         : "'" + scope.getParentEntity() + "'";
-    return "This is a child entity: pass parentId (the id of the " + parent + " record) on "
-        + String.join(", ", required)
-        + " \u2014 there is no global list of these records to read without it. ";
+    String head = "This is a child entity: pass parentId (the id of the " + parent + " record) on "
+        + String.join(", ", required);
+    // ETP-5852: where the entity may be searched across every parent, say so instead of "no
+    // global list" — the on-purpose alternative is etendo_list(allParents:true).
+    return scope.allowsAllParents()
+        ? head + ". To search it across every " + parent + " (for example by product), call "
+            + "etendo_list with allParents:true instead of parentId. "
+        : head + " \u2014 there is no global list of these records to read without it. ";
   }
 
   /**
