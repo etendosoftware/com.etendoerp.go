@@ -2234,6 +2234,9 @@ public class McpToolRouter {
         .requestBody(parameters)
         .sfEntity(reportEntity)
         .obContext(OBContext.getOBContext())
+        // ETP-5852: a report run from MCP says so, like every other MCP context, so a report can
+        // add what only an agent needs (the aging totals) without changing the SPA's answer.
+        .mcpOrigin(true)
         .build();
     NeoResponse neoResponse = handler.handle(ctx);
     if (neoResponse == null) {

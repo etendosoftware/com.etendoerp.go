@@ -35,6 +35,7 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -437,6 +438,12 @@ public class AgingReportHandler implements NeoHandler {
       responseData.put("data", rows);
       responseData.put("count", rows.length());
       responseData.put("meta", buildMeta(recOrPay, ctx.currentDate, buckets, showDetails));
+      if (context.isMcpOrigin()) {
+        // ETP-5852 (M-36): an agent had to add the partner rows up itself and guess what each
+        // column meant. MCP only: the SPA computes its own footer.
+        responseData.put("totals", sumColumns(rows));
+        responseData.getJSONObject("meta").put("columns", describeColumns(buckets));
+      }
 
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", responseData);
@@ -658,6 +665,49 @@ public class AgingReportHandler implements NeoHandler {
       rows.put(row);
     }
     return rows;
+  }
+
+  /** The amount columns of a summary row, in display order. */
+  private static final String[] AMOUNT_COLUMNS =
+      { "current", "days30", "days60", "days90", "days120", "days150plus", "total", "credits", "net" };
+
+  /** ETP-5852 (M-36): the sum of every amount column over the partner rows. */
+  static JSONObject sumColumns(JSONArray rows) throws JSONException {
+    JSONObject totals = new JSONObject();
+    for (String column : AMOUNT_COLUMNS) {
+      BigDecimal sum = BigDecimal.ZERO;
+      for (int i = 0; i < rows.length(); i++) {
+        sum = sum.add(toBigDecimal(rows.getJSONObject(i).optString(column, "0")));
+      }
+      totals.put(column, sum);
+    }
+    totals.put("partners", rows.length());
+    return totals;
+  }
+
+  /**
+   * ETP-5852 (M-36): what each amount column holds for these bucket limits. Buckets follow the
+   * open amount's due date against currentDate (core's AgingDao); credits are the partner's
+   * payments not yet applied to any document, and net is total minus credits.
+   */
+  private static JSONObject describeColumns(BucketConfig buckets) throws JSONException {
+    String[] limits = { buckets.col1Raw, buckets.col2Raw, buckets.col3Raw, buckets.col4Raw };
+    String[] keys = { "days30", "days60", "days90", "days120" };
+    JSONObject columns = new JSONObject();
+    columns.put("current", "open amount not yet due on currentDate");
+    int from = 1;
+    String last = "0";
+    for (int i = 0; i < buckets.activeBuckets; i++) {
+      columns.put(keys[i], "open amount " + from + "-" + limits[i] + " days overdue");
+      from = Integer.parseInt(limits[i].trim()) + 1;
+      last = limits[i];
+    }
+    columns.put("days150plus", "open amount more than " + last + " days overdue (the last "
+        + "bucket, whatever its key says)");
+    columns.put("total", "all open amounts of the partner (current + every bucket)");
+    columns.put("credits", "the partner's payments not yet applied to any document");
+    columns.put("net", "total - credits: what is really owed");
+    return columns;
   }
 
   /**
