@@ -57,7 +57,8 @@ public class SalesInvoiceLineHandler extends InvoiceLineHandler {
    *
    * <p>Last, once every check has passed, a line created on a rectificative from a source invoice
    * line or a return line links the invoice to the one it rectifies (ETP-6002, see
-   * {@link SalesRectificativeLineLinkSupport}). Before that, a line created from an order line
+   * {@link SalesRectificativeLineLinkSupport}); a line copied into a rectificative also loses the
+   * source line's order line (ETP-6002, as ETP-5729 does for the return path). Before that, a line created from an order line
    * is bound to that order line's oldest shipment line still pending to invoice
    * ({@link SalesInvoiceShipmentLineResolver}, ETP-6002 IMP-1, the shared rule of
    * {@link OrderLineMovementAllocation}). {@code sourceInvoiceLineId} is read before the parent
@@ -70,6 +71,8 @@ public class SalesInvoiceLineHandler extends InvoiceLineHandler {
     if (response != null) {
       return response;
     }
+    // ETP-6002: a line copied into a rectificative never keeps the source line's order line.
+    SalesRectificativeLineLinkSupport.dropOrderLineOnRectificativeCopy(context, sourceInvoiceLineId);
     // Before the amounts: a line sent without a price takes the price list's (ETP-5881).
     InvoiceLineAmountSupport.setPriceFromPriceListOnCreate(context);
     response = InvoiceLineAmountSupport.deriveAmountsOnWrite(context);

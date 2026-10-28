@@ -396,12 +396,15 @@ class SalesLineCustomizationHandlersTest {
   @Test
   void salesInvoiceLineCreateIntoAPlainInvoiceLinksNothing() throws Exception {
     LinkFixture fx = new LinkFixture(false, Collections.emptyList());
+    JSONObject body = fx.sourceLineBody(PARENT_ID_KEY).put("salesOrderLine", "OL-SRC");
 
-    NeoResponse response = fx.run(fx.sourceLineBody(PARENT_ID_KEY));
+    NeoResponse response = fx.run(body);
 
     assertNull(response);
     verify(fx.dal, never()).createCriteria(ReversedInvoice.class);
     verify(fx.dal, never()).save(any());
+    // ETP-6002: the order line is dropped only on a rectificative; a plain invoice keeps it.
+    assertEquals("OL-SRC", body.optString("salesOrderLine"));
   }
 
   /** A {@code sourceInvoiceLineId} that names no invoice line is refused before the create. */
@@ -430,6 +433,23 @@ class SalesLineCustomizationHandlersTest {
     verify(fx.link).setInvoice(fx.rectificative);
     verify(fx.link).setReversedInvoice(fx.origin);
     verify(fx.dal).save(fx.link);
+  }
+
+  /**
+   * Repro (ETP-6002): a line copied from a source invoice line into a rectificative loses the
+   * source line's order line, so C_INVOICE_POST neither lowers the order's invoiced quantity nor
+   * matches the rectificative to the order's shipment — the rule ETP-5729 applies to the return
+   * path. Any client (REST, batch) that sends it is overridden.
+   */
+  @Test
+  void salesInvoiceLineCopiedIntoARectificativeDropsTheOrderLine() throws Exception {
+    LinkFixture fx = new LinkFixture(true, Collections.emptyList());
+    JSONObject body = fx.sourceLineBody(PARENT_ID_KEY).put("salesOrderLine", "OL-SRC");
+
+    NeoResponse response = fx.run(body);
+
+    assertNull(response);
+    assertFalse(body.has("salesOrderLine"), "the source line's order line must not be copied");
   }
 
   /**

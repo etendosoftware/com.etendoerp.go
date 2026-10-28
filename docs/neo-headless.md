@@ -11579,6 +11579,18 @@ through the same `ensureReverseLink`. Purchase invoice lines are not affected
 (`PurchaseInvoiceLineHandler` does not call it) and still link through the header PATCH. The header
 path stays for compatibility.
 
+**ETP-6002 — a line copied into a sales rectificative carries no order line.** Same rule ETP-5729
+applies to the rectificative created from a return (`ReturnInvoiceSupport#buildAndSaveInvoiceLine`
+clears `C_OrderLine_ID`): in `SalesInvoiceLineHandler`'s pre-hook,
+`SalesRectificativeLineLinkSupport#dropOrderLineOnRectificativeCopy` removes `salesOrderLine` from
+the create body when the line carries `sourceInvoiceLineId` and the parent is a rectificative
+(`isRectificativeDocType`), on every channel, so neither the SPA (which stopped sending it) nor a
+REST / batch client can reintroduce it. Kept, `C_INVOICE_POST` treated the negative line as an
+invoice of the order: it lowered `C_OrderLine.QtyInvoiced` (the returned quantity became invoiceable
+again) and wrote an `M_MatchSI` row to the order's shipment, a transitive "related document".
+Rectificatives already stored with the order line are not repaired (no data-fix). Purchase is
+unchanged.
+
 **ETP-6002 — the sales invoice detail GET no longer deduces `sourceInvoice` / `sourceReturnReceipt`.**
 `SalesInvoiceHeaderHandler#enrichSourceInvoice` walked invoice line → return line → cancelled shipment
 line → invoice and injected both keys. The SPA's related-documents definition was their only reader

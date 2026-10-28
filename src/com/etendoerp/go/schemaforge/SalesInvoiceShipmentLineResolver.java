@@ -59,7 +59,8 @@ final class SalesInvoiceShipmentLineResolver {
 
   private static final Logger log = LogManager.getLogger(SalesInvoiceShipmentLineResolver.class);
 
-  static final String FIELD_SALES_ORDER_LINE = "salesOrderLine";
+  static final String FIELD_SALES_ORDER_LINE =
+      SalesRectificativeLineLinkSupport.FIELD_SALES_ORDER_LINE;
   static final String FIELD_GOODS_SHIPMENT_LINE =
       SalesRectificativeLineLinkSupport.FIELD_GOODS_SHIPMENT_LINE;
   private static final String FIELD_INVOICED_QTY = "invoicedQuantity";

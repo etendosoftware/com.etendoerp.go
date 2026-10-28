@@ -63,6 +63,7 @@ final class SalesRectificativeLineLinkSupport {
 
   static final String FIELD_SOURCE_INVOICE_LINE_ID = "sourceInvoiceLineId";
   static final String FIELD_GOODS_SHIPMENT_LINE = "goodsShipmentLine";
+  static final String FIELD_SALES_ORDER_LINE = "salesOrderLine";
   static final String ERROR_SOURCE_LINE_NOT_FOUND = "sourceInvoiceLineNotFound";
   private static final int SC_UNPROCESSABLE = 422;
 
@@ -79,6 +80,51 @@ final class SalesRectificativeLineLinkSupport {
   static String peekSourceInvoiceLineId(NeoContext context) {
     JSONObject body = createBody(context);
     return body != null ? idOrNull(body, FIELD_SOURCE_INVOICE_LINE_ID) : null;
+  }
+
+  /**
+   * Removes {@code salesOrderLine} from the create body of a line COPIED from an invoice line
+   * ({@code sourceInvoiceLineId}) into a sales rectificative (ETP-6002), on every channel — the
+   * same rule ETP-5729 applies to the rectificative created from a return
+   * ({@code ReturnInvoiceSupport#buildAndSaveInvoiceLine} clears the line's order line).
+   *
+   * <p>The source line's order line is only where the source invoice came from. Kept on the
+   * negative rectificative line, {@code C_INVOICE_POST} treats it as an invoice OF that order: it
+   * subtracts the quantity from {@code C_OrderLine.QtyInvoiced} (the returned quantity becomes
+   * invoiceable again — e.g. PV1000030 from 10 to 9) and creates an {@code M_MatchSI} row to the
+   * order's shipment, which then shows as a related document of the rectificative only by
+   * transitivity. A rectificative relates to the invoice it rectifies ({@code C_Invoice_Reverse})
+   * and, from a return, to the return — never to the order.
+   *
+   * <p>Abstains for any other request, a body without {@code sourceInvoiceLineId}, or an invoice
+   * that is not a rectificative. Lines already stored with an order line are not repaired.
+   *
+   * @param context             the pre-hook context of the line create
+   * @param sourceInvoiceLineId the id {@link #peekSourceInvoiceLineId} read, or {@code null}
+   */
+  static void dropOrderLineOnRectificativeCopy(NeoContext context, String sourceInvoiceLineId) {
+    JSONObject body = createBody(context);
+    if (body == null || StringUtils.isBlank(sourceInvoiceLineId)
+        || !body.has(FIELD_SALES_ORDER_LINE)) {
+      return;
+    }
+    String invoiceId = idOrNull(body, InvoiceLineAmountSupport.FIELD_PARENT_ID);
+    if (StringUtils.isBlank(invoiceId)) {
+      invoiceId = idOrNull(body, InvoiceLineAmountSupport.FIELD_INVOICE);
+    }
+    if (StringUtils.isBlank(invoiceId)) {
+      return;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      if (invoice != null
+          && SalesInvoiceHeaderHandler.isRectificativeDocType(invoice.getTransactionDocument())) {
+        body.remove(FIELD_SALES_ORDER_LINE);
+      }
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
