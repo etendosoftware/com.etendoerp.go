@@ -1691,6 +1691,19 @@ Plain text (`text/plain`) is deliberately **not** accepted — the ticket's orig
 that `.txt` uploaded fine while the UI advertised "PDF, Word, Excel, PowerPoint, images". ZIP, XML
 and RTF are kept: Facturae XML and zipped document bundles are real use cases.
 
+**Stored data type correction (ETP-5735).** The core stores `C_File.datatype` using `MimeTypeUtil`
+(Apache Tika 0.9), which does not know WEBP (and any other format newer than the library) and
+answers `application/octet-stream`. The SPA routes its viewer on that value, so a WEBP main
+attachment rendered through the PDF viewer. After `aim.upload(...)`, `NeoAttachmentStore` now
+replaces a blank or `application/octet-stream` data type with `NeoAttachmentPolicy.resolveMimeType(
+fileName, file)` (the policy's own extension + signature tables; unchanged when nothing resolves).
+The write is a native `UPDATE C_File SET C_DataType_ID` (`NeoAttachmentsHelper.updateDataType`, inside a
+savepoint, skipped when the MIME exceeds the 32-char column), never `setDataType` on the entity: a dirty
+`ADAttachment` fails the DAL write-access check when the session flushes at request commit, which turned
+the upload into a 500 with rollback (same reason `markAsMain` is native SQL).
+Rows stored before this change keep `application/octet-stream`; the SPA derives the type from the
+file extension in that case.
+
 #### Write-tier authorization (ETP-5205)
 
 Every attachment **write** — `POST` upload, `DELETE /attachments/file/{id}`,
@@ -11730,15 +11743,15 @@ the ETP-5715 prompts SQL (guarded by the previous value of each row).
 (`previousSentAt`), `InitialEmailContractsTest` (`contracts()`), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`,
 `McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`, `McpUsageTenantQaTest`, `McpAttachmentToolsTest`.
 
-#### 4.12.40 Creating a purchase invoice from a supplier's PDF: `etendo_request_document_extraction_upload`, `etendo_extract_invoice_document` (ETP-5715)
+#### 4.12.40 Creating a purchase invoice from a supplier's document (PDF or image): `etendo_request_document_extraction_upload`, `etendo_extract_invoice_document` (ETP-5715)
 
 Piece E of ETP-5715 stage 2: the application's purchase-invoice **"Subir factura" → "Extraer y completar"**, for an agent, **with mandatory human
 supervision**. It reuses piece A (§4.12.37: the upload link, `NeoAttachmentStore`, `NeoAttachmentTarget`). Nothing is created by these tools:
-they stage the PDF, read it and hand back **what was detected plus every decision the user must take**; the invoice itself is created by the agent
-with `etendo_batch` after the user confirmed, and the same PDF is then attached as its main attachment.
+they stage the document, read it and hand back **what was detected plus every decision the user must take**; the invoice itself is created by the agent
+with `etendo_batch` after the user confirmed, and the same document is then attached as its main attachment.
 
 **What the SPA does (measured in `tools/app-shell/src/components/copilot/ocr/`, the contract the MCP mirrors).** Only on a **new** purchase invoice
-(`OcrSidePanel`). The panel uploads the PDF to `/sws/copilot/file`, then `POST /sws/copilot/executeTool {tool_name:"SimpleOcrTool", params:{path, question,
+(`OcrSidePanel`). The panel uploads the document (PDF or image) to `/sws/copilot/file`, then `POST /sws/copilot/executeTool {tool_name:"SimpleOcrTool", params:{path, question,
 structured_output_schema}}`; the answer (a JSON text, possibly fenced) is parsed loosely and rejected as "nothing read" when every field is empty
 (`hasExtractedData`). A pre-flight compares the **receiver's** tax id with the organization's (`receiverTaxIdCheck.js`: VAT prefixes ignored, an NIE's `X`
 never stripped, receiver equal to issuer = the model confused the blocks): a mismatch **blocks**, an absent receiver id or an organization without a tax id
@@ -11747,38 +11760,41 @@ limited to two rows that returns exactly one; otherwise the user picks or create
 NOT NULL), a **duplicate** warning (same vendor, same supplier number case-insensitively, not voided), the number and date **toggles**, and per line a
 **product** (a similarity search, 3 candidates from 50 %: one same-name candidate is taken, anything else is only a suggestion) and a **tax** (never searched
 by label: the server's `defaultTax` for the vendor's address, the date and the printed rate, one lookup per distinct rate; no printed rate = no tax, the form's
-default applies). The batch is header + lines (`parentRef`); a line without a product is dropped; afterwards the PDF is attached with `?markAsMain=true`.
+default applies). The batch is header + lines (`parentRef`); a line without a product is dropped; afterwards the document is attached with `?markAsMain=true`.
 
 **The tools.**
 
 | tool | scope | what it does |
 |---|---|---|
 | `etendo_request_document_extraction_upload` | `etendo:write` | `{spec:"purchase-invoice", name}` → a **single-use upload link not bound to a record**, plus the `stagedDocumentId` the bytes will fill |
-| `etendo_extract_invoice_document` | `etendo:write` | `{spec, staged_document_id, vendor_id?}` → reads the staged PDF **once** and answers the supervised review |
-| `etendo_request_attachment_upload` + `staged_document_id` | `etendo:write` | attaches the staged PDF to the created invoice (`main:true` for the supplier's document) — no link, no second upload |
+| `etendo_extract_invoice_document` | `etendo:write` | `{spec, staged_document_id, vendor_id?}` → reads the staged document **once** and answers the supervised review |
+| `etendo_request_attachment_upload` + `staged_document_id` | `etendo:write` | attaches the staged document to the created invoice (`main:true` for the supplier's document) — no link, no second upload |
 
-**Scopes and annotations, and why.** Both new tools are **write**: they exist to create a document from the PDF (a read-only role has nothing to do with them),
+**Scopes and annotations, and why.** Both new tools are **write**: they exist to create a document from the document (a read-only role has nothing to do with them),
 the upload needs write access to the spec exactly as an attachment does, and the extraction spends a **paid external model**. `etendo_extract_invoice_document`
 is annotated **read-only + idempotent + `openWorldHint:true`** (the first tool read-only AND open-world): it changes nothing in the ERP and gives the same review for
-the same document, but it sends the user's PDF to an external model, which clients use to decide how to ask for approval. The link request is *additive*
+the same document, but it sends the user's document to an external model, which clients use to decide how to ask for approval. The link request is *additive*
 (a temporary file and a link; nothing replaced or deleted). Verbs in `ETGO_MCP_USAGE`: `document_extraction_upload`, `document_extraction`. Titles (en/es) in
 `mcp_titles_*.properties`. Both are offered **only for the specs the OCR configuration declares** (below), never named in code.
 
 **Upload and staging.** The link is the attachment link (§4.12.37): 192-bit token, single use, 10 minutes, bound to client/organization/user/**role**/warehouse, at
 most 10 pending per session (the same cap), `PUT /sws/neo/attachment/upload/{token}` with no bearer. A link carries a `Subject.staged(...)` instead of a record:
 at PUT time the spec is re-authorized for **writing** (`NeoAttachmentTarget.requireWriteAccess`: the role tier, the table rule, the 405 of windows with no
-Attachments tab, with no record involved), and the file must be a **PDF** — `.pdf` name (any case), declared size ≤ 10 MB before a byte is read, the policy's
-extension check, and the **magic bytes** (`%PDF`) after copying. A rejected file does not burn the link. The bytes are kept by `NeoStagedDocuments` under
+Attachments tab, with no record involved), and the file must be a type the extraction reads — a **PDF or a JPG/JPEG, PNG or WEBP image** (`NeoAttachmentPolicy.isOcrDocument`, the `ocr`-flagged entries of the
+attachment policy table; ETP-5735, parity with the SPA), declared size ≤ 10 MB before a byte is read, the policy's
+extension check, and the **magic bytes** of that extension after copying (a renamed file is refused with the policy's own message). The staged file keeps its name
+and extension, so it attaches (`etendo_request_attachment_upload` + `staged_document_id`) through `NeoAttachmentStore` like any upload, with the stored data type
+corrected for WEBP (§4.6a). Copilot's `SimpleOcrTool` detects the real type by content, so `CopilotOcrServiceClient` is unchanged. A rejected file does not burn the link. The bytes are kept by `NeoStagedDocuments` under
 `${java.io.tmpdir}/etgo-staged/<id>/` for **60 minutes**, bound to the session (client, organization, user) and to the spec; any other session, an unknown id
 and an expired one are the **same `404`**. The file is deleted at expiry (swept by every reservation and lookup), after being attached, and — if older than
-the TTL — at start-up. A reservation whose PDF has not arrived lives only as long as its link (**10 minutes**); a stored file lives **60 minutes from its arrival**. The upload-link answer therefore reports `reservationExpiresAt` (the 10-minute reservation; it carries no `stagedDocumentExpiresAt`), and every extraction answer (review or `nothing_extracted`) reports `stagedDocumentExpiresAt`, the real expiry (upload + 60 minutes). Guards for the disk, **not usage limits** (there is none on extractions): `MAX_PER_SESSION = 50` live documents per session, `MAX_PER_CLIENT = 100` per company, and `MAX_TOTAL = 200` **stored files** for the whole server (reservations hold no disk, so they never block another company). The checks and the insertion run under one lock. A daemon timer (started by `@PostConstruct`, stopped by `@PreDestroy`, one per application, never started by a constructor, and swallowing any failure of a tick) runs the clean-up every 10 minutes (expired documents, plus any directory older than the TTL left on disk); the sweep skips a document that is being read or attached and removes it on the next pass. Every upload also sweeps. The index is in
+the TTL — at start-up. A reservation whose file has not arrived lives only as long as its link (**10 minutes**); a stored file lives **60 minutes from its arrival**. The upload-link answer therefore reports `reservationExpiresAt` (the 10-minute reservation; it carries no `stagedDocumentExpiresAt`), and every extraction answer (review or `nothing_extracted`) reports `stagedDocumentExpiresAt`, the real expiry (upload + 60 minutes). Guards for the disk, **not usage limits** (there is none on extractions): `MAX_PER_SESSION = 50` live documents per session, `MAX_PER_CLIENT = 100` per company, and `MAX_TOTAL = 200` **stored files** for the whole server (reservations hold no disk, so they never block another company). The checks and the insertion run under one lock. A daemon timer (started by `@PostConstruct`, stopped by `@PreDestroy`, one per application, never started by a constructor, and swallowing any failure of a tick) runs the clean-up every 10 minutes (expired documents, plus any directory older than the TTL left on disk); the sweep skips a document that is being read or attached and removes it on the next pass. Every upload also sweeps. The index is in
 memory and single-node like the link store: a restart loses it and the agent uploads again.
 
 **The extraction.** Our **own HTTP client** (`CopilotOcrServiceClient`) to the same copilot service the panel reaches through `/sws/copilot`, with the same two
 calls (`attachFile`, then `executeTool`), the same properties (`copilot.host` / `copilot.port`, legacy spelling included) and the same question and schema, but with
 a **90 s budget in total** (the copilot module's client waits forever). The result is cached on the staged document, empty or not: a retry — or the recomputation
-for a vendor the user chose — does not read the PDF again; two concurrent calls read it once (a per-document lock). If building the review fails after a successful reading, the answer is a clean 500 and the reading stays cached. Attaching the staged PDF takes the same lock without waiting: while an extraction is reading it (or another attach is running) the answer is `409 conflict`, and an attached document cannot be attached twice. A service that does not answer, answers a failure status or an
-unparseable body is **`503 ocr_unavailable`** (an error content, nothing cached); the tool's own `{"error":...}` (HTTP 200), a blank PDF, an unparseable answer
+for a vendor the user chose — does not read the document again; two concurrent calls read it once (a per-document lock). If building the review fails after a successful reading, the answer is a clean 500 and the reading stays cached. Attaching the staged PDF takes the same lock without waiting: while an extraction is reading it (or another attach is running) the answer is `409 conflict`, and an attached document cannot be attached twice. A service that does not answer, answers a failure status or an
+unparseable body is **`503 ocr_unavailable`** (an error content, nothing cached); the tool's own `{"error":...}` (HTTP 200), a blank document, an unparseable answer
 and a payload empty once sanitized are **`nothing_extracted`** (`status:"blocked"`, 200).
 
 **One configuration, shared with the SPA.** The question, the tool and the strict answer schema live **once**, in `src/com/etendoerp/go/schemaforge/ocr/ocr-config.json`
@@ -11846,7 +11862,7 @@ SPA, §4.12.9); `line_i_product` = `classifyProductMatch` + the product popup (`
 address). **Not ported, on purpose:** totals (neither side compares them); creating the contact or the product (the agent does it, with the user's OK, through the
 existing tools); the SPA's modal navigation.
 
-**Supervision and prompt injection.** The text of a PDF is untrusted and can address the agent. What the server does: only keys the schema declares survive, **held to the type
+**Supervision and prompt injection.** The text of a document is untrusted and can address the agent. What the server does: only keys the schema declares survive, **held to the type
 the schema declares** (a number field keeps only a finite number of sane size or a plain numeric string of at most 30 digits and no exponent — `1e999999999`, `Infinity`, `NaN` and
 a ten-thousand-digit number become null, they are never converted); every
 string is a single line capped at 200 characters with control characters, invisible formatting, variation selectors, private-use and unassigned code points and lone surrogates removed; at most 100 lines; non-object lines dropped; the
@@ -11854,7 +11870,7 @@ document's text is **never** placed in a `message` or `hint` (those are fixed se
 vendor `createPrefill` (`untrusted:true`) and as the `value` of a toggle (`valueUntrusted:true`); the `batchTemplate` references `{documentData.lines[0].description}`
 instead of copying it. What it cannot do is make an agent obey: the `supervision` block restates the rules in every answer, the tool descriptions state them, and the
 purchase-invoice agent prompt ends with the procedure — show the detections, ask **every** decision (auto-matched ones too), never create a contact or a product, accept a
-suggestion or apply the number/date without the user's explicit OK, create only after the whole summary is confirmed, then attach the staged PDF. `etendo_batch` is
+suggestion or apply the number/date without the user's explicit OK, create only after the whole summary is confirmed, then attach the staged document. `etendo_batch` is
 not blocked; supervision is a prompt, not a control (declared in §4.12.9).
 
 **Reuse.** Vendor and address: `NeoSelectorService.querySelector` on the invoice header's own selectors (`C_BPartner_ID`, `C_BPartner_Location_ID`, context `isSOTrx=N`,
@@ -11876,7 +11892,7 @@ before the final date is applied).
 **Tests:** `OcrReviewAssemblerTest` (every decision with the application's rules, with fake lookups), `ReceiverTaxIdCheckTest` (the application's own cases, ported),
 `OcrExtractionParserTest`, `OcrSanitizerTest`, `OcrExtractionServiceTest`, `OcrConfigTest`, `CopilotOcrServiceClientTest` (the wire contract, the 90 s budget and every
 failure, against a stub server on loopback — never the real service), `NeoStagedDocumentsTest` (session binding, 60-minute expiry and clean-up), `NeoStagedAttachmentTest`,
-`NeoAttachmentUploadEndpointTest` and `NeoAttachmentUploadTicketsTest` (the staged link: single use, TTL, session, PDF only, size, magic bytes),
+`NeoAttachmentUploadEndpointTest` and `NeoAttachmentUploadTicketsTest` (the staged link: single use, TTL, session, PDF or image only, size, magic bytes),
 `NeoAttachmentTargetTest` (`requireWriteAccess`), `McpOcrToolsTest` (both tools, the cache, `nothing_extracted`, `ocr_unavailable`, the receiver block, injection),
 `McpAttachmentToolsTest` (the staged attach), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`,
 `McpAuthorizationServiceVectorTest`, `McpUsageTenantQaTest`; on the SPA side `useOcrConfig.vitest.jsx`, `OcrInlineUploader.vitest.jsx`, `ocrDocTypes.prefill.vitest.js`, `ocrDocTypes.test.js`.
