@@ -614,6 +614,16 @@ final class McpHookExecutor {
     return null;
   }
 
+  /** Whether a post-hook outcome is a refusal (status &ge; 400); {@code null} is not. */
+  static boolean isRefusal(NeoResponse post) {
+    return post != null && post.getHttpStatus() >= 400;
+  }
+
+  /** The body a post-hook replaced the response with, else {@code original}. */
+  static JSONObject bodyOr(NeoResponse post, JSONObject original) {
+    return post == null ? original : post.getBody();
+  }
+
   /**
    * Convert a {@link NeoResponse} to MCP result format.
    * Responses with status &ge; 400 set {@code isError: true}.

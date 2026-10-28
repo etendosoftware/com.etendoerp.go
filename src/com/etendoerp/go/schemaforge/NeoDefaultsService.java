@@ -216,7 +216,7 @@ public class NeoDefaultsService {
         // dependent fields from them exactly as on create or in the UI — a business partner's
         // payment terms, method, address and price list. Without this the cascade ran with the
         // partner empty and the defaults came back generic.
-        Set<String> contextFields = applyRecordContext(ctx, fields, dalEntity, defaults);
+        Set<String> contextFields = NeoDefaultsRecordContext.apply(ctx, fields, dalEntity, defaults);
 
         // Keep cascade enabled for /defaults to preserve the compatibility behavior chosen
         // for this merge: dependent defaults should still be derived during form bootstrap.
@@ -616,37 +616,6 @@ public class NeoDefaultsService {
       }
     }
     return sfFieldColumns;
-  }
-
-  /**
-   * ETP-5852: puts the query-param values that name an included field of this entity into
-   * {@code defaults} (with the reference's identifier), so the callout cascade starts from the
-   * record as the caller knows it. Keys that are not included fields — REST control params, a
-   * misspelt name — are ignored, never an error: the response then simply carries no derived
-   * values for them.
-   *
-   * @return the property names applied, which the cascade must not overwrite
-   */
-  static Set<String> applyRecordContext(NeoContext ctx, List<SFField> fields, Entity dalEntity,
-      JSONObject defaults) throws JSONException {
-    Map<String, String> params = ctx.getQueryParams();
-    Set<String> applied = new HashSet<>();
-    if (params == null || params.isEmpty() || dalEntity == null) {
-      return applied;
-    }
-    for (SFField sfField : fields) {
-      Column adColumn = sfField.getADColumn();
-      String propertyName = adColumn == null ? null
-          : NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, adColumn.getDBColumnName());
-      String value = propertyName == null ? null : params.get(propertyName);
-      if (StringUtils.isNotBlank(value)) {
-        defaults.put(propertyName, value);
-        defaults.remove(propertyName + "$_identifier");
-        tryInjectIdentifier(defaults, dalEntity, propertyName, value);
-        applied.add(propertyName);
-      }
-    }
-    return applied;
   }
 
   private static @Nullable Tab applyCascadeAndResolveTab(NeoContext ctx, JSONArray sequenceFields,

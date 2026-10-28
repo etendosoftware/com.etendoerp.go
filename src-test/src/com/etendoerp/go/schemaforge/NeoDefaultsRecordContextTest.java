@@ -67,7 +67,7 @@ class NeoDefaultsRecordContextTest {
     JSONObject defaults = new JSONObject().put("paymentTerms", "generic-term")
         .put("businessPartner$_identifier", "stale");
 
-    Set<String> applied = NeoDefaultsService.applyRecordContext(
+    Set<String> applied = NeoDefaultsRecordContext.apply(
         context(Map.of("businessPartner", "bp-1")), fields, entity, defaults);
 
     assertEquals(Set.of("businessPartner"), applied);
@@ -84,9 +84,8 @@ class NeoDefaultsRecordContextTest {
     List<SFField> fields = List.of(field(entity, "C_BPartner_ID", "businessPartner"));
     JSONObject defaults = new JSONObject();
 
-    Set<String> applied = NeoDefaultsService.applyRecordContext(
-        context(Map.of("view", "minimal", "noSuchField", "x", "businessPartner", "")), fields,
-        entity, defaults);
+    Set<String> applied = NeoDefaultsRecordContext.apply(context(Map.of("view", "minimal",
+        "noSuchField", "x", "businessPartner", "")), fields, entity, defaults);
 
     assertTrue(applied.isEmpty());
     assertEquals(0, defaults.length());
@@ -97,7 +96,7 @@ class NeoDefaultsRecordContextTest {
     Entity entity = mock(Entity.class);
     JSONObject defaults = new JSONObject().put("paymentTerms", "generic-term");
 
-    assertTrue(NeoDefaultsService.applyRecordContext(context(Map.of()),
+    assertTrue(NeoDefaultsRecordContext.apply(context(Map.of()),
         List.of(field(entity, "C_BPartner_ID", "businessPartner")), entity, defaults).isEmpty());
     assertEquals(1, defaults.length());
   }

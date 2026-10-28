@@ -57,11 +57,11 @@ final class McpAllParents {
   static String scopeWhere(String specName, String entityName, SFEntity sfEntity,
       String parentId) {
     if (StringUtils.isNotBlank(parentId)) {
-      throw McpRoutingException.allParentsWithParent();
+      throw McpRequestRefusals.allParentsWithParent();
     }
     McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
     if (!scope.allowsAllParents()) {
-      throw McpRoutingException.allParentsNotAllowed(specName, entityName);
+      throw McpRequestRefusals.allParentsNotAllowed(specName, entityName);
     }
     Tab parentTab = scope.getAllParentsTab();
     return scopeWhere(scope.getParentField(), parentTab.getTable().getName(),

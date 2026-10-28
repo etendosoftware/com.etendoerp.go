@@ -442,9 +442,7 @@ public class McpToolRouter {
     boolean allParents = args.optBoolean(McpConstants.PARAM_ALL_PARENTS, false);
     String allParentsWhere = allParents
         ? McpAllParents.scopeWhere(specName, entityName, sfEntity, parentId) : null;
-    if (!allParents) {
-      filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters);
-    }
+    filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters, allParents);
 
     // ETP-5405 + ETP-5415 (D13): the read's PRE phase, which must run before the tab is demanded.
     // A customization that answers here is serving the whole list itself — over REST that has
@@ -518,18 +516,8 @@ public class McpToolRouter {
     // ETP-5009: the customization's read predicates, ANDed in exactly as the REST list GET and
     // its ?_distinct= fetch do (NeoReadPredicates), so a row a customization excludes from the
     // query is excluded here too — rather than only from the page its afterHandle was handed.
-    String readPredicate = NeoReadPredicates.resolve(readCtx, NeoExtensionChannel.MCP);
-    if (StringUtils.isNotBlank(readPredicate)) {
-      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
-          params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), readPredicate));
-      params.put(JsonConstants.USE_ALIAS, "true");
-    }
-
-    if (StringUtils.isNotBlank(allParentsWhere)) {
-      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
-          params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), allParentsWhere));
-      params.put(JsonConstants.USE_ALIAS, "true");
-    }
+    andWhere(params, NeoReadPredicates.resolve(readCtx, NeoExtensionChannel.MCP));
+    andWhere(params, allParentsWhere);
 
     String result = jsonService.fetch(params);
     JSONObject responseJson = new JSONObject(result);
@@ -573,6 +561,15 @@ public class McpToolRouter {
       McpAllParents.annotate(flat, sfEntity);
     }
     return wrapAsTextContent(flat);
+  }
+
+  /** ANDs {@code clause} into the list's where clause; a blank clause changes nothing. */
+  private static void andWhere(Map<String, String> params, String clause) {
+    if (StringUtils.isNotBlank(clause)) {
+      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
+          params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), clause));
+      params.put(JsonConstants.USE_ALIAS, "true");
+    }
   }
 
   // ── etendo_get ───────────────────────────────────────────────────────────
@@ -653,7 +650,7 @@ public class McpToolRouter {
     // ETP-5200: the link the agent hands the user. Header records only — a line has no app page.
     McpRecordUrls.addRecordUrl(flat, specName, recordId,
         McpToolRouterSupport.isPrimaryTab(adTab));
-    return wrapAsTextContent(McpToolRouterSupport.unwrapSingleRecord(flat));
+    return wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));
   }
 
   // ── etendo_create ────────────────────────────────────────────────────────
@@ -711,13 +708,15 @@ public class McpToolRouter {
    * @param sfEntity   the resolved SchemaForge entity
    * @param parentId   the parent id supplied by the caller, may be blank
    * @param filters    the caller's filters, may be {@code null}
+   * @param allParents whether the caller asked for every parent (ETP-5852): the filters are then
+   *                   left as they are, the read being scoped by {@link McpAllParents} instead
    * @return the filters to apply, possibly a new object carrying the parent scope
    * @throws JSONException if the filters cannot be extended
    */
   private JSONObject scopeListToParent(String specName, String entityName, SFEntity sfEntity,
-      String parentId, JSONObject filters) throws JSONException {
+      String parentId, JSONObject filters, boolean allParents) throws JSONException {
     McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
-    if (!scope.requiresParentFor(McpParentSection.VERB_LIST)) {
+    if (allParents || !scope.requiresParentFor(McpParentSection.VERB_LIST)) {
       return filters;
     }
     String parentField = scope.getParentField();
@@ -995,12 +994,10 @@ public class McpToolRouter {
     // through the same shaping below, so the answer is {data:{…}} with its link like any other.
     NeoResponse postHookResponse =
         McpHookExecutor.runPostHookResponse(customizationRequest.post(handler), responseJson);
-    if (postHookResponse != null) {
-      if (postHookResponse.getHttpStatus() >= 400) {
-        return McpHookExecutor.neoResponseToMcpResult(postHookResponse);
-      }
-      responseJson = postHookResponse.getBody();
+    if (McpHookExecutor.isRefusal(postHookResponse)) {
+      return McpHookExecutor.neoResponseToMcpResult(postHookResponse);
     }
+    responseJson = McpHookExecutor.bodyOr(postHookResponse, responseJson);
 
     // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
     // CRUD path a handler was written against; only the body handed to the agent is flattened.
@@ -1015,7 +1012,7 @@ public class McpToolRouter {
     McpWriteRequestSupport.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
     McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
     // ETP-5945 (in ETP-5852): one record answers {data:{…}}, as etendo_get does.
-    return wrapAsTextContent(McpToolRouterSupport.unwrapSingleRecord(flat));
+    return wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));
   }
 
 
@@ -1191,12 +1188,10 @@ public class McpToolRouter {
     // ETP-5852: a replaced success body is shaped like an unreplaced one (see handleCreate).
     NeoResponse postHookResponse =
         McpHookExecutor.runPostHookResponse(extensionRequest.post(handler), responseJson);
-    if (postHookResponse != null) {
-      if (postHookResponse.getHttpStatus() >= 400) {
-        return McpHookExecutor.neoResponseToMcpResult(postHookResponse);
-      }
-      responseJson = postHookResponse.getBody();
+    if (McpHookExecutor.isRefusal(postHookResponse)) {
+      return McpHookExecutor.neoResponseToMcpResult(postHookResponse);
     }
+    responseJson = McpHookExecutor.bodyOr(postHookResponse, responseJson);
 
     // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
     // CRUD path a handler was written against; only the body handed to the agent is flattened.
@@ -1206,7 +1201,7 @@ public class McpToolRouter {
     McpRecordUrls.addRecordUrl(flat, specName, recordId, McpToolRouterSupport.isPrimaryTab(adTab));
     McpWriteRequestSupport.reportUnknownFields(flat, unknownWriteFields);
     McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
-    return wrapAsTextContent(McpToolRouterSupport.unwrapSingleRecord(flat));
+    return wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));
   }
 
   // ── etendo_delete ────────────────────────────────────────────────────────
@@ -1665,7 +1660,7 @@ public class McpToolRouter {
     // (NeoHandler#responseEnrichedFields: a shipment's linkedInvoices, invoiceStatus, ...) are
     // published as read-only fields. They came back on every read but the schema never named
     // them, so an agent could not know they existed and its fields:[…] here called them unknown.
-    fieldsArray = McpSchemaFieldBuilder.withEnrichedReadFields(fieldsArray,
+    fieldsArray = McpSchemaResponseHints.withEnrichedReadFields(fieldsArray,
         McpServerResolvedFields.enrichedOnRead(sfEntity));
 
     // IMP-12: fields:[…] — an explicit whitelist, for an agent that already knows what it wants.

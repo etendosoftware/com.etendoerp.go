@@ -131,7 +131,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
       return paymentMethodSelector;
     }
     // ETP-5703: the partner's only ship-to (and its bill-to) on a create without an address.
-    AbstractOrderHeaderHandler.fillPartnerLocations(context);
+    PartnerLocationDefaults.fillOrderLocations(context);
     // ETP-5535: ahead of the total-discount sync, which recalculates on every DocAction — a
     // rejection does not touch the lines, exactly as the UI's rejectQuotation does not.
     if (isRejectDocAction(context)) {

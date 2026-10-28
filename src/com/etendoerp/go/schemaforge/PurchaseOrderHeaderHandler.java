@@ -140,7 +140,7 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
     // ETP-5881 / ETP-5852: a create that names a vendor but no address (REST, the public API and
     // MCP; the SPA always sends one) gets the vendor's only address and its bill-to, as on sales
     // orders (ETP-5703). MCP also runs it before its mandatory check (resolveServerCreateFields).
-    AbstractOrderHeaderHandler.fillPartnerLocations(context);
+    PartnerLocationDefaults.fillOrderLocations(context);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     // ETP-5726: MCP only — a draft order's currency may not leave its price list in another one.
     NeoResponse currencyRefusal = OrderCurrencyPriceListGuard.refuseCurrencyOutsidePriceList(context);

@@ -913,25 +913,6 @@ final class McpToolRouterSupport {
   }
 
   /**
-   * ETP-5852: {@code etendo_get} answers one record as an object, {@code {"data":{…}}}, not the
-   * one-element array the core read produces. Agents asked whether more than one record could come
-   * back for one id. Only a one-element array is unwrapped; any other shape is returned as is.
-   *
-   * @param flat the flattened get result; mutated in place
-   * @return {@code flat}
-   */
-  static JSONObject unwrapSingleRecord(JSONObject flat) throws JSONException {
-    if (flat == null) {
-      return null;
-    }
-    JSONArray data = flat.optJSONArray(JsonConstants.DATA);
-    if (data != null && data.length() == 1 && data.optJSONObject(0) != null) {
-      flat.put(JsonConstants.DATA, data.getJSONObject(0));
-    }
-    return flat;
-  }
-
-  /**
    * Builds the guidance object advertised by {@code etendo_discover} so a cold agent is routed to the
    * {@code docs} tool for ready-to-run recipes (IMP-10). Shape:
    * {@code {"tool":"docs","hint":"Call docs(topic:…) for ready-to-run recipes per task."}}.

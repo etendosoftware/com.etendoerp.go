@@ -123,9 +123,25 @@ class McpRoutingException extends OBException {
    * @param extraKeys the keys to merge into {@link #toEnvelope()}
    * @return this exception
    */
-  private McpRoutingException withExtras(JSONObject extraKeys) {
+  McpRoutingException withExtras(JSONObject extraKeys) {
     this.extras = extraKeys;
     return this;
+  }
+
+  /**
+   * A 422 {@code validation_error} about a read request's own arguments, for the factories of
+   * {@link McpRequestRefusals}.
+   *
+   * @param detail    what was wrong and that nothing was read
+   * @param field     the argument the refusal is about
+   * @param available the values that would work; may be empty
+   * @param hint      how to correct the call
+   * @return the exception to throw
+   */
+  static McpRoutingException unprocessable(String detail, String field, List<String> available,
+      String hint) {
+    return new McpRoutingException(detail, McpConstants.STATUS_UNPROCESSABLE,
+        McpConstants.ERROR_VALIDATION, field, available, hint, McpConstants.SEE_ALSO_READING);
   }
 
   /**
@@ -631,50 +647,6 @@ class McpRoutingException extends OBException {
   }
 
   /**
-   * A filter used a recognized operator but gave it a value of the wrong shape (ETP-5184).
-   *
-   * <p>Only {@code between} can currently fail this way — it needs a two-element array, and a
-   * one-element or non-array value used to be logged and the condition dropped.</p>
-   *
-   * @param key      the filter key
-   * @param operator the operator whose value was malformed
-   * @param expected one clause describing the shape that was expected
-   * @return the exception to throw
-   */
-  static McpRoutingException malformedFilterOperator(String key, String operator, String expected) {
-    return new McpRoutingException(
-        "Filter '" + key + "' operator '" + operator + "' has a malformed value: " + expected,
-        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, key, List.of(),
-        "Correct the operator's value and retry.", McpConstants.SEE_ALSO_READING);
-  }
-
-  /**
-   * A filter value that is not of the field's type (ETP-5914): a word on a number, a date that is
-   * not {@code YYYY-MM-DD}, a boolean other than {@code true}/{@code false}. It used to reach the
-   * query and fail it with a 500, or be cleaned into a filter that matched everything.
-   *
-   * @param key          the filter key
-   * @param expectedType {@code number}, {@code date} or {@code boolean}
-   * @param received     the value as sent
-   * @return the exception to throw
-   */
-  static McpRoutingException invalidFilterValue(String key, String expectedType, Object received) {
-    JSONObject extras = new JSONObject();
-    try {
-      extras.put("expectedType", expectedType);
-      extras.put("received", received == null ? JSONObject.NULL : received);
-    } catch (JSONException e) {
-      // a String key and a JSON value cannot fail; the refusal still carries field and detail
-    }
-    return new McpRoutingException(
-        "Filter '" + key + "' expects a " + expectedType + " value"
-            + ("date".equals(expectedType) ? " (YYYY-MM-DD)" : "") + ", got '" + received + "'.",
-        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, key, List.of(),
-        "Correct the value and retry; nothing was read.", McpConstants.SEE_ALSO_READING)
-        .withExtras(extras);
-  }
-
-  /**
    * The same refusal, also naming {@code allParents} for an entity that may be listed across every
    * parent (ETP-5852): the agent learns the on-purpose alternative only where it exists.
    *
@@ -688,56 +660,6 @@ class McpRoutingException extends OBException {
         seeAlso);
     copy.extras = extras;
     return copy;
-  }
-
-  /**
-   * {@code allParents:true} sent together with {@code parentId} (ETP-5852).
-   *
-   * @return the exception to throw
-   */
-  static McpRoutingException allParentsWithParent() {
-    return new McpRoutingException(
-        "allParents and parentId contradict each other: parentId reads one parent's records, "
-            + "allParents reads them across every parent. Nothing was read.",
-        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
-        McpConstants.PARAM_ALL_PARENTS, List.of(), "Send only one of the two.",
-        McpConstants.SEE_ALSO_READING);
-  }
-
-  /**
-   * {@code allParents:true} on an entity that is read only through its parent (ETP-5852).
-   *
-   * @param specName   the spec
-   * @param entityName the entity
-   * @return the exception to throw
-   */
-  static McpRoutingException allParentsNotAllowed(String specName, String entityName) {
-    return new McpRoutingException(
-        "'" + entityName + QUOTED_OF + specName + "' cannot be listed across every parent: it is "
-            + "read only through one parent record. Nothing was read.",
-        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
-        McpConstants.PARAM_ALL_PARENTS, List.of(),
-        "Drop allParents and pass parentId. etendo_schema says per entity whether "
-            + "allParentsAllowed is true.",
-        McpConstants.SEE_ALSO_READING);
-  }
-
-  /**
-   * An {@code etendo_widget} {@code range} the widgets do not know (ETP-5852, M-38). It used to
-   * fall back to the rolling 12 months in silence.
-   *
-   * @param widget the widget
-   * @param range  the value sent
-   * @param valid  the accepted values
-   * @return the exception to throw
-   */
-  static McpRoutingException invalidWidgetRange(String widget, String range, List<String> valid) {
-    return new McpRoutingException(
-        "Widget '" + widget + "' does not know range '" + range + "'. Nothing was computed.",
-        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, "params.range", valid,
-        "Retry with one of the values in 'available', or omit range for the widget's default "
-            + "period.",
-        McpConstants.SEE_ALSO_READING);
   }
 
   /**

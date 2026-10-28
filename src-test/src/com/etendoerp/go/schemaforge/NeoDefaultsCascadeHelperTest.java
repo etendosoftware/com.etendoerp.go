@@ -3304,10 +3304,10 @@ public class NeoDefaultsCascadeHelperTest {
    */
   @Test
   public void testSameValueComparesNumbersByValue() {
-    assertTrue(NeoDefaultsCascadeHelper.sameValue(20, "20.00"));
-    assertTrue(NeoDefaultsCascadeHelper.sameValue(new java.math.BigDecimal("5.0"), 5));
-    assertTrue(NeoDefaultsCascadeHelper.sameValue("ABC", "ABC"));
-    assertFalse(NeoDefaultsCascadeHelper.sameValue(20, "18"));
-    assertFalse(NeoDefaultsCascadeHelper.sameValue("ABC", "abc"));
+    assertTrue(NeoHandlerUtils.sameTextOrNumber(20, "20.00"));
+    assertTrue(NeoHandlerUtils.sameTextOrNumber(new java.math.BigDecimal("5.0"), 5));
+    assertTrue(NeoHandlerUtils.sameTextOrNumber("ABC", "ABC"));
+    assertFalse(NeoHandlerUtils.sameTextOrNumber(20, "18"));
+    assertFalse(NeoHandlerUtils.sameTextOrNumber("ABC", "abc"));
   }
 }

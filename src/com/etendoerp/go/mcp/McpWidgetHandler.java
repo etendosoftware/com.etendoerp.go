@@ -106,7 +106,7 @@ final class McpWidgetHandler {
     String asked = rawParams == null ? null
         : org.apache.commons.lang3.StringUtils.trimToNull(rawParams.optString(KEY_RANGE, null));
     if (asked != null && !WidgetPeriod.RANGES.contains(asked)) {
-      throw McpRoutingException.invalidWidgetRange(widget, asked, WidgetPeriod.RANGES);
+      throw McpRequestRefusals.invalidWidgetRange(widget, asked, WidgetPeriod.RANGES);
     }
 
     // Forward the optional params object as the query-param map (e.g. range), mirroring

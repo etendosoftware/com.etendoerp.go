@@ -293,13 +293,14 @@ class BusinessPartnerHandlerTest {
     answer.getJSONObject("response").getJSONArray("data").getJSONObject(0)
         .put("searchKey", "1000005");
 
-    assertTrue(BusinessPartnerHandler.noteReplacedSearchKey(ctx, answer));
+    assertTrue(ContactSearchKey.noteReplaced(ctx, firstRecordOf(answer), answer));
     assertTrue(answer.getJSONObject("response")
-        .getString(BusinessPartnerHandler.KEY_SEARCH_KEY_NOTE).contains("'MINE'"));
+        .getString(ContactSearchKey.KEY_SEARCH_KEY_NOTE).contains("'MINE'"));
 
     when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
         .thenReturn(java.util.Set.of("name"));
-    assertFalse(BusinessPartnerHandler.noteReplacedSearchKey(ctx, buildResponseBody()));
+    JSONObject untouched = buildResponseBody();
+    assertFalse(ContactSearchKey.noteReplaced(ctx, firstRecordOf(untouched), untouched));
 
     when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
         .thenReturn(java.util.Set.of("name", "searchKey"));
@@ -307,7 +308,11 @@ class BusinessPartnerHandlerTest {
     JSONObject same = buildResponseBody();
     same.getJSONObject("response").getJSONArray("data").getJSONObject(0)
         .put("searchKey", "1000005");
-    assertFalse(BusinessPartnerHandler.noteReplacedSearchKey(ctx, same));
+    assertFalse(ContactSearchKey.noteReplaced(ctx, firstRecordOf(same), same));
+  }
+
+  private static JSONObject firstRecordOf(JSONObject body) throws Exception {
+    return body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
   }
 
   // ── handle() — PATCH: name derivation from persisted parts ───────────────────

@@ -587,59 +587,71 @@ final class McpQuerySupport {
     java.util.Iterator<String> ops = operators.keys();
     while (ops.hasNext()) {
       String op = ops.next();
+      appendAnd(where);
       if (McpBusinessFilters.OP_BETWEEN.equals(op)) {
-        JSONArray bounds = operators.optJSONArray(op);
-        if (bounds == null || bounds.length() != 2) {
-          // ETP-5184: same silent-drop shape as an unknown key. A malformed between used to be
-          // logged and skipped, so `{"amount":{"between":[100]}}` answered 200 with every row —
-          // the opposite of the narrowing the caller asked for.
-          throw McpRoutingException.malformedFilterOperator(key, op,
-              "the 'between' operator takes a two-element [from, to] array");
-        }
-        appendAnd(where);
-        where.append(path).append(" between ")
-            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(0)))
-            .append(" and ")
-            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(1)));
+        where.append(betweenCondition(path, prop, type, key, operators.optJSONArray(op)));
       } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
-        // ETP-5852: partial text search. Only on a text column — on a number, date, boolean or
-        // foreign key a substring match is meaningless, so refuse it instead of guessing.
-        if (!prop.isPrimitive() || !String.class.equals(type)) {
-          throw McpRoutingException.malformedFilterOperator(key, op,
-              "'contains' works only on text fields; use exact match, 'in' or a range here");
-        }
-        Object text = operators.get(op);
-        if (!(text instanceof String) || ((String) text).isEmpty()) {
-          throw McpRoutingException.malformedFilterOperator(key, op,
-              "the 'contains' operator takes a non-empty text value");
-        }
-        appendAnd(where);
-        where.append(McpBusinessFilters.containsCondition(path, text));
+        where.append(containsCondition(path, prop, type, key, operators.get(op)));
       } else if (McpBusinessFilters.OP_IN.equals(op)) {
-        // ETP-5852: one request for several exact values (ids, search keys, codes).
-        JSONArray values = operators.optJSONArray(op);
-        if (values == null || values.length() == 0) {
-          throw McpRoutingException.malformedFilterOperator(key, op,
-              "the 'in' operator takes a non-empty array of values");
-        }
-        java.util.List<Object> list = new java.util.ArrayList<>();
-        for (int i = 0; i < values.length(); i++) {
-          list.add(values.get(i));
-        }
         String inPath = prop.isPrimitive() ? path : filterPath(prop, target, ".id");
-        appendAnd(where);
-        where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(), list));
+        where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(),
+            inValues(key, operators.optJSONArray(op))));
       } else {
         String sql = McpBusinessFilters.operatorToSql(op);
         if (sql == null) {
           throw McpRoutingException.unknownFilterOperator(key, op,
               McpBusinessFilters.operatorKeys());
         }
-        appendAnd(where);
         where.append(path).append(' ').append(sql).append(' ')
             .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), operators.get(op)));
       }
     }
+  }
+
+  private static String betweenCondition(String path, Property prop, Class<?> type, String key,
+      JSONArray bounds) throws JSONException {
+    if (bounds == null || bounds.length() != 2) {
+      // ETP-5184: same silent-drop shape as an unknown key. A malformed between used to be
+      // logged and skipped, so `{"amount":{"between":[100]}}` answered 200 with every row —
+      // the opposite of the narrowing the caller asked for.
+      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_BETWEEN,
+          "the 'between' operator takes a two-element [from, to] array");
+    }
+    return path + " between "
+        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(0))
+        + " and "
+        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(1));
+  }
+
+  /**
+   * ETP-5852: partial text search. Only on a text column — on a number, date, boolean or foreign
+   * key a substring match is meaningless, so it is refused instead of guessed.
+   */
+  private static String containsCondition(String path, Property prop, Class<?> type, String key,
+      Object text) {
+    if (!prop.isPrimitive() || !String.class.equals(type)) {
+      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
+          "'contains' works only on text fields; use exact match, 'in' or a range here");
+    }
+    if (!(text instanceof String) || ((String) text).isEmpty()) {
+      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
+          "the 'contains' operator takes a non-empty text value");
+    }
+    return McpBusinessFilters.containsCondition(path, text);
+  }
+
+  /** ETP-5852: the values of an {@code in}, one request for several exact values. */
+  private static java.util.List<Object> inValues(String key, JSONArray values)
+      throws JSONException {
+    if (values == null || values.length() == 0) {
+      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_IN,
+          "the 'in' operator takes a non-empty array of values");
+    }
+    java.util.List<Object> list = new java.util.ArrayList<>();
+    for (int i = 0; i < values.length(); i++) {
+      list.add(values.get(i));
+    }
+    return list;
   }
 
   /**

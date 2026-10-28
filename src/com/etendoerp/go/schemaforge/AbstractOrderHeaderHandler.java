@@ -41,7 +41,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
@@ -61,7 +60,8 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * regardless of page size, so the row kebab menu can reproduce the detail form's "Gestionar"
  * decision without a single extra HTTP request.
  *
- * <p>The same post-hook also adjusts {@code grandTotalAmount} via {@link #applyTotalDiscountToRecord}
+ * <p>The same post-hook also adjusts {@code grandTotalAmount} via
+ * {@link OrderDraftTotalDiscount#applyToRecord}
  * for draft documents carrying a pending total discount — see that method's Javadoc for details.
  * Subclasses must implement {@link #getTotalDiscountService()} to expose their injected
  * {@link TotalDiscountService} for this purpose.
@@ -84,8 +84,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
   private static final String FIELD_VALUE = "value";
   private static final String DOC_TYPE_ORDER = "order";
   private static final String DOC_TYPE_INVOICE = "invoice";
-  private static final String FIELD_PROCESSED = "processed";
-  private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
   private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   private static final String FIELD_ID = "id";
   private static final String FIELD_ORDER_DATE = "orderDate";
@@ -146,30 +144,15 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
   }
 
   /**
-   * ETP-5703 / ETP-5852: a create that names a business partner but no address gets the partner's
-   * only ship-to location — the AD rule of {@code C_Order.C_BPartner_Location_ID} is "C_BPartner
-   * Location - Ship To" — and, only then, a bill-to for {@code BillTo_ID} that is never left empty
-   * (see {@link PartnerLocationDefaults#alignBillTo}). This is what the form does: picking the
-   * partner selects the address when its selector offers exactly one. With several it abstains and
-   * the mandatory-field check names the field.
-   *
-   * @param context the request context; only a CRUD {@code POST} create body is touched
-   */
-  static void fillPartnerLocations(NeoContext context) {
-    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
-        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
-        Location.PROPERTY_INVOICETOADDRESS);
-  }
-
-  /**
-   * Runs {@link #fillPartnerLocations} before MCP {@code etendo_create}'s mandatory-field check
+   * Runs {@link PartnerLocationDefaults#fillOrderLocations} before MCP {@code etendo_create}'s
+   * mandatory-field check
    * (ETP-5852). Until then only the pre-hook filled it, which runs after that check, so an agent got
    * a 422 for an address the form would have selected by itself (the divergence §4.12.9 declared).
    * Idempotent with the call in each subclass's {@code handle()}.
    */
   @Override
   public void resolveServerCreateFields(NeoContext context) {
-    fillPartnerLocations(context);
+    PartnerLocationDefaults.fillOrderLocations(context);
   }
 
   /**
@@ -493,8 +476,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
     syncLineCurrenciesOnCurrencyPatch(context);
     if (!"GET".equals(context.getHttpMethod())) {
-      return context.isMcpOrigin() && "PUT".equals(context.getHttpMethod())
-          ? applyTotalDiscountToUpdate(context) : null;
+      OrderDraftTotalDiscount.applyToMcpUpdate(context, this::getTotalDiscountService);
+      return null;
     }
     NeoResponse previousResult = context.getPreviousResult();
     if (previousResult == null || previousResult.getBody() == null) {
@@ -510,7 +493,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       boolean changed = false;
       if (dataArr != null && dataArr.length() > 0) {
         for (int i = 0; i < dataArr.length(); i++) {
-          applyTotalDiscountToRecord(dataArr.getJSONObject(i));
+          OrderDraftTotalDiscount.applyToRecord(dataArr.getJSONObject(i),
+              this::getTotalDiscountService);
         }
         if (context.getRecordId() != null) {
           dataArr.getJSONObject(0).put("hasLinkedDocuments", checkLinkedDocuments(context.getRecordId()));
@@ -529,71 +513,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       log.error("Error post-processing order header GET response (id={})", context.getRecordId(), e);
       return null;
     }
-  }
-
-  /**
-   * ETP-5727 (in ETP-5852): the record an MCP update answers with shows the same
-   * {@code grandTotalAmount} a read shows right after it — with the draft's pending total discount
-   * applied (see {@link #applyTotalDiscountToRecord}). Before, the update answered the undiscounted
-   * total and only the next read showed the discounted one. MCP only: the SPA reads the record
-   * again after saving.
-   *
-   * @return always {@code null}: the response body is patched in place
-   */
-  private NeoResponse applyTotalDiscountToUpdate(NeoContext context) {
-    NeoResponse previous = context.getPreviousResult();
-    JSONObject wrapper = previous == null || previous.getBody() == null ? null
-        : previous.getBody().optJSONObject("response");
-    JSONArray data = wrapper == null ? null : wrapper.optJSONArray("data");
-    if (data == null || data.length() == 0) {
-      return null;
-    }
-    try {
-      // Patched in place and declined (null): the MCP caller goes on shaping this same body
-      // (flatten, {data:{…}}, url), which a replacement response would skip.
-      for (int i = 0; i < data.length(); i++) {
-        applyTotalDiscountToRecord(data.getJSONObject(i));
-      }
-    } catch (Exception e) {
-      log.error("Error applying the total discount to an update response (id={})",
-          context.getRecordId(), e);
-    }
-    return null;
-  }
-
-  /**
-   * Adjusts {@code grandTotalAmount} for a draft order/quotation carrying a positive
-   * {@code etgoTotalDiscount} percentage that has not yet been materialized as a real line —
-   * the same GET-time compensation {@code SalesInvoiceHeaderHandler} already applies for
-   * invoices (list view and preview cards otherwise showed the raw undiscounted total while
-   * the document was still in draft, since the discount is only materialized into a real line
-   * at Complete time via {@link TotalDiscountService}).
-   *
-   * <p>No-op when the document is processed (the DB total already reflects the discount),
-   * when no discount percentage is set, or when the discount is already a real line
-   * ({@code hasDiscountLine} — avoids double-counting when e.g. an order was created carrying
-   * an already-materialized discount). Mirrors {@code AbstractInvoiceHeaderHandler}'s exact
-   * guard order: {@link #getTotalDiscountService()} is only dereferenced when {@code id} is
-   * present.
-   *
-   * <p>Unlike the invoice version, there is no {@code outstandingAmount} to adjust here —
-   * orders/quotations do not expose that field.
-   */
-  private void applyTotalDiscountToRecord(JSONObject order) throws Exception {
-    if (order.optBoolean(FIELD_PROCESSED, false)) {
-      return;
-    }
-    double discountPct = order.optDouble(FIELD_TOTAL_DISCOUNT_PCT, 0.0);
-    if (discountPct <= 0.0) {
-      return;
-    }
-    String orderId = order.optString(FIELD_ID, null);
-    if (orderId != null && getTotalDiscountService().hasDiscountLine(orderId, false)) {
-      return;
-    }
-    double factor = 1.0 - discountPct / 100.0;
-    double grand = order.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
-    order.put(FIELD_GRAND_TOTAL_AMOUNT, NeoHandlerUtils.roundHalfUp(grand * factor));
   }
 
   /**
@@ -940,7 +859,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     BigDecimal invoiced = totals != null ? totals.completedTotal() : BigDecimal.ZERO;
     boolean hasDraftInvoice = totals != null && totals.hasDraft();
     // The order total is read from the JSON record, not re-queried, so it is the SAME number
-    // the form sees: applyTotalDiscountToRecord() has already run over this array and may have
+    // the form sees: OrderDraftTotalDiscount.applyToRecord() has already run over this array and may have
     // adjusted grandTotalAmount for a draft carrying a not-yet-materialized total discount.
     BigDecimal totalOrder = BigDecimal.valueOf(rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0));
     rec.put(FIELD_NEEDS_INVOICE_DOC, totalOrder.compareTo(invoiced) != 0 && !hasDraftInvoice);

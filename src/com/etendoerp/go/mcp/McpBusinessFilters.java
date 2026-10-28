@@ -170,14 +170,14 @@ final class McpBusinessFilters {
 
   private static String number(String key, String raw, Object value) {
     if (!raw.matches(NUMBER_PATTERN)) {
-      throw McpRoutingException.invalidFilterValue(key, TYPE_NUMBER, value);
+      throw McpRequestRefusals.invalidFilterValue(key, TYPE_NUMBER, value);
     }
     return raw;
   }
 
   private static String bool(String key, String raw, Object value) {
     if (!"true".equalsIgnoreCase(raw) && !"false".equalsIgnoreCase(raw)) {
-      throw McpRoutingException.invalidFilterValue(key, TYPE_BOOLEAN, value);
+      throw McpRequestRefusals.invalidFilterValue(key, TYPE_BOOLEAN, value);
     }
     return raw.toLowerCase(java.util.Locale.ROOT);
   }
@@ -196,7 +196,7 @@ final class McpBusinessFilters {
       return java.time.LocalDate.from(
           java.time.format.DateTimeFormatter.ISO_DATE_TIME.parse(raw)).toString();
     } catch (java.time.DateTimeException e) {
-      throw McpRoutingException.invalidFilterValue(key, TYPE_DATE, value);
+      throw McpRequestRefusals.invalidFilterValue(key, TYPE_DATE, value);
     }
   }
 

@@ -17,7 +17,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -28,7 +27,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Savepoint;
 import java.util.regex.Pattern;
 
 import javax.inject.Named;
@@ -126,11 +124,6 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
   private static final String RESPONSE_KEY = "response";
-  private static final String FIELD_SEARCH_KEY = "searchKey";
-  private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
-  /** {@code C_BPartner.Value} is {@code VARCHAR(40)}. */
-  private static final int SEARCH_KEY_MAX_LENGTH = 40;
-  static final String KEY_SEARCH_KEY_NOTE = "searchKeyNote";
 
   private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of("priceList", "paymentMethod", "paymentTerms",
       "account", "customerBlocking", "purchasePricelist", "pOPaymentMethod", "pOPaymentTerms", "pOFinancialAccount",
@@ -279,7 +272,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    */
   @Override
   public Set<String> serverResolvedCreateFields() {
-    return Set.of(FIELD_SEARCH_KEY);
+    return Set.of(ContactSearchKey.FIELD_SEARCH_KEY);
   }
 
   /**
@@ -291,54 +284,15 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   @Override
   public void resolveServerCreateFields(NeoContext context) {
     JSONObject body = context == null ? null : context.getRequestBody();
-    if (body == null || body.has(FIELD_SEARCH_KEY)) {
+    if (body == null || body.has(ContactSearchKey.FIELD_SEARCH_KEY)) {
       return;
     }
     try {
       deriveName(context, body);
-      putSearchKeyPlaceholder(body);
+      ContactSearchKey.putPlaceholder(body);
     } catch (Exception e) {
       log.warn("BusinessPartnerHandler: could not resolve the create searchKey", e);
     }
-  }
-
-  private static void putSearchKeyPlaceholder(JSONObject body) throws Exception {
-    String name = body.optString(FIELD_NAME, null);
-    if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
-      // C_BPartner.Value is VARCHAR(40) while Name has 60, so a long commercial name
-      // cannot be used verbatim as the placeholder ("Value too long. Length 48,
-      // maximum allowed 40"). afterHandle() replaces it with em_etgo_identifier
-      // anyway, so truncating here is lossless. ETP-4156: the app-shell used to
-      // pre-truncate this client-side, which masked the missing guard.
-      body.put(FIELD_SEARCH_KEY, StringUtils.substring(name, 0, SEARCH_KEY_MAX_LENGTH));
-    }
-  }
-
-  /**
-   * ETP-5852 (M-107): on MCP, when the caller sent its own searchKey and the contact got its number
-   * instead, says so in the answer ({@code searchKeyNote}), so the replacement is not silent. The
-   * app never sends one: its form does not show the field.
-   *
-   * @return whether {@code body} was patched
-   */
-  static boolean noteReplacedSearchKey(NeoContext ctx, JSONObject body) throws Exception {
-    if (ctx == null || !ctx.isMcpOrigin() || ctx.getRequestBody() == null
-        || !(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS) instanceof Collection)
-        || !((Collection<?>) ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
-            .contains(FIELD_SEARCH_KEY)) {
-      return false;
-    }
-    String sent = ctx.getRequestBody().optString(FIELD_SEARCH_KEY, null);
-    JSONObject created = firstRecord(body);
-    String kept = created == null ? null : created.optString(FIELD_SEARCH_KEY, null);
-    JSONObject response = body.optJSONObject(RESPONSE_KEY);
-    if (StringUtils.isBlank(sent) || kept == null || sent.equals(kept) || response == null) {
-      return false;
-    }
-    response.put(KEY_SEARCH_KEY_NOTE, "The searchKey you sent ('" + sent + "') was not kept: a "
-        + "contact's searchKey is its number, assigned automatically as in the app (" + kept
-        + "). Do not send it when creating a contact.");
-    return true;
   }
 
   /**
@@ -390,72 +344,6 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     return null;
   }
 
-  private static String queryIdentifier(String recordId) throws Exception {
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT em_etgo_identifier FROM c_bpartner WHERE c_bpartner_id = ?")) {
-      ps.setString(1, recordId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return rs.getString(1);
-        }
-      }
-    }
-    return null;
-  }
-
-  private static void updateSearchKey(String recordId, String identifier) throws Exception {
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement("UPDATE c_bpartner SET value = ? WHERE c_bpartner_id = ?")) {
-      ps.setString(1, identifier);
-      ps.setString(2, recordId);
-      ps.executeUpdate();
-    }
-  }
-
-  /**
-   * Runs {@link #updateSearchKey(String, String)} under a savepoint so a duplicate-key
-   * hit (two concurrent rows racing on the same not-yet-committed sequence value) only
-   * rolls back the failed UPDATE instead of poisoning the whole shared {@code /batch}
-   * transaction for every other operation that follows on the same connection.
-   *
-   * @return {@code true} when the identifier was applied, {@code false} when it was
-   *         skipped due to a duplicate-key race (the placeholder {@code searchKey} is
-   *         kept in that case).
-   */
-  private static boolean applySearchKeyUpdate(String recordId, String identifier) throws Exception {
-    Connection conn = OBDal.getInstance().getConnection();
-    Savepoint savepoint = conn.setSavepoint();
-    try {
-      updateSearchKey(recordId, identifier);
-      return true;
-    } catch (SQLException e) {
-      if (!SQLSTATE_UNIQUE_VIOLATION.equals(e.getSQLState())) {
-        throw e;
-      }
-      log.warn("BusinessPartnerHandler: searchKey race on bp={} (duplicate identifier {}), "
-          + "keeping placeholder searchKey", recordId, identifier, e);
-      conn.rollback(savepoint);
-      return false;
-    }
-  }
-
-  private static void patchSearchKeyInResponse(JSONObject body, String identifier) {
-    try {
-      JSONObject response = body.optJSONObject(RESPONSE_KEY);
-      if (response == null) {
-        return;
-      }
-      JSONArray data = response.optJSONArray("data");
-      if (data == null || data.length() == 0) {
-        return;
-      }
-      data.getJSONObject(0).put(FIELD_SEARCH_KEY, identifier);
-    } catch (Exception e) {
-      log.warn("BusinessPartnerHandler: could not patch searchKey in response", e);
-    }
-  }
-
   @Override
   public NeoResponse handle(NeoContext ctx) {
     if (ctx != null && ctx.getEndpointType() == NeoEndpointType.SELECTOR) {
@@ -495,7 +383,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
       if ("POST".equals(method)) {
         stripPreCreateBillingDefaults(body);
-        putSearchKeyPlaceholder(body);
+        ContactSearchKey.putPlaceholder(body);
         injectOrgCurrency(ctx, body);
       }
     } catch (Exception e) {
@@ -776,30 +664,6 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     }
   }
 
-  /**
-   * POST only: replaces the placeholder {@code searchKey} the create had to invent with the
-   * identifier the database computed, both in C_BPartner and in the response being returned.
-   *
-   * <p>Extracted from {@link #afterHandle} (ETP-4997) when the list GET's child-data branch took
-   * that method past its cognitive-complexity budget. Behaviour is unchanged, including the
-   * short-circuit: {@code applySearchKeyUpdate} is still never called for a blank identifier.
-   *
-   * @return whether {@code body} was patched, which is what tells the caller to return a new
-   *     response instead of {@code null}.
-   */
-  private boolean applyPostCreateSearchKey(JSONObject body) throws Exception {
-    String recordId = extractRecordId(body);
-    if (recordId == null) {
-      return false;
-    }
-    String identifier = queryIdentifier(recordId);
-    if (StringUtils.isBlank(identifier) || !applySearchKeyUpdate(recordId, identifier)) {
-      return false;
-    }
-    patchSearchKeyInResponse(body, identifier);
-    return true;
-  }
-
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
     String method = ctx.getHttpMethod();
@@ -823,14 +687,14 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       boolean modified = false;
 
       if ("POST".equals(method)) {
-        modified = applyPostCreateSearchKey(body);
+        modified = ContactSearchKey.applyNumber(extractRecordId(body), body);
         // ETP-5791: the type flags may have been inherited from the category in handle(). The
         // INSERT trigger already provisions both posting-account rows, so this is a safety net
         // that only writes a row that is still missing for a type the contact now has.
         String createdId = extractRecordId(body);
         provisionBpAcctRowsAfterCreate(createdId);
         ContactTypeTelemetry.afterWrite(ctx, createdId);
-        modified |= noteReplacedSearchKey(ctx, body);
+        modified |= ContactSearchKey.noteReplaced(ctx, firstRecord(body), body);
       } else {
         // PUT/PATCH: flipping vendor/customer to Y on an already-persisted BP never runs through
         // c_bpartner_trg (it only fires on TG_OP='INSERT'), so backfill whichever posting-account

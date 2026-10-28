@@ -27,6 +27,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.Location;
+import org.openbravo.model.common.order.Order;
 
 /**
  * Defaults a business-partner location field of a document header on create, when the partner has
@@ -110,6 +111,21 @@ final class PartnerLocationDefaults {
     } catch (Exception e) {
       log.debug("[ETP-5703] {} alignment skipped: {}", billToKey, e.getMessage());
     }
+  }
+
+  /**
+   * ETP-5703 / ETP-5852: the order headers' case of {@link #fillShipToAndBillTo}. A create that
+   * names a business partner but no address gets the partner's only ship-to location — the AD rule
+   * of {@code C_Order.C_BPartner_Location_ID} is "C_BPartner Location - Ship To" — and, only then,
+   * a bill-to for {@code BillTo_ID} that is never left empty (see {@link #alignBillTo}). This is
+   * what the form does: picking the partner selects the address when its selector offers exactly
+   * one. With several it abstains and the mandatory-field check names the field.
+   *
+   * @param context the request context; only a CRUD {@code POST} create body is touched
+   */
+  static void fillOrderLocations(NeoContext context) {
+    fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS, Location.PROPERTY_SHIPTOADDRESS,
+        Order.PROPERTY_INVOICEADDRESS, Location.PROPERTY_INVOICETOADDRESS);
   }
 
   /**

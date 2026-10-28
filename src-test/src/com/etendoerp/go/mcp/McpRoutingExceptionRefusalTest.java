@@ -211,9 +211,8 @@ class McpRoutingExceptionRefusalTest {
     @Test
     @DisplayName("a malformed operator value says what shape was expected")
     void malformedOperator() throws JSONException {
-      JSONObject envelope = McpRoutingException
-          .malformedFilterOperator("amount", "between", "the 'between' operator takes a "
-              + "two-element [from, to] array")
+      JSONObject envelope = McpRequestRefusals.malformedFilterOperator("amount", "between",
+          "the 'between' operator takes a two-element [from, to] array")
           .toEnvelope();
       assertEquals(422, envelope.getInt(McpConstants.KEY_STATUS));
       assertEquals(McpConstants.ERROR_VALIDATION, envelope.getString(McpConstants.KEY_ERROR));

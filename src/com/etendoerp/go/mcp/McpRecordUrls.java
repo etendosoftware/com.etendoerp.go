@@ -168,6 +168,26 @@ public final class McpRecordUrls {
   }
 
   /**
+   * ETP-5852: {@code etendo_get} answers one record as an object, {@code {"data":{…}}}, not the
+   * one-element array the core read produces. Agents asked whether more than one record could come
+   * back for one id. Only a one-element array is unwrapped; any other shape is returned as is.
+   * Called after {@link #extractRecordId} and the url, which read the array form.
+   *
+   * @param flat the flattened single-record result; mutated in place
+   * @return {@code flat}
+   */
+  static JSONObject unwrapSingleRecord(JSONObject flat) throws JSONException {
+    if (flat == null) {
+      return null;
+    }
+    JSONArray data = flat.optJSONArray(KEY_DATA);
+    if (data != null && data.length() == 1 && data.optJSONObject(0) != null) {
+      flat.put(KEY_DATA, data.getJSONObject(0));
+    }
+    return flat;
+  }
+
+  /**
    * ETP-5945 (in ETP-5852): adds the record {@code url} to each committed create of an
    * {@code etendo_batch} envelope ({@code operations:[{id, ok, recordId}]}), as
    * {@code etendo_create} answers it — only for an op on its spec's primary entity, and only when

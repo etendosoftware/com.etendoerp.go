@@ -52,6 +52,8 @@ public class InventoryStockReportHandler implements NeoHandler {
   private static final String PARAM_WAREHOUSE_ID = "M_Warehouse_ID";
   private static final String PARAM_CATEGORY_ID = "M_Product_Category_ID";
   private static final String PARAM_INCLUDE_ZERO_STOCK = "includeZeroStock";
+  /** The product id: the SQL parameter prefix and the row key that carries it. */
+  private static final String KEY_PRODUCT_ID = "productId";
 
   /**
    * {@code AD_Window_ID} of the brand-new pseudo-{@code AD_Window} ("Informes de inventario" /
@@ -248,7 +250,7 @@ public class InventoryStockReportHandler implements NeoHandler {
       List<String> warehouseIds, List<String> categoryIds) {
     if (!productIds.isEmpty()) {
       sql.append("  AND p.m_product_id IN (")
-          .append(buildNamedParams("productId", productIds.size()))
+          .append(buildNamedParams(KEY_PRODUCT_ID, productIds.size()))
           .append(") ");
     }
 
@@ -273,7 +275,7 @@ public class InventoryStockReportHandler implements NeoHandler {
   private static void bindOptionalParameters(NativeQuery<Object[]> query, List<String> productIds,
       List<String> warehouseIds, List<String> categoryIds) {
     for (int i = 0; i < productIds.size(); i++) {
-      query.setParameter("productId" + i, productIds.get(i));
+      query.setParameter(KEY_PRODUCT_ID + i, productIds.get(i));
     }
 
     for (int i = 0; i < warehouseIds.size(); i++) {
@@ -389,7 +391,7 @@ public class InventoryStockReportHandler implements NeoHandler {
       item.put("qtyOnHand", toBigDecimal(row[5]));
       item.put("unitCost", row[6] == null ? JSONObject.NULL : toBigDecimal(row[6]));
       item.put("totalValuation", row[7] == null ? JSONObject.NULL : toBigDecimal(row[7]));
-      item.put("productId", row[8]);
+      item.put(KEY_PRODUCT_ID, row[8]);
       data.put(item);
     }
     return data;

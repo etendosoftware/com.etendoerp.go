@@ -882,28 +882,10 @@ public class NeoDefaultsCascadeHelper {
     if (proposed == null || JSONObject.NULL.equals(proposed)) {
       return;
     }
-    if (kept != null && sameValue(kept, proposed)) {
+    if (kept != null && NeoHandlerUtils.sameTextOrNumber(kept, proposed)) {
       return;
     }
     result.recordSuperseded(fieldName, kept, proposed);
-  }
-
-  /**
-   * Equal as text, or — ETP-5852 — equal as numbers: the caller sends {@code 20} and the callout
-   * answers {@code "20.00"}, which is the same price and was reported as a divergence
-   * ({@code {"sent":20,"callout":20}}), sending agents to compare two identical values.
-   */
-  static boolean sameValue(Object kept, Object proposed) {
-    String a = String.valueOf(kept);
-    String b = String.valueOf(proposed);
-    if (a.equals(b)) {
-      return true;
-    }
-    try {
-      return new java.math.BigDecimal(a.trim()).compareTo(new java.math.BigDecimal(b.trim())) == 0;
-    } catch (NumberFormatException e) {
-      return false;
-    }
   }
 
   private static boolean shouldKeepExistingValue(JSONObject defaults, String fieldName,
