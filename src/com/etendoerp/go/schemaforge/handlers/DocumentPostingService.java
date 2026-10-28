@@ -772,6 +772,9 @@ public class DocumentPostingService {
    *
    * <p>When the Business Partner cannot be resolved the keys are just {@code ["InvalidAccount"]}
    * with no params, and the message is the bare base text, as before.</p>
+   *
+   * <p>{@code STATUS_DocumentDisabled} (outside Goods Movements) names the reason
+   * {@link DocumentDisabledReason} can confirm, or the generic {@code DocumentDisabled} (ETP-5591).</p>
    */
   private static PostResult failureOf(AcctServer acct) {
     String message = errorMessageOf(acct);
@@ -790,6 +793,14 @@ public class DocumentPostingService {
     }
     if (AcctServer.STATUS_PeriodClosed.equals(acct.getStatus())) {
       return new PostResult(false, message, List.of(MSG_PERIOD_NOT_AVAILABLE));
+    }
+    if (AcctServer.STATUS_DocumentDisabled.equals(acct.getStatus())
+        && !TABLE_M_MOVEMENT.equals(acct.tableName)) {
+      // ETP-5591: core's text comes in the classic session language; name the reason in the GO one.
+      DocumentDisabledReason.Reason reason = DocumentDisabledReason.of(acct);
+      String text = localizedMessage(reason.messageKey());
+      return new PostResult(false, StringUtils.isNotBlank(text) ? reason.render(text) : message,
+          List.of(reason.messageKey()), reason.messageParams());
     }
     if (!AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
       return new PostResult(false, message);

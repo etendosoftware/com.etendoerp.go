@@ -1096,12 +1096,12 @@ public class DocumentPostingServiceTest {
   }
 
   /**
-   * ETP-5436 scoping guard: {@code STATUS_DocumentDisabled} on a NON-M_Movement table must
-   * NOT be rewritten — core's own message passes through untouched, proving the
-   * {@code TABLE_M_MOVEMENT} check actually scopes the rewrite.
+   * ETP-5591: {@code STATUS_DocumentDisabled} on a NON-M_Movement table is no longer core's
+   * classic-language text: it is re-resolved in the GO locale and named in {@code messageKeys}
+   * ({@code DocumentDisabled} when no certain reason is found — here the invoice is not found).
    */
   @Test
-  public void postDoesNotRewriteDocumentDisabledMessageForNonMovementTable() throws Exception {
+  public void postLocalizesDocumentDisabledMessageForNonMovementTable() throws Exception {
     DocumentPostingService svc = new DocumentPostingService();
 
     ConnectionProvider conn = mock(ConnectionProvider.class);
@@ -1117,16 +1117,60 @@ public class DocumentPostingServiceTest {
     err.setMessage("Document disabled");
     when(acct.getMessageResult()).thenReturn(err);
 
+    OBDal dal = mock(OBDal.class);
     try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
-        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
-      stubObContext(obc, "en_US");
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
       acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
           .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("DocumentDisabled"))
+          .thenReturn("Documento deshabilitado para contabilidad");
 
       DocumentPostingService.PostResult r = svc.post("259", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertEquals("Document disabled", r.message());
+      assertEquals("Documento deshabilitado para contabilidad", r.message());
+      assertEquals(List.of("DocumentDisabled"), r.messageKeys());
+    }
+  }
+
+  /**
+   * ETP-5591: a confirmed reason carries its key and params, and its text is interpolated.
+   */
+  @Test
+  public void postNamesTheMissingDepositAccountOfADisabledTransaction() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    when(conn.getTransactionConnection()).thenReturn(mock(Connection.class));
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.tableName = "FIN_Finacc_Transaction";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_DocumentDisabled);
+    OBError err = new OBError();
+    err.setMessage("Document disabled for accounting");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<DocumentDisabledReason> reasonStatic = mockStatic(DocumentDisabledReason.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      reasonStatic.when(() -> DocumentDisabledReason.of(acct)).thenReturn(new DocumentDisabledReason.Reason(
+          "ETGO_PostingDisabledNoDepositAccount", Map.of("financialAccount", "Caja")));
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_PostingDisabledNoDepositAccount"))
+          .thenReturn("The financial account @financialAccount@ has no deposit account.");
+
+      DocumentPostingService.PostResult r = svc.post("4D8C3B3C31D1410DA046140C9F024D17", "rec-1", conn);
+
+      assertEquals("The financial account Caja has no deposit account.", r.message());
+      assertEquals(List.of("ETGO_PostingDisabledNoDepositAccount"), r.messageKeys());
+      assertEquals(Map.of("financialAccount", "Caja"), r.messageParams());
     }
   }
 
