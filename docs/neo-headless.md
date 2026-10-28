@@ -1295,6 +1295,14 @@ legacy id case of `McpFkResolverTest`, and the two-tenant `NeoReferenceOwnership
 
 #### A write never SETS a reference to an inactive row (ETP-5802)
 
+> Left without a `§4.3.x` number on purpose: `§4.3.6` and `§4.3.7` are each already reused for two
+> unrelated topics in this file (see the cross-references at `§4.3.7`'s own occurrences above and at
+> `§4.12.9`), so the next free slot in sequence is `§4.3.10` — but that would sit here, between
+> `§4.3.7` and `§4.3.9`, out of numeric order, which is worse than unnumbered. Fixing the numbering
+> for real means renumbering the existing duplicates and updating every citing cross-reference
+> (`§4.3.7` is cited from three other places in this file); that is a dedicated cleanup, not a
+> one-line addition to this PR.
+
 External QA (retest "Pasada 2") reproduced `etendo_create` on `product` with `taxCategory` pointing
 at a `FinancialMgmtTaxCategory` row that had just been deactivated (System-level "OLD IVA Normal",
 `828E8E40DD3C4FA6A4F531569D26A6AF`): the write answered status 0, and the response echoed the
