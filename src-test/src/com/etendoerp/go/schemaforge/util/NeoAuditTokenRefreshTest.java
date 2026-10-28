@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.util;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -202,7 +203,7 @@ class NeoAuditTokenRefreshTest {
       // toAuditToken pairs it with convertToCorrectXSDFormat as core documents, so the refreshed
       // token carries the XSD colon offset (`+02:00`). Hence `XXX`, not `Z`.
       OffsetDateTime parsed = OffsetDateTime.parse(
-          refreshed, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + "XXX"));
+          refreshed, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + ".SSSXXX"));
       Timestamp storedTs = Timestamp.valueOf(STORED_LITERAL);
       ZoneOffset expected = ZoneId.systemDefault().getRules().getOffset(storedTs.toInstant());
 
@@ -303,17 +304,36 @@ class NeoAuditTokenRefreshTest {
     }
 
     @Test
-    @DisplayName("a read is skipped, and so is DELETE — no row left to read a token from")
+    @DisplayName("a list read is skipped, and so is DELETE — no row left to read a token from")
     void nonWriteMethodsAreSkipped() throws JSONException {
       givenStoredRow();
-      for (String method : new String[] { "GET", "DELETE" }) {
+      NeoContext listRead = NeoContext.builder()
+          .specName("users")
+          .entityName("header")
+          .httpMethod("GET")
+          .endpointType(NeoEndpointType.CRUD)
+          .adTab(crudWrite("GET").getAdTab())
+          .build();
+      for (NeoContext context : new NeoContext[] { listRead, crudWrite("DELETE") }) {
         JSONObject body = envelope(recordWithToken(STALE_TOKEN));
 
-        NeoAuditTokenRefresh.refreshInBody(crudWrite(method), body);
+        NeoAuditTokenRefresh.refreshInBody(context, body);
 
         assertEquals(STALE_TOKEN, firstRecordOf(body).getString("updated"),
-            method + " must not be refreshed");
+            context.getHttpMethod() + " must not be refreshed");
       }
+    }
+
+    @Test
+    @DisplayName("a single-record read is re-stamped with the stored token, milliseconds included")
+    void singleRecordReadIsRefreshed() throws JSONException {
+      givenStoredRow();
+      JSONObject body = envelope(recordWithToken(STALE_TOKEN));
+
+      NeoAuditTokenRefresh.refreshInBody(crudWrite("GET"), body);
+
+      assertNotEquals(STALE_TOKEN, firstRecordOf(body).getString("updated"));
+      assertTrue(firstRecordOf(body).getString("updated").matches(".*:\\d{2}\\.\\d{3}[+-].*"));
     }
 
     @Test

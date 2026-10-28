@@ -239,6 +239,30 @@ class NeoQuotaWriteGateTest {
   class OwnTransaction {
 
     /**
+     * REPRO (merge of ETP-5782 into ETP-5051): since ETP-5782 the write path commits a single write
+     * itself unless a caller owns the transaction. A create the gate owns must therefore run with
+     * the thread marked caller-owned, or the insert is committed before the quota check can refuse
+     * it. The mark is released afterwards, also when the create throws.
+     */
+    @Test
+    void aCreateTheGateOwnsRunsWithTheThreadMarkedCallerOwned() throws Exception {
+      assertFalse(BatchService.callerOwnsTransaction());
+
+      String seen = NeoQuotaWriteGate.runDeferringCommit(
+          service -> String.valueOf(BatchService.callerOwnsTransaction()), null);
+
+      assertEquals("true", seen, "the write path must defer its commit to the gate");
+      assertFalse(BatchService.callerOwnsTransaction(), "the mark is released after the create");
+
+      IllegalStateException thrown = org.junit.jupiter.api.Assertions.assertThrows(
+          IllegalStateException.class, () -> NeoQuotaWriteGate.runDeferringCommit(service -> {
+            throw new IllegalStateException("add failed");
+          }, null));
+      assertEquals("add failed", thrown.getMessage());
+      assertFalse(BatchService.callerOwnsTransaction(), "the mark is released when it throws");
+    }
+
+    /**
      * ETP-5051 re-review N1: the entry read before the insert is the one checked after it — no
      * second read, so no rebuild in between can change the answer or fail open.
      */

@@ -35,7 +35,7 @@ final class OcrSupervision {
           + "the detected document number or date without the user's explicit OK.",
       "The user's choice about the number and the date is final: if they decline one, do not send it.",
       "Create the invoice with etendo_batch only after the user confirmed the whole summary; then "
-          + "attach the staged PDF as the main attachment.",
+          + "attach the staged document as the main attachment.",
       "While the vendor is only a suggestion, whatever is marked basedOnSuggestedVendor (the taxes) "
           + "and the vendor's address are provisional: after the user chooses the vendor, call the "
           + "extraction again with vendor_id and use the new answer.",

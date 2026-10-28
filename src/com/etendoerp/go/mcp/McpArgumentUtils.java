@@ -29,12 +29,15 @@ final class McpArgumentUtils {
   }
 
   /**
-   * Copies a non-blank top-level {@code parentId} argument of {@code etendo_create} into its
-   * {@code fields} (IMP-40). Extracted from {@code McpToolRouter#handleCreate} to keep its
-   * cognitive complexity, and the router's method count, within Sonar's limits; behaviour
-   * unchanged.
+   * IMP-40: copies a non-blank top-level {@code parentId} argument into {@code fields}, where it
+   * overrides any {@code parentId} the fields already carry.
+   *
+   * @param args   the tool arguments
+   * @param fields the record fields of the create
+   * @throws JSONException if the argument cannot be read or copied
    */
-  static void copyTopLevelParentId(JSONObject args, JSONObject fields) throws JSONException {
+  static void copyTopLevelParentId(JSONObject args, JSONObject fields)
+      throws JSONException {
     if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
       String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
       if (StringUtils.isNotBlank(topLevelParentId)) {

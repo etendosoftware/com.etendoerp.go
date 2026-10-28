@@ -333,7 +333,7 @@ public final class NeoQuotaCreateCheck {
      *     ({@value NeoQuotaWriteGate#CHECK_FAILED_STATUS} {@code QUOTA_CHECK_FAILED})
      */
     public NeoResponse toResponse() {
-      if (!BatchService.isCallerOwnedTransaction()) {
+      if (!BatchService.callerOwnsTransaction()) {
         OBDal.getInstance().rollbackAndClose();
       }
       return response;

@@ -109,8 +109,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           + "minus invoiced, same sign as the ordered quantity): an already-invoiced or "
           + "over-invoiced line is never invoiced again, so a second call does not duplicate "
           + "the invoice and, once nothing is pending, answers 400 'No pending lines to invoice "
-          + "in this purchase order'. Only COMPLETED invoices count as invoiced: an invoice "
-          + "left in draft by other means does not reduce what is pending.")
+          + "in this purchase order'. Only COMPLETED invoices count as invoiced, but an "
+          + "order that already has a DRAFT invoice is refused with 409 draftInvoiceExists, "
+          + "creating nothing (one draft per order, as on the screen, which hides the button): "
+          + "the refusal lists the draft numbers in existingDraftInvoices, and "
+          + "allowDuplicate:true creates the invoice anyway and lists the drafts the order had.",
+      OrderInvoiceDuplicateGuard.allowDuplicateParam())
       .withIdDescription("the id of the purchase order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -269,6 +273,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private NeoResponse createAndCompleteInvoice(NeoContext context, String specName,
       String recordId) throws JSONException {
     Invoice invoice;
+    List<String> existingDrafts = List.of();
     if (SPEC_GOODS_RECEIPT.equals(specName)) {
       JSONObject body = context.getRequestBody();
       List<String> receiptIds = parseReceiptIds(body, recordId);
@@ -279,6 +284,20 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           ? createFromReceipt(receiptIds.get(0), body)
           : createFromReceipts(receiptIds, body);
     } else {
+      // The status error comes first, as on the sales route: the status guard of createFromOrder
+      // runs after this block, so it is applied here too (a missing order is reported there).
+      Order source = OBDal.getInstance().get(Order.class, recordId);
+      if (source != null) {
+        DocumentStatusGuard.requireCompleted(source.getDocumentNo(), source.getDocumentStatus(),
+            ERR_ORDER_NOT_COMPLETED);
+      }
+      // ETP-5714: one draft invoice per order, as on the screen (it hides the button then)
+      existingDrafts = OrderInvoiceDuplicateGuard.draftsOf(recordId, false);
+      NeoResponse duplicate =
+          OrderInvoiceDuplicateGuard.refuseIfDraftExists(context.getRequestBody(), existingDrafts);
+      if (duplicate != null) {
+        return duplicate;
+      }
       invoice = createFromOrder(recordId);
     }
     OBDal.getInstance().flush();
@@ -306,6 +325,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     data.put("documentNo", completed.getDocumentNo());
     // Not sent before this ticket; the frontend needs it to render the resulting status.
     data.put("documentStatus", completed.getDocumentStatus());
+    OrderInvoiceDuplicateGuard.listExisting(data, existingDrafts);
 
     JSONObject responseData = new JSONObject();
     responseData.put("data", data);

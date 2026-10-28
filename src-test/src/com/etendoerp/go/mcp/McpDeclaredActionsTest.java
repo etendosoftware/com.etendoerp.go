@@ -316,7 +316,8 @@ class McpDeclaredActionsTest {
           mock(org.openbravo.base.structure.BaseOBObject.class);
       SFEntity entity = recEntity();
       try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
-          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class)) {
+          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class,
+              Mockito.CALLS_REAL_METHODS)) {
         com.etendoerp.go.schemaforge.NeoHandler handler =
             mock(com.etendoerp.go.schemaforge.NeoHandler.class);
         lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
@@ -337,7 +338,8 @@ class McpDeclaredActionsTest {
     void unpostBeforeReactivateIsOptIn() {
       SFEntity entity = recEntity();
       try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
-          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class)) {
+          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class,
+              Mockito.CALLS_REAL_METHODS)) {
         com.etendoerp.go.schemaforge.NeoHandler plain = context -> null;
         com.etendoerp.go.schemaforge.NeoHandler optsIn = new com.etendoerp.go.schemaforge.NeoHandler() {
           @Override
@@ -384,7 +386,7 @@ class McpDeclaredActionsTest {
       dal = mock(OBDal.class);
       obDal = mockStatic(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      lookup = mockStatic(NeoHandlerLookup.class);
+      lookup = mockStatic(NeoHandlerLookup.class, Mockito.CALLS_REAL_METHODS);
       callability = mockStatic(NeoReportCallability.class);
       callability.when(() -> NeoReportCallability.buildNotConfiguredMessage(anyString()))
           .thenAnswer(inv -> "not configured: " + inv.getArgument(0));
@@ -505,7 +507,7 @@ class McpDeclaredActionsTest {
       callability.when(() -> NeoReportCallability.resolveReportContract(any()))
           .thenReturn(Optional.empty());
 
-      lookup = mockStatic(NeoHandlerLookup.class);
+      lookup = mockStatic(NeoHandlerLookup.class, Mockito.CALLS_REAL_METHODS);
       lookup.when(() -> NeoHandlerLookup.byQualifierQuietly(QUALIFIER))
           .thenReturn(new ReconciliationHandler());
 

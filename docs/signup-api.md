@@ -13,6 +13,18 @@ app: the marketing site (etendo.ai, through its backend), a CRM, or an agent.
 
 The app's own registration (`/sws/go/register`, `/onboarding`) is unchanged.
 
+## Links between the website and the onboarding
+
+- **Into the account creation view.** `/onboarding` opens on the login view by default. A website
+  button that should open account creation instead ("Start for free") links to
+  `<app>/onboarding?view=register`. The onboarding drops `view` from the address bar once read, so
+  a reload lands on the login view. A visitor who is already signed in goes to their environments
+  as usual.
+- **Back to the website.** The onboarding's logo and name link to the URL the SPA was built with
+  in `VITE_WEBSITE_URL` (`deploy-staging.yml` reads it from the `WEBSITE_URL` Actions variable;
+  one site for every target). Unset, they are not a link. The variable is baked at build time:
+  changing it takes a new SPA build.
+
 Code: `com.etendoerp.go.signup` (`SignupApiServlet`, `SignupRequest`, `SignupOptions`,
 `SignupApiKeys`) on top of `com.etendoerp.go.rest.SignupAccountService` (account lifecycle,
 background worker, login link) and `AccountRegistrationService` (rules shared with `/register`).

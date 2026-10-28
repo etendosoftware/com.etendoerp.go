@@ -124,7 +124,7 @@ public final class NeoQuotaWriteGate {
    */
   static Create begin(String dalEntityName) {
     return begin(dalEntityName, QuotaWriteGuard.getDefault(),
-        BatchService.isCallerOwnedTransaction());
+        BatchService.callerOwnsTransaction());
   }
 
   static Create begin(String dalEntityName, QuotaWriteGuard guard, boolean batchOwnsTransaction) {
@@ -192,7 +192,7 @@ public final class NeoQuotaWriteGate {
   public static Gated run(String dalEntityName, DefaultJsonDataService current,
       GatedCreate create) throws Exception { // NOSONAR — the create's own exceptions pass through
     return run(dalEntityName, current, create, QuotaWriteGuard.getDefault(),
-        BatchService.isCallerOwnedTransaction());
+        BatchService.callerOwnsTransaction());
   }
 
   static Gated run(String dalEntityName, DefaultJsonDataService current, GatedCreate create,
@@ -202,9 +202,28 @@ public final class NeoQuotaWriteGate {
       if (early != null) {
         return new Gated(early, null);
       }
-      String result = create.run(quota.jsonService(current));
+      String result = quota.ownsTransaction()
+          ? runDeferringCommit(create, quota.jsonService(current))
+          : create.run(quota.jsonService(current));
       NeoResponse refusal = quota.finish(result);
       return new Gated(refusal, quota.result());
+    }
+  }
+
+  /**
+   * Runs a create whose transaction this gate owns with the thread marked as caller-owned, so the
+   * write path defers its commit (and leaves a failure's rollback) to the gate. Since ETP-5782
+   * {@link NeoBatchJsonDataService} commits a single write itself unless a caller owns the
+   * transaction; without the mark the insert would be committed before the quota check could
+   * refuse it.
+   */
+  static String runDeferringCommit(GatedCreate create, DefaultJsonDataService service)
+      throws Exception { // NOSONAR — the create's own exceptions pass through
+    BatchService.beginCallerOwnedTransaction();
+    try {
+      return create.run(service);
+    } finally {
+      BatchService.endCallerOwnedTransaction();
     }
   }
 

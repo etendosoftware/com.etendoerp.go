@@ -87,6 +87,10 @@ class NeoAttachmentTargetTest {
     dalMock.when(OBDal::getInstance).thenReturn(dal);
     context = mock(OBContext.class);
     when(context.getReadableClients()).thenReturn(new String[] { OWN_CLIENT });
+    // The write rule (TenantOwnership) judges the session's current client and fails closed without it.
+    Client currentClient = mock(Client.class);
+    when(currentClient.getId()).thenReturn(OWN_CLIENT);
+    when(context.getCurrentClient()).thenReturn(currentClient);
     when(context.getReadableOrganizations()).thenReturn(new String[] { OWN_ORG, READ_ONLY_ORG });
     when(context.getWritableOrganizations()).thenReturn(Set.of(OWN_ORG));
     contextMock = mockStatic(OBContext.class);

@@ -43,8 +43,6 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
-import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
-import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -52,6 +50,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.usage.quota.QuotaDefinition;
 import com.etendoerp.go.usage.quota.QuotaEvaluation;
 import com.etendoerp.go.usage.quota.QuotaVerdict;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Unit tests for {@link McpHookExecutor}.
@@ -65,6 +64,8 @@ import com.etendoerp.go.usage.quota.QuotaVerdict;
  *
  * @covers com.etendoerp.go.mcp.McpHookExecutor
  * @covers com.etendoerp.go.schemaforge.NeoQuotaWriteGate
+ * @covers com.etendoerp.go.mcp.McpMessageKeyHints
+ * @covers com.etendoerp.go.mcp.McpToolResponses
  */
 public class McpHookExecutorTest {
 
@@ -265,7 +266,7 @@ public class McpHookExecutorTest {
       JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(400, body));
       JSONObject envelope = new JSONObject(
           result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
-      assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
+      assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
     }
   }
 
@@ -280,7 +281,7 @@ public class McpHookExecutorTest {
     String text = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT);
     JSONObject envelope = new JSONObject(text);
     assertFalse(text.contains("ETPR_"));
-    assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
+    assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
   }
 
   /** Any other refusal keeps its envelope without the period hint. */
@@ -314,12 +315,12 @@ public class McpHookExecutorTest {
       JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(400, body));
       JSONObject envelope = new JSONObject(
           result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
-      assertEquals(McpToolRouter.DOCUMENT_PROCESSED_HINT, envelope.getString("hint"));
+      assertEquals(McpMessageKeyHints.DOCUMENT_PROCESSED_HINT, envelope.getString("hint"));
     }
-    assertTrue(McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("documentAction RE"));
-    assertTrue(McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("view:'actions'"));
+    assertTrue(McpMessageKeyHints.DOCUMENT_PROCESSED_HINT.contains("documentAction RE"));
+    assertTrue(McpMessageKeyHints.DOCUMENT_PROCESSED_HINT.contains("view:'actions'"));
     assertFalse("the hint is keyed by message, not entity: no goods-specific wording",
-        McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("goods"));
+        McpMessageKeyHints.DOCUMENT_PROCESSED_HINT.contains("goods"));
 
     JSONObject own = new JSONObject().put("message", "x").put("hint", "mine")
         .put("messageKeys", new JSONArray().put("20501"));
@@ -327,6 +328,24 @@ public class McpHookExecutorTest {
         NeoResponse.error(400, own)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
         .getString(FIELD_TEXT));
     assertEquals("mine", kept.getString("hint"));
+  }
+
+  /**
+   * ETP-5714: a classified write failure (the DAL path) that carries message key {@code 20501}
+   * gets the keyed hint, not the generic one of its class; without a known key the class hint
+   * stays. Covers purchase and sales lines alike: the key is the identity, never the entity.
+   */
+  @Test
+  public void testClassifiedEnvelopePrefersTheMessageKeyHint() throws Exception {
+    JSONObject keyed = McpToolResponses.classifiedEnvelope(400, "business_rule",
+        "Documento ya procesado", List.of("20501"));
+    JSONObject plain = McpToolResponses.classifiedEnvelope(400, "business_rule", "rule",
+        List.of("OtherKey"));
+    JSONObject none = McpToolResponses.classifiedEnvelope(400, "business_rule", "rule", null);
+
+    assertEquals(McpMessageKeyHints.DOCUMENT_PROCESSED_HINT, keyed.getString("hint"));
+    assertTrue(plain.getString("hint").startsWith("A business rule rejected"));
+    assertTrue(none.getString("hint").startsWith("A business rule rejected"));
   }
 
   /** The two keyed hints do not leak into each other, and a key that merely contains 20501 is not it. */
@@ -344,7 +363,7 @@ public class McpHookExecutorTest {
         NeoResponse.error(400, lookalike)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
         .getString(FIELD_TEXT));
 
-    assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, periodEnvelope.getString("hint"));
+    assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, periodEnvelope.getString("hint"));
     assertFalse(lookalikeEnvelope.has("hint"));
   }
 
@@ -637,38 +656,6 @@ public class McpHookExecutorTest {
         .getString(FIELD_TEXT).contains("replaced"));
   }
 
-  // ── resolveEntityHandler (early-exit paths, no CDI) ──────────────────
-
-  @Test
-  public void testResolveEntityHandlerNullQualifierReturnsNull() {
-    SFEntity sfEntity = mock(SFEntity.class);
-    when(sfEntity.getJavaQualifier()).thenReturn(null);
-
-    NeoHandler result = McpHookExecutor.resolveEntityHandler(sfEntity);
-
-    assertNull(result);
-  }
-
-  @Test
-  public void testResolveEntityHandlerBlankQualifierReturnsNull() {
-    SFEntity sfEntity = mock(SFEntity.class);
-    when(sfEntity.getJavaQualifier()).thenReturn("   ");
-
-    NeoHandler result = McpHookExecutor.resolveEntityHandler(sfEntity);
-
-    assertNull(result);
-  }
-
-  @Test
-  public void testResolveEntityHandlerEmptyQualifierReturnsNull() {
-    SFEntity sfEntity = mock(SFEntity.class);
-    when(sfEntity.getJavaQualifier()).thenReturn("");
-
-    NeoHandler result = McpHookExecutor.resolveEntityHandler(sfEntity);
-
-    assertNull(result);
-  }
-
   // ── buildActionHookContext (ETP-4285) ─────────────────────────────────
 
   @Test
@@ -698,6 +685,45 @@ public class McpHookExecutorTest {
     }
   }
 
+  // ── runPostHook after the write committed (ETP-5782) ─────────────────
+
+  /**
+   * The write before the post-hook is committed, so a refusal raised by {@code afterHandle} — here
+   * a keyed one, a 422 anywhere else — is the server-side 500 it always was, with a hint telling
+   * the agent to read the record before re-sending, never a "correct and retry" refusal.
+   */
+  @Test
+  public void testPostHookFailureAfterTheCommitIsNotARetryableRefusal() throws Exception {
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").specName("sales-order")
+        .entityName("header").build();
+    com.etendoerp.go.schemaforge.NeoExtensionRequest request =
+        com.etendoerp.go.schemaforge.NeoExtensionRequest.builder()
+            .qualifier("q").specName("sales-order").entityName("header")
+            .surface(com.etendoerp.go.schemaforge.NeoExtensionSurface.of(ctx))
+            .channel(com.etendoerp.go.schemaforge.NeoExtensionChannel.MCP)
+            .context(ctx).build();
+    org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+
+    try (MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcher =
+        mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class);
+        MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+            mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      dispatcher.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenThrow(new org.openbravo.base.exception.OBException("@20502@"));
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+
+      JSONObject result = McpHookExecutor.runPostHook(request, new JSONObject().put("id", "A"));
+
+      assertTrue(result.getBoolean(FIELD_IS_ERROR));
+      JSONObject envelope = new JSONObject(
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+      assertEquals(500, envelope.getInt(FIELD_STATUS));
+      assertEquals("server_error", envelope.getString("error"));
+      assertEquals(com.etendoerp.go.schemaforge.NeoErrorResponses.AFTER_COMMIT_HINT,
+          envelope.getString("hint"));
+      verify(dal).rollbackAndClose();
+    }
+  }
   // ── ETP-5680: placeholder forwarding ──
 
   /** The placeholders the mandatory-defaults pass recorded reach the pre-hook's context. */
@@ -738,10 +764,9 @@ public class McpHookExecutorTest {
     JSONObject body = new JSONObject().put("businessPartner", "bp-1");
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
-        MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
+        MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
       obContextMock.when(OBContext::getOBContext).thenReturn(null);
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
-          .thenReturn(customization);
+      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity)).thenReturn(customization);
 
       McpHookExecutor.resolveServerCreateFields("sales-invoice", "header", null, sfEntity, body);
 
@@ -757,12 +782,11 @@ public class McpHookExecutorTest {
     SFEntity sfEntity = mock(SFEntity.class);
     JSONObject body = new JSONObject().put("a", "b");
 
-    try (MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
-          .thenReturn(null);
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity)).thenReturn(null);
       McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
 
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity))
           .thenThrow(new IllegalStateException("boom"));
       McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
     }

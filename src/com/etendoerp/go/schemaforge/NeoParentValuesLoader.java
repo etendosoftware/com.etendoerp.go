@@ -27,7 +27,6 @@ import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.KernelUtils;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 
 /**
@@ -83,11 +82,17 @@ final class NeoParentValuesLoader {
     return ModelProvider.getInstance().getEntityByTableId(parentTab.getTable().getId());
   }
 
+  /**
+   * ETP-5785: a parent of another tenant is treated as missing. {@code parentId} comes straight
+   * from the request, and a bare {@code OBDal.get} would copy that tenant's values (price list,
+   * partner, dates...) into this tenant's defaults — on {@code GET /defaults} as well as on a
+   * create.
+   */
   private static BaseOBObject resolveParentRecord(Entity parentEntity, String parentId) {
     if (parentEntity == null) {
       return null;
     }
-    return OBDal.getInstance().get(parentEntity.getName(), parentId);
+    return TenantOwnership.loadOwnedByClient(parentEntity.getName(), parentId);
   }
 
   private static void copyParentValues(Entity parentEntity, BaseOBObject parentRecord,

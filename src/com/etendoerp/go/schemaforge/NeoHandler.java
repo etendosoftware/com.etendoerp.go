@@ -138,8 +138,10 @@ public interface NeoHandler {
    * compares the value the caller is already shown.</p>
    *
    * <p><b>Where it is applied.</b> MCP {@code etendo_list} only, and the response says so when it
-   * happens. The REST list does not consult it — the SPA filters on the stored columns directly —
-   * a divergence declared in {@code docs/neo-headless.md} §4.12.9.</p>
+   * happens, in a {@code filterAliases} note that names the target only when the spec exposes it
+   * (an excluded target is never named: the caller could not filter on it). The REST list does
+   * not consult it — the SPA filters on the stored columns directly — a divergence declared in
+   * {@code docs/neo-headless.md} §4.12.9.</p>
    *
    * @param context the read context: spec, entity, {@code GET}, no record id, the query params
    * @return displayed property name to the property the filter is evaluated on; empty by default
@@ -212,6 +214,29 @@ public interface NeoHandler {
    * @return the property names resolved server-side on create; empty by default
    */
   default Set<String> serverResolvedCreateFields() {
+    return Collections.emptySet();
+  }
+
+  /**
+   * Declares the DAL property names this customization requires the caller to send on create
+   * although nothing generic says so — AD does not mark the column mandatory, or
+   * {@code etendo_defaults} answers a value for it (ETP-5473).
+   *
+   * <p><b>Why the customization declares it.</b> {@code etendo_schema(view:"create")} builds its
+   * {@code required} list from AD mandatoriness and demotes to {@code optional} with
+   * {@code serverDefaulted:true} every field {@code etendo_defaults} resolves. A default the
+   * customization offers only as a <em>suggestion</em> for a form — while its own pre-hook refuses a
+   * create that omits the field — therefore reaches the agent as "the server fills this", and the
+   * agent's first create is refused. Only the customization knows its pre-hook enforces the field,
+   * so it is the one that says so; shared code never names the entity.</p>
+   *
+   * <p>Reader: {@code etendo_schema} flags the names {@code userRequired:true} (every view) and
+   * {@code view:"create"} lists them under {@code required}, never {@code serverDefaulted}. It is a
+   * declaration of what the pre-hook already enforces; it adds no check of its own.</p>
+   *
+   * @return the property names a create must carry; empty by default
+   */
+  default Set<String> callerRequiredCreateFields() {
     return Collections.emptySet();
   }
 
@@ -337,8 +362,9 @@ public interface NeoHandler {
    * <p>Advisory, like the rest of availability: {@code etendo_schema(view:"actions")} reports the
    * entry as {@code availableNow:false} with the sentence as {@code unavailableReason} when it is
    * asked about a record. It never refuses a call, so the handler's own guard stays the
-   * enforcement. An implementation must not throw for a record it cannot judge: it omits the
-   * action instead.</p>
+   * enforcement. An implementation omits an action it cannot judge; one whose lookup fails may let
+   * the failure propagate, because the caller ({@code McpDeclaredActions#unavailableFor}) catches
+   * a {@link RuntimeException}, logs it and answers "nothing derived" for the whole record.</p>
    *
    * @param subject the record the agent asked about
    * @return {@code action name → reason}; empty by default

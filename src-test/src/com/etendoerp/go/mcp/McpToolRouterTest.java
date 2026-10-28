@@ -1543,4 +1543,140 @@ public class McpToolRouterTest {
         + " dropped from etendo_create, or refactored and this guard needs updating", at >= 0);
     return at;
   }
+
+  // ── handleCreate: what the pre-hook can tell about the agent's choices ─
+
+  /**
+   * {@code etendo_create} fills the mandatory defaults into the body BEFORE it dispatches the
+   * entity's pre-hook, so key presence there no longer says what the agent sent (a contact's
+   * {@code customer=true} is the AD default as often as a choice). The pre-hook must therefore be
+   * handed the key set of {@code userProvided} — the snapshot taken before the defaults pass and
+   * never reassigned — on the very context it is dispatched with. The consumer side (a defaulted
+   * key outside that set is not explicit) is specified in {@code ContactTypeRulesTest}.
+   *
+   * <p>Asserted on the source, as the other {@code handleCreate} call-site guards are
+   * ({@link McpSourceScanner}): reaching the dispatch needs {@code DefaultJsonDataService},
+   * {@code ModelProvider} and an {@code AD_Tab}, which cannot run in a unit test.</p>
+   */
+  @Test
+  public void testCreatePreHookIsHandedTheKeysTheAgentSentBeforeDefaults() {
+    String body = McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate")
+        .replaceAll("\\s+", "");
+
+    int snapshot = indexOrFail(body, "JSONObjectuserProvided=newJSONObject(filteredBody.toString());");
+    int defaults = indexOrFail(body, "NeoMandatoryDefaultsService.injectMandatoryDefaults(");
+    int hookContext = indexOrFail(body, "NeoContexthookCtx=McpHookExecutor.buildHookContext(");
+    int attribute = indexOrFail(body, "hookCtx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS,"
+        + "NeoCrudHelper.snapshotBodyFields(userProvided));");
+    int handedOver = indexOrFail(body, ".context(hookCtx)");
+    int dispatch = indexOrFail(body, "NeoExtensionDispatcher.dispatch(");
+
+    assertTrue("userProvided must be captured before injectMandatoryDefaults fills the body",
+        snapshot < defaults);
+    assertEquals("userProvided must not be reassigned after the snapshot", 1,
+        body.split("userProvided=", -1).length - 1);
+    assertTrue("the client-provided keys must be set on the hook context before it is dispatched",
+        hookContext < attribute && attribute < handedOver && handedOver < dispatch);
+  }
+
+  private static int indexOrFail(String body, String anchor) {
+    int index = body.indexOf(anchor);
+    assertTrue("handleCreate no longer contains " + anchor + " — either the call was dropped or"
+        + " the method was refactored and this guard needs updating", index >= 0);
+    return index;
+  }
+
+  // ── classified failures (ETP-5782) ───────────────────────────────────
+
+  /** A keyed refusal thrown out of a tool is a business rule the agent can act on, not a fault. */
+  @Test
+  public void testUnexpectedKeyedRefusalIsABusinessRuleEnvelope() throws Exception {
+    org.openbravo.erpCommon.utility.OBError translated =
+        new org.openbravo.erpCommon.utility.OBError();
+    translated.setMessage("Cannot change business partner or price list if there are lines.");
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class);
+        MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msg =
+            mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance)
+          .thenReturn(mock(org.openbravo.dal.service.OBDal.class));
+      msg.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.translateError(
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString()))
+          .thenReturn(translated);
+
+      JSONObject envelope = new JSONObject(McpToolResponses.buildUnexpectedErrorBody(
+          "etendo_update", new org.openbravo.base.exception.OBException("@20502@")));
+
+      assertEquals(422, envelope.getInt("status"));
+      assertEquals("validation_error", envelope.getString("error"));
+      assertEquals("business_rule", envelope.getString("code"));
+      assertEquals("Cannot change business partner or price list if there are lines.",
+          envelope.getString("detail"));
+      assertEquals("20502", envelope.getJSONArray("messageKeys").getString(0));
+      assertFalse("a refusal is not a bug to report", envelope.has("feedback"));
+      String hint = envelope.getString("hint").toLowerCase(java.util.Locale.ROOT);
+      assertFalse("a post-hook can fail after the main write committed",
+          hint.contains("nothing was written"));
+      assertTrue("the caller must reconcile the current state before retrying",
+          hint.matches("(?s).*(check|verify|inspect|confirm).*"));
+    }
+  }
+
+  /** A row still referenced, captured by NEO's write service, is a 409 conflict on MCP too. */
+  @Test
+  public void testCapturedWriteFailureFollowsItsClassification() throws Exception {
+    JSONObject response = dalFailure("Some core prose");
+    JSONObject classification = new JSONObject().put("status", 409)
+        .put("code", "record_in_use").put("message", "This record cannot be deleted because "
+            + "other records use it.").put("messageKeys", new JSONArray());
+    response.getJSONObject("response").getJSONObject("error")
+        .put("neoClassification", classification);
+
+    JSONObject envelope = invokeCheckJsonServiceError(response, McpConstants.SEE_ALSO_WRITING);
+
+    assertEquals(409, envelope.getInt("status"));
+    assertEquals("conflict", envelope.getString("error"));
+    assertEquals("record_in_use", envelope.getString("code"));
+    assertEquals(McpConstants.SEE_ALSO_WRITING, envelope.getString("seeAlso"));
+  }
+
+  /** A captured fault keeps this channel's existing answer for a refused write (declared, §4.12.9). */
+  @Test
+  public void testCapturedServerFaultKeepsTheExistingWriteAnswer() throws Exception {
+    JSONObject response = dalFailure("Some core prose");
+    response.getJSONObject("response").getJSONObject("error").put("neoClassification",
+        new JSONObject().put("status", 500).put("code", "server_error"));
+
+    JSONObject envelope = invokeCheckJsonServiceError(response, McpConstants.SEE_ALSO_WRITING);
+
+    assertEquals(422, envelope.getInt("status"));
+    assertEquals("Some core prose", envelope.getString("detail"));
+  }
+
+  /**
+   * An id that resolves to no row: the generic answer, identical whichever entity and id were sent,
+   * so it cannot tell an agent whether the id exists for another tenant.
+   */
+  @Test
+  public void testUnknownReferenceIsGenericAndIdentical() throws Exception {
+    JSONObject first = invokeCheckJsonServiceError(unknownReference("BusinessPartner", "4028E6C7"),
+        McpConstants.SEE_ALSO_WRITING);
+    JSONObject second = invokeCheckJsonServiceError(unknownReference("PriceList", "FFFF0000"),
+        McpConstants.SEE_ALSO_WRITING);
+
+    assertEquals(422, first.getInt("status"));
+    assertEquals("unknown_reference", first.getString("code"));
+    assertFalse(first.toString().contains("BusinessPartner"));
+    assertFalse(first.toString().contains("4028E6C7"));
+    assertEquals(first.toString(), second.toString());
+  }
+
+  private JSONObject unknownReference(String entity, String id) throws Exception {
+    JSONObject errors = new JSONObject().put("id", "New object " + entity + "(null)  (key: " + id
+        + "_" + entity + ") refered to but not present in the import set");
+    JSONObject inner = new JSONObject().put("status", -4).put("errors", errors);
+    return new JSONObject().put("response", inner);
+  }
 }

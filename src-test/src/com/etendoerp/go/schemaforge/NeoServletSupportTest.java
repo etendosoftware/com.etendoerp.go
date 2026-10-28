@@ -44,7 +44,9 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.weld.WeldUtils;
 
 /**
- * Unit tests for {@link NeoServletSupport#parsePath(String)}.
+ * Unit tests for {@link NeoServletSupport#parsePath(String)} and the customization dispatch.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoServletSupport
  */
 class NeoServletSupportTest {
 
@@ -220,18 +222,26 @@ class NeoServletSupportTest {
   private static class FakeHandler implements NeoHandler {
     NeoResponse preResult;
     NeoResponse postResult;
+    RuntimeException failure;
+    RuntimeException afterFailure;
     NeoContext lastHandleContext;
     NeoContext lastAfterHandleContext;
 
     @Override
     public NeoResponse handle(NeoContext context) {
       lastHandleContext = context;
+      if (failure != null) {
+        throw failure;
+      }
       return preResult;
     }
 
     @Override
     public NeoResponse afterHandle(NeoContext context) {
       lastAfterHandleContext = context;
+      if (afterFailure != null) {
+        throw afterFailure;
+      }
       return postResult;
     }
   }
@@ -402,6 +412,132 @@ class NeoServletSupportTest {
         verify(crudHandler, times(1)).handleDefault(context);
         assertNull(handler.lastAfterHandleContext,
             "afterHandle must not be called when the default CRUD write failed");
+      }
+    }
+
+    @Test
+    @DisplayName("a customization refusing with an AD message key answers 422 business_rule and "
+        + "rolls back what it saved")
+    void keyedRefusalFromCustomizationIs422() throws Exception {
+      NeoCrudHandler crudHandler = mock(NeoCrudHandler.class);
+      NeoContext context = NeoContext.builder().httpMethod("PUT").build();
+      NamedFakeHandler handler = new NamedFakeHandler();
+      handler.failure = new org.openbravo.base.exception.OBException("@20502@");
+      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+      org.openbravo.erpCommon.utility.OBError translated =
+          new org.openbravo.erpCommon.utility.OBError();
+      translated.setMessage("Cannot change business partner or price list if there are lines.");
+
+      try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class);
+          MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+              mockStatic(org.openbravo.dal.service.OBDal.class);
+          MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msg =
+              mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        weld.when(() -> WeldUtils.getInstances(NeoHandler.class))
+            .thenReturn(List.<NeoHandler>of(handler));
+        obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+        msg.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.translateError(any(), any(),
+            any(), org.mockito.ArgumentMatchers.anyString())).thenReturn(translated);
+
+        NeoResponse result = NeoServletSupport.handleWithHooks("test-handler-qualifier", context,
+            crudHandler);
+
+        assertEquals(422, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals("business_rule", error.getString("code"));
+        assertEquals("Cannot change business partner or price list if there are lines.",
+            error.getString("message"));
+        verify(dal).rollbackAndClose();
+      }
+    }
+
+    @Test
+    @DisplayName("a customization failing on SQL answers a 500 whose message carries no SQL")
+    void sqlFaultFromCustomizationIsSanitized() throws Exception {
+      NeoCrudHandler crudHandler = mock(NeoCrudHandler.class);
+      NeoContext context = NeoContext.builder().httpMethod("POST").build();
+      NamedFakeHandler handler = new NamedFakeHandler();
+      handler.failure = new org.hibernate.exception.GenericJDBCException("could not execute",
+          new java.sql.SQLException("ERROR: relation \"secret_table\" does not exist", "42P01"));
+
+      try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class);
+          MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+              mockStatic(org.openbravo.dal.service.OBDal.class)) {
+        weld.when(() -> WeldUtils.getInstances(NeoHandler.class))
+            .thenReturn(List.<NeoHandler>of(handler));
+        obdal.when(org.openbravo.dal.service.OBDal::getInstance)
+            .thenReturn(mock(org.openbravo.dal.service.OBDal.class));
+
+        NeoResponse result = NeoServletSupport.handleWithHooks("test-handler-qualifier", context,
+            crudHandler);
+
+        assertEquals(500, result.getHttpStatus());
+        String message = result.getBody().getJSONObject("error").getString("message");
+        assertTrue(message.startsWith("Hook handler error: "), message);
+        assertFalse(message.contains("secret_table"), message);
+      }
+    }
+
+    @Test
+    @DisplayName("an afterHandle failure after the write committed stays a 500 with a read-first "
+        + "hint, never a retryable refusal")
+    void afterHandleFailureAfterTheCommitIsNotARetryableRefusal() throws Exception {
+      NeoCrudHandler crudHandler = mock(NeoCrudHandler.class);
+      NeoContext context = NeoContext.builder().httpMethod("POST").build();
+      when(crudHandler.handleDefault(context)).thenReturn(NeoResponse.ok(new JSONObject()));
+      NamedFakeHandler handler = new NamedFakeHandler();
+      handler.afterFailure = new org.openbravo.base.exception.OBException("@20502@");
+      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+
+      try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class);
+          MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+              mockStatic(org.openbravo.dal.service.OBDal.class)) {
+        weld.when(() -> WeldUtils.getInstances(NeoHandler.class))
+            .thenReturn(List.<NeoHandler>of(handler));
+        obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+
+        NeoResponse result = NeoServletSupport.handleWithHooks("test-handler-qualifier", context,
+            crudHandler);
+
+        assertEquals(500, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals("server_error", error.getString("code"));
+        assertEquals(NeoErrorResponses.AFTER_COMMIT_HINT, error.getString("hint"));
+        assertTrue(error.getString("message").startsWith("Hook handler error: "));
+        verify(dal).rollbackAndClose();
+      }
+    }
+
+    @Test
+    @DisplayName("inside a batch nothing is committed yet, so an afterHandle refusal is classified")
+    void afterHandleRefusalInsideABatchIsClassified() throws Exception {
+      NeoCrudHandler crudHandler = mock(NeoCrudHandler.class);
+      NeoContext context = NeoContext.builder().httpMethod("POST").build();
+      when(crudHandler.handleDefault(context)).thenReturn(NeoResponse.ok(new JSONObject()));
+      NamedFakeHandler handler = new NamedFakeHandler();
+      handler.afterFailure = new org.openbravo.base.exception.OBException("@20502@");
+      org.openbravo.erpCommon.utility.OBError translated =
+          new org.openbravo.erpCommon.utility.OBError();
+      translated.setMessage("Cannot change business partner or price list if there are lines.");
+
+      try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class);
+          MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msg =
+              mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        weld.when(() -> WeldUtils.getInstances(NeoHandler.class))
+            .thenReturn(List.<NeoHandler>of(handler));
+        msg.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.translateError(any(), any(),
+            any(), org.mockito.ArgumentMatchers.anyString())).thenReturn(translated);
+        BatchService.beginCallerOwnedTransaction();
+        NeoResponse result;
+        try {
+          result = NeoServletSupport.handleWithHooks("test-handler-qualifier", context,
+              crudHandler);
+        } finally {
+          BatchService.endCallerOwnedTransaction();
+        }
+
+        assertEquals(422, result.getHttpStatus());
+        assertEquals("business_rule", result.getBody().getJSONObject("error").getString("code"));
       }
     }
   }

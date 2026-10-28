@@ -28,7 +28,6 @@ import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
@@ -149,8 +148,8 @@ public class NeoServlet extends HttpBaseServlet {
       try {
         super.service(request, response);
       } catch (Exception e) {
-        log.error("Error in NeoServlet.service", e);
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+        writeResponse(response, NeoErrorResponses.fromException(e, request.getMethod(),
+            "NeoServlet.service", null));
       }
     }
   }
@@ -184,8 +183,11 @@ public class NeoServlet extends HttpBaseServlet {
       // A body or JSON parameter the client sent could not be parsed: its error, not ours.
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
     } catch (Exception e) {
-      log.error("Error processing NEO request: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+      // ETP-5782: classified by what the exception is (a refused access is a 403, a trigger
+      // refusal a 422, a lost connection a 503…), logged once, rolled back; anything unrecognised
+      // stays a sanitized 500.
+      writeResponse(response, NeoErrorResponses.fromException(e, method,
+          "NEO " + method + " request", null));
     } finally {
       OBContext.restorePreviousMode();
     }

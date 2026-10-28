@@ -120,6 +120,8 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * @covers com.etendoerp.go.schemaforge.CreateDraftInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.OrderInvoiceListSupport
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
+ * @covers com.etendoerp.go.schemaforge.OrderInvoiceDuplicateGuard
+ * @covers com.etendoerp.go.schemaforge.DuplicateCreationRefusal
  */
 public class CreateDraftInvoiceHandlerTest {
 
@@ -1470,6 +1472,119 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
+   * ETP-5714: an order that already has a DRAFT invoice is refused with 409 {@code draftInvoiceExists},
+   * naming the draft numbers, and nothing is created; {@code allowDuplicate:true} creates the invoice
+   * and lists the drafts the order had; anything but a JSON boolean is a 422. Same rule as the screen,
+   * which hides the button while a draft exists.
+   */
+  @Test
+  public void handle_orderWithADraftInvoice_isRefusedUnlessAllowDuplicateTrue() throws JSONException {
+    Object[][] cases = {
+        // name, allowDuplicate body value (null = absent), expected status
+        { "absent", null, 409 },
+        { "false", Boolean.FALSE, 409 },
+        { "true", Boolean.TRUE, 201 },
+        { "string true", "true", 422 },
+        { "number one", 1, 422 },
+    };
+    for (Object[] c : cases) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+        mockAdminMode(obContextMock);
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.getSession()).thenReturn(mock(Session.class));
+        Invoice invoice = mock(Invoice.class);
+        when(invoice.getId()).thenReturn("inv-1");
+        DispatchHandler handler = new DispatchHandler();
+        handler.orderInvoice = invoice;
+        JSONObject body = new JSONObject();
+        if (c[1] != null) {
+          body.put("allowDuplicate", c[1]);
+        }
+
+        try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+          completion.existingDrafts = List.of("DRAFT-1", "DRAFT-2");
+          mockCompletedInvoice(dal, "inv-1", "INV-001", "CO");
+
+          NeoResponse response = handler.handle(NeoContext.builder()
+              .specName(SPEC_SALES_ORDER).entityName(ENTITY_HEADER).httpMethod("POST")
+              .endpointType(NeoEndpointType.ACTION).fieldName(ACTION_CREATE)
+              .recordId("order-1").requestBody(body).build());
+
+          assertEquals((String) c[0], (int) (Integer) c[2], response.getHttpStatus());
+          if (response.getHttpStatus() == 409) {
+            JSONObject error = response.getBody().getJSONObject("error");
+            assertEquals("draftInvoiceExists", error.getString("code"));
+            assertTrue(error.getString("message").contains("DRAFT-1, DRAFT-2"));
+            assertEquals(2, error.getJSONArray("existingDraftInvoices").length());
+            assertNull("nothing is created", handler.receivedLineOverrides);
+          } else if (response.getHttpStatus() == 201) {
+            JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+            assertEquals("DRAFT-1", data.getJSONArray("existingDraftInvoices").getString(0));
+          }
+        }
+      }
+    }
+  }
+
+  /** ETP-5714: the status error comes before the draft refusal: an uncompleted order is a 400. */
+  @Test
+  public void handle_uncompletedOrderWithADraftInvoice_answersTheStatusErrorFirst()
+      throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      DispatchHandler handler = new DispatchHandler();
+      handler.sourceOrderStatus = "DR";
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        completion.existingDrafts = List.of("DRAFT-1");
+
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_ORDER).entityName(ENTITY_HEADER).httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION).fieldName(ACTION_CREATE)
+            .recordId("order-1").requestBody(new JSONObject()).build());
+
+        assertEquals(400, response.getHttpStatus());
+        assertNull("nothing is created", handler.receivedLineOverrides);
+      }
+    }
+  }
+
+  /** ETP-5714: with no draft invoice the answer carries no {@code existingDraftInvoices} key. */
+  @Test
+  public void handle_orderWithoutADraftInvoice_answersAsBefore() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-1");
+      DispatchHandler handler = new DispatchHandler();
+      handler.orderInvoice = invoice;
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "inv-1", "INV-001", "CO");
+
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_ORDER).entityName(ENTITY_HEADER).httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION).fieldName(ACTION_CREATE)
+            .recordId("order-1").requestBody(new JSONObject()).build());
+
+        assertEquals(201, response.getHttpStatus());
+        assertFalse(response.getBody().getJSONObject("response").getJSONObject("data")
+            .has("existingDraftInvoices"));
+      }
+    }
+  }
+
+  /**
    * ETP-5381 — the sales-order branch confirms the invoice it just created: the response reports
    * the CONFIRMED status (not {@code DR}) and the completion process runs exactly once. Creating
    * a draft and leaving it behind is what allowed the same order to be invoiced twice, because
@@ -2067,8 +2182,13 @@ public class CreateDraftInvoiceHandlerTest {
    */
   @Test
   public void testHandleCreateUnexpectedErrorReturns500() throws Exception {
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OrderInvoiceDuplicateGuard> guard =
+            Mockito.mockStatic(OrderInvoiceDuplicateGuard.class)) {
       mockAdminMode(obContextMock);
+      // ETP-5714: the draft lookup is not what this test is about
+      guard.when(() -> OrderInvoiceDuplicateGuard.draftsOf(anyString(), anyBoolean()))
+          .thenReturn(Collections.emptyList());
 
       DispatchHandler handler = new DispatchHandler();
       handler.createFailure = new RuntimeException("boom");
@@ -3646,8 +3766,13 @@ public class CreateDraftInvoiceHandlerTest {
    */
   @Test
   public void testHandleCreateOBExceptionReturns400WithStructuredBody() throws Exception {
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OrderInvoiceDuplicateGuard> guard =
+            Mockito.mockStatic(OrderInvoiceDuplicateGuard.class)) {
       mockAdminMode(obContextMock);
+      // ETP-5714: the draft lookup is not what this test is about
+      guard.when(() -> OrderInvoiceDuplicateGuard.draftsOf(anyString(), anyBoolean()))
+          .thenReturn(Collections.emptyList());
 
       DispatchHandler handler = new DispatchHandler();
       handler.createFailure = new OBException("not enough stock");

@@ -26,7 +26,11 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Process;
 
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.ScopeRefusal;
+import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
@@ -106,6 +110,16 @@ class NeoRequestRouter {
           "Process specs only support GET (describe) and POST (execute)");
       return;
     }
+    // ETP-5783 — running a process is what etendo:process grants. The authenticator asks for it
+    // on an action route by its path; a process spec is only recognisable by its spec type, so the
+    // same scope is asked here, from the scopes the authenticator kept on the request.
+    if (!EnvironmentRequestAuthenticator.isScopeGranted(request, ApiScopes.PROCESS)) {
+      NeoResponse refusal = NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          ScopeRefusal.message(ApiScopes.PROCESS))
+          .withHeader(ScopeRefusal.CHALLENGE_HEADER, ScopeRefusal.CHALLENGE_VALUE);
+      servlet.writeResponse(response, refusal);
+      return;
+    }
     servlet.processReportEndpoint.handleProcessSpec(spec, request, response);
   }
 
@@ -133,10 +147,13 @@ class NeoRequestRouter {
           "Access denied to spec for current role");
       return;
     }
-    // NEO-native handler dispatch (single-segment handlers such as aging-receivable).
-    String reportHandlerQualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
-    if (reportHandlerQualifier != null
-        && dispatchReportHandler(reportHandlerQualifier, pathInfo, method, request, response)) {
+    // NEO-native handler dispatch (single-segment handlers such as aging-receivable). The
+    // dispatcher resolves the @NeoExtension first; the qualifier, when the entity still has one,
+    // is only its fallback — so an entity bound by annotation alone dispatches too.
+    SFEntity reportEntity = NeoReportCallability.resolveReportEntity(spec);
+    if (reportEntity != null
+        && dispatchReportHandler(reportEntity.getJavaQualifier(), pathInfo, method, request,
+            response)) {
       return;
     }
     // No NEO-native report handler: Jasper/AD_Process report execution has been removed.

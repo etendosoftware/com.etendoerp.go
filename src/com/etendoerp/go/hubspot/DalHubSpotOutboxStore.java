@@ -42,6 +42,28 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
 
   private static final String PARAM_ACCOUNT = "account";
   private static final String PARAM_ERROR = "error";
+  private static final String PARAM_ENVIRONMENT = "environment";
+  private static final String PARAM_TYPE = "type";
+
+  private static final String BILLING_TYPES = "('PAYMENT', 'PAYMENT_FAILED', 'CANCEL_REQUESTED',"
+      + " 'CANCEL_REVERTED', 'CANCELED')";
+
+  // The purchase that bought the subscription names the productive it created; a re-subscription
+  // buys a new subscription for an existing environment, recorded the same way.
+  private static final String SUBSCRIPTION_ENVIRONMENT_SQL = "select c.created_client_id,"
+      + " c.client_name, p.value from etgo_checkout_request c"
+      + " left join etgo_plan p on p.etgo_plan_id = c.etgo_plan_id"
+      + " where c.stripe_subscription_id = :subscription and c.created_client_id is not null"
+      + " order by c.created desc";
+
+  private static final String NEWER_BILLING_SQL = "select count(*) from etgo_hubspot_outbox"
+      + " where etgo_account_id = :account and environment_id = :environment"
+      + " and status = 'SENT' and event_type in " + BILLING_TYPES
+      + " and occurred_at > :occurred";
+
+  private static final String ENVIRONMENT_DEAL_SQL = "select hubspot_object_id, payload"
+      + " from etgo_hubspot_outbox where etgo_account_id = :account and event_type = :type"
+      + " and event_key = :environment and status = 'SENT'";
 
   private static final String OPEN_DEMOS_SQL = "select d.etgo_account_id, d.environment_id,"
       + " d.created, exists (select 1 from etgo_hubspot_outbox e"
@@ -67,7 +89,7 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
 
   private static final String PENDING_SQL = "select o.etgo_hubspot_outbox_id, o.etgo_account_id,"
       + " o.event_type, o.environment_id, o.payload, o.attempt_count, o.next_attempt_at,"
-      + " a.email, a.name"
+      + " a.email, a.name, o.occurred_at"
       + " from etgo_hubspot_outbox o join etgo_account a on a.etgo_account_id = o.etgo_account_id"
       + " where o.status = 'PENDING' and o.isactive = 'Y'"
       + " order by o.created, o.etgo_hubspot_outbox_id";
@@ -77,6 +99,68 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
       String payload) {
     return OBDal.getInstance().getSession().doReturningWork(connection -> HubSpotOutbox
         .enqueue(connection, accountId, eventType, environmentId, payload));
+  }
+
+  @Override
+  public Optional<SubscriptionEnvironment> findSubscriptionEnvironment(String subscriptionId) {
+    List<?> rows = query(SUBSCRIPTION_ENVIRONMENT_SQL)
+        .setParameter("subscription", subscriptionId)
+        .setMaxResults(1)
+        .getResultList();
+    if (rows.isEmpty()) {
+      return Optional.empty();
+    }
+    Object[] c = (Object[]) rows.get(0);
+    return Optional.of(new SubscriptionEnvironment((String) c[0], (String) c[1], (String) c[2]));
+  }
+
+  @Override
+  public void assignEnvironment(String id, String environmentId) {
+    update("environment_id = :environment", id)
+        .setParameter(PARAM_ENVIRONMENT, environmentId)
+        .executeUpdate();
+  }
+
+  @Override
+  public boolean hasNewerBillingEvent(String accountId, String environmentId,
+      Instant occurredAt) {
+    Object count = query(NEWER_BILLING_SQL)
+        .setParameter(PARAM_ACCOUNT, accountId)
+        .setParameter(PARAM_ENVIRONMENT, environmentId)
+        .setParameter("occurred", Timestamp.from(occurredAt))
+        .getSingleResult();
+    return count instanceof Number && ((Number) count).intValue() > 0;
+  }
+
+  @Override
+  public Optional<EnvironmentDeal> findEnvironmentDeal(String accountId, String environmentId) {
+    List<?> rows = query(ENVIRONMENT_DEAL_SQL)
+        .setParameter(PARAM_ACCOUNT, accountId)
+        .setParameter(PARAM_TYPE, PRODUCTIVE_DEAL)
+        .setParameter(PARAM_ENVIRONMENT, environmentId)
+        .getResultList();
+    if (rows.isEmpty()) {
+      return Optional.empty();
+    }
+    Object[] c = (Object[]) rows.get(0);
+    return Optional.of(new EnvironmentDeal((String) c[0],
+        HubSpotOutbox.OWNED_DEAL_PAYLOAD.equals(c[1])));
+  }
+
+  @Override
+  public int countEnvironmentDeals(String accountId) {
+    Object count = query("select count(*) from etgo_hubspot_outbox"
+        + " where etgo_account_id = :account and event_type = :type")
+        .setParameter(PARAM_ACCOUNT, accountId)
+        .setParameter(PARAM_TYPE, PRODUCTIVE_DEAL)
+        .getSingleResult();
+    return count instanceof Number ? ((Number) count).intValue() : 0;
+  }
+
+  @Override
+  public void recordEnvironmentDeal(String accountId, String environmentId, EnvironmentDeal deal) {
+    OBDal.getInstance().getSession().doWork(connection -> HubSpotOutbox
+        .recordEnvironmentDeal(connection, accountId, environmentId, deal));
   }
 
   @Override
@@ -92,7 +176,7 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
 
   @Override
   public boolean hasEnteredEnvironment(String environmentId) {
-    Object result = query(ENTERED_SQL).setParameter("environment", environmentId)
+    Object result = query(ENTERED_SQL).setParameter(PARAM_ENVIRONMENT, environmentId)
         .getSingleResult();
     return result instanceof Number && ((Number) result).intValue() == 1;
   }
@@ -115,7 +199,7 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
       Object[] c = (Object[]) row;
       pending.add(new PendingEvent((String) c[0], (String) c[1], (String) c[2], (String) c[3],
           (String) c[4], c[5] == null ? 0 : ((Number) c[5]).intValue(), instant(c[6]),
-          (String) c[7], (String) c[8]));
+          (String) c[7], (String) c[8], instant(c[9])));
     }
     return pending;
   }
@@ -134,7 +218,7 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
     List<?> rows = query("select status from etgo_hubspot_outbox"
         + " where etgo_account_id = :account and event_type = :type")
         .setParameter(PARAM_ACCOUNT, accountId)
-        .setParameter("type", eventType)
+        .setParameter(PARAM_TYPE, eventType)
         .getResultList();
     return rows.isEmpty() ? null : (String) rows.get(0);
   }

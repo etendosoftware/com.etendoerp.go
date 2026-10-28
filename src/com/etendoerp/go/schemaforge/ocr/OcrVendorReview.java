@@ -155,7 +155,7 @@ final class OcrVendorReview {
     decision.put("createPrefill", createPrefill(extraction));
     decision.put("afterChoosing", "Once the user has chosen or created the vendor, call this tool "
         + "again with vendor_id: the address, duplicates and taxes are recomputed for that vendor "
-        + "without reading the PDF again.");
+        + "without reading the document again.");
     return decision;
   }
 

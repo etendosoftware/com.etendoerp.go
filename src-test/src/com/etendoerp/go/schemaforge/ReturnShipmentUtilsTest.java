@@ -35,6 +35,7 @@ import java.sql.PreparedStatement;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 import org.hibernate.Session;
 import org.hibernate.criterion.SimpleExpression;
@@ -86,9 +87,10 @@ import static org.mockito.Mockito.when;
  * <ul>
  *   <li>null shipmentLineId → returns fallback without touching OBDal.</li>
  *   <li>Session returns a row with price &gt; 0 → returns that price.</li>
- *   <li>Session returns a row with null price → returns fallback.</li>
- *   <li>Session returns an empty list → returns fallback (logs warn).</li>
- *   <li>Session.createQuery throws → returns fallback (logs warn, no rethrow).</li>
+ *   <li>Session returns a row with null price → empty.</li>
+ *   <li>Session returns a row with price 0 → present (a deliberately free product, ETP-5712).</li>
+ *   <li>Session returns an empty list → empty (logs warn).</li>
+ *   <li>Session.createQuery throws → empty (logs warn, no rethrow).</li>
  *   <li>{@code findReturnDocTypeForOrg} — requireRectificative gating on column presence, org
  *       match, org-'0' fallback, and first-candidate fallback.</li>
  * </ul>
@@ -98,8 +100,6 @@ import static org.mockito.Mockito.when;
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 public class ReturnShipmentUtilsTest {
-
-  private static final BigDecimal FALLBACK = new BigDecimal("9.99");
 
   /**
    * The batch size the tests that do not care about paging ask for. Deliberately equal to
@@ -111,15 +111,15 @@ public class ReturnShipmentUtilsTest {
   // ── Case 1: null shipmentLineId → fallback, OBDal never called ──────────────
 
   @Test
-  public void resolvePriceFromSourceInvoiceLine_nullId_returnsFallbackWithoutCallingOBDal() {
+  public void resolvePriceFromSourceInvoiceLine_nullId_returnsEmptyWithoutCallingOBDal() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
-          null, "unitPrice", FALLBACK);
+      Optional<BigDecimal> result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
+          null, "unitPrice", Collections.<String>emptyList());
 
-      assertEquals(FALLBACK, result);
+      assertEquals(Optional.empty(), result);
       // OBDal.getInstance() must not be touched when shipmentLineId is null
       verify(dal, never()).getSession();
     }
@@ -146,10 +146,10 @@ public class ReturnShipmentUtilsTest {
       when(query.setMaxResults(anyInt())).thenReturn(query);
       when(query.list()).thenReturn(Collections.singletonList(expectedPrice));
 
-      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
-          "line-001", "unitPrice", FALLBACK);
+      Optional<BigDecimal> result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
+          "line-001", "unitPrice", Collections.<String>emptyList());
 
-      assertEquals(expectedPrice, result);
+      assertEquals(Optional.of(expectedPrice), result);
     }
   }
 
@@ -157,7 +157,7 @@ public class ReturnShipmentUtilsTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void resolvePriceFromSourceInvoiceLine_rowWithNullPrice_returnsFallback()
+  public void resolvePriceFromSourceInvoiceLine_rowWithNullPrice_returnsEmpty()
       throws Exception {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -173,10 +173,10 @@ public class ReturnShipmentUtilsTest {
       // The list has one element but it is null
       when(query.list()).thenReturn(Collections.singletonList(null));
 
-      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
-          "line-002", "unitPrice", FALLBACK);
+      Optional<BigDecimal> result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
+          "line-002", "unitPrice", Collections.<String>emptyList());
 
-      assertEquals(FALLBACK, result);
+      assertEquals(Optional.empty(), result);
     }
   }
 
@@ -184,7 +184,7 @@ public class ReturnShipmentUtilsTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void resolvePriceFromSourceInvoiceLine_emptyList_returnsFallback() throws Exception {
+  public void resolvePriceFromSourceInvoiceLine_emptyList_returnsEmpty() throws Exception {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -198,17 +198,17 @@ public class ReturnShipmentUtilsTest {
       when(query.setMaxResults(anyInt())).thenReturn(query);
       when(query.list()).thenReturn(Collections.<BigDecimal>emptyList());
 
-      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
-          "line-003", "unitPrice", FALLBACK);
+      Optional<BigDecimal> result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
+          "line-003", "unitPrice", Collections.<String>emptyList());
 
-      assertEquals(FALLBACK, result);
+      assertEquals(Optional.empty(), result);
     }
   }
 
   // ── Case 5: session throws → fallback (log warn, no rethrow) ────────────────
 
   @Test
-  public void resolvePriceFromSourceInvoiceLine_sessionThrows_returnsFallbackWithoutRethrow() {
+  public void resolvePriceFromSourceInvoiceLine_sessionThrows_returnsEmptyWithoutRethrow() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -219,18 +219,18 @@ public class ReturnShipmentUtilsTest {
           .thenThrow(new RuntimeException("HibernateException: session closed"));
 
       // Must not throw — exception is swallowed and fallback is returned
-      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
-          "line-004", "unitPrice", FALLBACK);
+      Optional<BigDecimal> result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
+          "line-004", "unitPrice", Collections.<String>emptyList());
 
-      assertEquals(FALLBACK, result);
+      assertEquals(Optional.empty(), result);
     }
   }
 
-  // ── Edge: row with price = 0 → treated as "no price" → fallback ─────────────
+  // ── Edge: row with price = 0 → a real price (free product), present ─────────────
 
   @Test
   @SuppressWarnings("unchecked")
-  public void resolvePriceFromSourceInvoiceLine_rowWithZeroPrice_returnsFallback()
+  public void resolvePriceFromSourceInvoiceLine_rowWithZeroPrice_isAPresentPrice()
       throws Exception {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -245,10 +245,10 @@ public class ReturnShipmentUtilsTest {
       when(query.setMaxResults(anyInt())).thenReturn(query);
       when(query.list()).thenReturn(Collections.singletonList(BigDecimal.ZERO));
 
-      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
-          "line-005", "unitPrice", FALLBACK);
+      Optional<BigDecimal> result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
+          "line-005", "unitPrice", Collections.<String>emptyList());
 
-      assertEquals(FALLBACK, result);
+      assertEquals(Optional.of(BigDecimal.ZERO), result);
     }
   }
 
@@ -2578,6 +2578,285 @@ public class ReturnShipmentUtilsTest {
     }
   }
 
+  // ── ETP-5712 point 7: a real 0 on the invoice line being rectified is a price ──────────────
+
+  /**
+   * Routes the two price lookups by their HQL: the source invoice line ({@code InvoiceLine}) and
+   * the price list ({@code PricingProductPrice}). {@code null} rows read as "no row at all".
+   * Returns the source-line query so a test can inspect what it was asked.
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private static Query stubPriceLookups(OBDal dal, List<BigDecimal> sourceRows,
+      List<BigDecimal> priceListRows) {
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    Query sourceQuery = mock(Query.class);
+    when(sourceQuery.setParameter(anyString(), any())).thenReturn(sourceQuery);
+    when(sourceQuery.setParameterList(anyString(), any(java.util.Collection.class)))
+        .thenReturn(sourceQuery);
+    when(sourceQuery.setMaxResults(anyInt())).thenReturn(sourceQuery);
+    when(sourceQuery.list()).thenReturn(sourceRows == null ? Collections.<BigDecimal>emptyList()
+        : sourceRows);
+    Query listQuery = mock(Query.class);
+    when(listQuery.setParameter(anyString(), any())).thenReturn(listQuery);
+    when(listQuery.setMaxResults(anyInt())).thenReturn(listQuery);
+    when(listQuery.list()).thenReturn(priceListRows == null ? Collections.<BigDecimal>emptyList()
+        : priceListRows);
+    when(session.createQuery(argThat((String hql) -> hql != null && hql.contains("FROM InvoiceLine")),
+        eq(BigDecimal.class))).thenReturn(sourceQuery);
+    when(session.createQuery(argThat((String hql) -> hql != null && hql.contains("PricingProductPrice")),
+        eq(BigDecimal.class))).thenReturn(listQuery);
+    return sourceQuery;
+  }
+
+  private static Invoice headerWithPriceList() {
+    Invoice header = mock(Invoice.class);
+    org.openbravo.model.pricing.pricelist.PriceList priceList =
+        mock(org.openbravo.model.pricing.pricelist.PriceList.class);
+    when(priceList.getId()).thenReturn("pl-1");
+    when(header.getPriceList()).thenReturn(priceList);
+    return header;
+  }
+
+  private static ShipmentInOutLine originLine(String id, String productName) {
+    ShipmentInOutLine orig = mock(ShipmentInOutLine.class);
+    Product product = mock(Product.class);
+    when(product.getName()).thenReturn(productName);
+    when(orig.getProduct()).thenReturn(product);
+    when(orig.getId()).thenReturn(id);
+    return orig;
+  }
+
+  /**
+   * A product deliberately invoiced at 0 can be refunded: the 0 on the completed invoice line
+   * being rectified is the price, not "no price". The order line and the price list say nothing.
+   */
+  @Test
+  public void refuseIfUnpriced_zeroOnTheRectifiedInvoiceLine_isNotRefused() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubPriceLookups(dal, Collections.singletonList(BigDecimal.ZERO), null);
+
+      assertNull(ReturnInvoiceSupport.refuseIfUnpriced(
+          Collections.singletonList(returnLine("Muestra", "-1", originLine("sl-1", "Muestra"))),
+          headerWithPriceList(), probePricing(Collections.<String, String>emptyMap())));
+    }
+  }
+
+  /**
+   * A 0 that only the order line (the handler's answer) or the price list produces is NOT a
+   * found price: with no invoice line behind it the document is still refused.
+   */
+  @Test
+  public void refuseIfUnpriced_zeroOnlyOnOrderLineAndPriceList_isStillRefused() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubPriceLookups(dal, null, Collections.singletonList(BigDecimal.ZERO));
+
+      NeoResponse refused = ReturnInvoiceSupport.refuseIfUnpriced(
+          Collections.singletonList(returnLine("Muestra", "-1", originLine("sl-1", "Muestra"))),
+          headerWithPriceList(), probePricing(Collections.<String, String>emptyMap()));
+
+      assertEquals(422, refused.getHttpStatus());
+      assertEquals("returnInvoiceWithoutAmount",
+          refused.getBody().getJSONObject("error").getString("code"));
+    }
+  }
+
+  /** An invoice line with a real price still wins over an order line priced at 0. */
+  @Test
+  public void refuseIfUnpriced_orderLineAtZeroButInvoiceLinePriced_isNotRefused() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubPriceLookups(dal, Collections.singletonList(new BigDecimal("7.00")), null);
+
+      assertNull(ReturnInvoiceSupport.refuseIfUnpriced(
+          Collections.singletonList(returnLine("Sal", "-1", originLine("sl-1", "Sal"))),
+          headerWithPriceList(), probePricing(Collections.<String, String>emptyMap())));
+    }
+  }
+
+  /** The refusal text no longer asks to price a completed invoice; the code and list stay. */
+  @Test
+  public void withoutAmountMessage_describesNoPriceSource_andKeepsTheProductList() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubPriceLookups(dal, null, null);
+
+      NeoResponse refused = ReturnInvoiceSupport.refuseIfUnpriced(Arrays.asList(
+          returnLine("Sal", "-1", originLine("sl-1", "Sal")), returnLine("Pan", "-1", originLine("sl-2", "Pan"))),
+          headerWithPriceList(), probePricing(Collections.<String, String>emptyMap()));
+
+      String message = refused.getBody().getJSONObject("error").getString("message");
+      assertTrue(message, message.contains("Sal, Pan"));
+      assertTrue(message, message.contains("no price source"));
+      assertFalse(message, message.contains("Set a price on the invoice being rectified"));
+    }
+  }
+
+  /**
+   * Mixed document: the free line is built at 0 (net 0, written explicitly), the priced one at its
+   * price, in the same document; nothing is refused.
+   */
+  @Test
+  public void addReturnInvoiceLines_freeAndPricedLines_areBothBuilt() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubPriceLookups(dal, Collections.singletonList(BigDecimal.ZERO), null);
+      Invoice header = headerWithPriceList();
+      TaxRate tax = mock(TaxRate.class);
+      InvoiceLine freeLine = mock(InvoiceLine.class);
+      when(freeLine.getUnitPrice()).thenReturn(BigDecimal.ZERO);
+      when(freeLine.getTax()).thenReturn(tax);
+      InvoiceLine pricedLine = mock(InvoiceLine.class);
+      when(pricedLine.getUnitPrice()).thenReturn(new BigDecimal("2.50"));
+      when(pricedLine.getTax()).thenReturn(tax);
+      CreateDraftInvoiceHandler handler = mock(CreateDraftInvoiceHandler.class);
+      ShipmentInOutLine free = returnLine("Muestra", "-1", originLine("sl-1", "Muestra"));
+      ShipmentInOutLine priced = returnLine("Agua", "-2", originLine("sl-2", "Agua"));
+      ShipmentInOutLine freeOrigin = free.getCanceledInoutLine();
+      ShipmentInOutLine pricedOrigin = priced.getCanceledInoutLine();
+      when(handler.createShipmentInvoiceLine(any(), eq(freeOrigin), any(), anyLong()))
+          .thenReturn(freeLine);
+      when(handler.createShipmentInvoiceLine(any(), eq(pricedOrigin), any(), anyLong()))
+          .thenReturn(pricedLine);
+
+      assertNull(ReturnInvoiceSupport.refuseIfUnpriced(Arrays.asList(free, priced), header, handler));
+      ReturnInvoiceSupport.addReturnInvoiceLines(header, Arrays.asList(free, priced), handler);
+
+      verify(freeLine).setUnitPrice(BigDecimal.ZERO);
+      verify(freeLine).setLineNetAmount(argThat((BigDecimal v) -> v.signum() == 0));
+      verify(dal).save(freeLine);
+      verify(pricedLine, never()).setUnitPrice(any());
+      verify(dal).save(pricedLine);
+    }
+  }
+
+  /**
+   * When the completion rolled the draft back (rollback-only transaction), the invoice cannot be
+   * read back: that is a clear error, not an IllegalArgumentException from {@code refresh(null)}.
+   */
+  @Test
+  public void finalizeReturnInvoice_invoiceGoneAfterCompletion_throwsAClearError() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<InvoiceCompletionService> completion =
+            Mockito.mockStatic(InvoiceCompletionService.class);
+        MockedStatic<ReturnInvoiceSupport> support =
+            Mockito.mockStatic(ReturnInvoiceSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      when(dal.get(Invoice.class, "inv-1")).thenReturn(null);
+      support.when(() -> ReturnInvoiceSupport.linkRectifiedInvoices(any(), any()))
+          .thenAnswer(inv -> null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-1");
+      CreateDraftInvoiceHandler handler = mock(CreateDraftInvoiceHandler.class);
+      when(handler.getSupport()).thenReturn(mock(InvoiceFromOrderSupport.class));
+
+      try {
+        ReturnInvoiceSupport.finalizeReturnInvoice(invoice, Collections.<ShipmentInOutLine>emptyList(),
+            handler, Collections.singletonList("orig-1"), null);
+        fail("expected a clear error");
+      } catch (IllegalStateException e) {
+        assertTrue(e.getMessage(), e.getMessage().contains("inv-1")
+            && e.getMessage().contains("could not be read back"));
+      }
+      verify(dal, never()).refresh(any());
+    }
+  }
+
+  /** A bad HQL (QueryException) is a programming error: it propagates; any other failure falls through. */
+  @Test
+  public void priceLookups_queryExceptionPropagates_otherFailuresFallThrough() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      when(session.createQuery(anyString(), eq(BigDecimal.class)))
+          .thenThrow(new org.hibernate.QueryException("could not resolve property: created"));
+      try {
+        ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine("sl-1", "unitPrice", null);
+        fail("source lookup must not swallow a QueryException");
+      } catch (org.hibernate.QueryException expected) {
+        // propagated
+      }
+      try {
+        ReturnInvoiceSupport.resolvePriceFromPriceList("p", "pl", "standardPrice", BigDecimal.ZERO);
+        fail("price list lookup must not swallow a QueryException");
+      } catch (org.hibernate.QueryException expected) {
+        // propagated
+      }
+
+      when(session.createQuery(anyString(), eq(BigDecimal.class)))
+          .thenThrow(new RuntimeException("session closed"));
+      assertEquals(Optional.empty(),
+          ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine("sl-1", "unitPrice", null));
+      assertEquals(new BigDecimal("3"),
+          ReturnInvoiceSupport.resolvePriceFromPriceList("p", "pl", "standardPrice", new BigDecimal("3")));
+    }
+  }
+
+  /**
+   * A free line (0 from the rectified invoice line) whose tax cannot be determined is not built:
+   * the tax guard throws instead of saving a line without tax.
+   */
+  @Test
+  public void buildAndSaveInvoiceLine_freeLineWithoutTax_throwsTheTaxGuard() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubPriceLookups(dal, Collections.singletonList(BigDecimal.ZERO), null);
+      Invoice header = headerWithPriceList();
+      InvoiceLine freeLine = mock(InvoiceLine.class);
+      when(freeLine.getUnitPrice()).thenReturn(BigDecimal.ZERO);
+      when(freeLine.getTax()).thenReturn(null);
+      CreateDraftInvoiceHandler handler = mock(CreateDraftInvoiceHandler.class);
+      when(handler.createShipmentInvoiceLine(any(), any(), any(), anyLong())).thenReturn(freeLine);
+      ShipmentInOutLine free = returnLine("Muestra", "-1", originLine("sl-1", "Muestra"));
+
+      try {
+        ReturnInvoiceSupport.buildAndSaveInvoiceLine(header, free, new BigDecimal("-1"), 2, 10L,
+            handler, Collections.<String>emptyList());
+        fail("expected the tax guard");
+      } catch (OBException e) {
+        assertTrue(e.getMessage(), e.getMessage().contains("Cannot determine tax rate for product 'Muestra'"));
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /**
+   * With the invoices being rectified known, the source price is looked up on THOSE invoices only;
+   * without them the lookup stays unconstrained (latest completed invoice line of the shipment line).
+   */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public void sourcePriceLookup_isConstrainedToTheRectifiedInvoices_onlyWhenKnown() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Query sourceQuery = stubPriceLookups(dal, Collections.singletonList(BigDecimal.ZERO), null);
+      List<ShipmentInOutLine> lines = Collections.singletonList(
+          returnLine("Muestra", "-1", originLine("sl-1", "Muestra")));
+      CreateDraftInvoiceHandler handler = probePricing(Collections.<String, String>emptyMap());
+
+      assertNull(ReturnInvoiceSupport.refuseIfUnpriced(lines, headerWithPriceList(), handler));
+      verify(sourceQuery, never()).setParameterList(anyString(), any(java.util.Collection.class));
+
+      assertNull(ReturnInvoiceSupport.refuseIfUnpriced(lines, headerWithPriceList(), handler,
+          Arrays.asList("inv-9")));
+      verify(sourceQuery, atLeastOnce()).setParameterList("invoiceIds", Arrays.asList("inv-9"));
+    }
+  }
+
   /** The previous rectificativas are reported as {id, documentNo, documentStatus}, nothing more. */
   @Test
   public void fetchPreviousReturnInvoices_reportsIdNumberAndStatusOfEachOne() throws Exception {
@@ -2597,6 +2876,81 @@ public class ReturnShipmentUtilsTest {
       assertEquals("CO", previous.getJSONObject(0).getString("documentStatus"));
       assertEquals(3, previous.getJSONObject(1).length());
       assertEquals("DR", previous.getJSONObject(1).getString("documentStatus"));
+    }
+  }
+
+  private static final String EXISTING_SENTENCE =
+      "A rectificative invoice already exists for this return document.";
+
+  private static JSONArray onePrevious() throws Exception {
+    return new JSONArray().put(new JSONObject().put("id", "prev-1").put("documentNo", "REC-1")
+        .put("documentStatus", "CO"));
+  }
+
+  /** ETP-5712: a return that already has a rectificativa is refused 409 with the SPA's exact sentence. */
+  @Test
+  public void refuseIfAlreadyInvoiced_existingOneWithoutTheFlag_is409WithTheExactSentence()
+      throws Exception {
+    for (JSONObject body : new JSONObject[] {null, new JSONObject(),
+        new JSONObject().put("allowDuplicate", false)}) {
+      NeoResponse refused = ReturnInvoiceSupport.refuseIfAlreadyInvoiced(body, onePrevious());
+
+      assertEquals(409, refused.getHttpStatus());
+      JSONObject error = refused.getBody().getJSONObject("error");
+      assertEquals(EXISTING_SENTENCE, error.getString("message"));
+      assertEquals("returnInvoiceAlreadyExists", error.getString("code"));
+      assertEquals(409, error.getInt("status"));
+      assertTrue(error.getString("hint"), error.getString("hint").contains("allowDuplicate:true"));
+      assertEquals("prev-1", error.getJSONArray("previousReturnInvoices").getJSONObject(0)
+          .getString("id"));
+    }
+  }
+
+  /** Only the JSON boolean true lifts the refusal. */
+  @Test
+  public void refuseIfAlreadyInvoiced_allowDuplicateTrue_letsItThrough() throws Exception {
+    assertNull(ReturnInvoiceSupport.refuseIfAlreadyInvoiced(
+        new JSONObject().put("allowDuplicate", true), onePrevious()));
+  }
+
+  /** A string, a number or null is never read as true, and never fails open: 422, nothing created. */
+  @Test
+  public void refuseIfAlreadyInvoiced_nonBooleanAllowDuplicate_isNeverAcceptedAsTrue()
+      throws Exception {
+    Object[] wrong = {"true", "yes", 1, 0, JSONObject.NULL, new JSONArray()};
+    for (Object value : wrong) {
+      JSONObject body = new JSONObject().put("allowDuplicate", value);
+      for (JSONArray previous : new JSONArray[] {onePrevious(), new JSONArray()}) {
+        NeoResponse refused = ReturnInvoiceSupport.refuseIfAlreadyInvoiced(body, previous);
+        assertEquals("allowDuplicate=" + value, 422, refused.getHttpStatus());
+      }
+    }
+  }
+
+  /** The first rectificativa of a return is unaffected, whatever the flag says. */
+  @Test
+  public void refuseIfAlreadyInvoiced_noPreviousOne_isNeverRefused() throws Exception {
+    assertNull(ReturnInvoiceSupport.refuseIfAlreadyInvoiced(null, new JSONArray()));
+    assertNull(ReturnInvoiceSupport.refuseIfAlreadyInvoiced(new JSONObject(), null));
+    assertNull(ReturnInvoiceSupport.refuseIfAlreadyInvoiced(
+        new JSONObject().put("allowDuplicate", false), new JSONArray()));
+  }
+
+  /** A VOIDED earlier rectificativa does not count: the lookup the guard reads excludes DocStatus VO. */
+  @Test
+  public void fetchPreviousReturnInvoices_excludesVoidedInvoices() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList(),
+          Collections.<String>emptyList(), Collections.<String[]>emptyList());
+
+      JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices("ret-1");
+
+      assertEquals(0, previous.length());
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      assertTrue(sql.getValue(), sql.getValue().contains("i.DocStatus != 'VO'"));
     }
   }
 
