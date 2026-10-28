@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * The account rules shared by {@code /register} and the signup API (ETP-5847): the address states
@@ -83,6 +84,12 @@ class AccountRegistrationServiceTest {
     dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(account);
 
     assertEquals(AccountRegistrationService.EmailStatus.REGISTERED, service.emailStatus(EMAIL));
+  }
+
+  @Test
+  void theSupportAddressIsRegisteredEvenThoughItsAccountIsHidden() {
+    assertEquals(AccountRegistrationService.EmailStatus.REGISTERED,
+        service.emailStatus(SupportAccessGuard.SUPPORT_ACCOUNT_EMAIL));
   }
 
   @Test

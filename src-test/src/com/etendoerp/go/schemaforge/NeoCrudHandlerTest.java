@@ -1952,6 +1952,39 @@ class NeoCrudHandlerTest {
       }
     }
 
+    /**
+     * ETP-5953: a captured unique violation keeps core's translated wording in every language.
+     * The text guard only recognises the English "must be unique", so under a Spanish session the
+     * classification used to win and replaced core's sentence with the English
+     * {@code DUPLICATE_KEY_ERROR}, which the SPA cannot map to its friendly duplicate message.
+     */
+    @Test
+    @DisplayName("A captured duplicate keeps core's translated wording, with its code, in any language")
+    void capturedDuplicateKeepsCoreWordingInAnyLanguage() throws Exception {
+      String spanish = "Ya existe un/a Categoría del producto con el mismo (Entidad, Organización,"
+          + " Identificador). (Entidad, Organización, Identificador) debe ser único. Cambie los"
+          + " valores introducidos.";
+      JSONObject classification = new JSONObject().put("status", 409)
+          .put("code", "duplicate_key")
+          .put("message", "A record with this value already exists. This value must be unique.");
+      JSONObject response = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE,
+          new JSONObject().put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_FAILURE)
+              .put(JsonConstants.RESPONSE_ERROR, new JSONObject().put("message", spanish)
+                  .put("neoClassification", classification)));
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+          mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        messages.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        NeoResponse result = invokeCheckResponse(response);
+
+        assertEquals(HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals(spanish, error.getString("message"));
+        assertEquals("duplicate_key", error.getString("code"));
+      }
+    }
+
     @Test
     @DisplayName("Returns 500 (not 409) when translated message does not report a duplicate key)")
     void returns500ForNonDuplicateFailureMessage() throws Exception {

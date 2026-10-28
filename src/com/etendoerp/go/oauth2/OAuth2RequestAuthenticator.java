@@ -23,6 +23,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -31,6 +32,7 @@ import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.SessionRoleRevokedException;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -89,6 +91,11 @@ final class OAuth2RequestAuthenticator {
         throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN,
             "Session has no environment selected");
       }
+      // ETP-5351 (T5): an authorization code becomes tokens that outlive the support session.
+      if (SupportAccessGuard.isSupportSession(sessionRecord)) {
+        throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN,
+            SupportAccessGuard.MESSAGE_FORBIDDEN);
+      }
       // An OAuth client authorized now keeps the role for as long as its tokens live, so it must
       // get the role the user holds today, not a revoked one the session was opened with.
       try {
@@ -106,14 +113,33 @@ final class OAuth2RequestAuthenticator {
     DecodedJWT jwt = authenticateJwt(authorizeRequest.jwtToken);
     String userId = jwt.getClaim("user").asString();
     String roleId = jwt.getClaim("role").asString();
+    Claim clientClaim = jwt.getClaim("client");
+    String clientId = clientClaim == null ? null : clientClaim.asString();
+    requireCredentialMintingAllowed(userId, clientId);
     // ETP-5270 — same reason as the cookie branch above, and a JWT cannot be rebound: refuse a
     // role revoked since the token was issued instead of handing it to the client.
     try {
-      sessionRoleReconciler.requireHeldRole(userId, roleId, jwt.getClaim("client").asString());
+      sessionRoleReconciler.requireHeldRole(userId, roleId, clientId);
     } catch (SessionRoleRevokedException e) {
       throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN, e.getMessage());
     }
     return new AuthorizePrincipal(userId, roleId);
+  }
+
+  /**
+   * ETP-5351 (T5): refuses (403) a credential that would outlive the session — an API key secret,
+   * an authorization code — when the acting user is the client's "Soporte Etendo" user.
+   *
+   * @param userId   the acting {@code AD_User_ID}
+   * @param clientId the {@code AD_Client_ID} it acts in
+   * @throws OAuth2Servlet.AuthException when the user is the support user
+   */
+  static void requireCredentialMintingAllowed(String userId, String clientId)
+      throws OAuth2Servlet.AuthException {
+    if (SupportAccessGuard.isSupportUser(userId, clientId)) {
+      throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN,
+          SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
   }
 
   /** The authenticated user/role pair resolved for an authorize request. */

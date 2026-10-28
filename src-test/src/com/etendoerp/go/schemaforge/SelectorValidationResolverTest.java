@@ -20,11 +20,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.HashMap;
+import java.util.Collections;
 import java.util.Map;
 
 import org.junit.jupiter.api.DisplayName;
@@ -33,10 +39,20 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedStatic;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.domain.Validation;
+
+import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 /**
- * Unit tests for the pure utility methods of {@link SelectorValidationResolver}.
- * Tests substituteValidationParams, quotedCsv, and lookupParamValue via reflection.
+ * Unit tests for {@link SelectorValidationResolver}: the pure utility methods (via reflection)
+ * and how a resolved validation rule composes with the rest of the selector query.
+ *
+ * @covers com.etendoerp.go.schemaforge.SelectorValidationResolver
  */
 class SelectorValidationResolverTest {
 
@@ -341,6 +357,111 @@ class SelectorValidationResolverTest {
           "IsBillTo='Y' static clause must be preserved: " + result);
       assertTrue(result.contains("C_BPartner_Location.IsActive='Y'"),
           "IsActive='Y' static clause must be preserved: " + result);
+    }
+  }
+  @Nested
+  @DisplayName("resolveValidationFilter — the rule is one group in the selector query")
+  class RuleGrouping {
+
+    /** AD rule 800001 (header C_Project_ID): a top-level OR keeps the current project selectable. */
+    private static final String PROJECT_RULE = "C_Project.projectstatus in ('OP', 'OR') and "
+        + "(C_Project.c_bpartner_id=@C_BPartner_ID@ or '@IsSOTrx@'='N') "
+        + "or C_Project.c_project_id = @c_project_id@";
+
+    /**
+     * Resolves {@code code} as the validation rule of a column, with a context whose ids are all
+     * null and an entity unknown to the model, so the rule text is only param-substituted.
+     */
+    private String resolve(String code, Map<String, String> contextParams) {
+      Validation validation = mock(Validation.class);
+      when(validation.getValidationCode()).thenReturn(code);
+      Column column = mock(Column.class);
+      when(column.getValidation()).thenReturn(validation);
+      ModelProvider modelProvider = mock(ModelProvider.class);
+      when(modelProvider.getEntity(anyString())).thenReturn(null);
+      when(modelProvider.getEntityByTableName(anyString())).thenReturn(null);
+      try (MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+        mp.when(ModelProvider::getInstance).thenReturn(modelProvider);
+        ctx.when(OBContext::getOBContext).thenReturn(mock(OBContext.class, RETURNS_DEEP_STUBS));
+        return SelectorValidationResolver.resolveValidationFilter(column, "Project", contextParams);
+      }
+    }
+
+    /** True when the first '(' of {@code s} closes at its last character. */
+    private boolean isOneParenthesizedGroup(String s) {
+      if (!s.startsWith("(") || !s.endsWith(")")) {
+        return false;
+      }
+      int depth = 0;
+      for (int i = 0; i < s.length(); i++) {
+        depth += s.charAt(i) == '(' ? 1 : s.charAt(i) == ')' ? -1 : 0;
+        if (depth == 0 && i < s.length() - 1) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /** True when {@code s} has an OR outside every parenthesis and string literal. */
+    private boolean hasTopLevelOr(String s) {
+      String upper = s.toUpperCase();
+      int depth = 0;
+      boolean inLiteral = false;
+      for (int i = 0; i < upper.length(); i++) {
+        char c = upper.charAt(i);
+        if (c == '\'') {
+          inLiteral = !inLiteral;
+        } else if (!inLiteral && c == '(') {
+          depth++;
+        } else if (!inLiteral && c == ')') {
+          depth--;
+        } else if (!inLiteral && depth == 0 && upper.startsWith(" OR ", i)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    @Test
+    @DisplayName("a rule with a top-level OR is wrapped as a single group")
+    void wrapsRuleWithTopLevelOr() {
+      String filter = resolve(PROJECT_RULE, Collections.singletonMap("IsSOTrx", "N"));
+
+      assertTrue(isOneParenthesizedGroup(filter), "Rule must be one group: " + filter);
+      assertTrue(filter.contains("'N'='N'"), "IsSOTrx must be substituted: " + filter);
+    }
+
+    @Test
+    @DisplayName("a rule made only of ANDs is wrapped too, with the same meaning")
+    void wrapsAndOnlyRule() {
+      assertEquals("(C_Project.projectstatus = 'OP' AND C_Project.isactive = 'Y')",
+          resolve("C_Project.projectstatus = 'OP' and C_Project.isactive = 'Y'",
+              Collections.emptyMap()));
+    }
+
+    @Test
+    @DisplayName("the search text filters every branch of a rule with a top-level OR")
+    void searchAppliesOutsideTheOrGroup() {
+      String filter = resolve(PROJECT_RULE, Collections.singletonMap("IsSOTrx", "N"));
+      SelectorMeta meta = new SelectorMeta.Builder("Project", "name")
+          .isRich(true)
+          .searchableProperties(Collections.singletonList(SearchableFragment.ofRelativePath("name")))
+          .build();
+
+      String where;
+      try (MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+        mp.when(ModelProvider::getInstance).thenReturn(mock(ModelProvider.class));
+        ctx.when(OBContext::getOBContext).thenReturn(null);
+        where = SelectorQueryBuilder.buildRichQueryWhereClause(meta, "beta", filter, "e", null)
+            .getHql();
+      }
+
+      assertEquals("as e where " + filter
+          + " AND (lower(COALESCE(cast(e.name as string), '')) LIKE :search)", where);
+      assertFalse(hasTopLevelOr(where.substring("as e where ".length())),
+          "An OR outside parentheses would let rows skip the search: " + where);
     }
   }
 }
