@@ -32,12 +32,14 @@ import org.openbravo.model.ad.access.UserRoles;
 
 /**
  * ETP-5351 (L2) — cuts an operator's open support accesses the moment they lose the right to hold
- * them: the AD_User is deactivated or deleted, the "Soporte Etendo GO" role is removed or
+ * them: the AD_User is deactivated (deleting one is blocked in practice by the foreign keys of the
+ * access history), the "Soporte Etendo GO" role is removed or
  * deactivated on the user, or the role itself is deactivated. Without it a session outlives the
  * change until its expiry (up to 480 minutes).
  *
- * <p>Runs inside the saving transaction: if Classic rolls the save back the sessions stay revoked,
- * which fails safe. Changes made outside the DAL (direct SQL, a modulescript) are not seen; the
+ * <p>Runs on the saving transaction's own connection: if Classic rolls the save back, the closing
+ * and the revocation are rolled back with it, which is consistent (the role change did not
+ * happen either). Changes made outside the DAL (direct SQL, a modulescript) are not seen; the
  * operator-role check at {@code issue} still stops new accesses.</p>
  */
 public class SupportOperatorRevocationObserver extends EntityPersistenceEventObserver {

@@ -135,7 +135,8 @@ public class JdbcSupportAccessStore implements SupportAccessStore {
       + "SET is_revoked = 'Y', updated = now(), updatedby = '0' "
       + "WHERE is_revoked = 'N' AND etgo_support_access_id IN ("
       + "SELECT a.etgo_support_access_id FROM etgo_support_access a "
-      + "WHERE a.ended_at IS NOT NULL AND (?::text IS NULL OR a.operator_user_id = ?))";
+      + "WHERE a.end_reason = ? AND a.ended_at = ? "
+      + "AND (?::text IS NULL OR a.operator_user_id = ?))";
 
   private static final String CLIENT_NAME_SQL = "SELECT name FROM ad_client WHERE ad_client_id = ?";
 
@@ -314,8 +315,10 @@ public class JdbcSupportAccessStore implements SupportAccessStore {
         closed = ps.executeUpdate();
       }
       try (PreparedStatement ps = connection.prepareStatement(REVOKE_SESSIONS_OF_OPERATOR_SQL)) {
-        ps.setString(1, operatorUserId);
-        ps.setString(2, operatorUserId);
+        ps.setString(1, SupportEndReason.REVOKED.getCode());
+        ps.setTimestamp(2, toTimestamp(now));
+        ps.setString(3, operatorUserId);
+        ps.setString(4, operatorUserId);
         ps.executeUpdate();
       }
       return closed;
