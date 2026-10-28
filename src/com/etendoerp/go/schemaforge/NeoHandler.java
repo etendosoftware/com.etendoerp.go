@@ -218,6 +218,29 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares the DAL property names this customization requires the caller to send on create
+   * although nothing generic says so — AD does not mark the column mandatory, or
+   * {@code etendo_defaults} answers a value for it (ETP-5473).
+   *
+   * <p><b>Why the customization declares it.</b> {@code etendo_schema(view:"create")} builds its
+   * {@code required} list from AD mandatoriness and demotes to {@code optional} with
+   * {@code serverDefaulted:true} every field {@code etendo_defaults} resolves. A default the
+   * customization offers only as a <em>suggestion</em> for a form — while its own pre-hook refuses a
+   * create that omits the field — therefore reaches the agent as "the server fills this", and the
+   * agent's first create is refused. Only the customization knows its pre-hook enforces the field,
+   * so it is the one that says so; shared code never names the entity.</p>
+   *
+   * <p>Reader: {@code etendo_schema} flags the names {@code userRequired:true} (every view) and
+   * {@code view:"create"} lists them under {@code required}, never {@code serverDefaulted}. It is a
+   * declaration of what the pre-hook already enforces; it adds no check of its own.</p>
+   *
+   * @return the property names a create must carry; empty by default
+   */
+  default Set<String> callerRequiredCreateFields() {
+    return Collections.emptySet();
+  }
+
+  /**
    * Fills create-body defaults that this customization can derive from the body alone, on the
    * channels whose mandatory-field pre-check runs <b>before</b> the pre-hook (ETP-5710).
    *

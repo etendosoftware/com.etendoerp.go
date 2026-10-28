@@ -142,7 +142,7 @@ final class McpAttachmentTools {
    * against the extension allow-list BEFORE the link exists, so a doomed upload fails here, with
    * the policy's own message, and not after the bytes have been sent.</p>
    *
-   * <p>With {@code staged_document_id} (ETP-5715) there is no link at all: the PDF the user already
+   * <p>With {@code staged_document_id} (ETP-5715) there is no link at all: the document the user already
    * uploaded for extraction is attached to the document right away
    * ({@link McpStagedAttachment}), so it is never uploaded twice.</p>
    */
@@ -150,7 +150,7 @@ final class McpAttachmentTools {
     String stagedId = StringUtils.trimToNull(
         McpArgumentUtils.optionalString(args, McpOcrTools.PARAM_STAGED_DOCUMENT_ID));
     if (stagedId != null) {
-      // ETP-5715: the PDF the user already uploaded for extraction is attached as it is.
+      // ETP-5715: the document the user already uploaded for extraction is attached as it is.
       return McpStagedAttachment.attach(authorize(args, true).target, stagedId,
           args.optBoolean(PARAM_MAIN, false));
     }

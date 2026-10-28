@@ -21,7 +21,6 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Locale;
 import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
@@ -38,27 +37,15 @@ import com.etendoerp.go.schemaforge.NeoStagedDocuments.Staged;
  * {@code etendo_request_document_extraction_upload}, run by {@link NeoAttachmentUploadEndpoint}.
  *
  * <p>The file goes through the same policy as an attachment — 10 MB, extension, magic bytes — and, on
- * top of it, must be a PDF: that is the only kind the extraction reads. The document is kept under the
+ * top of it, must be a type the extraction reads (a PDF or a JPG, PNG or WEBP image, see
+ * {@link NeoAttachmentPolicy#isOcrDocument}). The document is kept under the
  * staging directory of {@link NeoStagedDocuments}, and nothing is written to the database.</p>
  */
 final class NeoStagedUpload {
 
-  /** The only extension a staged document may have. */
-  static final String PDF_EXTENSION = ".pdf";
-
   private static final String KEY_NAME = "name";
 
   private NeoStagedUpload() {
-  }
-
-  /**
-   * Whether a file name is a PDF's.
-   *
-   * @param fileName the name
-   * @return {@code true} when it ends in {@value #PDF_EXTENSION}, in any case
-   */
-  static boolean isPdfName(String fileName) {
-    return fileName != null && fileName.toLowerCase(Locale.ROOT).endsWith(PDF_EXTENSION);
   }
 
   /**
@@ -72,8 +59,10 @@ final class NeoStagedUpload {
   static NeoResponse store(PendingUpload ticket, HttpServletRequest request) throws IOException {
     String name = ticket.getSubject().getFileName();
     String id = ticket.getSubject().getStagedDocumentId();
-    String rejection = isPdfName(name) ? NeoAttachmentPolicy.validateMetadata(name,
-        request.getContentLengthLong()) : "Only a PDF can be staged for extraction.";
+    String rejection = NeoAttachmentPolicy.isOcrDocument(name)
+        ? NeoAttachmentPolicy.validateMetadata(name, request.getContentLengthLong())
+        : "Only a PDF or an image (" + String.join(", ", NeoAttachmentPolicy.ocrExtensions())
+            + ") can be staged for extraction.";
     if (rejection != null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, rejection);
     }
