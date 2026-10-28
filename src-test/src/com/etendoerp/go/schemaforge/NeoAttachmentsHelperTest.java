@@ -154,6 +154,104 @@ public class NeoAttachmentsHelperTest {
     when(query.list()).thenReturn(Collections.singletonList(tableId));
   }
 
+  /** The upload looks the stored row up afterwards (data-type correction): nothing found. */
+  @SuppressWarnings("unchecked")
+  private static void stubNoUploadedAttachment(OBDal dal) {
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(null);
+  }
+
+  // ── updateDataType (ETP-5735): native, savepoint-guarded data type write ─────
+
+  private static final class DataTypeWork {
+    final java.sql.Connection connection = mock(java.sql.Connection.class);
+    final java.sql.PreparedStatement statement = mock(java.sql.PreparedStatement.class);
+    final java.sql.Savepoint savepoint = mock(java.sql.Savepoint.class);
+    final OBDal dal = mock(OBDal.class);
+    final Session session = mock(Session.class);
+
+    @SuppressWarnings("unchecked")
+    DataTypeWork() throws Exception {
+      when(dal.getSession()).thenReturn(session);
+      when(connection.setSavepoint()).thenReturn(savepoint);
+      when(connection.prepareStatement(anyString())).thenReturn(statement);
+      when(session.doReturningWork(any())).thenAnswer(invocation -> {
+        org.hibernate.jdbc.ReturningWork<Object> work = invocation.getArgument(0);
+        return work.execute(connection);
+      });
+    }
+  }
+
+  private static boolean runUpdateDataType(DataTypeWork w, String id, String type) {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(w.dal);
+      return NeoAttachmentsHelper.updateDataType(id, type);
+    }
+  }
+
+  @Test
+  public void updateDataTypeWritesAndReleasesTheSavepoint() throws Exception {
+    DataTypeWork w = new DataTypeWork();
+    when(w.statement.executeUpdate()).thenReturn(1);
+
+    assertTrue(runUpdateDataType(w, "ATT1", "image/webp"));
+
+    verify(w.statement).setString(1, "image/webp");
+    verify(w.statement).setString(2, "ATT1");
+    verify(w.connection).releaseSavepoint(w.savepoint);
+    verify(w.connection, never()).rollback(any(java.sql.Savepoint.class));
+  }
+
+  @Test
+  public void updateDataTypeReturnsFalseWhenNoRowMatched() throws Exception {
+    DataTypeWork w = new DataTypeWork();
+    when(w.statement.executeUpdate()).thenReturn(0);
+
+    assertFalse(runUpdateDataType(w, "ATT1", "image/webp"));
+  }
+
+  @Test
+  public void updateDataTypeRollsBackToTheSavepointOnSqlException() throws Exception {
+    DataTypeWork w = new DataTypeWork();
+    when(w.statement.executeUpdate()).thenThrow(new java.sql.SQLException("value too long"));
+
+    assertFalse(runUpdateDataType(w, "ATT1", "image/webp"));
+
+    verify(w.connection).rollback(w.savepoint);
+    verify(w.connection, never()).releaseSavepoint(any());
+  }
+
+  @Test
+  public void updateDataTypeSwallowsARuntimeException() throws Exception {
+    DataTypeWork w = new DataTypeWork();
+    Mockito.doThrow(new IllegalStateException("no session")).when(w.session).doReturningWork(any());
+
+    assertFalse(runUpdateDataType(w, "ATT1", "image/webp"));
+  }
+
+  @Test
+  public void updateDataTypeSkipsInvalidInputWithoutTouchingTheSession() throws Exception {
+    DataTypeWork w = new DataTypeWork();
+    String tooLong = "x".repeat(33);
+
+    assertFalse(runUpdateDataType(w, null, "image/webp"));
+    assertFalse(runUpdateDataType(w, "ATT1", null));
+    assertFalse(runUpdateDataType(w, "ATT1", ""));
+    assertFalse(runUpdateDataType(w, "ATT1", tooLong));
+
+    verify(w.dal, never()).getSession();
+    verify(w.session, never()).doReturningWork(any());
+  }
+
+  @Test
+  public void updateDataTypeAcceptsExactlyTheMaxLength() throws Exception {
+    DataTypeWork w = new DataTypeWork();
+    when(w.statement.executeUpdate()).thenReturn(1);
+
+    assertTrue(runUpdateDataType(w, "ATT1", "x".repeat(32)));
+  }
+
   @SuppressWarnings({"rawtypes", "unchecked"})
   private static void stubUnknownTableLookup(OBDal dal) {
     Session session = mock(Session.class);
@@ -1659,6 +1757,7 @@ public class NeoAttachmentsHelperTest {
     Entity entity = mock(Entity.class);
     AttachImplementationManager aim = mock(AttachImplementationManager.class);
     stubTableLookup(dal, "TABLE1");
+    stubNoUploadedAttachment(dal);
     when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(entity);
     when(entity.getName()).thenReturn("Order");
     when(dal.get("Order", "REC1")).thenReturn(mock(BaseOBObject.class));
@@ -1695,6 +1794,7 @@ public class NeoAttachmentsHelperTest {
     ModelProvider modelProvider = mock(ModelProvider.class);
     AttachImplementationManager aim = mock(AttachImplementationManager.class);
     stubTableLookup(dal, "TABLE1");
+    stubNoUploadedAttachment(dal);
     when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(null);
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);

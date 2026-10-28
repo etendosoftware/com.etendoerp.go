@@ -31,6 +31,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Covers the {@code fields} section's payload contract — the half that needs no DAL.
@@ -41,6 +43,8 @@ import org.junit.jupiter.api.Test;
  * uncurated default, the write verb stays hidden, and nothing anywhere says why. So an unknown
  * {@code visibility}, a quoted boolean and a missing {@code reason} all have to be reported
  * rather than ignored, and the message has to name the correction.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpFieldsSection
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -68,15 +72,19 @@ class McpFieldsSectionTest {
      * curation excluded, or exclude one it exposes, for the MCP alone — and it is what
      * {@code McpQuerySupport.writeGate} and {@code filterablePropertyNames} now resolve through
      * {@code McpFieldView} instead of through a criteria.
+     *
+     * <p>Updated for ETP-5791: {@code userRequired} joined them — the override of the flag
+     * {@code etendo_schema} derives structurally (editable, mandatory, no AD default).</p>
      */
     @Test
-    @DisplayName("declares the five documented keys and replace semantics")
+    @DisplayName("declares the six documented keys and replace semantics")
     void declaresKeys() {
       McpConfigSection section = McpFieldsSection.declaration();
       assertEquals(McpFieldsSection.NAME, section.getName());
       assertEquals("fields", section.getName());
       assertEquals(McpConfigSection.Merge.REPLACE, section.getMerge());
-      assertEquals(Set.of("visibility", "included", "readOnly", "businessCritical", "reason"),
+      assertEquals(Set.of("visibility", "included", "readOnly", "businessCritical", "userRequired",
+              "reason"),
           section.getAllowedKeys());
     }
 
@@ -151,6 +159,20 @@ class McpFieldsSectionTest {
     }
 
     @Test
+    @DisplayName("userRequired is read as configured, either way round, and absent stays empty")
+    void userRequiredReadAsConfigured() throws JSONException {
+      JSONObject optional = withReason("\"userRequired\":false");
+      JSONObject required = withReason("\"userRequired\":true");
+      assertTrue(McpFieldsSection.validate(optional).isEmpty());
+      assertTrue(McpFieldsSection.validate(required).isEmpty());
+      assertEquals(Optional.of(Boolean.FALSE), McpFieldsSection.userRequired(optional));
+      assertEquals(Optional.of(Boolean.TRUE), McpFieldsSection.userRequired(required));
+      assertEquals(Optional.empty(),
+          McpFieldsSection.userRequired(withReason("\"readOnly\":false")),
+          "an absent key must leave the derived userRequired standing");
+    }
+
+    @Test
     @DisplayName("the first consumer's real payload is valid")
     void bpLocationPayload() throws JSONException {
       JSONObject payload = body("{\"visibility\":\"editable\",\"readOnly\":false,"
@@ -200,14 +222,15 @@ class McpFieldsSectionTest {
       assertTrue(problems.get(0).contains("blank"));
     }
 
-    @Test
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = { "readOnly", "userRequired" })
     @DisplayName("a quoted boolean is refused — this section's payloads must be predictable")
-    void quotedBooleanRefused() throws JSONException {
+    void quotedBooleanRefused(String key) throws JSONException {
       // The dangerous one: some JSON libraries read "false" as false and others as true, so the
       // literal type is required rather than coerced.
-      List<String> problems = McpFieldsSection.validate(withReason("\"readOnly\":\"false\""));
+      List<String> problems = McpFieldsSection.validate(withReason("\"" + key + "\":\"false\""));
       assertEquals(1, problems.size());
-      assertTrue(problems.get(0).contains("readOnly"));
+      assertTrue(problems.get(0).contains(key));
       assertTrue(problems.get(0).contains("JSON boolean"));
       assertTrue(problems.get(0).contains("\"false\""), "the message should quote what was written");
     }
@@ -267,6 +290,7 @@ class McpFieldsSectionTest {
       assertNull(McpFieldsSection.visibility(null));
       assertEquals(Optional.empty(), McpFieldsSection.readOnly(null));
       assertEquals(Optional.empty(), McpFieldsSection.businessCritical(null));
+      assertEquals(Optional.empty(), McpFieldsSection.userRequired(null));
       assertNull(McpFieldsSection.reason(null));
     }
 

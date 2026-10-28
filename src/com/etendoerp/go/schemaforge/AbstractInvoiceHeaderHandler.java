@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
@@ -771,65 +770,27 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
-   * Injects {@code hasRectifications} (boolean) into the record.
-   * True when the invoice has one or more records in {@code C_Invoice_Reverse}.
-   * Only meaningful in detail view (single record); do not call for list responses.
+   * Response key of {@link InvoiceDetailEnrichment#enrichLinkedOrders}: the orders reached through
+   * the invoice lines.
    */
+  protected static final String FIELD_LINKED_ORDERS = "linkedOrders";
+
   /**
-   * ETP-4783: Injects the synthetic {@code tbaiConfigActive} field into the GET response
-   * so the header form's {@code displayLogic} for {@code tbaiReverseinvoicecode} can
-   * evaluate it client-side.
-   *
-   * <p>Queries {@code tbai_config} for an active record in the same org as the invoice.
-   * Injects {@code 'Y'} when found, {@code 'N'} otherwise. The backend ignores this
-   * synthetic field in PATCH bodies ({@code NeoFieldFilter} drops unknown fields).
+   * Distinct orders reached through the invoice's own lines ({@code C_InvoiceLine.C_OrderLine_ID}),
+   * excluding the {@code ETGO_DTO} total-discount line. Bound twice: invoice id, discount product.
    */
-  protected void enrichTbaiConfigActive(JSONObject rec) {
-    String value = "N"; // default: TBAI not active
-    try {
-      String orgId = rec.isNull("organization") ? null : rec.optString("organization", null);
-      if (orgId != null && !orgId.isEmpty()) {
-        String sql = "SELECT 1 FROM tbai_config WHERE ad_org_id = ? AND isactive = 'Y' LIMIT 1";
-        Connection conn = OBDal.getReadOnlyInstance().getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-          ps.setString(1, orgId);
-          try (ResultSet rs = ps.executeQuery()) {
-            value = rs.next() ? "Y" : "N";
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.debug("[ETP-4783] enrichTbaiConfigActive: {}", e.getMessage());
-    }
-    try {
-      rec.put("tbaiConfigActive", value);
-    } catch (Exception ignored) {
-      // best-effort: field stays absent on failure, which displayLogicJs treats as shown (safe default for TBAI orgs)
-    }
-  }
-
-    @SuppressWarnings("java:S2077")
-  protected void enrichHasRectifications(JSONObject rec, String invoiceId) throws Exception {
-    if (StringUtils.isBlank(invoiceId)) {
-      rec.put("hasRectifications", false);
-      return;
-    }
-    boolean result = false;
-    try {
-      String sql = "SELECT 1 FROM c_invoice_reverse WHERE c_invoice_id = ? AND isactive = 'Y' LIMIT 1";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, invoiceId);
-        try (ResultSet rs = ps.executeQuery()) {
-          result = rs.next();
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not check hasRectifications for invoice {}: {}", invoiceId, e.getMessage());
-    }
-    rec.put("hasRectifications", result);
-  }
-
+  static final String LINKED_ORDERS_SQL =
+      "SELECT o.c_order_id, o.documentno, o.docstatus, o.grandtotal, cur.iso_code, o.dateordered, "
+          + "  dt.docsubtypeso "
+          + "FROM c_order o "
+          + "LEFT JOIN c_currency cur ON cur.c_currency_id = o.c_currency_id "
+          + "LEFT JOIN c_doctype dt ON dt.c_doctype_id = o.c_doctypetarget_id "
+          + "WHERE o.c_order_id IN ("
+          + "  SELECT ol.c_order_id FROM c_invoiceline il "
+          + "  JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id "
+          + "  WHERE il.c_invoice_id = ? AND il.isactive = 'Y' "
+          + "    AND (il.m_product_id IS NULL OR il.m_product_id <> ?)) "
+          + "ORDER BY o.dateordered, o.documentno";
 
   /**
    * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying

@@ -1874,4 +1874,25 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
     }
   }
+
+  // ── ETP-5714: the unpost gate is wired in front of the posting service ─────
+
+  /** The behavior of the gate is covered in {@code GoodsPostingContractsTest}; this is the wiring. */
+  @Test
+  public void handle_unpostGateRunsBeforeThePostingService() throws Exception {
+    com.etendoerp.go.schemaforge.handlers.DocumentPostingService service =
+        mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+    NeoContext ctx = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION).fieldName("unpost").recordId("r-1").build();
+    NeoResponse refusal = NeoResponse.error(422, "not posted");
+    ReturnToVendorShipmentHeaderHandler h = new ReturnToVendorShipmentHeaderHandler();
+    h.setPostingService(service);
+
+    try (MockedStatic<GoodsPostingContracts> gate = Mockito.mockStatic(GoodsPostingContracts.class)) {
+      gate.when(() -> GoodsPostingContracts.checkUnpost(ctx)).thenReturn(refusal);
+
+      assertSame(refusal, h.handle(ctx));
+      Mockito.verify(service, Mockito.never()).handleAction(any());
+    }
+  }
 }

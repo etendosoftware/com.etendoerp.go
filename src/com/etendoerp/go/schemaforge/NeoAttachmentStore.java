@@ -44,6 +44,8 @@ import org.openbravo.model.ad.utility.Attachment;
 final class NeoAttachmentStore {
 
   private static final Logger log = LogManager.getLogger(NeoAttachmentStore.class);
+  /** What the core's MIME detection stores for a format it does not recognise. */
+  private static final String GENERIC_DATA_TYPE = "application/octet-stream";
 
   private NeoAttachmentStore() {
   }
@@ -112,15 +114,54 @@ final class NeoAttachmentStore {
     JSONObject body = new JSONObject();
     body.put("name", tempFile.getName());
     body.put("message", "uploaded");
-    if (upload.isMarkAsMain()) {
-      Attachment uploaded = NeoAttachmentsHelper.findLatestUploadedAttachment(tableId, recordId,
-          tempFile.getName());
-      if (uploaded != null) {
-        NeoAttachmentsHelper.markAsMain(uploaded);
-        body.put("id", uploaded.getId());
-        body.put("isMain", true);
-      }
+    // One lookup serves both the best-effort data type correction and markAsMain. Only
+    // markAsMain depends on it (as before ETP-5735), so a failure there still fails the
+    // request; any other upload just skips the correction.
+    Attachment uploaded = upload.isMarkAsMain()
+        ? NeoAttachmentsHelper.findLatestUploadedAttachment(tableId, recordId, tempFile.getName())
+        : findForCorrection(tableId, recordId, tempFile.getName());
+    correctDataType(uploaded, tempFile);
+    if (upload.isMarkAsMain() && uploaded != null) {
+      NeoAttachmentsHelper.markAsMain(uploaded);
+      body.put("id", uploaded.getId());
+      body.put("isMain", true);
     }
     return NeoResponse.created(body);
+  }
+
+  /** Best-effort lookup for the data type correction: a failure skips it, never the upload. */
+  private static Attachment findForCorrection(String tableId, String recordId, String fileName) {
+    try {
+      return NeoAttachmentsHelper.findLatestUploadedAttachment(tableId, recordId, fileName);
+    } catch (RuntimeException e) {
+      log.warn("Could not look up the uploaded attachment to correct its data type", e);
+      return null;
+    }
+  }
+
+  /**
+   * The core stores the MIME type Tika 0.9 detects, which is {@code application/octet-stream}
+   * for formats it does not know (WEBP). The viewers route on that value, so replace a blank or
+   * generic one with the type the attachments policy resolves. Never throws; leaves the value
+   * untouched when nothing resolves.
+   */
+  private static void correctDataType(Attachment uploaded, File file) {
+    if (uploaded == null) {
+      return;
+    }
+    try {
+      String stored = uploaded.getDataType();
+      if (stored != null && !stored.isBlank() && !GENERIC_DATA_TYPE.equals(stored)) {
+        return;
+      }
+      String resolved = NeoAttachmentPolicy.resolveMimeType(uploaded.getName(), file);
+      if (resolved != null) {
+        // Native SQL, not uploaded.setDataType: a dirty ADAttachment fails the DAL write-access
+        // check at commit (OBSecurityException -> 500, upload rolled back).
+        NeoAttachmentsHelper.updateDataType(uploaded.getId(), resolved);
+      }
+    } catch (RuntimeException e) {
+      log.warn("Could not correct the data type of attachment {}", uploaded.getId(), e);
+    }
   }
 }

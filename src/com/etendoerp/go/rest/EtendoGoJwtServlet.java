@@ -131,6 +131,7 @@ import com.etendoerp.go.onboarding.OnboardingStreamWriter;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
+import com.etendoerp.go.onboarding.OnboardingDefaultContactCategoryService;
 import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -478,6 +479,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
   OnboardingSampleDataService onboardingSampleDataService = new OnboardingSampleDataService();
+  OnboardingDefaultContactCategoryService onboardingDefaultContactCategoryService =
+      new OnboardingDefaultContactCategoryService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
   DevProvisioningFailureFixtureService devProvisioningFailureFixtureService =
       new DevProvisioningFailureFixtureService();
@@ -5089,6 +5092,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         elapsedMillis(residualStartedAt));
     // Before completeCommittedOnboarding and the sample data, which needs a demo's open periods.
     applyInitialPeriodStateBestEffort(clientId);
+    // ETP-5791: on both paths, after the commit, so the flag is read when the tenant is handed over.
+    applyDefaultContactCategoryBestEffort(clientId);
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
     if (paidUpgrade) {
@@ -5192,6 +5197,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
       log.error("ETP-5577 initial period state failed for client {}", clientId, e);
       EtendoGoDalHelper.rollbackDalChanges("initial period state", e, log);
+    }
+  }
+
+  /**
+   * ETP-5791 — with the {@code contact-category-type} flag on, makes "Cliente/Proveedor" the
+   * tenant's default contact category (see {@link OnboardingDefaultContactCategoryService}). Runs
+   * after the onboarding commit, for a classic and a pooled tenant alike, in its own transaction;
+   * never fails the caller — on any failure only this step rolls back and the tenant keeps the
+   * dataset's "Cliente" default.
+   *
+   * @param clientId the tenant just committed
+   */
+  void applyDefaultContactCategoryBestEffort(String clientId) {
+    try {
+      if (onboardingDefaultContactCategoryService.applyIfEnabled(clientId)) {
+        EtendoGoDalHelper.commitDalChanges("default contact category", log);
+      }
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.warn("ETP-5791 default contact category could not be set for client {}; it keeps the "
+          + "dataset default", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("default contact category", e, log);
     }
   }
 

@@ -35,6 +35,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Collections;
 
 import javax.servlet.http.HttpServletResponse;
@@ -79,10 +80,12 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  *   <li>{@code enrichDocTypeLocked}</li>
  *   <li>{@code completeInvoiceIfNeeded} (ETP-4388 — Verifactu/ProcessInvoiceHook dispatch fix)</li>
  *   <li>{@code isStandardInvoiceDocType} (ETP-5576 — follow-up eligibility, fails closed)</li>
+ *   <li>{@code enrichLinkedOrders} (ETP-5828 — every order reached through the invoice lines)</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.DocumentRateGuards
+ * @covers com.etendoerp.go.schemaforge.InvoiceDetailEnrichment
  */
 public class AbstractInvoiceHeaderHandlerTest {
 
@@ -3444,6 +3447,174 @@ public class AbstractInvoiceHeaderHandlerTest {
       }
       dalMock.verifyNoInteractions();
     }
+  }
+
+  // ── ETP-5828: enrichLinkedOrders — orders resolved from the invoice lines ────
+
+  /**
+   * Stubs the read-only connection so that {@link AbstractInvoiceHeaderHandler#LINKED_ORDERS_SQL}
+   * is answered by {@code ps}. Returns the connection so a test can verify on it.
+   */
+  private static Connection stubLinkedOrdersConnection(MockedStatic<OBDal> dalMock,
+      PreparedStatement ps) throws Exception {
+    OBDal roInst = mock(OBDal.class);
+    dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+    Connection conn = mock(Connection.class);
+    when(roInst.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(AbstractInvoiceHeaderHandler.LINKED_ORDERS_SQL)).thenReturn(ps);
+    return conn;
+  }
+
+  /**
+   * Two order rows — a quotation ('OB') and a standard order ('SO') — become two
+   * {@code linkedOrders} entries carrying every key the related-documents chip renders.
+   */
+  @Test
+  public void enrichLinkedOrders_twoRows_buildsEveryEntryWithAllKeys() throws Exception {
+    JSONObject rec = new JSONObject();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("ord-a", "ord-b");
+      when(rs.getString(2)).thenReturn("SQ-001", "SO-002");
+      when(rs.getString(3)).thenReturn("CO", "DR");
+      when(rs.getBigDecimal(4)).thenReturn(new BigDecimal("121.00"), new BigDecimal("50.50"));
+      when(rs.getString(5)).thenReturn("EUR", "USD");
+      when(rs.getDate(6)).thenReturn(java.sql.Date.valueOf("2026-03-01"),
+          java.sql.Date.valueOf("2026-03-15"));
+      when(rs.getString(7)).thenReturn("OB", "SO");
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-multi");
+    }
+
+    JSONArray orders = rec.getJSONArray("linkedOrders");
+    assertEquals(2, orders.length());
+
+    JSONObject first = orders.getJSONObject(0);
+    assertEquals("ord-a", first.getString("id"));
+    assertEquals("SQ-001", first.getString("documentNo"));
+    assertEquals("CO", first.getString("documentStatus"));
+    assertEquals(0, new BigDecimal("121.00").compareTo(
+        new BigDecimal(first.get("grandTotalAmount").toString())));
+    assertEquals("EUR", first.getString("currency$_identifier"));
+    assertEquals("2026-03-01", first.getString("orderDate"));
+    assertTrue("'OB' doc subtype is a quotation", first.getBoolean("isQuotation"));
+
+    JSONObject second = orders.getJSONObject(1);
+    assertEquals("ord-b", second.getString("id"));
+    assertEquals("SO-002", second.getString("documentNo"));
+    assertEquals("DR", second.getString("documentStatus"));
+    assertEquals(0, new BigDecimal("50.50").compareTo(
+        new BigDecimal(second.get("grandTotalAmount").toString())));
+    assertEquals("USD", second.getString("currency$_identifier"));
+    assertEquals("2026-03-15", second.getString("orderDate"));
+    assertFalse("'SO' doc subtype is a plain order", second.getBoolean("isQuotation"));
+  }
+
+  /**
+   * Null columns degrade without dropping the entry: no {@code orderDate} key, a zero
+   * {@code grandTotalAmount}, a JSON-null {@code currency$_identifier}, and a null doc subtype
+   * is not a quotation.
+   */
+  @Test
+  public void enrichLinkedOrders_nullColumns_omitDateZeroTotalAndNullCurrency() throws Exception {
+    JSONObject rec = new JSONObject();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("ord-null");
+      when(rs.getString(2)).thenReturn("SO-NULL");
+      when(rs.getString(3)).thenReturn("DR");
+      when(rs.getBigDecimal(4)).thenReturn(null);
+      when(rs.getString(5)).thenReturn(null);
+      when(rs.getDate(6)).thenReturn(null);
+      when(rs.getString(7)).thenReturn(null);
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-nulls");
+    }
+
+    JSONArray orders = rec.getJSONArray("linkedOrders");
+    assertEquals(1, orders.length());
+    JSONObject entry = orders.getJSONObject(0);
+    assertEquals("ord-null", entry.getString("id"));
+    assertFalse("a null DateOrdered must not emit orderDate", entry.has("orderDate"));
+    assertEquals(0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(entry.get("grandTotalAmount").toString())));
+    assertTrue("currency key is present", entry.has("currency$_identifier"));
+    assertTrue("a missing ISO code is a JSON null", entry.isNull("currency$_identifier"));
+    assertFalse(entry.getBoolean("isQuotation"));
+  }
+
+  /** The query binds the invoice id first and the ETGO_DTO total-discount product second. */
+  @Test
+  public void enrichLinkedOrders_bindsInvoiceIdThenDiscountProduct() throws Exception {
+    JSONObject rec = new JSONObject();
+    PreparedStatement ps = mock(PreparedStatement.class);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ResultSet rs = mock(ResultSet.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-binds");
+    }
+
+    verify(ps).setString(1, "inv-binds");
+    verify(ps).setString(2, TotalDiscountService.DISCOUNT_PRODUCT_ID);
+    verify(ps, times(2)).setString(Mockito.anyInt(), anyString());
+  }
+
+  /** An invoice with no order-linked line answers an empty array, not an absent key. */
+  @Test
+  public void enrichLinkedOrders_noRows_setsEmptyArray() throws Exception {
+    JSONObject rec = new JSONObject();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-no-orders");
+    }
+
+    assertTrue(rec.has("linkedOrders"));
+    assertEquals(0, rec.getJSONArray("linkedOrders").length());
+  }
+
+  /** Best-effort: a SQL failure leaves the key absent and does not propagate. */
+  @Test
+  public void enrichLinkedOrders_sqlException_leavesKeyAbsent() throws Exception {
+    JSONObject rec = new JSONObject().put("id", "inv-sql-fail");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenThrow(new SQLException("relation does not exist"));
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-sql-fail");
+    }
+
+    assertFalse(rec.has("linkedOrders"));
+    assertEquals("inv-sql-fail", rec.getString("id"));
+  }
+
+  /** A blank invoice id short-circuits before touching the database. */
+  @Test
+  public void enrichLinkedOrders_blankInvoiceId_skipsQueryAndKey() throws Exception {
+    JSONObject rec = new JSONObject();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, " ");
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, null);
+      dalMock.verifyNoInteractions();
+    }
+
+    assertFalse(rec.has("linkedOrders"));
   }
 
 }
