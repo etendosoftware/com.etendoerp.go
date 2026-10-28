@@ -174,4 +174,29 @@ final class McpSchemaResponseHints {
     }
     return all;
   }
+
+  /**
+   * ETP-5852 (M-245): puts on each {@code missingFields} entry of a create refusal the label
+   * {@code etendo_schema} shows for the same column — the form's label in the session language —
+   * instead of the {@code AD_Column} name the entry was built with, so "Business Partner" in the
+   * refusal and "Tercero" in the schema stop looking like two fields. An entry whose column has no
+   * form field keeps its label.
+   *
+   * @param missing  the refusal's entries, each with its {@code column}; mutated in place
+   * @param adTab    the entity's tab, whose fields carry the labels
+   * @param langCode the session language
+   */
+  static void localizeLabels(JSONArray missing, Tab adTab, String langCode) throws JSONException {
+    java.util.Map<String, String[]> labels = McpSchemaFieldBuilder.loadFieldLabels(adTab,
+        langCode);
+    for (int i = 0; i < missing.length(); i++) {
+      JSONObject info = missing.optJSONObject(i);
+      String column = info == null ? null : info.optString("column", null);
+      String[] label = column == null ? null
+          : labels.get(column.toUpperCase(java.util.Locale.ROOT));
+      if (label != null && label[0] != null && !label[0].isBlank()) {
+        info.put("label", label[0]);
+      }
+    }
+  }
 }

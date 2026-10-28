@@ -473,7 +473,7 @@ public class McpToolRouter {
     params.put(JsonConstants.NOCOUNT_PARAMETER, "false");
 
     if (StringUtils.isNotBlank(orderBy)) {
-      params.put(JsonConstants.SORTBY_PARAMETER, orderBy);
+      params.put(JsonConstants.SORTBY_PARAMETER, McpQuerySupport.withIdTieBreak(orderBy));
     }
     // ETP-5611: same default as the REST list — a child tab without orderBy follows the AD tab's
     // order-by instead of the random id order.
@@ -928,6 +928,7 @@ public class McpToolRouter {
     // Validate mandatory fields before insert — return structured error matching etendo_schema contract
     JSONArray missingFields = McpWriteRequestSupport.validateMandatoryFields(filteredBody, adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, log);
     if (missingFields.length() > 0) {
+      McpSchemaResponseHints.localizeLabels(missingFields, adTab, NeoLanguage.currentCode());
       // IMP-5: stable machine-detectable code + status so the agent can distinguish an
       // "invalid write" from a "server error"; the human text moves to `detail`, and the
       // existing `missingFields`/`hint` guidance is preserved.
@@ -970,7 +971,7 @@ public class McpToolRouter {
     NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(customizationRequest);
     NeoHandler handler = preDispatch.customization();
     if (preDispatch.response() != null) {
-      return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
+      return McpHookExecutor.servedRecordResult(preDispatch.response(), specName, null, adTab);
     }
 
     // Wrap for DefaultJsonDataService
@@ -1149,7 +1150,8 @@ public class McpToolRouter {
     NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(extensionRequest);
     NeoHandler handler = preDispatch.customization();
     if (preDispatch.response() != null) {
-      return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
+      return McpHookExecutor.servedRecordResult(preDispatch.response(), specName, recordId,
+          adTab);
     }
 
     // ETP-5073 / DOC-04: the conflict is detected before the write, for the same reason the REST

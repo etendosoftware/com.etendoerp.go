@@ -625,6 +625,24 @@ final class McpHookExecutor {
   }
 
   /**
+   * ETP-5852: a create or update the entity's pre-hook served by itself (a contact's address, …)
+   * answers like one the generic write served: {@code {data:{…}}} with its {@code url} when the
+   * entity has a page. Before, the handler's core-shaped {@code {response:{status, data:[…]}}}
+   * went out as is. A refusal goes through {@link #neoResponseToMcpResult} unchanged.
+   *
+   * @param recordId the updated record, or {@code null} on a create (read back from the body)
+   */
+  static JSONObject servedRecordResult(NeoResponse served, String specName, String recordId,
+      Tab adTab) throws JSONException {
+    if (isRefusal(served)) {
+      return neoResponseToMcpResult(served);
+    }
+    JSONObject flat = McpToolRouterSupport.flattenCoreResponse(served.getBody());
+    McpRecordUrls.addRecordUrl(flat, specName, recordId, McpToolRouterSupport.isPrimaryTab(adTab));
+    return McpToolRouter.wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));
+  }
+
+  /**
    * Convert a {@link NeoResponse} to MCP result format.
    * Responses with status &ge; 400 set {@code isError: true}.
    *

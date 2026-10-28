@@ -4233,6 +4233,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--C439DB1E3B314678A363E9118CAF00D9-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--C439DB1E3B314678A363E9118CAF00D9-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--C439DB1E3B314678A363E9118CAF00D9-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--C439DB1E3B314678A363E9118CAF00D9-->  <AGENT_PROMPT><![CDATA[A journal line has no description of its own, as in the app: write the note in the journal header's description (gLJournal.description), which covers the whole entry.]]></AGENT_PROMPT>
 <!--C439DB1E3B314678A363E9118CAF00D9--></ETGO_SF_ENTITY>
 
 <!--C4AE262E225D42649E4BD5E60A4BD303--><ETGO_SF_ENTITY>

@@ -82,6 +82,30 @@ final class McpQuerySupport {
   }
 
   /**
+   * ETP-5852 (M-188): appends {@code id} to an agent's {@code orderBy} so paging over a value many
+   * rows share (a date) is stable. Core sorts only by the fields it is given, and the database may
+   * return tied rows in a different order on each page, so a row could repeat on page 2 or never
+   * appear. Left as is when the caller already sorts by {@code id}.
+   *
+   * @param orderBy the caller's {@code orderBy}: comma-separated, each optionally {@code -}prefixed
+   *                or followed by {@code asc}/{@code desc}
+   * @return the same order with {@code id} as the last key
+   */
+  static String withIdTieBreak(String orderBy) {
+    if (StringUtils.isBlank(orderBy)) {
+      return orderBy;
+    }
+    for (String part : orderBy.split(",")) {
+      String name = StringUtils.removeStart(part.trim(), "-");
+      int space = name.indexOf(' ');
+      if ("id".equals(space < 0 ? name : name.substring(0, space))) {
+        return orderBy;
+      }
+    }
+    return orderBy + ",id";
+  }
+
+  /**
    * {@link #buildWhereFromFilters(JSONObject, Tab, SFEntity, org.apache.logging.log4j.Logger)},
    * with the customization's {@code filterAliases} honoured (ETP-5705).
    *
@@ -107,7 +131,13 @@ final class McpQuerySupport {
 
     // IMP-39: resolved once per request, not once per key - it costs one query, and the previous
     // contract was that the happy path pays nothing for the failure path's `available` list.
-    java.util.Set<String> excluded = excludedPropertyNames(sfEntity, dalEntity);
+    java.util.Set<String> excluded = new java.util.HashSet<>(
+        excludedPropertyNames(sfEntity, dalEntity));
+    // ETP-5852 (M-118): the link to the parent is how parentId scopes a child list (and the
+    // filter that satisfies the parent gate), so it stays filterable even when the spec does not
+    // publish it as a field: period control's documents excluded `period`, and every
+    // etendo_list(parentId) on them was refused as an unknown filter.
+    excluded.remove(McpParentScope.forEntity(sfEntity).getParentField());
 
     StringBuilder where = new StringBuilder();
     java.util.Iterator<String> keys = filters.keys();

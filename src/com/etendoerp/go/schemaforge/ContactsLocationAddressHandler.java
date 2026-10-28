@@ -232,7 +232,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       bpLoc.setActive(Boolean.TRUE);
       bpLoc.setBusinessPartner(bp);
       bpLoc.setLocationAddress(geoLoc);
-      bpLoc.setName(str(body, "name", "."));
+      bpLoc.setName(addressName(ctx, body, geoLoc));
       bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS, true));
       bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS, true));
       // C_BPartner_Location.IsTaxLocation's own AD default is an unquoted 'N', so a create that
@@ -517,6 +517,29 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // only and never written back to the record.
     String country = geoLoc.getCountry() != null ? nullIfEmpty(geoLoc.getCountry().getIdentifier()) : null;
     return joinNonNull(region, country);
+  }
+
+  /**
+   * The name of a new address: the one the caller sent, else a default. ETP-5852 (M-168): over
+   * MCP the default is the name the app's address editor gives — city and address line, else
+   * region and country, else "Location" — instead of the AD default ".", which an agent then showed
+   * as the address name. MCP's defaults pass puts that "." in the body before this hook, so only a
+   * name the caller itself sent ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}) counts as sent.
+   * Other callers always send a name and keep the old default.
+   */
+  private static String addressName(NeoContext ctx, JSONObject body,
+      org.openbravo.model.common.geography.Location geoLoc) {
+    if (ctx == null || !ctx.isMcpOrigin() || geoLoc == null) {
+      return str(body, "name", ".");
+    }
+    Object provided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
+    boolean sent = !(provided instanceof java.util.Collection)
+        || ((java.util.Collection<?>) provided).contains("name");
+    String name = sent ? str(body, "name", null) : null;
+    if (name == null) {
+      name = buildDisplayName(geoLoc);
+    }
+    return name != null ? name : "Location";
   }
 
   // ------------------------------------------------------------------ shared helpers

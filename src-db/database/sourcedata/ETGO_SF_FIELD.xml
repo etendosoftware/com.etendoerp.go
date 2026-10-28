@@ -50681,7 +50681,7 @@
 <!--7E4076F80454430DA5D72E54CC0D234C-->  <JAVA_QUALIFIER><![CDATA[orderDate]]></JAVA_QUALIFIER>
 <!--7E4076F80454430DA5D72E54CC0D234C-->  <SEQNO><![CDATA[160]]></SEQNO>
 <!--7E4076F80454430DA5D72E54CC0D234C-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
-<!--7E4076F80454430DA5D72E54CC0D234C-->  <AGENT_PROMPT><![CDATA[The order date. If omitted the server proposes today, as the form does; send the date the user gives when it is another one.]]></AGENT_PROMPT>
+<!--7E4076F80454430DA5D72E54CC0D234C-->  <AGENT_PROMPT><![CDATA[The order date. If omitted the server proposes today, as the form does; send the date the user gives when it is another one. It is also the order's accounting date: accountingDate always takes the same day (the app has one date), so changing orderDate moves accountingDate too and the answer shows both.]]></AGENT_PROMPT>
 <!--7E4076F80454430DA5D72E54CC0D234C-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--7E4076F80454430DA5D72E54CC0D234C--></ETGO_SF_FIELD>
 
@@ -88965,7 +88965,7 @@
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <JAVA_QUALIFIER><![CDATA[orderDate]]></JAVA_QUALIFIER>
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <SEQNO><![CDATA[160]]></SEQNO>
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
-<!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <AGENT_PROMPT><![CDATA[The order date. If omitted the server proposes today, as the form does; send the date the user gives when it is another one.]]></AGENT_PROMPT>
+<!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <AGENT_PROMPT><![CDATA[The order date. If omitted the server proposes today, as the form does; send the date the user gives when it is another one. It is also the order's accounting date: accountingDate always takes the same day (the app has one date), so changing orderDate moves accountingDate too and the answer shows both.]]></AGENT_PROMPT>
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--DFF174367DF44C7A8EC1F1AB5F9682D3--></ETGO_SF_FIELD>
 
