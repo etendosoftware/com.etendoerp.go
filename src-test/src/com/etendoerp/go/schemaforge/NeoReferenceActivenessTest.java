@@ -58,7 +58,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class NeoReferenceActivenessTest {
 
-  private static final String PRODUCT = "Product";
   private static final String TAX_CATEGORY = "TaxCategory";
   private static final String UOM = "UOM";
 
