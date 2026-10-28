@@ -33,6 +33,9 @@ import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.invoice.InvoiceTax;
 import org.openbravo.model.financialmgmt.accounting.FIN_FinancialAccountAccounting;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 /**
  * Why core disabled a document for accounting ({@code STATUS_DocumentDisabled}), told only when
@@ -43,6 +46,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
  *   <li>a financial account transaction with no payment, whose account has no deposit (BP deposit)
  *       or withdrawal (BP withdrawal, bank fee) account in its accounting
  *       ({@code DocFINFinAccTransaction});</li>
+ *   <li>a payment-linked transaction whose payment method, on that account, posts receipts to the
+ *       deposit account ({@code DEP}) or payments to the withdrawal account ({@code WIT}), and that
+ *       account is missing. The in-transit and cleared variants stay generic.</li>
  *   <li>an invoice whose lines and taxes are all zero ({@code DocInvoice}, core's own
  *       {@code TotalGrossIsZero}).</li>
  * </ul>
@@ -71,6 +77,8 @@ final class DocumentDisabledReason {
   private static final String TRXTYPE_BP_DEPOSIT = "BPD";
   private static final String TRXTYPE_BP_WITHDRAWAL = "BPW";
   private static final String TRXTYPE_BANK_FEE = "BF";
+  private static final String UPON_USE_DEPOSIT = "DEP";
+  private static final String UPON_USE_WITHDRAWAL = "WIT";
 
   /** The AD message naming the reason, and the values its text interpolates. */
   record Reason(String messageKey, Map<String, Object> messageParams) {
@@ -139,16 +147,39 @@ final class DocumentDisabledReason {
   }
 
   private static Reason transactionReason(FIN_FinaccTransaction trx) {
-    // A payment-linked transaction depends on the payment method's "upon use" setup: not re-checked.
-    if (trx == null || trx.getFinPayment() != null || trx.getAccount() == null) {
+    if (trx == null || trx.getAccount() == null) {
       return null;
+    }
+    if (trx.getFinPayment() != null) {
+      return paymentReason(trx.getAccount(), trx.getFinPayment());
     }
     String type = trx.getTransactionType();
     boolean deposit = TRXTYPE_BP_DEPOSIT.equals(type);
     if (!deposit && !TRXTYPE_BP_WITHDRAWAL.equals(type) && !TRXTYPE_BANK_FEE.equals(type)) {
       return null;
     }
-    List<FIN_FinancialAccountAccounting> rows = trx.getAccount().getFINFinancialAccountAcctList();
+    return missingAccountReason(trx.getAccount(), deposit);
+  }
+
+  /** Core's payment branch: the account's setup of the payment method says which account it needs. */
+  private static Reason paymentReason(FIN_FinancialAccount account, FIN_Payment payment) {
+    FinAccPaymentMethod line = account.getFinancialMgmtFinAccPaymentMethodList().stream()
+        .filter(l -> Boolean.TRUE.equals(l.isActive()) && l.getPaymentMethod() != null
+            && l.getPaymentMethod().equals(payment.getPaymentMethod()))
+        .findFirst().orElse(null);
+    if (line == null) {
+      return null;
+    }
+    boolean receipt = Boolean.TRUE.equals(payment.isReceipt());
+    if (receipt ? !UPON_USE_DEPOSIT.equals(line.getUponDepositUse())
+        : !UPON_USE_WITHDRAWAL.equals(line.getUponWithdrawalUse())) {
+      return null;
+    }
+    return missingAccountReason(account, receipt);
+  }
+
+  private static Reason missingAccountReason(FIN_FinancialAccount account, boolean deposit) {
+    List<FIN_FinancialAccountAccounting> rows = account.getFINFinancialAccountAcctList();
     boolean configured = rows.stream().anyMatch(row -> deposit
         ? row.getDepositAccount() != null
         : row.getWithdrawalAccount() != null);
@@ -156,7 +187,7 @@ final class DocumentDisabledReason {
       return null;
     }
     return new Reason(deposit ? MSG_NO_DEPOSIT_ACCOUNT : MSG_NO_WITHDRAWAL_ACCOUNT,
-        Map.of(MESSAGE_PARAMS_FINANCIAL_ACCOUNT, trx.getAccount().getName()));
+        Map.of(MESSAGE_PARAMS_FINANCIAL_ACCOUNT, account.getName()));
   }
 
   private static Reason invoiceReason(Invoice invoice) {

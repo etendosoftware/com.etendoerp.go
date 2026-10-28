@@ -47,6 +47,8 @@ import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 /**
  * A specific reason only when the re-check confirms core's condition, the generic
@@ -120,8 +122,59 @@ public class DocumentDisabledReasonTest {
     assertTrue(reason.messageParams().isEmpty());
   }
 
+  private static FIN_FinaccTransaction paidTransaction(boolean receipt, String uponDeposit,
+      String uponWithdrawal, FIN_FinancialAccountAccounting... rows) {
+    FIN_FinaccTransaction trx = transaction("BPD", rows);
+    FIN_PaymentMethod method = mock(FIN_PaymentMethod.class);
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.isReceipt()).thenReturn(receipt);
+    when(payment.getPaymentMethod()).thenReturn(method);
+    when(trx.getFinPayment()).thenReturn(payment);
+    FinAccPaymentMethod line = mock(FinAccPaymentMethod.class);
+    when(line.isActive()).thenReturn(true);
+    when(line.getPaymentMethod()).thenReturn(method);
+    when(line.getUponDepositUse()).thenReturn(uponDeposit);
+    when(line.getUponWithdrawalUse()).thenReturn(uponWithdrawal);
+    FIN_FinancialAccount account = trx.getAccount();
+    when(account.getFinancialMgmtFinAccPaymentMethodList()).thenReturn(List.of(line));
+    return trx;
+  }
+
   @Test
-  public void paymentLinkedTransactionIsNotReChecked() {
+  public void receiptPostedToTheMissingDepositAccountNamesIt() {
+    DocumentDisabledReason.Reason reason = reasonFor(acct(TRX_TABLE), FIN_FinaccTransaction.class,
+        paidTransaction(true, "DEP", "WIT", accountingRow(false, true)));
+
+    assertEquals(DocumentDisabledReason.MSG_NO_DEPOSIT_ACCOUNT, reason.messageKey());
+    assertEquals(Map.of("financialAccount", "Caja"), reason.messageParams());
+  }
+
+  @Test
+  public void paymentPostedToTheMissingWithdrawalAccountNamesIt() {
+    DocumentDisabledReason.Reason reason = reasonFor(acct(TRX_TABLE), FIN_FinaccTransaction.class,
+        paidTransaction(false, "DEP", "WIT", accountingRow(true, false)));
+
+    assertEquals(DocumentDisabledReason.MSG_NO_WITHDRAWAL_ACCOUNT, reason.messageKey());
+  }
+
+  @Test
+  public void receiptPostedInTransitStaysGeneric() {
+    DocumentDisabledReason.Reason reason = reasonFor(acct(TRX_TABLE), FIN_FinaccTransaction.class,
+        paidTransaction(true, "INT", "WIT", accountingRow(false, false)));
+
+    assertEquals(DocumentDisabledReason.MSG_DOCUMENT_DISABLED, reason.messageKey());
+  }
+
+  @Test
+  public void receiptWithTheDepositAccountConfiguredStaysGeneric() {
+    DocumentDisabledReason.Reason reason = reasonFor(acct(TRX_TABLE), FIN_FinaccTransaction.class,
+        paidTransaction(true, "DEP", "WIT", accountingRow(true, false)));
+
+    assertEquals(DocumentDisabledReason.MSG_DOCUMENT_DISABLED, reason.messageKey());
+  }
+
+  @Test
+  public void paymentMethodNotSetUpOnTheAccountStaysGeneric() {
     FIN_FinaccTransaction trx = transaction("BPD");
     when(trx.getFinPayment()).thenReturn(mock(FIN_Payment.class));
 
