@@ -89,10 +89,10 @@ final class McpConstants {
   static final String TOOL_NEO_GET_DOCUMENT_PDF = "etendo_get_document_pdf";
   /** Tool name of the document email send, the application's "Enviar" (ETP-5715). */
   static final String TOOL_NEO_SEND_DOCUMENT_EMAIL = "etendo_send_document_email";
-  /** Tool name of the single-use link that stages a PDF for data extraction (ETP-5715). */
+  /** Tool name of the single-use link that stages a document (PDF or image) for data extraction (ETP-5715). */
   static final String TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD =
       "etendo_request_document_extraction_upload";
-  /** Tool name of the data extraction of a staged supplier-invoice PDF, read-only (ETP-5715). */
+  /** Tool name of the data extraction of a staged supplier-invoice document, read-only (ETP-5715). */
   static final String TOOL_NEO_EXTRACT_INVOICE_DOCUMENT = "etendo_extract_invoice_document";
   /** Error code: the extraction service could not be used (503, ETP-5715). */
   static final String ERROR_OCR_UNAVAILABLE = "ocr_unavailable";

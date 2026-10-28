@@ -25,6 +25,7 @@ import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
@@ -74,6 +75,47 @@ final class McpServerResolvedFields {
     Set<String> resolved = new HashSet<>(NeoSelectorPolicy.serverResolvedFieldNames(sfEntity));
     resolved.addAll(declaredByCustomization(sfEntity));
     return resolved;
+  }
+
+  /**
+   * The property names the entity's customization requires on create although AD and
+   * {@code etendo_defaults} do not say so ({@link NeoHandler#callerRequiredCreateFields()},
+   * ETP-5473). {@code etendo_schema} reports them {@code userRequired} and keeps them out of
+   * {@code serverDefaulted}.
+   *
+   * @param sfEntity the Schema Forge entity; {@code null} answers an empty set
+   * @return the names, never {@code null}
+   */
+  static Set<String> callerRequiredOnCreate(SFEntity sfEntity) {
+    if (sfEntity == null) {
+      return Collections.emptySet();
+    }
+    return declaredByCustomization(sfEntity, NeoExtensionSurface.CREATE,
+        NeoHandler::callerRequiredCreateFields, "caller-required create");
+  }
+
+  /**
+   * Flags {@code userRequired:true} on the schema fields named in {@code callerRequired}, so the
+   * full dump and {@code view:"create"} both tell the agent to send them (ETP-5473). Fields not
+   * named are left untouched.
+   *
+   * @param fieldsArray    the schema field array, mutated in place; may be {@code null}
+   * @param callerRequired the names from {@link #callerRequiredOnCreate}
+   * @throws JSONException if a field cannot be written
+   */
+  static void markCallerRequired(JSONArray fieldsArray, Set<String> callerRequired)
+      throws JSONException {
+    if (fieldsArray == null || callerRequired == null || callerRequired.isEmpty()) {
+      return;
+    }
+    for (int i = 0; i < fieldsArray.length(); i++) {
+      JSONObject field = fieldsArray.optJSONObject(i);
+      // Guard the null name explicitly: Set.of() throws on contains(null).
+      String name = field != null ? field.optString("name", null) : null;
+      if (name != null && callerRequired.contains(name)) {
+        field.put(McpSchemaFieldBuilder.KEY_USER_REQUIRED, true);
+      }
+    }
   }
 
   /**

@@ -29,7 +29,7 @@ import org.openbravo.model.ad.utility.Attachment;
 import com.etendoerp.go.schemaforge.NeoStagedDocuments.Staged;
 
 /**
- * Attaches a staged document to the record created from it (ETP-5715), so the PDF the user supplied
+ * Attaches a staged document to the record created from it (ETP-5715), so the document the user supplied
  * ends as the document's attachment — the main one, as the application's supplier-invoice upload
  * leaves it — without uploading it twice.
  *

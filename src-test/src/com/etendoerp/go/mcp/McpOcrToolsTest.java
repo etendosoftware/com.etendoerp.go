@@ -288,7 +288,7 @@ class McpOcrToolsTest {
       assertEquals("factura-proveedor.pdf", reserved.getFileName());
       assertFalse(reserved.isStored());
       assertEquals(10L * 1024 * 1024, result.getLong("maxBytes"));
-      assertEquals("pdf", result.getString("allowedExtensions"));
+      assertEquals("pdf,png,jpg,jpeg,webp", result.getString("allowedExtensions"));
       assertNotNull(result.getString("expiresAt"));
       assertNotNull(result.getString("reservationExpiresAt"));
       assertFalse(result.has("stagedDocumentExpiresAt"));
@@ -325,6 +325,33 @@ class McpOcrToolsTest {
         assertEquals("validation_error", result.getString("error"), bad);
       }
       assertEquals(422, McpOcrTools.requestUpload(args()).getInt("status"));
+      assertEquals(0, tickets.size());
+      assertEquals(0, staged.size());
+    }
+
+    @Test
+    @DisplayName("a PDF or a PNG, JPG, JPEG or WEBP image name is accepted, in any case")
+    void imageNamesAreAccepted() throws Exception {
+      for (String ok : new String[] {"foto.png", "foto.jpg", "foto.jpeg", "foto.webp", "FOTO.WEBP",
+          "Foto.Png"}) {
+        JSONObject result = McpOcrTools.requestUpload(args("name", ok));
+
+        assertFalse(result.has("error"), ok + " -> " + result);
+        assertEquals(ok, result.getString("name"), ok);
+      }
+    }
+
+    @Test
+    @DisplayName("a name that is neither a PDF nor a readable image is a 422 with the new message and nothing issued")
+    void unreadableTypesAreRefused() throws Exception {
+      for (String bad : new String[] {"foto.gif", "factura.docx", "notas.txt", "sinextension"}) {
+        JSONObject result = McpOcrTools.requestUpload(args("name", bad));
+
+        assertEquals(422, result.getInt("status"), bad);
+        assertEquals("validation_error", result.getString("error"), bad);
+        assertTrue(result.toString().contains("Only a PDF or an image can be read"), result.toString());
+        assertTrue(result.toString().contains("pdf, png, jpg, jpeg, webp"), result.toString());
+      }
       assertEquals(0, tickets.size());
       assertEquals(0, staged.size());
     }

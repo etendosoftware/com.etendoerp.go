@@ -25,7 +25,6 @@ import java.sql.ResultSet;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
@@ -604,6 +603,29 @@ public abstract class AbstractInvoiceHeaderHandler {
       // best-effort: field stays absent on failure, which displayLogicJs treats as shown (safe default for TBAI orgs)
     }
   }
+
+  /**
+   * Response key of {@link InvoiceDetailEnrichment#enrichLinkedOrders}: the orders reached through
+   * the invoice lines.
+   */
+  protected static final String FIELD_LINKED_ORDERS = "linkedOrders";
+
+  /**
+   * Distinct orders reached through the invoice's own lines ({@code C_InvoiceLine.C_OrderLine_ID}),
+   * excluding the {@code ETGO_DTO} total-discount line. Bound twice: invoice id, discount product.
+   */
+  static final String LINKED_ORDERS_SQL =
+      "SELECT o.c_order_id, o.documentno, o.docstatus, o.grandtotal, cur.iso_code, o.dateordered, "
+          + "  dt.docsubtypeso "
+          + "FROM c_order o "
+          + "LEFT JOIN c_currency cur ON cur.c_currency_id = o.c_currency_id "
+          + "LEFT JOIN c_doctype dt ON dt.c_doctype_id = o.c_doctypetarget_id "
+          + "WHERE o.c_order_id IN ("
+          + "  SELECT ol.c_order_id FROM c_invoiceline il "
+          + "  JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id "
+          + "  WHERE il.c_invoice_id = ? AND il.isactive = 'Y' "
+          + "    AND (il.m_product_id IS NULL OR il.m_product_id <> ?)) "
+          + "ORDER BY o.dateordered, o.documentno";
 
   /**
    * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying

@@ -28,6 +28,7 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.Arrays;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -127,6 +128,33 @@ class NeoStagedAttachmentTest {
     assertEquals("%PDF-1.4 staged", Files.readString(copy.toPath()));
     assertFalse(copy.toPath().startsWith(root), "outside the staging directory");
     assertTrue(Files.exists(stagedFile), "the staged file is still there");
+    Files.deleteIfExists(copy.toPath());
+    Files.deleteIfExists(copy.getParentFile().toPath());
+  }
+
+  @Test
+  @DisplayName("an image staged for extraction reaches the store with its own name and bytes, unchanged")
+  void aStagedImageIsPassedThroughUnchanged() throws Exception {
+    NeoStagedDocuments documents = new NeoStagedDocuments(Clock.systemUTC(), root);
+    Session session = new Session("C", "O", "U", "R", null);
+    String id = documents.reserve(session, "purchase-invoice", "foto.webp");
+    Path file = documents.directoryFor(id).resolve("foto.webp");
+    byte[] webp = NeoAttachmentTestFixtures.WEBP;
+    Files.write(file, webp);
+    documents.markStored(id, file);
+    Staged image = documents.find(id, session).orElseThrow();
+    storeAnswers(NeoResponse.created(new JSONObject().put("name", "foto.webp")));
+
+    NeoStagedAttachment.attach(target, image, false);
+
+    ArgumentCaptor<NeoAttachmentUpload> captor = ArgumentCaptor.forClass(NeoAttachmentUpload.class);
+    storeMock.verify(() -> NeoAttachmentStore.store(captor.capture()));
+    NeoAttachmentUpload upload = captor.getValue();
+    assertEquals("foto.webp", upload.getFileName());
+    assertEquals(webp.length, upload.getDeclaredSize());
+    File copy = upload.getMaterializer().materialize("foto.webp");
+    assertEquals("foto.webp", copy.getName());
+    assertTrue(Arrays.equals(webp, Files.readAllBytes(copy.toPath())));
     Files.deleteIfExists(copy.toPath());
     Files.deleteIfExists(copy.getParentFile().toPath());
   }
