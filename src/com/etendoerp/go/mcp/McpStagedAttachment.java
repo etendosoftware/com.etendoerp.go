@@ -31,7 +31,7 @@ import com.etendoerp.go.schemaforge.NeoStagedDocuments.Staged;
 
 /**
  * {@code etendo_request_attachment_upload} with a {@code staged_document_id} (ETP-5715): attaches the
- * PDF the user already uploaded for data extraction to the document created from it, as the main
+ * document the user already uploaded for data extraction to the document created from it, as the main
  * attachment when asked — what the application's supplier-invoice upload leaves after "Extraer y
  * completar", without sending the file a second time.
  *
@@ -103,7 +103,7 @@ final class McpStagedAttachment {
     result.put("isMain", main);
     result.put(McpConstants.PARAM_SPEC, target.getSpecName());
     result.put(McpConstants.PARAM_ID, target.getRecordId());
-    result.put(McpConstants.KEY_HINT, "The staged PDF is now an attachment of the document"
+    result.put(McpConstants.KEY_HINT, "The staged document is now an attachment of the document"
         + (main ? ", marked as its main one" : "") + ". Check it with "
         + McpConstants.TOOL_NEO_LIST_ATTACHMENTS + " if you need to.");
     return result;

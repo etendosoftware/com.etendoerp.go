@@ -51,7 +51,7 @@ import org.openbravo.base.weld.WeldUtils;
 import com.etendoerp.go.schemaforge.NeoAttachmentUploadTickets.Session;
 
 /**
- * In-memory index of the documents staged for data extraction (ETP-5715): a PDF an agent uploaded
+ * In-memory index of the documents staged for data extraction (ETP-5715): a document (PDF or image) an agent uploaded
  * through a single-use link so its content can be read, before any record exists for it.
  *
  * <p>A staged document belongs to the session that reserved it (client, organization and user) and
@@ -62,7 +62,7 @@ import com.etendoerp.go.schemaforge.NeoAttachmentUploadTickets.Session;
  * run left behind, if older than that, are deleted when the store is first created.</p>
  *
  * <p>The extraction result is cached on the document, so asking again — or recomputing the review for
- * another vendor — does not read the PDF, and does not pay for it, a second time.</p>
+ * another vendor — does not read the document, and does not pay for it, a second time.</p>
  *
  * <p><b>Single-node only, as {@link NeoAttachmentUploadTickets}.</b> The index is in this JVM's heap:
  * a restart loses it (the files are purged at startup), and the agent just uploads again.</p>
@@ -83,7 +83,7 @@ public class NeoStagedDocuments {
   /** Name of the maintenance thread. */
   static final String MAINTENANCE_THREAD = "etgo-staged-documents-maintenance";
   /**
-   * How long a reservation whose PDF has not arrived is kept: the life of its upload link. Only a
+   * How long a reservation whose file has not arrived is kept: the life of its upload link. Only a
    * stored file stays for {@link #TTL}.
    */
   public static final Duration RESERVATION_TTL = Duration.ofMinutes(10);
@@ -215,7 +215,7 @@ public class NeoStagedDocuments {
     }
 
     /**
-     * The lock that serializes the uses of the file: an extraction holds it while it reads the PDF
+     * The lock that serializes the uses of the file: an extraction holds it while it reads the document
      * (so two concurrent extractions read it once), an attach holds it while it stores the file
      * (so it can neither run twice nor delete the file under a reading).
      *
@@ -247,7 +247,7 @@ public class NeoStagedDocuments {
 
     /**
      * Returns the instant after which the document is gone: {@link #RESERVATION_TTL} after it was
-     * reserved while its PDF has not arrived, {@link #TTL} after the PDF arrived.
+     * reserved while its file has not arrived, {@link #TTL} after the file arrived.
      */
     public Instant getExpiresAt() {
       Instant stored = storedAt;

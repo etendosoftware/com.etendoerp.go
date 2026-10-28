@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -394,5 +395,22 @@ final class FinancialAccountSupport {
   static boolean isArchivingRequest(JSONObject body) {
     String active = FinancialAccountHandler.FIELD_ACTIVE;
     return body.has(active) && !body.isNull(active) && !body.optBoolean(active, true);
+  }
+
+  /**
+   * The calendar day the caller sent. Taken from the request string, not from the persisted
+   * {@code Date}: the generic CRUD stores a {@code yyyy-MM-dd} at local midnight, so reading it back
+   * in another zone could shift the day. Moved here from {@code FinancialAccountHandler} to keep
+   * that class under the Sonar method-count threshold (java:S1448).
+   */
+  static LocalDate requestedCalendarDay(String raw) {
+    if (raw == null || raw.trim().length() < 10) {
+      return null;
+    }
+    try {
+      return LocalDate.parse(raw.trim().substring(0, 10));
+    } catch (java.time.format.DateTimeParseException e) {
+      return null;
+    }
   }
 }

@@ -63,11 +63,13 @@ final class FinancialAccountCountrySupport {
   /** ISO 13616 defines 15 as the shortest real IBAN (Norway); nothing shorter is worth checking
    *  against a country at all. */
   static final int IBAN_MIN_LENGTH = 15;
-  /** Returned for a Bank account whose effective IBAN is non-blank but has no country — both by
-   *  {@link #validateIbanCountryPair} and by {@code FinancialAccountHandler#validateCountryAndIban}
-   *  (ETP-5473). A wire contract with the SPA: {@code backendErrors.js} maps this exact text to
-   *  {@code backendError.countryIban}, so rewording it silently un-translates the toast. */
-  static final String MSG_IBAN_REQUIRES_COUNTRY = "A bank account with an IBAN must have a country.";
+  /** {@code AD_MESSAGE} value of the refusal for a Bank account whose effective IBAN is non-blank
+   *  but has no country — both {@link #validateIbanCountryPair} and
+   *  {@code FinancialAccountHandler#validateCountryAndIban} (ETP-5473). English base text
+   *  {@code "A bank account with an IBAN must have a country."}; resolved in the request language
+   *  through {@link NeoMessageText}. The SPA maps the key from {@code error.messageKeys} and keeps
+   *  the English text as an exact-match fallback ({@code backendError.countryIban}). */
+  static final String MSG_IBAN_REQUIRES_COUNTRY = "ETGO_FinAccIbanRequiresCountry";
 
   private static final String KEY_ID = "id";
   private static final String KEY_ISO = "iso";
@@ -161,7 +163,10 @@ final class FinancialAccountCountrySupport {
    * {@code tools/app-shell/src/lib/backendErrors.js} recognises these messages by their literal
    * text — exact-match for the fixed ones, prefix/suffix matchers for the three that interpolate.
    * Rewording any of them silently drops the user back to untranslated English; update the
-   * matchers and their {@code backendError.*} locale keys in the same change.
+   * matchers and their {@code backendError.*} locale keys in the same change. The one exception is
+   * the missing-country text ({@link #MSG_IBAN_REQUIRES_COUNTRY}, ETP-5473): an {@code AD_MESSAGE}
+   * answered in the request language. The handler checks a missing country itself before calling
+   * this method and answers it through {@link NeoMessageText#error}, which also publishes the key.
    *
    * @param iban    already {@link #normalizeIban(String) normalized}; assumed non-blank — callers
    *                only invoke this once they know the effective IBAN is present.
@@ -173,7 +178,7 @@ final class FinancialAccountCountrySupport {
       return "The IBAN is too short.";
     }
     if (country == null) {
-      return MSG_IBAN_REQUIRES_COUNTRY;
+      return NeoMessageText.text(MSG_IBAN_REQUIRES_COUNTRY);
     }
     String ibanPrefix = country.getIBANCode();
     Long ibanLength = country.getIBANLength();
