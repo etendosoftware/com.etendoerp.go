@@ -1106,6 +1106,10 @@ public class McpToolRouter {
       return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates));
     }
 
+    // ETP-5852 (M-103): a line price sent alone is the form's Precio, as on create.
+    McpLinePriceInjector.applyAgentPriceOnUpdate(filteredBody, dalEntity,
+        updateUserProvidedFields, OBDal.getInstance().get(dalEntityName, recordId));
+
     // ETP-5726: a required field cannot be emptied by sending null/"" (the screen cannot either).
     JSONObject clearedError = McpWriteRequestSupport.rejectClearedMandatoryFields(filteredBody,
         adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, NeoLanguage.currentCode());

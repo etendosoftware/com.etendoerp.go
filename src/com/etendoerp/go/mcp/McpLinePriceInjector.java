@@ -236,6 +236,47 @@ final class McpLinePriceInjector {
     return true;
   }
 
+  /** The line's discount property: order lines call it discount, invoice lines etgoDiscount. */
+  private static final String FIELD_INVOICE_DISCOUNT = "etgoDiscount";
+
+  /**
+   * ETP-5852 (M-103): the same rule as {@link #applyAgentPrice} on an update. A price the agent
+   * sends alone is the form's "Precio" (listPrice) and the net unitPrice follows from it and the
+   * line's discount — the one sent, else the one the line has. Before, an update kept the sent
+   * price as the net and moved another field to fit: order lines recomputed the discount (5 % to
+   * 20 % for a price of 40 on a list of 50), invoice lines the list price (44.44).
+   *
+   * @param body           the update body, keyed by DAL property; mutated in place
+   * @param dalEntity      the line's entity
+   * @param agentProvided  the keys the agent sent
+   * @param current        the line as stored, for its discount; may be {@code null}
+   * @return {@code true} when the price was rewritten
+   */
+  static boolean applyAgentPriceOnUpdate(JSONObject body, Entity dalEntity,
+      Set<String> agentProvided, BaseOBObject current) throws JSONException {
+    if (body == null || dalEntity == null || agentProvided == null
+        || !agentProvided.contains(FIELD_UNIT_PRICE) || agentProvided.contains(FIELD_LIST_PRICE)
+        || !dalEntity.hasProperty(FIELD_UNIT_PRICE) || !dalEntity.hasProperty(FIELD_LIST_PRICE)) {
+      return false;
+    }
+    String discountKey = dalEntity.hasProperty(FIELD_DISCOUNT) ? FIELD_DISCOUNT
+        : dalEntity.hasProperty(FIELD_INVOICE_DISCOUNT) ? FIELD_INVOICE_DISCOUNT : null;
+    java.math.BigDecimal price = decimalOrNull(body.opt(FIELD_UNIT_PRICE));
+    if (discountKey == null || price == null || price.signum() == 0) {
+      return false;
+    }
+    java.math.BigDecimal discount = agentProvided.contains(discountKey)
+        ? decimalOrNull(body.opt(discountKey))
+        : current == null ? null : decimalOrNull(current.get(discountKey));
+    if (discount == null || discount.signum() < 0 || discount.compareTo(HUNDRED) > 0) {
+      discount = java.math.BigDecimal.ZERO;
+    }
+    body.put(FIELD_LIST_PRICE, price);
+    body.put(FIELD_UNIT_PRICE, price.multiply(HUNDRED.subtract(discount))
+        .divide(HUNDRED, 6, java.math.RoundingMode.HALF_UP).stripTrailingZeros());
+    return true;
+  }
+
   private static java.math.BigDecimal decimalOrNull(Object value) {
     if (value == null || JSONObject.NULL.equals(value)) {
       return null;
