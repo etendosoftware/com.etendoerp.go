@@ -18,25 +18,19 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.math.BigDecimal;
-import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
-import javax.servlet.http.HttpServletResponse;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.query.Query;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
-import org.openbravo.model.financialmgmt.payment.PaymentTermTrl;
 
 import com.etendoerp.go.schemaforge.AbstractNeoHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -72,12 +66,17 @@ import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
  * create enrichment also runs earlier, through {@link #resolveServerCreateFields}; and the
  * mandatory-defaults pass runs before both, so on create the pre-hook first discards the
  * days-derived values the server filled (a placeholder 0 days, a default) and decides them as on
- * REST — see {@link #dropServerFilledCreateFields} (ETP-5978).</p>
+ * REST — see {@link PaymentTermCreateDefaults#dropServerFilledCreateFields} (ETP-5978).</p>
  *
  * <p>On an update, the range and duplicate checks only run when the days or the shape actually
  * change, so a legacy term that already breaks a rule can still be renamed. The message keys are
  * plain strings, deliberately not {@code AD_MESSAGE} records (ETP-5692 decision): the text is
  * English and a client that wants another language maps the key.</p>
+ *
+ * <p>This class is the only binding and keeps the {@code NeoHandler} surface; plain helpers carry
+ * the rest: {@link PaymentTermCreateDefaults} (create-time derivations),
+ * {@link PaymentTermRenameSync} (rename → translations) and {@link PaymentTermRefusals} (the keyed
+ * error responses).</p>
  */
 @NeoExtension(spec = "payment-term", entity = "header")
 public class PaymentTermHandler extends AbstractNeoHandler {
@@ -94,10 +93,6 @@ public class PaymentTermHandler extends AbstractNeoHandler {
   static final String F_FIXED_DUE_DATE = PaymentTerm.PROPERTY_FIXEDDUEDATE;
   static final String F_ORGANIZATION = PaymentTerm.PROPERTY_ORGANIZATION;
 
-  /** The days and every field a create derives from them (ETP-5978). */
-  static final List<String> CREATE_DERIVED_FIELDS = List.of(F_DAYS, F_NAME, F_SEARCH_KEY,
-      F_OFFSET_MONTH, F_NEXT_BUSINESS_DAY);
-
   static final int MIN_DAYS = 0;
   static final int MAX_DAYS = 365;
 
@@ -112,27 +107,10 @@ public class PaymentTermHandler extends AbstractNeoHandler {
   static final String CODE_DAYS_DUPLICATE = "payment_term_days_duplicate";
   static final String CODE_NAME_DUPLICATE = "payment_term_name_duplicate";
 
-  static final String IMMEDIATE_NAME = "Inmediato";
-  static final String IMMEDIATE_SEARCH_KEY = "I";
-
   /** A signed integer short enough to never overflow; longer digit runs are not a day count. */
   private static final Pattern WHOLE_NUMBER = Pattern.compile("[+-]?\\d{1,9}");
 
-  /** Context attribute: the name an accepted update gives the term (QA BUG-1, ETP-5978). */
-  static final String ATTR_RENAMED_TO = PaymentTermHandler.class.getName() + ".renamedTo";
-
   private static final String DATA_ENVELOPE = "data";
-  private static final String RESPONSE_ENVELOPE = "response";
-  private static final String KEY_ID = "id";
-  private static final String KEY_IDENTIFIER = "_identifier";
-  private static final String KEY_ERROR = "error";
-  private static final String KEY_MESSAGE = "message";
-  private static final String KEY_STATUS = "status";
-  private static final String KEY_CODE = "code";
-  private static final String KEY_FIELDS = "fields";
-  private static final String KEY_HINT = "hint";
-  private static final String KEY_MESSAGE_KEYS = "messageKeys";
-  private static final String KEY_MESSAGE_PARAMS = "messageParams";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -150,7 +128,8 @@ public class PaymentTermHandler extends AbstractNeoHandler {
    * <p>{@code searchKey} ({@code Value}) and {@code offsetMonthDue} ({@code FixMonthOffset}) are
    * mandatory in AD and hidden from the Payment Term window, so an agent creating a term from a
    * name and a number of days would otherwise get a {@code missingFields} 422 for fields it was
-   * never offered. This runs the same {@link #enrichCreate} the pre-hook runs, so every channel
+   * never offered. This runs the same {@link PaymentTermCreateDefaults#enrichCreate} the pre-hook
+   * runs, so every channel
    * derives the same values.</p>
    *
    * <p>Abstains (body untouched) on an update, or when the days are absent, null or not a whole
@@ -160,10 +139,12 @@ public class PaymentTermHandler extends AbstractNeoHandler {
    * safe-type placeholder 0, and the context this hook receives does not say so (no fallback
    * defaults, no {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}). The zero-day shape is then
    * derived here, harmlessly: the pre-hook does see both signals, treats the placeholder as absent
-   * ({@link #dropServerFilledCreateFields}) and answers the same 400 {@value #MSG_DAYS_INVALID} as
+   * ({@link PaymentTermCreateDefaults#dropServerFilledCreateFields}) and answers the same 400
+   * {@value #MSG_DAYS_INVALID} as
    * REST, before anything is persisted. Days out of range are still enriched, so the pre-hook
    * answers its keyed 400 instead of a 422 for a key derived from them. Idempotent with the later
-   * pre-hook and never overwrites a value the caller sent ({@link #enrichCreate}); never
+   * pre-hook and never overwrites a value the caller sent
+   * ({@link PaymentTermCreateDefaults#enrichCreate}); never
    * throws.</p>
    *
    * @param context the MCP create context; its request body is mutated in place
@@ -177,63 +158,18 @@ public class PaymentTermHandler extends AbstractNeoHandler {
         return;
       }
       JSONObject fields = unwrap(body);
-      if (!isCallerValue(context, fields, F_DAYS) || fields.isNull(F_DAYS)) {
+      if (!PaymentTermCreateDefaults.isCallerValue(context, fields, F_DAYS)
+          || fields.isNull(F_DAYS)) {
         return;
       }
       rawDays = fields.get(F_DAYS);
       Long days = parseWholeNumber(rawDays);
       if (days != null) {
-        enrichCreate(fields, days);
+        PaymentTermCreateDefaults.enrichCreate(fields, days);
       }
     } catch (JSONException | RuntimeException e) {
       log.debug("[ETP-5978] Payment term create defaults skipped (days={}): {}", rawDays,
           e.getMessage());
-    }
-  }
-
-  /**
-   * Whether {@code key} in a create body is the caller's own value, not one the server filled
-   * before this customization ran. REST single and batch run the pre-hook before any defaults
-   * pass, so there presence in the body is the answer. MCP {@code etendo_create} runs the
-   * mandatory-defaults pass first and says what it did: a key in
-   * {@link NeoContext#getFallbackDefaults()} is a placeholder (ETP-5669, forwarded to the
-   * pre-hook since ETP-5680), and when {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} is present
-   * only the keys it lists were sent.
-   *
-   * @param context the request; {@code null} means presence in the body
-   */
-  static boolean isCallerValue(NeoContext context, JSONObject body, String key) {
-    if (!body.has(key)) {
-      return false;
-    }
-    if (context == null) {
-      return true;
-    }
-    if (context.getFallbackDefaults().contains(key)) {
-      return false;
-    }
-    Object clientProvided = context.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
-    return !(clientProvided instanceof Collection)
-        || ((Collection<?>) clientProvided).contains(key);
-  }
-
-  /**
-   * On create, removes from the body the days-derived fields the server filled before the
-   * pre-hook (see {@link #isCallerValue}), so the pre-hook decides them exactly as on REST: days
-   * the caller did not send are refused as missing (400 {@value #MSG_DAYS_INVALID}) instead of
-   * creating a zero-day term from a placeholder, and {@code name}, {@code searchKey},
-   * {@code offsetMonthDue} and {@code nextBusinessDay} are derived from the days rather than kept
-   * from a default. A value the caller sent is never touched. A no-op without a context, and on
-   * REST, where the body only holds what the caller sent.
-   */
-  static void dropServerFilledCreateFields(JSONObject body, NeoContext context) {
-    if (context == null) {
-      return;
-    }
-    for (String key : CREATE_DERIVED_FIELDS) {
-      if (body.has(key) && !isCallerValue(context, body, key)) {
-        body.remove(key);
-      }
     }
   }
 
@@ -260,7 +196,8 @@ public class PaymentTermHandler extends AbstractNeoHandler {
    * {@link #validateAndEnrich(JSONObject, String)} with the request context, which a create needs
    * to resolve the organization the record will get when the caller does not send one (name
    * uniqueness is per organization), and to tell the caller's values from the ones an MCP create
-   * filled before the pre-hook ({@link #dropServerFilledCreateFields}). Without a context both are
+   * filled before the pre-hook ({@link PaymentTermCreateDefaults#dropServerFilledCreateFields}).
+   * Without a context both are
    * skipped.
    */
   NeoResponse validateAndEnrich(JSONObject body, String recordId, NeoContext context)
@@ -272,30 +209,16 @@ public class PaymentTermHandler extends AbstractNeoHandler {
       return null;
     }
     if (create) {
-      dropServerFilledCreateFields(body, context);
+      PaymentTermCreateDefaults.dropServerFilledCreateFields(body, context);
     }
     NeoResponse refusal = validateDaysAndEnrich(body, create, stored);
     if (refusal == null) {
       refusal = checkNameUnique(body, stored, context);
     }
     if (refusal == null && !create) {
-      rememberRename(body, stored, context);
+      PaymentTermRenameSync.rememberRename(context, stored, submittedString(body, F_NAME));
     }
     return refusal;
-  }
-
-  /**
-   * QA BUG-1 (ETP-5978): records on the context the name an accepted update gives the term, for
-   * {@link #afterHandle} to bring the translations in step once the write has succeeded. Nothing
-   * is recorded when the name is not sent, is blank or does not change.
-   */
-  static void rememberRename(JSONObject body, PaymentTerm stored, NeoContext context)
-      throws JSONException {
-    String name = submittedString(body, F_NAME);
-    if (context == null || StringUtils.isBlank(name) || name.equals(stored.getName())) {
-      return;
-    }
-    context.setAttribute(ATTR_RENAMED_TO, name);
   }
 
   /**
@@ -326,7 +249,7 @@ public class PaymentTermHandler extends AbstractNeoHandler {
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    Object renamedTo = context.getAttribute(ATTR_RENAMED_TO);
+    Object renamedTo = context.getAttribute(PaymentTermRenameSync.ATTR_RENAMED_TO);
     NeoResponse saved = context.getPreviousResult();
     if (!(renamedTo instanceof String) || saved == null || saved.getHttpStatus() >= 400
         || StringUtils.isBlank(context.getRecordId())) {
@@ -335,35 +258,12 @@ public class PaymentTermHandler extends AbstractNeoHandler {
     String name = (String) renamedTo;
     try {
       syncTranslatedName(context.getRecordId(), name);
-      applyIdentifier(saved.getBody(), context.getRecordId(), name);
+      PaymentTermRenameSync.applyIdentifier(saved.getBody(), context.getRecordId(), name);
     } catch (Exception e) {
       log.error("[ETP-5978] Could not sync the translated name of payment term {}: {}",
           context.getRecordId(), e.getMessage(), e);
     }
     return null;
-  }
-
-  /**
-   * Sets {@code _identifier} to {@code name} on the echoed record {@code recordId}, in the
-   * {@code {"response": {"data": [...]}}} shape core's update returns or in a flat
-   * {@code {"data": [...]}}. The identifier of a payment term is its name alone.
-   */
-  static void applyIdentifier(JSONObject body, String recordId, String name)
-      throws JSONException {
-    if (body == null) {
-      return;
-    }
-    JSONObject inner = body.optJSONObject(RESPONSE_ENVELOPE);
-    JSONArray rows = (inner != null ? inner : body).optJSONArray(DATA_ENVELOPE);
-    if (rows == null) {
-      return;
-    }
-    for (int i = 0; i < rows.length(); i++) {
-      JSONObject row = rows.optJSONObject(i);
-      if (row != null && recordId.equals(row.optString(KEY_ID, null))) {
-        row.put(KEY_IDENTIFIER, name);
-      }
-    }
   }
 
   private NeoResponse validateDaysAndEnrich(JSONObject body, boolean create, PaymentTerm stored)
@@ -379,7 +279,7 @@ public class PaymentTermHandler extends AbstractNeoHandler {
     }
 
     if (create) {
-      enrichCreate(body, days);
+      PaymentTermCreateDefaults.enrichCreate(body, days);
     }
     return checkDuplicate(body, stored, days);
   }
@@ -406,7 +306,7 @@ public class PaymentTermHandler extends AbstractNeoHandler {
     String clientId = stored == null ? currentClientId() : stored.getClient().getId();
     PaymentTerm existing = findSimpleTermWithDays(clientId, days,
         stored == null ? null : stored.getId());
-    return existing == null ? null : duplicate(days, existing);
+    return existing == null ? null : PaymentTermRefusals.duplicate(days, existing);
   }
 
   /**
@@ -444,7 +344,7 @@ public class PaymentTermHandler extends AbstractNeoHandler {
     String clientId = stored == null ? currentClientId() : stored.getClient().getId();
     PaymentTerm existing = findTermWithName(clientId, orgId, name,
         stored == null ? null : stored.getId());
-    return existing == null ? null : nameDuplicate(existing);
+    return existing == null ? null : PaymentTermRefusals.nameDuplicate(existing);
   }
 
   /** The string the body sets for {@code key}, untrimmed, or {@code null} when absent or null. */
@@ -498,16 +398,16 @@ public class PaymentTermHandler extends AbstractNeoHandler {
       throws JSONException {
     if (!body.has(F_DAYS) || body.isNull(F_DAYS)) {
       // Required on create; an explicit null on update would clear a mandatory column.
-      return create || body.has(F_DAYS) ? invalidDays(null) : null;
+      return create || body.has(F_DAYS) ? PaymentTermRefusals.invalidDays(null) : null;
     }
     Object raw = body.get(F_DAYS);
     Long days = parseWholeNumber(raw);
     if (days == null) {
-      return invalidDays(raw);
+      return PaymentTermRefusals.invalidDays(raw);
     }
     body.put(F_DAYS, days.longValue());
     if ((create || !days.equals(storedDays)) && !isInRange(days)) {
-      return daysOutOfRange(days);
+      return PaymentTermRefusals.daysOutOfRange(days);
     }
     return null;
   }
@@ -518,35 +418,6 @@ public class PaymentTermHandler extends AbstractNeoHandler {
     return !Objects.equals(stored.getOverduePaymentDaysRule(), days)
         || normalizeOffset(offset) != normalizeOffset(stored.getOffsetMonthDue())
         || fixedDueDate != Boolean.TRUE.equals(stored.isFixedDueDate());
-  }
-
-  /** Fills the fields the days-only create form does not send, leaving any value the caller sent. */
-  static void enrichCreate(JSONObject body, long days) throws JSONException {
-    if (isAbsent(body, F_NAME)) {
-      body.put(F_NAME, deriveName(days));
-    }
-    if (isAbsent(body, F_SEARCH_KEY)) {
-      body.put(F_SEARCH_KEY, deriveSearchKey(days));
-    }
-    if (!body.has(F_OFFSET_MONTH) || body.isNull(F_OFFSET_MONTH)) {
-      body.put(F_OFFSET_MONTH, 0L);
-    }
-    if (!body.has(F_NEXT_BUSINESS_DAY) || body.isNull(F_NEXT_BUSINESS_DAY)) {
-      body.put(F_NEXT_BUSINESS_DAY, days != 0);
-    }
-  }
-
-  /** {@code "N Días"}, {@code "1 Día"}, or {@code "Inmediato"} for zero — the seed's naming. */
-  static String deriveName(long days) {
-    if (days == 0) {
-      return IMMEDIATE_NAME;
-    }
-    return days == 1 ? "1 D\u00EDa" : days + " D\u00EDas";
-  }
-
-  /** {@code "ND"} (e.g. {@code "12D"}), or {@code "I"} for zero — the seed's search keys. */
-  static String deriveSearchKey(long days) {
-    return days == 0 ? IMMEDIATE_SEARCH_KEY : days + "D";
   }
 
   static boolean isInRange(long days) {
@@ -612,32 +483,15 @@ public class PaymentTermHandler extends AbstractNeoHandler {
     return stored != null && Boolean.TRUE.equals(stored.isFixedDueDate());
   }
 
-  private static boolean isAbsent(JSONObject body, String key) {
-    return optTrimmed(body, key) == null;
-  }
-
   // --- data access, package-private so unit tests can stub them on a spy ---------------------
 
   PaymentTerm loadStored(String recordId) {
     return OBDal.getInstance().get(PaymentTerm.class, recordId);
   }
 
-  /**
-   * Copies {@code name} into every translation of the term ({@code C_PaymentTerm_Trl}), all
-   * languages. Called from {@link #afterHandle}, i.e. after the rename has been committed by the
-   * write service (single REST / MCP write): it runs in a second transaction, committed at the end
-   * of the request, so it is not atomic with the rename. A bulk HQL update: it bypasses DAL entity
-   * access, which the role writing the base record does not need on the translation entity.
-   *
-   * @return the number of translation rows updated
-   */
+  /** Seam over {@link PaymentTermRenameSync#syncTranslatedName}, stubbed by unit tests. */
   int syncTranslatedName(String termId, String name) {
-    Query<?> update = OBDal.getInstance().getSession().createQuery(
-        "update " + PaymentTermTrl.ENTITY_NAME + " t set t." + PaymentTermTrl.PROPERTY_NAME
-            + " = :name where t." + PaymentTermTrl.PROPERTY_PAYMENTTERMS + ".id = :termId");
-    update.setParameter("name", name);
-    update.setParameter("termId", termId);
-    return update.executeUpdate();
+    return PaymentTermRenameSync.syncTranslatedName(termId, name);
   }
 
   boolean hasLines(PaymentTerm term) {
@@ -713,88 +567,5 @@ public class PaymentTermHandler extends AbstractNeoHandler {
     query.setMaxResult(1);
     List<PaymentTerm> found = query.list();
     return found.isEmpty() ? null : found.get(0);
-  }
-
-  // --- refusals --------------------------------------------------------------------------------
-
-  static NeoResponse invalidDays(Object value) throws JSONException {
-    JSONObject params = rangeParams().put("value", value == null ? JSONObject.NULL : value);
-    String message = "The number of days (" + F_DAYS + ") is required and must be a whole number"
-        + " between " + MIN_DAYS + " and " + MAX_DAYS + (value == null ? "." : "; got '" + value + "'.");
-    return refusal(HttpServletResponse.SC_BAD_REQUEST, CODE_DAYS_INVALID, MSG_DAYS_INVALID,
-        message, params, null);
-  }
-
-  static NeoResponse daysOutOfRange(long days) throws JSONException {
-    JSONObject params = rangeParams().put("value", days);
-    String message = "The number of days (" + F_DAYS + ") must be between " + MIN_DAYS + " and "
-        + MAX_DAYS + "; got " + days + ".";
-    return refusal(HttpServletResponse.SC_BAD_REQUEST, CODE_DAYS_OUT_OF_RANGE,
-        MSG_DAYS_OUT_OF_RANGE, message, params, null);
-  }
-
-  static NeoResponse duplicate(long days, PaymentTerm existing) throws JSONException {
-    boolean active = Boolean.TRUE.equals(existing.isActive());
-    JSONObject params = new JSONObject()
-        .put("days", days)
-        .put("paymentTermId", existing.getId())
-        .put("paymentTermName", existing.getName())
-        .put("paymentTermSearchKey", existing.getSearchKey())
-        .put("paymentTermActive", active);
-    String message = "A payment term for " + days + " days already exists"
-        + (active ? "" : " but is inactive") + ": '" + existing.getName() + "' ("
-        + existing.getSearchKey() + ", id " + existing.getId() + ").";
-    String hint = active
-        ? "Reuse the existing payment term: set paymentTerms to '" + existing.getId()
-            + "' on the document instead of creating a new term."
-        : "Reactivate the existing payment term '" + existing.getId()
-            + "' (payment-term/header, active=true) instead of creating a new term.";
-    return refusal(HttpServletResponse.SC_CONFLICT, CODE_DAYS_DUPLICATE, MSG_DAYS_DUPLICATE,
-        message, params, hint);
-  }
-
-  static NeoResponse nameDuplicate(PaymentTerm existing) throws JSONException {
-    boolean active = Boolean.TRUE.equals(existing.isActive());
-    JSONObject params = new JSONObject()
-        .put("paymentTermName", existing.getName())
-        .put("paymentTermId", existing.getId())
-        .put("paymentTermActive", active);
-    String message = "A payment term named '" + existing.getName() + "' already exists in this"
-        + " organization" + (active ? "" : " (inactive)") + " (id " + existing.getId() + ").";
-    String hint = "Choose another name for the payment term. If it was created from a number of"
-        + " days, the existing term with that name has another due-date shape (a month offset, a"
-        + " fixed due date or installment lines): send an explicit name, or rename the existing"
-        + " term.";
-    return refusal(HttpServletResponse.SC_CONFLICT, F_NAME, CODE_NAME_DUPLICATE,
-        MSG_NAME_DUPLICATE, message, params, hint);
-  }
-
-  private static JSONObject rangeParams() throws JSONException {
-    return new JSONObject().put("field", F_DAYS).put("min", MIN_DAYS).put("max", MAX_DAYS);
-  }
-
-  /**
-   * The refusal shape shared with {@code CompletedInvoiceWriteFence}: everything under
-   * {@code error}, with {@code messageKeys}/{@code messageParams} for the SPA and the MCP, and a
-   * {@code hint} an agent can act on.
-   */
-  private static NeoResponse refusal(int status, String code, String messageKey, String message,
-      JSONObject params, String hint) throws JSONException {
-    return refusal(status, F_DAYS, code, messageKey, message, params, hint);
-  }
-
-  private static NeoResponse refusal(int status, String field, String code, String messageKey,
-      String message, JSONObject params, String hint) throws JSONException {
-    JSONObject error = new JSONObject()
-        .put(KEY_STATUS, status)
-        .put(KEY_CODE, code)
-        .put(KEY_MESSAGE, message)
-        .put(KEY_FIELDS, new JSONArray().put(field))
-        .put(KEY_MESSAGE_KEYS, new JSONArray().put(messageKey))
-        .put(KEY_MESSAGE_PARAMS, params);
-    if (hint != null) {
-      error.put(KEY_HINT, hint);
-    }
-    return NeoResponse.error(status, new JSONObject().put(KEY_ERROR, error));
   }
 }

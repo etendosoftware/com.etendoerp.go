@@ -78,6 +78,9 @@ import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
  * {@link NeoMandatoryDefaultsService} / {@link NeoServerOwnedFields} statics.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentTermHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.PaymentTermCreateDefaults
+ * @covers com.etendoerp.go.schemaforge.handlers.PaymentTermRenameSync
+ * @covers com.etendoerp.go.schemaforge.handlers.PaymentTermRefusals
  */
 public class PaymentTermHandlerTest {
 
@@ -558,6 +561,13 @@ public class PaymentTermHandlerTest {
     assertEquals("12 Días", body.getString("name"));
     assertEquals("12D", body.getString("searchKey"));
     assertEquals(0L, body.getLong("offsetMonthDue"));
+
+    // Blank is String.trim() blank (chars <= U+0020), as AbstractNeoHandler#optTrimmed reads it:
+    // a control character counts as blank, an ideographic space (U+3000) does not.
+    JSONObject edge = days(12).put("name", "\u0001").put("searchKey", "　");
+    assertNull(create(edge));
+    assertEquals("12 Días", edge.getString("name"));
+    assertEquals("　", edge.getString("searchKey"));
   }
 
   @Test
@@ -867,11 +877,11 @@ public class PaymentTermHandlerTest {
         .put("nextBusinessDay", true).put("description", "d");
     String before = rest.toString();
 
-    PaymentTermHandler.dropServerFilledCreateFields(rest, ctx("POST", null, rest,
+    PaymentTermCreateDefaults.dropServerFilledCreateFields(rest, ctx("POST", null, rest,
         NeoEndpointType.CRUD));
     assertEquals(before, rest.toString());
 
-    PaymentTermHandler.dropServerFilledCreateFields(rest, null);
+    PaymentTermCreateDefaults.dropServerFilledCreateFields(rest, null);
     assertEquals(before, rest.toString());
   }
 
@@ -879,14 +889,14 @@ public class PaymentTermHandlerTest {
   public void dropServerFilledCreateFieldsOnlyTouchesTheDaysDerivedFields() throws Exception {
     JSONObject body = days(0).put("name", "N").put("description", "not derived");
 
-    PaymentTermHandler.dropServerFilledCreateFields(body,
+    PaymentTermCreateDefaults.dropServerFilledCreateFields(body,
         mcpCtx("POST", null, body, sent(), DAYS, "description"));
 
     assertFalse(body.has(DAYS));
     assertFalse(body.has("name"));
     assertEquals("not derived", body.getString("description"));
     assertEquals(Arrays.asList(DAYS, "name", "searchKey", "offsetMonthDue", "nextBusinessDay"),
-        PaymentTermHandler.CREATE_DERIVED_FIELDS);
+        PaymentTermCreateDefaults.CREATE_DERIVED_FIELDS);
   }
 
   @Test
@@ -904,23 +914,23 @@ public class PaymentTermHandlerTest {
   public void isCallerValueTruthTable() throws Exception {
     JSONObject body = days(12);
 
-    assertFalse("absent key", PaymentTermHandler.isCallerValue(
+    assertFalse("absent key", PaymentTermCreateDefaults.isCallerValue(
         mcpCtx("POST", null, body, sent("name")), body, "name"));
     assertTrue("no context means presence",
-        PaymentTermHandler.isCallerValue(null, body, DAYS));
-    assertTrue("REST: no signals means presence", PaymentTermHandler.isCallerValue(
+        PaymentTermCreateDefaults.isCallerValue(null, body, DAYS));
+    assertTrue("REST: no signals means presence", PaymentTermCreateDefaults.isCallerValue(
         ctx("POST", null, body, NeoEndpointType.CRUD), body, DAYS));
-    assertTrue("listed as sent", PaymentTermHandler.isCallerValue(
+    assertTrue("listed as sent", PaymentTermCreateDefaults.isCallerValue(
         mcpCtx("POST", null, body, sent(DAYS)), body, DAYS));
-    assertFalse("not listed as sent", PaymentTermHandler.isCallerValue(
+    assertFalse("not listed as sent", PaymentTermCreateDefaults.isCallerValue(
         mcpCtx("POST", null, body, sent("name")), body, DAYS));
-    assertFalse("a fallback default wins over the client set", PaymentTermHandler.isCallerValue(
+    assertFalse("a fallback default wins over the client set", PaymentTermCreateDefaults.isCallerValue(
         mcpCtx("POST", null, body, sent(DAYS), DAYS), body, DAYS));
 
     NeoContext nonCollection = ctx("POST", null, body, NeoEndpointType.CRUD);
     nonCollection.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, "name");
     assertTrue("a non-Collection attribute falls back to presence",
-        PaymentTermHandler.isCallerValue(nonCollection, body, DAYS));
+        PaymentTermCreateDefaults.isCallerValue(nonCollection, body, DAYS));
   }
 
   @Test
@@ -1121,7 +1131,7 @@ public class PaymentTermHandlerTest {
   /** A context whose pre-hook already ran and recorded a rename to {@code name}. */
   private static NeoContext renamedTo(String recordId, String name, NeoResponse previous) {
     NeoContext context = ctx("PATCH", recordId, new JSONObject(), NeoEndpointType.CRUD);
-    context.setAttribute(PaymentTermHandler.ATTR_RENAMED_TO, name);
+    context.setAttribute(PaymentTermRenameSync.ATTR_RENAMED_TO, name);
     context.setPreviousResult(previous);
     return context;
   }
@@ -1165,7 +1175,7 @@ public class PaymentTermHandlerTest {
 
       assertNull(handler.handle(context));
 
-      assertNull(body.toString(), context.getAttribute(PaymentTermHandler.ATTR_RENAMED_TO));
+      assertNull(body.toString(), context.getAttribute(PaymentTermRenameSync.ATTR_RENAMED_TO));
       assertAfterHandleDoesNotSync(context);
     }
   }
@@ -1176,7 +1186,7 @@ public class PaymentTermHandlerTest {
 
     assertNull(handler.handle(context));
 
-    assertNull(context.getAttribute(PaymentTermHandler.ATTR_RENAMED_TO));
+    assertNull(context.getAttribute(PaymentTermRenameSync.ATTR_RENAMED_TO));
     assertNull(handler.afterHandle(context));
     verify(handler, never()).syncTranslatedName(anyString(), anyString());
   }
@@ -1191,7 +1201,7 @@ public class PaymentTermHandlerTest {
 
     assertRefusal(handler.handle(context), 409, PaymentTermHandler.MSG_DAYS_DUPLICATE);
 
-    assertNull(context.getAttribute(PaymentTermHandler.ATTR_RENAMED_TO));
+    assertNull(context.getAttribute(PaymentTermRenameSync.ATTR_RENAMED_TO));
     assertAfterHandleDoesNotSync(context);
   }
 
@@ -1206,7 +1216,7 @@ public class PaymentTermHandlerTest {
 
     assertRefusal(handler.handle(context), 409, PaymentTermHandler.MSG_NAME_DUPLICATE, "name");
 
-    assertNull(context.getAttribute(PaymentTermHandler.ATTR_RENAMED_TO));
+    assertNull(context.getAttribute(PaymentTermRenameSync.ATTR_RENAMED_TO));
     assertAfterHandleDoesNotSync(context);
   }
 
@@ -1233,7 +1243,7 @@ public class PaymentTermHandlerTest {
   @Test
   public void afterHandleWithoutAStringMarkerIsANoOp() throws Exception {
     NeoContext context = ctx("PATCH", TERM_ID, new JSONObject(), NeoEndpointType.CRUD);
-    context.setAttribute(PaymentTermHandler.ATTR_RENAMED_TO, Boolean.TRUE);
+    context.setAttribute(PaymentTermRenameSync.ATTR_RENAMED_TO, Boolean.TRUE);
     context.setPreviousResult(savedResponse(echoedRow(TERM_ID, "Viejo")));
 
     assertAfterHandleDoesNotSync(context);
@@ -1255,11 +1265,11 @@ public class PaymentTermHandlerTest {
 
   @Test
   public void applyIdentifierToleratesABodyWithoutRows() throws Exception {
-    PaymentTermHandler.applyIdentifier(null, TERM_ID, "Nuevo");
+    PaymentTermRenameSync.applyIdentifier(null, TERM_ID, "Nuevo");
     JSONObject noRows = new JSONObject().put("response", new JSONObject().put("status", 0));
     String before = noRows.toString();
 
-    PaymentTermHandler.applyIdentifier(noRows, TERM_ID, "Nuevo");
+    PaymentTermRenameSync.applyIdentifier(noRows, TERM_ID, "Nuevo");
 
     assertEquals(before, noRows.toString());
   }
