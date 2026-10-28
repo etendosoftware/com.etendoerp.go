@@ -25,6 +25,7 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
@@ -200,16 +201,10 @@ public final class SupportAccessGuard {
     if (body == null) {
       return false;
     }
-    if (body.has(FIELD_PASSWORD) && StringUtils.isNotBlank(body.optString(FIELD_PASSWORD, null))
-        && !body.isNull(FIELD_PASSWORD)) {
+    if (hasPassword(body)) {
       return true;
     }
-    boolean any = body.has("email") || body.has("username") || body.has("defaultRole")
-        || body.has(FIELD_WS_ROLE);
-    for (String flag : ACCESS_FLAGS) {
-      any |= body.has(flag);
-    }
-    if (!any) {
+    if (!touchesAccessField(body)) {
       return false;
     }
     OBContext.setAdminMode(true);
@@ -218,12 +213,8 @@ public final class SupportAccessGuard {
       if (user == null) {
         return true;
       }
-      for (String flag : ACCESS_FLAGS) {
-        Object stored = user.get(flag);
-        if (body.has(flag) && !normalizeBoolean(incoming(body, flag))
-            .equals(normalizeBoolean(stored == null ? null : stored.toString()))) {
-          return true;
-        }
+      if (anyFlagDiffers(body, user)) {
+        return true;
       }
       return differs(body, "email", user.getEmail(), true)
           || differs(body, "username", user.getUsername(), true)
@@ -233,6 +224,51 @@ public final class SupportAccessGuard {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5351 (T6) — the tenant's "Soporte Etendo" user keeps exactly the client-admin role its
+   * provisioner gives it; nothing here composes, creates or restores a personal role for it,
+   * whoever asks.
+   *
+   * @param user the already-resolved target user
+   * @throws OBException if {@code user} is its client's support user
+   */
+  public static void rejectSupportUserTarget(User user) {
+    if (user != null && user.getClient() != null
+        && SupportAccessGuard.isSupportUser(user.getId(), user.getClient().getId())) {
+      throw new OBException("The support user's role is managed by support access: "
+          + user.getId());
+    }
+  }
+
+  private static boolean hasPassword(JSONObject body) {
+    return body.has(FIELD_PASSWORD) && StringUtils.isNotBlank(body.optString(FIELD_PASSWORD, null))
+        && !body.isNull(FIELD_PASSWORD);
+  }
+
+  private static boolean touchesAccessField(JSONObject body) {
+    if (body.has("email") || body.has("username") || body.has("defaultRole")
+        || body.has(FIELD_WS_ROLE)) {
+      return true;
+    }
+    for (String flag : ACCESS_FLAGS) {
+      if (body.has(flag)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean anyFlagDiffers(JSONObject body, User user) {
+    for (String flag : ACCESS_FLAGS) {
+      Object stored = user.get(flag);
+      if (body.has(flag) && !normalizeBoolean(incoming(body, flag))
+          .equals(normalizeBoolean(stored == null ? null : stored.toString()))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static String idOf(Object entity) {
@@ -249,8 +285,10 @@ public final class SupportAccessGuard {
 
   private static String incoming(JSONObject body, String field) {
     Object raw = body.opt(field);
-    return raw instanceof JSONObject ? ((JSONObject) raw).optString("id", null)
-        : (raw == null || JSONObject.NULL.equals(raw) ? null : raw.toString());
+    if (raw instanceof JSONObject) {
+      return ((JSONObject) raw).optString("id", null);
+    }
+    return raw == null || JSONObject.NULL.equals(raw) ? null : raw.toString();
   }
 
   private static boolean differs(JSONObject body, String field, String current,

@@ -296,7 +296,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       return null;
     }
     String method = context.getHttpMethod();
-    NeoResponse supportLockout = rejectSupportUserManagement(context);
+    NeoResponse supportLockout = UserSupportSessionGuard.rejectSupportUserManagement(context);
     if (supportLockout != null) {
       return supportLockout;
     }
@@ -304,37 +304,14 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       return handleCreate(context);
     }
     if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method)) {
-      NeoResponse supportGuard = rejectSupportSessionOnAdmin(context, context.getRecordId(),
-          isAdminStrippingUpdate(context.getRequestBody()));
+      NeoResponse supportGuard = UserSupportSessionGuard.rejectSupportSessionOnAdmin(context, context.getRecordId(),
+          UserSupportSessionGuard.isAdminStrippingUpdate(context.getRequestBody()));
       return supportGuard != null ? supportGuard : validateUpdate(context);
     }
     if (METHOD_DELETE.equalsIgnoreCase(method)) {
-      NeoResponse supportGuard = rejectSupportSessionOnAdmin(context, resolveDeleteTarget(context),
+      NeoResponse supportGuard = UserSupportSessionGuard.rejectSupportSessionOnAdmin(context, UserSupportSessionGuard.resolveDeleteTarget(context),
           true);
       return supportGuard != null ? supportGuard : rejectDangerousDelete(context);
-    }
-    return null;
-  }
-
-  /**
-   * ETP-5351 (Vigia H1) — a support session may not create a user, nor write the fields that
-   * grant or redirect access to the tenant ({@code email}, {@code username}, roles, a new {@code password},
-   * {@code active}/{@code locked}/owner flags; see {@link SupportAccessGuard#changesAccessFields})
-   * on any user, so it cannot leave persistent access behind. Everything else it edits is unchanged.
-   *
-   * @param context the request
-   * @return a 403 when refused, {@code null} to continue
-   */
-  private static NeoResponse rejectSupportUserManagement(NeoContext context) {
-    if (!SupportAccessGuard.isActingSupportUser(context.getObContext())) {
-      return null;
-    }
-    String method = context.getHttpMethod();
-    boolean write = METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method);
-    if (METHOD_POST.equalsIgnoreCase(method)
-        || (write && SupportAccessGuard.changesAccessFields(context.getRequestBody(),
-            context.getRecordId()))) {
-      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
     }
     return null;
   }
@@ -828,78 +805,6 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       // Fail CLOSED: an error here must not silently let a lockout-risking deactivation through.
       return NeoResponse.error(500, "Error validating deactivation: " + e.getMessage());
     }
-  }
-
-  /**
-   * ETP-5351 (T5) — in a support session, the tenant's "Soporte Etendo" user may not delete,
-   * deactivate or take the admin role away from the owner or any other admin (it may still do
-   * everything else an admin does). Checked before the ordinary guards, which only protect the
-   * last real admin (the support user is not counted, T6), not every admin.
-   *
-   * @param context   the request
-   * @param userId    the target {@code AD_User_ID}, may be null
-   * @param dangerous whether the request deletes, deactivates or changes the role of the target
-   * @return a 403 when refused, a 500 when the check itself failed, {@code null} to continue
-   */
-  private NeoResponse rejectSupportSessionOnAdmin(NeoContext context, String userId,
-      boolean dangerous) {
-    OBContext obContext = context.getObContext();
-    String actingUserId = obContext != null && obContext.getUser() != null
-        ? obContext.getUser().getId() : null;
-    String clientId = obContext != null && obContext.getCurrentClient() != null
-        ? obContext.getCurrentClient().getId() : null;
-    if (!dangerous || userId == null
-        || !SupportAccessGuard.isSupportUser(actingUserId, clientId)) {
-      return null;
-    }
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        User target = OBDal.getInstance().get(User.class, userId);
-        if (target != null && (OwnerSupport.isOwner(userId) || holdsClientAdminRole(target))) {
-          return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
-        }
-        return null;
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("UserRoleAssignmentHandler.rejectSupportSessionOnAdmin error for user {}: {}",
-          userId, e.getMessage(), e);
-      // Fail CLOSED, same reasoning as the other write-path guards in this class.
-      return NeoResponse.error(500, "Error validating support restrictions: " + e.getMessage());
-    }
-  }
-
-  /** Whether an update deactivates the user or touches its role (a demotion path). */
-  private static boolean isAdminStrippingUpdate(JSONObject requestBody) {
-    return requestBody != null
-        && (AbstractSmartDeactivationHandler.isExplicitlyDeactivating(requestBody)
-            || requestBody.has(FIELD_DEFAULT_ROLE));
-  }
-
-  /** Whether the user holds an active client-admin role (default role or any assignment). */
-  private static boolean holdsClientAdminRole(User user) {
-    Role defaultRole = user.getDefaultRole();
-    if (defaultRole != null && Boolean.TRUE.equals(defaultRole.isClientAdmin())) {
-      return true;
-    }
-    for (UserRoles assignment : user.getADUserRolesList()) {
-      if (Boolean.TRUE.equals(assignment.isActive()) && assignment.getRole() != null
-          && Boolean.TRUE.equals(assignment.getRole().isClientAdmin())) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** The record a DELETE touches: the path id, else the query {@code id} (ETP-5195, R3). */
-  private static String resolveDeleteTarget(NeoContext context) {
-    String userId = context.getRecordId();
-    if (userId == null && context.getQueryParams() != null) {
-      userId = context.getQueryParams().get(FIELD_ID);
-    }
-    return userId;
   }
 
   /**

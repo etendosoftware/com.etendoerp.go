@@ -25,7 +25,7 @@ import java.time.Instant;
  * <p>Only the SHA-256 of the pass is ever held here; the plaintext pass exists once, in the
  * {@link IssuedSupportTicket} returned to the operator.</p>
  */
-public class SupportAccessRecord {
+public class SupportAccessRecord extends SupportAccessEnding {
 
   private String id;
   private String operatorUserId;
@@ -40,9 +40,6 @@ public class SupportAccessRecord {
   private Instant ticketUsedAt;
   private String sessionId;
   private Instant startedAt;
-  private Instant endedAt;
-  private String endReason;
-  private String endedByUserId;
   private String ipHash;
   private String userAgent;
   private Instant sessionExpiresAt;
@@ -175,36 +172,6 @@ public class SupportAccessRecord {
   /** @param startedAt when the support session started */
   public void setStartedAt(Instant startedAt) {
     this.startedAt = startedAt;
-  }
-
-  /** @return when the access ended, or {@code null} while open */
-  public Instant getEndedAt() {
-    return endedAt;
-  }
-
-  /** @param endedAt when the access ended */
-  public void setEndedAt(Instant endedAt) {
-    this.endedAt = endedAt;
-  }
-
-  /** @return the {@link SupportEndReason} code, or {@code null} while open */
-  public String getEndReason() {
-    return endReason;
-  }
-
-  /** @param endReason the {@link SupportEndReason} code */
-  public void setEndReason(String endReason) {
-    this.endReason = endReason;
-  }
-
-  /** @return the {@code AD_User_ID} that revoked the access, when it was revoked */
-  public String getEndedByUserId() {
-    return endedByUserId;
-  }
-
-  /** @param endedByUserId the {@code AD_User_ID} that revoked the access */
-  public void setEndedByUserId(String endedByUserId) {
-    this.endedByUserId = endedByUserId;
   }
 
   /** @return the SHA-256 of the operator's IP when the pass was issued, or {@code null} */

@@ -24,7 +24,7 @@ import java.time.Instant;
  * <p>Only hashes of the opaque credentials are ever held here — never the plaintext session or
  * refresh token, which exist solely in the browser cookie.
  */
-public class GoSessionRecord {
+public class GoSessionRecord extends SupportMarkedSession {
 
   private String id;
   private String accountId;
@@ -47,9 +47,6 @@ public class GoSessionRecord {
   // Optional binding / audit.
   private String userAgent;
   private String ipHash;
-
-  // ETP-5351: the ETGO_SUPPORT_ACCESS row a support session was opened for; null otherwise.
-  private String supportAccessId;
 
   public String getId() {
     return id;
@@ -185,23 +182,5 @@ public class GoSessionRecord {
 
   public void setIpHash(String ipHash) {
     this.ipHash = ipHash;
-  }
-
-  /**
-   * The {@code ETGO_SUPPORT_ACCESS} row this session was opened for (ETP-5351).
-   *
-   * @return the support access id, or {@code null} for an ordinary session
-   */
-  public String getSupportAccessId() {
-    return supportAccessId;
-  }
-
-  /**
-   * Marks the session as a support session (ETP-5351). Rotation copies the mark.
-   *
-   * @param supportAccessId the {@code ETGO_SUPPORT_ACCESS} id, or {@code null}
-   */
-  public void setSupportAccessId(String supportAccessId) {
-    this.supportAccessId = supportAccessId;
   }
 }

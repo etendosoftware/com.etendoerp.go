@@ -342,7 +342,7 @@ public class UserRoleCompositionService {
       throw new OBException(USER_NOT_FOUND + userId);
     }
     enforceCallerClientBoundary(user, callerRole);
-    rejectSupportUserTarget(user);
+    SupportAccessGuard.rejectSupportUserTarget(user);
     enforceOwnerProtection(user, callerUserId);
 
     List<Role> templates = resolveAndValidateTemplates(templateRoleIds);
@@ -408,7 +408,7 @@ public class UserRoleCompositionService {
     if (user == null) {
       throw new OBException("Missing user for personal role creation");
     }
-    rejectSupportUserTarget(user);
+    SupportAccessGuard.rejectSupportUserTarget(user);
     OBContext.setAdminMode(true);
     try {
       return resolveOrCreatePersonalRole(user);
@@ -458,28 +458,12 @@ public class UserRoleCompositionService {
     if (user == null) {
       throw new OBException("Missing user for personal role creation");
     }
-    rejectSupportUserTarget(user);
+    SupportAccessGuard.rejectSupportUserTarget(user);
     OBContext.setAdminMode(true);
     try {
       return createPersonalRole(user);
     } finally {
       OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * ETP-5351 (T6) — the tenant's "Soporte Etendo" user keeps exactly the client-admin role its
-   * provisioner gives it; nothing here composes, creates or restores a personal role for it,
-   * whoever asks.
-   *
-   * @param user the already-resolved target user
-   * @throws OBException if {@code user} is its client's support user
-   */
-  private static void rejectSupportUserTarget(User user) {
-    if (user != null && user.getClient() != null
-        && SupportAccessGuard.isSupportUser(user.getId(), user.getClient().getId())) {
-      throw new OBException("The support user's role is managed by support access: "
-          + user.getId());
     }
   }
 
@@ -1324,7 +1308,7 @@ public class UserRoleCompositionService {
       throw new OBException(USER_NOT_FOUND + targetUserId);
     }
     enforceCallerClientBoundary(target, callerRole);
-    rejectSupportUserTarget(target);
+    SupportAccessGuard.rejectSupportUserTarget(target);
     if (OwnerSupport.isOwner(targetUserId)) {
       throw new OBException("The owner can never be demoted: " + targetUserId);
     }
