@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -242,9 +243,9 @@ public class ProductAttributeQueryIntegrationTest extends WeldBaseTest {
   }
 
   private static String literal(Object v) {
-    if (v instanceof java.util.Collection) {
+    if (v instanceof Collection) {
       List<String> parts = new ArrayList<>();
-      for (Object o : (java.util.Collection<?>) v) {
+      for (Object o : (Collection<?>) v) {
         parts.add(literal(o));
       }
       return String.join(", ", parts);

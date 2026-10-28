@@ -42,6 +42,8 @@ import org.openbravo.model.materialmgmt.cost.Costing;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
 import org.openbravo.model.pricing.pricelist.ProductPrice;
 
+import com.etendoerp.go.attributes.ProductAttributeListQuery;
+
 /**
  * NeoHandler for the {@code product} header entity (ETP-4670).
  *
@@ -193,14 +195,14 @@ public class ProductDefaultsHandler implements NeoHandler {
 
   /**
    * ETP-5977: sort and filter the Product list by an attribute value. Only a request that names an
-   * attribute parameter is touched; see {@link com.etendoerp.go.attributes.ProductAttributeListQuery}.
+   * attribute parameter is touched; see {@link ProductAttributeListQuery}.
    */
   @Override
   public NeoListPage listPage(NeoContext context) {
     if (context == null || !SPEC.equals(context.getSpecName())) {
       return null;
     }
-    return com.etendoerp.go.attributes.ProductAttributeListQuery.page(context,
+    return ProductAttributeListQuery.page(context,
         NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE));
   }
 

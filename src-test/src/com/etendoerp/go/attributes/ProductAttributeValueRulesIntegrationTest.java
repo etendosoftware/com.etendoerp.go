@@ -29,6 +29,7 @@ import org.hibernate.query.NativeQuery;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -292,7 +293,7 @@ public class ProductAttributeValueRulesIntegrationTest extends WeldBaseTest {
   // ---- helpers ----
 
   private String newCategory(String value) {
-    ProductCategory c = org.openbravo.base.provider.OBProvider.getInstance().get(ProductCategory.class);
+    ProductCategory c = OBProvider.getInstance().get(ProductCategory.class);
     c.setSearchKey(value);
     c.setName(value);
     c.setPlannedMargin(BigDecimal.ZERO);
@@ -301,14 +302,14 @@ public class ProductAttributeValueRulesIntegrationTest extends WeldBaseTest {
   }
 
   private String newDefinition(String code, String type, String category) {
-    ETGOAttrDef d = org.openbravo.base.provider.OBProvider.getInstance().get(ETGOAttrDef.class);
+    ETGOAttrDef d = OBProvider.getInstance().get(ETGOAttrDef.class);
     d.setSearchKey(MARK + "_" + code + "_" + UUID.randomUUID().toString().substring(0, 6));
     d.setName(d.getSearchKey());
     d.setTable(OBDal.getInstance().get(Table.class, "208"));
     d.setDataType(type);
     d.setMandatory(false);
     OBDal.getInstance().save(d);
-    ETGOAttrDefCategory s = org.openbravo.base.provider.OBProvider.getInstance().get(ETGOAttrDefCategory.class);
+    ETGOAttrDefCategory s = OBProvider.getInstance().get(ETGOAttrDefCategory.class);
     s.setAttributeDefinition(d);
     s.setProductCategory(OBDal.getInstance().get(ProductCategory.class, category));
     OBDal.getInstance().save(s);
@@ -329,7 +330,7 @@ public class ProductAttributeValueRulesIntegrationTest extends WeldBaseTest {
   }
 
   private String newValue(String product, String def, String text, BigDecimal number) {
-    ETGOProductAttrVal v = org.openbravo.base.provider.OBProvider.getInstance().get(ETGOProductAttrVal.class);
+    ETGOProductAttrVal v = OBProvider.getInstance().get(ETGOProductAttrVal.class);
     v.setProduct(OBDal.getInstance().get(Product.class, product));
     v.setAttributeDefinition(OBDal.getInstance().get(ETGOAttrDef.class, def));
     v.setTextValue(text);

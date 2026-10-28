@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.attributes;
 
+import java.math.BigDecimal;
+
 import javax.enterprise.event.Observes;
 
 import org.hibernate.FlushMode;
@@ -25,6 +27,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.client.kernel.event.EntityPersistenceEvent;
 import org.openbravo.client.kernel.event.EntityPersistenceEventObserver;
@@ -87,14 +90,14 @@ public class ProductAttributeValueEventHandler extends EntityPersistenceEventObs
     }
     fail(ProductAttributeRules.checkValueColumns(def.getDataType(),
         (String) event.getCurrentState(entity.getProperty(ETGOProductAttrVal.PROPERTY_TEXTVALUE)),
-        (java.math.BigDecimal) event.getCurrentState(entity.getProperty(ETGOProductAttrVal.PROPERTY_NUMBERVALUE))));
+        (BigDecimal) event.getCurrentState(entity.getProperty(ETGOProductAttrVal.PROPERTY_NUMBERVALUE))));
   }
 
   private static void rejectIfChanged(EntityUpdateEvent event, Property property) {
     Object before = event.getPreviousState(property);
     Object now = event.getCurrentState(property);
-    String beforeId = before == null ? null : ((org.openbravo.base.structure.BaseOBObject) before).getId().toString();
-    String nowId = now == null ? null : ((org.openbravo.base.structure.BaseOBObject) now).getId().toString();
+    String beforeId = before == null ? null : ((BaseOBObject) before).getId().toString();
+    String nowId = now == null ? null : ((BaseOBObject) now).getId().toString();
     if (beforeId != null && !beforeId.equals(nowId)) {
       throw new OBException("The " + property.getName() + " of an attribute value cannot be changed");
     }

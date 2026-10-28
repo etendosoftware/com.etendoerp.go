@@ -15,8 +15,9 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.attributes;
+package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.Arrays;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
@@ -56,7 +57,7 @@ public class AttributeDefinitionReadHandler implements NeoHandler {
       throw new IllegalArgumentException(PARAM + " is not a valid category id");
     }
     ProductCategory pc = OBDal.getInstance().get(ProductCategory.class, category);
-    if (pc == null || !java.util.Arrays.asList(OBContext.getOBContext().getReadableClients())
+    if (pc == null || !Arrays.asList(OBContext.getOBContext().getReadableClients())
         .contains(pc.getClient().getId())) {
       throw new IllegalArgumentException(PARAM + " does not name a product category of this client");
     }
