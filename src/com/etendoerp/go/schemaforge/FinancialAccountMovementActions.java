@@ -338,23 +338,22 @@ class FinancialAccountMovementActions {
   /** limit and offset, when sent, are whole numbers (limit ≥ 1, offset ≥ 0); 422 otherwise. */
   private static NeoResponse checkListWindow(JSONObject params) {
     for (String key : new String[] { P_LIMIT, P_OFFSET }) {
-      if (params == null || !params.has(key)) {
-        continue;
-      }
-      Object value = params.opt(key);
       long min = P_LIMIT.equals(key) ? 1 : 0;
-      try {
-        java.math.BigDecimal n = new java.math.BigDecimal(String.valueOf(value).trim());
-        if (n.stripTrailingZeros().scale() <= 0 && n.longValue() >= min) {
-          continue;
-        }
-      } catch (NumberFormatException e) {
-        // falls through to the refusal
+      if (params != null && params.has(key) && !isWholeAtLeast(params.opt(key), min)) {
+        return NeoResponse.error(422, "'" + key + "' must be a whole number of " + min
+            + " or more, got '" + params.opt(key) + "'");
       }
-      return NeoResponse.error(422,
-          "'" + key + "' must be a whole number of " + min + " or more, got '" + value + "'");
     }
     return null;
+  }
+
+  private static boolean isWholeAtLeast(Object value, long min) {
+    try {
+      java.math.BigDecimal n = new java.math.BigDecimal(String.valueOf(value).trim());
+      return n.stripTrailingZeros().scale() <= 0 && n.longValue() >= min;
+    } catch (NumberFormatException e) {
+      return false;
+    }
   }
 
   // ── writes ─────────────────────────────────────────────────────────────

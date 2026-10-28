@@ -182,6 +182,19 @@ public final class McpRecordUrls {
         || StringUtils.isBlank(PublicUrlResolver.resolveConfiguredAppBaseUrl())) {
       return;
     }
+    Map<String, JSONObject> byId = indexById(requested);
+    Map<String, Boolean> primary = new HashMap<>();
+    for (int i = 0; i < done.length(); i++) {
+      JSONObject result = done.optJSONObject(i);
+      JSONObject op = result == null ? null : byId.get(result.optString(KEY_ID));
+      String recordId = result == null ? null : result.optString("recordId", null);
+      if (op != null && StringUtils.isNotBlank(recordId)) {
+        addBatchUrl(result, op, recordId, primary);
+      }
+    }
+  }
+
+  private static Map<String, JSONObject> indexById(JSONArray requested) {
     Map<String, JSONObject> byId = new HashMap<>();
     for (int i = 0; i < requested.length(); i++) {
       JSONObject op = requested.optJSONObject(i);
@@ -189,22 +202,21 @@ public final class McpRecordUrls {
         byId.put(op.optString(KEY_ID), op);
       }
     }
-    Map<String, Boolean> primary = new HashMap<>();
-    for (int i = 0; i < done.length(); i++) {
-      JSONObject result = done.optJSONObject(i);
-      JSONObject op = result == null ? null : byId.get(result.optString(KEY_ID));
-      String recordId = result == null ? null : result.optString("recordId", null);
-      if (op == null || StringUtils.isBlank(recordId)) {
-        continue;
-      }
-      String spec = op.optString("spec");
-      String entity = op.optString("entity");
-      if (primary.computeIfAbsent(spec + "/" + entity, k -> isPrimary(spec, entity))) {
-        String url = buildRecordUrl(spec, recordId);
-        if (url != null) {
-          result.put(KEY_URL, url);
-        }
-      }
+    return byId;
+  }
+
+  /** Puts the url on one committed op when its entity is the spec's primary one. */
+  private static void addBatchUrl(JSONObject result, JSONObject op, String recordId,
+      Map<String, Boolean> primary) throws JSONException {
+    String spec = op.optString("spec");
+    String entity = op.optString("entity");
+    if (!Boolean.TRUE.equals(
+        primary.computeIfAbsent(spec + "/" + entity, k -> isPrimary(spec, entity)))) {
+      return;
+    }
+    String url = buildRecordUrl(spec, recordId);
+    if (url != null) {
+      result.put(KEY_URL, url);
     }
   }
 

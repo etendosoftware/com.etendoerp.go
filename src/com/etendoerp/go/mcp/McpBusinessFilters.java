@@ -67,8 +67,6 @@ final class McpBusinessFilters {
   static final String TYPE_DATE = "date";
   static final String TYPE_BOOLEAN = "boolean";
   private static final String NUMBER_PATTERN = "-?\\d+(\\.\\d+)?";
-  private static final java.util.regex.Pattern ISO_DATE =
-      java.util.regex.Pattern.compile("(\\d{4}-\\d{2}-\\d{2})(T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?.*)?");
 
   private static final Map<String, String> OPERATORS = new LinkedHashMap<>();
 
@@ -155,41 +153,51 @@ final class McpBusinessFilters {
    */
   static String formatHqlValue(String key, Class<?> javaType, boolean primitive, Object value) {
     String raw = value == null ? "" : String.valueOf(value).trim();
-    if (primitive && javaType != null) {
-      if (Number.class.isAssignableFrom(javaType)) {
-        if (!raw.matches(NUMBER_PATTERN)) {
-          throw McpRoutingException.invalidFilterValue(key, TYPE_NUMBER, value);
-        }
-        return raw;
-      }
-      if (Boolean.class.equals(javaType)) {
-        if (!"true".equalsIgnoreCase(raw) && !"false".equalsIgnoreCase(raw)) {
-          throw McpRoutingException.invalidFilterValue(key, TYPE_BOOLEAN, value);
-        }
-        return raw.toLowerCase(java.util.Locale.ROOT);
-      }
-      if (Date.class.isAssignableFrom(javaType)) {
-        return "to_date('" + isoDate(key, raw, value) + "','YYYY-MM-DD')";
-      }
+    if (!primitive || javaType == null) {
+      return quote(raw);
+    }
+    if (Number.class.isAssignableFrom(javaType)) {
+      return number(key, raw, value);
+    }
+    if (Boolean.class.equals(javaType)) {
+      return bool(key, raw, value);
+    }
+    if (Date.class.isAssignableFrom(javaType)) {
+      return "to_date('" + isoDate(key, raw, value) + "','YYYY-MM-DD')";
     }
     return quote(raw);
+  }
+
+  private static String number(String key, String raw, Object value) {
+    if (!raw.matches(NUMBER_PATTERN)) {
+      throw McpRoutingException.invalidFilterValue(key, TYPE_NUMBER, value);
+    }
+    return raw;
+  }
+
+  private static String bool(String key, String raw, Object value) {
+    if (!"true".equalsIgnoreCase(raw) && !"false".equalsIgnoreCase(raw)) {
+      throw McpRoutingException.invalidFilterValue(key, TYPE_BOOLEAN, value);
+    }
+    return raw.toLowerCase(java.util.Locale.ROOT);
   }
 
   /**
    * ETP-5914: the {@code YYYY-MM-DD} part of an ISO date or date-time, validated as a real date. A
    * value that is not one is refused rather than cleaned: stripping it to its digits used to turn
-   * {@code "ayer"} into an empty date that silently dropped the filter.
+   * {@code "ayer"} into an empty date that silently dropped the filter. Parsed by
+   * {@code java.time}, so a well-shaped but impossible date (2026-02-30) is refused too.
    */
   private static String isoDate(String key, String raw, Object value) {
-    java.util.regex.Matcher m = ISO_DATE.matcher(raw);
-    if (m.matches()) {
-      try {
-        return java.time.LocalDate.parse(m.group(1)).toString();
-      } catch (java.time.DateTimeException e) {
-        // falls through to the refusal: a well-shaped but impossible date (2026-02-30)
+    try {
+      if (raw.indexOf('T') < 0) {
+        return java.time.LocalDate.parse(raw).toString();
       }
+      return java.time.LocalDate.from(
+          java.time.format.DateTimeFormatter.ISO_DATE_TIME.parse(raw)).toString();
+    } catch (java.time.DateTimeException e) {
+      throw McpRoutingException.invalidFilterValue(key, TYPE_DATE, value);
     }
-    throw McpRoutingException.invalidFilterValue(key, TYPE_DATE, value);
   }
 
   /** Quote and escape a value as an HQL string literal. */

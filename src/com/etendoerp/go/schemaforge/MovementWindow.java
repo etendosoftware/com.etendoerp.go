@@ -76,15 +76,12 @@ final class MovementWindow {
       String day = StringUtils.left(row.optString(KEY_DATE, ""), DAY_LENGTH);
       if (to != null && day.compareTo(to) > 0) {
         balance = balance.subtract(new BigDecimal(row.optString(KEY_AMOUNT, "0")));
-        continue;
+      } else if (from == null || day.compareTo(from) >= 0) {
+        if (inRange >= offset && page.length() < limit) {
+          page.put(row);
+        }
+        inRange++;
       }
-      if (from != null && day.compareTo(from) < 0) {
-        continue;
-      }
-      if (inRange >= offset && page.length() < limit) {
-        page.put(row);
-      }
-      inRange++;
     }
     data.put(KEY_TRANSACTIONS, page);
     data.put(KEY_TOTAL_ROWS, inRange);

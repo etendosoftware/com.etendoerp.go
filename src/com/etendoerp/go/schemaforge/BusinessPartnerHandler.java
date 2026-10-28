@@ -329,8 +329,8 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       return false;
     }
     String sent = ctx.getRequestBody().optString(FIELD_SEARCH_KEY, null);
-    JSONObject record = firstRecord(body);
-    String kept = record == null ? null : record.optString(FIELD_SEARCH_KEY, null);
+    JSONObject created = firstRecord(body);
+    String kept = created == null ? null : created.optString(FIELD_SEARCH_KEY, null);
     JSONObject response = body.optJSONObject(RESPONSE_KEY);
     if (StringUtils.isBlank(sent) || kept == null || sent.equals(kept) || response == null) {
       return false;

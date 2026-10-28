@@ -288,7 +288,7 @@ final class McpSelectorContextHelper {
     // ETP-5852 (M-57): the payment's direction (the record's `receipt` field, or the classic
     // IsReceipt), as Y/N. It was not copied, so a rule on @Isreceipt@ found nothing.
     String receipt = firstNonBlank(context, FIELD_RECEIPT, PARAM_IS_RECEIPT, "isReceipt",
-        "Isreceipt");
+        PARAM_IS_RECEIPT_RULE);
     if (StringUtils.isNotBlank(receipt)) {
       contextParams.put(PARAM_IS_RECEIPT, toYesNo(receipt));
       contextParams.put(PARAM_IS_RECEIPT_RULE, toYesNo(receipt));

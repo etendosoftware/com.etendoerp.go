@@ -713,7 +713,7 @@ class McpRoutingException extends OBException {
    */
   static McpRoutingException allParentsNotAllowed(String specName, String entityName) {
     return new McpRoutingException(
-        "'" + entityName + "' of '" + specName + "' cannot be listed across every parent: it is "
+        "'" + entityName + QUOTED_OF + specName + "' cannot be listed across every parent: it is "
             + "read only through one parent record. Nothing was read.",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
         McpConstants.PARAM_ALL_PARENTS, List.of(),

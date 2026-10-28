@@ -636,19 +636,15 @@ public class NeoDefaultsService {
     }
     for (SFField sfField : fields) {
       Column adColumn = sfField.getADColumn();
-      if (adColumn == null) {
-        continue;
+      String propertyName = adColumn == null ? null
+          : NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, adColumn.getDBColumnName());
+      String value = propertyName == null ? null : params.get(propertyName);
+      if (StringUtils.isNotBlank(value)) {
+        defaults.put(propertyName, value);
+        defaults.remove(propertyName + "$_identifier");
+        tryInjectIdentifier(defaults, dalEntity, propertyName, value);
+        applied.add(propertyName);
       }
-      String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity,
-          adColumn.getDBColumnName());
-      String value = params.get(propertyName);
-      if (StringUtils.isBlank(value)) {
-        continue;
-      }
-      defaults.put(propertyName, value);
-      defaults.remove(propertyName + "$_identifier");
-      tryInjectIdentifier(defaults, dalEntity, propertyName, value);
-      applied.add(propertyName);
     }
     return applied;
   }

@@ -1122,9 +1122,9 @@ final class McpSchemaFieldBuilder {
       f.put("name", name);
       f.put("type", "computed");
       f.put(KEY_READ_ONLY, true);
-      f.put("visibility", VISIBILITY_READ_ONLY);
+      f.put(KEY_VISIBILITY, VISIBILITY_READ_ONLY);
       f.put("computedOnRead", true);
-      f.put("description", "Computed by the server when the record is read — not a stored column,"
+      f.put(McpConstants.KEY_DESCRIPTION, "Computed by the server when the record is read — not a stored column,"
           + " so it cannot be sent or used as a filter.");
       all.put(f);
     }

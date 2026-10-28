@@ -259,15 +259,12 @@ final class McpLinePriceInjector {
         || !dalEntity.hasProperty(FIELD_UNIT_PRICE) || !dalEntity.hasProperty(FIELD_LIST_PRICE)) {
       return false;
     }
-    String discountKey = dalEntity.hasProperty(FIELD_DISCOUNT) ? FIELD_DISCOUNT
-        : dalEntity.hasProperty(FIELD_INVOICE_DISCOUNT) ? FIELD_INVOICE_DISCOUNT : null;
+    String discountKey = discountKey(dalEntity);
     java.math.BigDecimal price = decimalOrNull(body.opt(FIELD_UNIT_PRICE));
     if (discountKey == null || price == null || price.signum() == 0) {
       return false;
     }
-    java.math.BigDecimal discount = agentProvided.contains(discountKey)
-        ? decimalOrNull(body.opt(discountKey))
-        : current == null ? null : decimalOrNull(current.get(discountKey));
+    java.math.BigDecimal discount = lineDiscount(body, discountKey, agentProvided, current);
     if (discount == null || discount.signum() < 0 || discount.compareTo(HUNDRED) > 0) {
       discount = java.math.BigDecimal.ZERO;
     }
@@ -275,6 +272,22 @@ final class McpLinePriceInjector {
     body.put(FIELD_UNIT_PRICE, price.multiply(HUNDRED.subtract(discount))
         .divide(HUNDRED, 6, java.math.RoundingMode.HALF_UP).stripTrailingZeros());
     return true;
+  }
+
+  private static String discountKey(Entity dalEntity) {
+    if (dalEntity.hasProperty(FIELD_DISCOUNT)) {
+      return FIELD_DISCOUNT;
+    }
+    return dalEntity.hasProperty(FIELD_INVOICE_DISCOUNT) ? FIELD_INVOICE_DISCOUNT : null;
+  }
+
+  /** The discount the agent sent, else the one the line has; {@code null} when neither. */
+  private static java.math.BigDecimal lineDiscount(JSONObject body, String discountKey,
+      Set<String> agentProvided, BaseOBObject current) {
+    if (agentProvided.contains(discountKey)) {
+      return decimalOrNull(body.opt(discountKey));
+    }
+    return current == null ? null : decimalOrNull(current.get(discountKey));
   }
 
   private static java.math.BigDecimal decimalOrNull(Object value) {

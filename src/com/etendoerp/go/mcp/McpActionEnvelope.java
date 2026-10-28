@@ -41,7 +41,9 @@ final class McpActionEnvelope {
   static final String KEY_MESSAGE = "message";
 
   /** Where a result may carry its human message, in order of preference. */
-  private static final String[] MESSAGE_KEYS = { "message", "processMessage", "detail", "title" };
+  private static final String[] MESSAGE_KEYS = { KEY_MESSAGE, "processMessage", "detail", "title" };
+  private static final String KEY_TEXT = "text";
+  private static final String VALUE_ERROR = "error";
 
   private McpActionEnvelope() {
   }
@@ -63,7 +65,7 @@ final class McpActionEnvelope {
         return result;
       }
       JSONObject item = content.getJSONObject(0);
-      String text = item.optString("text", null);
+      String text = item.optString(KEY_TEXT, null);
       if (text == null || !text.trim().startsWith("{")) {
         return result;
       }
@@ -73,7 +75,7 @@ final class McpActionEnvelope {
       if (message != null) {
         body.put(KEY_MESSAGE, NeoMessageTranslator.safeParseTranslation(message));
       }
-      item.put("text", McpResponseSanitizer.render(body));
+      item.put(KEY_TEXT, McpResponseSanitizer.render(body));
     } catch (JSONException e) {
       // A body that is not a JSON object is left as it came: the envelope is additive.
     }
@@ -87,8 +89,8 @@ final class McpActionEnvelope {
   private static boolean succeeded(JSONObject result, JSONObject body) {
     return !result.optBoolean("isError", false)
         && body.optBoolean(KEY_SUCCESS, true)
-        && !"error".equalsIgnoreCase(body.optString("processResult", ""))
-        && !"error".equalsIgnoreCase(body.optString("status", ""));
+        && !VALUE_ERROR.equalsIgnoreCase(body.optString("processResult", ""))
+        && !VALUE_ERROR.equalsIgnoreCase(body.optString("status", ""));
   }
 
   private static String firstMessage(JSONObject body) {

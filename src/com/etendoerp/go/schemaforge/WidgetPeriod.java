@@ -37,8 +37,12 @@ public final class WidgetPeriod {
   }
 
   /**
+   * The first day a widget {@code range} covers, computed now by the same SQL expression the
+   * widget queries filter with.
+   *
    * @param range one of {@link #RANGES}
    * @return the first day of the period, as the database computes it now
+   * @throws IllegalArgumentException for a range not in {@link #RANGES}
    */
   public static Date start(String range) {
     if (!RANGES.contains(range)) {
