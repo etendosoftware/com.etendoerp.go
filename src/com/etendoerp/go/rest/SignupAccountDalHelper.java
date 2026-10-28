@@ -25,6 +25,7 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * DAL access to the {@code ETGO_ACCOUNT} columns the signup API owns (ETP-5847): the signup state,
@@ -153,7 +154,8 @@ final class SignupAccountDalHelper {
     query.setNamedParameter(PARAM_NOW, now);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
+    Account account = query.uniqueResult();
+    return SupportAccessGuard.isSupportAccount(account) ? null : account;
   }
 
   /**

@@ -24,7 +24,7 @@ import java.time.Instant;
  * <p>Only hashes of the opaque credentials are ever held here — never the plaintext session or
  * refresh token, which exist solely in the browser cookie.
  */
-public class GoSessionRecord {
+public class GoSessionRecord extends SupportMarkedSession {
 
   private String id;
   private String accountId;
