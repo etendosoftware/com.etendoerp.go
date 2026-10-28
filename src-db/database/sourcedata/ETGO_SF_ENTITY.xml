@@ -952,6 +952,7 @@
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <JAVA_QUALIFIER><![CDATA[productStockWarehouseHandler]]></JAVA_QUALIFIER>
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <SEQNO><![CDATA[170]]></SEQNO>
+<!--296EE5752DA54E7880FECB13F5C7B40D-->  <AGENT_PROMPT><![CDATA[Stock per product, warehouse and storage bin. Lots, serial numbers and expiry dates are not handled in Etendo GO, so a row says nothing about them and no product is lot-tracked here.]]></AGENT_PROMPT>
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"product","reason":"M_Storage_Detail's only isparent column is M_RefInventory_ID, which points at the referenced inventory, not at the M_Product parent tab. Auto-resolution would have picked the wrong column."}}]]></MCP_CONFIG>
 <!--296EE5752DA54E7880FECB13F5C7B40D--></ETGO_SF_ENTITY>
 

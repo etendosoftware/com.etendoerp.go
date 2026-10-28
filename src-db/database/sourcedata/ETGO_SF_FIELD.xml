@@ -21825,6 +21825,7 @@
 <!--352850AF5B524AA2A52963EDC104CA3A-->  <JAVA_QUALIFIER><![CDATA[lineGrossAmount]]></JAVA_QUALIFIER>
 <!--352850AF5B524AA2A52963EDC104CA3A-->  <SEQNO><![CDATA[450]]></SEQNO>
 <!--352850AF5B524AA2A52963EDC104CA3A-->  <VISIBILITY><![CDATA[readOnly]]></VISIBILITY>
+<!--352850AF5B524AA2A52963EDC104CA3A-->  <AGENT_PROMPT><![CDATA[Line total with tax. On a voided order (header documentStatus VO) it keeps the original amount while orderedQuantity and lineNetAmount drop to 0: the line no longer counts, so read the header's documentStatus before adding lines up.]]></AGENT_PROMPT>
 <!--352850AF5B524AA2A52963EDC104CA3A-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--352850AF5B524AA2A52963EDC104CA3A--></ETGO_SF_FIELD>
 
@@ -36204,6 +36205,7 @@
 <!--59B71F023DFB400F87B15A4E00F72257-->  <JAVA_QUALIFIER><![CDATA[vendorPrepayment]]></JAVA_QUALIFIER>
 <!--59B71F023DFB400F87B15A4E00F72257-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--59B71F023DFB400F87B15A4E00F72257-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--59B71F023DFB400F87B15A4E00F72257-->  <AGENT_PROMPT><![CDATA[An accounting combination id (an Etendo account record), not the chart-of-accounts elementValue id: find it with etendo_selectors on this field, searching by account number (for example 430).]]></AGENT_PROMPT>
 <!--59B71F023DFB400F87B15A4E00F72257-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--59B71F023DFB400F87B15A4E00F72257--></ETGO_SF_FIELD>
 
@@ -64252,6 +64254,7 @@
 <!--A0ED03002DF84F2690FC203B9B573404-->  <JAVA_QUALIFIER><![CDATA[customerReceivablesNo]]></JAVA_QUALIFIER>
 <!--A0ED03002DF84F2690FC203B9B573404-->  <SEQNO><![CDATA[30]]></SEQNO>
 <!--A0ED03002DF84F2690FC203B9B573404-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--A0ED03002DF84F2690FC203B9B573404-->  <AGENT_PROMPT><![CDATA[An accounting combination id (an Etendo account record), not the chart-of-accounts elementValue id: find it with etendo_selectors on this field, searching by account number (for example 430).]]></AGENT_PROMPT>
 <!--A0ED03002DF84F2690FC203B9B573404-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--A0ED03002DF84F2690FC203B9B573404--></ETGO_SF_FIELD>
 
@@ -74893,6 +74896,7 @@
 <!--BC338D0C88134DF4A530FB6C3DB0F0B8-->  <JAVA_QUALIFIER><![CDATA[customerPrepayment]]></JAVA_QUALIFIER>
 <!--BC338D0C88134DF4A530FB6C3DB0F0B8-->  <SEQNO><![CDATA[40]]></SEQNO>
 <!--BC338D0C88134DF4A530FB6C3DB0F0B8-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--BC338D0C88134DF4A530FB6C3DB0F0B8-->  <AGENT_PROMPT><![CDATA[An accounting combination id (an Etendo account record), not the chart-of-accounts elementValue id: find it with etendo_selectors on this field, searching by account number (for example 430).]]></AGENT_PROMPT>
 <!--BC338D0C88134DF4A530FB6C3DB0F0B8-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--BC338D0C88134DF4A530FB6C3DB0F0B8--></ETGO_SF_FIELD>
 
@@ -90350,6 +90354,7 @@
 <!--E38E6A9817364CAAA584C4448EA4FFCF-->  <JAVA_QUALIFIER><![CDATA[lineGrossAmount]]></JAVA_QUALIFIER>
 <!--E38E6A9817364CAAA584C4448EA4FFCF-->  <SEQNO><![CDATA[450]]></SEQNO>
 <!--E38E6A9817364CAAA584C4448EA4FFCF-->  <VISIBILITY><![CDATA[readOnly]]></VISIBILITY>
+<!--E38E6A9817364CAAA584C4448EA4FFCF-->  <AGENT_PROMPT><![CDATA[Line total with tax. On a voided order (header documentStatus VO) it keeps the original amount while orderedQuantity and lineNetAmount drop to 0: the line no longer counts, so read the header's documentStatus before adding lines up.]]></AGENT_PROMPT>
 <!--E38E6A9817364CAAA584C4448EA4FFCF-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--E38E6A9817364CAAA584C4448EA4FFCF--></ETGO_SF_FIELD>
 
@@ -95648,6 +95653,7 @@
 <!--F0C32716541F42919CE8ED1F7D616F65-->  <JAVA_QUALIFIER><![CDATA[vendorLiability]]></JAVA_QUALIFIER>
 <!--F0C32716541F42919CE8ED1F7D616F65-->  <SEQNO><![CDATA[30]]></SEQNO>
 <!--F0C32716541F42919CE8ED1F7D616F65-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--F0C32716541F42919CE8ED1F7D616F65-->  <AGENT_PROMPT><![CDATA[An accounting combination id (an Etendo account record), not the chart-of-accounts elementValue id: find it with etendo_selectors on this field, searching by account number (for example 430).]]></AGENT_PROMPT>
 <!--F0C32716541F42919CE8ED1F7D616F65-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--F0C32716541F42919CE8ED1F7D616F65--></ETGO_SF_FIELD>
 

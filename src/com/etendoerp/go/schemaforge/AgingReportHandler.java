@@ -452,6 +452,11 @@ public class AgingReportHandler implements NeoHandler {
         // column meant. MCP only: the SPA computes its own footer.
         responseData.put("totals", sumColumns(rows));
         responseData.getJSONObject("meta").put("columns", describeColumns(buckets));
+        // ETP-5852 (M-153): when the documents are listed, each says when it falls due.
+        AgingDueDates.attach(rows);
+        responseData.getJSONObject("meta").getJSONObject("columns").put("docs[].dueDates",
+            "per document, its open installments {dueDate, outstanding} oldest first; "
+                + "outstanding is in the document's own currency (only with showDetails)");
       }
 
       JSONObject wrapper = new JSONObject();

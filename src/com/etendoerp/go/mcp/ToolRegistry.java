@@ -623,6 +623,14 @@ public class ToolRegistry {
     for (Map.Entry<String, String> e : WIDGET_DESCRIPTION_BY_NAME.entrySet()) {
       enumDesc.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
     }
+    // ETP-5852 (M-95): the card a user names when asking about "the dashboard".
+    enumDesc.append("Dashboard card each widget feeds: kpis = Financial summary (Resumen "
+        + "financiero); revenue-trend = Financial trend (Evolución financiera); pending-tasks = "
+        + "Pending tasks (Tareas pendientes); recent-invoices = Recent sales (Ventas recientes); "
+        + "best-products and best-sellers = Top selling products (Productos más vendidos), by "
+        + "amount and by quantity; pending-amounts = Collections & payments (Cobros y pagos); "
+        + "top-clients = Top clients (Clientes destacados). activity has no card of its own, and "
+        + "Quick actions (Accesos rápidos) are links, not data, so no widget serves them.\n");
 
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_WIDGET,
@@ -810,9 +818,19 @@ public class ToolRegistry {
         "List records from an Etendo API spec. "
             + "Supports filtering (exact match, range operators, named document status), "
             + "pagination, sorting, and field projection (`fields` / view:\"summary\"). "
-            + "`totalRows` is the number of records matching the filters, whatever page you ask for.",
+            + "`totalRows` is the number of records matching the filters, whatever page you ask for. "
+            + LIST_CODES_NOTE,
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
+
+  /**
+   * ETP-5852 (M-184): a list field (documentStatus, …) is read as its code; the label the user
+   * sees is in the schema, which agents did not know.
+   */
+  private static final String LIST_CODES_NOTE = "A field with a fixed list of values "
+      + "(documentStatus, paymentStatus, ...) comes as its code (CO, DR, ...); etendo_schema lists "
+      + "each code with its meaning under that field's options (CO = Booked, VO = Voided) — tell "
+      + "the user the meaning, not the code.";
 
   private McpToolDefinition buildGetTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
@@ -834,7 +852,7 @@ public class ToolRegistry {
         McpConstants.TOOL_NEO_GET,
         "Get a single record by ID from an Etendo API spec. The record comes back as an object "
             + "in `data` ({\"data\": {…}}), not a list. Supports field projection "
-            + "(`fields` / view:\"summary\"). "
+            + "(`fields` / view:\"summary\"). " + LIST_CODES_NOTE + " "
             + McpConstants.RECORD_URL_NOTE,
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
