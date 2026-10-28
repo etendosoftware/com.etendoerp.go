@@ -3057,7 +3057,7 @@ them `id` = the financial account:
 
 | Action | Kind | Parameters (required in **bold**) | UI gate it mirrors |
 |---|---|---|---|
-| `listMovements` | read | — | the Movements list (`GET financial-account-transactions`, same payload: `transactions[]` with `processed`, `posted`, `paymentId`, `transferTxnId`, the cross-currency `foreignAmount`/`foreignCurrency`/`foreignConversionRate` (see below), … and `totals`) |
+| `listMovements` | read | optional `fromDate`/`toDate` (inclusive), `limit`/`offset` (ETP-5852) | the Movements list (`GET financial-account-transactions`, same payload, narrowed to the range and paged newest first by `MovementWindow`, plus `totalRows` in the range and `balanceAtToDate` — current balance minus every movement dated after `toDate`: `transactions[]` with `processed`, `posted`, `paymentId`, `transferTxnId`, the cross-currency `foreignAmount`/`foreignCurrency`/`foreignConversionRate` (see below), … and `totals`) |
 | `movementGlItems` | read | `search` | the G/L item picker (`?action=glitem-lookup`) |
 | `createMovement` | write | **`trxType`** (`BPD`\|`BPW`), **`amount`** (> 0), **`date`** (also the accounting date), **`glItemId`**, `description` (≤ 255), `bpartnerId`, `projectId`, `costcenterId`, `productId`, `process` (`true` = Confirmar, default draft) | *Nuevo movimiento* — the form offers no bank fee and requires a G/L item |
 | `updateMovement` | write | **`movementId`**, any of the create fields, `process` (drafts only) | *Editar*: not on a payment-linked or posted movement; on a processed one only description, G/L item, contact and dimensions |
