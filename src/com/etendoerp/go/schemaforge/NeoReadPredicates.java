@@ -71,6 +71,27 @@ public final class NeoReadPredicates {
   }
 
   /**
+   * The page an entity customization took over for a REST list {@code GET} ({@link NeoHandler#listPage}).
+   *
+   * @param context the REST list read context
+   * @return the page, or {@code null} when there is no customization or it declines
+   */
+  static NeoListPage resolveListPage(NeoContext context) {
+    if (context == null || context.getRecordId() != null) {
+      return null;
+    }
+    NeoHandler customization = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
+        .qualifier(context.getSfEntity() != null ? context.getSfEntity().getJavaQualifier() : null)
+        .specName(context.getSpecName())
+        .entityName(context.getEntityName())
+        .surface(NeoExtensionSurface.READ)
+        .channel(NeoExtensionChannel.REST_SINGLE)
+        .context(context)
+        .build());
+    return customization == null ? null : customization.listPage(context);
+  }
+
+  /**
    * ANDs {@code predicate} onto an existing where clause.
    *
    * @param existing  the clause built so far; may be blank

@@ -117,6 +117,26 @@ public interface NeoHandler {
   }
 
   /**
+   * Takes over the ordering and paging of a REST list {@code GET} that core's query builder cannot
+   * express (ETP-5977 POC).
+   *
+   * <p>Core sorts only by an entity property or {@code fn(property)}; it cannot order by a value in a
+   * child table. A customization that supports such an ordering reads the page itself and returns the
+   * ids in order (with an exact total when the request asked for one); {@code NeoCrudHandler} then
+   * loads those rows through core, keeping the field filtering and identifiers of the normal list, and
+   * returns them in that order. The customization must apply the same tenant filters and
+   * {@link #readPredicates} as the default list, and must validate every request value it uses: it
+   * runs only for requests that name it (return {@code null} for any other).</p>
+   *
+   * @param context the list read context
+   * @return the page, or {@code null} to let the default list path run
+   * @throws IllegalArgumentException when a request value it owns is invalid (answered as HTTP 400)
+   */
+  default NeoListPage listPage(NeoContext context) {
+    return null;
+  }
+
+  /**
    * Whether the current role may reach the surface this handler serves.
    *
    * <p>Only meaningful for handlers that own their own access rule — today the report handlers,

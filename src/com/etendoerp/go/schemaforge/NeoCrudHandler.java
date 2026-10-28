@@ -500,6 +500,58 @@ class NeoCrudHandler {
   }
 
   /**
+   * Reads the rows of a page an entity customization chose ({@link NeoHandler#listPage}) through core, so
+   * the rows are exactly the ones of a normal list, then puts them in the customization's order and
+   * reports the paging the customization computed.
+   */
+  private String fetchCustomPage(DefaultJsonDataService jsonService, Map<String, String> params,
+      NeoListPage page) throws Exception {
+    List<String> ids = page.getIds();
+    int start = Integer.parseInt(params.getOrDefault(JsonConstants.STARTROW_PARAMETER, "0"));
+    if (ids.isEmpty()) {
+      return emptyListResponse(start, page.getTotalRows());
+    }
+    Map<String, String> rowParams = new HashMap<>(params);
+    rowParams.remove(JsonConstants.SORTBY_PARAMETER);
+    // The ids come from the customization's own query, never from the request: safe to splice.
+    String idFilter = "e.id in ('" + String.join("','", ids) + "')";
+    String where = rowParams.get(JsonConstants.WHERE_AND_FILTER_CLAUSE);
+    rowParams.put(JsonConstants.WHERE_AND_FILTER_CLAUSE,
+        StringUtils.isBlank(where) ? idFilter : "(" + where + ") and (" + idFilter + ")");
+    rowParams.put(JsonConstants.STARTROW_PARAMETER, "0");
+    rowParams.put(JsonConstants.ENDROW_PARAMETER, String.valueOf(ids.size() - 1));
+    JSONObject fetched = new JSONObject(jsonService.fetch(rowParams));
+    JSONObject response = fetched.getJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    JSONArray data = response.optJSONArray(JsonConstants.RESPONSE_DATA);
+    Map<String, JSONObject> byId = new HashMap<>();
+    for (int i = 0; data != null && i < data.length(); i++) {
+      byId.put(data.getJSONObject(i).getString("id"), data.getJSONObject(i));
+    }
+    JSONArray ordered = new JSONArray();
+    for (String id : ids) {
+      if (byId.containsKey(id)) {
+        ordered.put(byId.get(id));
+      }
+    }
+    response.put(JsonConstants.RESPONSE_DATA, ordered);
+    response.put(JsonConstants.RESPONSE_STARTROW, start);
+    response.put(JsonConstants.RESPONSE_ENDROW, start + Math.max(ordered.length(), 1) - 1);
+    response.put(JsonConstants.RESPONSE_TOTALROWS, page.getTotalRows() >= 0 ? page.getTotalRows()
+        : start + ordered.length());
+    return fetched.toString();
+  }
+
+  private static String emptyListResponse(int start, long total) throws JSONException {
+    JSONObject response = new JSONObject();
+    response.put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_SUCCESS);
+    response.put(JsonConstants.RESPONSE_STARTROW, start);
+    response.put(JsonConstants.RESPONSE_ENDROW, start);
+    response.put(JsonConstants.RESPONSE_TOTALROWS, Math.max(total, 0));
+    response.put(JsonConstants.RESPONSE_DATA, new JSONArray());
+    return new JSONObject().put(JsonConstants.RESPONSE_RESPONSE, response).toString();
+  }
+
+  /**
    * Builds the HQL where clause from the tab filter, the parent filter and the customization's
    * read predicate, and adds it to params.
    */
@@ -548,9 +600,17 @@ class NeoCrudHandler {
       DefaultJsonDataService jsonService, Map<String, String> params) throws Exception {
     String result;
     switch (context.getHttpMethod()) {
-      case "GET":
-        result = jsonService.fetch(params);
+      case "GET": {
+        NeoListPage customPage;
+        try {
+          customPage = NeoReadPredicates.resolveListPage(context);
+        } catch (IllegalArgumentException e) {
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+        }
+        result = customPage == null ? jsonService.fetch(params)
+            : fetchCustomPage(jsonService, params, customPage);
         break;
+      }
       case "POST": {
         NeoResponse earlyError = validatePostRequest(context);
         if (earlyError != null) {
