@@ -360,7 +360,7 @@ public class DocumentPostingService {
         PostResult notPostable = AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())
             ? notPostableFailure(acct.tableName, recordId, conn)
             : null;
-        return notPostable != null ? notPostable : failureOf(acct);
+        return notPostable != null ? notPostable : failureOf(acct, recordId, conn);
       }
       conn.releaseCommitConnection(con);
       return new PostResult(true, "Document posted");
@@ -776,7 +776,7 @@ public class DocumentPostingService {
    * <p>{@code STATUS_DocumentDisabled} (outside Goods Movements) names the reason
    * {@link DocumentDisabledReason} can confirm, or the generic {@code DocumentDisabled} (ETP-5591).</p>
    */
-  private static PostResult failureOf(AcctServer acct) {
+  private static PostResult failureOf(AcctServer acct, String recordId, ConnectionProvider conn) {
     String message = errorMessageOf(acct);
     if (AcctServer.STATUS_NotCalculatedCost.equals(acct.getStatus())) {
       if (CostingStall.isQueueStalled(acct)) {
@@ -798,6 +798,9 @@ public class DocumentPostingService {
         && !TABLE_M_MOVEMENT.equals(acct.tableName)) {
       // ETP-5591: core's text comes in the classic session language; name the reason in the GO one.
       DocumentDisabledReason.Reason reason = DocumentDisabledReason.of(acct);
+      if (reason.accountMissing()) {
+        DocumentDisabledReason.markInvalidAccount(recordId, conn);
+      }
       String text = localizedMessage(reason.messageKey());
       return new PostResult(false, StringUtils.isNotBlank(text) ? reason.render(text) : message,
           List.of(reason.messageKey()), reason.messageParams());

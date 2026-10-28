@@ -19,11 +19,16 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.util.List;
 import java.util.Map;
 
@@ -32,6 +37,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.ad_forms.AcctServer;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
@@ -169,5 +175,37 @@ public class DocumentDisabledReasonTest {
       assertEquals(DocumentDisabledReason.MSG_DOCUMENT_DISABLED,
           DocumentDisabledReason.of(acct(TRX_TABLE)).messageKey());
     }
+  }
+
+  @Test
+  public void onlyTheMissingAccountReasonsCountAsAccountMissing() {
+    assertTrue(new DocumentDisabledReason.Reason(DocumentDisabledReason.MSG_NO_DEPOSIT_ACCOUNT, Map.of()).accountMissing());
+    assertTrue(new DocumentDisabledReason.Reason(DocumentDisabledReason.MSG_NO_WITHDRAWAL_ACCOUNT, Map.of()).accountMissing());
+    assertFalse(new DocumentDisabledReason.Reason(DocumentDisabledReason.MSG_TOTAL_GROSS_IS_ZERO, Map.of()).accountMissing());
+    assertFalse(new DocumentDisabledReason.Reason(DocumentDisabledReason.MSG_DOCUMENT_DISABLED, Map.of()).accountMissing());
+  }
+
+  @Test
+  public void markInvalidAccountTurnsOnlyADisabledTransactionIntoInvalidAccount() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection connection = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(conn.getConnection()).thenReturn(connection);
+    when(connection.prepareStatement(anyString())).thenReturn(ps);
+
+    DocumentDisabledReason.markInvalidAccount("rec-1", conn);
+
+    verify(connection).prepareStatement("UPDATE FIN_Finacc_Transaction SET Posted = 'i' "
+        + "WHERE FIN_Finacc_Transaction_ID = ? AND Posted = 'D'");
+    verify(ps).setString(1, "rec-1");
+    verify(ps).executeUpdate();
+  }
+
+  @Test
+  public void markInvalidAccountNeverThrows() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    when(conn.getConnection()).thenThrow(new IllegalStateException("no connection"));
+
+    DocumentDisabledReason.markInvalidAccount("rec-1", conn);
   }
 }

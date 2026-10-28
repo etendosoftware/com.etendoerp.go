@@ -1171,6 +1171,8 @@ public class DocumentPostingServiceTest {
       assertEquals("The financial account Caja has no deposit account.", r.message());
       assertEquals(List.of("ETGO_PostingDisabledNoDepositAccount"), r.messageKeys());
       assertEquals(Map.of("financialAccount", "Caja"), r.messageParams());
+      // A missing account is an error the user can fix: the row is kept as 'i', not left 'D'.
+      reasonStatic.verify(() -> DocumentDisabledReason.markInvalidAccount("rec-1", conn));
     }
   }
 

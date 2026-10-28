@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.math.BigDecimal;
+import java.sql.PreparedStatement;
 import java.util.List;
 import java.util.Map;
 
@@ -25,6 +26,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.ad_forms.AcctServer;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
@@ -46,6 +48,10 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
  * </ul>
  * Anything else, or a re-check that does not confirm (core may have hit its catch branch), names
  * the generic {@code DocumentDisabled}: a wrong reason is worse than a vague one.
+ *
+ * <p>A missing account is a configuration error, not a document without accounting, so for those
+ * two reasons {@link #markInvalidAccount} turns core's {@code D} into {@code i} ("Invalid account"):
+ * the document stays among the posting errors instead of leaving the Not Posted Documents list.</p>
  */
 final class DocumentDisabledReason {
 
@@ -68,6 +74,11 @@ final class DocumentDisabledReason {
 
   /** The AD message naming the reason, and the values its text interpolates. */
   record Reason(String messageKey, Map<String, Object> messageParams) {
+    /** Whether the reason is a financial account with an accounting account missing. */
+    boolean accountMissing() {
+      return MSG_NO_DEPOSIT_ACCOUNT.equals(messageKey) || MSG_NO_WITHDRAWAL_ACCOUNT.equals(messageKey);
+    }
+
     /** The AD message text with its {@code @param@} tokens filled in. */
     String render(String text) {
       String out = text;
@@ -105,6 +116,25 @@ final class DocumentDisabledReason {
       return GENERIC;
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Marks the transaction core just left {@code D} as {@code i}. Written like core writes the
+   * status ({@code AcctServerData.updateSave}): through the provider's own connection, after the
+   * posting transaction was rolled back. Only a {@code D} row is touched. Never throws.
+   *
+   * @param recordId the transaction core failed to post
+   * @param conn the provider the post ran on
+   */
+  static void markInvalidAccount(String recordId, ConnectionProvider conn) {
+    String sql = "UPDATE FIN_Finacc_Transaction SET Posted = '" + AcctServer.STATUS_InvalidAccount
+        + "' WHERE FIN_Finacc_Transaction_ID = ? AND Posted = '" + AcctServer.STATUS_DocumentDisabled + "'";
+    try (PreparedStatement ps = conn.getConnection().prepareStatement(sql)) {
+      ps.setString(1, recordId);
+      ps.executeUpdate();
+    } catch (Exception e) {
+      log.warn("Could not mark transaction {} as invalid account; it stays disabled", recordId, e);
     }
   }
 
