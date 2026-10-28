@@ -34,9 +34,15 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.Query;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -50,6 +56,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
+import org.openbravo.model.financialmgmt.payment.PaymentTermTrl;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -119,12 +126,52 @@ public class PaymentTermHandlerTest {
         .build();
   }
 
+  /**
+   * A context carrying the MCP create signals: {@code clientProvided} as
+   * {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} (not set when {@code null}) and the keys the
+   * mandatory-defaults pass filled with a placeholder.
+   */
+  private static NeoContext mcpCtx(String method, String recordId, JSONObject body,
+      Set<String> clientProvided, String... fallbackDefaults) {
+    NeoContext context = ctx(method, recordId, body, NeoEndpointType.CRUD);
+    if (clientProvided != null) {
+      context.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, clientProvided);
+    }
+    for (String key : fallbackDefaults) {
+      context.addFallbackDefault(key);
+    }
+    return context;
+  }
+
+  private static Set<String> sent(String... keys) {
+    return new HashSet<>(Arrays.asList(keys));
+  }
+
+  private NeoResponse mcpCreate(JSONObject body, Set<String> clientProvided,
+      String... fallbackDefaults) {
+    return handler.handle(mcpCtx("POST", null, body, clientProvided, fallbackDefaults));
+  }
+
   private NeoResponse create(JSONObject body) {
     return handler.handle(ctx("POST", null, body, NeoEndpointType.CRUD));
   }
 
   private NeoResponse update(JSONObject body) {
     return handler.handle(ctx("PUT", TERM_ID, body, NeoEndpointType.CRUD));
+  }
+
+  /** The MCP create enrichment, which runs before the mandatory pre-check (and so before handle). */
+  private void resolveCreateFields(JSONObject body) {
+    handler.resolveServerCreateFields(ctx("POST", null, body, NeoEndpointType.CRUD));
+  }
+
+  /** resolveServerCreateFields must stay a pure body transformation: no DAL, no admin mode. */
+  private void assertNoDatabaseAccess() {
+    assertAdminModeNeverEntered();
+    assertNoDuplicateLookup();
+    assertNoNameLookup();
+    verify(handler, never()).loadStored(anyString());
+    verify(handler, never()).currentClientId();
   }
 
   private static JSONObject days(Object value) throws Exception {
@@ -524,6 +571,373 @@ public class PaymentTermHandlerTest {
     assertFalse(body.has("nextBusinessDay"));
   }
 
+  // --- MCP create enrichment (resolveServerCreateFields) ----------------------------------------
+
+  @Test
+  public void resolveServerCreateFieldsFillsTheSeededShapeFromANumberOrADigitString()
+      throws Exception {
+    for (Object twelve : new Object[] { 12, "12" }) {
+      JSONObject body = days(twelve);
+
+      resolveCreateFields(body);
+
+      assertEquals("12D", body.getString("searchKey"));
+      assertEquals(0L, body.getLong("offsetMonthDue"));
+      assertEquals("12 D\u00EDas", body.getString("name"));
+      assertTrue(body.getBoolean("nextBusinessDay"));
+      // The days are validated and normalized only by handle(), never here.
+      assertEquals(twelve, body.get(DAYS));
+    }
+    assertNoDatabaseAccess();
+  }
+
+  @Test
+  public void resolveServerCreateFieldsOfZeroDaysFollowsTheImmediateTerm() throws Exception {
+    JSONObject body = days(0);
+
+    resolveCreateFields(body);
+
+    assertEquals("I", body.getString("searchKey"));
+    assertEquals("Inmediato", body.getString("name"));
+    assertEquals(0L, body.getLong("offsetMonthDue"));
+    assertFalse(body.getBoolean("nextBusinessDay"));
+    assertNoDatabaseAccess();
+  }
+
+  @Test
+  public void resolveServerCreateFieldsKeepsACallerName() throws Exception {
+    JSONObject body = days(30).put("name", "Treinta");
+
+    resolveCreateFields(body);
+
+    assertEquals("Treinta", body.getString("name"));
+    assertEquals("30D", body.getString("searchKey"));
+    assertEquals(0L, body.getLong("offsetMonthDue"));
+  }
+
+  @Test
+  public void resolveServerCreateFieldsKeepsEveryCallerSuppliedValue() throws Exception {
+    JSONObject body = days(12)
+        .put("name", "Doce")
+        .put("searchKey", "D12")
+        .put("offsetMonthDue", 1)
+        .put("nextBusinessDay", false);
+
+    resolveCreateFields(body);
+
+    assertEquals("Doce", body.getString("name"));
+    assertEquals("D12", body.getString("searchKey"));
+    assertEquals(1, body.getInt("offsetMonthDue"));
+    assertFalse(body.getBoolean("nextBusinessDay"));
+  }
+
+  @Test
+  public void resolveServerCreateFieldsReplacesBlankOrNullValues() throws Exception {
+    JSONObject body = days(12)
+        .put("name", "   ")
+        .put("searchKey", JSONObject.NULL)
+        .put("offsetMonthDue", JSONObject.NULL)
+        .put("nextBusinessDay", JSONObject.NULL);
+
+    resolveCreateFields(body);
+
+    assertEquals("12 D\u00EDas", body.getString("name"));
+    assertEquals("12D", body.getString("searchKey"));
+    assertEquals(0L, body.getLong("offsetMonthDue"));
+    assertTrue(body.getBoolean("nextBusinessDay"));
+  }
+
+  @Test
+  public void resolveServerCreateFieldsAbstainsWithoutUsableDays() throws Exception {
+    JSONObject[] bodies = {
+        new JSONObject().put("name", "Sin d\u00EDas"),
+        days(JSONObject.NULL),
+        days(7.5d),
+        days("7,5"),
+        days("abc"),
+        days("50% 30 / 50% 60"),
+    };
+    for (JSONObject body : bodies) {
+      String before = body.toString();
+
+      resolveCreateFields(body);
+
+      assertEquals("the body must be left untouched", before, body.toString());
+    }
+    assertNoDatabaseAccess();
+  }
+
+  @Test
+  public void resolveServerCreateFieldsAbstainsWhenARecordIdIsPresent() throws Exception {
+    JSONObject body = days(12);
+
+    handler.resolveServerCreateFields(ctx("PUT", TERM_ID, body, NeoEndpointType.CRUD));
+
+    assertEquals(1, body.length());
+    assertEquals(12, body.getInt(DAYS));
+    assertNoDatabaseAccess();
+  }
+
+  @Test
+  public void resolveServerCreateFieldsAbstainsOnANullBody() {
+    NeoContext context = ctx("POST", null, null, NeoEndpointType.CRUD);
+
+    handler.resolveServerCreateFields(context);
+
+    assertNull(context.getRequestBody());
+    assertNoDatabaseAccess();
+  }
+
+  @Test
+  public void resolveServerCreateFieldsSwallowsAFailureReadingTheBody() {
+    NeoContext context = mock(NeoContext.class);
+    when(context.getRequestBody()).thenThrow(new IllegalStateException("unreadable body"));
+
+    handler.resolveServerCreateFields(context);
+
+    verify(context).getRequestBody();
+    assertNoDatabaseAccess();
+  }
+
+  @Test
+  public void resolveServerCreateFieldsSwallowsAFailureUnwrappingTheBody() throws Exception {
+    JSONObject body = spy(days(12));
+    doThrow(new IllegalStateException("broken envelope")).when(body).optJSONObject("data");
+    String before = body.toString();
+
+    resolveCreateFields(body);
+
+    assertEquals("the body must be left untouched", before, body.toString());
+    assertFalse(body.has("searchKey"));
+    assertNoDatabaseAccess();
+  }
+
+  @Test
+  public void resolveServerCreateFieldsFillsOutOfRangeDaysSoHandleAnswersItsKeyed400()
+      throws Exception {
+    for (long outOfRange : new long[] { -1L, 366L, 400L }) {
+      JSONObject body = days(outOfRange);
+
+      resolveCreateFields(body);
+
+      // Filled, so the mandatory pre-check does not answer a 422 for a key derived from the days.
+      assertEquals(outOfRange + "D", body.getString("searchKey"));
+      assertEquals(0L, body.getLong("offsetMonthDue"));
+      assertRefusal(create(body), 400, PaymentTermHandler.MSG_DAYS_OUT_OF_RANGE);
+    }
+    assertNoDuplicateLookup();
+  }
+
+  @Test
+  public void resolveServerCreateFieldsIsIdempotentWithAFollowingHandle() throws Exception {
+    JSONObject body = days("12");
+
+    resolveCreateFields(body);
+    String afterFirst = body.toString();
+    resolveCreateFields(body);
+    assertEquals(afterFirst, body.toString());
+
+    assertNull(create(body));
+    assertEquals(12L, body.getLong(DAYS));
+    assertEquals("12 D\u00EDas", body.getString("name"));
+    assertEquals("12D", body.getString("searchKey"));
+    assertEquals(0L, body.getLong("offsetMonthDue"));
+    assertTrue(body.getBoolean("nextBusinessDay"));
+  }
+
+  @Test
+  public void resolveServerCreateFieldsEnrichesInsideTheDataEnvelope() throws Exception {
+    JSONObject data = days(12);
+    JSONObject body = new JSONObject().put("data", data);
+
+    resolveCreateFields(body);
+
+    assertEquals("12D", data.getString("searchKey"));
+    assertEquals("12 D\u00EDas", data.getString("name"));
+    assertEquals(0L, data.getLong("offsetMonthDue"));
+    assertFalse(body.has("searchKey"));
+    assertFalse(body.has("name"));
+    assertNoDatabaseAccess();
+  }
+
+  // --- MCP create: server-filled values are re-derived (dropServerFilledCreateFields) ---------
+
+  @Test
+  public void mcpCreateRefusesAPlaceholderZeroDaysAsMissing() throws Exception {
+    JSONObject body = days(0).put("name", "Treinta");
+
+    NeoResponse response = mcpCreate(body, sent("name"), DAYS);
+
+    assertRefusal(response, 400, PaymentTermHandler.MSG_DAYS_INVALID);
+    assertFalse("the placeholder days must not survive", body.has(DAYS));
+    assertNoDuplicateLookup();
+    assertNoNameLookup();
+  }
+
+  @Test
+  public void mcpCreateRefusesAPlaceholderZeroDaysEvenAfterTheEarlyEnrichment()
+      throws Exception {
+    JSONObject body = days(0).put("name", "Treinta");
+    // In production the early hook gets no signals, so it derives the zero-day shape.
+    resolveCreateFields(body);
+    assertEquals("I", body.getString("searchKey"));
+
+    NeoResponse response = mcpCreate(body, sent("name"), DAYS);
+
+    assertRefusal(response, 400, PaymentTermHandler.MSG_DAYS_INVALID);
+    assertEquals("Treinta", body.getString("name"));
+    assertFalse(body.has("searchKey"));
+    assertNoDuplicateLookup();
+    assertNoNameLookup();
+  }
+
+  @Test
+  public void mcpCreateRefusesDaysTheCallerDidNotSend() throws Exception {
+    JSONObject body = days(0).put("name", "Treinta");
+
+    NeoResponse response = mcpCreate(body, sent("name"));
+
+    assertRefusal(response, 400, PaymentTermHandler.MSG_DAYS_INVALID);
+    assertFalse(body.has(DAYS));
+    assertNoDuplicateLookup();
+    assertNoNameLookup();
+  }
+
+  @Test
+  public void mcpCreateKeepsAnExplicitZeroDays() throws Exception {
+    JSONObject body = days(0);
+
+    assertNull(mcpCreate(body, sent(DAYS)));
+    assertEquals(0L, body.getLong(DAYS));
+    assertEquals("Inmediato", body.getString("name"));
+    assertEquals("I", body.getString("searchKey"));
+    assertFalse(body.getBoolean("nextBusinessDay"));
+    verify(handler).findSimpleTermWithDays(CLIENT_ID, 0L, null);
+  }
+
+  @Test
+  public void mcpCreateRederivesADefaultedNextBusinessDayFromTheDays() throws Exception {
+    JSONObject zero = days(0).put("nextBusinessDay", true);
+    JSONObject thirty = days(30).put("nextBusinessDay", false);
+    JSONObject placeholder = days(30).put("nextBusinessDay", false);
+
+    assertNull(mcpCreate(zero, sent(DAYS)));
+    assertNull(mcpCreate(thirty, sent(DAYS)));
+    // Without the client-provided attribute, a fallback key alone marks the placeholder.
+    assertNull(mcpCreate(placeholder, null, "nextBusinessDay"));
+
+    assertFalse(zero.getBoolean("nextBusinessDay"));
+    assertTrue(thirty.getBoolean("nextBusinessDay"));
+    assertTrue(placeholder.getBoolean("nextBusinessDay"));
+  }
+
+  @Test
+  public void mcpCreateKeepsANextBusinessDayTheCallerSent() throws Exception {
+    JSONObject body = days(30).put("nextBusinessDay", false);
+
+    assertNull(mcpCreate(body, sent(DAYS, "nextBusinessDay")));
+    assertFalse(body.getBoolean("nextBusinessDay"));
+  }
+
+  @Test
+  public void mcpCreateReplacesDerivedFieldsTheCallerDidNotSend() throws Exception {
+    JSONObject body = days(12).put("name", "Viejo").put("searchKey", "ZZ")
+        .put("offsetMonthDue", 3);
+
+    assertNull(mcpCreate(body, sent(DAYS)));
+    assertEquals("12 D\u00EDas", body.getString("name"));
+    assertEquals("12D", body.getString("searchKey"));
+    assertEquals(0L, body.getLong("offsetMonthDue"));
+  }
+
+  @Test
+  public void mcpCreateKeepsDerivedFieldsTheCallerSent() throws Exception {
+    JSONObject body = days(12).put("name", "Doce").put("searchKey", "ZZ")
+        .put("offsetMonthDue", 3);
+
+    assertNull(mcpCreate(body, sent(DAYS, "name", "searchKey", "offsetMonthDue")));
+    assertEquals("Doce", body.getString("name"));
+    assertEquals("ZZ", body.getString("searchKey"));
+    assertEquals(3, body.getInt("offsetMonthDue"));
+  }
+
+  @Test
+  public void dropServerFilledCreateFieldsIsANoOpOnRestAndWithoutAContext() throws Exception {
+    JSONObject rest = days(0).put("name", "N").put("searchKey", "S").put("offsetMonthDue", 1)
+        .put("nextBusinessDay", true).put("description", "d");
+    String before = rest.toString();
+
+    PaymentTermHandler.dropServerFilledCreateFields(rest, ctx("POST", null, rest,
+        NeoEndpointType.CRUD));
+    assertEquals(before, rest.toString());
+
+    PaymentTermHandler.dropServerFilledCreateFields(rest, null);
+    assertEquals(before, rest.toString());
+  }
+
+  @Test
+  public void dropServerFilledCreateFieldsOnlyTouchesTheDaysDerivedFields() throws Exception {
+    JSONObject body = days(0).put("name", "N").put("description", "not derived");
+
+    PaymentTermHandler.dropServerFilledCreateFields(body,
+        mcpCtx("POST", null, body, sent(), DAYS, "description"));
+
+    assertFalse(body.has(DAYS));
+    assertFalse(body.has("name"));
+    assertEquals("not derived", body.getString("description"));
+    assertEquals(Arrays.asList(DAYS, "name", "searchKey", "offsetMonthDue", "nextBusinessDay"),
+        PaymentTermHandler.CREATE_DERIVED_FIELDS);
+  }
+
+  @Test
+  public void updateKeepsDaysMissingFromTheClientProvidedSet() throws Exception {
+    storeTerm(30L, 0L, false, false);
+    JSONObject body = days(60).put("name", "Sesenta");
+
+    assertNull(handler.handle(mcpCtx("PUT", TERM_ID, body, sent("name"), DAYS)));
+    assertEquals(60L, body.getLong(DAYS));
+    assertFalse(body.has("searchKey"));
+    assertFalse(body.has("nextBusinessDay"));
+  }
+
+  @Test
+  public void isCallerValueTruthTable() throws Exception {
+    JSONObject body = days(12);
+
+    assertFalse("absent key", PaymentTermHandler.isCallerValue(
+        mcpCtx("POST", null, body, sent("name")), body, "name"));
+    assertTrue("no context means presence",
+        PaymentTermHandler.isCallerValue(null, body, DAYS));
+    assertTrue("REST: no signals means presence", PaymentTermHandler.isCallerValue(
+        ctx("POST", null, body, NeoEndpointType.CRUD), body, DAYS));
+    assertTrue("listed as sent", PaymentTermHandler.isCallerValue(
+        mcpCtx("POST", null, body, sent(DAYS)), body, DAYS));
+    assertFalse("not listed as sent", PaymentTermHandler.isCallerValue(
+        mcpCtx("POST", null, body, sent("name")), body, DAYS));
+    assertFalse("a fallback default wins over the client set", PaymentTermHandler.isCallerValue(
+        mcpCtx("POST", null, body, sent(DAYS), DAYS), body, DAYS));
+
+    NeoContext nonCollection = ctx("POST", null, body, NeoEndpointType.CRUD);
+    nonCollection.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, "name");
+    assertTrue("a non-Collection attribute falls back to presence",
+        PaymentTermHandler.isCallerValue(nonCollection, body, DAYS));
+  }
+
+  @Test
+  public void resolveServerCreateFieldsAbstainsOnServerFilledDays() throws Exception {
+    JSONObject placeholder = days(0);
+    JSONObject unsent = days(0).put("name", "Treinta");
+    String placeholderBefore = placeholder.toString();
+    String unsentBefore = unsent.toString();
+
+    handler.resolveServerCreateFields(mcpCtx("POST", null, placeholder, null, DAYS));
+    handler.resolveServerCreateFields(mcpCtx("POST", null, unsent, sent("name")));
+
+    assertEquals(placeholderBefore, placeholder.toString());
+    assertEquals(unsentBefore, unsent.toString());
+    assertNoDatabaseAccess();
+  }
+
   // --- pass-through ----------------------------------------------------------------------------
 
   @Test
@@ -677,6 +1091,213 @@ public class PaymentTermHandlerTest {
     assertNull(update(new JSONObject().put("description", "no name sent")));
     assertNull(update(days(60)));
     assertNoNameLookup();
+  }
+
+  /**
+   * QA BUG-1 repro: a rename answered 200 with the new {@code name} but the OLD
+   * {@code _identifier}. {@code Name} is translatable, the identifier is read from
+   * {@code C_PaymentTerm_Trl} in the request language, and {@code C_PAYMENTTERM_TRG} only flags
+   * the translations stale on update — it never copies the new name into them.
+   */
+  @Test
+  public void aSuccessfulRenameSyncsTheTranslationsAndTheEchoedIdentifier() throws Exception {
+    PaymentTerm stored = storeTerm(30L, 0L, false, false);
+    when(stored.getName()).thenReturn("30 Días");
+    doReturn(1).when(handler).syncTranslatedName(TERM_ID, "X editado");
+    NeoContext context = ctx("PATCH", TERM_ID, new JSONObject().put("name", "X editado"),
+        NeoEndpointType.CRUD);
+
+    assertNull(handler.handle(context));
+    JSONObject saved = new JSONObject().put("id", TERM_ID).put("name", "X editado")
+        .put("_identifier", "30 Días");
+    context.setPreviousResult(NeoResponse.ok(new JSONObject().put("response",
+        new JSONObject().put("status", 0).put("data", new JSONArray().put(saved)))));
+
+    assertNull(handler.afterHandle(context));
+    verify(handler).syncTranslatedName(TERM_ID, "X editado");
+    assertEquals("X editado", saved.getString("_identifier"));
+  }
+
+  /** A context whose pre-hook already ran and recorded a rename to {@code name}. */
+  private static NeoContext renamedTo(String recordId, String name, NeoResponse previous) {
+    NeoContext context = ctx("PATCH", recordId, new JSONObject(), NeoEndpointType.CRUD);
+    context.setAttribute(PaymentTermHandler.ATTR_RENAMED_TO, name);
+    context.setPreviousResult(previous);
+    return context;
+  }
+
+  private static JSONObject echoedRow(String id, String identifier) throws Exception {
+    return new JSONObject().put("id", id).put("_identifier", identifier);
+  }
+
+  private static NeoResponse savedResponse(JSONObject... rows) throws Exception {
+    JSONArray data = new JSONArray();
+    for (JSONObject row : rows) {
+      data.put(row);
+    }
+    return NeoResponse.ok(new JSONObject().put("response",
+        new JSONObject().put("status", 0).put("data", data)));
+  }
+
+  /** Runs the post-hook on an OK echo of the term and checks no translation was touched. */
+  private void assertAfterHandleDoesNotSync(NeoContext context) throws Exception {
+    JSONObject row = echoedRow(TERM_ID, "30 D\u00EDas");
+    if (context.getPreviousResult() == null) {
+      context.setPreviousResult(savedResponse(row));
+    }
+    assertNull(handler.afterHandle(context));
+    verify(handler, never()).syncTranslatedName(anyString(), anyString());
+    assertEquals("30 D\u00EDas", row.getString("_identifier"));
+  }
+
+  @Test
+  public void anUpdateThatKeepsOmitsOrBlanksTheNameRecordsNoRename() throws Exception {
+    PaymentTerm stored = storeTerm(30L, 0L, false, false);
+    when(stored.getName()).thenReturn("30 D\u00EDas");
+    JSONObject[] bodies = {
+        new JSONObject().put("name", "30 D\u00EDas"),
+        new JSONObject().put("description", "no name sent"),
+        new JSONObject().put("name", "   "),
+        new JSONObject().put("name", JSONObject.NULL),
+    };
+    for (JSONObject body : bodies) {
+      NeoContext context = ctx("PATCH", TERM_ID, body, NeoEndpointType.CRUD);
+
+      assertNull(handler.handle(context));
+
+      assertNull(body.toString(), context.getAttribute(PaymentTermHandler.ATTR_RENAMED_TO));
+      assertAfterHandleDoesNotSync(context);
+    }
+  }
+
+  @Test
+  public void aCreateRecordsNoRename() throws Exception {
+    NeoContext context = ctx("POST", null, days(12).put("name", "Doce"), NeoEndpointType.CRUD);
+
+    assertNull(handler.handle(context));
+
+    assertNull(context.getAttribute(PaymentTermHandler.ATTR_RENAMED_TO));
+    assertNull(handler.afterHandle(context));
+    verify(handler, never()).syncTranslatedName(anyString(), anyString());
+  }
+
+  @Test
+  public void aRenameRefusedForItsDaysRecordsNoRename() throws Exception {
+    PaymentTerm stored = storeTerm(30L, 0L, false, false);
+    when(stored.getName()).thenReturn("30 D\u00EDas");
+    doReturn(existingTerm(true)).when(handler).findSimpleTermWithDays(CLIENT_ID, 60L, TERM_ID);
+    NeoContext context = ctx("PATCH", TERM_ID, days(60).put("name", "Sesenta"),
+        NeoEndpointType.CRUD);
+
+    assertRefusal(handler.handle(context), 409, PaymentTermHandler.MSG_DAYS_DUPLICATE);
+
+    assertNull(context.getAttribute(PaymentTermHandler.ATTR_RENAMED_TO));
+    assertAfterHandleDoesNotSync(context);
+  }
+
+  @Test
+  public void aRenameRefusedForItsNameRecordsNoRename() throws Exception {
+    PaymentTerm stored = storeTerm(30L, 0L, false, false);
+    when(stored.getName()).thenReturn("30 D\u00EDas");
+    doReturn(namedTerm(NAME_22, true)).when(handler)
+        .findTermWithName(CLIENT_ID, STORED_ORG, NAME_22, TERM_ID);
+    NeoContext context = ctx("PATCH", TERM_ID, new JSONObject().put("name", NAME_22),
+        NeoEndpointType.CRUD);
+
+    assertRefusal(handler.handle(context), 409, PaymentTermHandler.MSG_NAME_DUPLICATE, "name");
+
+    assertNull(context.getAttribute(PaymentTermHandler.ATTR_RENAMED_TO));
+    assertAfterHandleDoesNotSync(context);
+  }
+
+  @Test
+  public void afterHandleIsANoOpOnAnErrorResultANullResultOrWithoutARecordId()
+      throws Exception {
+    JSONObject errorBody = new JSONObject().put("message", "refused");
+    String errorBefore = errorBody.toString();
+
+    assertNull(handler.afterHandle(renamedTo(TERM_ID, "Nuevo",
+        NeoResponse.error(400, errorBody))));
+    assertNull(handler.afterHandle(renamedTo(TERM_ID, "Nuevo",
+        NeoResponse.error(500, "boom"))));
+    assertNull(handler.afterHandle(renamedTo(TERM_ID, "Nuevo", null)));
+    for (String noId : new String[] { null, "", "  " }) {
+      assertNull(handler.afterHandle(renamedTo(noId, "Nuevo",
+          savedResponse(echoedRow(TERM_ID, "Viejo")))));
+    }
+
+    verify(handler, never()).syncTranslatedName(anyString(), anyString());
+    assertEquals(errorBefore, errorBody.toString());
+  }
+
+  @Test
+  public void afterHandleWithoutAStringMarkerIsANoOp() throws Exception {
+    NeoContext context = ctx("PATCH", TERM_ID, new JSONObject(), NeoEndpointType.CRUD);
+    context.setAttribute(PaymentTermHandler.ATTR_RENAMED_TO, Boolean.TRUE);
+    context.setPreviousResult(savedResponse(echoedRow(TERM_ID, "Viejo")));
+
+    assertAfterHandleDoesNotSync(context);
+  }
+
+  @Test
+  public void aRenameUpdatesOnlyItsOwnRowInAFlatDataBody() throws Exception {
+    doReturn(2).when(handler).syncTranslatedName(TERM_ID, "Nuevo");
+    JSONObject self = echoedRow(TERM_ID, "Viejo");
+    JSONObject other = echoedRow(OTHER_ID, "Otro");
+    JSONObject flat = new JSONObject().put("data", new JSONArray().put(self).put(other));
+
+    assertNull(handler.afterHandle(renamedTo(TERM_ID, "Nuevo", NeoResponse.ok(flat))));
+
+    verify(handler).syncTranslatedName(TERM_ID, "Nuevo");
+    assertEquals("Nuevo", self.getString("_identifier"));
+    assertEquals("Otro", other.getString("_identifier"));
+  }
+
+  @Test
+  public void applyIdentifierToleratesABodyWithoutRows() throws Exception {
+    PaymentTermHandler.applyIdentifier(null, TERM_ID, "Nuevo");
+    JSONObject noRows = new JSONObject().put("response", new JSONObject().put("status", 0));
+    String before = noRows.toString();
+
+    PaymentTermHandler.applyIdentifier(noRows, TERM_ID, "Nuevo");
+
+    assertEquals(before, noRows.toString());
+  }
+
+  @Test
+  public void aFailingTranslationSyncLeavesTheResponseUnchanged() throws Exception {
+    doThrow(new IllegalStateException("db down")).when(handler)
+        .syncTranslatedName(TERM_ID, "Nuevo");
+    NeoResponse saved = savedResponse(echoedRow(TERM_ID, "Viejo"));
+    String before = saved.getBody().toString();
+
+    assertNull(handler.afterHandle(renamedTo(TERM_ID, "Nuevo", saved)));
+
+    assertEquals(before, saved.getBody().toString());
+  }
+
+  @Test
+  public void syncTranslatedNameRunsABulkHqlUpdateOfTheTranslations() {
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    Query<?> query = mock(Query.class);
+    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+    when(dal.getSession()).thenReturn(session);
+    doReturn(query).when(session).createQuery(hql.capture());
+    when(query.executeUpdate()).thenReturn(3);
+
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      assertEquals(3, new PaymentTermHandler().syncTranslatedName(TERM_ID, "Nuevo"));
+    }
+
+    assertEquals("update " + PaymentTermTrl.ENTITY_NAME + " t set t."
+        + PaymentTermTrl.PROPERTY_NAME + " = :name where t."
+        + PaymentTermTrl.PROPERTY_PAYMENTTERMS + ".id = :termId", hql.getValue());
+    verify(query).setParameter("name", "Nuevo");
+    verify(query).setParameter("termId", TERM_ID);
+    verify(query).executeUpdate();
   }
 
   @Test

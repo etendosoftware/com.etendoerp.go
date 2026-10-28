@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.math.BigDecimal;
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
@@ -30,10 +31,12 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.query.Query;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
+import org.openbravo.model.financialmgmt.payment.PaymentTermTrl;
 
 import com.etendoerp.go.schemaforge.AbstractNeoHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -65,6 +68,12 @@ import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
  *       business day).</li>
  * </ul>
  *
+ * <p>On MCP {@code etendo_create} the mandatory pre-check runs before this pre-hook, so the
+ * create enrichment also runs earlier, through {@link #resolveServerCreateFields}; and the
+ * mandatory-defaults pass runs before both, so on create the pre-hook first discards the
+ * days-derived values the server filled (a placeholder 0 days, a default) and decides them as on
+ * REST — see {@link #dropServerFilledCreateFields} (ETP-5978).</p>
+ *
  * <p>On an update, the range and duplicate checks only run when the days or the shape actually
  * change, so a legacy term that already breaks a rule can still be renamed. The message keys are
  * plain strings, deliberately not {@code AD_MESSAGE} records (ETP-5692 decision): the text is
@@ -84,6 +93,10 @@ public class PaymentTermHandler extends AbstractNeoHandler {
   static final String F_NEXT_BUSINESS_DAY = PaymentTerm.PROPERTY_NEXTBUSINESSDAY;
   static final String F_FIXED_DUE_DATE = PaymentTerm.PROPERTY_FIXEDDUEDATE;
   static final String F_ORGANIZATION = PaymentTerm.PROPERTY_ORGANIZATION;
+
+  /** The days and every field a create derives from them (ETP-5978). */
+  static final List<String> CREATE_DERIVED_FIELDS = List.of(F_DAYS, F_NAME, F_SEARCH_KEY,
+      F_OFFSET_MONTH, F_NEXT_BUSINESS_DAY);
 
   static final int MIN_DAYS = 0;
   static final int MAX_DAYS = 365;
@@ -105,7 +118,13 @@ public class PaymentTermHandler extends AbstractNeoHandler {
   /** A signed integer short enough to never overflow; longer digit runs are not a day count. */
   private static final Pattern WHOLE_NUMBER = Pattern.compile("[+-]?\\d{1,9}");
 
+  /** Context attribute: the name an accepted update gives the term (QA BUG-1, ETP-5978). */
+  static final String ATTR_RENAMED_TO = PaymentTermHandler.class.getName() + ".renamedTo";
+
   private static final String DATA_ENVELOPE = "data";
+  private static final String RESPONSE_ENVELOPE = "response";
+  private static final String KEY_ID = "id";
+  private static final String KEY_IDENTIFIER = "_identifier";
   private static final String KEY_ERROR = "error";
   private static final String KEY_MESSAGE = "message";
   private static final String KEY_STATUS = "status";
@@ -122,6 +141,100 @@ public class PaymentTermHandler extends AbstractNeoHandler {
     }
     return NeoResponse.ensureTopLevelMessage(runWriteHook(context, SPEC, log,
         body -> validateAndEnrich(unwrap(body), context.getRecordId(), context)));
+  }
+
+  /**
+   * ETP-5978: fills the days-derived create fields on MCP {@code etendo_create} before its
+   * mandatory pre-check, which runs ahead of {@link #handle} on that channel (ETP-5710).
+   *
+   * <p>{@code searchKey} ({@code Value}) and {@code offsetMonthDue} ({@code FixMonthOffset}) are
+   * mandatory in AD and hidden from the Payment Term window, so an agent creating a term from a
+   * name and a number of days would otherwise get a {@code missingFields} 422 for fields it was
+   * never offered. This runs the same {@link #enrichCreate} the pre-hook runs, so every channel
+   * derives the same values.</p>
+   *
+   * <p>Abstains (body untouched) on an update, or when the days are absent, null or not a whole
+   * number: the pre-check then reports what is missing, and the days themselves are validated and
+   * normalized only by {@link #handle}. On MCP, though, an agent that omits the days rarely reaches
+   * that branch: the mandatory-defaults pass runs first and fills {@code NetDays} with a
+   * safe-type placeholder 0, and the context this hook receives does not say so (no fallback
+   * defaults, no {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}). The zero-day shape is then
+   * derived here, harmlessly: the pre-hook does see both signals, treats the placeholder as absent
+   * ({@link #dropServerFilledCreateFields}) and answers the same 400 {@value #MSG_DAYS_INVALID} as
+   * REST, before anything is persisted. Days out of range are still enriched, so the pre-hook
+   * answers its keyed 400 instead of a 422 for a key derived from them. Idempotent with the later
+   * pre-hook and never overwrites a value the caller sent ({@link #enrichCreate}); never
+   * throws.</p>
+   *
+   * @param context the MCP create context; its request body is mutated in place
+   */
+  @Override
+  public void resolveServerCreateFields(NeoContext context) {
+    Object rawDays = null;
+    try {
+      JSONObject body = context.getRequestBody();
+      if (body == null || StringUtils.isNotBlank(context.getRecordId())) {
+        return;
+      }
+      JSONObject fields = unwrap(body);
+      if (!isCallerValue(context, fields, F_DAYS) || fields.isNull(F_DAYS)) {
+        return;
+      }
+      rawDays = fields.get(F_DAYS);
+      Long days = parseWholeNumber(rawDays);
+      if (days != null) {
+        enrichCreate(fields, days);
+      }
+    } catch (JSONException | RuntimeException e) {
+      log.debug("[ETP-5978] Payment term create defaults skipped (days={}): {}", rawDays,
+          e.getMessage());
+    }
+  }
+
+  /**
+   * Whether {@code key} in a create body is the caller's own value, not one the server filled
+   * before this customization ran. REST single and batch run the pre-hook before any defaults
+   * pass, so there presence in the body is the answer. MCP {@code etendo_create} runs the
+   * mandatory-defaults pass first and says what it did: a key in
+   * {@link NeoContext#getFallbackDefaults()} is a placeholder (ETP-5669, forwarded to the
+   * pre-hook since ETP-5680), and when {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} is present
+   * only the keys it lists were sent.
+   *
+   * @param context the request; {@code null} means presence in the body
+   */
+  static boolean isCallerValue(NeoContext context, JSONObject body, String key) {
+    if (!body.has(key)) {
+      return false;
+    }
+    if (context == null) {
+      return true;
+    }
+    if (context.getFallbackDefaults().contains(key)) {
+      return false;
+    }
+    Object clientProvided = context.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
+    return !(clientProvided instanceof Collection)
+        || ((Collection<?>) clientProvided).contains(key);
+  }
+
+  /**
+   * On create, removes from the body the days-derived fields the server filled before the
+   * pre-hook (see {@link #isCallerValue}), so the pre-hook decides them exactly as on REST: days
+   * the caller did not send are refused as missing (400 {@value #MSG_DAYS_INVALID}) instead of
+   * creating a zero-day term from a placeholder, and {@code name}, {@code searchKey},
+   * {@code offsetMonthDue} and {@code nextBusinessDay} are derived from the days rather than kept
+   * from a default. A value the caller sent is never touched. A no-op without a context, and on
+   * REST, where the body only holds what the caller sent.
+   */
+  static void dropServerFilledCreateFields(JSONObject body, NeoContext context) {
+    if (context == null) {
+      return;
+    }
+    for (String key : CREATE_DERIVED_FIELDS) {
+      if (body.has(key) && !isCallerValue(context, body, key)) {
+        body.remove(key);
+      }
+    }
   }
 
   /** The record fields, unwrapped from the optional {@code {"data": {...}}} envelope. */
@@ -146,7 +259,9 @@ public class PaymentTermHandler extends AbstractNeoHandler {
   /**
    * {@link #validateAndEnrich(JSONObject, String)} with the request context, which a create needs
    * to resolve the organization the record will get when the caller does not send one (name
-   * uniqueness is per organization). Without a context that resolution is skipped.
+   * uniqueness is per organization), and to tell the caller's values from the ones an MCP create
+   * filled before the pre-hook ({@link #dropServerFilledCreateFields}). Without a context both are
+   * skipped.
    */
   NeoResponse validateAndEnrich(JSONObject body, String recordId, NeoContext context)
       throws JSONException {
@@ -156,8 +271,99 @@ public class PaymentTermHandler extends AbstractNeoHandler {
       // Unknown or unreadable id: the generic CRUD produces the canonical 404.
       return null;
     }
+    if (create) {
+      dropServerFilledCreateFields(body, context);
+    }
     NeoResponse refusal = validateDaysAndEnrich(body, create, stored);
-    return refusal != null ? refusal : checkNameUnique(body, stored, context);
+    if (refusal == null) {
+      refusal = checkNameUnique(body, stored, context);
+    }
+    if (refusal == null && !create) {
+      rememberRename(body, stored, context);
+    }
+    return refusal;
+  }
+
+  /**
+   * QA BUG-1 (ETP-5978): records on the context the name an accepted update gives the term, for
+   * {@link #afterHandle} to bring the translations in step once the write has succeeded. Nothing
+   * is recorded when the name is not sent, is blank or does not change.
+   */
+  static void rememberRename(JSONObject body, PaymentTerm stored, NeoContext context)
+      throws JSONException {
+    String name = submittedString(body, F_NAME);
+    if (context == null || StringUtils.isBlank(name) || name.equals(stored.getName())) {
+      return;
+    }
+    context.setAttribute(ATTR_RENAMED_TO, name);
+  }
+
+  /**
+   * QA BUG-1 (ETP-5978): after a successful rename, copies the new name into every
+   * {@code C_PaymentTerm_Trl} row of the term and into the {@code _identifier} the write echoes.
+   *
+   * <p>{@code C_PaymentTerm.Name} is translatable and is the entity's only identifier column, so
+   * the identifier core serialises ({@code DataToJsonConverter} → {@code
+   * BaseOBObject.getIdentifier()}) is read from the translation row of the request language, not
+   * from the base column. {@code C_PAYMENTTERM_TRG} copies the name into the translations on
+   * insert, but on update only sets {@code IsTranslated = 'N'} and leaves their text alone. A
+   * rename therefore kept the old name everywhere the identifier is shown — the PATCH response,
+   * the title and breadcrumb, every payment-term selector — while {@code name} itself and the
+   * database base row were right.</p>
+   *
+   * <p><b>Every language is overwritten, by design.</b> The rename replaces the {@code name} of
+   * every {@code C_PaymentTerm_Trl} row of the term, whatever its language: the trigger has just
+   * flagged all of them {@code IsTranslated = 'N'} (out of date), and Etendo GO has no
+   * translation tab for payment terms, so nothing else could ever correct them.</p>
+   *
+   * <p><b>Not atomic with the rename.</b> This runs only after the write succeeded (the
+   * dispatcher skips {@code afterHandle} on an error result, and this checks again), and on a
+   * single REST or MCP write that write is already committed by the write service; the
+   * translation update runs in a second transaction, committed at the end of the request. A
+   * failure here is logged at error and leaves the rename saved, the response as it was and the
+   * identifier stale until the name is changed again. Inside a batch both share the batch's
+   * transaction.</p>
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    Object renamedTo = context.getAttribute(ATTR_RENAMED_TO);
+    NeoResponse saved = context.getPreviousResult();
+    if (!(renamedTo instanceof String) || saved == null || saved.getHttpStatus() >= 400
+        || StringUtils.isBlank(context.getRecordId())) {
+      return null;
+    }
+    String name = (String) renamedTo;
+    try {
+      syncTranslatedName(context.getRecordId(), name);
+      applyIdentifier(saved.getBody(), context.getRecordId(), name);
+    } catch (Exception e) {
+      log.error("[ETP-5978] Could not sync the translated name of payment term {}: {}",
+          context.getRecordId(), e.getMessage(), e);
+    }
+    return null;
+  }
+
+  /**
+   * Sets {@code _identifier} to {@code name} on the echoed record {@code recordId}, in the
+   * {@code {"response": {"data": [...]}}} shape core's update returns or in a flat
+   * {@code {"data": [...]}}. The identifier of a payment term is its name alone.
+   */
+  static void applyIdentifier(JSONObject body, String recordId, String name)
+      throws JSONException {
+    if (body == null) {
+      return;
+    }
+    JSONObject inner = body.optJSONObject(RESPONSE_ENVELOPE);
+    JSONArray rows = (inner != null ? inner : body).optJSONArray(DATA_ENVELOPE);
+    if (rows == null) {
+      return;
+    }
+    for (int i = 0; i < rows.length(); i++) {
+      JSONObject row = rows.optJSONObject(i);
+      if (row != null && recordId.equals(row.optString(KEY_ID, null))) {
+        row.put(KEY_IDENTIFIER, name);
+      }
+    }
   }
 
   private NeoResponse validateDaysAndEnrich(JSONObject body, boolean create, PaymentTerm stored)
@@ -414,6 +620,24 @@ public class PaymentTermHandler extends AbstractNeoHandler {
 
   PaymentTerm loadStored(String recordId) {
     return OBDal.getInstance().get(PaymentTerm.class, recordId);
+  }
+
+  /**
+   * Copies {@code name} into every translation of the term ({@code C_PaymentTerm_Trl}), all
+   * languages. Called from {@link #afterHandle}, i.e. after the rename has been committed by the
+   * write service (single REST / MCP write): it runs in a second transaction, committed at the end
+   * of the request, so it is not atomic with the rename. A bulk HQL update: it bypasses DAL entity
+   * access, which the role writing the base record does not need on the translation entity.
+   *
+   * @return the number of translation rows updated
+   */
+  int syncTranslatedName(String termId, String name) {
+    Query<?> update = OBDal.getInstance().getSession().createQuery(
+        "update " + PaymentTermTrl.ENTITY_NAME + " t set t." + PaymentTermTrl.PROPERTY_NAME
+            + " = :name where t." + PaymentTermTrl.PROPERTY_PAYMENTTERMS + ".id = :termId");
+    update.setParameter("name", name);
+    update.setParameter("termId", termId);
+    return update.executeUpdate();
   }
 
   boolean hasLines(PaymentTerm term) {
