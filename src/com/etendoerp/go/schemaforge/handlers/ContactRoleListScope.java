@@ -9,18 +9,20 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+
+import com.etendoerp.go.schemaforge.NeoContext;
 
 /**
  * The role tabs of the Contacts window over {@code C_BPartner} — {@code contacts/customer} and
@@ -31,26 +33,25 @@ import org.apache.commons.lang3.StringUtils;
  * <p>On the MCP channel only, a list that names no parent business partner keeps the partners that
  * hold the role ({@code isCustomer} / {@code isVendor}). A list scoped to one partner
  * ({@code parentId}) is that partner's role tab and is left alone, and the SPA and REST lists are
- * unchanged.</p>
+ * unchanged. Read by the {@code readPredicates} of {@link ContactCustomerTabHandler} and
+ * {@link ContactVendorTabHandler}, which also carry the contact type guard.</p>
  */
-abstract class ContactsRoleTabCustomization implements NeoHandler {
+final class ContactRoleListScope {
 
   private static final String PARAM_PARENT_ID = "parentId";
 
-  /** @return the HQL predicate over {@code e} that keeps the partners holding this tab's role */
-  abstract String rolePredicate();
-
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    return null;
+  private ContactRoleListScope() {
   }
 
-  @Override
-  public List<String> readPredicates(NeoContext context) {
+  /**
+   * @param rolePredicate the HQL predicate over {@code e} that keeps the partners holding the role
+   * @return {@code rolePredicate} for an MCP list without a parent, else nothing
+   */
+  static List<String> forList(NeoContext context, String rolePredicate) {
     if (context == null || !context.isMcpOrigin() || hasParent(context.getQueryParams())) {
       return List.of();
     }
-    return List.of(rolePredicate());
+    return List.of(rolePredicate);
   }
 
   private static boolean hasParent(Map<String, String> queryParams) {
