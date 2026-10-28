@@ -76,7 +76,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String ACTION_IMPORT = "importOrderLines";
 
   private static final String PARAM_ORDER_ID = "orderId";
-  private static final Set<String> ACTIONS =
+  /** The three order actions of a normal invoice (a rectificative takes none, ETP-5876). */
+  static final Set<String> ACTIONS =
       Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES, ACTION_IMPORT);
   private static final int MAX_CANDIDATES = 200;
   private static final int MAX_ORDERS = 50;
@@ -96,7 +97,9 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         + "and the rest defaulted; etendo_schema view:\"create\" is the authority), call "
         + "availableOrders, then availableOrderLines, then importOrderLines on that header, and "
         + "complete it with documentAction (CO). To invoice a whole order in ONE step (created AND "
-        + "completed, no draft to fill) call " + oneStep + " instead.";
+        + "completed, no draft to fill) call " + oneStep + " instead. A rectificative invoice "
+        + "answers 422 importNotAvailableOnRectificative: its lines come from a return or from the "
+        + "invoice it rectifies.";
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(ACTION_AVAILABLE_ORDERS, NeoActionContract.read(ACTION_AVAILABLE_ORDERS,
         "Lists the completed " + order + "s of this " + doc + "'s business partner and currency "

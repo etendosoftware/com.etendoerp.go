@@ -11803,3 +11803,102 @@ every write. Changing the order date through the MCP therefore also changes the 
 no separate field is published. The agent prompts of `purchase-order` and `sales-order` say so.
 
 Tests: `McpWriteRequestSupportClearedMandatoryTest`, `OrderCurrencyPriceListGuardTest`.
+
+
+#### 4.12.42 Import lines into a draft rectificative invoice (ETP-5876)
+
+**The defect.** A draft rectificative invoice (sales or purchase) could not be built from what it rectifies. The window's
+rectificative menu offers "Import from return" and "Import from source invoice"; the MCP had neither, offered the order /
+goods-shipment / goods-receipt imports of ETP-5713 on the rectificative (which brought the lines in **positive**), and
+refused a return with `importDirectionMismatch`. The only way to credit a return was `createReturnInvoice` from the
+return.
+
+**What an agent has now.** Six actions, published by `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler`
+(`actionContracts()`), served by two delegates already injected in them, no entity name in shared code, no new
+`Java_Qualifier`:
+
+| Spec / entity | Actions | Delegate |
+|---|---|---|
+| `sales-invoice/header`, `purchase-invoice/header` | `availableReturns`, `availableReturnLines`, `importReturnLines` (param `returnId`) | `ImportInOutLinesIntoInvoiceHandler` (the ETP-5713 receipt / shipment delegate, with a return mode) |
+| same | `availableOriginInvoices`, `availableOriginInvoiceLines`, `importOriginInvoiceLines` (param `invoiceId`) | `ImportOriginInvoiceLinesHandler` |
+
+They take the same body and answer in the same envelope as §4.12.34 (`{data:{importedCount, lines:[…], headerLinked,
+salesOrder?}}`; the origin import adds `originInvoices:[{id, documentNo}]`), the same `error.code`s, and the `id` of
+`etendo_action` is the **draft rectificative**. The quantity a caller sends is always a **positive** number ("Return Qty",
+as the return's own lines show it); what is written is its negative, and `quantity` in the answer is negative.
+
+**The kind of invoice decides which imports exist** (`RectificativeImportGate`, fed by a `RectificativeImportPolicy` the
+header stores on the request context):
+
+| Invoice | Order / goods imports (`*Order*`, `*Shipment*`, `*Receipt*`) | Return / origin imports |
+|---|---|---|
+| normal | as in §4.12.34 | **422 `importRequiresRectificative`**, nothing created |
+| rectificative | **422 `importNotAvailableOnRectificative`**, nothing created | as below |
+
+"Rectificative" is the screen's `RECTIFICATIVA` subtype exactly as `getArSubtype` / `getApSubtype` take it from
+`arInvoiceSubtype` / `apInvoiceSubtype`: each header's own `classifyDocType` over the invoice's **target** document type
+(`transactionDocument`): the flag `EM_Etsg_Isrectificative`, or the legacy types (sales `ARC` / `ARI_RM`; purchase `APC`,
+or `API` with `isReturn`). The gate runs in the header's `handle`, before the dispatch to the delegates, so REST (single and
+batch) and MCP behave alike: **no channel divergence is introduced** (§4.12.9 is unchanged). The same rule is the advice of
+`NeoHandler#unavailableActions` (`InvoiceDocumentAvailability` → `RectificativeImportGate.unavailable`): on any invoice
+the actions that do not apply are listed with the reason and what to use instead, so `etendo_schema(view:"actions", id)`
+shows them as `availableNow:false`. Only a **draft** target takes an import (`importTargetNotDraft`).
+
+**From a return** (mirrors `ImportFromReturnShipmentModal` / `ImportFromGoodsReturnModal`, each side exactly, neither
+stricter nor laxer). Completed returns (`DocumentType.isReturn`) of the same business partner and direction (a customer
+return into a sales rectificative, a return to a vendor into a purchase one), and only returns whose `invoiceStatus` (the
+percent invoiced by completed invoices, `C_GETINVOICESTATUSFROMSHIPMENT`) is below 100, as both modals list them. The lines
+are created by the native `CreateInvoiceLinesFromProcess` with `ShipmentInOutLine` entries (the path of the shipment /
+receipt import), **negative**, linked to the **return line** (`M_InOutLine_ID`), with the unit price of the invoice's
+**current price list** and the tax the native process resolves (what the line callout gives): a return alone has no
+relation to the price it was sold at (`createReturnInvoice` is the way to credit at the original price). No
+`C_Invoice_Reverse` row is written by this import (`createReturnInvoice`, from the return, is what links). The native process stores the price list's standard price and price limit on the new lines (`C_InvoiceLine.PriceStd` / `PriceLimit`); the modals' body carries neither and the screen stores 0, so the import sets both to 0 on the NEW lines right after the process (`clearReferencePrices`), leaving `PriceActual`, `PriceList` and every amount untouched. What differs per side is chosen by the header's
+`RectificativeImportPolicy` (`salesModalRules`):
+
+| | Sales (`ImportFromReturnShipmentModal.jsx`: `fetchDocuments` builds the sum of invoice lines, the `invoiceStatus` filter and the currency filter; `fetchLines` the cap and the order-line block) | Purchase (`ImportFromGoodsReturnModal.jsx`: `fetchDocuments` builds the presence set, filters by `invoiceStatus` and returns `excludedByCurrency: false`; `fetchLines` sets `_maxQty` to the movement quantity) |
+|---|---|---|
+| Cap of a return line | the movement quantity minus the magnitude of **every** invoice line linked to it (`creditedQuantities`), **whatever the status of its invoice, voided included**, this invoice's own lines among them | the movement quantity |
+| Line not offered | remaining 0, or its order line is already on an invoice line linked to a movement line or on this invoice (`blockedOrderLines`) | a line THIS invoice already holds (presence, any quantity); what other invoices hold, drafts or completed, is **not** deducted |
+| Currency | compared with the currency of the return's sales order, only when the return has one | not compared |
+
+The quantity is signed negative whatever sign the return stored (`creditSelection`; a return made before ETP-5313 kept it
+positive).
+
+**From an origin invoice** (mirrors `ImportFromSourceInvoiceModal`, sales and purchase alike). Completed invoices of the
+same partner and direction (and the same currency on **sales only**: the sales `ImportFromSourceInvoiceModal.jsx` `fetchDocuments` filters by it; the purchase one returns `excludedByCurrency: false`),
+never the target, and never a rectificative (the modal lists FAC only). The lines
+offered are the source's active lines with a product and a quantity, without the total-discount line (the lines grid hides
+it); a line already imported into THIS rectificative (`EM_ETGO_Source_Invoiceline_ID` of one of its lines) is not offered
+again, even when only part of it came in (presence, not quantity, as the modal). **The per-line maximum is the source
+line's own quantity**: the window does not subtract what other draft rectificatives, or credits made through a return,
+already hold of that line, and that deliberate parity is kept. Partial quantities are accepted. The lines are written
+through the DAL (`ImportOriginInvoiceLinesHandler.copyInto`), negative, with the product, UOM, tax, unit / list / gross
+prices and `EM_Etgo_Discount` of the source line, the source line in `EM_ETGO_Source_Invoiceline_ID`, `PriceStd` and `PriceLimit` stored as 0 (the modals' body sends neither, so the screen stores 0 whatever the source line holds), and, **on sales only**
+(`RectificativeImportPolicy.keepsOrderLink`), its order line (the sales modal sends it, ETP-5381; the purchase one does not),
+after which the header's order reference follows the line-save rule. The origin invoice is linked in `C_Invoice_Reverse` (the Rectificaciones tab), once per distinct origin and deduped
+(`OriginInvoiceLinks.linkIfMissing`, written after the target is locked), on both sides and whether or not the source has an
+order: that is what the modal's `originInvoices` PATCH (`persistOriginInvoice`) is meant to do. That header write is left
+exactly as it was and is not used by this action. **The return import writes no link**; only `createReturnInvoice` (from
+the return) links a return to the invoice it rectifies.
+
+**The header's total discount (`EM_Etgo_Total_Discount`) is not carried by any of these paths**, nor by
+`createReturnInvoice` (deliberate, as the screen).
+
+**Where it differs from the window (declared).** Two things, neither a rule the MCP chooses:
+(1) a return line that carries an order line is priced from it by the native process, while the sales modal prices it from
+the price list (and applies the order line's discount); the return lines the module creates carry no order line.
+(2) *Purchase origin invoice pricing.* `buildLineBody` of the purchase `ImportFromSourceInvoiceModal.jsx` is callout-first:
+unit price `priceData.unitPrice || priceData.grossUnitPrice || line._unitPrice || line.unitPrice`, list price, tax and UOM
+from the callout before the source line, no order line, and a gross price only when the callout returns one. But it calls
+`resolveLinePrice(base, line.product, qty, {})` with an EMPTY header and no product auxiliary values, so the
+`purchase-invoice/lines/callout` request carries neither the invoice (`SL_Invoice_Product` reads `inpcInvoiceId` and the
+invoice's price list) nor the selector prices (`inpmProductId_PSTD` / `_PLIST` / `_UOM`). As written the callout is
+expected to answer nothing usable, and every `||` falls through to the source line, which is what the MCP copies on both
+sides (the sales `buildLineBody` calls no callout at all). That is an inference from the modal code, **not verified on
+screen**: if the callout does answer, the screen would price from the price list and the MCP would differ. Everything else
+follows each side's modal as listed above.
+
+Tests: `ImportInOutLinesIntoInvoiceHandlerTest` (returns), `ImportOriginInvoiceLinesHandlerTest`,
+`RectificativeImportGateTest`, `DocumentAvailabilityTest` (the advice), `SalesInvoiceHeaderHandlerTest` /
+`PurchaseInvoiceHeaderHandlerTest` (contracts and routing), and the real-model HQL parse in
+`ImportOrderLinesIntoInvoiceHandlerIntegrationTest`.
