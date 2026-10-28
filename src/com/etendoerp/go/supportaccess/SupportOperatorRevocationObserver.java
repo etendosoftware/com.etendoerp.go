@@ -96,7 +96,10 @@ public class SupportOperatorRevocationObserver extends EntityPersistenceEventObs
     } else {
       return;
     }
-    new SupportAccessService().revokeAllOf(operatorId,
-        OBContext.getOBContext().getUser().getId());
+    // Outside a request (background process, import) there may be no user: revoke anyway.
+    OBContext context = OBContext.getOBContext();
+    String byUserId = context == null || context.getUser() == null ? null
+        : context.getUser().getId();
+    new SupportAccessService().revokeAllOf(operatorId, byUserId);
   }
 }

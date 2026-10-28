@@ -193,6 +193,14 @@ class SupportUserManagementLockoutTest {
   }
 
   @Test
+  void contactDeleteIsRefusedInSupportSessionAndUnchangedForOthers() {
+    NeoContext asSupport = request("DELETE", null, context(SUPPORT_USER));
+    NeoContext asOther = request("DELETE", null, context(TARGET));
+    assertEquals(403, new ContactHandler().handle(asSupport).getHttpStatus());
+    assertEquals(null, new ContactHandler().handle(asOther));
+  }
+
+  @Test
   void actionsOnUserAndContactAreRefusedOnlyInSupportSession() {
     NeoContext asSupport = NeoContext.builder().endpointType(NeoEndpointType.ACTION).httpMethod("POST")
         .recordId(TARGET).fieldName("grantPortalAccess").obContext(context(SUPPORT_USER)).build();

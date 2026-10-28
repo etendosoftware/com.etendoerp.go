@@ -128,8 +128,8 @@ public class JdbcSupportAccessStore implements SupportAccessStore {
       + "WHERE etgo_support_access_id = ? AND is_revoked = 'N'";
 
   private static final String CLOSE_OF_OPERATOR_SQL = UPDATE_ACCESS
-      + "SET ended_at = ?, end_reason = ?, ended_by_user_id = ?, updated = now(), updatedby = ? "
-      + "WHERE ended_at IS NULL AND (?::text IS NULL OR operator_user_id = ?)";
+      + "SET ended_at = ?, end_reason = ?, ended_by_user_id = ?, updated = now(), "
+      + "updatedby = COALESCE(?, '0') WHERE ended_at IS NULL AND (?::text IS NULL OR operator_user_id = ?)";
 
   private static final String REVOKE_SESSIONS_OF_OPERATOR_SQL = "UPDATE etgo_go_session "
       + "SET is_revoked = 'Y', updated = now(), updatedby = '0' "
