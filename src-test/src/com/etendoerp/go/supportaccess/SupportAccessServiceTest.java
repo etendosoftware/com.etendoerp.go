@@ -51,6 +51,7 @@ class SupportAccessServiceTest {
   private static final String APP_BASE_URL = "https://go.example.test/app/";
 
   private InMemorySupportAccessStore store;
+  private InMemorySupportUserStore userStore;
   private MutableClock clock;
   private SupportAccessService service;
 
@@ -64,7 +65,7 @@ class SupportAccessServiceTest {
     store.preferences.put(SupportAccessService.PREF_DEFAULT_MINUTES, "60");
     store.preferences.put(SupportAccessService.PREF_MAX_MINUTES, "480");
     store.clientNames.put(CLIENT, "Acme SL");
-    InMemorySupportUserStore userStore = new InMemorySupportUserStore();
+    userStore = new InMemorySupportUserStore();
     userStore.adminRoles.put(CLIENT, ADMIN_ROLE);
     userStore.references.put(CLIENT,
         new SupportUserContext(CLIENT, null, ADMIN_ROLE, "ORG", "WH", null));
@@ -298,6 +299,28 @@ class SupportAccessServiceTest {
     assertEquals(OTHER_OPERATOR, row.getEndedByUserId());
     assertFalse(store.liveSessions.containsKey(issued.getAccessId()));
     assertEquals(0, service.revokeAllOf(null, OTHER_OPERATOR), "nothing left open");
+  }
+
+  @Test
+  void revokeAllOfLeavesTheSessionsOfOtherOperatorsAccessesAlone() {
+    IssuedSupportTicket mine = issue();
+    service.redeem(mine.getTicket());
+    store.liveSessions.put(mine.getAccessId(), clock.instant().plus(Duration.ofHours(1)));
+    String otherClient = "OTHER-CLIENT";
+    store.eligibleClients.add(otherClient);
+    userStore.adminRoles.put(otherClient, ADMIN_ROLE);
+    userStore.references.put(otherClient,
+        new SupportUserContext(otherClient, null, ADMIN_ROLE, "ORG", "WH", null));
+    IssuedSupportTicket theirs = service.issue(OTHER_OPERATOR, otherClient, REASON, null, null,
+        null);
+    service.redeem(theirs.getTicket());
+    store.liveSessions.put(theirs.getAccessId(), clock.instant().plus(Duration.ofHours(1)));
+
+    service.revokeAllOf(OPERATOR, OPERATOR);
+
+    assertFalse(store.liveSessions.containsKey(mine.getAccessId()));
+    assertTrue(store.liveSessions.containsKey(theirs.getAccessId()), "not closed by this call");
+    assertNull(store.rows.get(theirs.getAccessId()).getEndedAt());
   }
 
   @Test

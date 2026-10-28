@@ -102,6 +102,11 @@ public class SupportOperatorRevocationObserver extends EntityPersistenceEventObs
     OBContext context = OBContext.getOBContext();
     String byUserId = context == null || context.getUser() == null ? null
         : context.getUser().getId();
-    new SupportAccessService().revokeAllOf(operatorId, byUserId);
+    supportAccessService().revokeAllOf(operatorId, byUserId);
+  }
+
+  /** Seam for tests: the service that closes the accesses. */
+  SupportAccessService supportAccessService() {
+    return new SupportAccessService();
   }
 }
