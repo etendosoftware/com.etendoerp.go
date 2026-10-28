@@ -7485,6 +7485,7 @@
 <!--1162FD2D6F6E42BFB90688C78B091B40-->  <JAVA_QUALIFIER><![CDATA[searchKey]]></JAVA_QUALIFIER>
 <!--1162FD2D6F6E42BFB90688C78B091B40-->  <SEQNO><![CDATA[20]]></SEQNO>
 <!--1162FD2D6F6E42BFB90688C78B091B40-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--1162FD2D6F6E42BFB90688C78B091B40-->  <AGENT_PROMPT><![CDATA[The contact's number, assigned automatically on create as in the app (the same value as etgoIdentifier). Do not send it when creating a contact: a value you send is replaced by the number and the answer says so in searchKeyNote. To find a contact, filter by name or taxID.]]></AGENT_PROMPT>
 <!--1162FD2D6F6E42BFB90688C78B091B40-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--1162FD2D6F6E42BFB90688C78B091B40--></ETGO_SF_FIELD>
 

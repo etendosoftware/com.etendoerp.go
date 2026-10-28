@@ -248,6 +248,68 @@ class BusinessPartnerHandlerTest {
     assertEquals("CLAVE_EXISTENTE", body.getString("searchKey"));
   }
 
+  /**
+   * ETP-5852 (M-107): MCP's mandatory pre-check runs before {@code handle()}, so the placeholder
+   * must already be there for a create that sends only a person's name parts.
+   */
+  @Test
+  void aCreateWithoutSearchKeyGetsItsPlaceholderBeforeTheMcpPrecheck() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoFirstname", "Ana");
+    body.put("etgoLastname", "Ruiz");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    handler.resolveServerCreateFields(ctx);
+
+    assertEquals("Ana Ruiz", body.getString("searchKey"));
+    assertTrue(handler.serverResolvedCreateFields().contains("searchKey"));
+  }
+
+  /** ETP-5852 (M-107): a create without any name is left for the pre-check to report. */
+  @Test
+  void aCreateWithoutNameGetsNoPlaceholder() throws Exception {
+    JSONObject body = new JSONObject();
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    handler.resolveServerCreateFields(ctx);
+
+    assertFalse(body.has("searchKey"));
+  }
+
+  /**
+   * ETP-5852 (M-107): over MCP, a searchKey the caller sent and the number replaced is reported;
+   * one the server put itself, or one equal to the number, is not.
+   */
+  @Test
+  void aReplacedSearchKeyIsReportedOnlyWhenTheCallerSentIt() throws Exception {
+    JSONObject sent = new JSONObject().put("name", "X").put("searchKey", "MINE");
+    when(ctx.isMcpOrigin()).thenReturn(true);
+    when(ctx.getRequestBody()).thenReturn(sent);
+    when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name", "searchKey"));
+    JSONObject answer = buildResponseBody();
+    answer.getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .put("searchKey", "1000005");
+
+    assertTrue(BusinessPartnerHandler.noteReplacedSearchKey(ctx, answer));
+    assertTrue(answer.getJSONObject("response")
+        .getString(BusinessPartnerHandler.KEY_SEARCH_KEY_NOTE).contains("'MINE'"));
+
+    when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name"));
+    assertFalse(BusinessPartnerHandler.noteReplacedSearchKey(ctx, buildResponseBody()));
+
+    when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name", "searchKey"));
+    sent.put("searchKey", "1000005");
+    JSONObject same = buildResponseBody();
+    same.getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .put("searchKey", "1000005");
+    assertFalse(BusinessPartnerHandler.noteReplacedSearchKey(ctx, same));
+  }
+
   // ── handle() — PATCH: name derivation from persisted parts ───────────────────
 
   /**

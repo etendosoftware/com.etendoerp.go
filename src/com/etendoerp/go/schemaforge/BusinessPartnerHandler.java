@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -129,6 +130,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
   /** {@code C_BPartner.Value} is {@code VARCHAR(40)}. */
   private static final int SEARCH_KEY_MAX_LENGTH = 40;
+  static final String KEY_SEARCH_KEY_NOTE = "searchKeyNote";
 
   private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of("priceList", "paymentMethod", "paymentTerms",
       "account", "customerBlocking", "purchasePricelist", "pOPaymentMethod", "pOPaymentTerms", "pOFinancialAccount",
@@ -268,6 +270,75 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   @Override
   protected String persistedNamePartsSql() {
     return "SELECT name, em_etgo_firstname, em_etgo_lastname FROM c_bpartner WHERE c_bpartner_id = ?";
+  }
+
+  /**
+   * ETP-5852 (M-107): the contact's searchKey is numbered by the server, as in the app, whose form
+   * does not show it. Declared so {@code etendo_schema(view:"create")} lists it as server-defaulted
+   * instead of required.
+   */
+  @Override
+  public Set<String> serverResolvedCreateFields() {
+    return Set.of(FIELD_SEARCH_KEY);
+  }
+
+  /**
+   * ETP-5852 (M-107): puts the same temporary searchKey {@code handle()} puts, before MCP's
+   * mandatory pre-check, which runs ahead of {@code handle()} and refused a create without one.
+   * The name is derived first (person mode), as {@code handle()} does. Never overwrites a value
+   * the caller sent; abstains without a name, so the pre-check still reports it.
+   */
+  @Override
+  public void resolveServerCreateFields(NeoContext context) {
+    JSONObject body = context == null ? null : context.getRequestBody();
+    if (body == null || body.has(FIELD_SEARCH_KEY)) {
+      return;
+    }
+    try {
+      deriveName(context, body);
+      putSearchKeyPlaceholder(body);
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not resolve the create searchKey", e);
+    }
+  }
+
+  private static void putSearchKeyPlaceholder(JSONObject body) throws Exception {
+    String name = body.optString(FIELD_NAME, null);
+    if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
+      // C_BPartner.Value is VARCHAR(40) while Name has 60, so a long commercial name
+      // cannot be used verbatim as the placeholder ("Value too long. Length 48,
+      // maximum allowed 40"). afterHandle() replaces it with em_etgo_identifier
+      // anyway, so truncating here is lossless. ETP-4156: the app-shell used to
+      // pre-truncate this client-side, which masked the missing guard.
+      body.put(FIELD_SEARCH_KEY, StringUtils.substring(name, 0, SEARCH_KEY_MAX_LENGTH));
+    }
+  }
+
+  /**
+   * ETP-5852 (M-107): on MCP, when the caller sent its own searchKey and the contact got its number
+   * instead, says so in the answer ({@code searchKeyNote}), so the replacement is not silent. The
+   * app never sends one: its form does not show the field.
+   *
+   * @return whether {@code body} was patched
+   */
+  static boolean noteReplacedSearchKey(NeoContext ctx, JSONObject body) throws Exception {
+    if (ctx == null || !ctx.isMcpOrigin() || ctx.getRequestBody() == null
+        || !(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS) instanceof Collection)
+        || !((Collection<?>) ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+            .contains(FIELD_SEARCH_KEY)) {
+      return false;
+    }
+    String sent = ctx.getRequestBody().optString(FIELD_SEARCH_KEY, null);
+    JSONObject record = firstRecord(body);
+    String kept = record == null ? null : record.optString(FIELD_SEARCH_KEY, null);
+    JSONObject response = body.optJSONObject(RESPONSE_KEY);
+    if (StringUtils.isBlank(sent) || kept == null || sent.equals(kept) || response == null) {
+      return false;
+    }
+    response.put(KEY_SEARCH_KEY_NOTE, "The searchKey you sent ('" + sent + "') was not kept: a "
+        + "contact's searchKey is its number, assigned automatically as in the app (" + kept
+        + "). Do not send it when creating a contact.");
+    return true;
   }
 
   /**
@@ -424,15 +495,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
       if ("POST".equals(method)) {
         stripPreCreateBillingDefaults(body);
-        String name = body.optString(FIELD_NAME, null);
-        if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
-          // C_BPartner.Value is VARCHAR(40) while Name has 60, so a long commercial name
-          // cannot be used verbatim as the placeholder ("Value too long. Length 48,
-          // maximum allowed 40"). afterHandle() replaces it with em_etgo_identifier
-          // anyway, so truncating here is lossless. ETP-4156: the app-shell used to
-          // pre-truncate this client-side, which masked the missing guard.
-          body.put(FIELD_SEARCH_KEY, StringUtils.substring(name, 0, SEARCH_KEY_MAX_LENGTH));
-        }
+        putSearchKeyPlaceholder(body);
         injectOrgCurrency(ctx, body);
       }
     } catch (Exception e) {
@@ -767,6 +830,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
         String createdId = extractRecordId(body);
         provisionBpAcctRowsAfterCreate(createdId);
         ContactTypeTelemetry.afterWrite(ctx, createdId);
+        modified |= noteReplacedSearchKey(ctx, body);
       } else {
         // PUT/PATCH: flipping vendor/customer to Y on an already-persisted BP never runs through
         // c_bpartner_trg (it only fires on TG_OP='INSERT'), so backfill whichever posting-account
