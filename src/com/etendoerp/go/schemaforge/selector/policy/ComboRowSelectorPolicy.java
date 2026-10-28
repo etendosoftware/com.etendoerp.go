@@ -23,6 +23,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.data.FieldProvider;
 
 import com.etendoerp.go.schemaforge.SystemCategoryIds;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * ETP-4967: post-filters rows returned by {@code ComboReferenceSelectorExecutor}'s classic
@@ -53,6 +54,7 @@ import com.etendoerp.go.schemaforge.SystemCategoryIds;
 public final class ComboRowSelectorPolicy {
 
   private static final String COLUMN_PRODUCT_CATEGORY_FK = "M_Product_Category_ID";
+  private static final String FIELD_ID = "ID";
 
   private ComboRowSelectorPolicy() {
   }
@@ -69,17 +71,36 @@ public final class ComboRowSelectorPolicy {
    *         no hiding policy applies to {@code columnName} or nothing needs filtering
    */
   public static FieldProvider[] filter(String columnName, FieldProvider[] rawRows) {
-    if (rawRows == null || rawRows.length == 0
+    FieldProvider[] rows = withoutSupportUser(rawRows);
+    if (rows == null || rows.length == 0
         || !COLUMN_PRODUCT_CATEGORY_FK.equalsIgnoreCase(columnName)) {
-      return rawRows;
+      return rows;
     }
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
     Set<String> hiddenIds = SystemCategoryIds.resolve(clientId);
     if (hiddenIds.isEmpty()) {
+      return rows;
+    }
+    return Arrays.stream(rows)
+        .filter(row -> !hiddenIds.contains(row.getField(FIELD_ID)))
+        .toArray(FieldProvider[]::new);
+  }
+
+  /**
+   * ETP-5351 (T6) — drops the current client's "Soporte Etendo" user from a combo, whatever the
+   * column. The combo's SQL comes from the column's validation rule, so this is the only place
+   * the route can be filtered; the id is derived from the client and no other record of any table
+   * carries it, so matching on it alone is safe for every column. Same short-page limitation as
+   * the category filter above, at most one row per tenant.
+   */
+  private static FieldProvider[] withoutSupportUser(FieldProvider[] rawRows) {
+    String supportUserId = rawRows == null || rawRows.length == 0 ? null
+        : SupportUserExclusion.supportUserIdOrNull(SupportUserExclusion.currentClientId());
+    if (supportUserId == null) {
       return rawRows;
     }
     return Arrays.stream(rawRows)
-        .filter(row -> !hiddenIds.contains(row.getField("ID")))
+        .filter(row -> !supportUserId.equals(row.getField(FIELD_ID)))
         .toArray(FieldProvider[]::new);
   }
 }

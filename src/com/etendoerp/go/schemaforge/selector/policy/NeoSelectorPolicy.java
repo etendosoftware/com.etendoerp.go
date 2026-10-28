@@ -36,7 +36,8 @@ public final class NeoSelectorPolicy {
   private static final SelectorPolicyRegistry REGISTRY = new SelectorPolicyRegistry(
       List.of(new ContextParamSelectorPolicy(), new FinancialAccountPaymentMethodSelectorPolicy(),
           new CurrencyIsoAllowlistSelectorPolicy(), new GoodsMovementProductSelectorPolicy(),
-          new ProductCategorySystemFlagSelectorPolicy(), new PostingAccountCombinationSelectorPolicy()),
+          new ProductCategorySystemFlagSelectorPolicy(), new SupportUserSelectorPolicy(),
+          new PostingAccountCombinationSelectorPolicy()),
       List.of(new ProductPriceSelectorPolicy(), new InventoryProductSelectorPolicy(),
           new InvoiceLineTaxSifSelectorPolicy(), new ProductSystemCategorySelectorPolicy()));
 
