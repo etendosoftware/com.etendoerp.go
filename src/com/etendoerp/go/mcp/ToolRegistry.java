@@ -580,18 +580,32 @@ public class ToolRegistry {
     WIDGET_ENTITY_BY_NAME = java.util.Collections.unmodifiableMap(entities);
 
     Map<String, String> desc = new LinkedHashMap<>();
-    desc.put(McpConstants.WIDGET_KPIS, "Summary KPI cards: revenue this month, pending invoices, and "
-        + "other headline business metrics with trend percentages.");
-    desc.put(McpConstants.WIDGET_REVENUE_TREND, "Monthly revenue series (parallel labels/values arrays) "
-        + "for charting the revenue trend over the last 12 months.");
+    // ETP-5852 (M-24 / M-38): what each figure measures, so figures of different bases are not
+    // compared. The card keys keep their historical names; the period is in response.period.
+    desc.put(McpConstants.WIDGET_KPIS, "Headline KPI cards for the period in response.period "
+        + "(default 'ytd', year to date — the keys revenueThisMonth/expensesThisMonth keep their "
+        + "historical names but cover that period): revenue and expenses = NET amounts without "
+        + "VAT (invoice totallines) of completed/closed sales and purchase invoices dated in the "
+        + "period; netProfit = revenue - expenses; pendingInvoices = completed sales invoices "
+        + "still unpaid, counted now whatever their date. trend = % change against the previous "
+        + "period of the same length (0 with hasPrevious:false when there is none).");
+    desc.put(McpConstants.WIDGET_REVENUE_TREND, "Revenue series (parallel labels/values arrays): "
+        + "NET sales without VAT of completed/closed invoices per bucket — months by default (the "
+        + "rolling last 12 months), days for mtd/last30d, weeks for last90d.");
     desc.put(McpConstants.WIDGET_PENDING_TASKS, "Actionable pending tasks and alerts (overdue invoices, "
         + "pending receptions/shipments, collections/payments due).");
     desc.put(McpConstants.WIDGET_ACTIVITY, "Recent activity feed (invoices paid, documents posted, notes).");
-    desc.put(McpConstants.WIDGET_RECENT_INVOICES, "Most recent completed sales invoices (newest first).");
-    desc.put(McpConstants.WIDGET_BEST_PRODUCTS, "Best-performing products by revenue/quantity.");
-    desc.put(McpConstants.WIDGET_BEST_SELLERS, "Best-selling sales reps / sellers ranking.");
-    desc.put(McpConstants.WIDGET_PENDING_AMOUNTS, "Outstanding receivable/payable amounts pending collection.");
-    desc.put(McpConstants.WIDGET_TOP_CLIENTS, "Top clients ranked by revenue.");
+    desc.put(McpConstants.WIDGET_RECENT_INVOICES, "The 5 most recent completed/closed sales "
+        + "invoices (newest first); amount is the total WITH VAT.");
+    desc.put(McpConstants.WIDGET_BEST_PRODUCTS, "Products ranked by NET sales amount without VAT "
+        + "(invoice line net amounts) of completed/closed sales invoices.");
+    desc.put(McpConstants.WIDGET_BEST_SELLERS, "Products ranked by quantity sold (invoiced "
+        + "quantity of completed/closed sales invoices), with their unit of measure.");
+    desc.put(McpConstants.WIDGET_PENDING_AMOUNTS, "Open receivables and payables NOW: count and "
+        + "outstanding amount WITH VAT of completed sales/purchase invoices not fully paid. A "
+        + "balance, not a period flow: not comparable with the net revenue of 'kpis'.");
+    desc.put(McpConstants.WIDGET_TOP_CLIENTS, "Top 10 clients ranked by invoiced total WITH VAT "
+        + "of completed/closed sales invoices.");
     WIDGET_DESCRIPTION_BY_NAME = java.util.Collections.unmodifiableMap(desc);
   }
 
@@ -615,8 +629,9 @@ public class ToolRegistry {
             + "'range' to scope the period. Valid values: 'ytd', 'mtd', 'last30d', "
             + "'last90d', 'lastYear'. Omit for the widget's default window "
             + "(for 'kpis', an omitted range means 'ytd'; for 'revenue-trend' it means "
-            + "the rolling last 12 months, bucketed by month); any other value falls back "
-            + "to the rolling last 12 months."));
+            + "the rolling last 12 months, bucketed by month); any other value is refused with "
+            + "a 422. Every answer carries response.period: the effective range with its from/to "
+            + "dates (or the widget's default window) and asOf, the moment it was computed."));
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_WIDGET,

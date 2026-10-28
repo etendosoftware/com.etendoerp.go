@@ -723,6 +723,24 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * An {@code etendo_widget} {@code range} the widgets do not know (ETP-5852, M-38). It used to
+   * fall back to the rolling 12 months in silence.
+   *
+   * @param widget the widget
+   * @param range  the value sent
+   * @param valid  the accepted values
+   * @return the exception to throw
+   */
+  static McpRoutingException invalidWidgetRange(String widget, String range, List<String> valid) {
+    return new McpRoutingException(
+        "Widget '" + widget + "' does not know range '" + range + "'. Nothing was computed.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, "params.range", valid,
+        "Retry with one of the values in 'available', or omit range for the widget's default "
+            + "period.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
    * A call on a child entity did not name its parent record (ETP-5184).
    *
    * <p>The detail is written for an agent that does not know Etendo's data model: it says why there

@@ -21,12 +21,15 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.WidgetPeriod;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
@@ -47,6 +50,24 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * discoverable/invocable.
  */
 final class McpWidgetHandler {
+
+  private static final Logger log = LogManager.getLogger(McpWidgetHandler.class);
+
+  static final String KEY_RANGE = "range";
+
+  /** The range a widget computes when none is sent (WidgetKpisHandler, WidgetRevenueTrendHandler). */
+  static final Map<String, String> DEFAULT_RANGE_BY_WIDGET = Map.of(
+      McpConstants.WIDGET_KPIS, "ytd",
+      McpConstants.WIDGET_REVENUE_TREND, "lastYear");
+
+  /** The default window of a ranked widget called without a range (WidgetQueryPolicyRegistry). */
+  static final Map<String, String> DEFAULT_WINDOW_BY_WIDGET = Map.of(
+      McpConstants.WIDGET_BEST_PRODUCTS, "all completed sales invoices; trend = the month of the "
+          + "latest invoice against the month before",
+      McpConstants.WIDGET_BEST_SELLERS, "all completed sales invoices; trend = the month of the "
+          + "latest invoice against the month before",
+      McpConstants.WIDGET_TOP_CLIENTS, "the 12 months up to the latest completed sales invoice",
+      McpConstants.WIDGET_RECENT_INVOICES, "the 30 days up to the latest completed sales invoice");
 
   private McpWidgetHandler() {
   }
@@ -79,6 +100,15 @@ final class McpWidgetHandler {
           + "' (spec '" + McpConstants.SPEC_DASHBOARD + "', entity '" + entityName + "').");
     }
 
+    // ETP-5852 (M-38): an unknown range used to fall back to the rolling 12 months in silence,
+    // answering figures of another period than the one asked for.
+    JSONObject rawParams = arguments.optJSONObject(McpConstants.PARAM_PARAMS);
+    String asked = rawParams == null ? null
+        : org.apache.commons.lang3.StringUtils.trimToNull(rawParams.optString(KEY_RANGE, null));
+    if (asked != null && !WidgetPeriod.RANGES.contains(asked)) {
+      throw McpRoutingException.invalidWidgetRange(widget, asked, WidgetPeriod.RANGES);
+    }
+
     // Forward the optional params object as the query-param map (e.g. range), mirroring
     // the HTTP GET /sws/neo/dashboard/{entity}?range=... contract the handlers expect.
     Map<String, String> queryParams = new HashMap<>();
@@ -109,6 +139,41 @@ final class McpWidgetHandler {
     if (response.getHttpStatus() >= 400) {
       return McpToolRouter.wrapAsErrorContent(body);
     }
+    addPeriod(body, widget, asked);
     return McpToolRouter.wrapAsTextContent(body);
+  }
+
+  /**
+   * ETP-5852 (M-38 / M-42): says which period the figures cover and when they were computed, next
+   * to {@code data}. Widgets are computed on every call (no cache), so {@code asOf} is now. A
+   * widget whose figures depend on a range gets {@code range} (the effective one, the widget's
+   * default when none was sent), {@code from} and {@code to}; a ranked widget called without a
+   * range describes its own default window instead.
+   */
+  static void addPeriod(JSONObject body, String widget, String asked) {
+    JSONObject response = body == null ? null : body.optJSONObject("response");
+    if (response == null) {
+      return;
+    }
+    try {
+      JSONObject period = new JSONObject();
+      java.time.LocalDate today = java.time.LocalDate.now();
+      String range = asked != null ? asked : DEFAULT_RANGE_BY_WIDGET.get(widget);
+      if (range != null) {
+        period.put(KEY_RANGE, range);
+        period.put("from", WidgetPeriod.start(range).toString());
+        period.put("to", today.toString());
+      } else if (DEFAULT_WINDOW_BY_WIDGET.containsKey(widget)) {
+        period.put(KEY_RANGE, JSONObject.NULL);
+        period.put("window", DEFAULT_WINDOW_BY_WIDGET.get(widget));
+      } else {
+        period.put("window", "point in time: the state now, whatever the date of the documents");
+      }
+      period.put("asOf", java.time.OffsetDateTime.now().withNano(0).toString());
+      response.put("period", period);
+    } catch (Exception e) {
+      // The period is an annotation: the figures already computed are still answered.
+      log.debug("Could not describe the period of widget {}: {}", widget, e.getMessage());
+    }
   }
 }
