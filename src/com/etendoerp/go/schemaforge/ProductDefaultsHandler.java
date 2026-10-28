@@ -191,6 +191,19 @@ public class ProductDefaultsHandler implements NeoHandler {
     return List.of(EXCLUDE_SYSTEM_CATEGORY_PREDICATE);
   }
 
+  /**
+   * ETP-5977: sort and filter the Product list by an attribute value. Only a request that names an
+   * attribute parameter is touched; see {@link com.etendoerp.go.attributes.ProductAttributeListQuery}.
+   */
+  @Override
+  public NeoListPage listPage(NeoContext context) {
+    if (context == null || !SPEC.equals(context.getSpecName())) {
+      return null;
+    }
+    return com.etendoerp.go.attributes.ProductAttributeListQuery.page(context,
+        NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE));
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     if (context == null || !SPEC.equals(context.getSpecName())) {
