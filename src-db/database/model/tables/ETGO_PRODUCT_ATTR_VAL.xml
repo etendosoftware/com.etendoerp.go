@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_PRODUCT_ATTR_VAL">
+    <table name="ETGO_PRODUCT_ATTR_VAL" primaryKey="ETGO_PRODUCT_ATTR_VAL_KEY">
+      <column name="ETGO_PRODUCT_ATTR_VAL_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="M_PRODUCT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_ATTR_DEF_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="VALUE_TEXT" primaryKey="false" required="false" type="NVARCHAR" size="2000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="VALUE_NUMBER" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="VALUE_BPARTNER_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="C_BPARTNER" name="ETGO_PAV_BPARTNER_FK">
+        <reference local="VALUE_BPARTNER_ID" foreign="C_BPARTNER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_ATTR_DEF" name="ETGO_PAV_DEF_FK">
+        <reference local="ETGO_ATTR_DEF_ID" foreign="ETGO_ATTR_DEF_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="M_PRODUCT" name="ETGO_PAV_PRODUCT_FK" onDelete="cascade">
+        <reference local="M_PRODUCT_ID" foreign="M_PRODUCT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_PRODUCT_AT_VAL_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_PRODUCT_ATTR_VAL_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <index name="ETGO_PAV_NUM_IDX" unique="false">
+        <index-column name="ETGO_ATTR_DEF_ID"/>
+        <index-column name="VALUE_NUMBER"/>
+        <whereClause><![CDATA[VALUE_NUMBER IS NOT NULL]]></whereClause>
+      </index>
+      <index name="ETGO_PAV_TXT_IDX" unique="false">
+        <index-column name="ETGO_ATTR_DEF_ID"/>
+        <index-column name="VALUE_TEXT" operatorClass="text_pattern_ops"/>
+        <whereClause><![CDATA[VALUE_TEXT IS NOT NULL]]></whereClause>
+      </index>
+      <unique name="ETGO_PAV_UQ">
+        <unique-column name="M_PRODUCT_ID"/>
+        <unique-column name="ETGO_ATTR_DEF_ID"/>
+      </unique>
+      <check name="ETGO_PAV_ONEVALUE_CHK"><![CDATA[(
+CASE
+    WHEN VALUE_TEXT IS NULL THEN 0
+    ELSE 1
+END +
+CASE
+    WHEN VALUE_NUMBER IS NULL THEN 0
+    ELSE 1
+END +
+CASE
+    WHEN VALUE_BPARTNER_ID IS NULL THEN 0
+    ELSE 1
+END) <= 1]]></check>
+      <check name="ETGO_PRODUCT_ATTR_VAL_ACT_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+    </table>
+  </database>
