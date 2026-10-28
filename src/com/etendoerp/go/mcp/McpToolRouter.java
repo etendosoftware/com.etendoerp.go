@@ -462,6 +462,10 @@ public class McpToolRouter {
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.STARTROW_PARAMETER, String.valueOf(offset));
     params.put(JsonConstants.ENDROW_PARAMETER, String.valueOf(offset + limit - 1));
+    // ETP-5852 (M-1): ask core for the real count. By default it skips it and answers totalRows as
+    // "rows shown + 1" while more rows remain — a grid's scroll hint, which an agent read as the
+    // size of the set (5 products listed 2 at a time answered 3, then 5). One count query per call.
+    params.put(JsonConstants.NOCOUNT_PARAMETER, "false");
 
     if (StringUtils.isNotBlank(orderBy)) {
       params.put(JsonConstants.SORTBY_PARAMETER, orderBy);

@@ -785,7 +785,8 @@ public class ToolRegistry {
         McpConstants.TOOL_NEO_LIST,
         "List records from an Etendo API spec. "
             + "Supports filtering (exact match, range operators, named document status), "
-            + "pagination, sorting, and field projection (`fields` / view:\"summary\").",
+            + "pagination, sorting, and field projection (`fields` / view:\"summary\"). "
+            + "`totalRows` is the number of records matching the filters, whatever page you ask for.",
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
