@@ -150,6 +150,9 @@ final class McpHookExecutor {
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
+        // ETP-5852: the read's pre-phase is an MCP call like the others built here; without the
+        // flag a customization could not tell an agent's read from the app's.
+        .mcpOrigin(true)
         .queryParams(queryParams)
         .build();
     NeoExtensionResult result = NeoExtensionDispatcher.dispatch(NeoExtensionRequest.builder()

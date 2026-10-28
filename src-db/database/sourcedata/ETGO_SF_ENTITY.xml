@@ -4313,6 +4313,8 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--C5BDD6D41A824D1084B413900DF8919B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--C5BDD6D41A824D1084B413900DF8919B-->  <JAVA_QUALIFIER><![CDATA[chart-of-accounts]]></JAVA_QUALIFIER>
 <!--C5BDD6D41A824D1084B413900DF8919B-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--C5BDD6D41A824D1084B413900DF8919B-->  <AGENT_PROMPT><![CDATA[The client's chart of accounts. List and read it without parentId: the client has one chart, as in the app. To create an account pass parentId = the accountingElement every listed account carries (not the row's parentId, which is its place in the tree). A new account is a subaccount: send searchKey = 8 digits starting with the 4-digit code of the account it goes under (43000099 goes under 4300; the app's New subaccount does the same, there is no parent field), name and accountType; it is created active. An account with postings or combinations cannot be deleted: set active to false instead.]]></AGENT_PROMPT>
+<!--C5BDD6D41A824D1084B413900DF8919B-->  <MCP_CONFIG><![CDATA[{"parent":{"optionalFor":["list","get"],"reason":"accountingElement is the client's chart of accounts, a per-client singleton that no spec publishes: every account and the accounts of the only chart are the same set, and the app reads them without naming it."}}]]></MCP_CONFIG>
 <!--C5BDD6D41A824D1084B413900DF8919B--></ETGO_SF_ENTITY>
 
 <!--C699CB9178774674AD6B79E282AC2638--><ETGO_SF_ENTITY>
