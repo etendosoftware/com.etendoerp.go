@@ -33,6 +33,8 @@ import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 /**
  * ETP-5945 (in ETP-5852): every etendo_action result carries {@code success} and {@code message},
  * whatever shape the action answered with; the original keys stay.
+ *
+ * @covers com.etendoerp.go.mcp.McpActionEnvelope
  */
 class McpActionEnvelopeTest {
 

@@ -25,6 +25,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 /**
  * ETP-5852 (M-188): an agent's orderBy ends with {@code id}, so rows tied on the sorted value keep
  * one order across pages; an order that already names {@code id} is left as sent.
+ *
+ * @covers com.etendoerp.go.mcp.McpQuerySupport
  */
 class McpQuerySupportOrderTest {
 

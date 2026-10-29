@@ -25,7 +25,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
-/** ETP-5852: the {@code defaults} section of {@code MCP_CONFIG} and its catalog line. */
+/**
+ * ETP-5852: the {@code defaults} section of {@code MCP_CONFIG} and its catalog line.
+ *
+ * @covers com.etendoerp.go.mcp.McpDefaultsSection
+ */
 class McpDefaultsSectionTest {
 
   @Test

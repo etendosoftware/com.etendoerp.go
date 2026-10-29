@@ -33,6 +33,8 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 /**
  * ETP-5852 (M-172): an MCP list of contacts/customer or contacts/vendorCreditor keeps only the
  * partners holding the role; a list scoped to one partner and every non-MCP list are unchanged.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.ContactRoleListScope
  */
 class ContactRoleListScopeTest {
 

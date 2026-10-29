@@ -37,6 +37,8 @@ import org.junit.jupiter.api.Test;
  * reads, refuse writes, and demand a reason. A regression that silently accepted
  * {@code optionalFor:["create"]} would disable the write half of the gate without anyone noticing,
  * which is precisely the failure mode the design set out to avoid.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpParentSection
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

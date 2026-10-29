@@ -28,6 +28,8 @@ import org.junit.jupiter.api.Test;
 /**
  * ETP-5852: a list served by an entity's customization reaches the agent in the generic list shape,
  * paged and projected like any other list.
+ *
+ * @covers com.etendoerp.go.mcp.McpProvidedReadShaper
  */
 class McpProvidedReadShaperTest {
 

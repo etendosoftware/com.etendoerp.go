@@ -71,6 +71,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * sits inside a {@code catch (Exception)} that swallows failures, so "the body was left alone" is
  * not on its own evidence that the intended guard fired: each abstain test below therefore also
  * asserts that {@link FinancialUtils#getProductPrice} was never reached.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpLinePriceInjector
  */
 class McpLinePriceInjectorTest {
 

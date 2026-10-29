@@ -39,6 +39,8 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * ETP-5852: {@link NeoDefaultsService#applyRecordContext} — the values the caller already knows
  * must be on the record before the callout cascade derives the fields that depend on them (a
  * document's business partner → its payment terms), and only real fields of the entity count.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsRecordContext
  */
 class NeoDefaultsRecordContextTest {
 

@@ -29,6 +29,8 @@ import org.junit.jupiter.api.Test;
 /**
  * ETP-5852 (M-170): the certificate status an agent reads — the expiry as a date and the days left,
  * negative once expired; no certificate answers exists:false and nothing else.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.OrganizationCertificateAction
  */
 class OrganizationCertificateActionTest {
 

@@ -31,6 +31,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 /**
  * ETP-5852 (M-1 / M-70): listMovements narrowed by an inclusive date range, paged newest first,
  * with the count in the range and the balance at the end of toDate.
+ *
+ * @covers com.etendoerp.go.schemaforge.MovementWindow
  */
 class MovementWindowTest {
 

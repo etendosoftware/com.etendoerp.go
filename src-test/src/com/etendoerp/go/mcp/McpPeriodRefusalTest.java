@@ -55,6 +55,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * {@link McpPeriodRefusal}: which action refusals it enriches, and the {@code period} it names —
  * the period covering the record's accounting date in the controlling organization's calendar,
  * with its status for the document's category, or {@code exists:false}.
+ *
+ * @covers com.etendoerp.go.mcp.McpPeriodRefusal
  */
 class McpPeriodRefusalTest {
 

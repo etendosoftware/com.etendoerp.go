@@ -68,6 +68,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * with warehouse filter, empty result set, exception path (500), the ETP-5492
  * includeZeroStock movement-history gate, and private helpers via
  * reflection (parseIds, buildNamedParams, toBigDecimal).
+ *
+ * @covers com.etendoerp.go.schemaforge.InventoryStockReportHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

@@ -25,6 +25,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 /**
  * ETP-5852 (M-173): a list validation rule that names AD_Ref_List is run against the criteria
  * query's own alias, the only name PostgreSQL accepts there.
+ *
+ * @covers com.etendoerp.go.schemaforge.ListReferenceSelectorExecutor
  */
 class ListReferenceSelectorExecutorTest {
 
