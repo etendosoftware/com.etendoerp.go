@@ -230,6 +230,7 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
     linkOrigin(invoice, source);
     String headerOrderId = policy.keepsOrderLink() ? syncHeaderOrder(invoice)
         : orderIdOf(invoice);
+    requireQuotaAllowed(InvoiceLine.ENTITY_NAME, created);
     Map<String, Object> extra = new LinkedHashMap<>();
     extra.put(KEY_ORIGIN_INVOICES, new JSONArray().put(new JSONObject().put("id", source.getId())
         .put("documentNo", source.getDocumentNo())));

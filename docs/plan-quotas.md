@@ -92,6 +92,7 @@ are saved and **before** anything irreversible (a completion that commits, the r
 | follow-up documents (invoice → shipment / receipt, `FollowUpActionHandler`) | goods movement | |
 | clone (`neoCloneRecordHandler`, any window) | a copy of the record, with the children a hook copies | |
 | line imports (`Import*Lines*Handler`: `importOrderLines`, `importShipmentLines` / `importReceiptLines` on invoices) | lines added to an existing document | only the added lines are checked |
+| rectificative line imports (`importOriginInvoiceLines` from a source invoice, `ImportOriginInvoiceLinesHandler`; `importReturnLines` from a return, `ImportInOutLinesIntoInvoiceHandler`) | credit lines added to a draft rectificative invoice | only the added lines are checked |
 | return line imports (`importShipmentLines` on a return material receipt, `importReceiptLines` on a return to vendor; `ReturnShipmentUtils.importReturnLines`) | return lines added to an existing return | only the added lines are checked |
 
 A refusal rolls the whole action back (the generated invoice is never completed, the converted order
