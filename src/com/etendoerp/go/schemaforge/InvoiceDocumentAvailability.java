@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -45,6 +46,21 @@ final class InvoiceDocumentAvailability {
   private static final String VALUE_REACTIVATE = "RE";
 
   private InvoiceDocumentAvailability() {
+  }
+
+  /**
+   * Everything that does not apply to this invoice: the {@code documentAction} values of
+   * {@link #unavailable(BaseOBObject)} and the import actions that do not suit the kind of invoice
+   * it is (ETP-5876, {@link RectificativeImportGate#unavailable}).
+   *
+   * @param subject the record the agent asked about
+   * @param policy  the calling header's rule for "rectificative"
+   * @return {@code action[:value] → reason}
+   */
+  static Map<String, String> unavailable(BaseOBObject subject, RectificativeImportPolicy policy) {
+    Map<String, String> unavailable = new LinkedHashMap<>(unavailable(subject));
+    unavailable.putAll(RectificativeImportGate.unavailable(subject, policy));
+    return unavailable;
   }
 
   /**
