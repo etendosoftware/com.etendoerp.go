@@ -922,12 +922,12 @@ class McpSchemaFieldBuilderTest {
             argThat(ctx -> ctx != null
                 && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
 
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+        accounts.when(GoAccountResolver::currentAccountEmail)
             .thenReturn("localization@etendo.software");
         assertTrue(include(column("col-sepa", "EM_OBSEPA_StrtNm", true, null),
             java.util.Set.of(), metadata()));
 
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+        accounts.when(GoAccountResolver::currentAccountEmail)
             .thenReturn("someone.else@example.com");
         assertFalse(include(column("col-sepa", "EM_OBSEPA_StrtNm", true, null),
             java.util.Set.of(), metadata()));
@@ -949,7 +949,7 @@ class McpSchemaFieldBuilderTest {
           MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
         flags.when(() -> GoFeatureFlags.isEnabled(
             eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+        accounts.when(GoAccountResolver::currentAccountEmail)
             .thenReturn("localization@etendo.software");
 
         McpSchemaFieldBuilder.StructuredAddressGate gate =
@@ -959,14 +959,14 @@ class McpSchemaFieldBuilderTest {
           assertTrue(include(column("col-sepa", dbColumnName, true, null), java.util.Set.of(),
               metadata(), gate));
         }
-        accounts.verify(GoAccountResolver::resolveCurrentAccountEmail, times(1));
+        accounts.verify(GoAccountResolver::currentAccountEmail, times(1));
 
         // A table with none of the 3 columns pays nothing at all.
         McpSchemaFieldBuilder.StructuredAddressGate untouched =
             new McpSchemaFieldBuilder.StructuredAddressGate();
         assertTrue(include(column("col-1", "Name", true, null), java.util.Set.of(), metadata(),
             untouched));
-        accounts.verify(GoAccountResolver::resolveCurrentAccountEmail, times(1));
+        accounts.verify(GoAccountResolver::currentAccountEmail, times(1));
       }
     }
   }

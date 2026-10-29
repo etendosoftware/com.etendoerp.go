@@ -272,8 +272,9 @@ Cliente/Proveedor the tenant's only default category; with it off nothing runs a
 Cliente, as before ETP-5791.
 
 - **Where.** `EtendoGoJwtServlet.applyDefaultContactCategoryBestEffort`, right after the initial
-  period state, for pooled and classic onboardings alike. The flag (environment level, the same read
-  as the contact rules, `ContactTypeRules.isEnabled()`) is evaluated **at hand-over**, never when
+  period state, for pooled and classic onboardings alike. The flag is per account, and it is
+  evaluated for the **account the tenant is handed to** (`ContactTypeRules.isEnabled(accountEmail,
+  clientId)` — the hand-over runs as System, so the current user would target nobody), **at hand-over**, never when
   the pool fills: a pool tenant built with the flag off and claimed with it on gets the new default.
 - **How the category is found.** GOClient id `E075D97EFB264D028E8652E5CA057518` through the
   import's `AD_REF_DATA_LOADED` mapping, falling back to `Value = 'Cliente/Proveedor'` within the

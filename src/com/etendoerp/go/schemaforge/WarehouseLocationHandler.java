@@ -97,7 +97,7 @@ public class WarehouseLocationHandler implements NeoHandler {
     // on a single create. No ordering trap (see BpLocationHandler#handle): NEO authenticates
     // before dispatch, so the enclosing admin mode has not replaced the caller.
     boolean structuredAddressEnabled =
-        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
     try {
       if ("POST".equals(method) && recordId == null) {
         return handleCreate(ctx, structuredAddressEnabled);

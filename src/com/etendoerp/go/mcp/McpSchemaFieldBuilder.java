@@ -665,7 +665,7 @@ final class McpSchemaFieldBuilder {
    * resolved lazily and then remembered for the rest of the schema walk.
    *
    * <p>Two properties at once. <b>Once per walk</b>: the account resolution is a DB lookup
-   * ({@code GoAccountResolver.resolveCurrentAccountEmail} — up to 2 queries), and a table carrying
+   * ({@code GoAccountResolver.currentAccountEmail} — up to 2 queries), and a table carrying
    * all 3 structured columns used to pay for it 3 times, contradicting the "resolved once per
    * request, never re-resolved per check" invariant the flag's own javadoc and
    * {@code docs/feature-flags-and-tenant-upgrade.md} assert. <b>Only if needed</b>: it is still
@@ -679,7 +679,7 @@ final class McpSchemaFieldBuilder {
     boolean isEnabled() {
       if (enabled == null) {
         enabled = com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled(
-            com.etendoerp.go.common.GoAccountResolver.resolveCurrentAccountEmail());
+            com.etendoerp.go.common.GoAccountResolver.currentAccountEmail());
       }
       return enabled;
     }

@@ -278,10 +278,13 @@ class WarehouseLocationHandlerTest {
       verify(geoLoc).setRegion(region);
       verify(obDal).save(geoLoc);
       verify(obDal).flush();
-      // ETP-5806 — twice now: GoAccountResolver.resolveCurrentAccountEmail() elevates to read
-      // ETGO_ACCOUNT for the flag's targeting key, then handleCreate enters its own write block.
-      obContextStaticMock.verify(() -> OBContext.setAdminMode(true), times(2));
-      obContextStaticMock.verify(OBContext::restorePreviousMode, times(2));
+      // Once: handleCreate's own write block. GoAccountResolver.currentAccountEmail() would be
+      // the second elevation, but OBContext.getOBContext() is unstubbed here (so null) and it
+      // checks that before entering admin mode — no context means no identity to resolve, so it
+      // answers null without elevating. The flag is stubbed on any() context, so the missing
+      // targeting key does not change what this test asserts.
+      obContextStaticMock.verify(() -> OBContext.setAdminMode(true), times(1));
+      obContextStaticMock.verify(OBContext::restorePreviousMode, times(1));
 
       JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertEquals("geo-1", rec.getString("id"));
@@ -928,7 +931,7 @@ class WarehouseLocationHandlerTest {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
         MockedStatic<GoFeatureFlags> flags =
             mockStructuredAddressFlagTargetedAt(TARGETED_ACCOUNT)) {
-      accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(TARGETED_ACCOUNT);
 
       NeoResponse r = handler.handle(buildContext("POST", null, body));
 
@@ -964,7 +967,7 @@ class WarehouseLocationHandlerTest {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
         MockedStatic<GoFeatureFlags> flags =
             mockStructuredAddressFlagTargetedAt(TARGETED_ACCOUNT)) {
-      accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(OTHER_ACCOUNT);
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(OTHER_ACCOUNT);
 
       NeoResponse r = handler.handle(buildContext("POST", null, body));
 

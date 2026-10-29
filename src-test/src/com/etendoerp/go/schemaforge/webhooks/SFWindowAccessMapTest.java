@@ -700,7 +700,7 @@ class SFWindowAccessMapTest {
         givenRestrictedRole("role-sepa-no-account");
         stubWindowAccessRows(Collections.emptyList());
         stubShowAcctFieldsQuery(Collections.singletonList("N"));
-        // mockContext.getUser() is unstubbed → null, so GoAccountResolver.resolveCurrentAccountEmail()
+        // mockContext.getUser() is unstubbed → null, so GoAccountResolver.currentAccountEmail()
         // short-circuits to null without ever touching the DAL.
 
         try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {

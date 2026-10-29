@@ -82,7 +82,7 @@ public final class StructuredAddressComposer {
    *
    * <p><b>The account email is a parameter, not resolved here.</b> Each caller knows where its own
    * account comes from and nothing else does: a NEO/MCP request resolves the authenticated user's
-   * account with {@code GoAccountResolver.resolveCurrentAccountEmail()}, while the (pre-tenant)
+   * account with {@code GoAccountResolver.currentAccountEmail()}, while the (pre-tenant)
    * onboarding path already has the account in hand and runs under an admin execution context
    * where no caller identity is recoverable. Resolving implicitly inside this method would be
    * wrong for the second group and would hide a DB lookup behind what reads as a constant. Same

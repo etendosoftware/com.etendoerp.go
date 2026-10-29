@@ -35,9 +35,10 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
 /**
  * ETP-5952 — the external MCP feedback triage bot ({@code etendo-bots}, {@code bin/bug-triage})
  * records what it did with one {@code etendo_feedback} report: the cell it classified it into, the
- * person it assigned (if it was sure), the public GitHub pre-ticket and the private Jira task.
+ * person it assigned (if it was sure), the public GitHub pre-ticket and, when it opened one, the
+ * private Jira task.
  *
- * <pre>POST /webhooks/McpFeedbackTriage  {"id", "cell", "issue", "task", "assignee"?}</pre>
+ * <pre>POST /webhooks/McpFeedbackTriage  {"id", "cell", "issue", "task"?, "assignee"?}</pre>
  *
  * <p><b>Validated before anything is written.</b> A value that fails its format, or does not fit
  * its column, answers {@code error} and writes nothing.
@@ -123,7 +124,8 @@ public class McpFeedbackTriage extends BaseWebhookService {
 
   /**
    * @return the first validation failure, phrased for the caller, or {@code null} when every value
-   *         is acceptable; {@code assignee} may be {@code null}, the other four may not
+   *         is acceptable; {@code task} and {@code assignee} may be {@code null}, the other three
+   *         may not
    */
   static String validate(String id, String cell, String issue, String task, String assignee) {
     if (id == null) {
@@ -135,7 +137,7 @@ public class McpFeedbackTriage extends BaseWebhookService {
     if (!fits(issue, ISSUE, ISSUE_WIDTH)) {
       return "issue must be a https://github.com/etendosoftware/<repo>/issues/<number> URL";
     }
-    if (!fits(task, TASK, TASK_WIDTH)) {
+    if (task != null && !fits(task, TASK, TASK_WIDTH)) {
       return "task must be a Jira key such as ETP-1234";
     }
     if (assignee != null && !ASSIGNEE.matcher(assignee).matches()) {

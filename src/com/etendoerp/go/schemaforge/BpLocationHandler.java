@@ -214,7 +214,7 @@ public class BpLocationHandler implements NeoHandler {
     // SFWindowAccessMap): NeoServlet authenticates before dispatch, and OBContext.setAdminMode
     // only substitutes the admin identity when there is no context at all, so the lookup still
     // sees the real caller.
-    if (!StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail())) {
+    if (!StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail())) {
       stripStructuredAddressKeys(context);
       return null;
     }
@@ -448,7 +448,7 @@ public class BpLocationHandler implements NeoHandler {
     // false here anyway — belt-and-suspenders), and REMOVE the 3 fields from whatever the generic
     // path is about to answer with. Same per-account evaluation as handle() above, and the same
     // request, so the two agree.
-    if (!StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail())) {
+    if (!StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail())) {
       return stripStructuredAddressFromResponse(context);
     }
     String method = context.getHttpMethod();

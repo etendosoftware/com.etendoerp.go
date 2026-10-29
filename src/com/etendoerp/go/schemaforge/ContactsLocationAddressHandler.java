@@ -186,7 +186,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // repeated 4 times on one create). No ordering trap: this runs before the admin-mode block
     // below, and NEO authenticates before dispatch anyway (see BpLocationHandler#handle).
     boolean structuredAddressEnabled =
-        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
     String bpId = body != null ? body.optString(FIELD_BUSINESS_PARTNER, null) : null;
     if (StringUtils.isBlank(bpId) && ctx.getQueryParams() != null) {
       bpId = ctx.getQueryParams().get("parentId");
@@ -376,7 +376,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     String bplId = ctx.getRecordId();
     // ETP-5806 — resolved before the admin-mode block, for the same reasons as handleCreate.
     boolean structuredAddressEnabled =
-        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
 
     OBContext.setAdminMode(true);
     try {
@@ -495,7 +495,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // for the account lookup, and before the admin-mode block below on the same principle as
     // SFWindowAccessMap: resolve the caller's account while the caller is still the context.
     boolean structuredAddressEnabled =
-        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
 
     OBContext.setAdminMode(true);
     try {

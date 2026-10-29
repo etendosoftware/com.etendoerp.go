@@ -248,11 +248,16 @@ public final class GoFeatureFlags {
    * {@code EM_Etgo_Isvendor} columns, their AD metadata, the {@code ETGO_SF_FIELD} rows and the
    * reference/sample data ship unconditionally; with the flag off nothing enforces or reads them.
    *
-   * <p><b>Environment level and backend-only.</b> Evaluated with an account-less context by
-   * {@code ContactTypeRules#isEnabled()}, the only place it is read (the onboarding's
-   * {@code OnboardingDefaultContactCategoryService} goes through it too); nothing in the browser reads it, so
-   * never add it to the web client's {@code flag-keys.js}. Locally
-   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}.
+   * <p><b>Per account, read on both ends.</b> The backend evaluates it only through
+   * {@code ContactTypeRules#isEnabled()} — targeted at the {@code ETGO_ACCOUNT} email of the user
+   * making the request, plus {@value FeatureFlagContext#ATTRIBUTE_CLIENT_ID} — and the onboarding's
+   * {@code OnboardingDefaultContactCategoryService} through {@code ContactTypeRules#isEnabled(String,
+   * String)}, targeted at the account the tenant is handed to (the hand-over runs as System). The
+   * web client reads it too ({@code CONTACT_CATEGORY_TYPE} in {@code flag-keys.js}) and publishes
+   * the same account email as its {@code email} attribute, so a targeting rule must be written on
+   * the email for both ends to agree. Per-account targeting needs a hosted arm (Datadog, or
+   * ConfigCat while it is the fallback); locally {@code etendo.go.flags.contact-category-type} /
+   * {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE} stays a plain per-environment boolean.
    */
   public static final String FLAG_CONTACT_CATEGORY_TYPE = "contact-category-type";
 
@@ -327,7 +332,7 @@ public final class GoFeatureFlags {
    * <p><b>Where each call site gets the email.</b> Two shapes, because the account is knowable in
    * two different ways and resolving it implicitly would be wrong for the second:
    * <ul>
-   *   <li><b>Authenticated request</b> — {@code GoAccountResolver#resolveCurrentAccountEmail()} at
+   *   <li><b>Authenticated request</b> — {@code GoAccountResolver#currentAccountEmail()} at
    *       the call site: {@code SFWindowAccessMap} (capability),
    *       {@code ContactsLocationAddressHandler}/{@code WarehouseLocationHandler}/
    *       {@code BpLocationHandler} (NEO read/write gating),

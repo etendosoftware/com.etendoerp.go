@@ -67,7 +67,7 @@ a `fields` array is a projection list, whose entries are field names too. The er
 | `Triage_Cell` | VARCHAR(60) | feedback only: cell label the triage bot chose (`CelulaPlataforma`, …) |
 | `Triage_Assignee` | VARCHAR(60) | feedback only: GitHub login the bot assigned; `NULL` when it was not sure |
 | `Triage_Issue` | VARCHAR(200) | feedback only: URL of the public GitHub pre-ticket the bot opened |
-| `Triage_Task` | VARCHAR(60) | feedback only: key of the private Jira task the bot opened (`ETP-…`) |
+| `Triage_Task` | VARCHAR(60) | feedback only: key of the private Jira task the bot opened (`ETP-…`); `NULL` when it opened none |
 | `Triaged` | TIMESTAMP | feedback only: when the bot processed the row, assignee or not; `NULL` = pending |
 
 The five `Triage*` columns are written only by the external triage bot, through the
@@ -370,7 +370,8 @@ read-only sessions most likely to get lost.
 
 An external bot (`etendo-bots`, `bin/bug-triage`, origin `mcp`) classifies every feedback report
 into a cell, assigns it to a person when it is sure, opens a public pre-ticket on GitHub
-(`etendo-ai`) and a private Jira task (ETP), and records the result on the row. It polls every 15
+(`etendo-ai`) and, optionally, a private Jira task (ETP), and records the result on the row. The
+pre-ticket carries the `ETGO_MCP_USAGE` row id, which leads back to the private detail. It polls every 15
 minutes. **This module decides nothing and calls nobody:** it exposes two webhooks and stores what
 the bot sends. How a feedback row is written (`McpServlet.recordToolCall`) is unchanged.
 
@@ -401,13 +402,14 @@ below are the contract the bot consumes; change them only together with the bot.
 `Content-Type: application/json` and a JSON body `{"id", "cell", "issue", "task", "assignee"}`.
 The header matters: without it Tomcat reads the body as form data and the servlet finds it empty.
 
-- `id`, `cell`, `issue`, `task` are required; `assignee` is optional. A missing required parameter
-  is refused by `webhookevents` itself, before this class runs: HTTP 500 with
-  `{"message": "Missing parameter: …"}`, not an `error` key.
+- `id`, `cell`, `issue` are required; `task` and `assignee` are optional (omit them, do not send
+  an empty string). Without `task`, `Triage_Task` stays `NULL` and the row is still marked
+  triaged. A missing required parameter is refused by `webhookevents` itself, before this class
+  runs: HTTP 500 with `{"message": "Missing parameter: …"}`, not an `error` key.
 - Validated before anything is written; a failure answers `error` and writes nothing:
   `cell` `^Celula[A-Za-z]+$`, `assignee` a GitHub login `^[A-Za-z0-9-]{1,39}$`, `issue`
-  `^https://github\.com/etendosoftware/[A-Za-z0-9._-]+/issues/[0-9]+$`, `task`
-  `^[A-Z][A-Z0-9]+-[0-9]+$`, and each value within its column width.
+  `^https://github\.com/etendosoftware/[A-Za-z0-9._-]+/issues/\d+$`, `task` (when sent)
+  `^[A-Z][A-Z0-9]+-\d+$`, and each value within its column width.
 - One `UPDATE` sets the four `Triage_*` columns, `Triaged = now()`, `Updated = now()` and
   `UpdatedBy` = the bot's user, conditioned on `row_type = 'feedback' AND triaged IS NULL`. A
   triaged row is never overwritten, not even by a retry of the same call.

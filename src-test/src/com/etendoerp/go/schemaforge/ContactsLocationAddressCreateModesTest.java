@@ -386,7 +386,7 @@ class ContactsLocationAddressCreateModesTest {
           argThat(ctx -> ctx != null
               && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
 
-      accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+      accounts.when(GoAccountResolver::currentAccountEmail)
           .thenReturn("localization@etendo.software");
       NeoResponse targeted = handler.handle(post(body));
       assertEquals(400, targeted.getHttpStatus());
@@ -396,7 +396,7 @@ class ContactsLocationAddressCreateModesTest {
       // Same environment, a different account: the structured-field rule never runs, so the
       // request is never rejected for a missing streetName. (Whatever else the DAL stubs make of
       // the create past that point is not what this test is pinning.)
-      accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+      accounts.when(GoAccountResolver::currentAccountEmail)
           .thenReturn("someone.else@example.com");
       stubBusinessPartner();
       stubNewBpLocation();

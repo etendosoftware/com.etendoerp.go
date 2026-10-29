@@ -98,7 +98,7 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * Building Name fields only while this is {@code true}; off, they fall back to the pre-ETP-5806
  * single-line address editor, matching what the backend accepts/returns for the same flag state.
  * Evaluated per-account (the requesting user's {@code ETGO_ACCOUNT} email, resolved via {@link
- * GoAccountResolver#resolveCurrentAccountEmail()}) so a Datadog targeting rule can stage the
+ * GoAccountResolver#currentAccountEmail()}) so a Datadog targeting rule can stage the
  * rollout — the value is still computed once, identically regardless of which branch below
  * resolved, since it does not itself depend on role/admin status.</p>
  *
@@ -167,7 +167,7 @@ public class SFWindowAccessMap extends BaseWebhookService {
     // structured-address-for-sepa targeting key must be the one actually making this request, not
     // whatever OBContext exposes once admin mode (below) has replaced the user. Resolved here,
     // before that switch, and threaded through to buildAccessMap.
-    String currentAccountEmail = GoAccountResolver.resolveCurrentAccountEmail();
+    String currentAccountEmail = GoAccountResolver.currentAccountEmail();
 
     OBContext.setAdminMode();
     try {

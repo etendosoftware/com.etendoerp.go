@@ -99,29 +99,24 @@ public final class GoAccountResolver {
   }
 
   /**
-   * Resolves the {@code ETGO_ACCOUNT} email of the currently authenticated user, which is the
-   * targeting key per-account feature-flag evaluation needs ({@link
-   * com.etendoerp.go.featureflags.FeatureFlagContext#forAccount(String)}).
-   *
-   * <p>Shared by every caller that needs "the email of whoever is making this request" instead of
-   * duplicating the {@link OBContext#setAdminMode(boolean)}/lookup dance — originally written once
-   * in {@code PortalLinkPolicy} for {@code FLAG_BP_PORTAL_LINK} and extracted here for ETP-5806's
-   * {@code structured-address-for-sepa} per-account rollout.
+   * Resolves the {@code ETGO_ACCOUNT} email of the user bound to the current {@link OBContext} —
+   * the identity a per-account feature flag targets on. Every channel (REST single, REST batch,
+   * MCP) binds the authenticated AD user to the OBContext, so every channel resolves the same
+   * account for the same person.
    *
    * <p>Runs in admin mode because {@code ETGO_ACCOUNT} is a platform table the caller's own role
-   * has no reason to read, and the account being looked up is the caller's own. Neither
-   * {@code setAdminMode} overload replaces a user that is already there: per core's
-   * {@link OBContext#setAdminMode(boolean)}, the admin context is installed only when
-   * {@link OBContext#getOBContext()} is {@code null} (the no-arg {@link OBContext#setAdminMode()}
-   * is just {@code setAdminMode(false)}, differing only in whether entity access is checked).
-   * Resolve the account early anyway — before any work that could leave the request without an
-   * {@code OBContext} — because that is the one case where the caller's identity is no longer
-   * recoverable and this method would answer for the admin instead.
+   * has no reason to be able to read; the account looked up is the caller's own.
    *
-   * @return the account email, or {@code null} when no user, or no active account, resolves —
-   *     callers must treat {@code null} the same as "no account", never as "allow"
+   * <p>Never throws: no context, no user, no account behind the user (a hand-created ERP user, a
+   * system user) or any failure resolving it all answer {@code null}, which a flag evaluation turns
+   * into "not this account", never into "everyone".
+   *
+   * @return the account email, or {@code null} when no active account resolves
    */
-  public static String resolveCurrentAccountEmail() {
+  public static String currentAccountEmail() {
+    if (OBContext.getOBContext() == null) {
+      return null;
+    }
     try {
       OBContext.setAdminMode(true);
       OBContext ctx = OBContext.getOBContext();
@@ -131,9 +126,7 @@ public final class GoAccountResolver {
       }
       return findAccountByUsername(user.getUsername()).map(Account::getEmail).orElse(null);
     } catch (RuntimeException e) {
-      // Resolving the caller's account must never fail the caller; it is only a reason to
-      // evaluate the flag with no targeting key.
-      log.warn("Could not resolve the current account: {}", e.getMessage(), e);
+      log.warn("Could not resolve the platform account of the current user: {}", e.getMessage(), e);
       return null;
     } finally {
       OBContext.restorePreviousMode();

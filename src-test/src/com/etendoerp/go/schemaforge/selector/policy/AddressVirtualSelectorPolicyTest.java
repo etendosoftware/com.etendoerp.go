@@ -386,12 +386,12 @@ public class AddressVirtualSelectorPolicyTest {
           argThat(ctx -> ctx != null
               && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
 
-      accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+      accounts.when(GoAccountResolver::currentAccountEmail)
           .thenReturn("localization@etendo.software");
       assertEquals(4, AddressVirtualSelectorPolicy.resolveVirtualColumns(
           entityOnTable(WRAPPER_TABLE)).size());
 
-      accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+      accounts.when(GoAccountResolver::currentAccountEmail)
           .thenReturn("someone.else@example.com");
       List<Column> untargeted = AddressVirtualSelectorPolicy.resolveVirtualColumns(
           entityOnTable(WRAPPER_TABLE));

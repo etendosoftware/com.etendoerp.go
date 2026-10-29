@@ -865,7 +865,7 @@ class BpLocationHandlerTest {
     void handleInterceptsAndValidatesForATargetedAccount() throws Exception {
       try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
           MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+        accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(TARGETED_ACCOUNT);
 
         NeoResponse r = handler.handle(buildCrudContext("POST", null, new JSONObject()));
 
@@ -879,7 +879,7 @@ class BpLocationHandlerTest {
     void handleFallsThroughForAnUntargetedAccount() throws Exception {
       try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
           MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(OTHER_ACCOUNT);
+        accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(OTHER_ACCOUNT);
 
         assertNull(handler.handle(buildCrudContext("POST", null, new JSONObject())));
       }
@@ -893,7 +893,7 @@ class BpLocationHandlerTest {
     void handleStripsTheStructuredPropertiesForAnUntargetedAccount() throws Exception {
       try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
           MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(OTHER_ACCOUNT);
+        accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(OTHER_ACCOUNT);
         JSONObject body = new JSONObject();
         body.put("oBSEPAStreetName", "Gran Via");
         body.put("oBSEPABuildingNumber", "45");
@@ -913,7 +913,7 @@ class BpLocationHandlerTest {
     void handleKeepsTheStructuredFieldsForATargetedAccount() throws Exception {
       try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
           MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+        accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(TARGETED_ACCOUNT);
         JSONObject body = new JSONObject();
         body.put("streetName", "Gran Via");
 
@@ -934,7 +934,7 @@ class BpLocationHandlerTest {
 
       try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
           MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+        accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(TARGETED_ACCOUNT);
 
         NeoContext ctx = buildCrudContext("GET", "loc-get", null);
         ctx.setPreviousResult(wrapRecord("loc-get"));
@@ -959,7 +959,7 @@ class BpLocationHandlerTest {
 
       try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
           MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
-        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(OTHER_ACCOUNT);
+        accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(OTHER_ACCOUNT);
 
         NeoContext ctx = buildCrudContext("GET", "loc-get", null);
         ctx.setPreviousResult(wrapRecord("loc-get"));

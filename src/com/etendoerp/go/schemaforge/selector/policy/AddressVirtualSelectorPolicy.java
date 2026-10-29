@@ -291,7 +291,7 @@ public final class AddressVirtualSelectorPolicy {
     // (OBContext carries the real user) and this policy holds no state across requests. Resolved
     // once per call, after the wrapper check above, so a non-wrapper entity never pays for it.
     boolean structuredAddressEnabled =
-        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
     Map<String, Column> byName = locationColumns();
     List<Column> resolved = new ArrayList<>();
     for (String columnName : VIRTUAL_COLUMNS) {
