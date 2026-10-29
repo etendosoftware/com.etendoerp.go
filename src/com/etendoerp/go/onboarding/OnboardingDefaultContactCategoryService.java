@@ -92,7 +92,8 @@ public class OnboardingDefaultContactCategoryService {
    *
    * <p>The flag is per account, and the hand-over runs as System, not as the account owner, so the
    * account is passed in explicitly rather than read from the {@link OBContext}: evaluating it for
-   * the current user would target nobody and leave every targeted account on "Cliente".
+   * the current user would match no per-account rule and leave every targeted account on
+   * "Cliente" (only an everyone-on flag would still apply).
    *
    * @param clientId the tenant just committed
    * @param accountEmail the {@code ETGO_ACCOUNT} email of the account receiving the tenant

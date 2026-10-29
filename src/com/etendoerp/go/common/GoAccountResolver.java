@@ -117,8 +117,8 @@ public final class GoAccountResolver {
     if (OBContext.getOBContext() == null) {
       return null;
     }
-    OBContext.setAdminMode(true);
     try {
+      OBContext.setAdminMode(true);
       OBContext ctx = OBContext.getOBContext();
       User user = ctx == null ? null : ctx.getUser();
       if (user == null) {

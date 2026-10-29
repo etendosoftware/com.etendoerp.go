@@ -162,8 +162,11 @@ public final class ContactTypeRules {
    * REST batch and MCP all bind the authenticated AD user, so the same person gets the same answer
    * on every channel.
    *
-   * <p>A missing flag, an unreachable control plane, an evaluation error or a user with no account
-   * behind it resolves to {@code false}: the rules stay off.
+   * <p>A missing flag, an unreachable control plane or an evaluation error resolves to
+   * {@code false}: the rules stay off. A user with no account behind it is evaluated with an
+   * account-less context: it matches no per-account rule and gets the flag's default value — off,
+   * unless the flag is on for everyone (hosted default {@code true}, or the local
+   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}).
    *
    * @return {@code true} when the contact-type rules must be applied
    */

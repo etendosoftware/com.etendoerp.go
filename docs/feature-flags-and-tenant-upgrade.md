@@ -554,7 +554,9 @@ reference/sample data ship unconditionally. Full reference: [`neo-headless.md`](
 of the request's user>)` plus `clientId` (the tenant). The email comes from
 `GoAccountResolver.currentAccountEmail()` — the same resolver `/sws/neo/session` and `bp-portal-link`
 use — and REST single, REST batch and MCP all bind the authenticated AD user, so the same person gets
-the same answer on every channel. A user with no account behind it resolves to `false`. Per-account
+the same answer on every channel. A user with no account behind it is evaluated with an account-less context: it matches no
+per-account rule and gets the flag's default (catch-all) value — off, unless the flag is on for
+everyone (hosted default `true`, or the local `ETGO_FLAG_CONTACT_CATEGORY_TYPE` / property). Per-account
 targeting needs a **hosted arm** (Datadog, or ConfigCat while it is the fallback); where none is
 selected the flag degrades to the local per-environment boolean above, which can only answer
 "everyone" or "nobody".
