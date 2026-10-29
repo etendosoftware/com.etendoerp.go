@@ -29,6 +29,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -44,8 +45,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * ETP-5852 (M-170): the read-only {@code certificate} action of {@code organization} — whether the
  * organization has an active signing certificate (the one Verifactu, TicketBAI and SII sign with)
  * and when it expires, as the fiscal configuration shows it ({@code GET /sws/neo/certificate}).
- * Never the certificate itself or its password. The organization is the record the call names,
- * loaded with the caller's access, so an organization the role cannot read answers 404.
+ * Never the certificate itself or its password. An organization the caller's role cannot read
+ * (outside {@link OBContext#getReadableOrganizations()}) answers 404, like a missing one: the
+ * certificate query is raw SQL by organization id, so the role's org access is checked here.
  */
 @NeoExtension(spec = "organization", entity = "organization")
 public class OrganizationCertificateAction implements NeoHandler {
@@ -74,7 +76,8 @@ public class OrganizationCertificateAction implements NeoHandler {
       return null;
     }
     String orgId = context.getRecordId();
-    if (orgId == null || OBDal.getInstance().get(Organization.class, orgId) == null) {
+    if (orgId == null || !isReadable(orgId)
+        || OBDal.getInstance().get(Organization.class, orgId) == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Organization not found");
     }
     try {
@@ -85,6 +88,11 @@ public class OrganizationCertificateAction implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Could not read the certificate status");
     }
+  }
+
+  private static boolean isReadable(String orgId) {
+    String[] readable = OBContext.getOBContext().getReadableOrganizations();
+    return readable != null && java.util.Arrays.asList(readable).contains(orgId);
   }
 
   /** The answer for a certificate expiring on {@code expiry} ({@code null}: none), seen on {@code today}. */

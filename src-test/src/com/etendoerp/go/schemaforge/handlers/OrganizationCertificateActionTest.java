@@ -20,11 +20,22 @@ package com.etendoerp.go.schemaforge.handlers;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.time.LocalDate;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.schemaforge.NeoCertificateHelper;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * ETP-5852 (M-170): the certificate status an agent reads — the expiry as a date and the days left,
@@ -61,5 +72,26 @@ class OrganizationCertificateActionTest {
     assertFalse(status.getBoolean("exists"));
     assertFalse(status.has("validTo"));
     assertFalse(status.has("daysLeft"));
+  }
+
+  @Test
+  void anOrganizationTheRoleCannotReadIsNotFoundAndNeverQueried() {
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getReadableOrganizations()).thenReturn(new String[] { "0", "ORG_A" });
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn(OrganizationCertificateAction.ACTION);
+    when(ctx.getRecordId()).thenReturn("ORG_B");
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<NeoCertificateHelper> helperMock = mockStatic(NeoCertificateHelper.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      NeoResponse response = new OrganizationCertificateAction().handle(ctx);
+
+      assertEquals(404, response.getHttpStatus());
+      obDalMock.verifyNoInteractions();
+      helperMock.verifyNoInteractions();
+    }
   }
 }
