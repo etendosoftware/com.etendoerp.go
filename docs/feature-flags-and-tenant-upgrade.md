@@ -812,8 +812,8 @@ of the subscription (ETP-5049, additive):
   "planQuotas": [
     { "resourceKey": "POSTED_SALES_INVOICES", "resourceName": "POSTED_SALES_INVOICES",
       "unitLabel": "Inv", "includedQty": 500, "enforcementMode": "warn", "warningThreshold": 80,
-      "period": "month", "consumptionSource": "aggregate", "consumed": 412, "verdict": "WARN",
-      "periodStart": "2026-10-23", "periodEnd": "2026-11-23" }
+      "period": "year", "consumptionSource": "aggregate", "consumed": 412, "verdict": "WARN",
+      "periodStart": "2026-04-23", "periodEnd": "2027-04-23" }
   ]
 }
 ```
@@ -866,8 +866,11 @@ environment, whatever environment the session is in, so the portal takes an opti
   informational — what the plan includes, not what has been used. `resourceKey`, `resourceName` and
   `unitLabel` come from `ETGO_BILLING_RESOURCE`; `includedQty`, `enforcementMode`
   (`warn`/`block`/`off`) and `warningThreshold` (percent, may be null) from the quota row; `period`
-  is the plan's billing interval (`month`/`year`, null when the plan has none), which is the quota's
-  consumption window (`open-and-notable-topics.md` §5.5, §5.8). ETP-5051 adds the measurement:
+  is the quota's consumption window: `year` whenever the subscription row has a `START_DATE`, since
+  plan limits count over the subscription year whatever the billing interval (a monthly plan,
+  as in the example, still reports `year`); for a row without one, the plan's billing interval
+  (`month`/`year`, null when the plan has none), over which it then counts
+  (`open-and-notable-topics.md` §5.5, §5.8; `plan-quotas.md` §1). ETP-5051 adds the measurement:
   `consumptionSource`, `consumed` and `verdict` (null when unmeasured), and `periodStart` /
   `periodEnd`, the **counted window as date-only strings** (`yyyy-MM-dd`, server-local days): the
   first counted day and the exclusive end day, so consumption covers `[periodStart, periodEnd)`.

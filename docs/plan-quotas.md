@@ -11,7 +11,7 @@ before promising a customer that something can be capped.
 | The HTTP contract: the 403 `QUOTA_EXCEEDED` and 500 `QUOTA_CHECK_FAILED` bodies, the gate's transaction handling, the cache, locks, failure modes | [`neo-headless.md`](neo-headless.md) §4.16 |
 | The `quotas` and `accessEnforced` fields of `GET /sws/go/environments`, `planQuotas` of `GET /sws/go/billing/subscription` | [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md) §2 and §3 (*Exposure in `/environments`*) |
 | The `usage-aggregation-schedule` flag | [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md) §1 |
-| The decisions behind each rule, and the accepted limits as register topics | [`open-and-notable-topics.md`](open-and-notable-topics.md) §4.19, §5.1–§5.9, §5.15, §5.18 |
+| The decisions behind each rule, and the accepted limits as register topics | [`open-and-notable-topics.md`](open-and-notable-topics.md) §1.1 (seats), §4.19, §5.1–§5.9, §5.15, §5.18 |
 | How usage is counted and stored (catalog, counting modes, settling window, run log) | `schema_forge/docs/usage-measurement.md` |
 | What the SPA shows (banner, `/account`, translated refusals) | `schema_forge/docs/generated-custom-windows/app-shell-functional-flows.md` §3.2a-bis … §3.2a-quater |
 | The product requirements, including the ladder of §4 below | `schema_forge/docs/plans/2026-08-27-recurring-billing-and-resource-limits-prd.md` §7, §9.2 |
@@ -29,23 +29,35 @@ ETGO_BILLING_RESOURCE  (System catalog: what is countable and how)
 ETGO_PLAN_QUOTA        (Plans window → Quotas tab: one row per plan and resource)
    │  INCLUDED_QTY, ENFORCEMENT_MODE off|warn|block, WARNING_THRESHOLD %, CONSUMPTION_SOURCE
    ▼
-ETGO_SUBSCRIPTION      (the tenant's open row: its plan, CURRENT_PERIOD_START / _END)
+ETGO_SUBSCRIPTION      (the tenant's open row: its plan, START_DATE, CURRENT_PERIOD_START / _END)
    ▼
-QuotaEvaluator  ── consumption over the period ──►  QuotaRules.verdict → ALLOW | WARN | DENY
+QuotaEvaluator  ── consumption over the subscription year ──►  QuotaRules.verdict → ALLOW | WARN | DENY
    │                 aggregate: ETGO_USAGE_DAILY (written by the usage job)
    │                 live:      counted now, with the catalog's own rule
    ▼
 report points (entry, environment list, /account)        NEO write path (block, on create)
+                                                          user handler (block, seats only, §2.1)
 ```
 
 - **No active quota row means unlimited**, never zero, and costs no consumption query (§5.1 of the
   register). Deleting or deactivating a row is how a cap is removed.
-- **The window is the subscription's billing period**, never the calendar month (§5.5), counted in
-  whole server-local days: `[startOfDay(CURRENT_PERIOD_START), startOfDay(CURRENT_PERIOD_END))`.
-  On a yearly plan the included quantity is a **yearly** quantity (§5.8).
+- **The window is the subscription year, whatever the billing interval** (register §5.5, §5.8):
+  the year that starts on each anniversary of `ETGO_SUBSCRIPTION.START_DATE`
+  (`QuotaPeriod.yearContaining`, each anniversary computed from the anchor itself, so a 29 February
+  start falls on 28 February in non-leap years without drifting), never the calendar year or month, counted in whole server-local
+  days: `[startOfDay(anniversary), startOfDay(next anniversary))`. `Included Qty` is therefore
+  always a **yearly** quantity: a monthly-paid plan counts over the whole year and can reach its
+  limit in its first month. A row with no `START_DATE` (or one dated after now) falls back to the
+  billing period, `[startOfDay(CURRENT_PERIOD_START), startOfDay(CURRENT_PERIOD_END))`.
+- **The year follows the subscription row.** `START_DATE` is set when the row is opened
+  (`SubscriptionService.openSubscription`), so a new row — a re-subscription after a cancel, or a
+  plan change that opens a successor row (register §5.13) — starts a new quota year; renewals of
+  the same row do not.
 - **A subscription with no current period** (a bound missing, inverted, the row closed, or now
   outside the period) is ALLOW with no consumption query, plus one `[QUOTA]` WARN per tenant per
-  hour while the row is open (§5.9).
+  hour while the row is open (§5.9). This still holds with the yearly window: the year is only
+  measured while a billing period is in effect, so a periodless row is not measured even when its
+  `START_DATE` is known.
 - **One evaluator, one comparison.** Every point below gets its verdict from `QuotaEvaluator`,
   which compares only through `QuotaRules.verdict`. Nothing else in the module compares a consumed
   quantity with an included one.
@@ -54,7 +66,7 @@ report points (entry, environment list, /account)        NEO write path (block, 
 
 ## 2. Where quotas act
 
-Exactly four points read quotas today. Three report; one refuses.
+Exactly five points read quotas today. Three report; two refuse.
 
 | Point | Surface | What it does | Modes evaluated | Refuses? |
 |---|---|---|---|---|
@@ -62,6 +74,7 @@ Exactly four points read quotas today. Three report; one refuses.
 | **Environment list** | `GET /sws/go/environments` → `quotas` and `accessEnforced` per environment | The same WARN/DENY items for every listed tenant; the SPA's quota banner reads them for the current environment. Never fails the list. | `warn`, `block` | **No** — report |
 | **`/account`** | `GET /sws/go/billing/subscription` → `planQuotas`, `accessEnforced` | Every active quota with its consumption, mode `off` included (measured, no verdict), for the **entered environment's** subscription (the account's newest only when no environment is entered — ETP-5051 O-1, see [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md), *Which subscription the page shows*). | all | **No** — report |
 | **NEO write path** | REST `POST /sws/neo/{spec}/{entity}`, `/sws/neo/batch`, MCP `etendo_create`, MCP `etendo_batch` and the MCP batch jobs; **and the NEO actions that create documents** (REST `…/{id}/action/{name}` and MCP `etendo_action` alike), listed below | Refuses a **create** of the counted entity with 403 `QUOTA_EXCEEDED` when the row would take the tenant over the included quantity. | `block` only, on **declarative** resources only | **Yes** — on create of the counted entity only |
+| **User seats** | The `user` spec's create, and a `PUT`/`PATCH` of a `user` that reactivates an inactive one that would count as a seat once active (`UserRoleAssignmentHandler` → `SeatQuotaGuard`) | Refuses the new seat with 403 `QUOTA_EXCEEDED` when the tenant already uses every seat of its plan. §2.1 | `block` only, on the `tenantSeats` **strategy** resource only | **Yes** — a new user, or a reactivated one that is a seat once active |
 
 The NEO actions checked (ETP-5051), all through `NeoQuotaCreateCheck` — the same guard, restriction
 match, lock and count as the CRUD gate, run on the created header **and its lines** right after they
@@ -86,7 +99,7 @@ never kept) and answers the CRUD gate's envelope: 403 `QUOTA_EXCEEDED` with the 
 `QUOTA_CHECK_FAILED`. Discount lines added by `TotalDiscountService` while a document is saved are
 not checked.
 
-Read the last row literally:
+Read the NEO write path row literally:
 
 - **Only a create** is checked. An update, a delete, a process or a state change that makes an
   existing row count is not.
@@ -95,7 +108,9 @@ Read the last row literally:
   query.
 - **Only `block` quotas on declarative resources.** A `warn` quota never refuses. A `block` quota
   on a **named-strategy** resource is measured and reported as DENY at the three report points,
-  but never refused on a write: a strategy names no entity for the gate to match.
+  but never refused by this gate: a strategy names no entity for the gate to match. The one
+  strategy resource that is refused is the seats resource, and that refusal lives in the user
+  handler, not in the gate (§2.1).
 - **Only rows that count in the current period's window.** The created row must match the HQL
   restriction **and** its date property must fall inside the counted window. A backdated row
   consumes no current-period quota and stands.
@@ -115,7 +130,68 @@ transaction; the write check runs inside the create's transaction. Both are desc
 (posting, completing, Classic "generate invoices"), not a DAL observer, not a `NeoHandler` whose
 `handle()` creates the row and short-circuits the default create **unless it is one of the actions
 listed above**. A quota cannot cap "everything everywhere"; it caps
-NEO creates of one entity, and reports everything else. Adding a point is development (§3, tier 4).
+NEO creates of one entity (and the tenant's seats, §2.1), and reports everything else. Adding a
+point is development (§3, tier 4).
+
+### 2.1 Seats: the check in the user handler (ETP-5051)
+
+**What a seat is.** `TenantSeatCounter` (`@Named("tenantSeats")`) counts the active `AD_User` rows
+of the tenant that the Users window lists as people of the company:
+
+- the owner (`EM_ETGO_IS_OWNER = 'Y'`), and
+- every user with an `ETGO_INVITATION` row whose status is not `REVOKED`. A user created in the Go
+  SPA always gets one at creation, so a **pending** invitation already takes its seat; `EXPIRED`,
+  `DELIVERY_FAILED` and `ACCEPTED` take one too. A revoked invitation does not.
+
+Bootstrap users, the client admin and business-partner contacts have neither, so they never count.
+An inactive user does not count: deactivating a user frees its seat, and deleting it removes its
+invitations with it (`ETGO_INVITATION_USER_FK` cascades). `ETGO_ACCOUNT` is deliberately **not**
+the source: it is global (client 0, one row per email) and only created when an invitation is
+accepted, so counting it would let an admin invite without limit. The count is a **stock**: every
+call returns today's value, dated at the start of the requested range.
+
+**Where it is checked.** The NEO write gate never refuses a strategy resource (§2), so
+`UserRoleAssignmentHandler`'s `handle()` pre-hook runs `SeatQuotaGuard.refusalForNewSeat` itself:
+
+- on a **create** of a user (spec `user`), right after the duplicate-email check and before the
+  username is derived — nothing is inserted when it refuses;
+- on a **`PUT`/`PATCH`** whose body sets `active` to `true` (`true`, `"true"` or `"Y"`) on a user
+  that is inactive now **and would count as a seat once active** — the owner, or a user holding an
+  invitation that is not `REVOKED` (`TenantSeatCounter.isSeatOnceActive`). Such a reactivation takes
+  a seat back, so `SeatQuotaGuard.refusalForReactivation` checks it as a new one. Reactivating a
+  user that would be no seat — a contact without invitation, a user whose invitations are all
+  revoked — is never refused. An update that sends no `active`, or sends it for a user that is
+  already active, is not checked. Loading the target user is part of the check: if it fails, the
+  update answers 500 `QUOTA_CHECK_FAILED` like any other check error.
+
+`isSeatOnceActive` and the tenant count share one seat rule (`SEAT_CONDITION` in
+`TenantSeatCounter`), the count adding only that the user is active, so the two cannot drift
+apart.
+
+**The verdict.** The guard looks for the plan's quotas whose billing resource has Strategy
+Qualifier `tenantSeats`, and takes the verdict from `QuotaEvaluator.refusalForCreate`: a `block`
+quota refuses when the seats in use plus one exceed `Included Qty`, i.e. once every seat is taken.
+No such quota, a quota in mode `warn` or `off`, or no current period (§1; the periodless `[QUOTA]`
+WARN applies) lets the user through, as for every other quota. The refusal is the write gate's
+403 `QUOTA_EXCEEDED` body ([`neo-headless.md`](neo-headless.md) §4.16), `consumed` being the seats
+in use and `period` the quota window, so a client handles it as any other quota refusal (keyed off
+`error.code`). It **fails closed**: any error while checking answers 500 `QUOTA_CHECK_FAILED`, and
+nothing is saved.
+
+**How it differs from the write gate.**
+
+- **Always counted live.** The guard calls `TenantSeatCounter.seatsOf` directly, whatever the
+  quota's Consumption Source; the source only decides what the three report points show (§4.6).
+- **No cache.** The plan's quotas are read through `DalQuotaLookup` on every checked request, not
+  through `QuotaClientCache`, so a quota change reaches the next user create at once, not within
+  60 s.
+- **No lock.** The guard takes no `QuotaLock`, so two users created at the same moment for the
+  last free seat can both be accepted.
+
+**Not checked:** a user reactivated in the Classic UI or by any path other than the `user` spec;
+an invitation sent through `POST /sws/go/company-invitations` to an existing `AD_User` of the
+tenant that had none (that user starts taking a seat without the check). Both are still counted
+and reported.
 
 ---
 
@@ -136,7 +212,7 @@ What each tier means with what ETP-5051 delivered:
 
 1. **Change or enable a limit on a catalog resource at a wired point — configuration.** Edit or
    add the row in **Plans → Quotas** (§4.2). It reaches the reports on the next request and the
-   NEO write path within 60 s (§5). "Wired point" means the four rows of §2 and nothing else.
+   NEO write path within 60 s (§5). "Wired point" means the five rows of §2 and nothing else.
 2. **A new row-count resource with an HQL restriction — configuration.** First a catalog row in
    **Billing Resource** (declarative: entity, date property, restriction; validated when saved),
    then a quota row on the plan. With mode `block` it is refused on NEO creates of that entity
@@ -148,13 +224,16 @@ What each tier means with what ETP-5051 delivered:
    qualifier. Both consumption sources use it: the usage job stores its daily values, and a `live`
    quota calls it over the period. Such a resource is **reported** at all three report points,
    but a `block` quota on it **refuses nothing** on the NEO write path (§2): making it refusable
-   at a point is tier 4. Reference: `schema_forge/docs/neo-headless-extensibility.md` §2.8.
+   at a point is tier 4. Reference: `schema_forge/docs/neo-headless-extensibility.md` §2.8; the
+   one production strategy is `TenantSeatCounter` (`tenantSeats`, §2.1).
 4. **Enforce at an unwired place — development, additive, through the same evaluator.** For
    example at posting (the only way a posted-invoices count grows, §6), at a process, or for
    Classic writes through a DAL observer. The new point must take its verdict from
    `QuotaEvaluator` (`refusalForCreate`, or `evaluate` for a report) — never a second comparison
    of consumed against included, which is how two points drift apart (PRD §9.2). It is additive:
-   no existing point changes.
+   no existing point changes. The seat check (§2.1) is such a point: it makes the `tenantSeats`
+   strategy refusable at the user paths and asks `QuotaEvaluator.refusalForCreate` for the
+   verdict.
 
 ---
 
@@ -166,7 +245,8 @@ reached from a System role: a tenant sees its caps on `/account` but cannot chan
 ### 4.1 The resource exists in the catalog
 
 **Billing Resource** holds what can be counted. **The module ships it empty** — every resource is
-a row an operator adds (tier 2) or a strategy a developer deploys (tier 3).
+a row an operator adds (tier 2) or a strategy a developer deploys (tier 3). One strategy is
+deployed, `tenantSeats`; its catalog row is still the operator's to add (§4.6).
 
 | Field | Meaning |
 |---|---|
@@ -188,7 +268,7 @@ once (`LAST_VALIDATION_MS`).
 | Field | Values | Notes |
 |---|---|---|
 | Billing Resource | a catalog row | |
-| Included Qty | integer ≥ 0, **required, no default** | Per billing period of the plan. `0` in mode `block` refuses every in-window create of the entity |
+| Included Qty | integer ≥ 0, **required, no default** | Per subscription year, whatever the billing interval (§1). `0` in mode `block` refuses every in-window create of the entity |
 | Enforcement Mode | `off` / `warn` / `block`, **required, no default** | See the verdict table below |
 | Warning Threshold | 1–100 (percent) or empty | Empty: no early warning, only at the limit |
 | Consumption Source | `aggregate` (also when empty) or `live` | §5. The legacy value `sum` still stored on old rows reads as `aggregate` |
@@ -202,16 +282,19 @@ The verdict, computed by `QuotaRules.verdict` from the consumption over the peri
 | `warn` | never | consumed ≥ included, or the threshold is reached | ALLOW | Never |
 | `off` | — | — | no verdict | Never; measured on `/account` only, and no query anywhere else |
 
-> **Yearly plans.** The window is the plan's billing period, so on a `year` plan `Included Qty` is
-> consumed over the whole year, not per month. Enter the yearly figure. The window help says so,
-> and every quota item carries `period` (`month` / `year`) so the SPA shows "per year" next to it.
+> **Yearly limits, on every plan.** The window is the subscription year (§1), so `Included Qty` is
+> consumed over the whole year on a monthly-paid plan too: enter the yearly figure. A tenant that
+> uses it up in its first month is refused (`block`) until the next anniversary of its
+> `START_DATE`. Every quota item carries `period` = `year` (`TenantQuotas.getPlanInterval()`), so
+> the SPA shows "per year" next to it; only a subscription row without `START_DATE` reports the
+> plan's billing interval (`month` / `year`) and counts over the billing period.
 
 ### 4.3 Removing or relaxing a cap
 
 Deactivate or delete the quota row (unlimited), switch the mode to `warn` or `off`, or raise
 `Included Qty`. The reports see the change on their next request; the NEO write path within 60 s.
 
-### 4.4 Example: cap sales orders at 500 per billing period
+### 4.4 Example: cap sales orders at 500 per subscription year
 
 A Billing Resource row, declarative:
 
@@ -230,13 +313,14 @@ Warning Threshold `80`, Consumption Source `live`.
 
 What follows:
 
-- At 400 orders in the period the tenant's environment list and entry report WARN (the SPA shows
-  the amber banner); `/account` shows "Near the limit".
+- At 400 orders in the subscription year the tenant's environment list and entry report WARN (the
+  SPA shows the amber banner); `/account` shows "Near the limit". On a monthly-paid plan that can
+  happen in the first month: the 500 are for the whole year (§1).
 - The 500th order is still accepted; once 500 are counted, the next NEO create of a sales order
-  whose `orderDate` is in the period answers 403 `QUOTA_EXCEEDED`, `/account` shows "Limit
-  reached" and the SPA shows its translated "plan limit reached" message. A sales order
-  backdated to a previous period is not refused. A purchase order (`salesTransaction = false`) is
-  not refused either: it does not match the restriction.
+  whose `orderDate` is in the subscription year answers 403 `QUOTA_EXCEEDED`, `/account` shows
+  "Limit reached" and the SPA shows its translated "plan limit reached" message. A sales order
+  backdated to a previous subscription year is not refused. A purchase order
+  (`salesTransaction = false`) is not refused either: it does not match the restriction.
 - An order created in Classic, or by a process, is not refused, but it is counted: the next report
   includes it.
 
@@ -304,6 +388,42 @@ from the order generator that carry the target. A restriction on `e.documentType
 miss CRUD-created invoices at create time and never refuse them (§2, *Only restrictions that hold at
 create time*).
 
+### 4.6 Example: cap the seats of a plan
+
+Seats are counted by the deployed strategy `tenantSeats` (§2.1); nothing is seeded, so capping them
+is configuration on each environment. A Billing Resource row, strategy:
+
+| Field | Value |
+|---|---|
+| Search Key | `SEATS` (any stable key) |
+| Name / Unit Label | `Users` / `users` |
+| Counting Mode | `S` |
+| Strategy Qualifier | `tenantSeats` |
+| Aggregation | `last` |
+
+Then, on **each plan that should cap seats**, a Quotas row: the `SEATS` resource, Included Qty `5`,
+Enforcement Mode `block`, Consumption Source `live`, Warning Threshold optional. A plan without the
+row has unlimited seats.
+
+What follows:
+
+- The owner and every invited user count, a pending invitation included. With 5 seats in use, the
+  next user created in the Users window (or through the `user` spec on any channel) answers 403
+  `QUOTA_EXCEEDED`, and so does switching an inactive invited user back to active (an inactive
+  contact without invitation can always be switched back on: it takes no seat). Deactivating a user
+  frees its seat at once; the next create is accepted.
+- `/account` shows 5 of 5 users with "Limit reached"; the environment list reports DENY, so the
+  red banner shows.
+- `Included Qty` `1` lets the owner work alone: every other user is refused.
+
+**Why `last` and `live`.** The check counts live whatever the source (§2.1); `live` makes the three
+report points show that same number. Seats are a stock, so the days must not be added: `sum`
+would count each seat once per stored day, and `max` would report the highest stored day of the
+year, so a freed seat would never lower it. With `aggregate`, `last` shows the count of the latest
+usage-job run. While the usage schedule is on, the job also stores the seat count, but a stock has
+no history: every day it recomputes gets today's value (register §1.1). `last` reads the newest
+day, so the reports are unaffected; the stored past days are not a true history.
+
 ---
 
 ## 5. Freshness: when does a change or a create show up
@@ -313,6 +433,7 @@ create time*).
 | A quota row edited, (de)activated; a plan change; a renewal | Next request (no cache) | Within **60 s**: each client's block quotas and period are cached for 60 s **per JVM** (`QuotaClientCache`) |
 | A create, `live` source | Next request (counted now) | Immediately: the check counts under a per-tenant, per-resource advisory lock, so concurrent creates cannot both slip under the cap |
 | A create, `aggregate` source | After the next usage-job run | After the next usage-job run: until then the stored aggregate does not include it, so a `block` cap may be **overshot by what was created since the last run** (and a batch by up to N−1 more, §6) |
+| A seat taken or freed; a seat quota edited (§2.1) | `live`: next request. `aggregate`: after the next usage-job run | The user handler's check: **immediately**, whatever the source — it reads the plan's quotas and counts the seats on every checked request, with no cache |
 
 **`live` versus `aggregate`.** `live` is exact and costs one query per evaluation (and a lock on
 a checked create). `aggregate` costs a cheap read of the stored daily rows, but lags by up to one
@@ -366,11 +487,12 @@ Each was accepted during ETP-5051; none is a bug to fix silently.
   `importEngine.classifyImportError` (`@etendosoftware/app-shell-core`), which has no quota case
   yet; the user sees a generic row error, not "plan limit reached". The fix is owed to
   [ETP-5911](https://etendoproject.atlassian.net/browse/ETP-5911) (register §5.18).
-- **The last, partial day of a period is charged to the next period.** The window is
-  day-aligned, so a row dated on the day the period ends, created before the renewal time on that
-  day, falls outside the ending period's window: it is not charged to it, and a `block` quota does
-  not refuse it even at the cap. That day opens the next period's window, so the row counts there
-  once the renewal is recorded.
+- **The last, partial day of a window is charged to the next window.** The window is
+  day-aligned, so a row dated on the day the window ends — the subscription's anniversary, or the
+  billing period's end on a row without `START_DATE` — created before the boundary time on that
+  day, falls outside the ending window: it is not charged to it, and a `block` quota does not
+  refuse it even at the cap. That day opens the next window, so the row counts there once that
+  window is in effect (for the billing-period fallback, once the renewal is recorded).
 - **A batch can exceed an `aggregate` cap by more than the lag.** Each batch operation is its own
   create: the charge for rows already created resets per operation, and the stored aggregate
   never sees rows that earlier operations of the same batch created. A batch of N creates can
@@ -402,7 +524,10 @@ Each was accepted during ETP-5051; none is a bug to fix silently.
 
 | Symptom | Look at |
 |---|---|
-| A quota never refuses | Mode is `block`? The resource is declarative and its `COUNTED_ENTITY` is the entity being created? The created row matches the restriction at create time (not after a state change)? Its date is in the period? The source is `aggregate` and the usage job is not running (`[USAGE-LAG]`)? The tenant's subscription has a current period (`[QUOTA] … has no current billing period`)? |
+| A quota never refuses | Mode is `block`? The resource is declarative and its `COUNTED_ENTITY` is the entity being created (a strategy resource is refused only for seats, §2.1)? The created row matches the restriction at create time (not after a state change)? Its date is in the subscription year? The source is `aggregate` and the usage job is not running (`[USAGE-LAG]`)? The tenant's subscription has a current period (`[QUOTA] … has no current billing period`)? |
+| A quota is reached in the first month of a monthly plan | Expected: the window is the subscription year, not the billing period (§1). `Included Qty` is a yearly figure |
+| A user create or reactivation answers 403 `QUOTA_EXCEEDED` | The plan has a `block` quota on a `tenantSeats` resource and every seat is taken (§2.1); a reactivation is refused only for a user that is a seat once active (owner, or a non-revoked invitation). Seats are the owner plus the active users with a non-revoked invitation, pending ones included — not the rows of `ETGO_ACCOUNT`. Deactivate a user, or raise `Included Qty` |
+| More users are created than the seat quota allows | Two creates at the same moment for the last seat (the seat check takes no lock); a user reactivated outside the `user` spec; an invitation through `POST /sws/go/company-invitations` to a user that had none (§2.1, *Not checked*). Mode `warn`/`off`, or the Strategy Qualifier is not `tenantSeats`? |
 | A quota refuses too early / too late with `aggregate` | Stored usage is up to one cadence old; switch to `live` for an exact cap |
 | `consumed` is null on `/account` | No current period on the subscription row (register §5.9); fix the period by hand from Stripe |
 | No banner although `/account` shows DENY | The environment list blanked the report (a `[QUOTA] Could not …` line). A DENY banner cannot be dismissed. If the DENY is newer than the page, the SPA picks it up on the next tab focus, within 5 minutes, or at the next `QUOTA_EXCEEDED` refusal; with an `aggregate` source it shows only once the usage job has stored the new usage (§5) |

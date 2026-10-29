@@ -71,7 +71,10 @@ a period. **To decide:** the rule for it — e.g. a period computed locally from
 quota at all (true today, while `legacy-productive` has no quota rows, §5.1), or moving the tenant
 onto a real Stripe subscription (a plan change, ETP-5053) before any quota applies to it. Until it
 is decided, the ETP-5051 evaluator treats such a row as having no current period: ALLOW, nothing
-measured, one WARN per tenant per hour (§5.9).
+measured, one WARN per tenant per hour (§5.9). Since 2026-10-28 the quota window is the
+subscription year computed from `START_DATE` (§5.5), which such a row has; it is still not measured
+because a billing period in effect is required too. Lifting that requirement for rows with no
+Stripe subscription would be the cheapest form of the first option.
 
 **Sub-question (raised by Martin Taal, 2026-10-23): anchor every subscription to calendar
 months?** A customer who subscribes on the 15th would first pay a prorated partial month, then be
@@ -1137,6 +1140,20 @@ Such quotas are still measured and reported: on every environment of `GET /sws/g
 `QuotaEvaluator`, never with a second comparison. The enforcement table, the extensibility ladder
 and every accepted limit, for operators: `plan-quotas.md` §2, §3 and §6.
 
+**Seats: a strategy resource refused outside the gate (ETP-5051, 2026-10-28).** The gate matches
+declarative resources only, so it never refuses a `block` quota on a strategy resource. The seats
+resource (`tenantSeats`, §1.1) is checked instead by `SeatQuotaGuard` in
+`UserRoleAssignmentHandler`'s pre-hook, on a user create and on a `PUT`/`PATCH` that reactivates an
+inactive user who would count as a seat once active (owner, or an invitation not `REVOKED`;
+`refusalForReactivation`) — reactivating any other user is never refused: 403 `QUOTA_EXCEEDED` once
+every seat is taken, the verdict from `QuotaEvaluator.refusalForCreate`, 500 `QUOTA_CHECK_FAILED`
+on any error, loading the reactivated user included (fails closed). One seat rule
+(`SEAT_CONDITION`) serves both the tenant count and the per-user check. It counts
+live whatever the consumption source, reads the quotas uncached, and takes no `QuotaLock`, so two
+simultaneous creates can share the last seat. Still unchecked: a reactivation outside the `user`
+spec, and an invitation through `POST /sws/go/company-invitations` to an existing user that had
+none (`plan-quotas.md` §2.1).
+
 **Concurrent creates (review W4, decided by the coordinator 2026-10-24).** For a `live` `block`
 quota the check takes a PostgreSQL transaction advisory lock per tenant and resource
 (`pg_advisory_xact_lock`, `QuotaLock`) right before the live count, held until the create commits
@@ -1256,7 +1273,9 @@ same condition, and `START_DATE` is never compared with now. Therefore:
 - a **future-dated** `END_DATE` closes the row **immediately** — the tenant reads as canceled
   (`findLatest`, §3.7) and so `free` while still inside a period it paid for;
 - a successor inserted with a **future** `START_DATE` becomes the current row **immediately** — plan
-  and quotas switch early, and lifecycle webhooks land on it.
+  and quotas switch early, and lifecycle webhooks land on it. (The quota window, unlike the
+  open-row predicate, does compare `START_DATE` with now: until that date it falls back to the
+  billing period, §5.5.)
 
 Nothing rejects either shape: `ETGO_SUB_DATES_CHK` only checks `END_DATE >= START_DATE`.
 
@@ -1381,19 +1400,30 @@ a daily snapshot of the active clients (strategy `S`), not the ticket's `Client`
 
 **Follow-up:** no ticket.
 
-- **Implement both counters.** No class implements `UsageResourceCounter` yet — neither
-  `@Named("activeUsers")` nor `@Named("productiveEnvironments")` exists — so a catalog row for
-  either fails its run ("No UsageResourceCounter deployed", `UsageAggregationService`).
-- **Implementation trap: the scheduled run rewrites past days.** `runForSettlingWindow` recomputes
+- **Users: delivered as seats (ETP-5051, 2026-10-28).** The first production
+  `UsageResourceCounter` is `TenantSeatCounter`, `@Named("tenantSeats")` — not `activeUsers`. A
+  seat is an active `AD_User` of the tenant that is the owner (`EM_ETGO_IS_OWNER`) or has an
+  `ETGO_INVITATION` that is not `REVOKED`; a pending invitation takes a seat, a revoked one does
+  not, and bootstrap users, the client admin and business-partner contacts never count.
+  `ETGO_ACCOUNT` is deliberately not the source: it is global (client 0) and only created when an
+  invitation is accepted. It answers today's value dated at the range start. No catalog row is
+  seeded; a `block` quota on it is refused in the user handler (`plan-quotas.md` §2.1, §4.6).
+- **`productiveEnvironments`: still no counter.** No `@Named("productiveEnvironments")` exists, so
+  a catalog row for it fails its run ("No UsageResourceCounter deployed",
+  `UsageAggregationService`).
+- **Implementation trap: the scheduled run rewrites past days** — still open, and it applies to
+  `tenantSeats` too. `runForSettlingWindow` recomputes
   every day from `today − (window + 1)` to today (7 days at the default window of 5,
   `UsageSettings`) and replaces the value of every day not yet final. A stock counter asked about
   "yesterday" answers with today's value and overwrites the true one. Answering nothing is no way
   out: a tenant absent from a day's counts has its stored row zeroed
   (`zeroOutTenantsThatNoLongerCount`). So a stock resource needs support in the service, not just
   a counter: write only the current day, leave past days untouched, and refuse a historical
-  backfill (`run(from, to)` rewrites even final days).
-- **`schema_forge/docs/usage-measurement.md` §4 is stale** — still titled "(open)", and its note
-  on `productiveEnvironments` describes the ticket's `creationDate` wording, not the snapshot.
+  backfill (`run(from, to)` rewrites even final days). For a seat quota the trap is harmless as
+  long as the resource uses aggregation `last` (it reads the newest day) and the seat check counts
+  live anyway; the stored past days are still not a true history.
+- `schema_forge/docs/usage-measurement.md` §4 records the decision and the seat definition since
+  2026-10-28.
 
 ### ✅ 1.3 Enforcement default: shipped ON with a kill switch, or OFF behind a feature flag
 
@@ -1601,6 +1631,17 @@ window is the days `[startOfDay(CURRENT_PERIOD_START), startOfDay(CURRENT_PERIOD
 for the stored aggregate and the live count (`QuotaPeriod`), so consecutive periods share no day.
 A periodless row has the answer of §5.9.
 
+**Changed on 2026-10-28 (ETP-5051): the window is now the subscription year.** Plan limits are
+yearly whatever the billing interval: a quota counts over the year that starts on each anniversary
+of `ETGO_SUBSCRIPTION.START_DATE` (`QuotaPeriod.yearContaining`, each anniversary computed from
+the anchor, so a 29 February start clamps to 28 February in non-leap years without drifting),
+day-aligned the same way. Still
+never the calendar month or year. The billing period keeps two roles: a billing period in effect is
+still required before anything is measured (§5.9), and a row with no `START_DATE` (or one dated
+after now) counts over its billing period as before. `START_DATE` is the row's opening time, so
+the quota year is reset by a new subscription row (a re-subscription, a plan change that opens a
+successor, §5.13), never by a renewal of the same row. Operator view: `plan-quotas.md` §1.
+
 ### ✅ 5.6 Stock versus flow aggregation over the period — owned by nobody
 
 **Ticket:** owner ETP-5051 (delivered).
@@ -1621,8 +1662,10 @@ Billing Resource window; DAL property `aggregation`). How a period combines
 `last` is the most recent day that has a stored value; an omitted day is zero, so `max` and `last`
 stay right over a period that began before measurement (§1.1).
 
-**Follow-up:** set `max` or `last` on the stock resources when their catalog rows exist (none yet:
-`activeUsers` and `productiveEnvironments` have no counter, §1.1). No ticket.
+**Follow-up:** set `max` or `last` on the stock resources when their catalog rows exist. Seats
+(`tenantSeats`, §1.1) have a counter since 2026-10-28 and take `last` — `max` would keep a freed
+seat in the year's figure (`plan-quotas.md` §4.6); `productiveEnvironments` still has no counter.
+No ticket.
 
 ### ✅ 5.7 `ETGO_PLAN_QUOTA.CONSUMPTION_SOURCE` means something else in ETP-5051
 
@@ -1671,6 +1714,14 @@ counted window as server-local days (`yyyy-MM-dd`, end exclusive), not the perio
 **Follow-up:** none. `/account` shows the period word next to the included quantity ("… per
 year") and the counted window above the list (`app-shell-functional-flows.md` §3.2a-quater).
 
+**Widened on 2026-10-28 (ETP-5051): every quota is a yearly quota.** The window is now the
+subscription year whatever the billing interval (§5.5), so `INCLUDED_QTY` is a yearly figure on a
+monthly-paid plan too, and such a plan can reach it in one month. `TenantQuotas.getPlanInterval()`
+— the `period` of every `QuotaItem` — answers `year` whenever the row has a `START_DATE`, and the
+plan's billing interval only for a row without one; `periodStart` / `periodEnd` are the subscription
+year's days. **Still owed:** the **Quotas** tab help and the **Included Qty** help (`AD_TAB`,
+`AD_ELEMENT`, `AD_FIELD` sourcedata) still say "per billing period of the plan"; no ticket.
+
 ### ✅ 5.9 A subscription with no current period needs a defined answer
 
 **Ticket:** owner ETP-5051 (the evaluator's answer, delivered); no ticket for the lookup script.
@@ -1686,6 +1737,9 @@ the row is closed (`END_DATE`; not warned about), or now is outside `[start, end
 yet recorded. On the account page such a row's `consumed`, `verdict` and period bounds are null.
 The manual fix of 2026-09-28 stands: read the period from Stripe and update the row by hand; a row
 with a real Stripe subscription fills its own period at its next period-bearing event (§5.5).
+Since the yearly window (2026-10-28, §5.5) the rule is unchanged: the year is computed from
+`START_DATE`, but only while a billing period is in effect, so a periodless row stays unmeasured
+even when its `START_DATE` is known (`TenantQuotas.currentPeriod`).
 
 **Follow-up:** the read-only helper script that crosses the Stripe API with the rows — no ticket;
 a row with no Stripe subscription has no period to read (§1.2).
