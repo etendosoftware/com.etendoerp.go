@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -50,15 +52,18 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
 /**
  * Unit tests for {@link BpLocationHandler} (ETP-5806).
  *
- * <p>This entity is a direct, un-wrapped CRUD mapping onto {@code C_Location} with no curated
- * {@code ETGO_SF_FIELD} rows for the 3 structured SEPA columns (see the class javadoc), so the
- * handler owns them end to end: a pre-hook ({@code handle}) validates and remembers the effective
- * values, and a post-hook ({@code afterHandle}) persists them (POST/PUT) once the base record
- * exists, or enriches the response with them (GET) — bypassing {@code NeoFieldFilter} either way.
- * Also the {@code structured-address-for-sepa} flag-OFF branch ({@link FlagOff}), stubbing
+ * <p>This entity is a direct, un-wrapped CRUD mapping onto {@code C_Location}, and the handler
+ * owns the 3 structured SEPA fields end to end: a pre-hook ({@code handle}) validates and
+ * remembers the effective values, and a post-hook ({@code afterHandle}) persists them (POST/PUT)
+ * once the base record exists, or enriches the response with them (GET) — bypassing
+ * {@code NeoFieldFilter} either way.
+ *
+ * <p>Also the {@code structured-address-for-sepa} flag-OFF branch ({@link FlagOff}), stubbing
  * {@link GoFeatureFlags#isEnabled} directly so the suite does not depend on the local
- * {@code Openbravo.properties} toggle: {@code handle()}/{@code afterHandle()} return {@code null}
- * immediately, so the 3 fields fall through untouched to generic CRUD.
+ * {@code Openbravo.properties} toggle: {@code handle()}/{@code afterHandle()} decline immediately,
+ * and {@code handle()} first STRIPS the 3 fields from the write body. The 3 columns do carry
+ * curated {@code ETGO_SF_FIELD} rows (editable, not read-only — see the handler's class javadoc),
+ * so a body that still carried them would have them persisted ungated by generic CRUD.
  *
  * @covers com.etendoerp.go.schemaforge.BpLocationHandler
  */
@@ -197,6 +202,43 @@ class BpLocationHandlerTest {
       assertNotNull(r);
       assertEquals(400, r.getHttpStatus());
     }
+
+    /**
+     * ETP-5806 follow-up — the ON path reads the same sections the OFF path strips. A
+     * {@code {"data": {...}}} envelope is what {@code NeoFieldFilter#filterBody} unwraps and
+     * persists, so a create sent that way must be validated and composed from the INNER values,
+     * not fall back to "nothing sent" and be rejected as missing-mandatory.
+     */
+    @Test
+    void validCreateInsideADataEnvelopeIsValidatedFromTheInnerValues() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("streetName", "Gran Via");
+      inner.put("buildingNumber", "45");
+      inner.put("buildingName", "Torre A");
+      inner.put("cityName", "Madrid");
+      inner.put("country", "ES");
+      JSONObject body = new JSONObject();
+      body.put("data", inner);
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+    }
+
+    /** And an invalid inner value is caught rather than hidden by the envelope. */
+    @Test
+    void oversizedValueInsideADataEnvelopeStillReturns400() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("streetName", "Gran Via");
+      inner.put("buildingNumber", "A".repeat(17)); // EM_OBSEPA_BldgNb is VARCHAR(16)
+      inner.put("cityName", "Madrid");
+      inner.put("country", "ES");
+      JSONObject body = new JSONObject();
+      body.put("data", inner);
+
+      NeoResponse r = handler.handle(buildCrudContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+    }
   }
 
   // ── handle() — update (pre-hook) ─────────────────────────────────────────
@@ -274,6 +316,62 @@ class BpLocationHandlerTest {
 
       assertNotNull(r);
       assertEquals(400, r.getHttpStatus());
+    }
+
+    /**
+     * ETP-5806 follow-up: PATCH is an update too. {@code ETGO_SF_ENTITY} enables it for this
+     * entity ({@code ISPATCH=Y}), {@code NeoServlet} routes it through the same hook dispatch as
+     * PUT and {@code NeoCrudHandler} runs it through the same {@code executeUpdate} — so the
+     * pre-hook must intercept and validate it instead of silently falling through.
+     */
+    @Test
+    void patchIsValidatedLikeAPut() throws Exception {
+      Location existing = mock(Location.class);
+      when(existing.getOBSEPAStreetName()).thenReturn("Calle Existente");
+      when(existing.getOBSEPABuildingNumber()).thenReturn("9");
+      when(existing.getCityName()).thenReturn("Sevilla");
+      when(obDal.get(Location.class, "loc-1")).thenReturn(existing);
+
+      JSONObject body = new JSONObject();
+      body.put("streetName", ""); // explicit clear of a mandatory field
+
+      NeoResponse r = handler.handle(buildCrudContext("PATCH", "loc-1", body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+    }
+
+    /**
+     * A legitimate partial PATCH — the body mentions one optional field and omits every mandatory
+     * one — must NOT be rejected: {@code effective()} falls back to the existing record's values,
+     * which is exactly PATCH's partial-update semantics.
+     */
+    @Test
+    void partialPatchFallsBackToExistingValuesAndIsAccepted() throws Exception {
+      Location existing = mock(Location.class);
+      when(existing.getOBSEPAStreetName()).thenReturn("Calle Existente");
+      when(existing.getOBSEPABuildingNumber()).thenReturn("9");
+      when(existing.getCityName()).thenReturn("Sevilla");
+      org.openbravo.model.common.geography.Country existingCountry =
+          mock(org.openbravo.model.common.geography.Country.class);
+      when(existingCountry.getId()).thenReturn("ES");
+      when(existing.getCountry()).thenReturn(existingCountry);
+      when(obDal.get(Location.class, "loc-1")).thenReturn(existing);
+
+      JSONObject body = new JSONObject();
+      body.put("buildingName", "Nuevo Edificio");
+
+      assertNull(handler.handle(buildCrudContext("PATCH", "loc-1", body)));
+    }
+
+    @Test
+    void patchOnAMissingRecordReturns404() {
+      when(obDal.get(Location.class, "missing")).thenReturn(null);
+
+      NeoResponse r = handler.handle(buildCrudContext("PATCH", "missing", new JSONObject()));
+
+      assertNotNull(r);
+      assertEquals(404, r.getHttpStatus());
     }
 
     @Test
@@ -365,6 +463,40 @@ class BpLocationHandlerTest {
       assertEquals("45", recordJson.getString("buildingNumber"));
       assertEquals("Torre A", recordJson.getString("buildingName"));
       assertEquals("Gran Via, 45 - Torre A", recordJson.getString("addressLine1"));
+    }
+
+    /**
+     * PATCH reaches the persistence branch too, so a validated partial update recomposes
+     * {@code Address1}/{@code Address2} instead of leaving them stale (ETP-5806 follow-up).
+     */
+    @Test
+    void patchPersistsPendingFieldsAndRecomposesTheAddressLines() throws Exception {
+      Location existing = mock(Location.class);
+      when(existing.getOBSEPAStreetName()).thenReturn("Gran Via");
+      when(existing.getOBSEPABuildingNumber()).thenReturn("45");
+      when(existing.getCityName()).thenReturn("Madrid");
+      org.openbravo.model.common.geography.Country existingCountry =
+          mock(org.openbravo.model.common.geography.Country.class);
+      when(existingCountry.getId()).thenReturn("ES");
+      when(existing.getCountry()).thenReturn(existingCountry);
+      when(obDal.get(Location.class, "loc-1")).thenReturn(existing);
+
+      JSONObject body = new JSONObject();
+      body.put("buildingName", "Torre A"); // partial body: only the optional field changes
+
+      assertNull(handler.handle(buildCrudContext("PATCH", "loc-1", body)));
+
+      NeoContext postCtx = buildCrudContext("PATCH", "loc-1", body);
+      postCtx.setPreviousResult(wrapRecord("loc-1"));
+
+      NeoResponse result = handler.afterHandle(postCtx);
+
+      assertNotNull(result);
+      verify(existing).setOBSEPAStreetName("Gran Via");
+      verify(existing).setOBSEPABuildingNumber("45");
+      verify(existing).setOBSEPABuildingName("Torre A");
+      verify(existing).setAddressLine1("Gran Via, 45 - Torre A");
+      verify(obDal).flush();
     }
 
     @Test
@@ -479,6 +611,195 @@ class BpLocationHandlerTest {
     }
 
     /**
+     * Flag off: a caller that sends the DAL property names is NOT writing them (ETP-5806
+     * follow-up). The 3 columns DO carry {@code ETGO_SF_FIELD} rows for this entity
+     * ({@code ISINCLUDED=Y}, {@code VISIBILITY=editable}, {@code ISREADONLY=N}, committed in
+     * {@code ETGO_SF_FIELD.xml}), so falling through with the keys still on the body let generic
+     * CRUD persist them ungated on REST, and the MCP write gate let them through for the same
+     * reason — no mandatory check, no length check, and no {@code Address1}/{@code Address2}
+     * recomposition, so the structured fields and the legacy lines drifted apart on a shared
+     * {@code C_Location}. The pre-hook strips them from the body it declines to intercept.
+     */
+    @Test
+    void handleStripsTheStructuredPropertiesFromAnUpdateBody() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Gran Via");
+      body.put("oBSEPABuildingNumber", "45");
+      body.put("oBSEPABuildingName", "Torre A");
+      body.put("addressLine1", "Gran Via 45");
+      body.put("cityName", "Madrid");
+
+      assertNull(handler.handle(buildCrudContext("PUT", "loc-1", body)));
+
+      assertFalse(body.has("oBSEPAStreetName"));
+      assertFalse(body.has("oBSEPABuildingNumber"));
+      assertFalse(body.has("oBSEPABuildingName"));
+      // Everything else the caller sent is untouched: flag off means the legacy plain-text
+      // address path behaves exactly as it did before ETP-5806.
+      assertEquals("Gran Via 45", body.getString("addressLine1"));
+      assertEquals("Madrid", body.getString("cityName"));
+    }
+
+    /**
+     * The same strip on a PATCH (ETP-5806 follow-up). PATCH was absent from the create/update
+     * predicate, so {@code PATCH /sws/neo/bp-location/bpLocation/{id}} with a structured key still
+     * reached generic CRUD and persisted it ungated while the flag was off — the exact hole the
+     * strip exists to close, surviving on the easiest channel to reach.
+     */
+    @Test
+    void handleStripsTheStructuredPropertiesFromAPatchBody() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Gran Via");
+      body.put("oBSEPABuildingNumber", "45");
+      body.put("streetName", "Gran Via");
+      body.put("EM_OBSEPA_BldgNm", "Torre A");
+      body.put("cityName", "Madrid");
+
+      assertNull(handler.handle(buildCrudContext("PATCH", "loc-1", body)));
+
+      assertFalse(body.has("oBSEPAStreetName"));
+      assertFalse(body.has("oBSEPABuildingNumber"));
+      assertFalse(body.has("streetName"));
+      assertFalse(body.has("EM_OBSEPA_BldgNm"));
+      assertEquals("Madrid", body.getString("cityName"));
+      verify(obDal, never()).get(eq(Location.class), any());
+    }
+
+    /** Same strip on a create, and for the published spellings and the raw AD column names. */
+    @Test
+    void handleStripsEverySpellingOfTheStructuredFieldsFromACreateBody() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("streetName", "Gran Via");
+      body.put("oBSEPABuildingNumber", "45");
+      body.put("EM_OBSEPA_BldgNm", "Torre A");
+      body.put("addressLine2", "Torre A");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+
+      assertFalse(body.has("streetName"));
+      assertFalse(body.has("oBSEPABuildingNumber"));
+      assertFalse(body.has("EM_OBSEPA_BldgNm"));
+      assertEquals("Torre A", body.getString("addressLine2"));
+    }
+
+    /**
+     * ETP-5806 follow-up, the repro that was open: a {@code {"data": {...}}} envelope.
+     * {@code NeoFieldFilter#filterBody} unwraps it and returns the INNER object, which
+     * {@code NeoCrudHandler#executeUpdate} goes on to filter and persist — and the inner keys pass
+     * the filter because the 3 columns are curated writable. A strip that only looked at the top
+     * level removed nothing ({@code data} is the only top-level key), so
+     * {@code PUT /sws/neo/bp-location/bpLocation/{id} {"data":{"oBSEPAStreetName":…}}} wrote the
+     * field ungated: no mandatory check, no length check, no {@code Address1}/{@code Address2}
+     * recomposition. Classic "mutates one object while persistence reads another".
+     */
+    @Test
+    void handleStripsTheStructuredPropertiesFromADataWrappedUpdateBody() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("oBSEPAStreetName", "Gran Via");
+      inner.put("oBSEPABuildingNumber", "45");
+      inner.put("oBSEPABuildingName", "Torre A");
+      inner.put("addressLine1", "Gran Via 45");
+      inner.put("cityName", "Madrid");
+      JSONObject body = new JSONObject();
+      body.put("data", inner);
+
+      assertNull(handler.handle(buildCrudContext("PUT", "loc-1", body)));
+
+      assertFalse(inner.has("oBSEPAStreetName"));
+      assertFalse(inner.has("oBSEPABuildingNumber"));
+      assertFalse(inner.has("oBSEPABuildingName"));
+      // Everything else inside the envelope is untouched.
+      assertEquals("Gran Via 45", inner.getString("addressLine1"));
+      assertEquals("Madrid", inner.getString("cityName"));
+      // And the envelope itself survives — NeoFieldFilter still has something to unwrap.
+      assertTrue(body.has("data"));
+    }
+
+    /** Same envelope on a create: {@code filterCreateRequest} calls the very same unwrap. */
+    @Test
+    void handleStripsEverySpellingFromADataWrappedCreateBody() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("streetName", "Gran Via");
+      inner.put("oBSEPABuildingNumber", "45");
+      inner.put("EM_OBSEPA_BldgNm", "Torre A");
+      inner.put("addressLine2", "Torre A");
+      JSONObject body = new JSONObject();
+      body.put("data", inner);
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+
+      assertFalse(inner.has("streetName"));
+      assertFalse(inner.has("oBSEPABuildingNumber"));
+      assertFalse(inner.has("EM_OBSEPA_BldgNm"));
+      assertEquals("Torre A", inner.getString("addressLine2"));
+    }
+
+    /**
+     * Both shapes in one body are handled in one pass — nothing guarantees only one is present,
+     * and leaving either behind reopens the hole on whichever layer happens to read that one.
+     */
+    @Test
+    void handleStripsBothTheTopLevelAndTheEnvelopeInOnePass() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("oBSEPAStreetName", "inner");
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "outer");
+      body.put("data", inner);
+
+      assertNull(handler.handle(buildCrudContext("PATCH", "loc-1", body)));
+
+      assertFalse(body.has("oBSEPAStreetName"));
+      assertFalse(inner.has("oBSEPAStreetName"));
+    }
+
+    /**
+     * The {@code /batch} channel (and MCP {@code etendo_batch}, which shares the method) reaches
+     * this pre-hook: {@code BatchService#createRecord} builds a CRUD {@code NeoContext} with
+     * {@code httpMethod "POST"}, a null {@code recordId} and the op's body, then dispatches
+     * through {@code NeoServletSupport.handleWithHooks(..., REST_BATCH)} UNCONDITIONALLY — the
+     * blank-qualifier early return was removed in ETP-5415 — and
+     * {@code NeoExtensionDispatcher#resolve} tries the {@code @NeoExtension} index before the
+     * qualifier on every channel. That matters here because {@code ETGO_SF_ENTITY.Java_Qualifier}
+     * is empty for {@code bpLocation}: the annotation is the only binding. This asserts the body
+     * such an op carries is stripped, in both shapes.
+     */
+    @Test
+    void handleStripsABatchCreateOperationBody() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("oBSEPAStreetName", "Gran Via");
+      JSONObject body = new JSONObject();
+      body.put("oBSEPABuildingNumber", "45");
+      body.put("cityName", "Madrid");
+      body.put("data", inner);
+
+      NeoContext ctx = NeoContext.builder()
+          .specName(SPEC)
+          .entityName(ENTITY)
+          .httpMethod("POST")
+          .requestBody(body)
+          .queryParams(java.util.Collections.emptyMap())
+          .endpointType(NeoEndpointType.CRUD)
+          .build();
+
+      assertNull(handler.handle(ctx));
+
+      assertFalse(body.has("oBSEPABuildingNumber"));
+      assertFalse(inner.has("oBSEPAStreetName"));
+      assertEquals("Madrid", body.getString("cityName"));
+    }
+
+    /** A GET carries no write body, and the strip must not disturb the read path. */
+    @Test
+    void handleLeavesAReadAlone() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Gran Via");
+
+      assertNull(handler.handle(buildCrudContext("GET", "loc-1", body)));
+
+      assertEquals("Gran Via", body.getString("oBSEPAStreetName"));
+    }
+
+    /**
      * Flag off: {@code afterHandle()} never persists the pending write (there is none — {@code
      * handle()} never set it while off) and never enriches a GET with the 3 structured keys; the
      * previous result passes through to the caller exactly as the generic CRUD layer produced it.
@@ -561,6 +882,44 @@ class BpLocationHandlerTest {
         accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(OTHER_ACCOUNT);
 
         assertNull(handler.handle(buildCrudContext("POST", null, new JSONObject())));
+      }
+    }
+
+    /**
+     * An untargeted account cannot write the 3 fields by naming the DAL properties: the fall-
+     * through strips them from the body generic CRUD goes on to persist (ETP-5806 follow-up).
+     */
+    @Test
+    void handleStripsTheStructuredPropertiesForAnUntargetedAccount() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
+        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(OTHER_ACCOUNT);
+        JSONObject body = new JSONObject();
+        body.put("oBSEPAStreetName", "Gran Via");
+        body.put("oBSEPABuildingNumber", "45");
+
+        assertNull(handler.handle(buildCrudContext("PUT", "loc-1", body)));
+
+        assertFalse(body.has("oBSEPAStreetName"));
+        assertFalse(body.has("oBSEPABuildingNumber"));
+      }
+    }
+
+    /**
+     * A targeted account's body is NOT stripped: the handler owns those keys while the flag is on,
+     * and {@code afterHandle} writes the validated values itself.
+     */
+    @Test
+    void handleKeepsTheStructuredFieldsForATargetedAccount() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
+        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+        JSONObject body = new JSONObject();
+        body.put("streetName", "Gran Via");
+
+        handler.handle(buildCrudContext("POST", null, body));
+
+        assertTrue(body.has("streetName"));
       }
     }
 
