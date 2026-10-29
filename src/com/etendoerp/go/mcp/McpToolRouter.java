@@ -1650,6 +1650,8 @@ public class McpToolRouter {
       // ETP-5473: a value etendo_defaults merely suggests is not one the server fills when the
       // customization refuses a create without it — those stay required, never serverDefaulted.
       serverResolved.removeAll(callerRequired);
+      // ETP-5852 (M-106): nor is one the customization leaves empty on create.
+      serverResolved.removeAll(McpServerResolvedFields.unsetOnCreate(sfEntity));
       JSONObject createView = McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray, serverResolved, isChildEntity,
               entityAgentPrompt);

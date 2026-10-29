@@ -113,7 +113,11 @@ final class McpDefaultsView {
     drop.forEach(defaults::remove);
   }
 
-  /** {@link #withoutExcluded(JSONObject, Set)} on a defaults answer; a refusal is left as is. */
+  /**
+   * {@link #withoutExcluded(JSONObject, Set)} on a defaults answer, for the fields the agent
+   * surface excludes and — ETP-5852 (M-106) — those the entity's customization leaves empty on
+   * create ({@link McpServerResolvedFields#unsetOnCreate}). A refusal is left as is.
+   */
   static void withoutExcluded(com.etendoerp.go.schemaforge.NeoResponse answer,
       com.etendoerp.go.schemaforge.data.SFEntity sfEntity,
       org.openbravo.model.ad.ui.Tab adTab) {
@@ -121,9 +125,11 @@ final class McpDefaultsView {
         || answer.getBody().optJSONObject(KEY_DEFAULTS) == null) {
       return;
     }
-    withoutExcluded(answer.getBody(), McpQuerySupport.excludedPropertyNames(sfEntity,
+    Set<String> dropped = new java.util.HashSet<>(McpQuerySupport.excludedPropertyNames(sfEntity,
         org.openbravo.base.model.ModelProvider.getInstance()
             .getEntityByTableName(adTab.getTable().getDBTableName())));
+    dropped.addAll(McpServerResolvedFields.unsetOnCreate(sfEntity));
+    withoutExcluded(answer.getBody(), dropped);
   }
 
   /**

@@ -1152,6 +1152,7 @@
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <JAVA_QUALIFIER><![CDATA[businessPartnerHandler]]></JAVA_QUALIFIER>
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--34EBCCEE2E9643BF962CDF84379232C4-->  <AGENT_PROMPT><![CDATA[A new contact has no billing preferences of its own: price list, payment terms, payment method, financial account and blocking, for sales and for purchases. The ones you send on create are saved; the others stay empty until you set them with etendo_update, as in the app.]]></AGENT_PROMPT>
 <!--34EBCCEE2E9643BF962CDF84379232C4--></ETGO_SF_ENTITY>
 
 <!--36A012B00ABF40708D723756DD6AAC00--><ETGO_SF_ENTITY>

@@ -276,6 +276,15 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   }
 
   /**
+   * ETP-5852 (M-106): the billing preferences a new contact is saved without (see
+   * {@link #stripPreCreateBillingDefaults}), so the MCP does not call them server-defaulted.
+   */
+  @Override
+  public Set<String> createUnsetFields() {
+    return PRECREATE_BILLING_FIELDS;
+  }
+
+  /**
    * ETP-5852 (M-107): puts the same temporary searchKey {@code handle()} puts, before MCP's
    * mandatory pre-check, which runs ahead of {@code handle()} and refused a create without one.
    * The name is derived first (person mode), as {@code handle()} does. Never overwrites a value
@@ -382,7 +391,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       deriveName(ctx, body);
 
       if ("POST".equals(method)) {
-        stripPreCreateBillingDefaults(body);
+        stripPreCreateBillingDefaults(ctx, body);
         ContactSearchKey.putPlaceholder(body);
         injectOrgCurrency(ctx, body);
       }
@@ -657,8 +666,21 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     }
   }
 
-  private void stripPreCreateBillingDefaults(JSONObject body) {
+  /**
+   * Clears the billing preferences from a create body: the app fills them in after the contact
+   * exists, and its form clears the prefilled ones before saving. ETP-5852 (M-106): over MCP, a
+   * value the agent itself sent ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}) is kept — it was
+   * dropped without a word — while a value the defaults pass put in is still cleared, as in the
+   * app.
+   */
+  private static void stripPreCreateBillingDefaults(NeoContext ctx, JSONObject body) {
+    Object provided = ctx.isMcpOrigin()
+        ? ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS) : null;
     for (String key : PRECREATE_BILLING_FIELDS) {
+      if (provided instanceof java.util.Collection
+          && ((java.util.Collection<?>) provided).contains(key)) {
+        continue;
+      }
       body.remove(key);
       body.remove(key + "$_identifier");
     }

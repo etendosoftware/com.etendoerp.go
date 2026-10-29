@@ -338,6 +338,47 @@ class BusinessPartnerHandlerTest {
     assertNull(body.optString("paymentMethod", null));
   }
 
+  /**
+   * Over MCP a billing preference the agent itself sent is saved, while one the defaults pass put
+   * in is still cleared, as in the app. It used to be dropped without a word.
+   */
+  @Test
+  void testHandlePostKeepsBillingFieldsTheAgentSentOverMcp() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("paymentTerms", "PT_ID");
+    body.put("paymentTerms$_identifier", "30 días");
+    body.put("priceList", "PRICE_LIST_ID");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.isMcpOrigin()).thenReturn(true);
+    when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name", "paymentTerms"));
+
+    handler.handle(ctx);
+
+    assertEquals("PT_ID", body.optString("paymentTerms", null));
+    assertEquals("30 días", body.optString("paymentTerms$_identifier", null));
+    assertNull(body.optString("priceList", null));
+  }
+
+  /** The same body from the app's REST channel is cleared whole: the form never sends them. */
+  @Test
+  void testHandlePostStripsSentBillingFieldsOutsideMcp() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("paymentTerms", "PT_ID");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.isMcpOrigin()).thenReturn(false);
+    org.mockito.Mockito.lenient().when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name", "paymentTerms"));
+
+    handler.handle(ctx);
+
+    assertNull(body.optString("paymentTerms", null));
+  }
+
   // ── handle() — POST: org currency injection (ETP-4649) ───────────────────────
 
   /**

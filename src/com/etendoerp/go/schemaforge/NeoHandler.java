@@ -241,6 +241,23 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares the DAL property names this customization leaves empty on create unless the caller
+   * sends them, although {@code etendo_defaults} answers a value for them (ETP-5852, M-106).
+   *
+   * <p>The app's form prefills such a field and then clears it before saving the new record (the
+   * contact's billing preferences are filled in after it exists). {@code etendo_schema(view:"create")}
+   * would otherwise mark them {@code serverDefaulted} — "the server fills this" — while the record
+   * is saved with them empty. Reader: the MCP layer, which does not call them server-defaulted and
+   * drops them from its {@code etendo_defaults} answer. The customization decides, on its own
+   * channel, what it does with a value the caller sends.</p>
+   *
+   * @return the property names left empty on create; empty by default
+   */
+  default Set<String> createUnsetFields() {
+    return Collections.emptySet();
+  }
+
+  /**
    * Fills create-body defaults that this customization can derive from the body alone, on the
    * channels whose mandatory-field pre-check runs <b>before</b> the pre-hook (ETP-5710).
    *
