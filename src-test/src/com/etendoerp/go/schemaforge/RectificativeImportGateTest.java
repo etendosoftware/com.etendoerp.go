@@ -193,7 +193,7 @@ public class RectificativeImportGateTest {
   @Test
   public void theDefaultPolicyJudgesNothingARectificative() {
     assertFalse(RectificativeImportPolicy.NONE.isRectificative(invoice));
-    assertFalse(RectificativeImportPolicy.NONE.keepsOrderLink());
+    assertFalse(RectificativeImportPolicy.NONE.linksReturnsToRectifiedInvoices());
     assertEquals(RectificativeImportPolicy.NONE, RectificativeImportPolicy.from(null));
     NeoContext context = request("importOrderLines", "i1", "POST");
     assertEquals(RectificativeImportPolicy.NONE, RectificativeImportPolicy.from(context));

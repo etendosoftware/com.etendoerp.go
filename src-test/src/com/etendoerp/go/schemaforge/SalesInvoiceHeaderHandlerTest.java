@@ -495,7 +495,7 @@ public class SalesInvoiceHeaderHandlerTest {
     assertEquals(447.10, resultData.getJSONObject(2).getDouble("grandTotalAmount"), 0.005); // adjusted
   }
 
-  // ── enrichSourceInvoice() ──────────────────────────────────────────────────
+  // ── detail GET: no deduced source invoice (ETP-6002) ──────────────────────────────────────────────────
 
   /**
    * Builds a context for detail GET (recordId != null).
@@ -524,35 +524,32 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that enrichSourceInvoice injects both sourceReturnReceipt and sourceInvoice
-   * when the SQL query finds a return receipt linked to an original invoice.
+   * ETP-6002: the detail GET no longer deduces {@code sourceInvoice} / {@code sourceReturnReceipt}
+   * through the return chain (invoice line → return line → cancelled shipment line → invoice).
+   * A sales invoice relates to other invoices only through {@code C_Invoice_Reverse}
+   * ({@code originInvoices} / {@code rectifyingInvoices}), and the return receipt is already
+   * listed by {@code linkedShipments}. Every statement here would answer a row, so a surviving
+   * deduction would show up.
    */
   @Test
-  public void testEnrichSourceInvoiceInjectsBothFieldsWhenReturnReceiptAndInvoiceFound() throws Exception {
+  public void testDetailGetDoesNotDeduceSourceInvoiceFromTheReturnChain() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
-      // ETP-5576: afterHandle now also runs the follow-up lookup (and other enrichers) on the
-      // same connection. Route only enrichSourceInvoice's statement to the stubbed row; every
-      // other statement reads an empty result, so none of them consumes rs.next().
       PreparedStatement otherPs = mock(PreparedStatement.class);
       ResultSet emptyRs = mock(ResultSet.class);
       when(otherPs.executeQuery()).thenReturn(emptyRs);
       when(conn.prepareStatement(anyString())).thenReturn(otherPs);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(contains("Canceled_Inoutline_ID"))).thenReturn(ps);
-      ResultSet rs = mock(ResultSet.class);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString("ret_id")).thenReturn("ret-001");
-      when(rs.getString("ret_doc")).thenReturn("RRET-001");
-      when(rs.getString("ret_status")).thenReturn("CO");
-      when(rs.getString("inv_id")).thenReturn("inv-orig-001");
-      when(rs.getString("inv_doc")).thenReturn("INV-ORIG-001");
+      PreparedStatement chainPs = mock(PreparedStatement.class);
+      when(conn.prepareStatement(contains("Canceled_Inoutline_ID"))).thenReturn(chainPs);
+      ResultSet chainRs = mock(ResultSet.class);
+      when(chainPs.executeQuery()).thenReturn(chainRs);
+      when(chainRs.next()).thenReturn(true, false);
+      when(chainRs.getString("ret_id")).thenReturn("ret-001");
+      when(chainRs.getString("inv_id")).thenReturn("inv-orig-001");
 
       JSONObject body = invoiceBodyNoDiscount("inv-001");
       NeoContext ctx = getDetailCtx("inv-001");
@@ -563,69 +560,17 @@ public class SalesInvoiceHeaderHandlerTest {
       assertNotNull(result);
       JSONObject rec = result.getBody()
           .getJSONObject("response").getJSONArray("data").getJSONObject(0);
-
-      JSONObject retReceipt = rec.getJSONObject("sourceReturnReceipt");
-      assertEquals("ret-001", retReceipt.getString("id"));
-      assertEquals("RRET-001", retReceipt.getString("documentNo"));
-      assertEquals("CO", retReceipt.getString("documentStatus"));
-
-      JSONObject sourceInvoice = rec.getJSONObject("sourceInvoice");
-      assertEquals("inv-orig-001", sourceInvoice.getString("id"));
-      assertEquals("INV-ORIG-001", sourceInvoice.getString("documentNo"));
-    }
-  }
-
-  /**
-   * Verifies that enrichSourceInvoice injects only sourceReturnReceipt (no sourceInvoice key)
-   * when the SQL row has a return receipt but no original invoice (inv_id = null).
-   */
-  @Test
-  public void testEnrichSourceInvoiceInjectsOnlyReturnReceiptWhenNoOriginalInvoice() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-      // ETP-5576: afterHandle now also runs the follow-up lookup (and other enrichers) on the
-      // same connection. Route only enrichSourceInvoice's statement to the stubbed row; every
-      // other statement reads an empty result, so none of them consumes rs.next().
-      PreparedStatement otherPs = mock(PreparedStatement.class);
-      ResultSet emptyRs = mock(ResultSet.class);
-      when(otherPs.executeQuery()).thenReturn(emptyRs);
-      when(conn.prepareStatement(anyString())).thenReturn(otherPs);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(contains("Canceled_Inoutline_ID"))).thenReturn(ps);
-      ResultSet rs = mock(ResultSet.class);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString("ret_id")).thenReturn("ret-002");
-      when(rs.getString("ret_doc")).thenReturn("RRET-002");
-      when(rs.getString("ret_status")).thenReturn("DR");
-      when(rs.getString("inv_id")).thenReturn(null); // no original invoice
-
-      JSONObject body = invoiceBodyNoDiscount("inv-002");
-      NeoContext ctx = getDetailCtx("inv-002");
-      ctx.setPreviousResult(NeoResponse.ok(body));
-
-      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
-
-      assertNotNull(result);
-      JSONObject rec = result.getBody()
-          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
-
-      assertNotNull(rec.optJSONObject("sourceReturnReceipt"));
+      assertFalse(rec.has("sourceReturnReceipt"));
       assertFalse(rec.has("sourceInvoice"));
     }
   }
 
   /**
-   * Verifies that neither sourceReturnReceipt nor sourceInvoice is injected
-   * when the SQL returns no rows (regular invoice, no Canceled_Inoutline_ID).
+   * Verifies that neither sourceReturnReceipt nor sourceInvoice is injected on a detail GET
+   * whose statements return no rows, and that the follow-up annotation still runs.
    */
   @Test
-  public void testEnrichSourceInvoiceInjectsNothingWhenNoRowsFound() throws Exception {
+  public void testDetailGetInjectsNoSourceInvoiceWhenNoRowsFound() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -662,16 +607,15 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that enrichSourceInvoice is NOT called for list GET (recordId == null),
-   * so neither sourceReturnReceipt nor sourceInvoice appears in list results.
+   * Verifies that neither sourceReturnReceipt nor sourceInvoice appears in list results.
    */
   @Test
-  public void testEnrichSourceInvoiceNotCalledForListView() throws Exception {
+  public void testListViewInjectsNoSourceInvoice() throws Exception {
     JSONObject body = invoiceBody(false, 0.0, 100.0, 100.0);
     NeoContext ctx = getCtx(); // recordId = null — list view
     ctx.setPreviousResult(NeoResponse.ok(body));
 
-    // No OBDal mock needed — enrichSourceInvoice should not be reached
+    // No OBDal mock needed — list view runs no detail enrichment
     NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
 
     assertNotNull(result);
@@ -934,6 +878,16 @@ public class SalesInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * The static rule behind {@code classifyDocType} (its true/false cases are covered through
+   * {@code resolveSubtype} above) is also called on an invoice whose document type may be unset —
+   * the sales-invoice line pre-hook reads it off the parent. A missing type is not a rectificative.
+   */
+  @Test
+  public void isRectificativeDocType_nullDocType_isFalse() {
+    assertFalse(SalesInvoiceHeaderHandler.isRectificativeDocType(null));
+  }
+
   @Test
   public void resolveSubtype_ariCategory_returnsFac() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -1003,7 +957,7 @@ public class SalesInvoiceHeaderHandlerTest {
   @Test
   public void afterHandle_positiveRectificativaViaArc_keepsPositiveAmounts() throws Exception {
     JSONObject body = invoiceBodyWithDocType("dt-arc", 150.0, 100.0);
-    NeoContext ctx = getCtx(); // list mode — no recordId, no enrichSourceInvoice call
+    NeoContext ctx = getCtx(); // list mode — no recordId, no detail enrichment
     ctx.setPreviousResult(NeoResponse.ok(body));
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -1139,11 +1093,11 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that a SQL exception in enrichSourceInvoice is caught silently —
+   * Verifies that a SQL exception in the detail enrichments is caught silently —
    * afterHandle still returns a valid response without rethrowing.
    */
   @Test
-  public void testEnrichSourceInvoiceSqlExceptionCaughtSilently() throws Exception {
+  public void testDetailEnrichmentSqlExceptionCaughtSilently() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);

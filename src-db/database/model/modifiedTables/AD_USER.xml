@@ -7,7 +7,7 @@
       </column>
       <column name="EM_ETGO_IS_SUPPORT" primaryKey="false" required="false" type="CHAR" size="1" autoIncrement="false">
         <default><![CDATA[N]]></default>
-        <onCreateDefault><![CDATA[N]]></onCreateDefault>
+        <onCreateDefault><![CDATA['N']]></onCreateDefault>
       </column>
       <index name="EM_ETGO_USER_OWNER_IDX" unique="false">
         <index-column name="AD_CLIENT_ID"/>

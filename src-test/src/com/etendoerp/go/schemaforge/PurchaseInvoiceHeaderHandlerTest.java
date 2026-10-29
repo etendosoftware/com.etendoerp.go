@@ -1797,8 +1797,10 @@ public class PurchaseInvoiceHeaderHandlerTest {
         "importReturnLines", new JSONObject().put("returnId", "r1")));
     assertNull(NeoActionContract.validate(contracts,
         "importOriginInvoiceLines", new JSONObject().put("invoiceId", "f1")));
-    assertFalse("the purchase origin import does not keep the order line",
-        contracts.get("importOriginInvoiceLines").getDescription().contains("order line"));
+    // ETP-6002: neither side keeps the source line's order line, and the contract says so.
+    assertTrue("the purchase origin import does not keep the order line",
+        contracts.get("importOriginInvoiceLines").getDescription()
+            .contains("never its order line"));
   }
 
   /**

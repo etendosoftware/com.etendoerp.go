@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static com.etendoerp.go.schemaforge.LineAmountTestSupport.assertAmount;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -44,6 +45,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -633,6 +635,119 @@ class OrderLineDiscountSupportTest {
     assertAmount(label, expectedGross, json, OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT);
     assertAmount(label, null, json, OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT);
     verify(dal, times(expectedReads)).get(OrderLine.class, LINE_ID);
+  }
+
+  /**
+   * ETP-6012: a public API {@code PATCH} of the quantity alone. {@code lineGrossAmount} is read-only
+   * on REST, so the save derives it again over the body: the body must carry the stored price and
+   * tax, or the gross is zeroed (no price) or taken at 0 % (no tax).
+   */
+  @Test
+  void sparseUpdateCarriesTheStoredPriceAndTax() throws Exception {
+    JSONObject json = new JSONObject("{\"orderedQuantity\":3}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals(3, json.getInt(OrderLineDiscountSupport.FIELD_ORDERED_QTY), "the caller's quantity is kept");
+    assertEquals(240, json.getInt(OrderLineDiscountSupport.FIELD_UNIT_PRICE));
+    assertEquals(TAX_ID, json.getString(OrderLineDiscountSupport.FIELD_TAX));
+    verify(dal, times(1)).get(OrderLine.class, LINE_ID);
+  }
+
+  @Test
+  void sparseUpdateNeverOverwritesAnInputTheCallerSent() throws Exception {
+    JSONObject json = new JSONObject("{\"orderedQuantity\":3,\"tax\":\"OTHER\"}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals("OTHER", json.getString(OrderLineDiscountSupport.FIELD_TAX));
+    assertEquals(240, json.getInt(OrderLineDiscountSupport.FIELD_UNIT_PRICE));
+  }
+
+  /**
+   * On a tax-included line the stored gross price would win the gross derivation, so a new net
+   * price must not carry it; a new quantity still does.
+   */
+  @Test
+  void aNewUnitPriceNeverCarriesTheStoredGrossPrice() throws Exception {
+    String taxIncludedLine = "{\"orderedQuantity\":2,\"unitPrice\":10,\"grossUnitPrice\":12.1,"
+        + "\"tax\":\"" + TAX_ID + "\"}";
+    JSONObject priceOnly = new JSONObject("{\"unitPrice\":20}");
+    JSONObject qtyOnly = new JSONObject("{\"orderedQuantity\":3}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, taxIncludedLine)) {
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", priceOnly, null));
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", qtyOnly, null));
+    }
+
+    assertFalse(priceOnly.has(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE));
+    assertEquals(2, priceOnly.getInt(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertEquals(12.1, qtyOnly.getDouble(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE));
+  }
+
+  @Test
+  void updateWithoutAnAmountInputCarriesNothingAndReadsNothing() throws Exception {
+    JSONObject json = new JSONObject("{\"description\":\"x\"}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals(1, json.length());
+    verify(dal, times(0)).get(OrderLine.class, LINE_ID);
+  }
+
+  /** Through {@code applyLineRules}: a patch with no amount input carries nothing into the body. */
+  @Test
+  void applyLineRulesCarriesNoAmountInputIntoAnUpdateWithoutOne() throws Exception {
+    JSONObject json = new JSONObject("{\"description\":\"x\"}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals(1, json.length());
+    assertFalse(json.has(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertFalse(json.has(OrderLineDiscountSupport.FIELD_TAX));
+  }
+
+  /**
+   * ETP-6012: a patch that sends only {@code discount} sends no amount input itself, but it
+   * reprices the line, so the stored quantity and tax are carried for the save's gross derivation.
+   */
+  @Test
+  void aDiscountOnlyUpdateCarriesTheStoredQuantityAndTax() throws Exception {
+    JSONObject json = new JSONObject("{\"discount\":10}");
+    OBDal dal = mock(OBDal.class);
+    Tab tab = mock(Tab.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE);
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class);
+        MockedStatic<NeoTypeCoercionHelper> coercion = mockStatic(NeoTypeCoercionHelper.class)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", json, tab));
+
+      cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(any(), any(),
+          any(), any(), any(), any(), any()), times(1));
+    }
+
+    assertEquals(10, json.getInt(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertEquals(TAX_ID, json.getString(OrderLineDiscountSupport.FIELD_TAX));
+    assertEquals(10, json.getInt(OrderLineDiscountSupport.FIELD_DISCOUNT));
   }
 
   // ── CP-9: an update of the price alone derives the discount ───────────

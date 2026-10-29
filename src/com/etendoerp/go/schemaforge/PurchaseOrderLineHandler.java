@@ -23,7 +23,9 @@ package com.etendoerp.go.schemaforge;
  * ({@link OrderLineDiscountSupport#setStandardPriceOnCreate}): the unit price when the line was
  * sent without one, and always the standard price, as the form's {@code SL_Order_Product} does.
  * The other sales order rules (discount, amounts) are not applied: purchase lines were on the
- * plain parent on purpose.
+ * plain parent on purpose. Only {@link OrderLineDiscountSupport#completeAmountInputsOnUpdate} is
+ * (ETP-6012): a sparse update must carry the line's price and tax so its gross is not stored at 0
+ * or at a 0 % rate.
  *
  * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
  * {@code Java_Qualifier}, which stays {@code orderLineHandler} for the readers that look it up
@@ -41,6 +43,7 @@ public class PurchaseOrderLineHandler extends OrderLineHandler {
       return response;
     }
     OrderLineDiscountSupport.setStandardPriceOnCreate(context);
+    OrderLineDiscountSupport.completeAmountInputsOnUpdate(context);
     return null;
   }
 }

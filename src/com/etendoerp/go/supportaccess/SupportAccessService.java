@@ -235,6 +235,22 @@ public class SupportAccessService {
     return end(accessId, reason, null);
   }
 
+  /**
+   * Cuts every open access of an operator who lost the support role (or was deactivated), or of
+   * all operators when the role itself was deactivated, and revokes their sessions.
+   *
+   * @param operatorUserId the operator; {@code null} for every operator
+   * @param byUserId       who made the change
+   * @return the number of accesses closed
+   */
+  public int revokeAllOf(String operatorUserId, String byUserId) {
+    int closed = store.revokeOpenAccessesOf(operatorUserId, byUserId, clock.instant());
+    if (closed > 0) {
+      log.info("Support accesses of {} revoked: {} closed", operatorUserId, closed);
+    }
+    return closed;
+  }
+
   private boolean end(String accessId, SupportEndReason reason, String byUserId) {
     if (StringUtils.isBlank(accessId)) {
       return false;
