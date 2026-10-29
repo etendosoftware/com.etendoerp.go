@@ -4085,46 +4085,16 @@ DB column name (upper-cased), consulted identically for any entity that happens 
 the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
 per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
 
-**ETP-5806 follow-up — `resolveEntityHandler` has no `@NeoExtension` fallback (fixed on the MCP
-read path; two call sites still carry the risk).** `BpLocationHandler` binds only through
-`@NeoExtension(spec = "bp-location", entity = "bpLocation")` — it has no `Java_Qualifier` (see
-the entity's own `decisions.json` note). `McpHookExecutor.runReadHook` resolved the handler for
-its POST phase (the one that runs `afterHandle` and is what strips/enriches the SEPA fields on a
-read) via `McpHookExecutor.resolveEntityHandler`, which is `NeoHandlerLookup.byQualifier` alone —
-it has no annotation fallback and returns `null` for an `@NeoExtension`-only handler. The result:
-`afterHandle` never ran over an MCP `etendo_get`/`etendo_list` read of `bp-location`, so the
-structured SEPA fields leaked through MCP reads regardless of the `structured-address-for-sepa`
-flag, while the write path, REST reads (which carry the PRE-resolved handler straight into the
-post hook — `NeoServletSupport.handleWithHooks`, unaffected by this gap), and every Mockito test
-that calls `afterHandle()` directly all looked correct. Fixed (commit `f0543df32`) by resolving
-`runReadHook`'s POST phase through `NeoExtensionDispatcher.resolveOnly` instead — annotation
-first, `Java_Qualifier` second — matching every other MCP hook site (`runReadProvider`'s own PRE
-dispatch, `resolveServerCreateFields`) and the REST path's resolution.
-
-This is the general lesson for anything extending the `NeoHandler` pattern (§5.3.a) through
-`@NeoExtension` alone: **a resolution call that is literally `NeoHandlerLookup.byQualifier` (or an
-equivalent qualifier-only lookup) will silently no-op for a handler with no `Java_Qualifier`.**
-Line ~9527 above lists `NeoFieldFilter`'s read-only rejection and `protectedCreateCalloutFields` as
-two readers that still resolve the qualifier directly by design, for the `orderLineHandler`
-binding — that is a deliberate, qualifier-set case. The `bp-location` case is different: the
-handler has *no* qualifier at all, so a qualifier-only resolver is not a design choice there, it is
-a dead code path for that handler.
-
-**Two residual call sites, same latent bug class, deliberately left unfixed.** `resolveEntityHandler`
-is still called directly (not through `NeoExtensionDispatcher.resolveOnly`) at:
-- `McpWidgetHandler.java:75` — widget rendering resolves the entity's handler to let it customize
-  widget behaviour; an `@NeoExtension`-only handler resolves to `null` here too.
-- `McpWriteRequestSupport.java:91` — used as a `handler != null` presence check (gating some write
-  guard), with the same qualifier-only blind spot.
-
-Both reviewers and the developer flagged these during the ETP-5806 cycle as carrying the identical
-resolution gap just fixed on the read path, and both recommended a follow-up ticket rather than
-widening the fix in the same change (risk of changing resolution semantics for every qualifier-set
-handler these two sites currently serve, untested). No `@NeoExtension`-only handler currently
-relies on being found through either site in production, which is why this was accepted as a
-follow-up rather than a blocker — but the next handler written as `@NeoExtension`-only (per the
-"use this for anything new" guidance in §5.3.a) that also needs widget support or this write guard
-will hit the same silent `null`. Tracked in `docs/plans/2026-10-29-etp-5806-resolveentityhandler-followup.md`.
+**ETP-5806 follow-up — closed by ETP-5588.** Between ETP-5806 (which fixed
+`McpHookExecutor.runReadHook`'s POST phase to resolve through `NeoExtensionDispatcher.resolveOnly`,
+commit `f0543df32`) and ETP-5588, two call sites — `McpWidgetHandler.java:75` and
+`McpWriteRequestSupport.java:91` — still resolved a `bp-location`-style `@NeoExtension`-only
+handler via the qualifier-only `McpHookExecutor.resolveEntityHandler`, the same silent-`null`
+risk the ETP-5806 fix addressed on the read path. ETP-5588's migration (§5.3.a) removed
+`resolveEntityHandler` entirely and replaced both call sites with `NeoHandlerLookup.forEntity`,
+which tries `NeoExtensionIndex.resolve` first and falls back to the qualifier only second — so the
+gap is closed as a side effect of that migration, not by a dedicated fix. Former tracking doc
+moved to `docs/plans/discarded/`.
 
 **Pending DB update — confirmed still outstanding.** The field-level `AGENT_PROMPT` on
 `ETGO_SF_FIELD` for `C_Location_ID` still has not been updated in the database to mention the 3

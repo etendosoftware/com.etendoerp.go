@@ -1,5 +1,13 @@
 # ETP-5806 follow-up: `resolveEntityHandler` has no `@NeoExtension` fallback at 2 call sites
 
+**Discarded (2026-10-29):** closed by ETP-5588's migration, not by a dedicated fix.
+ETP-5588 removed `McpHookExecutor.resolveEntityHandler` entirely and replaced both call sites
+below with `NeoHandlerLookup.forEntity(sfEntity)`, which tries `NeoExtensionIndex.resolve` first
+and falls back to the qualifier only second — exactly the annotation-first resolution this plan
+asked for. Verified against the post-merge state of `McpWidgetHandler.java`,
+`McpWriteRequestSupport.java`, and `NeoHandlerLookup.java`. Kept for history only; the problem
+statement below no longer applies.
+
 **Status:** active (not yet a Jira ticket — recorded here so the knowledge survives the agent
 session that found it; a human/Clerk should open the follow-up ticket and link it here).
 
