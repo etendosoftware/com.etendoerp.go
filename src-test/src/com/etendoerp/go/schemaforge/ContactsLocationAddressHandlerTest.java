@@ -89,6 +89,12 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * {@link GoFeatureFlags#isEnabled} stubbed to {@code false}, only {@code country} is mandatory,
  * the 3 structured fields are never read off the body nor written to the record even when the
  * payload carries them, and a response never carries their keys (absent, not null).
+ * Also the ETP-5806 follow-up wire-format matrix: the 3 structured fields are read by the raw AD
+ * column spelling ({@code EM_OBSEPA_StrtNm}/{@code BldgNb}/{@code BldgNm}) as well as the
+ * published name on both create and update, the published spelling wins when both are sent in
+ * the same body, a raw-column spelling is ignored while the flag is off (same as the published
+ * one already is), and a reuse body ({@code locationAddress}) carrying a raw-column spelling is
+ * just as ambiguous as one carrying the published spelling.
  *
  * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  */
@@ -453,6 +459,139 @@ class ContactsLocationAddressHandlerTest {
     }
   }
 
+  // ── ETP-5806 follow-up: raw AD column / DAL property spellings on create ──
+
+  /**
+   * Flag on: a create body that sends the raw AD column spellings ({@code EM_OBSEPA_StrtNm}/
+   * {@code EM_OBSEPA_BldgNb}) instead of the published {@code streetName}/{@code buildingNumber}
+   * is accepted and persisted — this handler owns its own body parsing end to end and never
+   * falls back to {@code McpWriteRequestSupport#resolveProperty}, which is what tolerates a raw
+   * column name for most entities.
+   */
+  @Test
+  void testHandleCreateAcceptsRawColumnSpellingWhenFlagOn() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("cityName", "Madrid");
+    body.put("EM_OBSEPA_StrtNm", "Gran Via");
+    body.put("EM_OBSEPA_BldgNb", "45");
+    body.put("EM_OBSEPA_BldgNm", "Local 2");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Local 2");
+    }
+  }
+
+  /**
+   * Flag on: when a create body sends BOTH the published spelling and the raw AD column
+   * spelling for the same field, the published spelling wins — same precedence rule as
+   * {@code BpLocationHandler}.
+   */
+  @Test
+  void testHandleCreatePublishedSpellingWinsOverRawColumnWhenBothPresent() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("cityName", "Madrid");
+    body.put("streetName", "Published Street");
+    body.put("EM_OBSEPA_StrtNm", "Raw Column Street");
+    body.put("buildingNumber", "10");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Published Street");
+      verify(geoLoc, never()).setOBSEPAStreetName("Raw Column Street");
+    }
+  }
+
+  /**
+   * Flag off: the raw AD column spelling is ignored exactly like the published spelling already
+   * is — neither read off the body nor persisted, and no mandatory-field error for the omitted
+   * {@code cityName}.
+   */
+  @Test
+  void testHandleCreateRawColumnSpellingIgnoredWhenFlagOff() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("EM_OBSEPA_StrtNm", "Gran Via");
+    body.put("EM_OBSEPA_BldgNb", "45");
+    // cityName intentionally omitted — mandatory only when the flag is on.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc, never()).setOBSEPAStreetName(any());
+      verify(geoLoc, never()).setOBSEPABuildingNumber(any());
+    }
+  }
+
+  /**
+   * A reuse body ({@code locationAddress}) that also carries a raw-column-spelling structured
+   * field is just as ambiguous as one that carries the published spelling — {@code
+   * hasRawAddressFields} must recognize both.
+   */
+  @Test
+  void testHandleCreateAmbiguousWithRawColumnSpellingReturns400() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    JSONObject body = new JSONObject();
+    body.put("locationAddress", "existing-geo-loc-id");
+    body.put("EM_OBSEPA_StrtNm", "Gran Via");
+
+    NeoContext ctx = buildContext("POST", null, body, params);
+    NeoResponse response = handler.handle(ctx);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+  }
+
   // ── handleUpdate ────────────────────────────────────────────────────────
 
   /**
@@ -530,6 +669,39 @@ class ContactsLocationAddressHandlerTest {
       // caller also sent (as a legacy free-text Address1 might already hold) is never stored as-is.
       verify(geoLoc).setAddressLine1("Calle Mayor, 7");
       verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
+    }
+  }
+
+  /**
+   * ETP-5806 follow-up — flag on: an update body sending the raw AD column spelling is accepted
+   * and persisted, the same as on create.
+   */
+  @Test
+  void testHandleUpdateAcceptsRawColumnSpellingWhenFlagOn() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-id");
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bpl-id");
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("EM_OBSEPA_StrtNm", "Calle Mayor");
+    body.put("EM_OBSEPA_BldgNb", "7");
+    body.put("cityName", "Toledo");
+    body.put("country", "ES");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Calle Mayor");
+      verify(geoLoc).setOBSEPABuildingNumber("7");
     }
   }
 

@@ -22,6 +22,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 
@@ -90,6 +91,24 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_STREET_NAME = "streetName";
   private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
   private static final String FIELD_BUILDING_NAME = "buildingName";
+  /**
+   * ETP-5806 follow-up — every spelling of one logical structured-address field a caller can
+   * address it by, in precedence order: the published name first, then the DAL property name,
+   * then the raw AD column name. Mirrors {@code BpLocationHandler#KEYS_STREET_NAME} and its
+   * siblings. Needed here specifically because this handler owns its own body parsing end to
+   * end — {@code handle()} short-circuits generic CRUD entirely and never calls
+   * {@code McpWriteRequestSupport#resolveProperty}, which is what tolerates a raw-column spelling
+   * for most entities — so without this alias list a raw-column or DAL-property spelling was
+   * silently dropped instead of being validated and persisted.
+   */
+  private static final List<String> KEYS_STREET_NAME = List.of(FIELD_STREET_NAME,
+      org.openbravo.model.common.geography.Location.PROPERTY_OBSEPASTREETNAME, "EM_OBSEPA_StrtNm");
+  private static final List<String> KEYS_BUILDING_NUMBER = List.of(FIELD_BUILDING_NUMBER,
+      org.openbravo.model.common.geography.Location.PROPERTY_OBSEPABUILDINGNUMBER,
+      "EM_OBSEPA_BldgNb");
+  private static final List<String> KEYS_BUILDING_NAME = List.of(FIELD_BUILDING_NAME,
+      org.openbravo.model.common.geography.Location.PROPERTY_OBSEPABUILDINGNAME,
+      "EM_OBSEPA_BldgNm");
   /** FK to an existing C_Location, for the "reuse" create mode. See {@link #handleCreate}. */
   private static final String FIELD_LOCATION_ADDRESS = "locationAddress";
   /** Free-text region, resolved server-side against the payload's own country. See {@link #resolveRegionByName}. */
@@ -308,8 +327,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return countryId == null ? NeoResponse.error(400, "Missing required field: country (C_Country_ID)") : null;
     }
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
-        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        readAlias(body, KEYS_STREET_NAME),
+        readAlias(body, KEYS_BUILDING_NUMBER),
         nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
         countryId);
     if (!missing.isEmpty()) {
@@ -336,9 +355,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return null;
     }
     List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
-        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)));
+        readAlias(body, KEYS_STREET_NAME),
+        readAlias(body, KEYS_BUILDING_NUMBER),
+        readAlias(body, KEYS_BUILDING_NAME));
     if (tooLong.isEmpty()) {
       return null;
     }
@@ -427,8 +446,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return null;
     }
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
-        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        readAlias(body, KEYS_STREET_NAME),
+        readAlias(body, KEYS_BUILDING_NUMBER),
         nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
         effectiveCountryForValidation);
     if (!missing.isEmpty()) {
@@ -570,6 +589,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    * exactly the reuse mode, not an ambiguous request.
    */
   private static boolean hasRawAddressFields(JSONObject body) {
+    // ETP-5806 follow-up — the 3 structured fields are checked by EVERY spelling (readAlias),
+    // not just the published one: a reuse body that sends the raw column or DAL property
+    // spelling alongside `locationAddress` is exactly as ambiguous as one that sends the
+    // published spelling, and must be refused the same way.
     return nullIfEmpty(body.optString(FIELD_ADDRESS_LINE1, null)) != null
         || nullIfEmpty(body.optString(FIELD_ADDRESS_LINE2, null)) != null
         || nullIfEmpty(body.optString(FIELD_CITY_NAME, null)) != null
@@ -577,9 +600,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         || nullIfEmpty(body.optString(FIELD_COUNTRY, null)) != null
         || nullIfEmpty(body.optString(FIELD_REGION, null)) != null
         || nullIfEmpty(body.optString(FIELD_REGION_NAME, null)) != null
-        || nullIfEmpty(body.optString(FIELD_STREET_NAME, null)) != null
-        || nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)) != null
-        || nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)) != null;
+        || readAlias(body, KEYS_STREET_NAME) != null
+        || readAlias(body, KEYS_BUILDING_NUMBER) != null
+        || readAlias(body, KEYS_BUILDING_NAME) != null;
   }
 
   private static void applyGeoLocFields(JSONObject body,
@@ -591,12 +614,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // that already has structured data from before the flag was switched off keeps it untouched
     // instead of being clobbered by this write's absence of the fields. Resolved per account in
     // handle()'s create/update entry points and threaded here.
-    String streetName = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_STREET_NAME, null)) : null;
+    String streetName = structuredAddressEnabled ? readAlias(body, KEYS_STREET_NAME) : null;
     String buildingNumber = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)) : null;
-    String buildingName = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)) : null;
+        ? readAlias(body, KEYS_BUILDING_NUMBER) : null;
+    String buildingName = structuredAddressEnabled ? readAlias(body, KEYS_BUILDING_NAME) : null;
     if (structuredAddressEnabled) {
       geoLoc.setOBSEPAStreetName(streetName);
       geoLoc.setOBSEPABuildingNumber(buildingNumber);
@@ -1073,6 +1094,53 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static String nullIfEmpty(String s) {
     return (s == null || s.isEmpty() || "null".equals(s)) ? null : s;
+  }
+
+  /**
+   * The key {@code body} actually carries for {@code alias}, matched exactly first and then
+   * ignoring case, or {@code null} when it carries neither. Mirrors
+   * {@code BpLocationHandler#matchingKey}.
+   *
+   * <p>Case-insensitively because AD column resolution is
+   * ({@code Entity#getPropertyByColumnName}), so a caller may legitimately send
+   * {@code em_obsepa_strtnm}. JSON itself is case-sensitive, so the caller's own spelling is what
+   * gets read — never a normalised one.
+   */
+  private static String matchingKey(JSONObject body, String alias) {
+    if (body.has(alias)) {
+      return alias;
+    }
+    // Jettison's keys() is a raw Iterator; read it as Object and convert, rather than casting to
+    // Iterator<String> and taking an unchecked warning for it.
+    Iterator<?> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      if (key.equalsIgnoreCase(alias)) {
+        return key;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * ETP-5806 follow-up — the resolved value of the first alias {@code body} carries, in
+   * {@code aliases}' own precedence order (so the published spelling wins when more than one
+   * spelling is present in the same body), or {@code null} when {@code body} carries none of
+   * them. See {@link #KEYS_STREET_NAME} for the full rationale.
+   *
+   * @param aliases every spelling of the field, in precedence order
+   */
+  private static String readAlias(JSONObject body, List<String> aliases) {
+    if (body == null) {
+      return null;
+    }
+    for (String alias : aliases) {
+      String present = matchingKey(body, alias);
+      if (present != null) {
+        return nullIfEmpty(body.optString(present, null));
+      }
+    }
+    return null;
   }
 
   private static boolean boolField(JSONObject body, String key, boolean defaultVal) {
