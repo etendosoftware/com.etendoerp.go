@@ -33,6 +33,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
 /**
  * Reactivating a posted document reverses its accounting first, on the server (ETP-5684).
@@ -89,6 +90,12 @@ public final class ReactivationUnpost {
     Tab tab = context.getAdTab();
     if (tab == null || tab.getTable() == null || !isPosted(tab, context.getRecordId())) {
       return null;
+    }
+    // The un-post commits: a role that may not run the reactivation itself must not get it.
+    NeoResponse denied = NeoButtonActionHelper.refusalForButtonProcess(context.getSfEntity(),
+        context.getFieldName());
+    if (denied != null) {
+      return denied;
     }
     DocumentPostingService.PostResult result =
         posting.unpost(tab.getTable().getId(), context.getRecordId());

@@ -178,18 +178,45 @@ public final class NeoButtonActionHelper {
     effectiveParams.put("recordId", recordId);
     effectiveParams.put("inpRecordId", recordId);
     addTabParamsCore(entity, recordId, effectiveParams);
-    if (obuiappProcess != null) {
-      if (!NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
-        return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+    NeoResponse denied = processAccessRefusal(adProcess, obuiappProcess);
+    if (denied != null) {
+      return denied;
+    }
+    return obuiappProcess != null
+        ? NeoProcessService.executeObuiappProcess(obuiappProcess, effectiveParams)
+        : NeoProcessService.executeProcess(adProcess, effectiveParams);
+  }
+
+  /**
+   * Whether the current role may run the process behind a button, resolved as
+   * {@link #executeButtonActionCore} resolves it. ETP-5684: a reactivation un-posts (and commits)
+   * before its process runs, so it asks this first — a role that cannot run the process must not
+   * get the un-post either.
+   *
+   * @return the 403 the action would answer, or {@code null} when the role may run it (or the
+   *         action has no button process to check, which the action itself then answers)
+   */
+  public static NeoResponse refusalForButtonProcess(SFEntity entity, String actionName) {
+    Column column = entity == null ? null : findButtonColumn(entity.getId(), actionName);
+    if (column == null) {
+      return null;
+    }
+    org.openbravo.client.application.Process obuiappProcess = column.getOBUIAPPProcess();
+    Process adProcess = column.getProcess();
+    if (adProcess == null && obuiappProcess == null) {
+      obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(column);
+    }
+    return processAccessRefusal(adProcess, obuiappProcess);
+  }
+
+  private static NeoResponse processAccessRefusal(Process adProcess,
+      org.openbravo.client.application.Process obuiappProcess) {
+    boolean allowed = obuiappProcess != null
+        ? NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())
+        : adProcess == null || NeoAccessHelper.hasProcessAccess(adProcess.getId());
+    return allowed ? null
+        : NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
             "Access denied to process for current role");
-      }
-      return NeoProcessService.executeObuiappProcess(obuiappProcess, effectiveParams);
-    }
-    if (!NeoAccessHelper.hasProcessAccess(adProcess.getId())) {
-      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
-          "Access denied to process for current role");
-    }
-    return NeoProcessService.executeProcess(adProcess, effectiveParams);
   }
 
   private static void addTabParamsCore(SFEntity entity, String recordId,

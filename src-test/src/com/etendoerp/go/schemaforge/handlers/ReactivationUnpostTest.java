@@ -54,6 +54,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
 /**
  * The server-side un-post a reactivation runs first (ETP-5684): only a posted record is un-posted,
@@ -135,6 +137,23 @@ class ReactivationUnpostTest {
     assertNull(ReactivationUnpost.unpostFirst(context, posting));
     assertEquals(Boolean.TRUE, attributes.get(ReactivationUnpost.ATTRIBUTE_UNPOSTED));
     assertTrue(ReactivationUnpost.ran(context));
+  }
+
+  @Test
+  void aRoleThatCannotRunTheReactivationGetsNoUnpost() {
+    when(row.get("posted")).thenReturn("Y");
+    SFEntity entity = mock(SFEntity.class);
+    when(context.getSfEntity()).thenReturn(entity);
+    when(context.getFieldName()).thenReturn("DocAction");
+    NeoResponse forbidden = NeoResponse.error(403, "Access denied to process for current role");
+    try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
+      helper.when(() -> NeoButtonActionHelper.refusalForButtonProcess(entity, "DocAction"))
+          .thenReturn(forbidden);
+
+      assertSame(forbidden, ReactivationUnpost.unpostFirst(context, posting));
+    }
+    verify(posting, never()).unpost(anyString(), anyString());
+    assertFalse(ReactivationUnpost.ran(context));
   }
 
   @Test

@@ -2008,6 +2008,11 @@ public class McpToolRouter {
     } else {
       actionName = McpDeclaredActions.customizationNameOf(sfEntity, actionName);
     }
+    // ETP-5684: judged again on the resolved name, so a contract alias for post/unpost is refused too.
+    postingRefusal = NeoAccountingAccessPolicy.refusalForPostingAction(sfEntity, actionName);
+    if (postingRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(postingRefusal);
+    }
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
     NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);

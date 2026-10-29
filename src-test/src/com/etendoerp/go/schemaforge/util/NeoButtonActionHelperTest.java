@@ -687,6 +687,39 @@ class NeoButtonActionHelperTest {
     }
 
     @Test
+    @DisplayName("ETP-5684: refusalForButtonProcess answers 403 when the role cannot run the button process")
+    void refusalForButtonProcessDeniesWithoutProcessAccess() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      Process classicProc = mock(Process.class);
+      doReturn("cproc1").when(classicProc).getId();
+      Column btnColumn = createButtonColumn("DocAction", classicProc, null);
+      setupFieldCriteria(new ArrayList<>(List.of(createMockField(btnColumn, "documentAction"))));
+      accessHelperMock.when(() -> NeoAccessHelper.hasProcessAccess("cproc1")).thenReturn(false);
+
+      NeoResponse response = NeoButtonActionHelper.refusalForButtonProcess(entity, "DocAction");
+
+      assertEquals(HttpServletResponse.SC_FORBIDDEN, response.getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("ETP-5684: refusalForButtonProcess lets the role through with access, or without a button")
+    void refusalForButtonProcessAllowsWithAccessOrWithoutButton() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      org.openbravo.client.application.Process obuiProc = mock(
+          org.openbravo.client.application.Process.class);
+      doReturn("proc1").when(obuiProc).getId();
+      Column btnColumn = createButtonColumn("Processed", null, obuiProc);
+      setupFieldCriteria(new ArrayList<>(List.of(createMockField(btnColumn, "processed"))));
+      accessHelperMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess("proc1")).thenReturn(true);
+
+      assertNull(NeoButtonActionHelper.refusalForButtonProcess(entity, "Processed"));
+      assertNull(NeoButtonActionHelper.refusalForButtonProcess(entity, "NoSuchButton"));
+      assertNull(NeoButtonActionHelper.refusalForButtonProcess(null, "Processed"));
+    }
+
+    @Test
     @DisplayName("should return 403 when Classic process access denied")
     void shouldReturn403WhenClassicAccessDenied() throws Exception {
       SFEntity entity = mock(SFEntity.class);

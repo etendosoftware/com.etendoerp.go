@@ -2718,6 +2718,33 @@ class McpToolRouterRouteTest {
     }
 
     @Test
+    @DisplayName("ETP-5684: a typed name that resolves to a posting action is refused on the resolved name")
+    void postingGateJudgesTheResolvedActionName() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+      NeoResponse forbidden = NeoResponse.error(403, "Access denied to accounting");
+
+      try (MockedStatic<McpDeclaredActions> declaredMock = mockStatic(McpDeclaredActions.class);
+          MockedStatic<NeoAccountingAccessPolicy> policyMock =
+              mockStatic(NeoAccountingAccessPolicy.class)) {
+        declaredMock.when(() -> McpDeclaredActions.customizationNameOf(entity, ACTION_NAME))
+            .thenReturn("unpost");
+        policyMock.when(() -> NeoAccountingAccessPolicy.refusalForPostingAction(entity, "unpost"))
+            .thenReturn(forbidden);
+
+        JSONObject result = router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        policyMock.verify(() -> NeoAccountingAccessPolicy.refusalForPostingAction(entity, ACTION_NAME));
+      }
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), any(), any(), any()), never());
+    }
+
+    @Test
     @DisplayName("etendo_action surfaces processResult:error for error NeoResponse")
     void actionErrorSurfacesProcessResultError() throws Exception {
       SFSpec spec = mockSpec();
