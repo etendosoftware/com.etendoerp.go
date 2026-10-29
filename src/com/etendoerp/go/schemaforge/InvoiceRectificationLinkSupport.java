@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -300,8 +301,9 @@ class InvoiceRectificationLinkSupport {
   }
 
   /**
-   * Injects {@code rectifyingInvoices} (a JSON array of {@code {id, documentNo}}, one entry per
-   * rectificativa that rectifies THIS invoice) into the record, by querying
+   * Injects {@code rectifyingInvoices} (a JSON array of {@code {id, documentNo, documentStatus,
+   * grandTotalAmount, currency$_identifier}}, one entry per rectificativa that rectifies THIS
+   * invoice) into the record, by querying
    * {@code C_Invoice_Reverse} for ALL active links where this invoice is the REVERSED one
    * (ETP-5745 CP-12) — the mirror image of {@link #enrichOriginInvoice}, which reads the same
    * table in the opposite direction.
@@ -316,9 +318,10 @@ class InvoiceRectificationLinkSupport {
   @SuppressWarnings("java:S2077")
   void enrichRectifyingInvoices(JSONObject rec, String invoiceId) throws Exception {
     String sql =
-        "SELECT inv.c_invoice_id, inv.documentno "
+        "SELECT inv.c_invoice_id, inv.documentno, inv.docstatus, inv.grandtotal, cur.iso_code "
         + "FROM c_invoice_reverse r "
         + "JOIN c_invoice inv ON inv.c_invoice_id = r.c_invoice_id "
+        + "LEFT JOIN c_currency cur ON cur.c_currency_id = inv.c_currency_id "
         + "WHERE r.reversed_c_invoice_id = ? AND r.isactive = 'Y' "
         + "ORDER BY inv.documentno";
     try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
@@ -326,7 +329,17 @@ class InvoiceRectificationLinkSupport {
       try (ResultSet rs = ps.executeQuery()) {
         JSONArray rectifying = new JSONArray();
         while (rs.next()) {
-          rectifying.put(new JSONObject().put("id", rs.getString(1)).put("documentNo", rs.getString(2)));
+          // ETP-6002: the fields every invoice chip renders (amount, currency, status), the same
+          // shape GoodsShipmentHeaderHandler#enrichLinkedInvoices returns — the related-documents
+          // chip of a rectificative used to show its number only. Purely additive keys.
+          BigDecimal total = rs.getBigDecimal(4);
+          String iso = rs.getString(5);
+          rectifying.put(new JSONObject()
+              .put("id", rs.getString(1))
+              .put("documentNo", rs.getString(2))
+              .put("documentStatus", rs.getString(3))
+              .put("grandTotalAmount", total != null ? total : JSONObject.NULL)
+              .put("currency$_identifier", iso != null ? iso : JSONObject.NULL));
         }
         rec.put(AbstractInvoiceHeaderHandler.FIELD_RECTIFYING_INVOICES, rectifying);
       }

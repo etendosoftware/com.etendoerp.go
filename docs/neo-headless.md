@@ -11537,7 +11537,7 @@ both `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler` — both met
 abstract handler from growing (java:S1448)): the rectificativa(s) that rectify THIS
 invoice, read from `C_Invoice_Reverse` in the opposite direction. Before this field existed, the ORIGINAL
 invoice's own "Rectificaciones" tab and "Documentos relacionados" card always rendered empty — only a
-rectificativa could show anything, via `originInvoices`.
+rectificativa could show anything, via `originInvoices`. Since ETP-6002 each entry is `{id, documentNo, documentStatus, grandTotalAmount, currency$_identifier}` (the shape of the shipment's `linkedInvoices`), so the related-documents chip shows amount and status; purely additive keys, sales and purchase alike.
 
 **ETP-6002 — a sales rectificative is linked by its lines, not by a header PATCH.** `C_Invoice_Reverse`
 used to be written only by `InvoiceRectificationLinkSupport#persistOriginInvoice`, on a header
