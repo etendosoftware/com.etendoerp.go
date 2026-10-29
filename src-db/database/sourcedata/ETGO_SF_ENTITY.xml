@@ -403,6 +403,7 @@
 <!--119BA0E891D944B8B19E2C557E1914C6-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--119BA0E891D944B8B19E2C557E1914C6-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--119BA0E891D944B8B19E2C557E1914C6-->  <SEQNO><![CDATA[30]]></SEQNO>
+<!--119BA0E891D944B8B19E2C557E1914C6-->  <AGENT_PROMPT><![CDATA[Prices of one price list version (parentId = the version). There is no bulk update, in the app either: to change many prices, list them here (paged, totalRows is the real count), show the user the new prices, and after the user confirms update them one by one with etendo_update.]]></AGENT_PROMPT>
 <!--119BA0E891D944B8B19E2C557E1914C6--></ETGO_SF_ENTITY>
 
 <!--1211A620DEB64FCEBCDB32FDE7E956CB--><ETGO_SF_ENTITY>

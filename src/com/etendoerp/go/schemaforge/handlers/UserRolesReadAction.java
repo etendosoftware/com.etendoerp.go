@@ -56,6 +56,8 @@ final class UserRolesReadAction {
   private static final Logger log = LogManager.getLogger(UserRolesReadAction.class);
 
   static final String ACTION = "roles";
+  /** The answer's list of roles; same word as the action, a different thing. */
+  private static final String KEY_ROLES = ACTION;
 
   private static final NeoActionContract CONTRACT = NeoActionContract.read(ACTION,
       "Returns the roles this user has, as the Users window shows them: {userId, administrator, "
@@ -99,7 +101,7 @@ final class UserRolesReadAction {
       JSONObject body = new JSONObject();
       body.put("userId", userId);
       body.put("administrator", holdsClientAdminRole(user));
-      body.put("roles", roles);
+      body.put(KEY_ROLES, roles);
       return NeoResponse.ok(body);
     } catch (OBException e) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "User not found");
