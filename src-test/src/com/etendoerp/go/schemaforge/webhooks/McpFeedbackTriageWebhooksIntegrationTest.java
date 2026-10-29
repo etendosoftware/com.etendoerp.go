@@ -214,6 +214,20 @@ public class McpFeedbackTriageWebhooksIntegrationTest extends OBBaseTest {
   }
 
   @Test
+  public void triageWithoutTaskMarksTheRowWithAnEmptyTask() throws Exception {
+    String id = insertRow(otherClient, FEEDBACK, PAYLOAD, 0, false);
+
+    Map<String, String> response = call(new McpFeedbackTriage(),
+        params(id, CELL, ISSUE, null, ASSIGNEE));
+
+    assertEquals(TRUE, response.get(McpFeedbackTriage.KEY_UPDATED));
+    Map<String, Object> row = readRow(id);
+    assertNull(row.get("triage_task"));
+    assertEquals(ISSUE, row.get("triage_issue"));
+    assertNotNull(row.get("triaged"));
+  }
+
+  @Test
   public void triageWithoutAssigneeStillMarksTheRowProcessed() throws Exception {
     String id = insertRow(otherClient, FEEDBACK, PAYLOAD, 0, false);
 
@@ -276,7 +290,6 @@ public class McpFeedbackTriageWebhooksIntegrationTest extends OBBaseTest {
         { CELL, ISSUE, TASK, "a".repeat(40) },
         { null, ISSUE, TASK, ASSIGNEE },
         { CELL, null, TASK, ASSIGNEE },
-        { CELL, ISSUE, null, ASSIGNEE },
     };
     for (String[] values : invalid) {
       Map<String, String> response = call(new McpFeedbackTriage(),
