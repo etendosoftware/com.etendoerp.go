@@ -69,9 +69,11 @@ final class McpSchemaFieldBuilder {
    */
   private static final Map<String, String> VIRTUAL_FIELD_PROMPTS = Map.of(
       "C_COUNTRY_ID",
-      "The country of the address. Also the argument the region selector needs: call etendo_selectors "
-          + "for 'region' with recordContext {\"country\": \"<this id>\"}, since province names "
-          + "exist only relative to a country.",
+      "The country of the address, as an ID ONLY (e.g. '106' for Spain) — resolve it with "
+          + "etendo_selectors for 'country'; a country NAME sent here is refused, not resolved. "
+          + "Also the argument the region selector needs: call etendo_selectors for "
+          + "'region' with recordContext {\"country\": \"<this id>\"}, since province names exist "
+          + "only relative to a country.",
       "C_REGION_ID",
       "The province, as an ID ONLY — resolve it with etendo_selectors, passing the country in "
           + "recordContext. A province NAME sent here is refused, not resolved; send it in "
@@ -760,6 +762,9 @@ final class McpSchemaFieldBuilder {
         businessCriticalByColumnId.get((String) col.getId()));
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
+    if ("list".equals(type)) {
+      McpSchemaActionFields.addListOptions(fieldObj, col);
+    }
     addWritableVia(fieldObj, dalEntity, dbColName);
     if (isButton) {
       addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));
