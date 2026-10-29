@@ -142,11 +142,6 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
     // ETP-5703: the partner's only ship-to (and its bill-to) on a create without an address.
     PartnerLocationDefaults.fillOrderLocations(context);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
-    // ETP-5726: MCP only — a draft order's currency may not leave its price list in another one.
-    NeoResponse currencyRefusal = OrderCurrencyPriceListGuard.refuseCurrencyOutsidePriceList(context);
-    if (currencyRefusal != null) {
-      return currencyRefusal;
-    }
     // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
     // with side effects runs.
     NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);

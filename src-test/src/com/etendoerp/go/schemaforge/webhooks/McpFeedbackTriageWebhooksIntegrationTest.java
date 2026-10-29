@@ -163,6 +163,22 @@ public class McpFeedbackTriageWebhooksIntegrationTest extends OBBaseTest {
   }
 
   @Test
+  public void pendingSendsNonAsciiPayloadsAsAsciiEscapes() throws Exception {
+    String text = "{\"summary\":\"ignoró “comillas” → 😀\"}";
+    String id = insertRow(otherClient, FEEDBACK, text, 0, false);
+
+    Map<String, String> response = call(new McpFeedbackPending(), new HashMap<>());
+
+    String result = response.get("result");
+    assertTrue("result survives a Latin-1 body: " + result,
+        result.chars().allMatch(c -> c < 0x80));
+    JSONArray rows = new JSONArray(result);
+    assertEquals(id, rows.getJSONObject(0).getString("id"));
+    assertEquals("the parser restores the original text", text,
+        rows.getJSONObject(0).getString("payload"));
+  }
+
+  @Test
   public void pendingDefaultsToTwentyAndCapsAtOneHundred() {
     assertEquals(Integer.valueOf(20), McpFeedbackPending.parseLimit(null));
     assertEquals(Integer.valueOf(20), McpFeedbackPending.parseLimit(" "));
@@ -211,6 +227,20 @@ public class McpFeedbackTriageWebhooksIntegrationTest extends OBBaseTest {
     assertEquals("The human review is not touched", "Y", row.get("isactive"));
     assertNull(row.get("status"));
     assertFalse("A triaged row leaves the queue", ids(pending()).contains(id));
+  }
+
+  @Test
+  public void triageWithoutTaskMarksTheRowWithAnEmptyTask() throws Exception {
+    String id = insertRow(otherClient, FEEDBACK, PAYLOAD, 0, false);
+
+    Map<String, String> response = call(new McpFeedbackTriage(),
+        params(id, CELL, ISSUE, null, ASSIGNEE));
+
+    assertEquals(TRUE, response.get(McpFeedbackTriage.KEY_UPDATED));
+    Map<String, Object> row = readRow(id);
+    assertNull(row.get("triage_task"));
+    assertEquals(ISSUE, row.get("triage_issue"));
+    assertNotNull(row.get("triaged"));
   }
 
   @Test
@@ -276,7 +306,6 @@ public class McpFeedbackTriageWebhooksIntegrationTest extends OBBaseTest {
         { CELL, ISSUE, TASK, "a".repeat(40) },
         { null, ISSUE, TASK, ASSIGNEE },
         { CELL, null, TASK, ASSIGNEE },
-        { CELL, ISSUE, null, ASSIGNEE },
     };
     for (String[] values : invalid) {
       Map<String, String> response = call(new McpFeedbackTriage(),

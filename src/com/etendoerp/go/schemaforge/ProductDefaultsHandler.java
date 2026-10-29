@@ -536,6 +536,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       overwriteDefault(defaults, FIELD_UOM, UOM.class, clientId);
       overwriteDefault(defaults, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
       injectTypeTaxCategory(defaults, context, clientId);
+      injectTypeStockFlags(defaults);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("product afterHandle: failed to inject uOM/taxCategory default", e);
@@ -740,6 +741,23 @@ public class ProductDefaultsHandler implements NeoHandler {
     putCategory(defaults, FIELD_TAX_CATEGORY, id, identifier);
     if (typeRequested) {
       putCategory(defaults, DEFAULT_KEY_TYPE_TAX_CATEGORY, id, identifier);
+    }
+  }
+
+  /**
+   * ETP-5680: the {@code stocked} / {@code returnable} defaults follow the product type, as the
+   * create path already enforces ({@link #enforceNonStockableProductTypes}). The generic resolver
+   * answers the column defaults ({@code IsStocked='Y'}, {@code Returnable='Y'}, i.e. Item) whatever
+   * type is asked for, so for a {@link #NON_STOCKABLE_PRODUCT_TYPES} type both are overridden with
+   * {@code false}. Runs after {@link #injectTypeTaxCategory}, which has already set
+   * {@code defaults.productType} to the requested type when it is valid, so that value is the
+   * effective type; every other type (Item, Online, none) is left as the generic resolver answered.
+   */
+  private static void injectTypeStockFlags(JSONObject defaults) throws JSONException {
+    String type = StringUtils.trimToNull(defaults.optString(FIELD_PRODUCT_TYPE, null));
+    if (type != null && NON_STOCKABLE_PRODUCT_TYPES.contains(type)) {
+      defaults.put(FIELD_STOCKED, false);
+      defaults.put(FIELD_RETURNABLE, false);
     }
   }
 
