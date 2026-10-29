@@ -368,7 +368,8 @@ read-only sessions most likely to get lost.
 
 ## Triage bot (ETP-5952)
 
-An external bot (`etendo-bots`, `bin/bug-triage`, origin `mcp`) classifies every feedback report
+An external bot, the bug router (`etendo-bots`, `bin/bug-router`, origin `mcp`; called `bin/bug-triage`
+before it was renamed), classifies every feedback report
 into a cell, assigns it to a person when it is sure, opens a public pre-ticket on GitHub
 (`etendo-ai`) and, optionally, a private Jira task (ETP), and records the result on the row. The
 pre-ticket carries the `ETGO_MCP_USAGE` row id, which leads back to the private detail. It polls every 15

@@ -33,7 +33,7 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * ETP-5952 — the external MCP feedback triage bot ({@code etendo-bots}, {@code bin/bug-triage})
+ * ETP-5952 — the external MCP feedback bug router ({@code etendo-bots}, {@code bin/bug-router})
  * records what it did with one {@code etendo_feedback} report: the cell it classified it into, the
  * person it assigned (if it was sure), the public GitHub pre-ticket and, when it opened one, the
  * private Jira task.
