@@ -356,6 +356,32 @@ public final class GoFeatureFlags {
   public static final String FLAG_STRUCTURED_ADDRESS_FOR_SEPA = "structured-address-for-sepa";
 
   /**
+   * ETP-5716 — whether Modelo 390 (the annual VAT summary) is available in the Fiscal Models
+   * catalog. Positive polarity: {@code true} = available; the default ({@code false}, and every
+   * failure of this class) hides it. TTL 2027-01-01.
+   *
+   * <p><b>Backend-only, read through one gate.</b> Only {@code FiscalModel390Flag} evaluates it,
+   * and only {@code NeoFiscalModelsCatalogService} calls that gate: off, the catalog answer drops
+   * model {@code 390} and lists it under {@code _unavailable}, and a catalog save can neither
+   * switch it on nor erase the value stored before the flag was turned off. Every SPA surface
+   * (catalog drawer, declarations list, new declaration, the Organization window's Modelo 390
+   * section) reacts to that answer; nothing in the browser reads this key, so never add it to
+   * the web client's {@code flag-keys.js}.
+   *
+   * <p><b>A visual gate, not authorization.</b> The {@code /fiscal390/*} and
+   * legal-representative endpoints keep answering whatever the flag says; they stay protected
+   * by the role's window access.
+   *
+   * <p><b>Targeted per user and per tenant</b> on the hosted arms: the context carries the
+   * authenticated account email (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; with no resolvable account, {@code clientId} only. A Datadog rule matches the
+   * lowercase {@code email} attribute against a lowercase value. The local arm is a plain
+   * per-environment boolean: {@code etendo.go.flags.fiscal-model-390} /
+   * {@code ETGO_FLAG_FISCAL_MODEL_390}.
+   */
+  public static final String FLAG_FISCAL_MODEL_390 = "fiscal-model-390";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

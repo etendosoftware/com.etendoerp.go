@@ -670,6 +670,48 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
+   * ETP-5716 — a PUT the service refuses because the stored catalog cannot be read is a server
+   * fault, not the client's: the {@link IllegalStateException} is not turned into a 400 here, and
+   * nothing is flushed or answered — it propagates to {@code NeoServlet}, which maps it to a 500
+   * (see {@code NeoServletProcessRequestTest}).
+   */
+  @Test
+  public void handleFiscalModelsCatalogPutRefusedByTheServiceIsNotABadRequest() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    OBDal dal = mock(OBDal.class);
+    IllegalStateException refusal = new IllegalStateException(
+        "The stored fiscal models catalog could not be read; nothing was saved");
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoRequestBodyParser> bodyParserMock =
+             Mockito.mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "PUT")).thenReturn(true);
+      bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{\"303\":true}");
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      catalogMock.when(() -> NeoFiscalModelsCatalogService.saveActiveModels("{\"303\":true}"))
+          .thenThrow(refusal);
+
+      try {
+        handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+            "PUT", request, response);
+        throw new AssertionError("expected the refusal to propagate to the servlet");
+      } catch (IllegalStateException propagated) {
+        assertEquals(refusal, propagated);
+      }
+      verify(servlet, never()).sendError(any(), Mockito.anyInt(), any());
+      verify(servlet, never()).writeResponse(any(), any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
    * Verifies method restriction for the fiscal models catalog endpoint.
    */
   @Test
