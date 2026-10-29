@@ -21,9 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
@@ -59,6 +61,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -762,7 +765,8 @@ class McpSchemaFieldBuilderTest {
 
     private static final Class<?>[] SIGNATURE = {
         org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class,
-        McpSchemaFieldBuilder.FieldMetadata.class };
+        McpSchemaFieldBuilder.FieldMetadata.class,
+        McpSchemaFieldBuilder.StructuredAddressGate.class };
 
     private McpSchemaFieldBuilder.FieldMetadata metadata(String... excludedColumnIds) {
       return new McpSchemaFieldBuilder.FieldMetadata(new HashMap<>(), new HashMap<>(),
@@ -788,8 +792,15 @@ class McpSchemaFieldBuilderTest {
     private boolean include(org.openbravo.model.ad.datamodel.Column col,
         java.util.Set<String> systemCols, McpSchemaFieldBuilder.FieldMetadata fieldMetadata)
         throws Exception {
+      return include(col, systemCols, fieldMetadata,
+          new McpSchemaFieldBuilder.StructuredAddressGate());
+    }
+
+    private boolean include(org.openbravo.model.ad.datamodel.Column col,
+        java.util.Set<String> systemCols, McpSchemaFieldBuilder.FieldMetadata fieldMetadata,
+        McpSchemaFieldBuilder.StructuredAddressGate gate) throws Exception {
       return (boolean) invokeStatic("shouldIncludeSchemaColumn", SIGNATURE, col, systemCols,
-          fieldMetadata);
+          fieldMetadata, gate);
     }
 
     @Test
@@ -890,6 +901,72 @@ class McpSchemaFieldBuilderTest {
 
         assertTrue(include(column("col-sepa", dbColumnName, true, null),
             java.util.Set.of(), metadata()));
+      }
+    }
+
+    /**
+     * ETP-5806 follow-up — the gate is PER ACCOUNT: the same environment publishes the column to
+     * a targeted account's agent and withholds it from everyone else. An account-less evaluation
+     * here would have answered the global default to every account, contradicting the per-account
+     * capability signal the SPA already renders from.
+     */
+    @Test
+    @DisplayName("a structured SEPA address column is gated per account")
+    void structuredAddressColumnIsGatedPerAccount() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+            argThat(ctx -> ctx != null
+                && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
+
+        accounts.when(GoAccountResolver::currentAccountEmail)
+            .thenReturn("localization@etendo.software");
+        assertTrue(include(column("col-sepa", "EM_OBSEPA_StrtNm", true, null),
+            java.util.Set.of(), metadata()));
+
+        accounts.when(GoAccountResolver::currentAccountEmail)
+            .thenReturn("someone.else@example.com");
+        assertFalse(include(column("col-sepa", "EM_OBSEPA_StrtNm", true, null),
+            java.util.Set.of(), metadata()));
+      }
+    }
+
+    /**
+     * ETP-5806 follow-up — the account is resolved ONCE for a whole schema walk, and not at all on
+     * a table that carries none of the 3 structured columns. Before the gate was threaded down,
+     * this call site resolved it inline per matching column — up to 3 account lookups (each of
+     * which can issue 2 queries) per address-bearing table — contradicting the "resolved once per
+     * request, never re-resolved per check" invariant stated in {@code GoFeatureFlags} and
+     * {@code docs/feature-flags-and-tenant-upgrade.md}.
+     */
+    @Test
+    @DisplayName("the account is resolved once per walk, and never without a structured column")
+    void theStructuredAddressAccountIsResolvedOncePerWalk() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+        accounts.when(GoAccountResolver::currentAccountEmail)
+            .thenReturn("localization@etendo.software");
+
+        McpSchemaFieldBuilder.StructuredAddressGate gate =
+            new McpSchemaFieldBuilder.StructuredAddressGate();
+        for (String dbColumnName : java.util.List.of("EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb",
+            "EM_OBSEPA_BldgNm")) {
+          assertTrue(include(column("col-sepa", dbColumnName, true, null), java.util.Set.of(),
+              metadata(), gate));
+        }
+        accounts.verify(GoAccountResolver::currentAccountEmail, times(1));
+
+        // A table with none of the 3 columns pays nothing at all.
+        McpSchemaFieldBuilder.StructuredAddressGate untouched =
+            new McpSchemaFieldBuilder.StructuredAddressGate();
+        assertTrue(include(column("col-1", "Name", true, null), java.util.Set.of(), metadata(),
+            untouched));
+        accounts.verify(GoAccountResolver::currentAccountEmail, times(1));
       }
     }
   }
