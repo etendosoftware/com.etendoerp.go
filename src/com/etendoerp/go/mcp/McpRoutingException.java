@@ -123,9 +123,25 @@ class McpRoutingException extends OBException {
    * @param extraKeys the keys to merge into {@link #toEnvelope()}
    * @return this exception
    */
-  private McpRoutingException withExtras(JSONObject extraKeys) {
+  McpRoutingException withExtras(JSONObject extraKeys) {
     this.extras = extraKeys;
     return this;
+  }
+
+  /**
+   * A 422 {@code validation_error} about a read request's own arguments, for the factories of
+   * {@link McpRequestRefusals}.
+   *
+   * @param detail    what was wrong and that nothing was read
+   * @param field     the argument the refusal is about
+   * @param available the values that would work; may be empty
+   * @param hint      how to correct the call
+   * @return the exception to throw
+   */
+  static McpRoutingException unprocessable(String detail, String field, List<String> available,
+      String hint) {
+    return new McpRoutingException(detail, McpConstants.STATUS_UNPROCESSABLE,
+        McpConstants.ERROR_VALIDATION, field, available, hint, McpConstants.SEE_ALSO_READING);
   }
 
   /**
@@ -631,21 +647,19 @@ class McpRoutingException extends OBException {
   }
 
   /**
-   * A filter used a recognized operator but gave it a value of the wrong shape (ETP-5184).
+   * The same refusal, also naming {@code allParents} for an entity that may be listed across every
+   * parent (ETP-5852): the agent learns the on-purpose alternative only where it exists.
    *
-   * <p>Only {@code between} can currently fail this way — it needs a two-element array, and a
-   * one-element or non-array value used to be logged and the condition dropped.</p>
-   *
-   * @param key      the filter key
-   * @param operator the operator whose value was malformed
-   * @param expected one clause describing the shape that was expected
-   * @return the exception to throw
+   * @return a copy of this refusal with the alternative in its hint
    */
-  static McpRoutingException malformedFilterOperator(String key, String operator, String expected) {
-    return new McpRoutingException(
-        "Filter '" + key + "' operator '" + operator + "' has a malformed value: " + expected,
-        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, key, List.of(),
-        "Correct the operator's value and retry.", McpConstants.SEE_ALSO_READING);
+  McpRoutingException offeringAllParents() {
+    McpRoutingException copy = new McpRoutingException(getMessage(), status, errorCode, field,
+        available, (hint == null ? "" : hint + " ")
+            + "To search this entity across every parent instead (for example by product), "
+            + "call etendo_list again with allParents:true and the filters you need.",
+        seeAlso);
+    copy.extras = extras;
+    return copy;
   }
 
   /**
