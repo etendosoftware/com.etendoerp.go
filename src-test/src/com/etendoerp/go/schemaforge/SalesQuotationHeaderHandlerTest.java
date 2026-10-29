@@ -88,6 +88,7 @@ import org.openbravo.model.common.order.Order;
  * created order's rate is recomputed from its own date instead of copied.
  *
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  */
 public class SalesQuotationHeaderHandlerTest {
@@ -630,6 +631,49 @@ public class SalesQuotationHeaderHandlerTest {
       assertEquals("order-5528", result.getBody().getString("salesOrderId"));
       assertEquals("DR", result.getBody().getString("documentStatus"));
     }
+  }
+
+  /**
+   * ETP-5051 — the order created from the quotation and its lines are checked against the plan
+   * quotas after the conversion and its reactivation, before the answer. Nothing has been committed
+   * yet, so a refusal rolls the WHOLE conversion back: 403 {@code QUOTA_EXCEEDED}, a rollback, no
+   * commit, and no {@code salesOrderId} handed to the client.
+   */
+  @Test
+  public void testConvertQuotation_overABlockQuota_rollsTheWholeConversionBack() throws Exception {
+    Order order = orderWithStatus("CO", "DR");
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    when(process.convertQuotationIntoSalesOrder(false, "q-5528")).thenReturn(order);
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class), mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class), mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+    OBDal dal = mock(OBDal.class);
+    when(dal.getSession()).thenReturn(mock(Session.class));
+
+    NeoResponse result;
+    try (MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class);
+         MockedConstruction<DocumentCurrencyRate> rates =
+             Mockito.mockConstruction(DocumentCurrencyRate.class);
+         MockedStatic<OrderDocActionSupport> docAction =
+             Mockito.mockStatic(OrderDocActionSupport.class);
+         MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
+
+      result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("Convertquotation").recordId("q-5528").build());
+
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(order));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(result);
+    assertFalse(result.getBody().has("salesOrderId"));
+    verify(dal).rollbackAndClose();
+    verify(dal, never()).commitAndClose();
   }
 
   /**

@@ -777,6 +777,63 @@ class SubscriptionServiceTest {
     }
 
     @Test
+    void writesTheProviderCancelAtPeriodEndFlagWithoutTouchingTheStatusMapping() {
+      // ETP-5051 (O-1b) — display-only: the flag rides along, the status stays CURRENT -> active.
+      Subscription row = subscriptionOf(CLIENT_ID);
+      when(row.isCancelAtPeriodEnd()).thenReturn(false);
+
+      service.applyLifecycleOutcome(row, SubscriptionEventOutcome
+          .apply(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null)
+          .withCancelAtPeriodEnd(CancelAtPeriodEnd.SET), eventAt);
+
+      verify(row).setCancelAtPeriodEnd(true);
+      verify(row).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
+      verify(row).setGraceAnchor(null);
+    }
+
+    @Test
+    void leavesTheCancelFlagAloneWhenTheEventDoesNotReportIt() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+
+      service.applyLifecycleOutcome(row, pastDue(), eventAt);
+
+      verify(row, never()).setCancelAtPeriodEnd(any());
+    }
+
+    @Test
+    void writeCancelAtPeriodEndReportsNoChangeForAnEqualOrUnreportedFlag() {
+      for (Boolean stored : new Boolean[] { Boolean.TRUE, Boolean.FALSE }) {
+        Subscription row = subscriptionOf(CLIENT_ID);
+        when(row.isCancelAtPeriodEnd()).thenReturn(stored);
+
+        assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, CancelAtPeriodEnd.of(stored)),
+            "same " + stored);
+        assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, CancelAtPeriodEnd.NOT_REPORTED),
+            "not reported on " + stored);
+        assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, null), "null on " + stored);
+        verify(row, never()).setCancelAtPeriodEnd(any());
+      }
+    }
+
+    @Test
+    void writeCancelAtPeriodEndTogglesTheFlagInEitherDirection() {
+      Subscription scheduling = subscriptionOf(CLIENT_ID);
+      when(scheduling.isCancelAtPeriodEnd()).thenReturn(false);
+      Subscription resuming = subscriptionOf(CLIENT_ID);
+      when(resuming.isCancelAtPeriodEnd()).thenReturn(true);
+      Subscription unset = subscriptionOf(CLIENT_ID);
+      when(unset.isCancelAtPeriodEnd()).thenReturn(null);
+
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(scheduling, CancelAtPeriodEnd.SET));
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(resuming, CancelAtPeriodEnd.CLEARED));
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(unset, CancelAtPeriodEnd.CLEARED));
+
+      verify(scheduling).setCancelAtPeriodEnd(true);
+      verify(resuming).setCancelAtPeriodEnd(false);
+      verify(unset).setCancelAtPeriodEnd(false);
+    }
+
+    @Test
     void setsTheWatermarkOnARowThatHasNone() {
       Subscription row = subscriptionOf(CLIENT_ID);
 

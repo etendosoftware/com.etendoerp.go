@@ -93,7 +93,6 @@
     "TbaiXmlgeneratorHandler",
     "TransactionTypeHandler",
     "TrialBalanceReportHandler",
-    "UserRoleAssignmentHandler",
     "VendorAccountingHandler",
     "VerifactuConfigReadyHandler",
     "WidgetActivityHandler",

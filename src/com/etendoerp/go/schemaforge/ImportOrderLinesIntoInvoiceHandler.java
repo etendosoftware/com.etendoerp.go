@@ -279,6 +279,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
           (call, lines) -> unmarkRemainder(batches, call, lines)));
     }
     InvoiceGlobalDiscountRule.apply(invoice, discount);
+    requireQuotaAllowed(InvoiceLine.ENTITY_NAME, created);
     return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
         : invoice.getSalesOrder().getId());
   }
