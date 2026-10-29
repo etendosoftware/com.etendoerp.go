@@ -44,8 +44,12 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.usage.quota.QuotaDefinition;
+import com.etendoerp.go.usage.quota.QuotaEvaluation;
+import com.etendoerp.go.usage.quota.QuotaVerdict;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
@@ -59,6 +63,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * {@code OBContext}; the CRUD/DEFAULTS context builders remain integration-covered.
  *
  * @covers com.etendoerp.go.mcp.McpHookExecutor
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaWriteGate
  * @covers com.etendoerp.go.mcp.McpMessageKeyHints
  * @covers com.etendoerp.go.mcp.McpToolResponses
  */
@@ -125,6 +130,31 @@ public class McpHookExecutorTest {
 
     assertNotNull(result);
     assertTrue("400 must set isError", result.getBoolean(FIELD_IS_ERROR));
+  }
+
+  /**
+   * ETP-5051 — an {@code etendo_create} refused by a plan quota reaches the agent as an MCP error
+   * that still carries the 403, the {@code QUOTA_EXCEEDED} code, the sentence and the QuotaItem.
+   */
+  @Test
+  public void testNeoResponseToMcpResultKeepsAQuotaRefusalMachineReadable() throws Exception {
+    QuotaDefinition quota = QuotaDefinition.builder().resourceId("RES-DOCS")
+        .resourceKey("POSTED_SALES_INVOICES").resourceName("Posted sales invoices")
+        .unitLabel("Inv").enforcementMode("block").includedQty(100L).build();
+    NeoResponse refusal = NeoQuotaWriteGate.refusalResponse(
+        new QuotaEvaluation(quota, "month", null, 100L, QuotaVerdict.DENY));
+
+    JSONObject result = McpHookExecutor.neoResponseToMcpResult(refusal);
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    JSONObject body = new JSONObject(
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+    assertEquals(403, body.getInt(FIELD_STATUS));
+    assertEquals("QUOTA_EXCEEDED", body.getString("code"));
+    assertEquals("Quota exceeded: Posted sales invoices (100/100 Inv)", body.getString("detail"));
+    assertEquals("POSTED_SALES_INVOICES",
+        body.getJSONObject("quota").getString("resourceKey"));
+    assertEquals(100L, body.getJSONObject("quota").getLong("consumed"));
   }
 
   @Test

@@ -39,6 +39,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -51,20 +52,25 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.data.Account;
 
 /**
  * Specifies the contact-type rules: a contact ({@code C_BPartner}) and a contact category
@@ -85,6 +91,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * @covers com.etendoerp.go.schemaforge.handlers.ContactTypeFlagGuardHandler
  * @covers com.etendoerp.go.schemaforge.handlers.ContactCustomerTabHandler
  * @covers com.etendoerp.go.schemaforge.handlers.ContactVendorTabHandler
+ * @covers com.etendoerp.go.common.GoAccountResolver
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -428,6 +435,135 @@ class ContactTypeRulesTest {
 
     assertNull(new BusinessPartnerCategoryHandler().handle(crudContext(method, body, null)));
     verify(conn, never()).prepareStatement(anyString());
+  }
+
+  // ── Flag targeting: per account (ETGO_ACCOUNT email) + tenant ─────────────────────────────
+
+  /**
+   * The request's flag read targets the {@code ETGO_ACCOUNT} behind the OBContext user — not the
+   * AD username, which carries the per-environment suffix — plus the OBContext tenant. The
+   * targeting key and {@code Email} keep the stored case; {@code email} is lowercased for Datadog.
+   */
+  @Test
+  void isEnabledTargetsTheAccountOfTheRequestUserAndItsTenant() {
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("Owner@Example.com");
+    givenAccountLookupReturns(account);
+    OBContext obContext = obContext("owner@example.com+acmeltd", "CLI-1", false);
+
+    try (MockedStatic<OBContext> obContextStatic = mockStatic(OBContext.class)) {
+      obContextStatic.when(OBContext::getOBContext).thenReturn(obContext);
+      assertTrue(ContactTypeRules.isEnabled());
+    }
+
+    FeatureFlagContext flagContext = capturedFlagContext();
+    assertEquals("Owner@Example.com", flagContext.getTargetingKey());
+    assertEquals(Map.of(
+        FeatureFlagContext.ATTRIBUTE_EMAIL, "Owner@Example.com",
+        FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE, "owner@example.com",
+        FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLI-1"), flagContext.getAttributes());
+  }
+
+  static Stream<Arguments> requestsWithNoAccount() {
+    return Stream.of(
+        Arguments.of("no OBContext", false, null, null, false, Map.of()),
+        Arguments.of("no user, tenant still published", true, null, "CLI-1", false,
+            Map.of(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLI-1")),
+        Arguments.of("hand-created user with no ETGO_ACCOUNT", true, "warehouse-operator",
+            "CLI-1", false, Map.of(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLI-1")),
+        Arguments.of("tenant lookup fails", true, "warehouse-operator", null, true, Map.of()));
+  }
+
+  /**
+   * A request with no account behind it is evaluated account-less — no targeting key, no email
+   * attribute, so no per-account rule can match — and a tenant that cannot be read is left out;
+   * neither case fails the write.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("requestsWithNoAccount")
+  void isEnabledWithoutAnAccountIsEvaluatedAccountLess(String scenario, boolean hasContext,
+      String username, String clientId, boolean clientLookupFails,
+      Map<String, String> expectedAttributes) {
+    givenAccountLookupReturns(null);
+    OBContext obContext = hasContext ? obContext(username, clientId, clientLookupFails) : null;
+
+    try (MockedStatic<OBContext> obContextStatic = mockStatic(OBContext.class)) {
+      obContextStatic.when(OBContext::getOBContext).thenReturn(obContext);
+      ContactTypeRules.isEnabled();
+    }
+
+    FeatureFlagContext flagContext = capturedFlagContext();
+    assertNull(flagContext.getTargetingKey(), scenario);
+    assertEquals(expectedAttributes, flagContext.getAttributes(), scenario);
+  }
+
+  static Stream<Arguments> explicitAccountAndTenant() {
+    return Stream.of(
+        Arguments.of("account and tenant", "owner@example.com", "CLI-1", "owner@example.com",
+            Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "owner@example.com",
+                FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE, "owner@example.com",
+                FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLI-1")),
+        Arguments.of("blank tenant is omitted", "owner@example.com", "  ", "owner@example.com",
+            Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "owner@example.com",
+                FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE, "owner@example.com")),
+        Arguments.of("blank account is account-less", "  ", "CLI-1", null,
+            Map.of(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLI-1")),
+        Arguments.of("neither", null, null, null, Map.of()));
+  }
+
+  /**
+   * The explicit overload (the onboarding hand-over, which runs as System) targets exactly the
+   * account and tenant it is given and never reads the OBContext.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("explicitAccountAndTenant")
+  void isEnabledForAnExplicitAccountTargetsOnlyWhatItIsGiven(String scenario, String accountEmail,
+      String clientId, String expectedKey, Map<String, String> expectedAttributes) {
+    try (MockedStatic<OBContext> obContextStatic = mockStatic(OBContext.class)) {
+      assertTrue(ContactTypeRules.isEnabled(accountEmail, clientId));
+      obContextStatic.verifyNoInteractions();
+    }
+
+    FeatureFlagContext flagContext = capturedFlagContext();
+    assertEquals(expectedKey, flagContext.getTargetingKey(), scenario);
+    assertEquals(expectedAttributes, flagContext.getAttributes(), scenario);
+  }
+
+  /** The one context the {@code contact-category-type} flag was evaluated with. */
+  private FeatureFlagContext capturedFlagContext() {
+    ArgumentCaptor<FeatureFlagContext> captor = ArgumentCaptor.forClass(FeatureFlagContext.class);
+    flagsStatic.verify(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE), captor.capture()));
+    return captor.getValue();
+  }
+
+  /** Every {@code ETGO_ACCOUNT} lookup answers {@code account} ({@code null} = none). */
+  @SuppressWarnings("unchecked")
+  private void givenAccountLookupReturns(Account account) {
+    OBQuery<Account> query = mock(OBQuery.class);
+    when(query.setNamedParameter(anyString(), any())).thenReturn(query);
+    when(query.uniqueResult()).thenReturn(account);
+    OBDal readOnlyDal = mock(OBDal.class);
+    when(readOnlyDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+    obDalStatic.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+  }
+
+  /** An OBContext for {@code username} ({@code null} = no user) in tenant {@code clientId}. */
+  private static OBContext obContext(String username, String clientId, boolean clientLookupFails) {
+    OBContext obContext = mock(OBContext.class);
+    if (username != null) {
+      User user = mock(User.class);
+      when(user.getUsername()).thenReturn(username);
+      when(obContext.getUser()).thenReturn(user);
+    }
+    if (clientLookupFails) {
+      when(obContext.getCurrentClient()).thenThrow(new IllegalStateException("no session"));
+    } else if (clientId != null) {
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn(clientId);
+      when(obContext.getCurrentClient()).thenReturn(client);
+    }
+    return obContext;
   }
 
   private void givenContactTypeFlag(boolean enabled) {
