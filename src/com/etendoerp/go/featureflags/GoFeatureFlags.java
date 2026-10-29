@@ -302,7 +302,7 @@ public final class GoFeatureFlags {
    *       execution context with no caller identity to recover, so it is passed down explicitly:
    *       {@code EtendoGoJwtServlet#buildSessionCapabilities} and the two
    *       {@code validateStructuredAddress*} checks take it as a parameter, and it rides
-   *       {@code OnboardingProvisioningChain.OrgInfoInput} to
+   *       {@code OrgInfoInput} to
    *       {@code OnboardingOrgInfoService#createLocation}, which persists the fields.</li>
    * </ul>
    * {@code StructuredAddressComposer#isEnabled(String)} is the one evaluator they all share and

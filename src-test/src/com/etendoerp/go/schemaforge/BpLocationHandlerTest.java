@@ -566,7 +566,34 @@ class BpLocationHandlerTest {
 
     /** The read path is gated for the same account, so a targeted GET gets the 3 keys back. */
     @Test
-    void afterHandleEnrichesOnlyForATargetedAccount() throws Exception {
+    void afterHandleEnrichesForATargetedAccount() throws Exception {
+      Location geoLoc = mock(Location.class);
+      when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+      when(geoLoc.getOBSEPABuildingNumber()).thenReturn("45");
+      when(geoLoc.getOBSEPABuildingName()).thenReturn("Torre A");
+      when(obDal.get(eq(Location.class), eq("loc-get"))).thenReturn(geoLoc);
+
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
+        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+
+        NeoContext ctx = buildCrudContext("GET", "loc-get", null);
+        ctx.setPreviousResult(wrapRecord("loc-get"));
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        assertNotNull(result);
+        JSONObject recordJson =
+            result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+        assertEquals("Gran Via", recordJson.getString("streetName"));
+        assertEquals("45", recordJson.getString("buildingNumber"));
+        assertEquals("Torre A", recordJson.getString("buildingName"));
+      }
+    }
+
+    /** Same environment and same record, untargeted account: the response is left untouched. */
+    @Test
+    void afterHandleDoesNotEnrichForAnUntargetedAccount() throws Exception {
       Location geoLoc = mock(Location.class);
       when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
       when(obDal.get(eq(Location.class), eq("loc-get"))).thenReturn(geoLoc);

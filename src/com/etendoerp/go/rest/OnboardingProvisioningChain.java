@@ -40,6 +40,7 @@ import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
+import com.etendoerp.go.onboarding.OrgInfoInput;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
@@ -127,25 +128,6 @@ public class OnboardingProvisioningChain {
       new OnboardingForceTestModeService();
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
-
-  /**
-   * The signup form's fiscal/address data the {@code orgInfo} step persists.
-   *
-   * <p>{@code streetName}/{@code buildingNumber}/{@code buildingName}/{@code cityName} (ETP-5806)
-   * are the structured address fields from the onboarding company step; {@code address} is kept as
-   * a legacy free-text fallback used only when none of the structured fields is present — see
-   * {@code OnboardingOrgInfoService#createLocation}.
-   *
-   * <p>{@code accountEmail} (ETP-5806 follow-up) is the {@code ETGO_ACCOUNT} email the
-   * {@code structured-address-for-sepa} flag is evaluated for when the address is persisted.
-   * Provisioning runs under an admin execution context with no caller identity to recover, so the
-   * account has to be carried here from the request that started it; blank for a pooled
-   * placeholder tenant, which belongs to no account and has no address to compose anyway.
-   */
-  public record OrgInfoInput(String countryCode, String address, String streetName,
-      String buildingNumber, String buildingName, String cityName, String taxId,
-      String accountEmail) {
-  }
 
   /** The admin identity the chain runs under once the client exists. */
   public static final class AdminContext {
@@ -550,17 +532,7 @@ public class OnboardingProvisioningChain {
       String adminUserId, String adminRoleId, OrgInfoInput orgInfo) {
     sink.progress(PROGRESS_ORG_INFO, PROGRESS_IN_PROGRESS, "Setting up organization address...");
     try {
-      String countryCode = orgInfo != null ? orgInfo.countryCode() : null;
-      String address = orgInfo != null ? orgInfo.address() : null;
-      String streetName = orgInfo != null ? orgInfo.streetName() : null;
-      String buildingNumber = orgInfo != null ? orgInfo.buildingNumber() : null;
-      String buildingName = orgInfo != null ? orgInfo.buildingName() : null;
-      String cityName = orgInfo != null ? orgInfo.cityName() : null;
-      String taxId = orgInfo != null ? orgInfo.taxId() : null;
-      String accountEmail = orgInfo != null ? orgInfo.accountEmail() : null;
-      onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId,
-          countryCode, address, streetName, buildingNumber, buildingName, cityName, taxId,
-          accountEmail);
+      onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId, orgInfo);
       sink.progress(PROGRESS_ORG_INFO, PROGRESS_DONE, "Organization address ready");
       return true;
     } catch (Exception e) {

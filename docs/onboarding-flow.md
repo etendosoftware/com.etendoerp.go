@@ -329,7 +329,7 @@ structured fields are never read even if a stale client still sends them. **Whil
 also sends `streetName`/`buildingNumber`/`buildingName`/`city`; `streetName`/`buildingNumber`/`city`
 are mandatory together **only once the user has started filling the block in**
 (`EtendoGoJwtServlet#validateStructuredAddressBlock`) — a blank block is still accepted, matching
-the step's minimalist, fully-optional-address design. `OnboardingOrgInfoService#createLocation`
+the step's minimalist, fully-optional-address design. `OnboardingOrgInfoService#applyAddressFields`
 then prioritizes the structured fields over the legacy `address` when both are present, computing
 `addressLine1`/`addressLine2` via `StructuredAddressComposer` (the same algorithm every other
 address popup uses) and persisting the 3 raw columns alongside them. `OnboardingWarehouseAddressService`
@@ -671,12 +671,18 @@ skipped, not waited for), and a failure anywhere later rolls the claim back and 
   (ETP-5638). The other derived names fit the 40-character company name whole;
 - admin `AD_User`: username (`buildClientUsername`), name (full name, else username),
   description, email, password hash, **active**;
-- the signup address onto the pooled fiscal location's street line.
+- **not** the address (ETP-5806 follow-up). It used to be written here, from the legacy free-text
+  `address` alone, because `OnboardingOrgInfoService` refused to touch a location that already
+  existed — and a pooled tenant always has one, created empty by its pool build. That made the
+  claim the only address writer on the pooled path, and it knew nothing about the structured SEPA
+  fields or the city, so a signup that filled them lost the whole address silently.
+  `ensureOrgInfoLocation` now completes an *existing but still blank* location instead (it never
+  overwrites a populated one), so classic and pooled persist the address through the same code.
 
 After it, the servlet runs its existing calls: owner marking (`resolveAdminContextData`), the paid
-upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id) and
-`warehouseAddress` (re-copies the fiscal address) — the only chain steps that consume signup
-data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
+upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id **and the whole
+address**, see above) and `warehouseAddress` (re-copies the fiscal address) — the only chain steps
+that consume signup data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
 commit, the initial period state (ETP-5577: a demo's trial window, re-evaluated for a pooled demo
 built in an earlier month, or a productive tenant's never-opened signup year; see
 `OnboardingPeriodControlService`), the `environment-ready` email and costing activation. The stream skips the `organization`

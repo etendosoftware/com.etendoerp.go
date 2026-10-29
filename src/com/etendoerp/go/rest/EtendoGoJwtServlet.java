@@ -128,6 +128,7 @@ import com.etendoerp.go.onboarding.NdjsonOnboardingProgressSink;
 import com.etendoerp.go.onboarding.NdjsonSinkWriter;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.OnboardingStreamWriter;
+import com.etendoerp.go.onboarding.OrgInfoInput;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
@@ -5254,7 +5255,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     PooledTenantClaimService.ClaimRequest claimRequest =
         new PooledTenantClaimService.ClaimRequest(accountEmail, request.clientName,
             request.fullName, request.currencyIso, request.countryCode, request.language,
-            request.address, adminPassword);
+            adminPassword);
     return fixtureClientId == null
         ? pooledTenantClaimService.claim(sink, claimRequest, correlationId)
         : pooledTenantClaimService.claim(sink, claimRequest, correlationId, fixtureClientId,
@@ -6317,10 +6318,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return chain;
   }
 
-  private static OnboardingProvisioningChain.OrgInfoInput orgInfoInput(
+  private static OrgInfoInput orgInfoInput(
       OnboardingRequestData requestData) {
     return requestData == null ? null
-        : new OnboardingProvisioningChain.OrgInfoInput(requestData.countryCode,
+        : new OrgInfoInput(requestData.countryCode,
             requestData.address, requestData.streetName, requestData.buildingNumber,
             requestData.buildingName, requestData.city, requestData.taxId,
             requestData.accountEmail);
@@ -7380,7 +7381,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static class OnboardingRequestData {
     // ETP-5806 — the account this onboarding belongs to, the targeting key the
     // `structured-address-for-sepa` flag is evaluated with on both the validation side (here) and
-    // the persistence side (OrgInfoInput -> OnboardingOrgInfoService#createLocation).
+    // the persistence side (OrgInfoInput -> OnboardingOrgInfoService#applyAddressFields).
     private String accountEmail;
     private String clientName;
     private String currencyIso;

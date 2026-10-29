@@ -4261,8 +4261,7 @@ public class EtendoGoJwtServletCoverageTest {
       throws Exception {
     PaidOnboardingStage stage = stagePaidOnboarding(pooled);
     doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
-        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any(),
-            any(), any(), any(), any(), any());
+        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any());
     when(servlet.tenantPlanService.resolvePlan("own-productive"))
         .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
@@ -4345,12 +4344,12 @@ public class EtendoGoJwtServletCoverageTest {
     }
     assertEquals("Company data never fails the provisioning",
         PaidProvisioningService.Status.PROVISIONED, outcome[0].status());
-    ArgumentCaptor<String> address = ArgumentCaptor.forClass(String.class);
-    ArgumentCaptor<String> taxId = ArgumentCaptor.forClass(String.class);
+    ArgumentCaptor<com.etendoerp.go.onboarding.OrgInfoInput> orgInfo =
+        ArgumentCaptor.forClass(com.etendoerp.go.onboarding.OrgInfoInput.class);
     verify(servlet.onboardingOrgInfoService).ensureOrgInfo(anyString(), anyString(), anyString(),
-        anyString(), eq(input.countryCode()), address.capture(), any(), any(), any(), any(),
-        taxId.capture(), any());
-    return new String[] { address.getValue(), taxId.getValue() };
+        anyString(), orgInfo.capture());
+    assertEquals(input.countryCode(), orgInfo.getValue().countryCode());
+    return new String[] { orgInfo.getValue().address(), orgInfo.getValue().taxId() };
   }
 
   /** ETP-5048 S4 — the draft's address and fiscal identifier reach the organization. */

@@ -151,8 +151,9 @@ public class EtendoGoJwtServletTenantPoolTest {
     verify(dataset, never()).importDataset(anyString(), anyString());
     // ETP-5806 — the onboarding account's own email reaches the persistence step, so the flag
     // gating what gets written there is evaluated for the same account the servlet validated for.
-    verify(orgInfo).ensureOrgInfo("POOLED-CLIENT", "ORG-1", "ADMIN-USER", "ADMIN-ROLE", "ES",
-        "Calle Mayor 1", "", "", "", "", "", "user@test.com");
+    verify(orgInfo).ensureOrgInfo("POOLED-CLIENT", "ORG-1", "ADMIN-USER", "ADMIN-ROLE",
+        new com.etendoerp.go.onboarding.OrgInfoInput("ES", "Calle Mayor 1", "", "", "", "", "",
+            "user@test.com"));
     verify(warehouse).alignDefaultWarehouseAddress("POOLED-CLIENT", "ORG-1", "ADMIN-USER",
         "ADMIN-ROLE");
     verify(lifecycle).markDemoReady(eq("POOLED-CLIENT"), any(Instant.class));

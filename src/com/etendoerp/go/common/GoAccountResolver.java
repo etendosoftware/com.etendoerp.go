@@ -108,12 +108,15 @@ public final class GoAccountResolver {
    * in {@code PortalLinkPolicy} for {@code FLAG_BP_PORTAL_LINK} and extracted here for ETP-5806's
    * {@code structured-address-for-sepa} per-account rollout.
    *
-   * <p>Runs in admin mode (the boolean overload, which keeps the current user and only elevates
-   * the role) because {@code ETGO_ACCOUNT} is a platform table the caller's own role has no reason
-   * to read, and the account being looked up is the caller's own. Must be called BEFORE the
-   * caller enters its own admin-mode block with the no-arg {@link OBContext#setAdminMode()} —
-   * that overload replaces the user too, and {@link OBContext#getOBContext()} would then resolve
-   * the admin identity instead of the real caller.
+   * <p>Runs in admin mode because {@code ETGO_ACCOUNT} is a platform table the caller's own role
+   * has no reason to read, and the account being looked up is the caller's own. Neither
+   * {@code setAdminMode} overload replaces a user that is already there: per core's
+   * {@link OBContext#setAdminMode(boolean)}, the admin context is installed only when
+   * {@link OBContext#getOBContext()} is {@code null} (the no-arg {@link OBContext#setAdminMode()}
+   * is just {@code setAdminMode(false)}, differing only in whether entity access is checked).
+   * Resolve the account early anyway — before any work that could leave the request without an
+   * {@code OBContext} — because that is the one case where the caller's identity is no longer
+   * recoverable and this method would answer for the admin instead.
    *
    * @return the account email, or {@code null} when no user, or no active account, resolves —
    *     callers must treat {@code null} the same as "no account", never as "allow"
