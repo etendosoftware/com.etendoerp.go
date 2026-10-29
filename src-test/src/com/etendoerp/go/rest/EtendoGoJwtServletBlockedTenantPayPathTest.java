@@ -454,7 +454,7 @@ class EtendoGoJwtServletBlockedTenantPayPathTest {
     dalHelper.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(ACCOUNT_EMAIL))
         .thenReturn(Collections.singletonList(environmentUser));
     dalHelper.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(eq(tenant), any(),
-        eq(environmentUser), any())).thenReturn(new JSONObject());
+        eq(environmentUser), any(), any())).thenReturn(new JSONObject());
     // A canceled subscription: the tenant's plan answers from the row, never the DB fallback.
     Subscription canceled = mock(Subscription.class);
     when(canceled.getSubscriptionStatus()).thenReturn(SubscriptionService.STATUS_CANCELED);
