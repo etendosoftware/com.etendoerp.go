@@ -335,22 +335,28 @@ class FinancialAccountMovementActions {
     return delete(movement, mcp);
   }
 
-  /** limit and offset, when sent, are whole numbers (limit ≥ 1, offset ≥ 0); 422 otherwise. */
+  /**
+   * limit and offset, when sent, are whole numbers (limit ≥ 1, offset ≥ 0) no larger than
+   * {@link Integer#MAX_VALUE}; 422 otherwise. A larger value used to pass and then fail paging as a
+   * 500.
+   */
   private static NeoResponse checkListWindow(JSONObject params) {
     for (String key : new String[] { P_LIMIT, P_OFFSET }) {
       long min = P_LIMIT.equals(key) ? 1 : 0;
-      if (params != null && params.has(key) && !isWholeAtLeast(params.opt(key), min)) {
-        return NeoResponse.error(422, "'" + key + "' must be a whole number of " + min
-            + " or more, got '" + params.opt(key) + "'");
+      if (params != null && params.has(key) && !isWholeInRange(params.opt(key), min)) {
+        return NeoResponse.error(422, "'" + key + "' must be a whole number from " + min
+            + " to " + Integer.MAX_VALUE + ", got '" + params.opt(key) + "'");
       }
     }
     return null;
   }
 
-  private static boolean isWholeAtLeast(Object value, long min) {
+  private static boolean isWholeInRange(Object value, long min) {
     try {
       java.math.BigDecimal n = new java.math.BigDecimal(String.valueOf(value).trim());
-      return n.stripTrailingZeros().scale() <= 0 && n.longValue() >= min;
+      return n.stripTrailingZeros().scale() <= 0
+          && n.compareTo(java.math.BigDecimal.valueOf(min)) >= 0
+          && n.compareTo(java.math.BigDecimal.valueOf(Integer.MAX_VALUE)) <= 0;
     } catch (NumberFormatException e) {
       return false;
     }
