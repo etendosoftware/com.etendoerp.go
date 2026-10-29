@@ -2101,6 +2101,9 @@ public class McpToolRouter {
     NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(actionRequest);
     NeoHandler handler = preDispatch.customization();
     if (preDispatch.response() != null) {
+      // ETP-5852 (M-193): a customization's refusal of a closed period names it too (a success
+      // body carries no period message key, so it is left alone).
+      McpPeriodRefusal.addTo(preDispatch.response().getBody(), sfEntity, recordId);
       return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
     }
 
@@ -2117,6 +2120,7 @@ public class McpToolRouter {
         actionResult.put(McpConstants.KEY_PROCESS_MESSAGE,
             "Request failed with HTTP status " + neoResponse.getHttpStatus());
       }
+      McpPeriodRefusal.addTo(actionResult, sfEntity, recordId);
       return wrapAsErrorContent(actionResult);
     }
 
