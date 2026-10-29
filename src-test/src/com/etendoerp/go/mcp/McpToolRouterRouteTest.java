@@ -3114,11 +3114,11 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── etendo_action on ONE posted document: un-post, then reactivate (ETP-5715 round 3) ──
+  // ── etendo_action on the document-action button: an id that is no row (ETP-5715 W1) ──
 
   @Nested
-  @DisplayName("route — etendo_action reactivating a posted document")
-  class SingleReactivationUnpostTests {
+  @DisplayName("route — etendo_action on the document-action button")
+  class DocumentActionButtonTests {
 
     private static final String INVOICE_ID = "inv-001";
     private static final String DAL_ENTITY = "Invoice";
@@ -3160,7 +3160,6 @@ class McpToolRouterRouteTest {
           .thenAnswer(inv -> "unpost".equals(inv.getArgument(1)) ? unpostContract : null);
       declaredMock.when(() -> McpDeclaredActions.customizationNameOf(any(), anyString()))
           .thenAnswer(inv -> inv.getArgument(1));
-      declaredMock.when(() -> McpDeclaredActions.unpostsBeforeReactivation(any())).thenReturn(true);
 
       org.openbravo.base.model.Entity dal = mock(org.openbravo.base.model.Entity.class);
       when(dal.getName()).thenReturn(DAL_ENTITY);
@@ -3215,114 +3214,6 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("a posted invoice is un-posted, committed, then reactivated")
-    void postedInvoiceIsUnpostedFirst() throws Exception {
-      processAnswers(null);
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(result.has("isError"));
-      JSONObject body = new JSONObject(contentText(result));
-      assertEquals("success", body.getString("processResult"));
-      assertEquals("unpost", body.getJSONArray("steps").getString(0));
-      assertEquals("documentAction", body.getJSONArray("steps").getString(1));
-      assertEquals(List.of("run:unpost", "commit", "run:documentAction"), events);
-    }
-
-    @Test
-    @DisplayName("an invoice that is not posted is reactivated with no extra step")
-    void notPostedHasNoExtraStep() throws Exception {
-      posted = false;
-      processAnswers(null);
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(new JSONObject(contentText(result)).has("steps"));
-      assertEquals(List.of("run:documentAction"), events);
-    }
-
-    @Test
-    @DisplayName("a failed un-post is the answer and nothing is reactivated")
-    void failedUnpostStopsTheReactivation() throws Exception {
-      processAnswers("unpost");
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertTrue(result.getBoolean("isError"));
-      JSONObject body = new JSONObject(contentText(result));
-      assertEquals("unpost refused", body.getString("processMessage"));
-      assertEquals(1, body.getJSONArray("steps").length());
-      assertFalse(body.has("partial"));
-      assertEquals(List.of("run:unpost", "rollback"), events);
-    }
-
-    @Test
-    @DisplayName("a refused reactivation after a committed un-post says the un-post stays")
-    void refusedReactivationReportsPartial() throws Exception {
-      processAnswers("documentAction");
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertTrue(result.getBoolean("isError"));
-      JSONObject body = new JSONObject(contentText(result));
-      assertEquals("documentAction refused", body.getString("processMessage"));
-      assertEquals(2, body.getJSONArray("steps").length());
-      assertTrue(body.getString("partial").contains("not undone"), body.toString());
-      assertEquals(List.of("run:unpost", "commit", "run:documentAction", "rollback"), events);
-    }
-
-    @Test
-    @DisplayName("a reactivation the customization rules out is not un-posted first")
-    void ruledOutReactivationUnpostsNothing() throws Exception {
-      declaredMock.when(() -> McpDeclaredActions.unavailableFor(any(), any()))
-          .thenReturn(java.util.Map.of("documentAction:RE", "accepted and rectified"));
-      processAnswers("documentAction");
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(new JSONObject(contentText(result)).has("steps"));
-      assertEquals(List.of("run:documentAction"), events);
-    }
-
-    @Test
-    @DisplayName("completing or voiding a posted invoice never un-posts")
-    void otherDocActionsAreUnchanged() throws Exception {
-      processAnswers(null);
-
-      for (String docAction : new String[] {"CO", "VO"}) {
-        events.clear();
-        JSONObject result = router.route("etendo_action", reactivateArgs(docAction), WRITE_SCOPES);
-        assertFalse(new JSONObject(contentText(result)).has("steps"), docAction);
-        assertEquals(List.of("run:documentAction"), events, docAction);
-      }
-    }
-
-    @Test
-    @DisplayName("B2: a posted goods document or journal declares unpost but does not opt in: no un-post")
-    void entityThatDoesNotOptInIsUnchanged() throws Exception {
-      declaredMock.when(() -> McpDeclaredActions.unpostsBeforeReactivation(any())).thenReturn(false);
-      processAnswers(null);
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(new JSONObject(contentText(result)).has("steps"));
-      assertEquals(List.of("run:documentAction"), events);
-    }
-
-    @Test
-    @DisplayName("an entity that declares no unpost (an order) reactivates unchanged")
-    void entityWithoutUnpostIsUnchanged() throws Exception {
-      declaredMock.when(() -> McpDeclaredActions.precheck(any(), anyString(), any()))
-          .thenReturn(null);
-      processAnswers(null);
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(new JSONObject(contentText(result)).has("steps"));
-      assertEquals(List.of("run:documentAction"), events);
-    }
-
-    @Test
     @DisplayName("W1: a DocAction on an id that is not a row answers the same 404 as a foreign id")
     void missingDocumentIsARecordNotFound() throws Exception {
       processAnswers(null);
@@ -3373,23 +3264,40 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("W2: an exception after a committed un-post is reported with steps and partial")
     void exceptionAfterCommittedUnpostIsReported() throws Exception {
+      // ETP-5684: the un-post runs server-side, inside the customization, before the button. Drive
+      // the real ReactivationUnpost.unpostFirst on the action's own context, then let the button throw.
+      com.etendoerp.go.schemaforge.handlers.DocumentPostingService posting =
+          mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+      when(posting.unpost(anyString(), anyString())).thenAnswer(inv -> {
+        events.add("unpost");
+        return new com.etendoerp.go.schemaforge.handlers.DocumentPostingService.PostResult(
+            true, "Unposted", null, null);
+      });
       buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
           any(SFEntity.class), anyString(), anyString(), any())).thenAnswer(inv -> {
-            String action = inv.getArgument(2);
-            events.add("run:" + action);
-            if ("documentAction".equals(action)) {
-              throw new IllegalStateException("boom");
-            }
-            return NeoResponse.ok(new JSONObject().put("status", "success").put("message", "ok"));
+            events.add("run:" + inv.getArgument(2));
+            throw new IllegalStateException("boom");
           });
 
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+      JSONObject result;
+      try (MockedStatic<McpHookExecutor> hooks =
+          mockStatic(McpHookExecutor.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+        hooks.when(() -> McpHookExecutor.buildActionHookContext(anyString(), anyString(),
+            anyString(), anyString(), any(), any(), any(), anyString())).thenAnswer(inv -> {
+              com.etendoerp.go.schemaforge.NeoContext ctx =
+                  (com.etendoerp.go.schemaforge.NeoContext) inv.callRealMethod();
+              assertNull(com.etendoerp.go.schemaforge.handlers.ReactivationUnpost
+                  .unpostFirst(ctx, posting));
+              return ctx;
+            });
+        result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+      }
 
       assertTrue(result.getBoolean("isError"));
       JSONObject body = new JSONObject(contentText(result));
-      assertEquals(2, body.getJSONArray("steps").length());
+      assertEquals("[\"unpost\"]", body.getJSONArray("steps").toString());
       assertTrue(body.getString("partial").contains("not undone"), body.toString());
-      assertEquals("rollback", events.get(events.size() - 1));
+      assertEquals(List.of("unpost", "run:documentAction", "rollback"), events);
     }
 
     @Test

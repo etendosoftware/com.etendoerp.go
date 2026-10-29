@@ -203,7 +203,7 @@ public final class InvoiceReactivationGuard {
    * either at the root ({@code docAction}/{@code documentAction}) or nested under
    * {@code fieldValues} as sent by the draft-mode confirm button.
    */
-  private static boolean isReactivateAction(NeoContext context) {
+  static boolean isReactivateAction(NeoContext context) {
     if (context == null || !NeoEndpointType.ACTION.equals(context.getEndpointType())
         || !FIELD_DOCUMENT_ACTION.equals(context.getFieldName())) {
       return false;

@@ -32,6 +32,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -57,6 +59,8 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
@@ -257,7 +261,7 @@ public class McpToolRouter {
             }
             return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
-            return McpActionBatchUnpost.runSingle(specName, arguments, this::handleAction);
+            return handleAction(specName, arguments);
           case McpConstants.TOOL_NEO_ACTION_BATCH:
             return McpActionBatch.handle(specName, arguments, this::handleAction);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
@@ -1978,6 +1982,13 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    // ETP-5684: posting needs the showAccountingFields capability (same check as REST), judged on
+    // the typed name before anything else can answer, so no other refusal reveals the record.
+    NeoResponse postingRefusal =
+        NeoAccountingAccessPolicy.refusalForPostingAction(sfEntity, actionName);
+    if (postingRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(postingRefusal);
+    }
     // ETP-5558: judged before the customization runs — an action MCP_CONFIG.actions hides or
     // redirects is refused, and a declared one is validated against its contract (422 naming the
     // wrong key). The contract also says which HTTP method the handler answers it on.
@@ -2031,8 +2042,23 @@ public class McpToolRouter {
       return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
     }
 
-    NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
-        sfEntity, recordId, firedName, actionParams);
+    NeoResponse neoResponse;
+    try {
+      neoResponse = NeoButtonActionHelper.executeButtonActionCore(
+          sfEntity, recordId, firedName, actionParams);
+    } catch (Exception e) {
+      if (!ReactivationUnpost.ran(hookCtx)) {
+        throw e;
+      }
+      // ETP-5684: the un-post was committed before the reactivation threw, so the caller must hear
+      // that it stays: answer the error with the note (the router rolls an error answer back).
+      neoResponse = NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          McpActionBatch.parseBody(McpActionBatch.errorBodyOf(e, McpConstants.TOOL_NEO_ACTION)));
+    }
+    // ETP-5684: when the customization un-posted the record before reactivating it, say so — on
+    // the error path too, which never reaches the post-hook below.
+    hookCtx.setPreviousResult(neoResponse);
+    ReactivationUnpost.notePartial(hookCtx);
 
     JSONObject actionResult = McpToolRouterSupport.mapNeoResponseToActionResult(neoResponse);
 

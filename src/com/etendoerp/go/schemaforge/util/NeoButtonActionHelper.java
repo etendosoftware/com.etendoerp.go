@@ -63,7 +63,14 @@ public final class NeoButtonActionHelper {
   public static NeoResponse listButtonActions(String entityId) throws Exception {
     List<SFField> fields = loadEntityFields(entityId);
     JSONArray actions = new JSONArray();
+    // ETP-5684: posting buttons are not listed to a role without showAccountingFields.
+    boolean hidePosting = fields.stream()
+        .anyMatch(f -> NeoAccountingAccessPolicy.isPostingButton(f.getADColumn()))
+        && !NeoAccountingAccessPolicy.currentRoleSeesAccounting();
     for (SFField field : fields) {
+      if (hidePosting && NeoAccountingAccessPolicy.isPostingButton(field.getADColumn())) {
+        continue;
+      }
       JSONObject actionObj = buildButtonActionEntry(field);
       if (actionObj != null) {
         actions.put(actionObj);
@@ -214,7 +221,10 @@ public final class NeoButtonActionHelper {
    *         {@code null} when the table declares none
    */
   private static String findKeyColumnName(Table table) {
-    List<Column> columns = table.getADColumnList();
+    // ETP-5684: re-read by id, as a reactivation's un-post commits and closes the session first,
+    // detaching the table this request loaded (its lazy column list would throw).
+    Table current = OBDal.getInstance().get(Table.class, table.getId());
+    List<Column> columns = current != null ? current.getADColumnList() : null;
     if (columns == null) {
       return null;
     }
