@@ -449,7 +449,7 @@
 <!--0D144B65F7644726B820AE1B7898424A-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--0D144B65F7644726B820AE1B7898424A-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--0D144B65F7644726B820AE1B7898424A-->  <NAME><![CDATA[Exchange rate]]></NAME>
-<!--0D144B65F7644726B820AE1B7898424A-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency, valid on the document's reference date. Recalculated when the currency or that date changes, and editable by the user. A foreign-currency document cannot be saved or completed with it empty.]]></DESCRIPTION>
+<!--0D144B65F7644726B820AE1B7898424A-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency on its reference date. Recalculated when the currency or that date changes; editable. A foreign-currency document cannot be saved or completed without it.]]></DESCRIPTION>
 <!--0D144B65F7644726B820AE1B7898424A-->  <ISCENTRALLYMAINTAINED><![CDATA[N]]></ISCENTRALLYMAINTAINED>
 <!--0D144B65F7644726B820AE1B7898424A-->  <AD_TAB_ID><![CDATA[186]]></AD_TAB_ID>
 <!--0D144B65F7644726B820AE1B7898424A-->  <AD_COLUMN_ID><![CDATA[E01F12C1B9CE4539B145357B931F49FD]]></AD_COLUMN_ID>
@@ -1054,7 +1054,7 @@
 <!--1B3EC15829754957B7E7AEBF71963F96-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--1B3EC15829754957B7E7AEBF71963F96-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--1B3EC15829754957B7E7AEBF71963F96-->  <NAME><![CDATA[Exchange rate]]></NAME>
-<!--1B3EC15829754957B7E7AEBF71963F96-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency, valid on the document's reference date. Recalculated when the currency or that date changes, and editable by the user. A foreign-currency document cannot be saved or completed with it empty.]]></DESCRIPTION>
+<!--1B3EC15829754957B7E7AEBF71963F96-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency on its reference date. Recalculated when the currency or that date changes; editable. A foreign-currency document cannot be saved or completed without it.]]></DESCRIPTION>
 <!--1B3EC15829754957B7E7AEBF71963F96-->  <ISCENTRALLYMAINTAINED><![CDATA[N]]></ISCENTRALLYMAINTAINED>
 <!--1B3EC15829754957B7E7AEBF71963F96-->  <AD_TAB_ID><![CDATA[F87F1EB7EB404F1F916EBAFAD1A0A334]]></AD_TAB_ID>
 <!--1B3EC15829754957B7E7AEBF71963F96-->  <AD_COLUMN_ID><![CDATA[E01F12C1B9CE4539B145357B931F49FD]]></AD_COLUMN_ID>
@@ -1967,7 +1967,7 @@
 <!--31A752B217014FB39B0533A4B4B3B0D0-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--31A752B217014FB39B0533A4B4B3B0D0-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--31A752B217014FB39B0533A4B4B3B0D0-->  <NAME><![CDATA[Exchange rate]]></NAME>
-<!--31A752B217014FB39B0533A4B4B3B0D0-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency, valid on the document's reference date. Recalculated when the currency or that date changes, and editable by the user. A foreign-currency document cannot be saved or completed with it empty.]]></DESCRIPTION>
+<!--31A752B217014FB39B0533A4B4B3B0D0-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency on its reference date. Recalculated when the currency or that date changes; editable. A foreign-currency document cannot be saved or completed without it.]]></DESCRIPTION>
 <!--31A752B217014FB39B0533A4B4B3B0D0-->  <ISCENTRALLYMAINTAINED><![CDATA[N]]></ISCENTRALLYMAINTAINED>
 <!--31A752B217014FB39B0533A4B4B3B0D0-->  <AD_TAB_ID><![CDATA[294]]></AD_TAB_ID>
 <!--31A752B217014FB39B0533A4B4B3B0D0-->  <AD_COLUMN_ID><![CDATA[E01F12C1B9CE4539B145357B931F49FD]]></AD_COLUMN_ID>
@@ -2078,7 +2078,7 @@
 <!--33661617E4794CCD831D3D36DE4127DD-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--33661617E4794CCD831D3D36DE4127DD-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--33661617E4794CCD831D3D36DE4127DD-->  <NAME><![CDATA[Exchange rate]]></NAME>
-<!--33661617E4794CCD831D3D36DE4127DD-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency, valid on the document's reference date. Recalculated when the currency or that date changes, and editable by the user. A foreign-currency document cannot be saved or completed with it empty.]]></DESCRIPTION>
+<!--33661617E4794CCD831D3D36DE4127DD-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency on its reference date. Recalculated when the currency or that date changes; editable. A foreign-currency document cannot be saved or completed without it.]]></DESCRIPTION>
 <!--33661617E4794CCD831D3D36DE4127DD-->  <ISCENTRALLYMAINTAINED><![CDATA[N]]></ISCENTRALLYMAINTAINED>
 <!--33661617E4794CCD831D3D36DE4127DD-->  <AD_TAB_ID><![CDATA[263]]></AD_TAB_ID>
 <!--33661617E4794CCD831D3D36DE4127DD-->  <AD_COLUMN_ID><![CDATA[ED7BBE1365C14A93B363EF4B37C4079B]]></AD_COLUMN_ID>
@@ -9364,7 +9364,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--F40A3BD72C224764844987DCDE9F48A1-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--F40A3BD72C224764844987DCDE9F48A1-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--F40A3BD72C224764844987DCDE9F48A1-->  <NAME><![CDATA[Exchange rate]]></NAME>
-<!--F40A3BD72C224764844987DCDE9F48A1-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency, valid on the document's reference date. Recalculated when the currency or that date changes, and editable by the user. A foreign-currency document cannot be saved or completed with it empty.]]></DESCRIPTION>
+<!--F40A3BD72C224764844987DCDE9F48A1-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency on its reference date. Recalculated when the currency or that date changes; editable. A foreign-currency document cannot be saved or completed without it.]]></DESCRIPTION>
 <!--F40A3BD72C224764844987DCDE9F48A1-->  <ISCENTRALLYMAINTAINED><![CDATA[N]]></ISCENTRALLYMAINTAINED>
 <!--F40A3BD72C224764844987DCDE9F48A1-->  <AD_TAB_ID><![CDATA[290]]></AD_TAB_ID>
 <!--F40A3BD72C224764844987DCDE9F48A1-->  <AD_COLUMN_ID><![CDATA[ED7BBE1365C14A93B363EF4B37C4079B]]></AD_COLUMN_ID>
