@@ -126,6 +126,47 @@ decision 11, `billing-reconciliation.md` §3, the flag section of
 `feature-flags-and-tenant-upgrade.md`). The menu entry, the process and Process Request scheduling
 are unaffected either way.
 
+### 🔴 1.10 A `block` quota on invoice lines can stop a legally required credit invoice (ETP-5051)
+
+**Ticket:** related ETP-5051 (the quota check), ETP-5876 (the rectificative and return line
+imports); no ticket. **Status:** open, product decision pending.
+
+**To raise with / decides:** Martin Taal
+
+Since ETP-5051 the NEO actions that create invoice lines run the plan quota check
+(`plan-quotas.md` §2), and three of them create the lines of a **credit** invoice:
+
+- `importOriginInvoiceLines` (`ImportOriginInvoiceLinesHandler`) copies a source invoice's lines,
+  negated, into a draft rectificative invoice ("factura rectificativa"). Checked since `3029c01cb`.
+- `importReturnLines` (`ImportInOutLinesIntoInvoiceHandler`) adds the lines of a completed return,
+  negative, to a draft rectificative invoice.
+- `createReturnInvoice` creates the return invoice; it was checked before either import.
+
+The two imports call `AbstractLineImportHandler.requireQuotaAllowed`, which runs
+`NeoQuotaCreateCheck` on the created `InvoiceLine` rows. A tenant whose plan has a `block` quota on
+an `InvoiceLine` resource and has reached the cap is answered 403 `QUOTA_EXCEEDED`, and the whole
+import is rolled back. **The tenant cannot issue a correcting or credit invoice through NEO.** In
+Spain (and elsewhere) issuing a rectificative to correct or cancel an issued invoice is a legal
+obligation, not an optional document, so a commercial cap ends up blocking a compliance duty.
+
+- **Only `block` mode refuses.** A `warn` quota reports and never refuses; `off` is never
+  evaluated on a create.
+- **There is no built-in exemption.** The check does not tell a credit line from any other line.
+- **The only way out today is operator configuration:** a restriction on the quota's Billing
+  Resource that credit lines do not match, so they are neither counted nor refused. For example
+  `e.invoicedQuantity > 0`: the lines both imports create are negative. Every other negative line
+  stops counting too, one on an ordinary invoice included. How restrictions are written and
+  matched: `plan-quotas.md` §2 (*Only restrictions that hold at create time*), §4.1 and §4.5.
+
+**Options:**
+
+- **(a) Keep blocking**, and document the restriction workaround for operators in
+  `plan-quotas.md`. No code; it relies on each operator setting the restriction before a tenant
+  reaches the cap.
+- **(b) Exempt rectificative and return credit lines from `block` quotas in code.**
+- **(c) Seed a default restriction on `InvoiceLine` quotas.** The module ships the Billing Resource
+  catalog empty (`plan-quotas.md` §4.1), so today there is no row to seed it on.
+
 ---
 
 ## 2. Deployment — constraints that are not visible in the code
@@ -1125,9 +1166,11 @@ ways to consume a resource never pass through either:
   document), whose `Refused` `NeoExtensionDispatcher` maps to the gate's 403 `QUOTA_EXCEEDED` with
   the action rolled back. The NEO actions that create documents do — invoice, shipment and receipt
   generation, returns and return invoices, follow-up documents, clone, quotation conversion and the
-  line imports, return line imports included (`plan-quotas.md` §2 lists them). Still unchecked: the
-  discount lines `TotalDiscountService` adds while a document is saved (deliberately), and any new
-  customization that creates rows and forgets the call — nothing detects the omission.
+  line imports, rectificative line imports (`importOriginInvoiceLines`, `importReturnLines`) and
+  return line imports included (`plan-quotas.md` §2 lists them; on credit invoices see §1.10).
+  Still unchecked: the discount lines `TotalDiscountService` adds while a document is saved
+  (deliberately), and any new customization that creates rows and forgets the call — nothing
+  detects the omission.
 - **Rows created by processes** or the Classic UI. The check sits on the NEO write path only; there
   is no DAL observer, by decision. The SPA's CSV/XLSX import is not among them: it writes through
   `/sws/neo/batch` and is refused, only with a generic row message (§5.18, ETP-5911).

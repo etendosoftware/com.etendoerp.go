@@ -100,6 +100,8 @@ never kept) and answers the CRUD gate's envelope: 403 `QUOTA_EXCEEDED` with the 
 `QUOTA_CHECK_FAILED`. Discount lines added by `TotalDiscountService` while a document is saved are
 not checked.
 
+Because the rectificative line imports are checked, a `block` quota on `InvoiceLine` also refuses the credit lines of a rectificative invoice; whether it should is open (register [§1.10](open-and-notable-topics.md)).
+
 Read the NEO write path row literally:
 
 - **Only a create** is checked. An update, a delete, a process or a state change that makes an
