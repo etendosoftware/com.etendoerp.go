@@ -76,8 +76,10 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * #returnPending}): sales nets every invoice line linked to the return line whatever the status of
  * its invoice, and compares the currency of the return's sales order; purchase offers the return
  * line's quantity, skips only a line this invoice already holds and compares no currency; both list
- * only returns whose {@code invoiceStatus} is below 100. No {@code C_Invoice_Reverse} row is written, as in the window,
- * and the header's total discount is not carried. The actions are only offered to a rectificative:
+ * only returns whose {@code invoiceStatus} is below 100. On the SALES side the rectificative is
+ * linked in {@code C_Invoice_Reverse} to the completed invoices the imported return lines rectify
+ * ({@link ReturnLineRectifiedInvoices}, ETP-6002), as the window's line create does; the purchase
+ * side writes no link. The header's total discount is not carried. The actions are only offered to a rectificative:
  * {@link RectificativeImportGate} refuses them on a normal invoice, and refuses the order and
  * goods actions on a rectificative.
  */
@@ -94,6 +96,8 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String ACTION_AVAILABLE_RETURNS = "availableReturns";
   static final String ACTION_AVAILABLE_RETURN_LINES = "availableReturnLines";
   static final String ACTION_IMPORT_RETURN_LINES = "importReturnLines";
+  /** Response key of the invoices a sales return import linked the rectificative to (ETP-6002). */
+  static final String KEY_RECTIFIED_INVOICES = "rectifiedInvoices";
 
   /** Joins the steps of the flow sentence of a contract. */
   private static final String THEN = ", then ";
@@ -240,10 +244,17 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "requested and the pending quantity, and creates NOTHING. Refused (422) when the "
             + "invoice is not a draft rectificative, the document is not a completed return, or "
             + "business partner or direction differ (currency too, on a sales invoice, when the "
-            + "return has a sales order). It does not link the invoice to an "
-            + "invoice being rectified (that is importOriginInvoiceLines) and does not carry any "
-            + "total discount. Returns {data:{importedCount, lines:[{id, sourceLineId, product, "
-            + "productName, quantity}], headerLinked, salesOrder}} (quantity is negative). Step 3."
+            + "return has a sales order). "
+            + (sales ? "It links the rectificative, in the Rectificaciones tab, to every COMPLETED "
+                + "invoice of the same customer that billed the shipment line each imported return "
+                + "line returns (once per invoice, never duplicated), as the window does; a refusal "
+                + "of that link (e.g. a processed invoice) imports nothing. "
+                : "It does not link the invoice to an invoice being rectified (that is "
+                + "importOriginInvoiceLines). ")
+            + "It does not carry any total discount. Returns {data:{importedCount, lines:[{id, "
+            + "sourceLineId, product, productName, quantity}], headerLinked, salesOrder"
+            + (sales ? ", rectifiedInvoices:[{id, documentNo}]" : "")
+            + "}} (quantity is negative). Step 3."
             + flow,
         NeoActionContract.Param.required(PARAM_RETURN_ID, NeoActionContract.TYPE_STRING,
             "Id of the return to import from, returned by " + ACTION_AVAILABLE_RETURNS + "."),
@@ -338,6 +349,19 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       planned.replaceAll((id, quantity) -> quantity.negate());
     }
 
+    // ETP-6002: a SALES return import links the rectificative to the invoices the imported return
+    // lines rectify, as the window's line create does — before the lines, in this transaction.
+    JSONArray rectified = null;
+    if (returns && policy.linksReturnsToRectifiedInvoices()) {
+      try {
+        rectified = linkRectifiedInvoices(invoice, linesById, planned.keySet());
+      } catch (RuntimeException e) {
+        // A C_INVOICE_REVERSE_TRG refusal (another partner, a processed invoice) is answered
+        // classified, as on the lines CRUD, and rolled back: nothing is imported.
+        return NeoErrorResponses.fromException(e, "POST", "importReturnLines link", null);
+      }
+    }
+
     JSONArray selected = returns ? creditSelection(planned)
         : MultiDocumentInvoiceSupport.buildInOutLineSelection(List.of(source), planned,
             pendingMagnitudes, log);
@@ -349,8 +373,61 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       ReturnLineCredit.clearReferencePrices(invoice, createdIds);
     }
     requireQuotaAllowed(InvoiceLine.ENTITY_NAME, created);
-    return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
-        : invoice.getSalesOrder().getId());
+    String headerOrderId = invoice.getSalesOrder() == null ? null : invoice.getSalesOrder().getId();
+    if (rectified == null) {
+      return DocumentLineImport.ok(created, headerOrderId);
+    }
+    Map<String, Object> extra = new LinkedHashMap<>();
+    extra.put(KEY_RECTIFIED_INVOICES, rectified);
+    return DocumentLineImport.ok(created, headerOrderId, extra);
+  }
+
+  /**
+   * Links {@code invoice} in {@code C_Invoice_Reverse} to every invoice the planned return lines
+   * rectify ({@link ReturnLineRectifiedInvoices}), deduped ({@link #linkIfMissing}), and flushes so
+   * a trigger refusal surfaces here, before any line is created.
+   *
+   * @return the invoices the rectificative is linked to through these lines, {@code [{id,
+   *     documentNo}]} (already-linked ones included)
+   */
+  private JSONArray linkRectifiedInvoices(Invoice invoice, Map<String, ShipmentInOutLine> linesById,
+      Collection<String> plannedLineIds) throws JSONException {
+    String partnerId = invoice.getBusinessPartner() == null ? null
+        : invoice.getBusinessPartner().getId();
+    Map<String, Invoice> origins = new LinkedHashMap<>();
+    for (String lineId : plannedLineIds) {
+      for (Invoice origin : rectifiedInvoicesOf(linesById.get(lineId), partnerId)) {
+        if (!origin.getId().equals(invoice.getId())) {
+          origins.putIfAbsent(origin.getId(), origin);
+        }
+      }
+    }
+    boolean created = false;
+    JSONArray linked = new JSONArray();
+    for (Invoice origin : origins.values()) {
+      created |= linkIfMissing(invoice, origin);
+      linked.put(new JSONObject().put("id", origin.getId())
+          .put("documentNo", origin.getDocumentNo()));
+    }
+    if (created) {
+      flushLinks();
+    }
+    return linked;
+  }
+
+  /** Seam: the invoices a return line rectifies, for the rectificative's partner. */
+  protected List<Invoice> rectifiedInvoicesOf(ShipmentInOutLine returnLine, String partnerId) {
+    return ReturnLineRectifiedInvoices.of(returnLine, partnerId);
+  }
+
+  /** Seam: the {@code C_Invoice_Reverse} row, created unless the pair is already linked. */
+  protected boolean linkIfMissing(Invoice invoice, Invoice origin) {
+    return InvoiceRectificationLinkSupport.ensureReverseLink(invoice, origin);
+  }
+
+  /** Seam: flushes the links, so the trigger runs before the lines are created. */
+  protected void flushLinks() {
+    OBDal.getInstance().flush();
   }
 
   /**

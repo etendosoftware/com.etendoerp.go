@@ -192,9 +192,7 @@ final class SalesRectificativeLineLinkSupport {
    * shipment line the given return line cancels. Nothing for a line that is not a return line,
    * whose original line was never invoiced, or for a rectificative with no partner yet.
    *
-   * <p>The partner filter is the reason {@link RectifiableInvoiceUtils#fetchSelectableInvoices}
-   * filters too: {@code C_INVOICE_REVERSE_TRG} unconditionally refuses a cross-partner link, so
-   * one such invoice in the chain (anomalous data) would otherwise refuse the whole line import.
+   * <p>The chain and its partner filter are {@link ReturnLineRectifiedInvoices#of}.
    */
   private static void addReturnedLineInvoices(Map<String, Invoice> origins, String shipmentLineId,
       Invoice invoice) {
@@ -202,18 +200,10 @@ final class SalesRectificativeLineLinkSupport {
       return;
     }
     ShipmentInOutLine returnLine = OBDal.getInstance().get(ShipmentInOutLine.class, shipmentLineId);
-    ShipmentInOutLine original = returnLine != null ? returnLine.getCanceledInoutLine() : null;
-    if (original == null) {
-      return;
-    }
-    for (InvoiceLine billed : OBDal.getInstance()
-        .createQuery(InvoiceLine.class,
-            "as il where il.goodsShipmentLine.id = :lineId and il.invoice.documentStatus = 'CO'"
-                + " and il.invoice.businessPartner.id = :bpId")
-        .setNamedParameter("lineId", original.getId())
-        .setNamedParameter("bpId", invoice.getBusinessPartner().getId())
-        .list()) {
-      addOrigin(origins, billed.getInvoice());
+    // The chain itself is shared with the return import action (ETP-6002).
+    for (Invoice billed : ReturnLineRectifiedInvoices.of(returnLine,
+        invoice.getBusinessPartner().getId())) {
+      addOrigin(origins, billed);
     }
   }
 

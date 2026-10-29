@@ -11840,7 +11840,9 @@ the create body when the line carries `sourceInvoiceLineId` and the parent is a 
 REST / batch client can reintroduce it. Kept, `C_INVOICE_POST` treated the negative line as an
 invoice of the order: it lowered `C_OrderLine.QtyInvoiced` (the returned quantity became invoiceable
 again) and wrote an `M_MatchSI` row to the order's shipment, a transitive "related document".
-Rectificatives already stored with the order line are not repaired (no data-fix). Purchase is
+Rectificatives already stored with the order line are not repaired (no data-fix). The MCP
+`importOriginInvoiceLines` action (ETP-5876) follows the same rule on both sides (it copies no order line), so the SPA,
+REST single, `/batch` and MCP agree — there is no channel divergence on the order line. The purchase line CRUD is
 unchanged.
 
 **ETP-6002 — the sales invoice detail GET no longer deduces `sourceInvoice` / `sourceReturnReceipt`.**
@@ -12551,13 +12553,23 @@ again, even when only part of it came in (presence, not quantity, as the modal).
 line's own quantity**: the window does not subtract what other draft rectificatives, or credits made through a return,
 already hold of that line, and that deliberate parity is kept. Partial quantities are accepted. The lines are written
 through the DAL (`ImportOriginInvoiceLinesHandler.copyInto`), negative, with the product, UOM, tax, unit / list / gross
-prices and `EM_Etgo_Discount` of the source line, the source line in `EM_ETGO_Source_Invoiceline_ID`, `PriceStd` and `PriceLimit` stored as 0 (the modals' body sends neither, so the screen stores 0 whatever the source line holds), and, **on sales only**
-(`RectificativeImportPolicy.keepsOrderLink`), its order line (the sales modal sends it, ETP-5381; the purchase one does not),
-after which the header's order reference follows the line-save rule. The origin invoice is linked in `C_Invoice_Reverse` (the Rectificaciones tab), once per distinct origin and deduped
-(`OriginInvoiceLinks.linkIfMissing`, written after the target is locked), on both sides and whether or not the source has an
+prices and `EM_Etgo_Discount` of the source line, the source line in `EM_ETGO_Source_Invoiceline_ID`, `PriceStd` and `PriceLimit` stored as 0 (the modals' body sends neither, so the screen stores 0 whatever the source line holds), and, since ETP-6002, **never its order line, on either side** (the sales modal no longer sends it,
+so the action follows it: as ETP-5729 decided for the return path, on the negative line `C_INVOICE_POST` would lower the
+order's `QtyInvoiced` — the returned quantity turning invoiceable again — and write an `M_MatchSI` to the order's shipment, a
+transitive relation). The header's order reference is therefore left as it was; `RectificativeImportPolicy.keepsOrderLink`
+was removed. The origin invoice is linked in `C_Invoice_Reverse` (the Rectificaciones tab), once per distinct origin and deduped
+(`InvoiceRectificationLinkSupport.ensureReverseLink` — the one dedupe-then-insert of `C_Invoice_Reverse`, shared since
+ETP-6002 with the header PATCH, the sales line create and `createReturnInvoice`; `OriginInvoiceLinks` was folded into it —
+written after the target is locked and flushed by the action when a row was created), on both sides and whether or not the source has an
 order: that is what the modal's `originInvoices` PATCH (`persistOriginInvoice`) is meant to do. That header write is left
-exactly as it was and is not used by this action. **The return import writes no link**; only `createReturnInvoice` (from
-the return) links a return to the invoice it rectifies.
+exactly as it was and is not used by this action. **The return import links on the sales side only** (ETP-6002, as the window's line
+create does): for every imported return line it links the rectificative to the COMPLETED invoices of the same customer that
+billed the shipment line the return line cancels (`ReturnLineRectifiedInvoices`, the one definition of that chain, shared
+with `SalesRectificativeLineLinkSupport`), through `ensureReverseLink`, flushed before the lines are created; a
+`C_INVOICE_REVERSE_TRG` refusal is answered classified (`NeoErrorResponses.fromException`) and nothing is imported. The
+response adds `rectifiedInvoices:[{id, documentNo}]`. Chosen by the side's `RectificativeImportPolicy`
+(`linksReturnsToRectifiedInvoices`, the sales modal rules), never by name; the purchase return import writes no link, as
+before. `createReturnInvoice` (from the return) keeps linking on both sides.
 
 **The header's total discount (`EM_Etgo_Total_Discount`) is not carried by any of these paths**, nor by
 `createReturnInvoice` (deliberate, as the screen).

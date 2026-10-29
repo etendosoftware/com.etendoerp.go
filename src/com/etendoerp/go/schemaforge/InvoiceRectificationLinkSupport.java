@@ -212,9 +212,10 @@ class InvoiceRectificationLinkSupport {
    * Saves a {@code C_Invoice_Reverse} row tying {@code invoice} (the rectificative) to
    * {@code origin} (the invoice it rectifies) unless that exact pair already exists. The one
    * dedupe-then-create of the link, shared by the header PATCH ({@link #persistOriginInvoice}), the
-   * line create of a sales rectificative ({@link SalesRectificativeLineLinkSupport}, ETP-6002) and
+   * line create of a sales rectificative ({@link SalesRectificativeLineLinkSupport}, ETP-6002),
    * the invoice created from a return document
-   * ({@link ReturnInvoiceSupport#linkRectifiedInvoices}).
+   * ({@link ReturnInvoiceSupport#linkRectifiedInvoices}) and the origin-invoice import action
+   * ({@link ImportOriginInvoiceLinesHandler}, ETP-5876, which flushes on {@code true} itself).
    *
    * <p>Does not flush: the caller decides when {@code C_INVOICE_REVERSE_TRG} runs, and so where its
    * refusal (processed invoice, different business partner) surfaces.

@@ -36,6 +36,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -56,8 +57,10 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
@@ -206,6 +209,32 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     BigDecimal invoiceStatus = BigDecimal.ZERO;
     /** Which window's modal rules the header would pass in. */
     boolean salesModalRules;
+    /** ETP-6002: the invoices each return line rectifies (by return line id), and the links made. */
+    final Map<String, List<Invoice>> rectifiedByLine = new LinkedHashMap<>();
+    final List<String> links = new ArrayList<>();
+    /** When set, {@link #linkIfMissing} throws it, as C_INVOICE_REVERSE_TRG would refuse a link. */
+    RuntimeException linkRefusal;
+
+    @Override
+    protected List<Invoice> rectifiedInvoicesOf(ShipmentInOutLine returnLine, String partnerId) {
+      calls.add("rectifiedOf");
+      return rectifiedByLine.getOrDefault(returnLine == null ? null : returnLine.getId(),
+          List.of());
+    }
+
+    @Override
+    protected boolean linkIfMissing(Invoice target, Invoice origin) {
+      if (linkRefusal != null) {
+        throw linkRefusal;
+      }
+      links.add(target.getId() + "->" + origin.getId());
+      return true;
+    }
+
+    @Override
+    protected void flushLinks() {
+      calls.add("flushLinks");
+    }
 
     @Override
     protected List<ShipmentInOut> findCandidateReturns(String partnerId, boolean sales) {
@@ -826,6 +855,75 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
 
   private static BigDecimal selected(Probe probe, int index) throws Exception {
     return new BigDecimal(probe.nativeSelection.getJSONObject(index).getString("orderedQuantity"));
+  }
+
+  /**
+   * Repro (ETP-6002): a SALES return import links the rectificative to the invoice the return line
+   * rectifies (C_Invoice_Reverse), deduped, before the lines are created — as the window's line
+   * create does — and answers it as {@code rectifiedInvoices}.
+   */
+  @Test
+  public void importReturnLines_salesLinksTheRectifiedInvoice() throws Exception {
+    Probe probe = customerReturn();
+    Invoice original = mock(Invoice.class);
+    when(original.getId()).thenReturn("orig");
+    when(original.getDocumentNo()).thenReturn("FV1");
+    String firstLineId = probe.source.getMaterialMgmtShipmentInOutLineList().get(0).getId();
+    probe.rectifiedByLine.put(firstLineId, List.of(original));
+
+    NeoResponse response = importReturn(probe, RETURN_ID);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(List.of("i1->orig"), probe.links);
+    assertTrue("a new link is flushed so a trigger refusal surfaces before the lines",
+        probe.calls.contains("flushLinks"));
+    assertTrue("the links are written before the lines are created",
+        probe.calls.indexOf("flushLinks") < probe.calls.indexOf("native"));
+    JSONArray rectified = data(response).getJSONArray("rectifiedInvoices");
+    assertEquals(1, rectified.length());
+    assertEquals("FV1", rectified.getJSONObject(0).getString("documentNo"));
+  }
+
+  /**
+   * A refused link (a C_INVOICE_REVERSE_TRG-style refusal: another partner, a processed invoice) is
+   * answered classified — a 4xx business rule, as on the lines CRUD — and no line is created.
+   */
+  @Test
+  public void importReturnLines_aRefusedLinkIsAClassifiedRefusal_andImportsNothing()
+      throws Exception {
+    Probe probe = customerReturn();
+    Invoice original = mock(Invoice.class);
+    when(original.getId()).thenReturn("orig");
+    String firstLineId = probe.source.getMaterialMgmtShipmentInOutLineList().get(0).getId();
+    probe.rectifiedByLine.put(firstLineId, List.of(original));
+    probe.linkRefusal = new OBException("@NotEqualBPartner@");
+    OBDal dal = mock(OBDal.class);
+
+    NeoResponse response;
+    try (MockedStatic<OBDal> obdal = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+      obdal.when(OBDal::getInstance).thenReturn(dal);
+      response = importReturn(probe, RETURN_ID);
+    }
+
+    assertTrue("a classified 4xx, not a 500", response.getHttpStatus() >= 400
+        && response.getHttpStatus() < 500);
+    assertEquals("business_rule", response.getBody().getJSONObject("error").getString("code"));
+    assertFalse("no line is created", probe.calls.contains("native"));
+    assertNull(probe.nativeSelection);
+  }
+
+  /** The purchase side writes no link and does not even look for one (unchanged, ETP-5876). */
+  @Test
+  public void importReturnLines_purchaseWritesNoLink() throws Exception {
+    Probe probe = returnToVendor();
+
+    NeoResponse response = importReturn(probe, RETURN_ID);
+
+    assertEquals(200, response.getHttpStatus());
+    assertTrue(probe.links.isEmpty());
+    assertFalse(probe.calls.contains("rectifiedOf"));
+    assertFalse(data(response).has("rectifiedInvoices"));
   }
 
   @Test
