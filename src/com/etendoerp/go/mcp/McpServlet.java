@@ -48,6 +48,7 @@ import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.schemaforge.NeoWriteChannel;
+import com.etendoerp.go.schemaforge.NeoTenantWriteGuard;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -917,7 +918,8 @@ public class McpServlet extends HttpServlet {
     log.info("MCP tools/call: tool={}, user={}, role={}, client={}, org={}",
         toolName, identity.userId, identity.roleId, identity.clientId, identity.orgId);
 
-    return McpSessionManager.executeInContext(
+    // ETP-5819: outside executeInContext so its closing flush, and its rollback, are guarded too.
+    return NeoTenantWriteGuard.call(() -> McpSessionManager.executeInContext(
         identity.userId, identity.roleId, identity.clientId,
         identity.orgId, null, () -> {
           OBContext.setAdminMode(true);
@@ -927,7 +929,7 @@ public class McpServlet extends HttpServlet {
           } finally {
             OBContext.restorePreviousMode();
           }
-        });
+        }));
   }
 
   // ── Handler: resources/list ─────────────────────────────────────────────
