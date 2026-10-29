@@ -873,7 +873,7 @@ class OrderLineDiscountSupportTest {
       throws Exception {
     JSONObject json = new JSONObject(body);
 
-    OrderLineDiscountSupport.deriveDiscountOnCreate(mcpCtx("POST", json));
+    OrderLineCreateDiscount.derive(mcpCtx("POST", json));
 
     if (expected == null) {
       assertEquals(new JSONObject(body).toString(), json.toString(), label);
@@ -901,7 +901,7 @@ class OrderLineDiscountSupportTest {
   void deriveDiscountOnCreateIgnoresUpdates(String method) throws Exception {
     JSONObject json = new JSONObject("{\"listPrice\":33,\"unitPrice\":29.7}");
 
-    OrderLineDiscountSupport.deriveDiscountOnCreate(mcpCtx(method, json));
+    OrderLineCreateDiscount.derive(mcpCtx(method, json));
 
     assertTrue(!json.has("discount"));
   }
@@ -911,7 +911,7 @@ class OrderLineDiscountSupportTest {
   void deriveDiscountOnCreateLeavesARestCreateAlone() throws Exception {
     JSONObject json = new JSONObject("{\"listPrice\":33,\"unitPrice\":29.7}");
 
-    OrderLineDiscountSupport.deriveDiscountOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    OrderLineCreateDiscount.derive(ctx("POST", NeoEndpointType.CRUD, json));
 
     assertTrue(!json.has("discount"));
   }

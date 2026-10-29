@@ -432,7 +432,7 @@ final class OrderLineDiscountSupport {
    */
   static void applyLineRules(NeoContext ctx) {
     setStandardPriceOnCreate(ctx);
-    deriveDiscountOnCreate(ctx);
+    OrderLineCreateDiscount.derive(ctx);
     // One lazy read of the stored line for the whole update: each step that needs it asks, the
     // first one reads, and a request no step needs it for reads nothing.
     StoredLine storedLine = new StoredLine(ctx);
@@ -471,47 +471,6 @@ final class OrderLineDiscountSupport {
   static void completeAmountInputsOnUpdate(NeoContext ctx) {
     if (ctx != null && changesAmountInput(ctx.getRequestBody())) {
       new StoredLine(ctx).carryAmountInputsInto(ctx);
-    }
-  }
-
-  /**
-   * ETP-5852: a new line whose body carries a {@code unitPrice} below or above its
-   * {@code listPrice} and no {@code discount} gets the discount that price implies,
-   * {@code (listPrice − unitPrice) / listPrice × 100} rounded to two decimals — what the form shows
-   * when a price is typed over the tariff. An agent that negotiated 29.70 on a list of 33 used to
-   * leave a line "29.70, discount 0", so the discount was invisible in the UI and in reports.
-   *
-   * <p><b>MCP only.</b> The form never needs it — every form write sends {@code discount} (the
-   * inline row and the side panel both carry it) — and a REST create keeps the values it sent, as
-   * before. A body with a {@code discount} other than 0, a price equal to the list price within
-   * half a cent, a zero or missing list price, and an explicit gross price abstain. Total: never
-   * throws.
-   *
-   * @param ctx the pre-hook context; its request body is mutated in place
-   */
-  static void deriveDiscountOnCreate(NeoContext ctx) {
-    if (ctx == null || !ctx.isMcpOrigin() || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
-        || !METHOD_POST.equals(ctx.getHttpMethod())) {
-      return;
-    }
-    JSONObject body = ctx.getRequestBody();
-    // A zero discount is what the defaults pass and the AD column default put there, so it is not a
-    // choice; the form never sends 0 with a price off the list (it sends list × (1 − discount)).
-    if (body == null || !isZero(body.opt(FIELD_DISCOUNT)) || sentExplicitGrossPrice(body)) {
-      return;
-    }
-    BigDecimal listPrice = decimal(body.opt(FIELD_LIST_PRICE));
-    BigDecimal unitPrice = decimal(body.opt(FIELD_UNIT_PRICE));
-    if (listPrice == null || listPrice.signum() == 0 || unitPrice == null
-        || unitPrice.subtract(listPrice).abs().compareTo(HALF_CENT) < 0) {
-      return;
-    }
-    try {
-      body.put(FIELD_DISCOUNT, listPrice.subtract(unitPrice).multiply(HUNDRED)
-          .divide(listPrice, 2, java.math.RoundingMode.HALF_UP));
-    } catch (Exception e) {
-      log.warn("[ORDER-LINE-PRICE] Could not derive the discount of a new line on {} {}: {}",
-          ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
     }
   }
 

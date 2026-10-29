@@ -9807,7 +9807,7 @@ they are the same `C_OrderLine` table, callouts and trigger, so the same rules a
 On REST `PurchaseOrderLineHandler#applyRules` keeps develop's purchase rules only
 (`setStandardPriceOnCreate` and ETP-6012's `completeAmountInputsOnUpdate`): the purchase form derives
 price and discount itself before it saves, and REST scope stays with ETP-5727. A declared divergence
-between channels. `deriveDiscountOnCreate` (the discount a new line's price implies) is MCP-only on
+between channels. `OrderLineCreateDiscount` (the discount a new line's price implies) is MCP-only on
 every order line for the same reason: the form always sends its discount.
 `McpLinePriceInjector` is **not** part of this: it stays a shared MCP compensation, selected by a
 `hasProperty` guard, for every commercial line — tolerated until migration M4 and unchanged here.
