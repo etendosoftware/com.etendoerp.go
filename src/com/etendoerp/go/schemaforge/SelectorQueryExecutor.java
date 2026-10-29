@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -49,6 +50,7 @@ final class SelectorQueryExecutor {
   private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
   private static final String PARAM_LANGUAGE = "language";
+  private static final String PARAM_SEARCH_MATCH_IDS = NeoSelectorExecutionHelper.PARAM_SEARCH_MATCH_IDS;
   /** Aux out-field suffix carrying the per-locator on-hand quantity of a stock-breakdown selector. */
   private static final String AUX_SUFFIX_QTY = "_QTY";
   /** Aux out-field suffix carrying the per-locator storage bin of a stock-breakdown selector. */
@@ -66,25 +68,35 @@ final class SelectorQueryExecutor {
       String validationFilter, String contextOrganizationId,
       Map<String, Object> extraFilterParams) throws Exception {
     if (meta.isRich) {
+      // shortcut: search-match ids (ETP-5948) only widen simple selectors, the tax policy's case.
+      // Wire them into the rich query builders when a rich selector needs one.
       return executeRichQuery(meta, search, limit, offset, validationFilter, contextOrganizationId,
-          extraFilterParams);
+          withoutKey(extraFilterParams, PARAM_SEARCH_MATCH_IDS));
     }
     return executeQuery(meta, search, limit, offset, validationFilter, contextOrganizationId,
         extraFilterParams);
+  }
+
+  private static Map<String, Object> withoutKey(Map<String, Object> params, String key) {
+    if (params == null || !params.containsKey(key)) {
+      return params;
+    }
+    Map<String, Object> copy = new HashMap<>(params);
+    copy.remove(key);
+    return copy;
   }
 
   private static NeoResponse executeQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
-    // Extract language before binding — it is not an HQL parameter
-    String language = null;
-    Map<String, Object> safeExtraParams = extraFilterParams;
-    if (extraFilterParams != null && extraFilterParams.containsKey(PARAM_LANGUAGE)) {
-      language = (String) extraFilterParams.get(PARAM_LANGUAGE);
-      safeExtraParams = new HashMap<>(extraFilterParams);
-      safeExtraParams.remove(PARAM_LANGUAGE);
-    }
+    // Extract language and the search-match ids before binding — they are not plain HQL parameters
+    String language = extraFilterParams != null ? (String) extraFilterParams.get(PARAM_LANGUAGE) : null;
+    @SuppressWarnings("unchecked")
+    Set<String> searchMatchIds = extraFilterParams != null
+        ? (Set<String>) extraFilterParams.get(PARAM_SEARCH_MATCH_IDS) : null;
+    Map<String, Object> safeExtraParams = withoutKey(withoutKey(extraFilterParams, PARAM_LANGUAGE),
+        PARAM_SEARCH_MATCH_IDS);
 
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
@@ -98,12 +110,15 @@ final class SelectorQueryExecutor {
     String searchLang = resolveEnrichLanguage(language);
     NeoTrl.TrlSearchMeta trlSearch = (StringUtils.isNotBlank(search) && StringUtils.isNotBlank(searchLang))
         ? NeoTrl.resolveSearchMeta(meta.entityName) : null;
+    StringBuilder searchPredicate = new StringBuilder();
     if (trlSearch != null) {
-      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, meta.displayProperty, search, trlSearch);
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(searchPredicate, meta.displayProperty, search,
+          trlSearch);
       queryParams.put(PARAM_SEARCH_LANG, searchLang);
     } else {
-      NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
+      NeoSelectorExecutionHelper.appendSimpleSearchFilter(searchPredicate, meta.displayProperty, search);
     }
+    NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, searchPredicate, searchMatchIds, queryParams);
     if (safeExtraParams != null) {
       queryParams.putAll(safeExtraParams);
     }

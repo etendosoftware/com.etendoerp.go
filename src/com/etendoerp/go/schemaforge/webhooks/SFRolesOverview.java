@@ -44,6 +44,7 @@ import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
 import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
@@ -565,6 +566,9 @@ public class SFRolesOverview extends BaseWebhookService {
         userIds.add(userRole.getUserContact().getId());
       }
     }
+    // ETP-5351 (T6): the tenant's "Soporte Etendo" user holds the admin role but is not one of
+    // the tenant's users, so it never counts on a card.
+    SupportUserExclusion.removeFrom(userIds, role.getClient().getId());
     return userIds;
   }
 

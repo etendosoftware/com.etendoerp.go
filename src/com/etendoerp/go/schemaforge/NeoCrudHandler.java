@@ -587,7 +587,18 @@ class NeoCrudHandler {
         if (earlyError != null) {
           return earlyError;
         }
-        result = executePostCreate(context, adTab, dalEntityName, fieldFilter, jsonService, params);
+        // ETP-5051: the plan-quota check runs after the insert, in the same transaction. The gate
+        // decides from catalog data alone whether this entity is checked; when it is not, the
+        // create runs exactly as before (same service, same commit, no query). When the client's
+        // quotas cannot be read the create is refused before it runs: no callout, no insert.
+        NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(dalEntityName, jsonService,
+            service -> executePostCreate(context, adTab, dalEntityName, fieldFilter, service,
+                params));
+        if (gated.refusal() != null) {
+          return gated.refusal();
+        }
+        // The gate's own commit may have failed: then this is core's error JSON for it.
+        result = gated.result();
         break;
       }
       case "PUT":
@@ -841,9 +852,14 @@ class NeoCrudHandler {
       }
       // ETP-5782: a failure NEO's write service captured carries the classification of its
       // throwable — a trigger refusal (422), a row still in use (409), a deadlock (409), a lost
-      // connection (503)… Unique violations are left to the branch below, which keeps Etendo's own
-      // wording. Captured 5xx failures use the sanitized classification message. An uncaptured
-      // failure keeps the legacy answer; its class is never guessed from its text.
+      // connection (503)… A unique violation keeps Etendo's own translated wording, in whatever
+      // language the request runs (ETP-5953). Captured 5xx failures use the sanitized
+      // classification message. An uncaptured failure keeps the legacy answer; its class is never
+      // guessed from its text.
+      NeoResponse duplicate = NeoErrorResponses.duplicateWithCoreWording(innerResponse, translated);
+      if (duplicate != null) {
+        return duplicate;
+      }
       if (!NeoErrorSanitizer.isDuplicateKeyMessage(translated)) {
         NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse);
         if (classified != null) {

@@ -60,6 +60,31 @@ public class SubscriptionLifecycleApplierTest {
             + "\"cancel_at_period_end\":true}}}"));
     assertTrue(outcome.isApplied());
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, outcome.status());
+    // ETP-5051 (O-1b) — carried for display, never as a status.
+    assertEquals(CancelAtPeriodEnd.SET, outcome.cancelAtPeriodEnd());
+    assertNull(outcome.dueAt());
+  }
+
+  @Test
+  public void aSubscriptionUpdateCarriesAClearedCancelFlagAndNoneWhenAbsent() throws Exception {
+    assertEquals(CancelAtPeriodEnd.CLEARED, applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"cancel_at_period_end\":false}}}")).cancelAtPeriodEnd());
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED, applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\"}}}"))
+        .cancelAtPeriodEnd());
+    // An invoice event never reports it, so the stored flag is left alone.
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED, applier.evaluate("invoice.paid",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\"}}}")).cancelAtPeriodEnd());
+  }
+
+  @Test
+  public void anIgnoredSubscriptionUpdateCarriesNoCancelFlag() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"incomplete\","
+            + "\"cancel_at_period_end\":true}}}"));
+    assertTrue(outcome.isIgnored());
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED, outcome.cancelAtPeriodEnd());
   }
 
   @Test

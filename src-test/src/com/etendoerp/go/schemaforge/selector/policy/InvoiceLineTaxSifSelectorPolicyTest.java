@@ -38,12 +38,14 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
@@ -392,7 +394,7 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
       assertTrue(sql.contains("else t.rate end as label_rate"));
 
       JSONObject item = items.getJSONObject(0);
-      assertEquals("21 %", item.getString("labelPrefix"));
+      assertEquals("21%", item.getString("labelPrefix"));
       // The plain label is what the picker searches to pin its committed value (ETP-5846).
       assertEquals("Entregas IVA 21%", item.getString("label"));
     }
@@ -421,11 +423,65 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
 
   @Test
   public void formatRateStripsTrailingZerosAndUsesTheGivenDecimalSeparator() {
-    assertEquals("21 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("21.00"), ","));
-    assertEquals("0 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("0.000"), ","));
-    assertEquals("5,2 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("5.20"), ","));
-    assertEquals("5.2 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("5.20"), "."));
-    assertEquals("-24 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("-24"), ","));
+    assertEquals("21%", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("21.00"), ","));
+    assertEquals("0%", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("0.000"), ","));
+    assertEquals("5,2%", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("5.20"), ","));
+    assertEquals("5.2%", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("5.20"), "."));
+    assertEquals("-24%", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("-24"), ","));
+  }
+
+  // ── ETP-5948 — the rate the pickers show is searchable ────────────────────
+
+  @Test
+  public void normalizeRateTermReadsWhatTheUserTypesAsAPlainRatePrefix() {
+    assertEquals("11.4", InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm("11,4"));
+    assertEquals("11.4", InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm(" 11,4 % "));
+    assertEquals("21", InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm("21%"));
+    assertEquals("21", InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm("21,"));
+    assertEquals("5.2", InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm("5.2"));
+    assertNull(InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm("IVA"));
+    assertNull(InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm("10+1"));
+    assertNull(InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm(""));
+    assertNull(InvoiceLineTaxSifSelectorPolicy.normalizeRateTerm(null));
+  }
+
+  @Test
+  public void searchMatchIdsReturnsTheTaxesWhoseShownRateStartsWithTheTerm() throws Exception {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext obContext = mock(OBContext.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+      when(obContext.getCurrentClient().getId()).thenReturn("client-1");
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, true, false);
+      when(rs.getString("c_tax_id")).thenReturn("re-11-4", "iva-11", "iva-21");
+      when(rs.getBigDecimal("label_rate"))
+          .thenReturn(new BigDecimal("11.400000"), new BigDecimal("11.000000"), new BigDecimal("21"));
+
+      Set<String> ids = policy.searchMatchIds(metaFor(TARGET_TAX_RATE),
+          ctx(ENTITY_LINES, WINDOW_SALES_ORDER), "11,4");
+
+      assertEquals(Set.of("re-11-4"), ids);
+      // Same rate the prefix shows (summary = sum of children), scoped like the picker.
+      String sql = sqlCaptor.getValue().toLowerCase();
+      assertTrue(sql.contains("else t.rate end as label_rate"));
+      assertTrue(sql.contains("t.parent_tax_id is null"));
+      verify(ps).setString(1, "client-1");
+    }
+  }
+
+  @Test
+  public void searchMatchIdsSkipsTheDatabaseForANonNumericTerm() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      assertTrue(policy.searchMatchIds(metaFor(TARGET_TAX_RATE),
+          ctx(ENTITY_LINES, WINDOW_SALES_ORDER), "IVA").isEmpty());
+      dalMock.verifyNoInteractions();
+    }
   }
 
   /**

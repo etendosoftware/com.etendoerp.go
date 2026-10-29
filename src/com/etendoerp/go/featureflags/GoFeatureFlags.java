@@ -275,6 +275,22 @@ public final class GoFeatureFlags {
       "billing-reconciliation-schedule";
 
   /**
+   * ETP-5051 — whether the usage aggregation is scheduled ({@code open-and-notable-topics.md}
+   * §5.15). The same shape as {@link #FLAG_BILLING_RECONCILIATION_SCHEDULE}: strictly off by
+   * default (and off on every failure of this class); while it is off
+   * {@code UsageAggregationScheduleStartup} plants no process request, so turning it on takes effect
+   * at the next restart. The process checks it on every scheduled run (a process request with
+   * timing {@code S}), whoever created the request, so turning it off stops all scheduled work
+   * without a restart: a scheduled run with the flag off does nothing and ends as ERROR in Process
+   * Monitor. A run started from the Classic menu or once from a Process Request is not gated.
+   * Environment level, evaluated with an empty context; locally
+   * {@code etendo.go.flags.usage-aggregation-schedule} /
+   * {@code ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE}. Backend-only. Its callers are
+   * {@code UsageAggregationScheduleStartup} and {@code UsageAggregationProcess}.
+   */
+  public static final String FLAG_USAGE_AGGREGATION_SCHEDULE = "usage-aggregation-schedule";
+
+  /**
    * ETP-5806 — whether the structured address fields (Street/Number/Building Name) are visible,
    * writable and validated across the 4 address popups (Contacts, Warehouse, Business Partner
    * location, onboarding's Company step), MCP, and the onboarding mandatory-address check.
