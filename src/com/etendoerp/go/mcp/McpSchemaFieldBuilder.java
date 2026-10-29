@@ -425,8 +425,25 @@ final class McpSchemaFieldBuilder {
     if (adTab == null) {
       return byColumn;
     }
-    Map<String, Field> fieldByColumnName = new HashMap<>();
     List<String> fieldIds = new ArrayList<>();
+    Map<String, Field> fieldByColumnName = indexActiveFieldsByColumn(adTab, fieldIds);
+    Map<String, String[]> trlById = loadFieldTranslations(fieldIds, langCode);
+    String tableName = adTab.getTable() != null ? adTab.getTable().getDBTableName() : null;
+    for (Map.Entry<String, Field> entry : fieldByColumnName.entrySet()) {
+      Field field = entry.getValue();
+      String[] trl = trlById.get((String) field.getId());
+      byColumn.put(entry.getKey(), resolveFieldLabel(field, trl, tableName, langCode));
+    }
+    return byColumn;
+  }
+
+  /**
+   * Indexes the tab's active, column-backed fields by upper-cased DB column name, keeping the
+   * first field per column (the tab's field list is sequence-ordered). The id of every kept field
+   * is appended to {@code fieldIds}, in the same order, for the translation lookup.
+   */
+  private static Map<String, Field> indexActiveFieldsByColumn(Tab adTab, List<String> fieldIds) {
+    Map<String, Field> fieldByColumnName = new HashMap<>();
     for (Field field : adTab.getADFieldList()) {
       if (!Boolean.TRUE.equals(field.isActive()) || field.getColumn() == null) {
         continue;
@@ -436,25 +453,36 @@ final class McpSchemaFieldBuilder {
         fieldIds.add((String) field.getId());
       }
     }
-    Map<String, String[]> trlById = loadFieldTranslations(fieldIds, langCode);
-    String tableName = adTab.getTable() != null ? adTab.getTable().getDBTableName() : null;
-    for (Map.Entry<String, Field> entry : fieldByColumnName.entrySet()) {
-      Field field = entry.getValue();
-      String[] trl = trlById.get((String) field.getId());
-      // ETP-5840: the versioned catalog wins for the fields whose translation is not versioned.
-      String label = McpFieldLabels.of(tableName, field.getColumn().getDBColumnName(), langCode);
-      if (label == null) {
-        label = trl != null && StringUtils.isNotBlank(trl[0]) ? trl[0] : field.getName();
-      }
-      String description = McpFieldLabels.descriptionOf(tableName,
-          field.getColumn().getDBColumnName(), langCode);
-      if (description == null) {
-        description = trl != null && StringUtils.isNotBlank(trl[1])
-            ? trl[1] : field.getDescription();
-      }
-      byColumn.put(entry.getKey(), new String[] { label, description });
+    return fieldByColumnName;
+  }
+
+  /**
+   * Resolves one field's {@code {label, description}} pair. Each value follows the precedence
+   * documented on {@link #loadFieldLabels}: the {@link McpFieldLabels} catalog for
+   * {@code langCode}, then the {@code AD_FIELD_TRL} text ({@code trl}, may be {@code null}), then
+   * the base-language {@code AD_FIELD} text.
+   */
+  private static String[] resolveFieldLabel(Field field, String[] trl, String tableName,
+      String langCode) {
+    // ETP-5840: the versioned catalog wins for the fields whose translation is not versioned.
+    String label = McpFieldLabels.of(tableName, field.getColumn().getDBColumnName(), langCode);
+    if (label == null) {
+      label = translatedOrBase(trl, 0, field.getName());
     }
-    return byColumn;
+    String description = McpFieldLabels.descriptionOf(tableName,
+        field.getColumn().getDBColumnName(), langCode);
+    if (description == null) {
+      description = translatedOrBase(trl, 1, field.getDescription());
+    }
+    return new String[] { label, description };
+  }
+
+  /**
+   * Returns {@code trl[index]} when a translation row exists and that value is not blank,
+   * otherwise the base-language {@code base} text.
+   */
+  private static String translatedOrBase(String[] trl, int index, String base) {
+    return trl != null && StringUtils.isNotBlank(trl[index]) ? trl[index] : base;
   }
 
   /**
