@@ -2479,9 +2479,22 @@ class McpToolRouterSupportTest {
     void mapsStatusesToCodes() {
       assertEquals("not_found", McpSupportInternals.errorCodeForStatus(404));
       assertEquals("method_not_allowed", McpSupportInternals.errorCodeForStatus(405));
+      assertEquals("forbidden", McpSupportInternals.errorCodeForStatus(403));
       assertEquals("validation_error", McpSupportInternals.errorCodeForStatus(400));
       assertEquals("validation_error", McpSupportInternals.errorCodeForStatus(422));
       assertEquals("server_error", McpSupportInternals.errorCodeForStatus(500));
+    }
+
+    @Test
+    @DisplayName("a handler's 403 refusal reads forbidden, not validation_error")
+    void handlerAccessDeniedIsForbidden() throws Exception {
+      JSONObject body = new JSONObject().put("error",
+          new JSONObject().put("message", "Access denied").put("status", 403));
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(body, 403);
+
+      assertEquals("forbidden", envelope.getString("error"));
+      assertEquals(403, envelope.getInt("status"));
     }
 
     @Test
