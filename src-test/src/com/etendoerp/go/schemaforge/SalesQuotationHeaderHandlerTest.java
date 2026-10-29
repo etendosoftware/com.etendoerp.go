@@ -49,6 +49,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.criterion.Criterion;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
@@ -87,11 +88,33 @@ import org.openbravo.model.common.order.Order;
  * created order's rate is recomputed from its own date instead of copied.
  *
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  */
 public class SalesQuotationHeaderHandlerTest {
 
   private static final String QUOTATION_ID = "quotation-abc-123";
+
+  /**
+   * ETP-6007: without a DAL, {@code OBContext.setAdminMode(true)} pushes onto its thread-local
+   * stack and only then throws (no session factory). {@code DocumentCurrencyRate} and the
+   * {@code handleConvertQuotation} path call it OUTSIDE their {@code try}, so the {@code finally}
+   * that would restore the frame is never entered, and both then swallow or log the exception
+   * ("[ETP-5840] Could not evaluate the exchange rate of Order …", "[ETP-4027]
+   * handleConvertQuotation failed …"). The cases pass and the orphan frames are charged to the next
+   * {@code OBBaseTest} class in the same Gradle worker running as a non-admin user —
+   * {@code StorageDetailCostColumnsIntegrationTest} in the merge-block cut. Same symptom and same
+   * remedy as ETP-5953 ({@code NeoDefaultsServiceTest}, {@code NeoProcessServiceTest}).
+   *
+   * <p>The root fix is to make those sites enter through {@code NeoAdminMode#enter}, which already
+   * restores the frame when {@code setAdminMode} throws; that is product code, so it goes in its
+   * own ticket. It is a test-environment leak only: in production an {@code OBContext} always
+   * exists, so {@code setAdminContextLocally()} is never reached and the pairs stay balanced.
+   */
+  @After
+  public void clearAdminModeLeakedWithoutDal() {
+    OBContext.clearAdminModeStack();
+  }
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -608,6 +631,49 @@ public class SalesQuotationHeaderHandlerTest {
       assertEquals("order-5528", result.getBody().getString("salesOrderId"));
       assertEquals("DR", result.getBody().getString("documentStatus"));
     }
+  }
+
+  /**
+   * ETP-5051 — the order created from the quotation and its lines are checked against the plan
+   * quotas after the conversion and its reactivation, before the answer. Nothing has been committed
+   * yet, so a refusal rolls the WHOLE conversion back: 403 {@code QUOTA_EXCEEDED}, a rollback, no
+   * commit, and no {@code salesOrderId} handed to the client.
+   */
+  @Test
+  public void testConvertQuotation_overABlockQuota_rollsTheWholeConversionBack() throws Exception {
+    Order order = orderWithStatus("CO", "DR");
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    when(process.convertQuotationIntoSalesOrder(false, "q-5528")).thenReturn(order);
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class), mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class), mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+    OBDal dal = mock(OBDal.class);
+    when(dal.getSession()).thenReturn(mock(Session.class));
+
+    NeoResponse result;
+    try (MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class);
+         MockedConstruction<DocumentCurrencyRate> rates =
+             Mockito.mockConstruction(DocumentCurrencyRate.class);
+         MockedStatic<OrderDocActionSupport> docAction =
+             Mockito.mockStatic(OrderDocActionSupport.class);
+         MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
+
+      result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("Convertquotation").recordId("q-5528").build());
+
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(order));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(result);
+    assertFalse(result.getBody().has("salesOrderId"));
+    verify(dal).rollbackAndClose();
+    verify(dal, never()).commitAndClose();
   }
 
   /**

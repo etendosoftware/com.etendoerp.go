@@ -2031,7 +2031,7 @@ public class EtendoGoJwtServletTest {
       // this unit test has no DB context for. Only orgId/orgName are asserted, so a minimal
       // fixture built from the same arguments is enough.
       dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(any(Client.class),
-          any(Organization.class), any(User.class), any(EnvironmentPlanCache.class)))
+          any(Organization.class), any(User.class), any(EnvironmentPlanCache.class), any()))
           .thenAnswer(invocation -> {
             Organization org = invocation.getArgument(1);
             JSONObject env = new JSONObject();

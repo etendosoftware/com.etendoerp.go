@@ -65,7 +65,13 @@ import org.openbravo.test.base.TestConstants;
  *
  * <p>Runs in its own JVM: listed in {@code isolatedDalTests} (see {@code docs/test-jvm-isolation.md}).
  *
+ * <p>It also parses, against the real DAL model, the HQL the rectificative imports run
+ * (ETP-5876): a bad property path in a plain {@code Session.createQuery} is swallowed by the
+ * handler's error translation and leaves the transaction rollback-only, and the unit tests' mocks
+ * never run it.
+ *
  * @covers com.etendoerp.go.schemaforge.ImportInOutLinesIntoInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.ImportOriginInvoiceLinesHandler
  */
 public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseTest {
 
@@ -94,6 +100,18 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
   @After
   public void tearDown() {
     OBDal.getInstance().rollbackAndClose();
+  }
+
+  /** The candidate queries of the return and origin invoice imports resolve against the model. */
+  @Test
+  public void rectificativeImportQueriesResolveAgainstTheRealModel() {
+    org.hibernate.Session session = OBDal.getInstance().getSession();
+    session.createQuery(ImportInOutLinesIntoInvoiceHandler.candidateReturnsHql(),
+        ShipmentInOut.class);
+    for (boolean withCurrency : new boolean[] {false, true}) {
+      session.createQuery(ImportOriginInvoiceLinesHandler.candidateInvoicesHql(withCurrency),
+          Invoice.class);
+    }
   }
 
   @Test

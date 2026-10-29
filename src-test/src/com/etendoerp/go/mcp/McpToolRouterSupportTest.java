@@ -62,10 +62,15 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.NeoActionSurface;
+import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
+import com.etendoerp.go.usage.quota.QuotaDefinition;
+import com.etendoerp.go.usage.quota.QuotaEvaluation;
+import com.etendoerp.go.usage.quota.QuotaVerdict;
 
 /**
  * Unit tests for {@link McpToolRouterSupport}.
@@ -2365,6 +2370,66 @@ class McpToolRouterSupportTest {
       String hint = McpBatchEnvelope.toMcpBatchPreflightFailure(envelope, 0, null)
           .getString("hint");
       assertTrue(hint.contains("retry the whole batch"), hint);
+    }
+
+    /** The batch body {@code BatchService} returns for an operation refused by the quota gate. */
+    private JSONObject quotaFailure(NeoResponse refusal) throws Exception {
+      JSONObject error = new JSONObject();
+      error.put("status", refusal.getHttpStatus());
+      error.put("message", "Operation 'h1' rejected by server");
+      error.put("detail", refusal.getBody());
+      JSONObject body = new JSONObject();
+      body.put("committed", false);
+      body.put("failedAt", new JSONObject().put("index", 0).put("id", "h1"));
+      body.put("error", error);
+      return body;
+    }
+
+    /**
+     * REPRO (ETP-5051 QA BUG-3): an MCP batch rebuilt a quota refusal as a validation_error with
+     * prose, losing {@code QUOTA_EXCEEDED} and the {@code QuotaItem}. It must arrive in the same
+     * flattened shape {@code etendo_create} answers with.
+     */
+    @Test
+    @DisplayName("a quota refusal keeps its code and QuotaItem, flattened as etendo_create does")
+    void keepsAQuotaRefusalMachineReadable() throws Exception {
+      QuotaDefinition quota =
+          QuotaDefinition.builder().resourceId("RES-DOCS")
+              .resourceKey("POSTED_SALES_INVOICES").resourceName("Posted sales invoices")
+              .unitLabel("Inv").enforcementMode("block").includedQty(100L).build();
+      NeoResponse refusal = NeoQuotaWriteGate.refusalResponse(
+          new QuotaEvaluation(quota, "month", null, 100L,
+              QuotaVerdict.DENY));
+
+      JSONObject result = McpBatchEnvelope.toMcpBatchFailure(quotaFailure(refusal));
+
+      JSONObject error = result.getJSONObject("error");
+      JSONObject single = new JSONObject(McpHookExecutor.neoResponseToMcpResult(
+          NeoQuotaWriteGate.refusalResponse(
+              new QuotaEvaluation(quota, "month", null, 100L,
+                  QuotaVerdict.DENY)))
+          .getJSONArray("content").getJSONObject(0).getString("text"));
+      assertEquals(403, error.getInt("status"));
+      assertEquals("QUOTA_EXCEEDED", error.getString("code"));
+      assertEquals(single.getString("error"), error.getString("error"));
+      assertEquals("Quota exceeded: Posted sales invoices (100/100 Inv)",
+          error.getString("detail"));
+      assertEquals("POSTED_SALES_INVOICES",
+          error.getJSONObject("quota").getString("resourceKey"));
+      assertEquals(100L, error.getJSONObject("quota").getLong("consumed"));
+      assertEquals("h1", result.getJSONObject("failedAt").getString("id"));
+    }
+
+    @Test
+    @DisplayName("a failed quota check keeps QUOTA_CHECK_FAILED")
+    void keepsAFailedQuotaCheckMachineReadable() throws Exception {
+      JSONObject result = McpBatchEnvelope.toMcpBatchFailure(quotaFailure(
+          NeoQuotaWriteGate.checkFailedResponse()));
+
+      JSONObject error = result.getJSONObject("error");
+      assertEquals(500, error.getInt("status"));
+      assertEquals("QUOTA_CHECK_FAILED", error.getString("code"));
+      assertFalse(error.has("quota"));
     }
 
     @Test

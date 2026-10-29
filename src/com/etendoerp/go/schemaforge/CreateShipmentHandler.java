@@ -115,6 +115,8 @@ public class CreateShipmentHandler implements NeoHandler {
         createShipmentLines(shipment, result.getPendingLines(), result.getLocator());
 
         OBDal.getInstance().flush();
+        // ETP-5051: the plan-quota check of the created shipment and its lines.
+        NeoQuotaCreateCheck.requireAllowedDocument(shipment);
 
         JSONObject data = new JSONObject();
         data.put("id", shipment.getId());
@@ -131,6 +133,8 @@ public class CreateShipmentHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (OBException e) {
       SessionHandler.getInstance().rollback();
       log.warn("Error creating shipment from order {}: {}", recordId, e.getMessage());

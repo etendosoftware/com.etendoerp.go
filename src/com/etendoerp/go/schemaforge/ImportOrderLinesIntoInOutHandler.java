@@ -212,6 +212,7 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
           order.getId()));
     }
     String linkedOrderId = linkHeader(target);
+    requireQuotaAllowed(ShipmentInOutLine.ENTITY_NAME, created);
     return DocumentLineImport.ok(created, linkedOrderId);
   }
 

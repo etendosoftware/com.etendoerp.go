@@ -113,12 +113,16 @@ final class NeoReturnReceiptService {
 
         OBDal.getInstance().flush();
         ensureDocumentNo(returnDoc);
+        // ETP-5051: the plan-quota check of the created return and its lines.
+        NeoQuotaCreateCheck.requireAllowedDocument(returnDoc);
 
         return NeoResponse.createdWithData(ReturnFromDocumentSupport.describe(returnDoc, created));
 
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (OBException e) {
       log.warn("Error creating return from {}: {}", shipmentId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
