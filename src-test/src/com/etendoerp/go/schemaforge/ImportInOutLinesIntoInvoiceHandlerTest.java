@@ -212,28 +212,36 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     /** ETP-6002: the invoices each return line rectifies (by return line id), and the links made. */
     final Map<String, List<Invoice>> rectifiedByLine = new LinkedHashMap<>();
     final List<String> links = new ArrayList<>();
-    /** When set, {@link #linkIfMissing} throws it, as C_INVOICE_REVERSE_TRG would refuse a link. */
+    /** When set, the link seam throws it, as C_INVOICE_REVERSE_TRG would refuse a link. */
     RuntimeException linkRefusal;
 
-    @Override
-    protected List<Invoice> rectifiedInvoicesOf(ShipmentInOutLine returnLine, String partnerId) {
-      calls.add("rectifiedOf");
-      return rectifiedByLine.getOrDefault(returnLine == null ? null : returnLine.getId(),
-          List.of());
+    {
+      // The handler's rectification-link collaborator, with its DAL seams recorded here.
+      rectificationLinks = new RecordingLinks();
     }
 
-    @Override
-    protected boolean linkIfMissing(Invoice target, Invoice origin) {
-      if (linkRefusal != null) {
-        throw linkRefusal;
+    /** The real link step over recorded seams: lookups from the map, links and flushes logged. */
+    final class RecordingLinks extends ReturnImportRectificationLinks {
+      @Override
+      protected List<Invoice> rectifiedInvoicesOf(ShipmentInOutLine returnLine, String partnerId) {
+        calls.add("rectifiedOf");
+        return rectifiedByLine.getOrDefault(returnLine == null ? null : returnLine.getId(),
+            List.of());
       }
-      links.add(target.getId() + "->" + origin.getId());
-      return true;
-    }
 
-    @Override
-    protected void flushLinks() {
-      calls.add("flushLinks");
+      @Override
+      protected boolean linkIfMissing(Invoice target, Invoice origin) {
+        if (linkRefusal != null) {
+          throw linkRefusal;
+        }
+        links.add(target.getId() + "->" + origin.getId());
+        return true;
+      }
+
+      @Override
+      protected void flushLinks() {
+        calls.add("flushLinks");
+      }
     }
 
     @Override

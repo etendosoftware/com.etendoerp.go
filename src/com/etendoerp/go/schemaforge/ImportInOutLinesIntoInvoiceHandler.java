@@ -99,6 +99,12 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   /** Response key of the invoices a sales return import linked the rectificative to (ETP-6002). */
   static final String KEY_RECTIFIED_INVOICES = "rectifiedInvoices";
 
+  /**
+   * The rectification-link step of a sales return import (ETP-6002). A field, not a CDI bean: it
+   * holds no state, and the unit test swaps in a recording double.
+   */
+  ReturnImportRectificationLinks rectificationLinks = new ReturnImportRectificationLinks();
+
   /** Joins the steps of the flow sentence of a contract. */
   private static final String THEN = ", then ";
   private static final String DOCUMENT = "Document ";
@@ -354,7 +360,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     JSONArray rectified = null;
     if (returns && policy.linksReturnsToRectifiedInvoices()) {
       try {
-        rectified = linkRectifiedInvoices(invoice, linesById, planned.keySet());
+        rectified = rectificationLinks.link(invoice, linesById, planned.keySet());
       } catch (RuntimeException e) {
         // A C_INVOICE_REVERSE_TRG refusal (another partner, a processed invoice) is answered
         // classified, as on the lines CRUD, and rolled back: nothing is imported.
@@ -380,54 +386,6 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     Map<String, Object> extra = new LinkedHashMap<>();
     extra.put(KEY_RECTIFIED_INVOICES, rectified);
     return DocumentLineImport.ok(created, headerOrderId, extra);
-  }
-
-  /**
-   * Links {@code invoice} in {@code C_Invoice_Reverse} to every invoice the planned return lines
-   * rectify ({@link ReturnLineRectifiedInvoices}), deduped ({@link #linkIfMissing}), and flushes so
-   * a trigger refusal surfaces here, before any line is created.
-   *
-   * @return the invoices the rectificative is linked to through these lines, {@code [{id,
-   *     documentNo}]} (already-linked ones included)
-   */
-  private JSONArray linkRectifiedInvoices(Invoice invoice, Map<String, ShipmentInOutLine> linesById,
-      Collection<String> plannedLineIds) throws JSONException {
-    String partnerId = invoice.getBusinessPartner() == null ? null
-        : invoice.getBusinessPartner().getId();
-    Map<String, Invoice> origins = new LinkedHashMap<>();
-    for (String lineId : plannedLineIds) {
-      for (Invoice origin : rectifiedInvoicesOf(linesById.get(lineId), partnerId)) {
-        if (!origin.getId().equals(invoice.getId())) {
-          origins.putIfAbsent(origin.getId(), origin);
-        }
-      }
-    }
-    boolean created = false;
-    JSONArray linked = new JSONArray();
-    for (Invoice origin : origins.values()) {
-      created |= linkIfMissing(invoice, origin);
-      linked.put(new JSONObject().put("id", origin.getId())
-          .put("documentNo", origin.getDocumentNo()));
-    }
-    if (created) {
-      flushLinks();
-    }
-    return linked;
-  }
-
-  /** Seam: the invoices a return line rectifies, for the rectificative's partner. */
-  protected List<Invoice> rectifiedInvoicesOf(ShipmentInOutLine returnLine, String partnerId) {
-    return ReturnLineRectifiedInvoices.of(returnLine, partnerId);
-  }
-
-  /** Seam: the {@code C_Invoice_Reverse} row, created unless the pair is already linked. */
-  protected boolean linkIfMissing(Invoice invoice, Invoice origin) {
-    return InvoiceRectificationLinkSupport.ensureReverseLink(invoice, origin);
-  }
-
-  /** Seam: flushes the links, so the trigger runs before the lines are created. */
-  protected void flushLinks() {
-    OBDal.getInstance().flush();
   }
 
   /**
