@@ -146,12 +146,16 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
         OBDal.getInstance().refresh(returnReceipt);
 
         ensureDocumentNo(returnReceipt);
+        // ETP-5051: the plan-quota check of the created return and its lines.
+        NeoQuotaCreateCheck.requireAllowedDocument(returnReceipt);
 
         return NeoResponse.createdWithData(ReturnFromDocumentSupport.describe(returnReceipt, created));
 
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (OBException e) {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Error creating purchase return from receipt {}: {}", recordId, e.getMessage());

@@ -56,7 +56,7 @@
 <!--4602F18BBC93404CA81B3AA4D24F2E81-->  <VALUE><![CDATA[ETGO_UsageAggregation]]></VALUE>
 <!--4602F18BBC93404CA81B3AA4D24F2E81-->  <NAME><![CDATA[Billing Resource Usage Aggregation]]></NAME>
 <!--4602F18BBC93404CA81B3AA4D24F2E81-->  <DESCRIPTION><![CDATA[Computes the usage counts for billing resources]]></DESCRIPTION>
-<!--4602F18BBC93404CA81B3AA4D24F2E81-->  <HELP><![CDATA[Computes the usage counts for billing resources]]></HELP>
+<!--4602F18BBC93404CA81B3AA4D24F2E81-->  <HELP><![CDATA[Computes the daily usage counts of the active billing resources. With no dates it recomputes the settling window; with Starting Date and Ending Date it backfills that range. Re-running a range is safe. A scheduled run does nothing while the usage-aggregation-schedule flag is off, and ends as an error in Process Monitor; the default cadence is two hours.]]></HELP>
 <!--4602F18BBC93404CA81B3AA4D24F2E81-->  <ACCESSLEVEL><![CDATA[4]]></ACCESSLEVEL>
 <!--4602F18BBC93404CA81B3AA4D24F2E81-->  <ISUSERSTARTABLE><![CDATA[N]]></ISUSERSTARTABLE>
 <!--4602F18BBC93404CA81B3AA4D24F2E81-->  <ISREPORT><![CDATA[N]]></ISREPORT>

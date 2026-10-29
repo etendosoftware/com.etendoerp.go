@@ -248,6 +248,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (DocumentCurrencyRate.MissingRateException e) {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
@@ -302,6 +304,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
     OBDal.getInstance().getSession().refresh(invoice);
     ensureDocumentNo(invoice);
+    // ETP-5051: the plan-quota check of the generated invoice, BEFORE the completion commits it.
+    NeoQuotaCreateCheck.requireAllowedDocument(invoice);
 
     // ETP-5381: create and confirm atomically — see CreateDraftInvoiceHandler.handleCreate for
     // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits

@@ -24,6 +24,7 @@ import static org.mockito.Mockito.times;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
+import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
 
 /**
@@ -34,6 +35,12 @@ import com.etendoerp.go.usageevents.UsageEventRecorder;
  * the servlet's teardown. {@code super.destroy()} ({@code GenericServlet}) is a no-op with nothing
  * observable, so the second half is asserted as "destroy() still completes normally" when the
  * shutdown throws.</p>
+ *
+ * <p>ETP-5051 — the isolated quota-report readers are daemon threads of this webapp too, so
+ * {@code destroy()} also calls {@link IsolatedDalRead#shutdown()}, whatever the steps before it
+ * did.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoServlet
  */
 class NeoServletDestroyTest {
 
@@ -52,6 +59,36 @@ class NeoServletDestroyTest {
       NeoServlet servlet = new NeoServlet();
       assertDoesNotThrow(servlet::destroy);
       recorder.verify(UsageEventRecorder::shutdown, times(1));
+    }
+  }
+
+  @Test
+  void destroyStopsTheIsolatedReadWorkers() {
+    try (MockedStatic<UsageEventRecorder> recorder = mockStatic(UsageEventRecorder.class);
+        MockedStatic<IsolatedDalRead> isolated = mockStatic(IsolatedDalRead.class)) {
+      new NeoServlet().destroy();
+      isolated.verify(IsolatedDalRead::shutdown, times(1));
+    }
+  }
+
+  @Test
+  void theIsolatedReadWorkersAreStoppedEvenWhenTheUsageWriterShutdownFails() {
+    try (MockedStatic<UsageEventRecorder> recorder = mockStatic(UsageEventRecorder.class);
+        MockedStatic<IsolatedDalRead> isolated = mockStatic(IsolatedDalRead.class)) {
+      recorder.when(UsageEventRecorder::shutdown).thenThrow(new IllegalStateException("boom"));
+      new NeoServlet().destroy();
+      isolated.verify(IsolatedDalRead::shutdown, times(1));
+    }
+  }
+
+  @Test
+  void aFailingIsolatedReadShutdownDoesNotFailDestroy() {
+    try (MockedStatic<UsageEventRecorder> recorder = mockStatic(UsageEventRecorder.class);
+        MockedStatic<IsolatedDalRead> isolated = mockStatic(IsolatedDalRead.class)) {
+      isolated.when(IsolatedDalRead::shutdown).thenThrow(new IllegalStateException("boom"));
+      NeoServlet servlet = new NeoServlet();
+      assertDoesNotThrow(servlet::destroy);
+      isolated.verify(IsolatedDalRead::shutdown, times(1));
     }
   }
 }

@@ -115,9 +115,32 @@ class SalesLineCustomizationHandlersTest {
     NeoExtensionIndex.invalidate();
   }
 
+  /**
+   * Drops the index built from the mocked bean manager, and clears the admin-mode stack this class
+   * leaks without a DAL.
+   *
+   * <p>ETP-6007: {@code handleRecalculatesTheAmountsOnUpdate} is the only case here that builds a
+   * PATCH context carrying a record id, so it is the only one that reaches
+   * {@code CompletedInvoiceWriteFence#read}. That method calls {@code OBContext.setAdminMode(true)}
+   * OUTSIDE its {@code try}, and {@code setAdminMode} pushes onto its thread-local stack before
+   * {@code setAdminContextLocally()} throws for the missing session factory — so the {@code try} is
+   * never entered and its {@code finally} never restores the frame. {@code checkLine} then swallows
+   * the exception ("Could not evaluate the completed-invoice fence for line …"), the case passes,
+   * and the orphan frame is charged to the next {@code OBBaseTest} class in the same Gradle worker
+   * running as a non-admin user — {@code StorageDetailCostColumnsIntegrationTest} in the merge-block
+   * cut. Same symptom and same remedy as ETP-5953 ({@code NeoDefaultsServiceTest},
+   * {@code NeoProcessServiceTest}).
+   *
+   * <p>Unlike those two, the production code here is NOT balanced. The root fix is to make
+   * {@code read} enter through {@code NeoAdminMode#enter}, which already restores the frame when
+   * {@code setAdminMode} throws; that is product code, so it goes in its own ticket against
+   * ETP-5692. It is a test-environment leak only: in production an {@code OBContext} always exists,
+   * so {@code setAdminContextLocally()} is never reached and the pair stays balanced.
+   */
   @AfterEach
-  void dropIndexBuiltFromMocks() {
+  void dropIndexAndAdminModeLeakedWithoutDal() {
     NeoExtensionIndex.invalidate();
+    OBContext.clearAdminModeStack();
   }
 
   @ParameterizedTest(name = "{0}")

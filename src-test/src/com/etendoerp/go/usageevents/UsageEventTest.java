@@ -50,6 +50,8 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+
 /**
  * Unit specs for {@link UsageEvent} and its builder (ETP-5462).
  *
@@ -353,6 +355,64 @@ class UsageEventTest {
       UsageEvent event = assertDoesNotThrow(
           () -> UsageEvent.builder().property("bad", Double.NaN).build());
       assertNull(event.properties());
+    }
+  }
+
+  /** ETP-5351 (T7) — events of a support session are kept and marked, never dropped. */
+  @Nested
+  @DisplayName("support actor marker")
+  class SupportActor {
+
+    private final String supportUser = SupportAccessGuard.supportUserIdFor(CLIENT_ID);
+
+    @Test
+    @DisplayName("an event by the tenant's support user is marked actor=support")
+    void supportUserEventIsMarked() throws Exception {
+      UsageEvent event = UsageEvent.builder().clientId(CLIENT_ID).userId(supportUser)
+          .eventType(UsageEventTypes.AI_AGENT_MESSAGE).property("model", "kimi").build();
+
+      JSONObject properties = new JSONObject(event.properties());
+      assertEquals(UsageEvent.ACTOR_SUPPORT, properties.getString(UsageEvent.PROPERTY_ACTOR));
+      assertEquals("kimi", properties.getString("model"));
+      assertEquals(supportUser, event.userId());
+    }
+
+    @Test
+    @DisplayName("a support event without attributes still carries the marker")
+    void supportUserEventWithoutPropertiesIsMarked() {
+      UsageEvent event = UsageEvent.builder().clientId(CLIENT_ID).userId(supportUser).build();
+
+      assertEquals("{\"actor\":\"support\"}", event.properties());
+    }
+
+    @Test
+    @DisplayName("an oversized support event keeps the marker next to the truncation flag")
+    void oversizedSupportEventKeepsTheMarker() throws Exception {
+      String big = "x".repeat(UsageEvent.PROPERTIES_MAX_BYTES + 1);
+      UsageEvent event = UsageEvent.builder().clientId(CLIENT_ID).userId(supportUser)
+          .property("blob", big).build();
+
+      JSONObject properties = new JSONObject(event.properties());
+      assertTrue(properties.getBoolean("_truncated"));
+      assertEquals(UsageEvent.ACTOR_SUPPORT, properties.getString(UsageEvent.PROPERTY_ACTOR));
+    }
+
+    @Test
+    @DisplayName("a caller cannot forge the marker on a tenant event")
+    void forgedMarkerIsDropped() {
+      UsageEvent event = UsageEvent.builder().clientId(CLIENT_ID).userId(USER_ID)
+          .property(UsageEvent.PROPERTY_ACTOR, UsageEvent.ACTOR_SUPPORT).build();
+
+      assertNull(event.properties());
+    }
+
+    @Test
+    @DisplayName("the support user of another client is not this client's support user")
+    void otherClientsSupportUserIsNotMarked() {
+      UsageEvent event = UsageEvent.builder().clientId(ORG_ID).userId(supportUser)
+          .property("k", 1).build();
+
+      assertFalse(event.properties().contains(UsageEvent.PROPERTY_ACTOR));
     }
   }
 }

@@ -57,6 +57,7 @@ import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
@@ -70,6 +71,7 @@ import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.invoice.ReversedInvoice;
+import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -96,6 +98,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 public class ReturnMaterialReceiptHeaderHandlerTest {
 
@@ -490,6 +493,47 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       NeoResponse result = handler.handle(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_NOT_FOUND, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * ETP-5051 — the rectificative invoice created from the return receipt is refused by a plan quota
+   * ({@code ReturnInvoiceSupport} checks it before the completion commits): the handler answers
+   * 403 {@code QUOTA_EXCEEDED}, not its generic 500, and the creation is rolled back.
+   */
+  @Test
+  public void testHandleCreateReturnInvoiceOverABlockQuotaAnswers403AndRollsBack()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ReturnShipmentUtils> utils = Mockito.mockStatic(ReturnShipmentUtils.class);
+         MockedStatic<ReturnInvoiceSupport> support =
+             Mockito.mockStatic(ReturnInvoiceSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
+      when(receipt.getDocumentStatus()).thenReturn("CO");
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getProduct()).thenReturn(mock(Product.class));
+      when(receipt.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+      when(receipt.getOrganization()).thenReturn(org);
+      DocumentType docType = mock(DocumentType.class);
+      utils.when(() -> ReturnShipmentUtils.findReturnDocTypeForOrg(any(), eq("org-1"),
+          eq("ARI"), anyBoolean(), anyBoolean(), anyBoolean())).thenReturn(docType);
+      support.when(() -> ReturnInvoiceSupport.createReturnInvoice(any(), anyString(), any(),
+          any(), anyBoolean(), any(), any())).thenThrow(QuotaRefusalTestSupport.refusal());
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("createReturnInvoice").recordId("rec-1").build());
+
+      QuotaRefusalTestSupport.assertQuotaExceeded(result);
+      Mockito.verify(dal).rollbackAndClose();
+      Mockito.verify(dal, Mockito.never()).commitAndClose();
     }
   }
 
@@ -1971,6 +2015,48 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
     java.util.Set<String> declared = new ReturnMaterialReceiptHeaderHandler().responseEnrichedFields();
     for (String key : java.util.List.of("sourceShipments", "sourceShipmentDocNo", "returnInvoices", "hasReturnInvoice", "linesCount", "invoiceStatus")) {
       org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
+  }
+
+  /**
+   * ETP-5051 — the return lines importShipmentLines adds are quota-checked before the answer: refused, the
+   * import answers 403 {@code QUOTA_EXCEEDED} and is rolled back.
+   */
+  @Test
+  public void testHandleImportShipmentLinesOverAQuotaIsRefusedAndRolledBack() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+         MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L, (src, excl) -> BigDecimal.ZERO);
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(returnDoc);
+      when(returnDoc.getClient()).thenReturn(mock(Client.class));
+      when(returnDoc.getOrganization()).thenReturn(mock(Organization.class));
+      ShipmentInOutLine sourceLine =
+          ReturnedQuantityTestSupport.sourceLine("src-1", "Agua", "5");
+      when(dal.get(ShipmentInOutLine.class, "src-1")).thenReturn(sourceLine);
+      when(sourceLine.getUOM()).thenReturn(mock(UOM.class));
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      ShipmentInOutLine retLine = mock(ShipmentInOutLine.class);
+      when(retLine.getId()).thenReturn("ret-line-1");
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(retLine);
+
+      JSONObject body = new JSONObject().put("lines", new JSONArray().put(
+          new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", "3")));
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("importShipmentLines").recordId("rec-1").requestBody(body).build());
+
+      QuotaRefusalTestSupport.assertQuotaExceeded(result);
+      Mockito.verify(dal).rollbackAndClose();
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowed(ShipmentInOutLine.ENTITY_NAME,
+          List.of("ret-line-1")));
     }
   }
 
