@@ -747,9 +747,11 @@ public class ImportOriginInvoiceLinesHandlerTest {
     String text = ImportOriginInvoiceLinesHandler.contracts(true).get("importOriginInvoiceLines")
         .getDescription();
     assertTrue(text, text.contains("NEGATIVE") && text.contains("Rectificaciones")
-        && text.contains("NOT deducted") && text.contains("order line"));
-    assertFalse(ImportOriginInvoiceLinesHandler.contracts(false).get("importOriginInvoiceLines")
-        .getDescription().contains("order line"));
+        && text.contains("NOT deducted") && text.contains("never its order line"));
+    // ETP-6002: neither side keeps the source line's order line, and both contracts say so.
+    String purchase = ImportOriginInvoiceLinesHandler.contracts(false)
+        .get("importOriginInvoiceLines").getDescription();
+    assertTrue(purchase, purchase.contains("never its order line"));
   }
 
   @Test

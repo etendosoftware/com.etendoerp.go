@@ -1256,9 +1256,15 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     }
     String text = ImportInOutLinesIntoInvoiceHandler.returnContracts(true)
         .get("importReturnLines").getDescription();
+    // ETP-6002: the sales return import links the invoices the return lines rectify, and says so.
     assertTrue(text, text.contains("NEGATIVE") && text.contains("CURRENT price list")
-        && text.contains("createReturnInvoice") && text.contains("does not link")
+        && text.contains("createReturnInvoice") && text.contains("links the rectificative")
+        && text.contains("rectifiedInvoices") && !text.contains("does not link")
         && text.contains("voided ones too"));
+    String purchaseImport = ImportInOutLinesIntoInvoiceHandler.returnContracts(false)
+        .get("importReturnLines").getDescription();
+    assertTrue("the purchase return import still writes no link", purchaseImport.contains(
+        "does not link") && !purchaseImport.contains("rectifiedInvoices"));
     String purchase = ImportInOutLinesIntoInvoiceHandler.returnContracts(false)
         .get("availableReturnLines").getDescription();
     assertTrue(purchase, purchase.contains("NOT deducted")
