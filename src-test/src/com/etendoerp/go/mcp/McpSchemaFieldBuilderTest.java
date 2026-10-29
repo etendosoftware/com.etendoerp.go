@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -59,6 +60,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -886,6 +888,36 @@ class McpSchemaFieldBuilderTest {
             eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
 
         assertTrue(include(column("col-sepa", dbColumnName, true, null),
+            java.util.Set.of(), metadata()));
+      }
+    }
+
+    /**
+     * ETP-5806 follow-up — the gate is PER ACCOUNT: the same environment publishes the column to
+     * a targeted account's agent and withholds it from everyone else. An account-less evaluation
+     * here would have answered the global default to every account, contradicting the per-account
+     * capability signal the SPA already renders from.
+     */
+    @Test
+    @DisplayName("a structured SEPA address column is gated per account")
+    void structuredAddressColumnIsGatedPerAccount() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+            argThat(ctx -> ctx != null
+                && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
+
+        accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+            .thenReturn("localization@etendo.software");
+        assertTrue(include(column("col-sepa", "EM_OBSEPA_StrtNm", true, null),
+            java.util.Set.of(), metadata()));
+
+        accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+            .thenReturn("someone.else@example.com");
+        assertFalse(include(column("col-sepa", "EM_OBSEPA_StrtNm", true, null),
             java.util.Set.of(), metadata()));
       }
     }

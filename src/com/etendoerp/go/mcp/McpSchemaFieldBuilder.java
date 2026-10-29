@@ -638,8 +638,13 @@ final class McpSchemaFieldBuilder {
     if (!col.isActive() || systemColumns.contains(col.getDBColumnName().toUpperCase())) {
       return false;
     }
+    // ETP-5806 — per-account (staged rollout), same account the capability signal resolves for.
+    // The account lookup sits AFTER the column-name test on purpose: && short-circuits, so a
+    // schema walk only pays for it on the at most 3 columns this set can match, and never at all
+    // on a table that has none of them.
     if (STRUCTURED_ADDRESS_COLUMNS.contains(col.getDBColumnName().toUpperCase())
-        && !com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled()) {
+        && !com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled(
+            com.etendoerp.go.common.GoAccountResolver.resolveCurrentAccountEmail())) {
       return false;
     }
     return McpSchemaActionFields.isButtonColumn(col) || fieldMetadata.exposes(col);

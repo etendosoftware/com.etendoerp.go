@@ -135,9 +135,16 @@ public class OnboardingProvisioningChain {
    * are the structured address fields from the onboarding company step; {@code address} is kept as
    * a legacy free-text fallback used only when none of the structured fields is present — see
    * {@code OnboardingOrgInfoService#createLocation}.
+   *
+   * <p>{@code accountEmail} (ETP-5806 follow-up) is the {@code ETGO_ACCOUNT} email the
+   * {@code structured-address-for-sepa} flag is evaluated for when the address is persisted.
+   * Provisioning runs under an admin execution context with no caller identity to recover, so the
+   * account has to be carried here from the request that started it; blank for a pooled
+   * placeholder tenant, which belongs to no account and has no address to compose anyway.
    */
   public record OrgInfoInput(String countryCode, String address, String streetName,
-      String buildingNumber, String buildingName, String cityName, String taxId) {
+      String buildingNumber, String buildingName, String cityName, String taxId,
+      String accountEmail) {
   }
 
   /** The admin identity the chain runs under once the client exists. */
@@ -550,8 +557,10 @@ public class OnboardingProvisioningChain {
       String buildingName = orgInfo != null ? orgInfo.buildingName() : null;
       String cityName = orgInfo != null ? orgInfo.cityName() : null;
       String taxId = orgInfo != null ? orgInfo.taxId() : null;
+      String accountEmail = orgInfo != null ? orgInfo.accountEmail() : null;
       onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId,
-          countryCode, address, streetName, buildingNumber, buildingName, cityName, taxId);
+          countryCode, address, streetName, buildingNumber, buildingName, cityName, taxId,
+          accountEmail);
       sink.progress(PROGRESS_ORG_INFO, PROGRESS_DONE, "Organization address ready");
       return true;
     } catch (Exception e) {

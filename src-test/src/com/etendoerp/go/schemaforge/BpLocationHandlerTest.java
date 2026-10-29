@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -43,6 +44,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.geography.Location;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 
 /**
@@ -120,6 +122,20 @@ class BpLocationHandlerTest {
   @Nested
   class Create {
 
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
+
     @Test
     void missingMandatoryFieldsReturns400() throws Exception {
       JSONObject body = new JSONObject();
@@ -187,6 +203,20 @@ class BpLocationHandlerTest {
 
   @Nested
   class Update {
+
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
 
     @Test
     void notFoundReturns404() {
@@ -273,6 +303,20 @@ class BpLocationHandlerTest {
   @Nested
   class PersistAfterHandle {
 
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
+
     @Test
     void nonCrudEndpointReturnsNull() {
       NeoContext ctx = NeoContext.builder()
@@ -350,6 +394,20 @@ class BpLocationHandlerTest {
 
   @Nested
   class GetEnrichment {
+
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
 
     @Test
     void enrichesEveryRowWithStructuredFields() throws Exception {
@@ -453,6 +511,76 @@ class BpLocationHandlerTest {
   }
 
   // ── helpers ────────────────────────────────────────────────────────────
+
+  // ── ETP-5806 follow-up: per-account targeting ─────────────────────────────
+
+  /**
+   * The write/read gating resolves the flag for the REQUESTING ACCOUNT, not account-less. Before
+   * this follow-up the capability signal was already per-account while this handler was not, so a
+   * targeted user saw the 3 fields in the UI, filled them in, and {@code handle()} returned
+   * {@code null} — generic CRUD then dropped them without an error, per the flag's deliberate
+   * "ignore, don't reject" contract.
+   */
+  @Nested
+  class PerAccountTargeting {
+
+    private static final String TARGETED_ACCOUNT = "localization@etendo.software";
+    private static final String OTHER_ACCOUNT = "someone.else@example.com";
+
+    /** True for {@link #TARGETED_ACCOUNT} only; false for every other key, including none. */
+    private MockedStatic<GoFeatureFlags> targetedFlag() {
+      MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+          argThat(ctx -> ctx != null && TARGETED_ACCOUNT.equals(ctx.getTargetingKey()))))
+          .thenReturn(true);
+      return flags;
+    }
+
+    /** The targeted account's create IS intercepted and validated, so nothing is dropped. */
+    @Test
+    void handleInterceptsAndValidatesForATargetedAccount() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
+        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+
+        NeoResponse r = handler.handle(buildCrudContext("POST", null, new JSONObject()));
+
+        assertNotNull(r);
+        assertEquals(400, r.getHttpStatus());
+      }
+    }
+
+    /** Same environment, untargeted account: the off behaviour is unchanged. */
+    @Test
+    void handleFallsThroughForAnUntargetedAccount() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
+        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(OTHER_ACCOUNT);
+
+        assertNull(handler.handle(buildCrudContext("POST", null, new JSONObject())));
+      }
+    }
+
+    /** The read path is gated for the same account, so a targeted GET gets the 3 keys back. */
+    @Test
+    void afterHandleEnrichesOnlyForATargetedAccount() throws Exception {
+      Location geoLoc = mock(Location.class);
+      when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+      when(obDal.get(eq(Location.class), eq("loc-get"))).thenReturn(geoLoc);
+
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = targetedFlag()) {
+        accounts.when(GoAccountResolver::resolveCurrentAccountEmail).thenReturn(OTHER_ACCOUNT);
+
+        NeoContext ctx = buildCrudContext("GET", "loc-get", null);
+        ctx.setPreviousResult(wrapRecord("loc-get"));
+        assertNull(handler.afterHandle(ctx));
+      }
+    }
+  }
 
   private NeoContext buildCrudContext(String method, String recordId, JSONObject body) {
     return NeoContext.builder()

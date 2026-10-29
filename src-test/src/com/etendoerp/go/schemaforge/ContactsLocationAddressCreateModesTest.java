@@ -18,9 +18,12 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -46,6 +49,9 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
+
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 
 /**
  * ETP-5234 for {@link ContactsLocationAddressHandler}: the two create modes.
@@ -281,14 +287,16 @@ class ContactsLocationAddressCreateModesTest {
       body.put("country", COUNTRY_ID);
       // streetName, buildingNumber and cityName intentionally omitted
 
-      NeoResponse response = handler.handle(post(body));
+      try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+        NeoResponse response = handler.handle(post(body));
 
-      assertEquals(400, response.getHttpStatus());
-      String message = response.getBody().toString();
-      assertTrue(message.contains("streetName"), message);
-      assertTrue(message.contains("buildingNumber"), message);
-      assertTrue(message.contains("cityName"), message);
-      verify(obDal, never()).get(BusinessPartner.class, BP_ID);
+        assertEquals(400, response.getHttpStatus());
+        String message = response.getBody().toString();
+        assertTrue(message.contains("streetName"), message);
+        assertTrue(message.contains("buildingNumber"), message);
+        assertTrue(message.contains("cityName"), message);
+        verify(obDal, never()).get(BusinessPartner.class, BP_ID);
+      }
     }
 
     /**
@@ -308,11 +316,13 @@ class ContactsLocationAddressCreateModesTest {
       // EM_OBSEPA_BldgNm is VARCHAR(35) — 36 chars overflows it.
       body.put("buildingName", "A".repeat(36));
 
-      NeoResponse response = handler.handle(post(body));
+      try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+        NeoResponse response = handler.handle(post(body));
 
-      assertEquals(400, response.getHttpStatus());
-      assertTrue(response.getBody().toString().contains("buildingName"), response.getBody().toString());
-      verify(obDal, never()).save(any());
+        assertEquals(400, response.getHttpStatus());
+        assertTrue(response.getBody().toString().contains("buildingName"), response.getBody().toString());
+        verify(obDal, never()).save(any());
+      }
     }
   }
 
@@ -354,7 +364,58 @@ class ContactsLocationAddressCreateModesTest {
     }
   }
 
+  /**
+   * ETP-5806 follow-up — the create-mode validation resolves {@code structured-address-for-sepa}
+   * for the REQUESTING ACCOUNT. In one environment, a targeted account gets the stricter
+   * Street/Number/City rule (so what it fills in is accepted and persisted) while an untargeted
+   * account keeps the pre-ETP-5806 country-only rule. Before this, the backend evaluated an
+   * account-less context here while the UI already rendered the fields per account.
+   */
+  @Test
+  void createMandatoryRuleIsResolvedPerAccount() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("country", "country-es");
+    // No streetName/buildingNumber/cityName — a 400 for a targeted account, fine for anyone else.
+
+    try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+        MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+          argThat(ctx -> ctx != null
+              && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
+
+      accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+          .thenReturn("localization@etendo.software");
+      NeoResponse targeted = handler.handle(post(body));
+      assertEquals(400, targeted.getHttpStatus());
+      assertTrue(targeted.getBody().toString().contains("streetName"),
+          targeted.getBody().toString());
+
+      // Same environment, a different account: the structured-field rule never runs, so the
+      // request is never rejected for a missing streetName. (Whatever else the DAL stubs make of
+      // the create past that point is not what this test is pinning.)
+      accounts.when(GoAccountResolver::resolveCurrentAccountEmail)
+          .thenReturn("someone.else@example.com");
+      stubBusinessPartner();
+      stubNewBpLocation();
+      when(obProvider.get(Location.class)).thenReturn(mock(Location.class));
+      NeoResponse untargeted = handler.handle(post(body));
+      assertFalse(untargeted.getBody().toString().contains("streetName"),
+          untargeted.getBody().toString());
+    }
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────────
+
+  /** Stubs {@link GoFeatureFlags#isEnabled} for the {@code structured-address-for-sepa} flag only. */
+  private MockedStatic<GoFeatureFlags> mockStructuredAddressFlag(boolean enabled) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(enabled);
+    return flags;
+  }
 
   private void stubBusinessPartner() {
     BusinessPartner bp = mock(BusinessPartner.class);

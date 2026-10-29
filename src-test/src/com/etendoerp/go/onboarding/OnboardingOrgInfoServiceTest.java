@@ -22,6 +22,7 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -61,7 +62,7 @@ public class OnboardingOrgInfoServiceTest {
   public void testEnsureOrgInfoFailsWhenClientIdIsMissing() {
     TestableService service = new TestableService();
     try {
-      service.ensureOrgInfo(null, "ORG-1", "USER-1", "ROLE-1", "ES", null, null, null, null, null, null);
+      service.ensureOrgInfo(null, "ORG-1", "USER-1", "ROLE-1", "ES", null, null, null, null, null, null, null);
       fail("Expected missing clientId to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Missing client"));
@@ -72,7 +73,7 @@ public class OnboardingOrgInfoServiceTest {
   public void testEnsureOrgInfoFailsWhenOrgIdIsMissing() {
     TestableService service = new TestableService();
     try {
-      service.ensureOrgInfo("CLIENT-1", null, "USER-1", "ROLE-1", "ES", null, null, null, null, null, null);
+      service.ensureOrgInfo("CLIENT-1", null, "USER-1", "ROLE-1", "ES", null, null, null, null, null, null, null);
       fail("Expected missing orgId to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Missing organization"));
@@ -83,7 +84,7 @@ public class OnboardingOrgInfoServiceTest {
   public void testEnsureOrgInfoFailsWhenAdminUserIsMissing() {
     TestableService service = new TestableService();
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", null, "ROLE-1", "ES", null, null, null, null, null, null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", null, "ROLE-1", "ES", null, null, null, null, null, null, null);
       fail("Expected missing admin user to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Missing admin user"));
@@ -94,7 +95,7 @@ public class OnboardingOrgInfoServiceTest {
   public void testEnsureOrgInfoFailsWhenAdminRoleIsMissing() {
     TestableService service = new TestableService();
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", null, "ES", null, null, null, null, null, null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", null, "ES", null, null, null, null, null, null, null);
       fail("Expected missing admin role to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Missing admin role"));
@@ -110,7 +111,7 @@ public class OnboardingOrgInfoServiceTest {
     TestableService service = new TestableService();
     service.client = null;
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null, null, null, null, null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null, null, null, null, null, null);
       fail("Expected client-not-found failure");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Client not found for org-info setup"));
@@ -122,7 +123,7 @@ public class OnboardingOrgInfoServiceTest {
     TestableService service = new TestableService();
     service.organization = null;
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null, null, null, null, null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null, null, null, null, null, null);
       fail("Expected organization-not-found failure");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Organization not found for org-info setup"));
@@ -136,7 +137,7 @@ public class OnboardingOrgInfoServiceTest {
     OBContext previous = mock(OBContext.class);
     OBContext.setOBContext(previous);
 
-    service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", "Main St 1", null, null, null, null, null);
+    service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", "Main St 1", null, null, null, null, null, null);
 
     assertTrue(service.ensureLocationCalled);
     assertTrue(service.flushed);
@@ -152,7 +153,7 @@ public class OnboardingOrgInfoServiceTest {
     OBContext.setOBContext(previous);
 
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null, null, null, null, null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null, null, null, null, null, null);
       fail("Expected delegated failure");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("location-boom"));
@@ -219,7 +220,7 @@ public class OnboardingOrgInfoServiceTest {
       when(orgInfo.getLocationAddress()).thenReturn(mock(Location.class));
       service.orgInfo = orgInfo;
 
-      service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, null, null, null, null, null);
+      service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, null, null, null, null, null, null);
 
       // Already located: no location created, no link, no save.
       assertNull(service.createdLocation);
@@ -240,7 +241,7 @@ public class OnboardingOrgInfoServiceTest {
       service.resolvedCountry = null; // resolveCountry yields nothing
 
       try {
-        service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, null, null, null, null, null);
+        service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, null, null, null, null, null, null);
         fail("Expected no-country failure");
       } catch (OBException e) {
         assertTrue(e.getMessage().contains("No country available"));
@@ -265,7 +266,7 @@ public class OnboardingOrgInfoServiceTest {
       service.resolvedCountry = country;
       service.locationToCreate = location;
 
-      service.ensureOrgInfoLocation(service.client, service.organization, "ES", "Main St 1", null, null, null, null, null);
+      service.ensureOrgInfoLocation(service.client, service.organization, "ES", "Main St 1", null, null, null, null, null, null);
 
       assertTrue(service.createOrgInfoCalled);
       assertSame(location, service.createdLocation);
@@ -325,7 +326,7 @@ public class OnboardingOrgInfoServiceTest {
       when(orgInfo.getLocationAddress()).thenReturn(mock(Location.class));
       service.orgInfo = orgInfo;
 
-      service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, null, null, null, null, "5678");
+      service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, null, null, null, null, "5678", null);
 
       verify(orgInfo).setTaxID("5678");
       // Still no location work — that early return is unrelated to the Tax ID.
@@ -418,7 +419,8 @@ public class OnboardingOrgInfoServiceTest {
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obProvider.when(OBProvider::getInstance).thenReturn(provider);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertSame(location, service.createLocation(client, org, country, "  Main St 1  ", null, null, null, null));
+      assertSame(location, service.createLocation(client, org, country, "  Main St 1  ", null, null, null, null,
+          "lola@example.com"));
     }
 
     verify(location).setNewOBObject(true);
@@ -446,7 +448,8 @@ public class OnboardingOrgInfoServiceTest {
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obProvider.when(OBProvider::getInstance).thenReturn(provider);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      service.createLocation(client, org, country, "   ", null, null, null, null);
+      service.createLocation(client, org, country, "   ", null, null, null, null,
+          "lola@example.com");
     }
 
     verify(location, never()).setAddressLine1(anyString());
@@ -478,7 +481,7 @@ public class OnboardingOrgInfoServiceTest {
       flags.when(() -> GoFeatureFlags.isEnabled(
           eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
       service.createLocation(client, org, country, "Legacy free text — must be ignored",
-          "Gran Via", "45", "Torre A", "Madrid");
+          "Gran Via", "45", "Torre A", "Madrid", "lola@example.com");
     }
 
     verify(location).setOBSEPAStreetName("Gran Via");
@@ -516,7 +519,8 @@ public class OnboardingOrgInfoServiceTest {
       flags.when(() -> GoFeatureFlags.isEnabled(
           eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
 
-      service.createLocation(client, org, country, null, "Gran Via", "45", "Torre A", "Madrid");
+      service.createLocation(client, org, country, null, "Gran Via", "45", "Torre A", "Madrid",
+          "lola@example.com");
     }
 
     verify(location, never()).setOBSEPAStreetName(any());
@@ -554,7 +558,7 @@ public class OnboardingOrgInfoServiceTest {
           eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
 
       service.createLocation(client, org, country, "Legacy free text", "Gran Via", "45",
-          "Torre A", "Madrid");
+          "Torre A", "Madrid", "lola@example.com");
     }
 
     verify(location).setAddressLine1("Legacy free text");
@@ -585,7 +589,8 @@ public class OnboardingOrgInfoServiceTest {
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obProvider.when(OBProvider::getInstance).thenReturn(provider);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      service.createLocation(client, org, country, null, null, null, null, "Sevilla");
+      service.createLocation(client, org, country, null, null, null, null, "Sevilla",
+          "lola@example.com");
     }
 
     verify(location).setCityName("Sevilla");
@@ -611,11 +616,64 @@ public class OnboardingOrgInfoServiceTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       flags.when(() -> GoFeatureFlags.isEnabled(
           eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
-      service.createLocation(client, org, country, null, "Gran Via", "  ", "   ", "Madrid");
+      service.createLocation(client, org, country, null, "Gran Via", "  ", "   ", "Madrid",
+          "lola@example.com");
     }
 
     verify(location).setOBSEPABuildingNumber(isNull());
     verify(location).setOBSEPABuildingName(isNull());
+  }
+
+  /**
+   * ETP-5806 follow-up — provisioning persists the structured fields for the ONBOARDING ACCOUNT's
+   * own flag answer. The account email is carried in from the request (provisioning runs under an
+   * admin execution context with no caller identity left to recover), so a targeted account's
+   * Street/Number survive to the C_Location while an untargeted one in the same environment keeps
+   * the legacy free-text behaviour. Without this, the servlet validated the block per account and
+   * then this step dropped exactly what it had just accepted.
+   */
+  @Test
+  public void testCreateLocationPersistsStructuredFieldsOnlyForTheTargetedAccount() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location targetedLocation = mock(Location.class);
+    Location otherLocation = mock(Location.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      // True for the targeted account only — every other key, and the account-less context this
+      // used to evaluate with, resolve false.
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+          argThat(ctx -> ctx != null
+              && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
+
+      when(provider.get(Location.class)).thenReturn(targetedLocation);
+      service.createLocation(client, org, country, "Legacy free text", "Gran Via", "45", "Torre A",
+          "Madrid", "localization@etendo.software");
+
+      when(provider.get(Location.class)).thenReturn(otherLocation);
+      service.createLocation(client, org, country, "Legacy free text", "Gran Via", "45", "Torre A",
+          "Madrid", "someone.else@example.com");
+    }
+
+    verify(targetedLocation).setOBSEPAStreetName("Gran Via");
+    verify(targetedLocation).setOBSEPABuildingNumber("45");
+    verify(targetedLocation).setAddressLine1("Gran Via, 45 - Torre A");
+
+    verify(otherLocation, never()).setOBSEPAStreetName(any());
+    verify(otherLocation, never()).setOBSEPABuildingNumber(any());
+    verify(otherLocation).setAddressLine1("Legacy free text");
   }
 
   // ---------------------------------------------------------------------------
@@ -740,7 +798,7 @@ public class OnboardingOrgInfoServiceTest {
     @Override
     protected void ensureOrgInfoLocation(Client client, Organization org, String countryIso,
         String address, String streetName, String buildingNumber, String buildingName,
-        String cityName, String taxId) {
+        String cityName, String taxId, String accountEmail) {
       if (overrideLocation) {
         ensureLocationCalled = true;
         if (failOnLocation) {
@@ -749,7 +807,7 @@ public class OnboardingOrgInfoServiceTest {
         return;
       }
       super.ensureOrgInfoLocation(client, org, countryIso, address, streetName, buildingNumber,
-          buildingName, cityName, taxId);
+          buildingName, cityName, taxId, accountEmail);
     }
 
     @Override
@@ -766,7 +824,7 @@ public class OnboardingOrgInfoServiceTest {
     @Override
     protected Location createLocation(Client client, Organization org, Country country,
         String address, String streetName, String buildingNumber, String buildingName,
-        String cityName) {
+        String cityName, String accountEmail) {
       createdLocation = locationToCreate;
       return locationToCreate;
     }

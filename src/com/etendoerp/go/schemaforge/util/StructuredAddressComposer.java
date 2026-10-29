@@ -38,6 +38,12 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * <p>Used by both {@code ContactsLocationAddressHandler} and {@code WarehouseLocationHandler} so
  * the two entities that wrap a {@code C_Location} compute the exact same lines, on every channel
  * (REST and MCP reach the same handler code, so there is nothing channel-specific to port twice).
+ *
+ * <p><b>Gating is per-account (ETP-5806 staged rollout).</b> {@link #isEnabled(String)} takes the
+ * {@code ETGO_ACCOUNT} email to evaluate the flag for; there is no account-less overload, by
+ * design. Validation, persistence and MCP-schema exposure therefore resolve the flag for the same
+ * account the capability signal the UI reads was resolved for, so a targeted account can never see
+ * the structured fields in the UI while the backend silently drops what it fills in.
  */
 public final class StructuredAddressComposer {
 
@@ -58,14 +64,12 @@ public final class StructuredAddressComposer {
   private static final int BUILDING_NUMBER_MAX_LENGTH = 16;
   private static final int BUILDING_NAME_MAX_LENGTH = 35;
 
-  /** Account-less evaluation context — this flag is environment-level, never per-account. */
-  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
-
   private StructuredAddressComposer() {
   }
 
   /**
-   * Whether the {@code structured-address-for-sepa} backend-only flag (ETP-5806, TTL 2026-11-15) is on.
+   * Whether the {@code structured-address-for-sepa} backend-only flag (ETP-5806, TTL 2026-11-15)
+   * is on <b>for the given account</b>.
    *
    * <p>The 3 call sites below — {@link #missingMandatoryFields}, {@link #fieldsExceedingMaxLength}
    * and {@link #composeAddressLines} — are each only meaningful once the structured fields exist
@@ -75,9 +79,26 @@ public final class StructuredAddressComposer {
    * them. Centralized here rather than duplicated per handler because the composer is already the
    * one place {@code ContactsLocationAddressHandler}, {@code WarehouseLocationHandler} and {@code
    * BpLocationHandler} share for structured-address-for-sepa logic.
+   *
+   * <p><b>The account email is a parameter, not resolved here.</b> Each caller knows where its own
+   * account comes from and nothing else does: a NEO/MCP request resolves the authenticated user's
+   * account with {@code GoAccountResolver.resolveCurrentAccountEmail()}, while the (pre-tenant)
+   * onboarding path already has the account in hand and runs under an admin execution context
+   * where no caller identity is recoverable. Resolving implicitly inside this method would be
+   * wrong for the second group and would hide a DB lookup behind what reads as a constant. Same
+   * explicit-at-the-call-site shape the capability signal uses ({@code SFWindowAccessMap},
+   * {@code EtendoGoJwtServlet#buildSessionCapabilities}), so the backend's write/read gating and
+   * the signal the UI renders from can never disagree for the same account.
+   *
+   * @param accountEmail the {@code ETGO_ACCOUNT} email to target the evaluation at; {@code null}
+   *     or blank yields an untargeted evaluation ({@link FeatureFlagContext#forAccount(String)}),
+   *     which every provider must treat as "no targeting key", never as "allow"
+   * @return {@code true} when the flag resolves on for that account, {@code false} otherwise —
+   *     including whenever it cannot be resolved at all, since the off state is the safe one
    */
-  public static boolean isEnabled() {
-    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ENVIRONMENT);
+  public static boolean isEnabled(String accountEmail) {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA,
+        FeatureFlagContext.forAccount(accountEmail));
   }
 
   /** The two computed address lines. Either may be {@code null} when empty. */

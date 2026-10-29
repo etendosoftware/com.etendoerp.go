@@ -36,6 +36,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.common.geography.Location;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 
 /**
@@ -284,7 +285,13 @@ public final class AddressVirtualSelectorPolicy {
     if (!isAddressWrapper(entity)) {
       return List.of();
     }
-    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled();
+    // ETP-5806 — evaluated for the account behind this MCP/REST schema walk, not account-less:
+    // a targeted account must see the 3 columns advertised, exactly as the capability signal the
+    // UI reads already tells it to. Safe to resolve here because an MCP request is authenticated
+    // (OBContext carries the real user) and this policy holds no state across requests. Resolved
+    // once per call, after the wrapper check above, so a non-wrapper entity never pays for it.
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
     Map<String, Column> byName = locationColumns();
     List<Column> resolved = new ArrayList<>();
     for (String columnName : VIRTUAL_COLUMNS) {

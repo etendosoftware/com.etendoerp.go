@@ -196,6 +196,38 @@ browser reads it, and none must be added. It gates the link only: the portal rou
 unconditionally, and revocation in particular must work whatever the flag says, since it is the only
 kill switch for a link already out.
 
+`structured-address-for-sepa` (ETP-5806, TTL 2026-11-15) decides whether the structured SEPA
+address fields (Street/Number/Building Name) are exposed and enforced, backend-only — the frontend
+only ever reads `capabilities.structuredAddressForSepa` (off `SFWindowAccessMap` and the session
+bootstrap) and never evaluates the flag key itself. Since ETP-5806's staged-rollout follow-up,
+**every** call site is targeted per account, mirroring `bp-portal-link`'s pattern: the real
+`ETGO_ACCOUNT` email goes into `FeatureFlagContext.forAccount(...)` rather than `null`. This lets a
+Datadog targeting rule (e.g. "email is one of [...]") roll the feature out to the localization team
+first, then the rest of Etendo, then everyone, instead of flipping it for every tenant at once; with
+no targeting rule configured it is still the plain per-environment boolean default, so the TTL stays
+a hard global deadline.
+
+The email reaches each call site in one of two ways, and the split is the point — resolving it
+implicitly inside the shared evaluator would be wrong for the second group:
+
+| Call site | Gates | Where the email comes from |
+|---|---|---|
+| `SFWindowAccessMap` | the capability signal | `GoAccountResolver.resolveCurrentAccountEmail()`, resolved **before** the webhook's own `OBContext.setAdminMode()` |
+| `ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler` | NEO read/write (validation, persistence, response shape) | `GoAccountResolver.resolveCurrentAccountEmail()`, once per request at the handler's entry point, then threaded through its own helpers |
+| `AddressVirtualSelectorPolicy`, `McpSchemaFieldBuilder` | MCP schema exposure | `GoAccountResolver.resolveCurrentAccountEmail()` (both are request-scoped — nothing is cached across accounts) |
+| `EtendoGoJwtServlet#buildSessionCapabilities` | the capability signal in the onboarding bootstrap | the restored session's own account |
+| `EtendoGoJwtServlet#validateStructuredAddressBlock` / `…Length` | onboarding validation | passed down from `prepareOnboarding`, which already resolved the account |
+| `OnboardingOrgInfoService#createLocation` | onboarding **persistence** | carried on `OnboardingProvisioningChain.OrgInfoInput` from the same request — provisioning runs under an admin execution context, so there is no caller identity left to recover |
+
+`StructuredAddressComposer.isEnabled(String accountEmail)` is the one evaluator they all share and
+it deliberately has **no account-less overload**. That is what keeps the ends honest: the gap this
+follow-up closed was a targeted account seeing the 3 fields in the UI (per-account capability) while
+the backend validated, accepted and persisted them per the global default (account-less gating) —
+the user filled them in, saved, and the data was silently dropped by the flag's "ignore, don't
+reject when off" contract. Watch for the ordering trap when adding a call site: resolve the account
+email **before** any no-arg `OBContext.setAdminMode()`, which substitutes the admin identity when
+there is no context at all.
+
 `tenant-upgrade` was the only earlier backend flag and it retired with ETP-4966.
 
 **Lesson from the retired flag, worth honouring for the next one:** a flag whose two ends read from

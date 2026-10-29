@@ -265,9 +265,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private static final String FIELD_CAPABILITIES = "capabilities";
   private static final String CAPABILITY_STRUCTURED_ADDRESS = "structuredAddressForSepa";
-  /** Account-less evaluation context for the environment-level {@code structured-address-for-sepa} flag. */
-  private static final FeatureFlagContext STRUCTURED_ADDRESS_CONTEXT =
-      FeatureFlagContext.forAccount(null);
   private static final String FIELD_CURRENCY = "currency";
   /** Key of the resource a Stripe event carries under {@code data}. */
   private static final String STRIPE_EVENT_OBJECT = "object";
@@ -5339,7 +5336,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (rejectWhenEmailNotVerified(authenticated.account, response)) {
       return null;
     }
-    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
+    // ETP-5806 — the account is already resolved just above, so the structured-address flag is
+    // evaluated for the real account here too, exactly like buildSessionCapabilities(accountEmail).
+    OnboardingRequestData onboardingRequest =
+        parseOnboardingRequest(request, response, accountEmail);
     if (onboardingRequest == null) {
       return null;
     }
@@ -5898,7 +5898,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private OnboardingRequestData parseOnboardingRequest(HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
+      HttpServletResponse response, String accountEmail) throws IOException {
     try {
       JSONObject body = readJsonBody(request);
       String clientName = body.getString(FIELD_CLIENT_NAME).trim();
@@ -5912,6 +5912,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return null;
       }
       OnboardingRequestData data = new OnboardingRequestData();
+      // ETP-5806 — carried on the request data so the provisioning chain can evaluate the same
+      // flag, for the same account, when it PERSISTS the address (OnboardingOrgInfoService):
+      // validating per account and then persisting per the global default would drop exactly the
+      // data a targeted account was just allowed to send.
+      data.accountEmail = accountEmail;
       data.clientName = clientName;
       data.currencyIso = body.optString(FIELD_CURRENCY, "EUR").trim();
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
@@ -5926,10 +5931,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.buildingNumber = body.optString(FIELD_BUILDING_NUMBER, "").trim();
       data.buildingName = body.optString(FIELD_BUILDING_NAME, "").trim();
       data.city = body.optString(FIELD_CITY_NAME, "").trim();
-      if (!validateStructuredAddressBlock(data, response)) {
+      if (!validateStructuredAddressBlock(data, response, accountEmail)) {
         return null;
       }
-      if (!validateStructuredAddressLength(data, response)) {
+      if (!validateStructuredAddressLength(data, response, accountEmail)) {
         return null;
       }
       // Full name of the person onboarding. Optional in the payload; it becomes the display
@@ -5982,11 +5987,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @return {@code true} to continue; {@code false} once an error response has been written
    */
   private boolean validateStructuredAddressBlock(OnboardingRequestData data,
-      HttpServletResponse response) throws IOException {
-    // ETP-5806 — `structured-address-for-sepa` off: nothing to validate for fields the onboarding
-    // UI does not even render while the flag is off (defense in depth against a stale client that
-    // still sends them — ignored, not rejected, same contract as the NEO handlers).
-    if (!StructuredAddressComposer.isEnabled()) {
+      HttpServletResponse response, String accountEmail) throws IOException {
+    // ETP-5806 — `structured-address-for-sepa` off FOR THIS ACCOUNT: nothing to validate for
+    // fields the onboarding UI does not even render while the flag is off (defense in depth
+    // against a stale client that still sends them — ignored, not rejected, same contract as the
+    // NEO handlers). Evaluated against the caller's own account (staged rollout), the same email
+    // buildSessionCapabilities answers the capability signal with.
+    if (!StructuredAddressComposer.isEnabled(accountEmail)) {
       return true;
     }
     boolean addressBlockStarted = StringUtils.isNotBlank(data.streetName)
@@ -6021,9 +6028,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @return {@code true} to continue; {@code false} once an error response has been written
    */
   private boolean validateStructuredAddressLength(OnboardingRequestData data,
-      HttpServletResponse response) throws IOException {
+      HttpServletResponse response, String accountEmail) throws IOException {
     // ETP-5806 — same reasoning as validateStructuredAddressBlock above.
-    if (!StructuredAddressComposer.isEnabled()) {
+    if (!StructuredAddressComposer.isEnabled(accountEmail)) {
       return true;
     }
     List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(data.streetName,
@@ -6315,7 +6322,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return requestData == null ? null
         : new OnboardingProvisioningChain.OrgInfoInput(requestData.countryCode,
             requestData.address, requestData.streetName, requestData.buildingNumber,
-            requestData.buildingName, requestData.city, requestData.taxId);
+            requestData.buildingName, requestData.city, requestData.taxId,
+            requestData.accountEmail);
   }
 
   /** @see OnboardingProvisioningChain#ensureOnboardingDataset */
@@ -7067,7 +7075,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(sessionRecord));
       result.put(FIELD_ROLE_LIST, loadSessionRoleList(sessionRecord));
       result.put(FIELD_CSRF_TOKEN, sessionRecord.getCsrfToken());
-      result.put(FIELD_CAPABILITIES, buildSessionCapabilities());
+      result.put(FIELD_CAPABILITIES, buildSessionCapabilities(account.getEmail()));
 
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
@@ -7084,14 +7092,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-5806 — environment-level backend-only flags surfaced to the (pre-tenant) onboarding
-   * bootstrap. Currently only {@code structured-address-for-sepa}; add new backend-only onboarding-time
-   * flags here rather than inventing a second capabilities endpoint.
+   * ETP-5806 — backend-only flags surfaced to the (pre-tenant) onboarding bootstrap. Currently
+   * only {@code structured-address-for-sepa}; add new backend-only onboarding-time flags here
+   * rather than inventing a second capabilities endpoint.
+   *
+   * <p>Evaluated per-account (staged rollout) using the email of the account the session was just
+   * restored for — {@link #handleSessionRestore} already resolves it a few lines above its own
+   * call into this method, so no extra lookup is needed here.
+   *
+   * @param accountEmail the restored session's account email; may be {@code null}, which {@link
+   *     FeatureFlagContext#forAccount(String)} turns into an untargeted evaluation, never "allow"
    */
-  private static JSONObject buildSessionCapabilities() throws JSONException {
+  private static JSONObject buildSessionCapabilities(String accountEmail) throws JSONException {
     JSONObject capabilities = new JSONObject();
     capabilities.put(CAPABILITY_STRUCTURED_ADDRESS,
-        GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA, STRUCTURED_ADDRESS_CONTEXT));
+        GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA,
+            FeatureFlagContext.forAccount(accountEmail)));
     return capabilities;
   }
 
@@ -7362,6 +7378,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private static class OnboardingRequestData {
+    // ETP-5806 — the account this onboarding belongs to, the targeting key the
+    // `structured-address-for-sepa` flag is evaluated with on both the validation side (here) and
+    // the persistence side (OrgInfoInput -> OnboardingOrgInfoService#createLocation).
+    private String accountEmail;
     private String clientName;
     private String currencyIso;
     private String language;

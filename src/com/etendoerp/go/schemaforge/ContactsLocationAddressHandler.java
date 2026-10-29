@@ -44,6 +44,7 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Region;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
@@ -161,6 +162,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    */
   private NeoResponse handleCreate(NeoContext ctx) throws Exception {
     JSONObject body = ctx.getRequestBody();
+    // ETP-5806 — resolved ONCE per request and threaded through validation, the write mapping and
+    // the response shape, so all three answer for the same account (and the account lookup is not
+    // repeated 4 times on one create). No ordering trap: this runs before the admin-mode block
+    // below, and NEO authenticates before dispatch anyway (see BpLocationHandler#handle).
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
     String bpId = body != null ? body.optString(FIELD_BUSINESS_PARTNER, null) : null;
     if (StringUtils.isBlank(bpId) && ctx.getQueryParams() != null) {
       bpId = ctx.getQueryParams().get("parentId");
@@ -171,7 +178,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
     String locationAddressId = nullIfEmpty(body.optString(FIELD_LOCATION_ADDRESS, null));
     String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
-    NeoResponse rejected = rejectUnusableCreatePayload(body, locationAddressId, countryId);
+    NeoResponse rejected = rejectUnusableCreatePayload(body, locationAddressId, countryId,
+        structuredAddressEnabled);
     if (rejected != null) {
       return rejected;
     }
@@ -219,7 +227,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         geoLoc.setClient(bp.getClient());
         geoLoc.setOrganization(bp.getOrganization());
         geoLoc.setActive(Boolean.TRUE);
-        applyGeoLocFields(body, geoLoc);
+        applyGeoLocFields(body, geoLoc, structuredAddressEnabled);
         OBDal.getInstance().save(geoLoc);
         effectiveCountryId = countryId;
       }
@@ -247,7 +255,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       OBDal.getInstance().flush();
 
       // Build the response record and optionally inject a tax-key warning message
-      JSONObject locationJson = buildRecord(bpLoc, geoLoc);
+      JSONObject locationJson = buildRecord(bpLoc, geoLoc, structuredAddressEnabled);
       checkAndAutoSetTaxKey(locationJson, bpId, effectiveCountryId, preSaveKey);
       return wrapRecord(locationJson, 201);
     } finally {
@@ -283,7 +291,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    * already valid.
    */
   private static NeoResponse rejectUnusableCreatePayload(JSONObject body, String locationAddressId,
-      String countryId) {
+      String countryId, boolean structuredAddressEnabled) {
     if (locationAddressId != null && hasRawAddressFields(body)) {
       return NeoResponse.error(400,
           "Ambiguous create: send either locationAddress (to reuse an existing C_Location) or "
@@ -292,10 +300,11 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     if (locationAddressId != null) {
       return null;
     }
-    // ETP-5806 — `structured-address-for-sepa` off: nothing to validate for fields that do not exist on
-    // the wire; fall back to the pre-ETP-5806 rule (country only; addressLine1 is not enforced
-    // server-side, matching the original Mode B check before this feature existed).
-    if (!StructuredAddressComposer.isEnabled()) {
+    // ETP-5806 — `structured-address-for-sepa` off FOR THIS ACCOUNT: nothing to validate for
+    // fields that do not exist on the wire. Falls back to the pre-ETP-5806 rule, where country was
+    // the only mandatory one and the address line was never enforced server side, matching the
+    // original Mode B check before this feature existed.
+    if (!structuredAddressEnabled) {
       return countryId == null ? NeoResponse.error(400, "Missing required field: country (C_Country_ID)") : null;
     }
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
@@ -306,7 +315,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     if (!missing.isEmpty()) {
       return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
     }
-    NeoResponse tooLong = rejectOversizedFields(body);
+    NeoResponse tooLong = rejectOversizedFields(body, structuredAddressEnabled);
     if (tooLong != null) {
       return tooLong;
     }
@@ -319,9 +328,11 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    * Shared by create and update so a too-long value is rejected cleanly on both instead of
    * reaching {@code OBDal.flush()} as a raw data-truncation SQL exception (a bare 500).
    */
-  private static NeoResponse rejectOversizedFields(JSONObject body) {
-    // ETP-5806 — fields that do not exist on the wire while the flag is off cannot overflow.
-    if (!StructuredAddressComposer.isEnabled()) {
+  private static NeoResponse rejectOversizedFields(JSONObject body,
+      boolean structuredAddressEnabled) {
+    // ETP-5806 — fields that do not exist on the wire while the flag is off for this account
+    // cannot overflow.
+    if (!structuredAddressEnabled) {
       return null;
     }
     List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
@@ -344,6 +355,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private NeoResponse handleUpdate(NeoContext ctx) throws Exception {
     JSONObject body = ctx.getRequestBody();
     String bplId = ctx.getRecordId();
+    // ETP-5806 — resolved before the admin-mode block, for the same reasons as handleCreate.
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
 
     OBContext.setAdminMode(true);
     try {
@@ -367,18 +381,19 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       // matching applyGeoLocFields' own set-if-provided semantics for that one field.
       String effectiveCountryForValidation =
           countryId != null ? countryId : countryIdOf(geoLoc);
-      NeoResponse validationError = validateUpdateMandatoryFields(body, effectiveCountryForValidation);
+      NeoResponse validationError = validateUpdateMandatoryFields(body,
+          effectiveCountryForValidation, structuredAddressEnabled);
       if (validationError != null) {
         return validationError;
       }
-      NeoResponse tooLong = rejectOversizedFields(body);
+      NeoResponse tooLong = rejectOversizedFields(body, structuredAddressEnabled);
       if (tooLong != null) {
         return tooLong;
       }
       String bpId = bpLoc.getBusinessPartner() != null ? bpLoc.getBusinessPartner().getId() : null;
       String preSaveKey = (countryId != null && bpId != null) ? queryBPKey(bpId) : null;
 
-      applyGeoLocFields(body, geoLoc);
+      applyGeoLocFields(body, geoLoc, structuredAddressEnabled);
 
       String nameVal = nullIfEmpty(body.optString("name", null));
       if (nameVal != null) {
@@ -389,7 +404,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       OBDal.getInstance().flush();
 
       // Build the response record and optionally inject a tax-key warning message
-      JSONObject locationJson = buildRecord(bpLoc, geoLoc);
+      JSONObject locationJson = buildRecord(bpLoc, geoLoc, structuredAddressEnabled);
       checkAndAutoSetTaxKey(locationJson, bpId, countryId, preSaveKey);
       return wrapRecord(locationJson, 200);
     } finally {
@@ -403,8 +418,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   // back to the existing record's own country when the body omits it, matching applyGeoLocFields'
   // own set-if-provided semantics for that one field. With `structured-address-for-sepa` off,
   // nothing on the wire needs validating beyond the pre-ETP-5806 rule (country only).
-  private NeoResponse validateUpdateMandatoryFields(JSONObject body, String effectiveCountryForValidation) {
-    if (!StructuredAddressComposer.isEnabled()) {
+  private NeoResponse validateUpdateMandatoryFields(JSONObject body,
+      String effectiveCountryForValidation, boolean structuredAddressEnabled) {
+    if (!structuredAddressEnabled) {
       if (effectiveCountryForValidation == null) {
         return NeoResponse.error(400, "Missing required field: country (C_Country_ID)");
       }
@@ -454,6 +470,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return null;
     }
 
+    // ETP-5806 — the read path is gated for the same account as the write path, so a targeted
+    // account that can save the 3 fields can also read them back. Resolved here rather than in
+    // afterHandle() so a plain GET list (enrichListDisplayNames, which needs no flag) never pays
+    // for the account lookup, and before the admin-mode block below on the same principle as
+    // SFWindowAccessMap: resolve the caller's account while the caller is still the context.
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail());
+
     OBContext.setAdminMode(true);
     try {
       org.openbravo.model.common.geography.Location geoLoc =
@@ -461,7 +485,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       if (geoLoc == null) {
         return null;
       }
-      putGeoLocFields(locationJson, geoLoc);
+      putGeoLocFields(locationJson, geoLoc, structuredAddressEnabled);
       return NeoResponse.ok(ctx.getPreviousResult().getBody());
     } finally {
       OBContext.restorePreviousMode();
@@ -559,13 +583,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   }
 
   private static void applyGeoLocFields(JSONObject body,
-      org.openbravo.model.common.geography.Location geoLoc) throws Exception {
+      org.openbravo.model.common.geography.Location geoLoc, boolean structuredAddressEnabled)
+      throws Exception {
     // ETP-5806 — `structured-address-for-sepa` backend-only flag (TTL 2026-11-15). While off, the 3
     // structured fields are ignored entirely: never read off the body (so a stray value from a
     // stale client is dropped, not persisted and not validated) and never written, so a record
     // that already has structured data from before the flag was switched off keeps it untouched
-    // instead of being clobbered by this write's absence of the fields.
-    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled();
+    // instead of being clobbered by this write's absence of the fields. Resolved per account in
+    // handle()'s create/update entry points and threaded here.
     String streetName = structuredAddressEnabled
         ? nullIfEmpty(body.optString(FIELD_STREET_NAME, null)) : null;
     String buildingNumber = structuredAddressEnabled
@@ -815,7 +840,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   }
 
   private static void putGeoLocFields(JSONObject locationJson,
-      org.openbravo.model.common.geography.Location geoLoc) throws Exception {
+      org.openbravo.model.common.geography.Location geoLoc, boolean structuredAddressEnabled)
+      throws Exception {
     locationJson.put(FIELD_ADDRESS_LINE1, geoLoc.getAddressLine1() != null ? geoLoc.getAddressLine1() : JSONObject.NULL);
     locationJson.put(FIELD_ADDRESS_LINE2, geoLoc.getAddressLine2() != null ? geoLoc.getAddressLine2() : JSONObject.NULL);
     locationJson.put(FIELD_CITY_NAME,     geoLoc.getCityName()     != null ? geoLoc.getCityName()     : JSONObject.NULL);
@@ -856,7 +882,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // Gated behind `structured-address-for-sepa` (backend-only flag, TTL 2026-11-15): while off,
     // the 3 keys are omitted from the response entirely — not nulled, not present-and-empty —
     // matching the plan's "hide data, not just a UI entry point" requirement.
-    if (StructuredAddressComposer.isEnabled()) {
+    if (structuredAddressEnabled) {
       putOrNull(locationJson, FIELD_STREET_NAME, geoLoc.getOBSEPAStreetName());
       putOrNull(locationJson, FIELD_BUILDING_NUMBER, geoLoc.getOBSEPABuildingNumber());
       putOrNull(locationJson, FIELD_BUILDING_NAME, geoLoc.getOBSEPABuildingName());
@@ -868,14 +894,15 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   }
 
   private static JSONObject buildRecord(org.openbravo.model.common.businesspartner.Location bpLoc,
-      org.openbravo.model.common.geography.Location geoLoc) throws Exception {
+      org.openbravo.model.common.geography.Location geoLoc, boolean structuredAddressEnabled)
+      throws Exception {
     JSONObject locationJson = new JSONObject();
     locationJson.put("id",              bpLoc.getId());
     locationJson.put("locationAddress", geoLoc.getId());
     locationJson.put("name",            bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
     locationJson.put(FIELD_SHIP_TO_ADDRESS,    Boolean.TRUE.equals(bpLoc.isShipToAddress()) ? "Y" : "N");
     locationJson.put(FIELD_INVOICE_TO_ADDRESS, Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
-    putGeoLocFields(locationJson, geoLoc);
+    putGeoLocFields(locationJson, geoLoc, structuredAddressEnabled);
     return locationJson;
   }
 

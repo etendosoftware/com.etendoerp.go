@@ -75,10 +75,15 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
    *                       {@code streetName}/{@code buildingNumber} when the structured block was
    *                       started — already enforced by the servlet before this method is called
    * @param taxId          optional Tax ID from the onboarding request; left untouched when blank
+   * @param accountEmail   ETP-5806 — the {@code ETGO_ACCOUNT} email the
+   *                       {@code structured-address-for-sepa} flag is evaluated for. Carried in
+   *                       from the request rather than resolved here: provisioning runs under the
+   *                       admin execution context applied just below, so there is no caller
+   *                       identity left to recover. Blank yields an untargeted evaluation.
    */
   public void ensureOrgInfo(String clientId, String orgId, String adminUserId, String adminRoleId,
       String countryIso, String address, String streetName, String buildingNumber,
-      String buildingName, String cityName, String taxId) {
+      String buildingName, String cityName, String taxId, String accountEmail) {
     validateContext(clientId, orgId, adminUserId, adminRoleId);
     OBContext previousContext = captureCurrentContext();
     applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
@@ -94,7 +99,7 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
           throw new OBException("Organization not found for org-info setup: " + orgId);
         }
         ensureOrgInfoLocation(client, org, countryIso, address, streetName, buildingNumber,
-            buildingName, cityName, taxId);
+            buildingName, cityName, taxId, accountEmail);
         flushChanges();
       } finally {
         exitAdminMode();
@@ -106,7 +111,7 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
 
   protected void ensureOrgInfoLocation(Client client, Organization org, String countryIso,
       String address, String streetName, String buildingNumber, String buildingName,
-      String cityName, String taxId) {
+      String cityName, String taxId, String accountEmail) {
     OrganizationInformation orgInfo = resolveOrgInfo(org);
     if (orgInfo == null) {
       orgInfo = createOrgInfo(client, org);
@@ -121,7 +126,7 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
       throw new OBException("No country available to locate onboarding organization");
     }
     Location location = createLocation(client, org, country, address, streetName, buildingNumber,
-        buildingName, cityName);
+        buildingName, cityName, accountEmail);
     orgInfo.setLocationAddress(location);
     OBDal.getInstance().save(orgInfo);
   }
@@ -160,7 +165,7 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
 
   protected Location createLocation(Client client, Organization org, Country country,
       String address, String streetName, String buildingNumber, String buildingName,
-      String cityName) {
+      String cityName, String accountEmail) {
     Location location = OBProvider.getInstance().get(Location.class);
     location.setNewOBObject(true);
     location.setClient(client);
@@ -171,8 +176,11 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
     // (not read, not persisted), matching every sibling handler gated in c8c014007
     // (ContactsLocationAddressHandler#applyGeoLocFields, WarehouseLocationHandler#applyGeoLocFields,
     // BpLocationHandler). Falls back to the pre-ETP-5806 behaviour: only the legacy free-text
-    // `address` populates Address1.
-    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled();
+    // `address` populates Address1. Evaluated for the onboarding account (ETP-5806 staged
+    // rollout), the same email the servlet validated the block with a moment earlier — the two
+    // must agree, or a targeted account's Street/Number would pass validation and then be
+    // dropped here by a global-default evaluation.
+    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled(accountEmail);
     String effectiveStreetName = structuredAddressEnabled ? streetName : null;
     // The structured fields take priority over the legacy free-text `address`: the servlet already
     // guarantees streetName+buildingNumber are both present whenever the structured block was used

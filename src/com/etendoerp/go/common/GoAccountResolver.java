@@ -22,8 +22,10 @@ import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.schemaforge.data.Account;
 
@@ -93,6 +95,45 @@ public final class GoAccountResolver {
       log.warn("Could not resolve the platform account for username {}: {}",
           maskUsername(normalized), e.getMessage(), e);
       return Optional.empty();
+    }
+  }
+
+  /**
+   * Resolves the {@code ETGO_ACCOUNT} email of the currently authenticated user, which is the
+   * targeting key per-account feature-flag evaluation needs ({@link
+   * com.etendoerp.go.featureflags.FeatureFlagContext#forAccount(String)}).
+   *
+   * <p>Shared by every caller that needs "the email of whoever is making this request" instead of
+   * duplicating the {@link OBContext#setAdminMode(boolean)}/lookup dance — originally written once
+   * in {@code PortalLinkPolicy} for {@code FLAG_BP_PORTAL_LINK} and extracted here for ETP-5806's
+   * {@code structured-address-for-sepa} per-account rollout.
+   *
+   * <p>Runs in admin mode (the boolean overload, which keeps the current user and only elevates
+   * the role) because {@code ETGO_ACCOUNT} is a platform table the caller's own role has no reason
+   * to read, and the account being looked up is the caller's own. Must be called BEFORE the
+   * caller enters its own admin-mode block with the no-arg {@link OBContext#setAdminMode()} —
+   * that overload replaces the user too, and {@link OBContext#getOBContext()} would then resolve
+   * the admin identity instead of the real caller.
+   *
+   * @return the account email, or {@code null} when no user, or no active account, resolves —
+   *     callers must treat {@code null} the same as "no account", never as "allow"
+   */
+  public static String resolveCurrentAccountEmail() {
+    try {
+      OBContext.setAdminMode(true);
+      OBContext ctx = OBContext.getOBContext();
+      User user = ctx == null ? null : ctx.getUser();
+      if (user == null) {
+        return null;
+      }
+      return findAccountByUsername(user.getUsername()).map(Account::getEmail).orElse(null);
+    } catch (RuntimeException e) {
+      // Resolving the caller's account must never fail the caller; it is only a reason to
+      // evaluate the flag with no targeting key.
+      log.warn("Could not resolve the current account: {}", e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 

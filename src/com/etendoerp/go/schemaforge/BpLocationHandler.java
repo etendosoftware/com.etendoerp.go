@@ -27,6 +27,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.geography.Location;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
@@ -103,11 +104,15 @@ public class BpLocationHandler implements NeoHandler {
     if (context == null || context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }
-    // ETP-5806 — `structured-address-for-sepa` off: never intercept. The 3 fields fall through to
-    // generic CRUD, which already drops them (no ETGO_SF_FIELD row for this entity — see class
-    // javadoc), so a stray value from a stale client is silently ignored, never persisted and
-    // never rejected, exactly as the flag's write-path contract requires.
-    if (!StructuredAddressComposer.isEnabled()) {
+    // ETP-5806 — `structured-address-for-sepa` off FOR THIS ACCOUNT: never intercept. The 3 fields
+    // fall through to generic CRUD, which already drops them (no ETGO_SF_FIELD row for this entity
+    // — see class javadoc), so a stray value from a stale client is silently ignored, never
+    // persisted and never rejected, exactly as the flag's write-path contract requires. Resolved
+    // against the requesting account (staged rollout) so this path and the capability signal the
+    // UI renders from agree. No ordering trap here (unlike SFWindowAccessMap): NeoServlet
+    // authenticates before dispatch, and OBContext.setAdminMode only substitutes the admin
+    // identity when there is no context at all, so the lookup still sees the real caller.
+    if (!StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail())) {
       return null;
     }
     String method = context.getHttpMethod();
@@ -199,10 +204,11 @@ public class BpLocationHandler implements NeoHandler {
     if (context == null || context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }
-    // ETP-5806 — off: never enrich a GET with the 3 fields (they must be omitted from reads, not
-    // just unwritable) and never run the pending-write persistence (handle() never set it when
-    // off, so hasPendingWrite is always false here anyway — this is belt-and-suspenders).
-    if (!StructuredAddressComposer.isEnabled()) {
+    // ETP-5806 — off for this account: never enrich a GET with the 3 fields (they must be omitted
+    // from reads, not just unwritable) and never run the pending-write persistence (handle() never
+    // set it when off, so hasPendingWrite is always false here anyway — belt-and-suspenders).
+    // Same per-account evaluation as handle() above, and the same request, so the two agree.
+    if (!StructuredAddressComposer.isEnabled(GoAccountResolver.resolveCurrentAccountEmail())) {
       return null;
     }
     String method = context.getHttpMethod();

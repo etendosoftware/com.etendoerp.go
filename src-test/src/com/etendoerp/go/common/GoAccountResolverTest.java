@@ -33,8 +33,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.schemaforge.data.Account;
 
@@ -155,6 +157,110 @@ class GoAccountResolverTest {
     try (var dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       assertFalse(GoAccountResolver.findAccountByUsername("user@example.com").isPresent());
+    }
+  }
+
+  // ── resolveCurrentAccountEmail (ETP-5806 — shared per-account targeting helper) ────────
+
+  /**
+   * The happy path: a real authenticated user whose username resolves to an active account
+   * returns that account's email — the targeting key {@code FeatureFlagContext.forAccount}
+   * needs for a staged per-account rollout (originally written once in {@code PortalLinkPolicy}
+   * for {@code bp-portal-link}, extracted here so {@code SFWindowAccessMap} and
+   * {@code EtendoGoJwtServlet} can reuse it for {@code structured-address-for-sepa}).
+   */
+  @Test
+  void resolveCurrentAccountEmailReturnsTheAuthenticatedUsersAccountEmail() {
+    User user = mock(User.class);
+    when(user.getUsername()).thenReturn("user@example.com");
+    OBContext ctx = mock(OBContext.class);
+    when(ctx.getUser()).thenReturn(user);
+
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@example.com");
+
+    OBDal dal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBQuery<Account> query = mock(OBQuery.class);
+    when(dal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+    when(query.setNamedParameter(anyString(), anyString())).thenReturn(query);
+    when(query.uniqueResult()).thenReturn(account);
+
+    try (var dalMock = mockStatic(OBDal.class);
+        var ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      String email = GoAccountResolver.resolveCurrentAccountEmail();
+
+      assertEquals("user@example.com", email);
+      ctxMock.verify(() -> OBContext.setAdminMode(true));
+      ctxMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /** No authenticated user on the context ⇒ no email, never a throw. */
+  @Test
+  void resolveCurrentAccountEmailReturnsNullWhenNoUserIsOnTheContext() {
+    OBContext ctx = mock(OBContext.class);
+    when(ctx.getUser()).thenReturn(null);
+
+    try (var ctxMock = mockStatic(OBContext.class)) {
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      assertEquals(null, GoAccountResolver.resolveCurrentAccountEmail());
+    }
+  }
+
+  /** No {@code OBContext} at all ⇒ no email, never a throw. */
+  @Test
+  void resolveCurrentAccountEmailReturnsNullWhenThereIsNoContext() {
+    try (var ctxMock = mockStatic(OBContext.class)) {
+      ctxMock.when(OBContext::getOBContext).thenReturn(null);
+
+      assertEquals(null, GoAccountResolver.resolveCurrentAccountEmail());
+    }
+  }
+
+  /**
+   * A user whose username maps to no active account degrades to {@code null} (same contract as
+   * {@link #findAccountByUsername} returning empty), never a throw.
+   */
+  @Test
+  void resolveCurrentAccountEmailReturnsNullWhenTheUsernameMapsToNoAccount() {
+    User user = mock(User.class);
+    when(user.getUsername()).thenReturn("stranger@example.com");
+    OBContext ctx = mock(OBContext.class);
+    when(ctx.getUser()).thenReturn(user);
+
+    OBDal dal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBQuery<Account> query = mock(OBQuery.class);
+    when(dal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+    when(query.setNamedParameter(anyString(), anyString())).thenReturn(query);
+    when(query.uniqueResult()).thenReturn(null);
+
+    try (var dalMock = mockStatic(OBDal.class);
+        var ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      assertEquals(null, GoAccountResolver.resolveCurrentAccountEmail());
+    }
+  }
+
+  /**
+   * Resolving the current account must never fail the caller — a {@code RuntimeException} out of
+   * {@code OBContext}/the DAL degrades to {@code null} (flag-evaluation contract: never block,
+   * never fail, default false, per {@code GoFeatureFlags}' class javadoc).
+   */
+  @Test
+  void resolveCurrentAccountEmailDegradesToNullInsteadOfThrowing() {
+    try (var ctxMock = mockStatic(OBContext.class)) {
+      ctxMock.when(OBContext::getOBContext).thenThrow(new IllegalStateException("no session"));
+
+      assertEquals(null, GoAccountResolver.resolveCurrentAccountEmail());
+      ctxMock.verify(OBContext::restorePreviousMode);
     }
   }
 
