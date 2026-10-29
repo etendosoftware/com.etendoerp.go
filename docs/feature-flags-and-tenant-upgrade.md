@@ -590,10 +590,16 @@ and `NeoFiscalModelsCatalogService` its only caller:
   answers `{"_unavailable": ["390"]}`. Flag on: exactly the stored catalog, no marker.
 - **`PUT /sws/neo/fiscal-models-catalog`, flag off:** the client's `390` value is ignored and the
   stored one kept, so a save can neither switch 390 on nor erase the tenant's earlier choice
-  (turning the flag back on restores it). `_unavailable` is never persisted, flag on or off. If the
-  stored catalog cannot be read while the flag is off, the save is **refused** (an error, nothing
-  written) instead of being merged over `{}`, which would drop the stored 390; a stored value that
-  is not valid JSON holds nothing to keep and counts as `{}`.
+  (turning the flag back on restores it). `_unavailable` is never persisted, flag on or off.
+- **`PUT`, flag on:** only an **explicit** `390` value changes it (`false` still turns it off). A body
+  without the `390` key keeps the stored value — absent is not `false`. This covers a page that was
+  loaded while the flag was off (it never offered the 390) and saved after the flag was turned on at
+  runtime: without this rule that save would erase the tenant's stored 390. The drawer always sends
+  an explicit value for a 390 it offered and the user changed, because it starts from the answer
+  and a toggle writes `true`/`false`.
+- **Stored catalog unreadable:** the save is **refused** (an error, nothing written) in both flag
+  states, since both may need to keep the stored 390; it is never merged over `{}`. A stored value
+  that is not valid JSON holds nothing to keep and counts as `{}`.
 - **Errors fail hidden:** if the GET answer cannot be built, it is `{"_unavailable": ["390"]}`
   (`FiscalModel390Flag.failHiddenAnswer()`), never a bare `{}`.
 

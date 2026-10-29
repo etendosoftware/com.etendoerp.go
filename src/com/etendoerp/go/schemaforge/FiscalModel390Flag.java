@@ -42,7 +42,9 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  *   <li><b>Write</b> ({@link #applyToWrite}): the {@value #UNAVAILABLE_KEY} marker is never
  *       persisted, and with the flag off the client's value for {@value #MODEL_ID} is ignored and
  *       the value stored before is kept — a save can neither switch 390 on nor erase a tenant's
- *       choice, so turning the flag back on restores it.</li>
+ *       choice, so turning the flag back on restores it. With the flag on, a body that does not
+ *       carry {@value #MODEL_ID} at all (a page loaded while the flag was off) also keeps the
+ *       stored value; only an explicit value changes it.</li>
  * </ul>
  *
  * <p><b>Hidden is the default.</b> {@link GoFeatureFlags#isEnabled} answers {@code false} for an
@@ -127,7 +129,11 @@ final class FiscalModel390Flag {
       throws JSONException {
     JSONObject toSave = new JSONObject(incoming.toString());
     toSave.remove(UNAVAILABLE_KEY);
-    if (!enabled) {
+    // Off: the client's 390 never counts. On: only an explicit value counts — a body without the
+    // key (a page loaded while the flag was off, so it never offered the 390) keeps the stored
+    // value instead of erasing it. An explicit false still turns it off.
+    boolean keepStored = !enabled || !incoming.has(MODEL_ID);
+    if (keepStored) {
       toSave.remove(MODEL_ID);
       if (stored.has(MODEL_ID)) {
         toSave.put(MODEL_ID, stored.get(MODEL_ID));

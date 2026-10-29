@@ -178,6 +178,17 @@ class FiscalModel390FlagTest {
   }
 
   @Test
+  void writeWithTheFlagOnKeepsTheStored390WhenTheBodyOmitsIt() throws Exception {
+    JSONObject stored = new JSONObject("{\"303\":true,\"390\":true}");
+
+    JSONObject toSave = FiscalModel390Flag.applyToWrite(
+        new JSONObject("{\"303\":false}"), stored, true);
+
+    assertFalse(toSave.getBoolean("303"));
+    assertTrue(toSave.getBoolean("390"), "absent is not false: the stored 390 survives");
+  }
+
+  @Test
   void writeNeverStoresTheMarker() throws Exception {
     JSONObject incoming = new JSONObject("{\"303\":true,\"_unavailable\":[\"390\"]}");
 

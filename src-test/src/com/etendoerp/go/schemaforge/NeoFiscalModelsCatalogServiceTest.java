@@ -354,9 +354,12 @@ public class NeoFiscalModelsCatalogServiceTest {
     }
   }
 
-  /** With the flag on the stored 390 is not kept, so an unreadable stored catalog does not block. */
+  /**
+   * With the flag on the stored catalog is needed too (a body may omit the 390), so an unreadable
+   * store refuses the save in both flag states.
+   */
   @Test
-  public void saveActiveModelsWithTheFlagOnDoesNotNeedTheStoredCatalog() throws Exception {
+  public void saveActiveModelsWithTheFlagOnRefusesWhenTheStoredCatalogCannotBeRead() {
     Client client = mock(Client.class);
     OBContext obCtx = contextFor(client);
 
@@ -369,10 +372,42 @@ public class NeoFiscalModelsCatalogServiceTest {
           eq(client), (Organization) isNull(), (User) isNull(), (Role) isNull(), (Window) isNull()))
           .thenThrow(new PropertyException("conflict", null));
 
-      NeoFiscalModelsCatalogService.saveActiveModels("{\"303\":true,\"390\":true}");
+      try {
+        NeoFiscalModelsCatalogService.saveActiveModels("{\"303\":true,\"390\":true}");
+        throw new AssertionError("expected the save to be refused");
+      } catch (IllegalStateException expected) {
+        // refused
+      }
+      prefMock.verify(() -> Preferences.setPreferenceValue(
+          anyString(), anyString(), anyBoolean(), Mockito.any(Client.class),
+          Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any()),
+          Mockito.never());
+    }
+  }
 
-      JSONObject saved = savedCatalog(prefMock, client);
-      assertTrue(saved.getBoolean("390"));
+  /**
+   * Repro: stored 390 active, page loaded while the flag was off (its body has no 390), flag
+   * turned on at runtime, drawer closed — the stored 390 must survive; an explicit false still
+   * turns it off.
+   */
+  @Test
+  public void saveActiveModelsWithTheFlagOnKeepsTheStored390WhenTheBodyOmitsIt() throws Exception {
+    for (String body : new String[] { "{\"303\":true}", "{\"303\":true,\"390\":false}" }) {
+      Client client = mock(Client.class);
+      OBContext obCtx = contextFor(client);
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<Preferences> prefMock = mockStatic(Preferences.class);
+           MockedStatic<FiscalModel390Flag> flag = flag(true)) {
+        ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+        storeCatalog(prefMock, client, "{\"303\":true,\"390\":true}");
+
+        NeoFiscalModelsCatalogService.saveActiveModels(body);
+
+        JSONObject saved = savedCatalog(prefMock, client);
+        assertTrue(saved.getBoolean("303"));
+        assertEquals(body, !body.contains("390"), saved.getBoolean("390"));
+      }
     }
   }
 }

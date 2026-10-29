@@ -153,13 +153,12 @@ class NeoFiscalModelsCatalogService {
     Client client = ctx.getCurrentClient();
     // ETP-5716 toggle point (FiscalModel390Flag): the `_unavailable` marker is never stored, and
     // with the fiscal-model-390 flag off the stored value of model 390 is kept as it was.
-    // When the stored catalog cannot be read, the save is refused rather than merged over {}: the
-    // stored 390 would otherwise be lost. Read only while the flag is off (it is ignored when on).
+    // The gate may keep stored values (flag off, or a body that omits a model), so it always gets
+    // the stored catalog; when that cannot be read, the save is refused rather than merged over {}.
     boolean enabled = FiscalModel390Flag.isEnabled(client != null ? client.getId() : null);
     JSONObject toSave;
     try {
-      JSONObject stored = enabled ? new JSONObject() : readStoredModelsStrict(client);
-      toSave = FiscalModel390Flag.applyToWrite(parsed, stored, enabled);
+      toSave = FiscalModel390Flag.applyToWrite(parsed, readStoredModelsStrict(client), enabled);
     } catch (JSONException e) {
       log.warn("Invalid fiscal models catalog JSON: {}", e.getMessage());
       throw new IllegalArgumentException("Invalid JSON body");
