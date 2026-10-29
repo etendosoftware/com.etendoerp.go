@@ -30,6 +30,7 @@ import org.apache.logging.log4j.Logger;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * Account rules shared by the app's {@code /sws/go/register} and the public signup API
@@ -83,6 +84,10 @@ public class AccountRegistrationService {
    * @return whether the address is free, waiting for its confirmation, or taken
    */
   public EmailStatus emailStatus(String email) {
+    // the support account is hidden from the lookup below, but its address is still taken
+    if (SupportAccessGuard.isSupportEmail(email)) {
+      return EmailStatus.REGISTERED;
+    }
     Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
     if (account == null) {
       return EmailStatus.AVAILABLE;

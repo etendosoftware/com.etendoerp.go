@@ -97,6 +97,26 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="TRIAGE_CELL" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TRIAGE_ASSIGNEE" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TRIAGE_ISSUE" primaryKey="false" required="false" type="VARCHAR" size="200" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TRIAGE_TASK" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TRIAGED" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_MCP_USAGE_AD_CLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>

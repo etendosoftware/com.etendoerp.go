@@ -435,7 +435,7 @@ class DocumentAvailabilityTest {
     void guardedInvoiceRulesOutReactivate() {
       try (MockedStatic<InvoiceReactivationGuard> guard = mockStatic(InvoiceReactivationGuard.class)) {
         guard.when(() -> InvoiceReactivationGuard.computeBlock("I1")).thenReturn(
-            new InvoiceReactivationGuard.Block("SII", List.of("R-1", "R-2")));
+            new InvoiceReactivationGuard.Block(List.of("SII"), List.of("R-1", "R-2")));
 
         Map<String, String> unavailable = new SalesInvoiceHeaderHandler()
             .unavailableActions(invoice("CO"));

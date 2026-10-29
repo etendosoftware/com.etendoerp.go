@@ -49,6 +49,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.criterion.Criterion;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
@@ -93,6 +94,27 @@ import org.openbravo.model.common.order.Order;
 public class SalesQuotationHeaderHandlerTest {
 
   private static final String QUOTATION_ID = "quotation-abc-123";
+
+  /**
+   * ETP-6007: without a DAL, {@code OBContext.setAdminMode(true)} pushes onto its thread-local
+   * stack and only then throws (no session factory). {@code DocumentCurrencyRate} and the
+   * {@code handleConvertQuotation} path call it OUTSIDE their {@code try}, so the {@code finally}
+   * that would restore the frame is never entered, and both then swallow or log the exception
+   * ("[ETP-5840] Could not evaluate the exchange rate of Order …", "[ETP-4027]
+   * handleConvertQuotation failed …"). The cases pass and the orphan frames are charged to the next
+   * {@code OBBaseTest} class in the same Gradle worker running as a non-admin user —
+   * {@code StorageDetailCostColumnsIntegrationTest} in the merge-block cut. Same symptom and same
+   * remedy as ETP-5953 ({@code NeoDefaultsServiceTest}, {@code NeoProcessServiceTest}).
+   *
+   * <p>The root fix is to make those sites enter through {@code NeoAdminMode#enter}, which already
+   * restores the frame when {@code setAdminMode} throws; that is product code, so it goes in its
+   * own ticket. It is a test-environment leak only: in production an {@code OBContext} always
+   * exists, so {@code setAdminContextLocally()} is never reached and the pairs stay balanced.
+   */
+  @After
+  public void clearAdminModeLeakedWithoutDal() {
+    OBContext.clearAdminModeStack();
+  }
 
   // ── helpers ───────────────────────────────────────────────────────────────
 

@@ -852,9 +852,14 @@ class NeoCrudHandler {
       }
       // ETP-5782: a failure NEO's write service captured carries the classification of its
       // throwable — a trigger refusal (422), a row still in use (409), a deadlock (409), a lost
-      // connection (503)… Unique violations are left to the branch below, which keeps Etendo's own
-      // wording. Captured 5xx failures use the sanitized classification message. An uncaptured
-      // failure keeps the legacy answer; its class is never guessed from its text.
+      // connection (503)… A unique violation keeps Etendo's own translated wording, in whatever
+      // language the request runs (ETP-5953). Captured 5xx failures use the sanitized
+      // classification message. An uncaptured failure keeps the legacy answer; its class is never
+      // guessed from its text.
+      NeoResponse duplicate = NeoErrorResponses.duplicateWithCoreWording(innerResponse, translated);
+      if (duplicate != null) {
+        return duplicate;
+      }
       if (!NeoErrorSanitizer.isDuplicateKeyMessage(translated)) {
         NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse);
         if (classified != null) {

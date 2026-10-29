@@ -50,6 +50,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Criterion;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
@@ -93,6 +94,27 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  */
 public class SalesInvoiceHeaderHandlerTest {
+
+  /**
+   * ETP-6007: without a DAL, {@code OBContext.setAdminMode(true)} pushes onto its thread-local
+   * stack and only then throws (no session factory). The guards this class drives — {@code
+   * InvoiceReactivationGuard#readInvoice}, {@code CompletedInvoiceWriteFence#read} and {@code
+   * DocumentCurrencyRate} — all call it OUTSIDE their {@code try}, so the {@code finally} that
+   * would restore the frame is never entered, and each guard then swallows the exception ("Could
+   * not evaluate the reactivation guard for invoice …"). The cases pass and the orphan frames are
+   * charged to the next {@code OBBaseTest} class in the same Gradle worker running as a non-admin
+   * user — {@code StorageDetailCostColumnsIntegrationTest} in the merge-block cut. Same symptom and
+   * same remedy as ETP-5953 ({@code NeoDefaultsServiceTest}, {@code NeoProcessServiceTest}).
+   *
+   * <p>The root fix is to make those guards enter through {@code NeoAdminMode#enter}, which already
+   * restores the frame when {@code setAdminMode} throws; that is product code, so it goes in its
+   * own ticket. It is a test-environment leak only: in production an {@code OBContext} always
+   * exists, so {@code setAdminContextLocally()} is never reached and the pairs stay balanced.
+   */
+  @After
+  public void clearAdminModeLeakedWithoutDal() {
+    OBContext.clearAdminModeStack();
+  }
 
   /**
    * Creates a {@link SalesInvoiceHeaderHandler} with its {@code @Inject} fields replaced by the
@@ -663,6 +685,124 @@ public class SalesInvoiceHeaderHandlerTest {
 
     assertFalse(rec.has("sourceReturnReceipt"));
     assertFalse(rec.has("sourceInvoice"));
+  }
+
+  // ── linkedOrders wiring (ETP-5828) ─────────────────────────────────────────
+
+  /**
+   * Stubs OBDal so every statement of the detail GET reads an empty result except
+   * {@link AbstractInvoiceHeaderHandler#LINKED_ORDERS_SQL}, which is answered by
+   * {@code ordersPs}. Returns the connection so a test can verify on it.
+   */
+  private static Connection stubConnectionWithLinkedOrders(MockedStatic<OBDal> obDalMock,
+      PreparedStatement ordersPs) throws Exception {
+    OBDal dal = mock(OBDal.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(dal);
+    obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+    Connection conn = mock(Connection.class);
+    when(dal.getConnection()).thenReturn(conn);
+    PreparedStatement otherPs = mock(PreparedStatement.class);
+    ResultSet emptyRs = mock(ResultSet.class);
+    when(otherPs.executeQuery()).thenReturn(emptyRs);
+    when(conn.prepareStatement(anyString())).thenReturn(otherPs);
+    when(conn.prepareStatement(AbstractInvoiceHeaderHandler.LINKED_ORDERS_SQL)).thenReturn(ordersPs);
+    return conn;
+  }
+
+  /**
+   * ETP-5828: the detail GET of a sales invoice built from two orders (one of them a quotation)
+   * carries both in {@code linkedOrders}, even though the header {@code C_Order_ID} is blank.
+   */
+  @Test
+  public void testDetailGetInjectsLinkedOrdersFromInvoiceLines() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ordersPs = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      stubConnectionWithLinkedOrders(obDalMock, ordersPs);
+      when(ordersPs.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("ord-q", "ord-o");
+      when(rs.getString(2)).thenReturn("SQ-1", "SO-2");
+      when(rs.getString(3)).thenReturn("CO", "CO");
+      when(rs.getBigDecimal(4)).thenReturn(new BigDecimal("10.00"), new BigDecimal("20.00"));
+      when(rs.getString(5)).thenReturn("EUR", "EUR");
+      when(rs.getDate(6)).thenReturn(java.sql.Date.valueOf("2026-01-10"),
+          java.sql.Date.valueOf("2026-01-20"));
+      when(rs.getString(7)).thenReturn("OB", "SO");
+
+      JSONObject body = invoiceBodyNoDiscount("inv-5828");
+      NeoContext ctx = getDetailCtx("inv-5828");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      JSONObject rec = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      JSONArray orders = rec.getJSONArray("linkedOrders");
+      assertEquals(2, orders.length());
+      JSONObject quotation = orders.getJSONObject(0);
+      assertEquals("ord-q", quotation.getString("id"));
+      assertEquals("SQ-1", quotation.getString("documentNo"));
+      assertEquals("CO", quotation.getString("documentStatus"));
+      assertEquals("EUR", quotation.getString("currency$_identifier"));
+      assertEquals("2026-01-10", quotation.getString("orderDate"));
+      assertTrue(quotation.getBoolean("isQuotation"));
+      JSONObject order = orders.getJSONObject(1);
+      assertEquals("ord-o", order.getString("id"));
+      assertEquals("SO-2", order.getString("documentNo"));
+      assertEquals("2026-01-20", order.getString("orderDate"));
+      assertFalse(order.getBoolean("isQuotation"));
+      Mockito.verify(ordersPs).setString(1, "inv-5828");
+      Mockito.verify(ordersPs).setString(2, TotalDiscountService.DISCOUNT_PRODUCT_ID);
+    }
+  }
+
+  /** ETP-5828: {@code linkedOrders} is detail-only — a list GET never runs the query. */
+  @Test
+  public void testListGetNeverInjectsLinkedOrders() throws Exception {
+    JSONObject body = invoiceBody(false, 0.0, 100.0, 100.0);
+    NeoContext ctx = getCtx(); // recordId = null — list view
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ordersPs = mock(PreparedStatement.class);
+      Connection conn = stubConnectionWithLinkedOrders(obDalMock, ordersPs);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+      for (int i = 0; i < resultData.length(); i++) {
+        assertFalse(resultData.getJSONObject(i).has("linkedOrders"));
+      }
+      Mockito.verify(conn, Mockito.never())
+          .prepareStatement(AbstractInvoiceHeaderHandler.LINKED_ORDERS_SQL);
+    }
+  }
+
+  /** ETP-5828: a failing orders query drops only {@code linkedOrders}; the response stays OK. */
+  @Test
+  public void testDetailGetLinkedOrdersSqlFailureKeepsResponseOk() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ordersPs = mock(PreparedStatement.class);
+      stubConnectionWithLinkedOrders(obDalMock, ordersPs);
+      when(ordersPs.executeQuery()).thenThrow(new SQLException("boom"));
+
+      JSONObject body = invoiceBodyNoDiscount("inv-5828-fail");
+      NeoContext ctx = getDetailCtx("inv-5828-fail");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      JSONObject rec = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(rec.has("linkedOrders"));
+      assertEquals("inv-5828-fail", rec.getString("id"));
+    }
   }
 
   // ── SifSubRecordAttachments wiring (ETP-4888) ─────────────────────────────

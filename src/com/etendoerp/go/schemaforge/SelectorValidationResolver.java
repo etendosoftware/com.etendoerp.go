@@ -160,7 +160,9 @@ public final class SelectorValidationResolver {
     if (resolvedClauses.isEmpty()) {
       return null;
     }
-    return String.join(SelectorQueryBuilder.SQL_AND, resolvedClauses);
+    // One group, as Classic's ComboTableData does: a top-level OR in the rule must not escape
+    // the AND that joins it with the selector's other filters and the search text.
+    return "(" + String.join(SelectorQueryBuilder.SQL_AND, resolvedClauses) + ")";
   }
 
   /**

@@ -36,6 +36,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
@@ -158,6 +159,48 @@ class NeoSelectorExecutionHelperTest {
       StringBuilder hql = new StringBuilder("e.active = true");
       NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, "commercialName", "acme");
       assertEquals("e.active = true AND lower(e.commercialName) LIKE :search", hql.toString());
+    }
+  }
+
+  // ------------------------------------------------------------------ //
+  // appendSearchWithMatchIds (ETP-5948)
+  // ------------------------------------------------------------------ //
+
+  @Nested
+  @DisplayName("appendSearchWithMatchIds")
+  class AppendSearchWithMatchIdsTests {
+
+    @Test
+    @DisplayName("no search predicate appends nothing, even with ids")
+    void emptyPredicateAppendsNothing() {
+      StringBuilder hql = new StringBuilder("e.active = true");
+      Map<String, Object> params = new HashMap<>();
+      NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, "", Set.of("t1"), params);
+      assertEquals("e.active = true", hql.toString());
+      assertTrue(params.isEmpty());
+    }
+
+    @Test
+    @DisplayName("no ids keeps the plain search predicate")
+    void noIdsKeepsPlainPredicate() {
+      StringBuilder hql = new StringBuilder("e.active = true");
+      Map<String, Object> params = new HashMap<>();
+      NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, "lower(e.name) LIKE :search",
+          Set.of(), params);
+      assertEquals("e.active = true AND lower(e.name) LIKE :search", hql.toString());
+      assertTrue(params.isEmpty());
+    }
+
+    @Test
+    @DisplayName("ids widen the search inside parentheses and are bound")
+    void idsWidenTheSearch() {
+      StringBuilder hql = new StringBuilder("e.active = true");
+      Map<String, Object> params = new HashMap<>();
+      NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, "lower(e.name) LIKE :search",
+          Set.of("t1"), params);
+      assertEquals("e.active = true AND (lower(e.name) LIKE :search OR e.id IN (:searchMatchIds))",
+          hql.toString());
+      assertEquals(Set.of("t1"), params.get("searchMatchIds"));
     }
   }
 

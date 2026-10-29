@@ -46,6 +46,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -72,6 +73,7 @@ import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -1652,6 +1654,21 @@ class EtendoGoJwtDalHelperTest {
       UserRoles result = EtendoGoJwtDalHelper.findClientAdminUserRole("CLIENT-2");
 
       assertNull(result);
+    }
+
+    @Test
+    @DisplayName("never returns the tenant's support user (ETP-5351)")
+    void excludesTheSupportUser() {
+      when(obDal.createQuery(eq(UserRoles.class), anyString())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      EtendoGoJwtDalHelper.findClientAdminUserRole("CLIENT-1");
+
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(obDal).createQuery(eq(UserRoles.class), hql.capture());
+      assertTrue(hql.getValue().contains("userrole.userContact.id <> :etgoSupportUserId"));
+      verify(query).setNamedParameter("etgoSupportUserId",
+          SupportAccessGuard.supportUserIdFor("CLIENT-1"));
     }
   }
 

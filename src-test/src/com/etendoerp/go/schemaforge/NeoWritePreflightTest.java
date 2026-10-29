@@ -69,6 +69,7 @@ public class NeoWritePreflightTest {
   private static final String PARENT_ID = "parentId";
 
   private MockedStatic<NeoReferenceOwnership> ownership;
+  private MockedStatic<NeoReferenceActiveness> activeness;
   private MockedStatic<NeoActionRecordGuard> targets;
   private MockedStatic<NeoFieldFilter> fieldFilters;
   private MockedStatic<OBContext> obContext;
@@ -78,6 +79,11 @@ public class NeoWritePreflightTest {
   @Before
   public void setUp() {
     ownership = mockStatic(NeoReferenceOwnership.class);
+    activeness = mockStatic(NeoReferenceActiveness.class);
+    // ETP-5802: the activeness check only runs once ownership passes (default here); each test
+    // that cares about it stubs findInactiveReference explicitly.
+    activeness.when(() -> NeoReferenceActiveness.findInactiveReference(any(), any()))
+        .thenReturn(null);
     targets = mockStatic(NeoActionRecordGuard.class);
     fieldFilters = mockStatic(NeoFieldFilter.class);
     obContext = mockStatic(OBContext.class);
@@ -99,6 +105,7 @@ public class NeoWritePreflightTest {
   @After
   public void tearDown() {
     ownership.close();
+    activeness.close();
     targets.close();
     fieldFilters.close();
     obContext.close();
@@ -243,6 +250,49 @@ public class NeoWritePreflightTest {
     NeoResponse refusal = NeoWritePreflight.refusalFor(request);
     assertNotNull("An unresolved target must not reach a customization", refusal);
     assertEquals(404, refusal.getHttpStatus());
+  }
+
+  /**
+   * ETP-5802: a reference the request SETS to an inactive row is refused with a structured 422,
+   * the same way REST answers {@link ReadOnlyFieldRejectedException}, before any customization
+   * runs.
+   */
+  @Test
+  public void testRefusesAReferenceSetToAnInactiveRow() throws Exception {
+    NeoReferenceActiveness.InactiveReference inactive =
+        new NeoReferenceActiveness.InactiveReference("taxCategory", "TaxCategory");
+    activeness.when(() -> NeoReferenceActiveness.findInactiveReference(any(), any()))
+        .thenReturn(inactive);
+
+    NeoResponse response = NeoWritePreflight.refusalFor(context("POST",
+        new JSONObject().put("taxCategory", "TC-OLD"), null));
+
+    assertNotNull(response);
+    assertEquals(422, response.getHttpStatus());
+    JSONObject error = response.getBody();
+    assertEquals("INACTIVE_REFERENCE_VALUE", error.getString("error"));
+    assertEquals("taxCategory", error.getString("field"));
+  }
+
+  /**
+   * ETP-5802 CP-6: the activeness check runs ONLY after ownership passes, and only once per
+   * request — an unowned reference is refused first, and the activeness check never even runs.
+   */
+  @Test
+  public void testDoesNotCheckActivenessWhenOwnershipAlreadyRefused() throws Exception {
+    ownership.when(() -> NeoReferenceOwnership.refuseUnownedReferences(any(), any(), any()))
+        .thenReturn(REFUSAL);
+
+    NeoResponse response;
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD(anyString())).thenAnswer(inv -> inv.getArgument(0));
+      response = NeoWritePreflight.refusalFor(context("POST",
+          new JSONObject().put("businessPartner", "P-1"), null));
+    }
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    activeness.verifyNoInteractions();
   }
 
 }

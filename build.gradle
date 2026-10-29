@@ -188,6 +188,14 @@ def isolatedDalTests = [
         // ETP-5051: commits on purpose (the quota gate's real commit/rollback) and its action case
         // reads the JVM-wide default quota guard, whose 60 s client cache must start empty.
         '**/NeoQuotaWriteGateIntegrationTest.class',
+        // ETP-5894: same symptom in the merge-block cut; the class and the receipt path it runs keep
+        // setAdminMode() balanced, so the leak comes from an earlier class in the worker.
+        '**/GoodsReceiptWarehouseSwitchReanchorIntegrationTest.class',
+        // ETP-5953: same symptom in the merge-block cut. Traced this time: NeoDefaultsServiceTest
+        // and NeoProcessServiceTest reach OBContext.setAdminMode() with no DAL, which pushes and
+        // then throws before the production try/finally, so the push leaks in the worker. Both
+        // now clear the stack after each test; the isolation keeps any other leaker away from it.
+        '**/NeoReferenceOwnershipIntegrationTest.class',
 ]
 
 def isolatedDalTestClasses = [
@@ -207,6 +215,8 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.DocumentListTotalsIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoQuotaWriteGateIntegrationTest',
+        'com.etendoerp.go.schemaforge.GoodsReceiptWarehouseSwitchReanchorIntegrationTest',
+        'com.etendoerp.go.schemaforge.NeoReferenceOwnershipIntegrationTest',
 ]
 
 def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->
