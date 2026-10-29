@@ -179,7 +179,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
 | `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
-| `contact-category-type` | `etendo.go.flags.contact-category-type` | `ETGO_FLAG_CONTACT_CATEGORY_TYPE` | absent ⇒ **`false`** (pre-ETP-5791 contact behaviour) |
+| `contact-category-type` | `etendo.go.flags.contact-category-type` | `ETGO_FLAG_CONTACT_CATEGORY_TYPE` | absent ⇒ **`false`** (pre-ETP-5791 contact behaviour); per account on a hosted arm only — see its section below |
 | `billing-reconciliation-schedule` | `etendo.go.flags.billing-reconciliation-schedule` | `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | `structured-address-for-sepa` | `etendo.go.flags.structured-address-for-sepa` | `ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA` | absent ⇒ **`false`** (legacy single-line address; TTL 2026-11-15 — SEPA 2025 rulebooks ban unstructured addresses in SEPA remittance files from that date, per [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24)) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
@@ -284,10 +284,19 @@ endpoint is served by this module and consumed by app-shell code directly, not t
 package, so it needs no core change and no version bump — which is what unblocked this after the
 `/environments` route stalled on the core helper dropping top-level fields.
 
-**This is not closed until the web client consumes them.** The backend now exposes the identity; the
-frontend half is the remaining scope. Until it lands, the two ends still bucket differently, so **no
-flag with a frontend end may be made targeting-aware**. Full client-side reasoning is in
-`docs/feature-flags.md` in the functional repo.
+**Status (ETP-5791 audit): half closed.** The web client now consumes them —
+`refreshAccountIdentity` in the functional repo's `tools/app-shell/src/lib/flags/bootstrap.js` reads
+`/sws/neo/session` and `buildEvaluationContext` publishes `accountEmail` (lowercased) as `email`. So a
+rule on the account **email** agrees on both ends. The **targeting key** still differs (web: the
+`ETGO_ACCOUNT` id; backend: the email), so identifier rules and percentage rollouts still bucket
+differently, and the tenant attribute is `account_id` on the web and `clientId` on the backend. The
+first two-ended per-account flag, `contact-category-type`, is therefore targeted on email only — see
+its section below.
+
+**What remains open is the targeting key.** Until both ends use the same key, **a flag with a
+frontend end may be made targeting-aware only through rules on the email attribute** — never on the
+identifier, a percentage rollout or a tenant attribute named for one end only. Full client-side
+reasoning is in `docs/feature-flags.md` in the functional repo.
 
 **What ETP-5267 changed, and why it is not a violation of the above.** A targeting-aware provider
 *is* now installed (see **Per-account targeting**), which the previous wording ruled out
@@ -529,7 +538,7 @@ To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local
 ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
 when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
 
-### `contact-category-type` (ETP-5791) — backend-only, environment level
+### `contact-category-type` (ETP-5791) — per account, read on both ends
 
 Turns on contact types driven by the contact category: a category (`C_BP_Group`) must declare
 Customer and/or Vendor/Creditor, a new contact inherits them unless the request sends them, a
@@ -537,15 +546,48 @@ contact cannot be saved with no type, and moving a contact to another category r
 Unset or `false` (the default) keeps the pre-ETP-5791 behaviour: the contact and contact-category
 customizations return `null` and the default CRUD runs. Only behaviour is gated — the new
 `EM_ETGO_ISCUSTOMER`/`EM_ETGO_ISVENDOR` columns, AD metadata, `ETGO_SF_FIELD` rows and
-reference/sample data ship unconditionally. Environment level (account-less context), always read
-through `ContactTypeRules.isEnabled()`. Nothing in the browser reads it. Full reference:
-[`neo-headless.md`](neo-headless.md) §5.3.6.
+reference/sample data ship unconditionally. Full reference: [`neo-headless.md`](neo-headless.md)
+§5.3.6.
+
+**Targeted per account, like `bp-portal-link`.** The backend always reads it through
+`ContactTypeRules.isEnabled()`, which evaluates `FeatureFlagContext.forAccount(<ETGO_ACCOUNT email
+of the request's user>)` plus `clientId` (the tenant). The email comes from
+`GoAccountResolver.currentAccountEmail()` — the same resolver `/sws/neo/session` and `bp-portal-link`
+use — and REST single, REST batch and MCP all bind the authenticated AD user, so the same person gets
+the same answer on every channel. A user with no account behind it resolves to `false`. Per-account
+targeting needs a **hosted arm** (Datadog, or ConfigCat while it is the fallback); where none is
+selected the flag degrades to the local per-environment boolean above, which can only answer
+"everyone" or "nobody".
+
+**The web client reads it too** (`CONTACT_CATEGORY_TYPE` in the functional repo's `flag-keys.js`:
+the Contact Category window and the contacts import), so this is a two-ended flag and the two ends
+must agree. They agree on a rule written against the **account email**: the web client puts
+`/sws/neo/session`'s `accountEmail` (the same `GoAccountResolver` resolution) lowercased into its
+`email` attribute, which ConfigCat maps to *Email* and Datadog matches as `email`; the backend
+publishes the same address as `Email` (as stored) and `email` (lowercased). Rules that do **not**
+agree, so do not write them for this flag:
+
+- **Identifier / targeting key, and percentage rollouts** — the web client's targeting key is the
+  `ETGO_ACCOUNT` *id*, the backend's is the account *email*, so the two bucket differently.
+- **Per-tenant rules** — the tenant reaches the web client as `account_id` and the backend as
+  `clientId`; a tenant rule must name both attributes.
+- **ConfigCat Email with upper-case letters** — the web client lowercases it, the backend sends it as
+  stored; write the rule value in lowercase (Datadog already compares the lowercased `email`).
 
 It also decides a new tenant's default contact category: on, the onboarding makes
 "Cliente/Proveedor" the default (`OnboardingDefaultContactCategoryService`, read at hand-over, so
 pool tenants built while it was off still get it when claimed); off, the dataset's "Cliente" stays
-default. Tenants created while it was off are never revisited. See
-[`onboarding-flow.md`](onboarding-flow.md) "Default contact category".
+default. The hand-over runs as System, so it is evaluated for the **account the tenant is handed
+to** (`ContactTypeRules.isEnabled(accountEmail, clientId)`), not for the current user. Tenants
+created while it was off are never revisited. See [`onboarding-flow.md`](onboarding-flow.md)
+"Default contact category".
+
+**Before targeting anyone in an environment, the contact-category data-fixes R55 and R56 must have
+run there** (`R55-bp-category-customer-vendor-flags`, `R56-bp-category-custom-flags-from-contacts`,
+in the functional repo's `cli/src/data-fixes/sql/`). Categories created before ETP-5791 have neither
+`EM_ETGO_ISCUSTOMER` nor `EM_ETGO_ISVENDOR` (`N`/`N`); with the flag on, the "at least one type" rule
+rejects saving such a category, and a new contact in it inherits nothing — a targeted user would be
+left with categories they cannot save until someone sets their type.
 
 ### `billing-reconciliation-schedule` (ETP-5048) — backend-only, strictly off by default
 
