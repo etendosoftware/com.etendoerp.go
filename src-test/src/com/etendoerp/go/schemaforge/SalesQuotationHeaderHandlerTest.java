@@ -90,6 +90,7 @@ import org.openbravo.model.common.order.Order;
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
+ * @covers com.etendoerp.go.schemaforge.QuotationShipmentLinks
  */
 public class SalesQuotationHeaderHandlerTest {
 
@@ -803,8 +804,9 @@ public class SalesQuotationHeaderHandlerTest {
 
   // ── afterHandle GET — total discount adjustment (ETP-4029 follow-up) ─────
   //
-  // Exercised through the inherited AbstractOrderHeaderHandler#afterHandle GET path — this
-  // handler no longer overrides afterHandle (ETP-5840 removed the Convertquotation rate transfer).
+  // Exercised through the inherited AbstractOrderHeaderHandler#afterHandle GET path, which this
+  // handler's override runs first (ETP-6002 only adds linkedShipments on the detail GET; the
+  // reader's failure on these unstubbed read-only connections is logged and leaves the key out).
 
   private static SalesQuotationHeaderHandler handlerWithTotalDiscountMock(
       TotalDiscountService svc) throws Exception {
@@ -922,6 +924,87 @@ public class SalesQuotationHeaderHandlerTest {
           .getDouble("grandTotalAmount");
       assertEquals(198.99, grand, 0.005);
     }
+  }
+
+  // ── afterHandle GET — linkedShipments (QuotationShipmentLinks) ────────────
+
+  /**
+   * {@code linkedShipments} — the shipments whose header or lines point at the quotation — is read
+   * on the detail GET only: never on the list, and a failed read leaves the key out without
+   * failing the GET. One row per case: {@code label, recordId, readFails, expectedShipments}
+   * ({@code -1} = key absent).
+   */
+  @Test
+  public void testAfterHandle_linkedShipmentsOnDetailGetOnly() throws Exception {
+    Object[][] cases = {
+        { "detail GET", "quot-ship-1", false, 1 },
+        { "list GET", null, false, -1 },
+        { "detail GET with a failed read", "quot-ship-1", true, -1 },
+    };
+    for (Object[] row : cases) {
+      String label = (String) row[0];
+      String recordId = (String) row[1];
+      boolean readFails = (Boolean) row[2];
+      int expected = (Integer) row[3];
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        stubNoLinkedDocuments(obDalMock);
+        ResultSet emptyRs = mock(ResultSet.class);
+        when(emptyRs.next()).thenReturn(false);
+        PreparedStatement otherPs = mock(PreparedStatement.class);
+        when(otherPs.executeQuery()).thenReturn(emptyRs);
+        ResultSet shipmentsRs = mock(ResultSet.class);
+        when(shipmentsRs.next()).thenReturn(true, false);
+        when(shipmentsRs.getString(1)).thenReturn("ship-1");
+        when(shipmentsRs.getString(2)).thenReturn("SH-1");
+        when(shipmentsRs.getString(3)).thenReturn("CO");
+        when(shipmentsRs.getString(4)).thenReturn("N");
+        PreparedStatement shipmentsPs = mock(PreparedStatement.class);
+        when(shipmentsPs.executeQuery()).thenReturn(shipmentsRs);
+        Connection readOnlyConn = mock(Connection.class);
+        when(readOnlyConn.prepareStatement(anyString())).thenReturn(otherPs);
+        if (readFails) {
+          when(readOnlyConn.prepareStatement(QuotationShipmentLinks.SQL))
+              .thenThrow(new java.sql.SQLException("read failed"));
+        } else {
+          when(readOnlyConn.prepareStatement(QuotationShipmentLinks.SQL)).thenReturn(shipmentsPs);
+        }
+        OBDal readOnlyDal = mock(OBDal.class);
+        when(readOnlyDal.getConnection()).thenReturn(readOnlyConn);
+        obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+
+        JSONObject body = new JSONObject().put("response", new JSONObject().put("data",
+            new JSONArray().put(quotationRecordWithDiscount(true, 0.0, 100.0))));
+        NeoContext ctx = getCtx(recordId);
+        ctx.setPreviousResult(NeoResponse.ok(body));
+
+        NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+        JSONObject rec = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+        if (expected < 0) {
+          assertFalse(label, rec.has(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS));
+        } else {
+          assertNotNull(label, result);
+          JSONArray shipments = result.getBody().getJSONObject("response").getJSONArray("data")
+              .getJSONObject(0).getJSONArray(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS);
+          assertEquals(label, expected, shipments.length());
+          assertEquals(label, "ship-1", shipments.getJSONObject(0).getString("id"));
+          assertEquals(label, "SH-1", shipments.getJSONObject(0).getString("documentNo"));
+          assertFalse(label, shipments.getJSONObject(0).getBoolean("isReturn"));
+        }
+        if (recordId == null) {
+          verify(readOnlyConn, never()).prepareStatement(QuotationShipmentLinks.SQL);
+        } else if (readFails) {
+          assertNotNull(label + ": a failed read must not fail the GET", result);
+        }
+      }
+    }
+  }
+
+  /** The injected key is declared, so the response field filter keeps it. */
+  @Test
+  public void testResponseEnrichedFields_declaresLinkedShipments() {
+    assertTrue(new SalesQuotationHeaderHandler().responseEnrichedFields()
+        .contains(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS));
   }
 
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────

@@ -30,18 +30,14 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.QueryException;
-import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.Query;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Tax;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
-import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
@@ -469,18 +465,7 @@ final class ReturnInvoiceSupport {
       if (origin == null) {
         throw new OBException("Invoice to rectify not found: " + originId);
       }
-      OBCriteria<ReversedInvoice> existing = OBDal.getInstance().createCriteria(ReversedInvoice.class);
-      existing.add(Restrictions.eq(ReversedInvoice.PROPERTY_INVOICE, invoice));
-      existing.add(Restrictions.eq(ReversedInvoice.PROPERTY_REVERSEDINVOICE, origin));
-      if (!existing.list().isEmpty()) {
-        continue;
-      }
-      ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
-      link.setClient(invoice.getClient());
-      link.setOrganization(invoice.getOrganization());
-      link.setInvoice(invoice);
-      link.setReversedInvoice(origin);
-      OBDal.getInstance().save(link);
+      InvoiceRectificationLinkSupport.ensureReverseLink(invoice, origin);
     }
   }
 

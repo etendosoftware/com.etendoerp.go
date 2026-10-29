@@ -316,50 +316,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   // Distribution over the delivered lines
   // ---------------------------------------------------------------------------
 
-  /** One movement line that can take part of an order line's quantity, and how much of it. */
-  static final class Candidate {
-    final ShipmentInOutLine line;
-    /** Still invoiceable on this line, signed like it; drafts and invoices already deducted. */
-    final BigDecimal pending;
-
-    Candidate(ShipmentInOutLine line, BigDecimal pending) {
-      this.line = line;
-      this.pending = pending;
-    }
-  }
-
-  /** A slice of the requested quantity assigned to one movement line. */
-  static final class Allocation {
-    final ShipmentInOutLine line;
-    final BigDecimal quantity;
-
-    Allocation(ShipmentInOutLine line, BigDecimal quantity) {
-      this.line = line;
-      this.quantity = quantity;
-    }
-  }
-
-  /**
-   * Distributes {@code quantity} over the candidates in the order given (oldest first), each up to
-   * its own pending, keeping the sign of the request. What no candidate can take is the remainder
-   * ({@code quantity} minus the sum of the allocations).
-   */
-  static List<Allocation> allocate(BigDecimal quantity, List<Candidate> candidates) {
-    List<Allocation> allocations = new ArrayList<>();
-    BigDecimal left = quantity.abs();
-    for (Candidate candidate : candidates) {
-      if (left.signum() == 0) {
-        break;
-      }
-      if (candidate.pending.signum() == quantity.signum()) {
-        BigDecimal taken = left.min(candidate.pending.abs());
-        allocations.add(new Allocation(candidate.line,
-            quantity.signum() < 0 ? taken.negate() : taken));
-        left = left.subtract(taken);
-      }
-    }
-    return allocations;
-  }
+  // The rule itself (candidates, pending, oldest-first allocation with split) lives in
+  // OrderLineMovementAllocation, shared with the sales "create invoice from order" path (ETP-6002).
 
   /** The native calls to make, and what has to be undone on the last one. */
   static final class Batches {
@@ -409,11 +367,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     JSONArray remainders = new JSONArray();
     for (Map.Entry<String, BigDecimal> entry : planned.entrySet()) {
       OrderLine orderLine = linesById.get(entry.getKey());
-      List<Allocation> allocations = allocate(entry.getValue(),
-          candidatesOf(orderLine, entry.getValue(), movementsByLine.get(entry.getKey()),
-              pendingByMovement));
+      List<OrderLineMovementAllocation.Allocation> allocations =
+          OrderLineMovementAllocation.allocate(entry.getValue(),
+              OrderLineMovementAllocation.candidatesOf(orderLine, entry.getValue(),
+                  movementsByLine.get(entry.getKey()), pendingByMovement));
       BigDecimal remainder = entry.getValue();
-      for (Allocation allocation : allocations) {
+      for (OrderLineMovementAllocation.Allocation allocation : allocations) {
         bound.put(MultiDocumentInvoiceSupport.buildOrderLineEntryForInOutLine(orderLine.getId(),
             allocation.line, allocation.quantity));
         remainder = remainder.subtract(allocation.quantity);
@@ -464,32 +423,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             "A remainder line is still linked to a receipt / shipment line; nothing was imported");
       }
     }
-  }
-
-  /** The movement lines that can take quantity of this order line: same product, unit and sign. */
-  private static List<Candidate> candidatesOf(OrderLine orderLine, BigDecimal quantity,
-      List<ShipmentInOutLine> movements, Map<String, BigDecimal> pendingByMovement) {
-    List<Candidate> candidates = new ArrayList<>();
-    for (ShipmentInOutLine movement : movements) {
-      BigDecimal moved = movement.getMovementQuantity();
-      BigDecimal magnitude = pendingByMovement.get(movement.getId());
-      if (moved == null || moved.signum() != quantity.signum() || magnitude == null
-          || !sameProductAndUnit(orderLine, movement)) {
-        continue;
-      }
-      BigDecimal capped = magnitude.min(moved.abs());
-      if (capped.signum() > 0) {
-        candidates.add(new Candidate(movement, moved.signum() < 0 ? capped.negate() : capped));
-      }
-    }
-    return candidates;
-  }
-
-  private static boolean sameProductAndUnit(OrderLine orderLine, ShipmentInOutLine movement) {
-    return orderLine.getProduct() != null && movement.getProduct() != null
-        && orderLine.getProduct().getId().equals(movement.getProduct().getId())
-        && orderLine.getUOM() != null && movement.getUOM() != null
-        && orderLine.getUOM().getId().equals(movement.getUOM().getId());
   }
 
   // ---------------------------------------------------------------------------
@@ -653,17 +586,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    * id): the lines an invoice quantity is distributed over before any remainder.
    */
   protected List<ShipmentInOutLine> movementLinesOf(OrderLine orderLine) {
-    return OBDal.getInstance().getSession().createQuery(
-        "select il from MaterialMgmtShipmentInOutLine il join il.shipmentReceipt sh "
-            + "where il.salesOrderLine.id = :id and sh.processed = 'Y' "
-            + "and sh.documentStatus = 'CO' and il.active = true "
-            + "order by sh.movementDate, il.id", ShipmentInOutLine.class)
-        .setParameter("id", orderLine.getId()).list();
+    return OrderLineMovementAllocation.completedMovementLines(orderLine);
   }
 
   /** Pending MAGNITUDE per movement line of one document, drafts included (the receipt cap). */
   protected Map<String, BigDecimal> movementPending(String inOutId) {
-    return NeoInvoiceSupport.computePendingQtyPerLineOrThrow(inOutId, true);
+    return OrderLineMovementAllocation.movementPending(inOutId);
   }
 
   /**

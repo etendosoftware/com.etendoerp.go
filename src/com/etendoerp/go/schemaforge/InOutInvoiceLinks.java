@@ -48,6 +48,21 @@ import org.openbravo.dal.service.OBDal;
  * <p><b>Structure, not identity.</b> Which match table applies is decided by {@code IsSOTrx},
  * a generic flag every commercial document carries — see {@link MatchTable#forSalesTransaction}.
  * Nothing here names a window, spec or entity.
+ *
+ * <p><b>Temporary sales/purchase divergence (ETP-6002).</b> The invoice ↔ movement link readers
+ * ({@link #linkedInOutLineIdsSql}, {@link #linkedInvoiceIdsSql}) used to add a third, deduced
+ * arm: an invoice line and a movement line on the same ORDER line. On the sales side
+ * ({@link MatchTable#SALES}) that arm is gone — an invoice and a shipment are related only by the
+ * invoice-line ↔ shipment-line link (the column or {@code M_MatchSI}), never by their order line,
+ * which made an invoice show every shipment of its order (including ones another invoice billed)
+ * and a shipment show every invoice of its order. To keep sales invoices created from an order
+ * linked, the sales line create ({@link SalesInvoiceShipmentLineResolver}), the
+ * {@code importOrderLines} action and "create invoice from order" write the line's
+ * {@code M_InOutLine_ID} with one shared rule ({@link OrderLineMovementAllocation}). The purchase
+ * side ({@link MatchTable#PURCHASE}) keeps the order-line arm unchanged until its own pass;
+ * {@link MatchTable#linksByOrderLine()} carries the difference, chosen by direction, never by
+ * window. The invoiced-percentage readers
+ * (e.g. {@code buildInvoiceStatusSql}'s order-line arm) are untouched.
  */
 final class InOutInvoiceLinks {
 
@@ -61,16 +76,27 @@ final class InOutInvoiceLinks {
    */
   enum MatchTable {
     /** Sales side ({@code IsSOTrx = 'Y'}): {@code M_MatchSI}. */
-    SALES("m_matchsi", "m_matchsi_id"),
+    SALES("m_matchsi", "m_matchsi_id", false),
     /** Purchase side ({@code IsSOTrx = 'N'}): {@code M_MatchInv}. */
-    PURCHASE("m_matchinv", "m_matchinv_id");
+    PURCHASE("m_matchinv", "m_matchinv_id", true);
 
     private final String tableName;
     private final String idColumn;
+    private final boolean linksByOrderLine;
 
-    MatchTable(String tableName, String idColumn) {
+    MatchTable(String tableName, String idColumn, boolean linksByOrderLine) {
       this.tableName = tableName;
       this.idColumn = idColumn;
+      this.linksByOrderLine = linksByOrderLine;
+    }
+
+    /**
+     * Whether the link readers of this direction still add the deduced order-line arm. {@code false}
+     * for sales since ETP-6002; {@code true} for purchase until its own pass — see the class
+     * javadoc.
+     */
+    boolean linksByOrderLine() {
+      return linksByOrderLine;
     }
 
     /** Lower-case physical table name. A fixed literal — never derived from request input. */
@@ -174,32 +200,64 @@ final class InOutInvoiceLinks {
         + "WHERE mt.m_inoutline_id = " + inOutLineRef);
   }
 
-  /** Number of {@code ?} placeholders in {@link #linkedInOutLineIdsSql}, all bound to the invoice id. */
+  /** Placeholders of the direct-column and match-table arms of each link reader. */
+  private static final int LINK_ARMS_PARAMS = 2;
+
+  /**
+   * Number of {@code ?} placeholders in {@link #linkedInOutLineIdsSql} for
+   * {@link MatchTable#PURCHASE} (with the order-line arm), all bound to the invoice id. Kept so the
+   * purchase readers stay untouched; equals {@code linkedInOutLinesParams(MatchTable.PURCHASE)}.
+   */
   static final int LINKED_INOUT_LINES_PARAMS = 3;
 
-  /** Number of {@code ?} placeholders in {@link #linkedInvoiceIdsSql}, all bound to the movement id. */
+  /**
+   * Number of {@code ?} placeholders in {@link #linkedInvoiceIdsSql} for {@link MatchTable#PURCHASE}
+   * (with the order-line arm), all bound to the movement id. Kept so the purchase readers stay
+   * untouched; equals {@code linkedInvoicesParams(MatchTable.PURCHASE)}.
+   */
   static final int LINKED_INVOICES_PARAMS = 3;
 
   /**
+   * Number of {@code ?} placeholders in {@link #linkedInOutLineIdsSql} for {@code matchTable}, all
+   * bound to the invoice id: 3 with the order-line arm, 2 without.
+   */
+  static int linkedInOutLinesParams(MatchTable matchTable) {
+    return LINK_ARMS_PARAMS + (matchTable.linksByOrderLine() ? 1 : 0);
+  }
+
+  /**
+   * Number of {@code ?} placeholders in {@link #linkedInvoiceIdsSql} for {@code matchTable}, all
+   * bound to the movement id: 3 with the order-line arm, 2 without.
+   */
+  static int linkedInvoicesParams(MatchTable matchTable) {
+    return LINK_ARMS_PARAMS + (matchTable.linksByOrderLine() ? 1 : 0);
+  }
+
+  /**
    * Sub-select yielding one column, {@code m_inoutline_id}: every movement line linked to the
-   * invoice bound to its {@value #LINKED_INOUT_LINES_PARAMS} placeholders (bind the same invoice
-   * id to all of them, see {@link #bindRepeated}). Three arms, deduplicated by {@code UNION}:
+   * invoice bound to its {@link #linkedInOutLinesParams} placeholders (bind the same invoice id
+   * to all of them, see {@link #bindRepeated}). Arms, deduplicated by {@code UNION}:
    * <ol>
    *   <li>{@code C_InvoiceLine.M_InOutLine_ID};</li>
    *   <li>the match table;</li>
-   *   <li>the pre-existing order-line fallback — an invoice line with no direct movement link
-   *       reaches every movement line of the same order line. Kept exactly as the
-   *       related-documents queries had it before ETP-5576.</li>
+   *   <li>only when {@link MatchTable#linksByOrderLine()} (purchase, until its own pass): the
+   *       pre-existing order-line fallback — an invoice line with no direct movement link reaches
+   *       every movement line of the same order line, as the related-documents queries had it
+   *       before ETP-5576. Dropped for sales by ETP-6002 (see the class javadoc).</li>
    * </ol>
    * Only active invoice lines participate, as before.
    */
   static String linkedInOutLineIdsSql(MatchTable matchTable) {
-    return "SELECT il.m_inoutline_id FROM c_invoiceline il "
+    String sql = "SELECT il.m_inoutline_id FROM c_invoiceline il "
         + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' AND il.m_inoutline_id IS NOT NULL "
         + "UNION "
         + "SELECT mt.m_inoutline_id FROM " + matchTable.tableName() + " mt "
         + "JOIN c_invoiceline il ON il.c_invoiceline_id = mt.c_invoiceline_id "
-        + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' "
+        + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y'";
+    if (!matchTable.linksByOrderLine()) {
+      return sql;
+    }
+    return sql + " "
         + "UNION "
         + "SELECT iol.m_inoutline_id FROM c_invoiceline il "
         + "JOIN m_inoutline iol ON iol.c_orderline_id = il.c_orderline_id "
@@ -209,20 +267,25 @@ final class InOutInvoiceLinks {
 
   /**
    * Sub-select yielding one column, {@code c_invoice_id}: every invoice linked to the goods
-   * movement bound to its {@value #LINKED_INVOICES_PARAMS} placeholders. Mirror image of
-   * {@link #linkedInOutLineIdsSql}: direct column, match table, and the pre-existing order-line
-   * arm (any invoice line on the same order line as one of the movement's lines). Only active
-   * movement lines participate, as before.
+   * movement bound to its {@link #linkedInvoicesParams} placeholders. Mirror image of
+   * {@link #linkedInOutLineIdsSql}: direct column, match table, and — only when
+   * {@link MatchTable#linksByOrderLine()} (purchase) — the pre-existing order-line arm (any
+   * invoice line on the same order line as one of the movement's lines). Only active movement
+   * lines participate, as before.
    */
   static String linkedInvoiceIdsSql(MatchTable matchTable) {
-    return "SELECT il.c_invoice_id FROM m_inoutline sil "
+    String sql = "SELECT il.c_invoice_id FROM m_inoutline sil "
         + "JOIN c_invoiceline il ON il.m_inoutline_id = sil.m_inoutline_id "
         + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y' "
         + "UNION "
         + "SELECT il.c_invoice_id FROM m_inoutline sil "
         + "JOIN " + matchTable.tableName() + " mt ON mt.m_inoutline_id = sil.m_inoutline_id "
         + "JOIN c_invoiceline il ON il.c_invoiceline_id = mt.c_invoiceline_id "
-        + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y' "
+        + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
+    if (!matchTable.linksByOrderLine()) {
+      return sql;
+    }
+    return sql + " "
         + "UNION "
         + "SELECT il.c_invoice_id FROM m_inoutline sil "
         + "JOIN c_invoiceline il ON il.c_orderline_id = sil.c_orderline_id "
