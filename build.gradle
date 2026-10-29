@@ -185,6 +185,9 @@ def isolatedDalTests = [
         // ETP-5863: same symptom in the merge-block cut; neither the class nor the selector path it
         // runs calls setAdminMode() unbalanced, so the leak comes from an earlier class in the worker.
         '**/NeoSelectorServiceValuePagingIntegrationTest.class',
+        // ETP-5051: commits on purpose (the quota gate's real commit/rollback) and its action case
+        // reads the JVM-wide default quota guard, whose 60 s client cache must start empty.
+        '**/NeoQuotaWriteGateIntegrationTest.class',
         // ETP-5894: same symptom in the merge-block cut; the class and the receipt path it runs keep
         // setAdminMode() balanced, so the leak comes from an earlier class in the worker.
         '**/GoodsReceiptWarehouseSwitchReanchorIntegrationTest.class',
@@ -211,6 +214,7 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest',
         'com.etendoerp.go.schemaforge.DocumentListTotalsIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest',
+        'com.etendoerp.go.schemaforge.NeoQuotaWriteGateIntegrationTest',
         'com.etendoerp.go.schemaforge.GoodsReceiptWarehouseSwitchReanchorIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoReferenceOwnershipIntegrationTest',
 ]

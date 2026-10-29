@@ -69,6 +69,7 @@ import org.openbravo.model.common.invoice.Invoice;
  * and the creator themselves.
  *
  * @covers com.etendoerp.go.schemaforge.FollowUpActionHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 class FollowUpActionHandlerTest {
 
@@ -302,6 +303,32 @@ class FollowUpActionHandlerTest {
     verifyNoInteractions(other);
     verify(sessionHandler, never()).rollback();
     obContextStatic.verify(() -> OBContext.setAdminMode(true));
+    obContextStatic.verify(OBContext::restorePreviousMode);
+  }
+
+  /**
+   * ETP-5051 — the movement a follow-up created is refused by a plan quota: the handler answers
+   * 403 {@code QUOTA_EXCEEDED} (not its generic 500), the refusal rolls the follow-up back, and
+   * admin mode is restored.
+   */
+  @Test
+  void aQuotaRefusalOfTheCreatedMovementAnswers403AndRollsBack() throws Exception {
+    ownedInvoice("inv-1");
+    pendingLines(shipmentResolver, "inv-1");
+    when(shipmentCreator.createTarget("inv-1", PENDING, FollowUpInputs.none()))
+        .thenThrow(QuotaRefusalTestSupport.refusal());
+    org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+
+    NeoResponse response;
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obDal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      obDal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      response = handler.handle(actionCtx("createShipment", "inv-1"));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(response);
+    verify(dal).rollbackAndClose();
+    verify(sessionHandler, never()).rollback();
     obContextStatic.verify(OBContext::restorePreviousMode);
   }
 

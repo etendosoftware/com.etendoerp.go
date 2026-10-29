@@ -125,6 +125,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Inject
   private ImportInOutLinesIntoInvoiceHandler importShipmentLinesHandler;
 
+  @Inject
+  private ImportOriginInvoiceLinesHandler importOriginInvoiceLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -151,16 +154,23 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     // ETP-5713: import the pending lines of a completed order / goods shipment into this draft.
     contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(true));
     contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(true));
+    // ETP-5876: a DRAFT rectificative takes its lines from a return or from the invoice it
+    // rectifies instead (the window's "Import from return" / "Import from source invoice").
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.returnContracts(true));
+    contracts.putAll(ImportOriginInvoiceLinesHandler.contracts(true));
     return contracts;
   }
 
   /**
    * {@inheritDoc} Reactivate is ruled out for an invoice {@link InvoiceReactivationGuard} would
-   * refuse to reactivate (ETP-5714).
+   * refuse to reactivate (ETP-5714), and the import actions that do not suit the kind of invoice
+   * it is: the order and goods ones on a rectificative, the return and origin ones on any other
+   * (ETP-5876).
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
-    return InvoiceDocumentAvailability.unavailable(subject);
+    return InvoiceDocumentAvailability.unavailable(subject,
+        RectificativeImportPolicy.forHeader(this::classifyDocType, true));
   }
 
   /**
@@ -238,9 +248,19 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (reactivationGuard != null) {
       return reactivationGuard;
     }
+    // ETP-5876: the import actions go with the KIND of invoice, as in the window — order and
+    // shipment on a normal one, return and origin invoice on a rectificative — and the delegates
+    // classify through this header's own rule, handed in on the request.
+    RectificativeImportPolicy importPolicy =
+        RectificativeImportPolicy.forHeader(this::classifyDocType, true);
+    context.setAttribute(RectificativeImportPolicy.ATTRIBUTE, importPolicy);
+    NeoResponse importKindRefusal = RectificativeImportGate.refuse(context, importPolicy);
+    if (importKindRefusal != null) {
+      return importKindRefusal;
+    }
     return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
         registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, importOrderLinesHandler,
-        importShipmentLinesHandler, followUp.actionHandler());
+        importShipmentLinesHandler, importOriginInvoiceLinesHandler, followUp.actionHandler());
   }
 
   /**

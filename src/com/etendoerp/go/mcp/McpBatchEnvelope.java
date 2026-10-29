@@ -22,6 +22,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 
 /**
  * The outcome envelope {@code etendo_batch} answers a failed batch with, whether the batch was
@@ -32,6 +33,9 @@ final class McpBatchEnvelope {
 
   private McpBatchEnvelope() {
   }
+
+  /** The machine-readable code a NEO handler error carries ({@code error.code}). */
+  private static final String KEY_CODE = "code";
 
   /**
    * Error codes of a batch operation that no change to its body can fix: the entity refuses the
@@ -137,6 +141,16 @@ final class McpBatchEnvelope {
       return result;
     }
 
+    if (isQuotaRefusal(detail)) {
+      // ETP-5051: a plan-quota refusal keeps its machine-readable code and QuotaItem, in the same
+      // flattened shape etendo_create answers with — never a validation_error with prose.
+      JSONObject flattened = McpToolRouterSupport.toMcpHandlerError(
+          new JSONObject(detail.toString()), status);
+      flattened.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+      result.put(McpConstants.KEY_ERROR, flattened);
+      return result;
+    }
+
     String dalMessage = McpSupportInternals.extractDalMessage(detail);
 
     JSONObject clean = new JSONObject();
@@ -146,6 +160,16 @@ final class McpBatchEnvelope {
     clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     result.put(McpConstants.KEY_ERROR, clean);
     return result;
+  }
+
+  /**
+   * Whether the failing operation's sub-response is the NEO write gate's refusal: its nested
+   * {@code error.code} is {@code QUOTA_EXCEEDED} or {@code QUOTA_CHECK_FAILED}.
+   */
+  private static boolean isQuotaRefusal(JSONObject detail) {
+    JSONObject nested = detail == null ? null : detail.optJSONObject(McpConstants.KEY_ERROR);
+    String code = nested == null ? null : nested.optString(KEY_CODE, null);
+    return NeoQuotaWriteGate.CODE.equals(code) || NeoQuotaWriteGate.CHECK_FAILED_CODE.equals(code);
   }
 
   /**

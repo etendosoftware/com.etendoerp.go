@@ -94,6 +94,16 @@ final class DocumentLineImport {
   static final String ERROR_NO_STORAGE_BIN = "importNoStorageBin";
   /** The lines created do not add up to what was planned; everything is rolled back. */
   static final String ERROR_QUANTITY_NOT_HONOURED = "importQuantityNotHonoured";
+  /** An order / goods shipment / goods receipt import asked of a rectificative invoice (ETP-5876). */
+  static final String ERROR_RECTIFICATIVE_TARGET = "importNotAvailableOnRectificative";
+  /** A return / origin invoice import asked of an invoice that is not a rectificative (ETP-5876). */
+  static final String ERROR_NOT_RECTIFICATIVE = "importRequiresRectificative";
+  /** The document named as a return is not one (ETP-5876). */
+  static final String ERROR_SOURCE_NOT_RETURN = "importSourceNotReturn";
+  /** The invoice named as origin is the target itself (ETP-5876). */
+  static final String ERROR_SOURCE_IS_TARGET = "importSourceIsTarget";
+  /** The invoice named as origin is itself a rectificative (ETP-5876). */
+  static final String ERROR_SOURCE_NOT_STANDARD = "importSourceInvoiceNotStandard";
 
   static final int SC_UNPROCESSABLE = 422;
   static final int SC_NOT_FOUND = 404;
@@ -127,6 +137,10 @@ final class DocumentLineImport {
   /** Row lock on one movement line, taken before the pending total is read (see above). */
   private static final String LOCK_INOUT_LINE_SQL =
       "SELECT M_InOutLine_ID FROM M_InOutLine WHERE M_InOutLine_ID = ? FOR NO KEY UPDATE";
+
+  /** Row lock on the target invoice of an import that decides from the lines it holds. */
+  private static final String LOCK_INVOICE_SQL =
+      "SELECT C_Invoice_ID FROM C_Invoice WHERE C_Invoice_ID = ? FOR NO KEY UPDATE";
 
   private DocumentLineImport() {
   }
@@ -384,6 +398,15 @@ final class DocumentLineImport {
     lock(LOCK_ORDER_LINE_SQL, ids);
   }
 
+  /**
+   * Locks one invoice row ({@code FOR NO KEY UPDATE}) before the lines it already holds are read,
+   * so two calls importing into the same draft (a retry included) serialise and the second one
+   * sees what the first one wrote.
+   */
+  static void lockInvoice(String id) throws SQLException {
+    lock(LOCK_INVOICE_SQL, List.of(id));
+  }
+
   /** Same lock on movement (receipt / shipment) lines. */
   static void lockInOutLines(Collection<String> ids) throws SQLException {
     lock(LOCK_INOUT_LINE_SQL, ids);
@@ -497,6 +520,17 @@ final class DocumentLineImport {
    * @param headerOrderId the order the target's header points at after the import, or {@code null}
    */
   static NeoResponse ok(List<ImportedLine> lines, String headerOrderId) throws JSONException {
+    return ok(lines, headerOrderId, Map.of());
+  }
+
+  /**
+   * Same answer with extra keys in {@code data} (the origin invoice import reports the invoices it
+   * linked), written after the standard ones.
+   *
+   * @param extra additional {@code data} entries, in iteration order
+   */
+  static NeoResponse ok(List<ImportedLine> lines, String headerOrderId, Map<String, Object> extra)
+      throws JSONException {
     JSONArray array = new JSONArray();
     boolean linked = false;
     for (ImportedLine line : lines) {
@@ -515,6 +549,9 @@ final class DocumentLineImport {
     data.put("headerLinked", linked);
     if (headerOrderId != null) {
       data.put("salesOrder", headerOrderId);
+    }
+    for (Map.Entry<String, Object> entry : extra.entrySet()) {
+      data.put(entry.getKey(), entry.getValue());
     }
     return wrap(data);
   }
