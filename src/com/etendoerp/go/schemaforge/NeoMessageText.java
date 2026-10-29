@@ -75,6 +75,12 @@ public final class NeoMessageText {
   /**
    * The text of {@code key} in {@code language}, resolved in the order the class documents.
    * Total: never throws.
+   *
+   * @param key      the {@code AD_MESSAGE} value
+   * @param language the AD language code, for example {@code es_ES}
+   * @param args     the placeholder values, in order
+   * @return the message text with the placeholders substituted, or the key itself when no source
+   *         has it
    */
   public static String text(String key, String language, Object... args) {
     String translated = translatedRow(key, language);
