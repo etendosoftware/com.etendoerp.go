@@ -1106,6 +1106,31 @@ class ContactsLocationAddressHandlerTest {
         response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(1).getString("name"));
   }
 
+  /** A listed address carries the same address fields a single read returns (ETP-6012). */
+  @Test
+  void listedAddressesCarryTheirAddressFields() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-1"))
+        .thenReturn(bpLoc);
+    JSONObject rec = new JSONObject().put("id", "bpl-1").put("name", "Head office");
+    JSONObject wrapper = new JSONObject().put("response",
+        new JSONObject().put("status", 0).put("data", new JSONArray().put(rec)));
+    NeoContext ctx = buildContextWithPrevious("GET", null, NeoResponse.ok(wrapper));
+
+    NeoResponse response = handler.afterHandle(ctx);
+
+    JSONObject listed = response.getBody().getJSONObject("response").getJSONArray("data")
+        .getJSONObject(0);
+    assertEquals("Old street 1", listed.getString("addressLine1"));
+    assertEquals("Madrid", listed.getString("cityName"));
+    assertEquals("106", listed.getString("country"));
+    assertEquals("Head office", listed.getString("name"), "a real name is kept");
+  }
+
   /**
    * Verifies that afterHandle GET list returns null when no names need replacing.
    */

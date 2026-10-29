@@ -4053,7 +4053,9 @@ same 409 `stale_record`. `PUT` replaces the whole address (an omitted address fi
 `PATCH` first fills every address field it omits with the stored value, except the stored region
 when the country changes, and the stored structured fields when it sends an address line. An address-only edit
 touches only `C_Location`, so the handler bumps `C_BPartner_Location.Updated` on every update, and
-the create/update response carries the new `updated` token, so the caller gets a fresh ETag.
+the create/update response carries the new `updated` token, so the caller gets a fresh ETag. A list read
+returns the same address fields as a single read: the default list of `C_BPartner_Location` has none
+of them, so the handler's post-hook adds them per record.
 
 **Pending DB update — confirmed still outstanding.** The field-level `AGENT_PROMPT` on
 `ETGO_SF_FIELD` for `C_Location_ID` still has not been updated in the database to mention the 3

@@ -171,8 +171,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         // Enrich GET-by-ID response with C_Location fields so the modal can pre-populate the form
         return enrichWithLocationData(ctx);
       }
-      // Enrich GET list: replace stale "Location" names with a computed display name
-      return enrichListDisplayNames(ctx);
+      // Enrich GET list with the C_Location fields, and replace stale "Location" names
+      return enrichList(ctx);
     } catch (Exception e) {
       log.error("ContactsLocationAddressHandler afterHandle error", e);
       return null;
@@ -558,7 +558,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ enrich GET list
 
-  private NeoResponse enrichListDisplayNames(NeoContext ctx) throws Exception {
+  // The address fields live in C_Location, so the default list of C_BPartner_Location returns none
+  // of them: every record gets the same fields a single read returns (ETP-6012), and a stale
+  // "Location" name is replaced with a computed one. One lookup per record, bounded by the page size.
+  private NeoResponse enrichList(NeoContext ctx) throws Exception {
     JSONArray dataArr = extractDataArray(ctx);
     if (dataArr == null) {
       return null;
@@ -569,10 +572,6 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       boolean modified = false;
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
-        String name = rec.optString("name", "");
-        if (!"Location".equals(name) && !name.isEmpty()) {
-          continue;
-        }
         String bplId = nullIfEmpty(rec.optString("id", null));
         if (bplId == null) {
           continue;
@@ -582,10 +581,15 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         if (bpLoc == null || bpLoc.getLocationAddress() == null) {
           continue;
         }
+        putGeoLocFields(rec, bpLoc.getLocationAddress());
+        modified = true;
+        String name = rec.optString("name", "");
+        if (!"Location".equals(name) && !name.isEmpty()) {
+          continue;
+        }
         String computed = buildDisplayName(bpLoc.getLocationAddress());
         if (computed != null && !computed.equals(name)) {
           rec.put("name", computed);
-          modified = true;
         }
       }
       return modified ? NeoResponse.ok(ctx.getPreviousResult().getBody()) : null;
