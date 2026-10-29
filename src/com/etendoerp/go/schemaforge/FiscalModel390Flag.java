@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.List;
+import java.util.Map;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -29,7 +32,8 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * ETP-5716 — the one gate of the {@value GoFeatureFlags#FLAG_FISCAL_MODEL_390} flag. Retiring the
  * flag is a grep for this class.
  *
- * <p>Only {@link NeoFiscalModelsCatalogService} calls it, at two toggle points:
+ * <p>Only {@link NeoFiscalModelsCatalogService} calls it, at two toggle points (plus
+ * {@link #failHiddenAnswer()} on the read's error path):
  * <ul>
  *   <li><b>Read</b> ({@link #applyToRead}): flag off, the catalog answer drops model
  *       {@value #MODEL_ID} — so every surface that only shows an <em>active</em> model hides it —
@@ -86,6 +90,14 @@ final class FiscalModel390Flag {
   static FeatureFlagContext contextFor(String accountEmail, String clientId) {
     return FeatureFlagContext.forAccount(accountEmail)
         .with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, clientId);
+  }
+
+  /**
+   * The answer when the catalog answer cannot be built: no model active and 390 unavailable — the
+   * same shape the flag gives when it is off, so a failure never offers the 390. Never throws.
+   */
+  static JSONObject failHiddenAnswer() {
+    return new JSONObject(Map.of(UNAVAILABLE_KEY, new JSONArray(List.of(MODEL_ID))));
   }
 
   /**

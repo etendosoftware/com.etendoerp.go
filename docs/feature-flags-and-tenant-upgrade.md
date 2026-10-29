@@ -590,7 +590,12 @@ and `NeoFiscalModelsCatalogService` its only caller:
   answers `{"_unavailable": ["390"]}`. Flag on: exactly the stored catalog, no marker.
 - **`PUT /sws/neo/fiscal-models-catalog`, flag off:** the client's `390` value is ignored and the
   stored one kept, so a save can neither switch 390 on nor erase the tenant's earlier choice
-  (turning the flag back on restores it). `_unavailable` is never persisted, flag on or off.
+  (turning the flag back on restores it). `_unavailable` is never persisted, flag on or off. If the
+  stored catalog cannot be read while the flag is off, the save is **refused** (an error, nothing
+  written) instead of being merged over `{}`, which would drop the stored 390; a stored value that
+  is not valid JSON holds nothing to keep and counts as `{}`.
+- **Errors fail hidden:** if the GET answer cannot be built, it is `{"_unavailable": ["390"]}`
+  (`FiscalModel390Flag.failHiddenAnswer()`), never a bare `{}`.
 
 The SPA never evaluates the flag (no key in `flag-keys.js`): every 390 surface already shows only
 *active* models, and the catalog drawer also hides the models listed in `_unavailable`

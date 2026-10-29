@@ -406,4 +406,11 @@ class FiscalModel390FlagTest {
       return ProviderEvaluation.<Value>builder().value(defaultValue).build();
     }
   }
+
+  @Test
+  void failHiddenAnswerHasNoModelAndMarksThe390Unavailable() throws Exception {
+    JSONObject answer = FiscalModel390Flag.failHiddenAnswer();
+    assertEquals(1, answer.length());
+    assertEquals("[\"390\"]", answer.getJSONArray(FiscalModel390Flag.UNAVAILABLE_KEY).toString());
+  }
 }

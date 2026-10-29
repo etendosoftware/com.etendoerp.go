@@ -74,27 +74,57 @@ class NeoFiscalModelsCatalogService {
       return NeoResponse.ok(FiscalModel390Flag.applyToRead(stored,
           FiscalModel390Flag.isEnabled(client != null ? client.getId() : null)));
     } catch (Exception e) {
+      // Fail hidden: the same shape the flag gives when it is off, never a bare {} that would
+      // let the catalog drawer offer what the flag hides.
       log.error("Error building fiscal models catalog answer: {}", e.getMessage(), e);
-      return NeoResponse.ok(new JSONObject());
+      return NeoResponse.ok(FiscalModel390Flag.failHiddenAnswer());
     }
   }
 
   /**
-   * Reads the stored catalog of {@code client}; {@code {}} when nothing was saved yet or the
-   * stored value cannot be read or parsed.
+   * Reads the stored catalog of {@code client} for an answer; {@code {}} when nothing was saved
+   * yet or the stored value cannot be read or parsed.
    */
   private static JSONObject readStoredModels(Client client) {
     try {
-      String raw = Preferences.getPreferenceValue(
+      return readStoredModelsStrict(client);
+    } catch (StoredCatalogUnreadableException e) {
+      return new JSONObject();
+    }
+  }
+
+  /**
+   * Reads the stored catalog of {@code client}, telling "cannot be read" apart from "empty".
+   *
+   * <p>{@code {}} when nothing was saved yet, the stored value is blank, or it is not valid JSON
+   * (a corrupt value holds nothing that could be kept). Throws when the preference itself cannot
+   * be read, so a save that must keep part of the stored catalog does not merge over {@code {}}.
+   *
+   * @throws StoredCatalogUnreadableException when the preference cannot be read
+   */
+  private static JSONObject readStoredModelsStrict(Client client)
+      throws StoredCatalogUnreadableException {
+    String raw;
+    try {
+      raw = Preferences.getPreferenceValue(
           PREF_KEY, false,
           client, null, null, null, null);
-      return new JSONObject(raw);
     } catch (PropertyNotFoundException e) {
       return new JSONObject();
     } catch (PropertyException e) {
       log.warn("Could not read {} for client {}: {}", PREF_KEY, clientIdOf(client), e.getMessage());
+      throw new StoredCatalogUnreadableException(e);
+    } catch (RuntimeException e) {
+      log.error("Could not read {} for client {}: {}", PREF_KEY, clientIdOf(client),
+          e.getMessage(), e);
+      throw new StoredCatalogUnreadableException(e);
+    }
+    if (raw == null || raw.isBlank()) {
       return new JSONObject();
-    } catch (Exception e) {
+    }
+    try {
+      return new JSONObject(raw);
+    } catch (JSONException e) {
       log.error("Error parsing stored fiscal models catalog: {}", e.getMessage(), e);
       return new JSONObject();
     }
@@ -123,14 +153,29 @@ class NeoFiscalModelsCatalogService {
     Client client = ctx.getCurrentClient();
     // ETP-5716 toggle point (FiscalModel390Flag): the `_unavailable` marker is never stored, and
     // with the fiscal-model-390 flag off the stored value of model 390 is kept as it was.
+    // When the stored catalog cannot be read, the save is refused rather than merged over {}: the
+    // stored 390 would otherwise be lost. Read only while the flag is off (it is ignored when on).
+    boolean enabled = FiscalModel390Flag.isEnabled(client != null ? client.getId() : null);
     JSONObject toSave;
     try {
-      toSave = FiscalModel390Flag.applyToWrite(parsed, readStoredModels(client),
-          FiscalModel390Flag.isEnabled(client != null ? client.getId() : null));
+      JSONObject stored = enabled ? new JSONObject() : readStoredModelsStrict(client);
+      toSave = FiscalModel390Flag.applyToWrite(parsed, stored, enabled);
     } catch (JSONException e) {
       log.warn("Invalid fiscal models catalog JSON: {}", e.getMessage());
       throw new IllegalArgumentException("Invalid JSON body");
+    } catch (StoredCatalogUnreadableException e) {
+      throw new IllegalStateException(
+          "The stored fiscal models catalog could not be read; nothing was saved", e);
     }
     Preferences.setPreferenceValue(PREF_KEY, toSave.toString(), false, client, null, null, null, null, null);
+  }
+
+  /** The stored catalog preference could not be read (not: it is empty or corrupt). */
+  private static final class StoredCatalogUnreadableException extends Exception {
+    private static final long serialVersionUID = 1L;
+
+    StoredCatalogUnreadableException(Throwable cause) {
+      super(cause);
+    }
   }
 }
