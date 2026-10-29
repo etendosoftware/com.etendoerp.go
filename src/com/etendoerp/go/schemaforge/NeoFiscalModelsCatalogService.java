@@ -48,7 +48,8 @@ import com.etendoerp.go.common.MalformedJsonException;
  * ({@code {}}); the frontend treats any model absent from the response as inactive,
  * giving an "all models inactive" default with no server-side special-casing.
  *
- * <p>ETP-5716: while the {@code fiscal-model-390} flag is off for the tenant, GET also carries
+ * <p>ETP-5716: while the {@code fiscal-model-390} flag is off for the current request — it is
+ * targeted per user (account email) and per tenant — GET also carries
  * {@code "_unavailable": ["390"]} (and never {@code "390"}), and PUT keeps the stored 390 value —
  * see {@link FiscalModel390Flag}.
  */

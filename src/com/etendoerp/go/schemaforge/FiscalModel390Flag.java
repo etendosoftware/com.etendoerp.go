@@ -106,7 +106,8 @@ final class FiscalModel390Flag {
    * Builds the catalog answer from the stored catalog. Never modifies {@code stored}.
    *
    * @param stored the persisted catalog ({@code {}} when none)
-   * @param enabled the flag's value for the current tenant
+   * @param enabled the flag's value for the current request, targeted per user (account email)
+   *     and per tenant
    */
   static JSONObject applyToRead(JSONObject stored, boolean enabled) throws JSONException {
     JSONObject answer = new JSONObject(stored.toString());
@@ -123,7 +124,8 @@ final class FiscalModel390Flag {
    *
    * @param incoming the catalog the client sent
    * @param stored the catalog persisted before this save ({@code {}} when none)
-   * @param enabled the flag's value for the current tenant
+   * @param enabled the flag's value for the current request, targeted per user (account email)
+   *     and per tenant
    */
   static JSONObject applyToWrite(JSONObject incoming, JSONObject stored, boolean enabled)
       throws JSONException {
