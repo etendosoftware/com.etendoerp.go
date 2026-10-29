@@ -21,6 +21,7 @@ import static com.etendoerp.go.usage.quota.QuotaTestFixtures.CLIENT;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.NOW;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.PERIOD_END;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.PERIOD_START;
+import static com.etendoerp.go.usage.quota.QuotaTestFixtures.local;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.quota;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.util.Date;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
@@ -46,6 +48,8 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * Snapshotting the catalog: a quota row and its billing resource become a detached
  * {@link QuotaDefinition}, and a subscription row with its quotas a {@link TenantQuotas}. The
  * descriptor is copied whole, so a resource added to the catalog later needs no code to be read.
+ * With a subscription start (the anchor) a tenant's quotas count over the subscription year,
+ * whatever the billing interval, while a billing period must still be in effect.
  *
  * @covers com.etendoerp.go.usage.quota.QuotaDefinition
  * @covers com.etendoerp.go.usage.quota.ConsumptionSource
@@ -214,5 +218,96 @@ class QuotaDefinitionTest {
     assertNull(withRows.currentPeriod(NOW), "a closed row still has no current period");
     assertEquals("month", withRows.getPlanInterval());
     assertEquals(CLIENT, withRows.getClientId());
+  }
+
+  // ─── the yearly quota window (ETP-5051) ─────────────────────────────────────
+
+  /** A subscription started on 3 March 2026, billed monthly: NOW is in its first year. */
+  private static final Date ANCHOR = local(2026, 3, 3, 8, 0);
+
+  private static TenantQuotas anchored(Date periodStart, Date periodEnd, boolean closed) {
+    return new TenantQuotas(CLIENT, "month", periodStart, periodEnd, closed, ANCHOR,
+        List.of(quota("DOCS", "block", 10L, 80L).build()));
+  }
+
+  @Test
+  void anAnchoredTenantReportsTheYearlyWindowWhateverItsBillingInterval() {
+    assertEquals(TenantQuotas.QUOTA_WINDOW, anchored(PERIOD_START, PERIOD_END, false)
+        .getPlanInterval());
+    assertEquals("year", TenantQuotas.QUOTA_WINDOW);
+    assertEquals("month", new TenantQuotas(CLIENT, "month", PERIOD_START, PERIOD_END, false,
+        null, null).getPlanInterval(), "without an anchor the billing interval is reported");
+  }
+
+  @Test
+  void anAnchoredTenantCountsOverTheSubscriptionYearNotTheBillingPeriod() {
+    QuotaPeriod period = anchored(PERIOD_START, PERIOD_END, false).currentPeriod(NOW);
+
+    assertEquals(ANCHOR, period.getStart());
+    assertEquals(local(2027, 3, 3, 8, 0), period.getEnd());
+  }
+
+  @Test
+  void withoutAnAnchorTheBillingPeriodIsTheWindow() {
+    QuotaPeriod period = new TenantQuotas(CLIENT, "month", PERIOD_START, PERIOD_END, false, null,
+        null).currentPeriod(NOW);
+
+    assertEquals(PERIOD_START, period.getStart());
+    assertEquals(PERIOD_END, period.getEnd());
+  }
+
+  @Test
+  void anAnchoredTenantWithNoBillingPeriodInEffectHasNoWindow() {
+    assertNull(anchored(null, null, false).currentPeriod(NOW), "periodless row");
+    assertNull(anchored(PERIOD_START, PERIOD_END, true).currentPeriod(NOW), "closed row");
+    assertNull(anchored(PERIOD_START, PERIOD_END, false).currentPeriod(PERIOD_END),
+        "the billing period has ended (a renewal not yet recorded)");
+  }
+
+  @Test
+  void anAnchorAfterNowFallsBackToTheBillingPeriod() {
+    TenantQuotas future = new TenantQuotas(CLIENT, "month", PERIOD_START, PERIOD_END, false,
+        local(2027, 1, 1, 0, 0), null);
+
+    assertEquals(PERIOD_START, future.currentPeriod(NOW).getStart());
+    assertEquals("year", future.getPlanInterval());
+  }
+
+  @Test
+  void withQuotasKeepsTheAnchor() {
+    TenantQuotas swapped = anchored(PERIOD_START, PERIOD_END, false)
+        .withQuotas(List.of(quota("NEW", "warn", 20L, 90L).build()));
+
+    assertEquals("year", swapped.getPlanInterval());
+    assertEquals(ANCHOR, swapped.currentPeriod(NOW).getStart());
+    assertEquals("NEW", swapped.getQuotas().get(0).getResourceKey());
+  }
+
+  @Test
+  void theAnchorIsADefensiveCopy() {
+    Date anchor = new Date(ANCHOR.getTime());
+    TenantQuotas tenant = new TenantQuotas(CLIENT, "month", PERIOD_START, PERIOD_END, false,
+        anchor, null);
+
+    anchor.setTime(0L);
+
+    assertEquals(ANCHOR, tenant.currentPeriod(NOW).getStart());
+  }
+
+  @Test
+  void aSubscriptionRowGivesItsStartDateAsTheAnchor() {
+    Plan plan = mock(Plan.class);
+    when(plan.getBillingInterval()).thenReturn("month");
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getPlan()).thenReturn(plan);
+    when(subscription.getStartDate()).thenReturn(ANCHOR);
+    when(subscription.getCurrentPeriodStart()).thenReturn(PERIOD_START);
+    when(subscription.getCurrentPeriodEnd()).thenReturn(PERIOD_END);
+
+    TenantQuotas tenant = TenantQuotas.of(CLIENT, subscription, null);
+
+    assertEquals("year", tenant.getPlanInterval());
+    assertEquals(ANCHOR, tenant.currentPeriod(NOW).getStart());
+    assertEquals(local(2027, 3, 3, 8, 0), tenant.currentPeriod(NOW).getEnd());
   }
 }

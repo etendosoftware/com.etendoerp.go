@@ -17,15 +17,18 @@
 
 package com.etendoerp.go.usage.quota;
 
+import java.util.Calendar;
 import java.util.Date;
 import java.util.Objects;
 
 import com.etendoerp.go.usage.UsageDayRange;
 
 /**
- * ETP-5051 — the consumption window of a quota: the subscription's current billing period
- * ({@code ETGO_SUBSCRIPTION.CURRENT_PERIOD_START/END}), never the calendar month
- * ({@code open-and-notable-topics.md} §5.5).
+ * ETP-5051 — the consumption window of a quota, never the calendar month
+ * ({@code open-and-notable-topics.md} §5.5): the subscription year anchored on
+ * {@code ETGO_SUBSCRIPTION.START_DATE} ({@link #yearContaining}), or the current billing period
+ * ({@code CURRENT_PERIOD_START/END}, {@link #current}) when there is no anchor. A billing period in
+ * effect is still required either way: a subscription with none is not measured (§5.9).
  *
  * <p><b>Day alignment.</b> Usage is stored per day, so the window counted is the days from the
  * period's start day up to, not including, its end day: {@code [startOfDay(start),
@@ -65,6 +68,45 @@ public final class QuotaPeriod {
       return null;
     }
     return new QuotaPeriod(start, end);
+  }
+
+  /**
+   * The yearly quota window containing {@code now}: the subscription year that starts on an
+   * anniversary of {@code anchor}. Plan limits are yearly whatever the billing interval, so a
+   * monthly-paid plan still counts over the whole year and can reach its limit in one day.
+   *
+   * <p>Every anniversary is {@code anchor} plus a whole number of years, added to the anchor
+   * itself: a 29 February anchor falls on 28 February in a non-leap year and back on the 29th in a
+   * leap year, never drifting to the 28th for good.
+   *
+   * @param anchor the subscription start ({@code ETGO_SUBSCRIPTION.START_DATE})
+   * @param now the evaluation instant
+   * @return the subscription year containing {@code now}, or null when {@code anchor} is missing
+   *     or later than {@code now}
+   */
+  public static QuotaPeriod yearContaining(Date anchor, Date now) {
+    if (anchor == null || now == null || now.before(anchor)) {
+      return null;
+    }
+    Calendar probe = Calendar.getInstance();
+    probe.setTime(now);
+    Calendar anchorDay = Calendar.getInstance();
+    anchorDay.setTime(anchor);
+    int years = probe.get(Calendar.YEAR) - anchorDay.get(Calendar.YEAR);
+    Date start = anniversary(anchor, years);
+    if (start.after(now)) {
+      years--;
+      start = anniversary(anchor, years);
+    }
+    return new QuotaPeriod(start, anniversary(anchor, years + 1));
+  }
+
+  /** {@code anchor} plus {@code years}, always added to the anchor, never to a clamped date. */
+  private static Date anniversary(Date anchor, int years) {
+    Calendar calendar = Calendar.getInstance();
+    calendar.setTime(anchor);
+    calendar.add(Calendar.YEAR, years);
+    return calendar.getTime();
   }
 
   /** @return the exact period start; a defensive copy */

@@ -36,9 +36,12 @@ import static org.mockito.Mockito.when;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.Consumer;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -65,6 +68,11 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
+import com.etendoerp.go.usage.quota.QuotaDefinition;
+import com.etendoerp.go.usage.quota.QuotaEvaluation;
+import com.etendoerp.go.usage.quota.QuotaPeriod;
+import com.etendoerp.go.usage.quota.QuotaVerdict;
+import com.etendoerp.go.usage.quota.SeatQuotaGuard;
 
 /**
  * Unit tests for {@link UserRoleAssignmentHandler} — two independent post-hook concerns on the
@@ -116,6 +124,13 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * handleAllowsCreateWhenNoDuplicateEmailExistsForClient}), and that the guard is a no-op when no
  * client is resolved (already covered by {@code handleForcesUsernameToMirrorEmailOnPost}, which
  * mocks no {@code OBContext} at all).
+ *
+ * <p>Seat quota (ETP-5051): a create, and a PUT/PATCH that reactivates an inactive user, take a
+ * seat and are refused with the NEO write path's 403 {@code QUOTA_EXCEEDED} when {@link
+ * SeatQuotaGuard} says every seat of the plan is taken, failing closed with {@code
+ * QUOTA_CHECK_FAILED} when the check, or loading the reactivated user, throws. A reactivation
+ * the guard says takes no seat is let through. A PUT on an already active user, or one that does
+ * not set {@code active} to true, checks no seat.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.UserRoleAssignmentHandler
  * @covers com.etendoerp.go.schemaforge.handlers.UserEmailCorrection
@@ -1537,6 +1552,9 @@ public class UserRoleAssignmentHandlerTest {
 
   @Test
   public void handleAllowsPutWithoutExplicitActiveFalse() throws Exception {
+    // A non-deactivating PUT on an already active user passes every guard. Since ETP-5051 an
+    // explicit active=true loads the target (a reactivation takes a seat), so the user is mocked
+    // as active: no seat is taken and no seat check runs.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject requestBody = new JSONObject();
     requestBody.put("active", true);
@@ -1546,6 +1564,145 @@ public class UserRoleAssignmentHandlerTest {
         .recordId(USER_ID)
         .requestBody(requestBody)
         .build();
+    User activeUser = mock(User.class);
+    when(activeUser.isActive()).thenReturn(true);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<SeatQuotaGuard> seatMock = mockStatic(SeatQuotaGuard.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(activeUser);
+
+      assertNull(handler.handle(ctx));
+      seatMock.verifyNoInteractions();
+    }
+  }
+
+  // ─── handle(): seat quota on create and reactivation (ETP-5051) ──────────────
+
+  /** A {@code block} seat quota of 3, all taken: the refusal {@link SeatQuotaGuard} answers. */
+  private static QuotaEvaluation seatsExhausted() {
+    QuotaDefinition quota = QuotaDefinition.builder().resourceId("RES-SEATS")
+        .resourceKey("SEATS").resourceName("Seats").unitLabel("users")
+        .strategyQualifier("tenantSeats").enforcementMode("block").includedQty(3L).build();
+    Date start = new Date(1_790_000_000_000L);
+    Date end = new Date(1_821_536_000_000L);
+    return new QuotaEvaluation(quota, "year",
+        QuotaPeriod.current(start, end, false, new Date(1_791_000_000_000L)), 3L,
+        QuotaVerdict.DENY);
+  }
+
+  private static NeoContext createUserContext(String email) throws Exception {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(new JSONObject().put("email", email))
+        .build();
+  }
+
+  private static NeoContext reactivationContext(Object activeValue) throws Exception {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(USER_ID)
+        .requestBody(new JSONObject().put("active", activeValue))
+        .build();
+  }
+
+  /**
+   * Runs a {@code user} create for a tenant with no duplicate email, with {@link SeatQuotaGuard}
+   * stubbed by {@code seatGuard}; returns the handler's answer and the request body.
+   */
+  private static Object[] runCreate(Consumer<MockedStatic<SeatQuotaGuard>>
+      seatGuard) throws Exception {
+    NeoContext ctx = createUserContext("new.seat@example.com");
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<UserEmailCorrection> emailMock = mockStatic(UserEmailCorrection.class);
+        MockedStatic<SeatQuotaGuard> seatMock = mockStatic(SeatQuotaGuard.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      emailMock.when(() -> UserEmailCorrection.emailOf(any())).thenCallRealMethod();
+      emailMock.when(() -> UserEmailCorrection.rejectDuplicateEmail(any(), any(), any()))
+          .thenReturn(null);
+      emailMock.when(() -> UserEmailCorrection.deriveUsername(any(), any()))
+          .thenReturn("new.seat@example.com");
+      seatGuard.accept(seatMock);
+
+      NeoResponse response = new UserRoleAssignmentHandler().handle(ctx);
+
+      seatMock.verify(() -> SeatQuotaGuard.refusalForNewSeat(CLIENT_ID));
+      return new Object[] { response, ctx.getRequestBody() };
+    }
+  }
+
+  private static void assertSeatQuotaExceeded(NeoResponse response) throws Exception {
+    assertEquals(403, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("QUOTA_EXCEEDED", error.getString("code"));
+    assertEquals("SEATS", error.getJSONObject("quota").getString("resourceKey"));
+  }
+
+  @Test
+  public void handleRefusesACreateWhenEverySeatOfThePlanIsTaken() throws Exception {
+    QuotaEvaluation refusal = seatsExhausted();
+
+    Object[] result = runCreate(seat -> seat.when(() -> SeatQuotaGuard.refusalForNewSeat(
+        CLIENT_ID)).thenReturn(Optional.of(refusal)));
+
+    assertSeatQuotaExceeded((NeoResponse) result[0]);
+    assertFalse("a refused create derives no username",
+        ((JSONObject) result[1]).has("username"));
+  }
+
+  @Test
+  public void handleLetsACreateThroughWhileASeatIsFree() throws Exception {
+    Object[] result = runCreate(seat -> seat.when(() -> SeatQuotaGuard.refusalForNewSeat(
+        CLIENT_ID)).thenReturn(Optional.empty()));
+
+    assertNull(result[0]);
+    assertEquals("new.seat@example.com", ((JSONObject) result[1]).getString("username"));
+  }
+
+  @Test
+  public void handleFailsClosedWhenTheSeatCheckThrowsOnCreate() throws Exception {
+    Object[] result = runCreate(seat -> seat.when(() -> SeatQuotaGuard.refusalForNewSeat(
+        CLIENT_ID)).thenThrow(new RuntimeException("DB unavailable")));
+
+    NeoResponse response = (NeoResponse) result[0];
+    assertEquals(500, response.getHttpStatus());
+    assertEquals("QUOTA_CHECK_FAILED",
+        response.getBody().getJSONObject("error").getString("code"));
+    assertFalse(((JSONObject) result[1]).has("username"));
+  }
+
+  /**
+   * Runs a {@code user} PATCH carrying {@code active = activeValue} against a target whose
+   * current {@code isActive} is {@code targetActive}, with {@link SeatQuotaGuard} refusing the
+   * reactivation.
+   */
+  private static NeoResponse runReactivation(Object activeValue, boolean targetActive,
+      MockedStatic<SeatQuotaGuard> seatMock) throws Exception {
+    seatMock.when(() -> SeatQuotaGuard.refusalForReactivation(CLIENT_ID, USER_ID))
+        .thenReturn(Optional.of(seatsExhausted()));
+    return runReactivationAgainst(activeValue, targetActive);
+  }
+
+  private static NeoResponse runReactivationAgainst(Object activeValue, boolean targetActive)
+      throws Exception {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    User target = mock(User.class);
+    when(target.isActive()).thenReturn(targetActive);
+    when(target.getClient()).thenReturn(client);
 
     try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
         MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
@@ -1553,8 +1710,108 @@ public class UserRoleAssignmentHandlerTest {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
       ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
-      assertNull(handler.handle(ctx));
-      obDalMock.verify(OBDal::getInstance, never());
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(target);
+
+      return new UserRoleAssignmentHandler().handle(reactivationContext(activeValue));
+    }
+  }
+
+  @Test
+  public void handleRefusesReactivatingAnInactiveUserWhenEverySeatIsTaken() throws Exception {
+    try (MockedStatic<SeatQuotaGuard> seatMock = mockStatic(SeatQuotaGuard.class)) {
+      NeoResponse response = runReactivation(true, false, seatMock);
+
+      assertSeatQuotaExceeded(response);
+      seatMock.verify(() -> SeatQuotaGuard.refusalForReactivation(CLIENT_ID, USER_ID));
+    }
+  }
+
+  @Test
+  public void handleLetsAReactivationThroughWhenTheUserWouldTakeNoSeat() throws Exception {
+    // Every seat is taken, but the target is not a seat once active (a contact with no
+    // invitation, or only revoked ones): the guard lets it through, and so does the handler.
+    try (MockedStatic<SeatQuotaGuard> seatMock = mockStatic(SeatQuotaGuard.class)) {
+      seatMock.when(() -> SeatQuotaGuard.refusalForNewSeat(CLIENT_ID))
+          .thenReturn(Optional.of(seatsExhausted()));
+      seatMock.when(() -> SeatQuotaGuard.refusalForReactivation(CLIENT_ID, USER_ID))
+          .thenReturn(Optional.empty());
+
+      assertNull(runReactivationAgainst(true, false));
+      seatMock.verify(() -> SeatQuotaGuard.refusalForReactivation(CLIENT_ID, USER_ID));
+      seatMock.verify(() -> SeatQuotaGuard.refusalForNewSeat(any()), never());
+    }
+  }
+
+  @Test
+  public void handleTreatsTheStringFormsOfActiveAsAReactivationToo() throws Exception {
+    for (Object form : new Object[] { "true", "TRUE", "Y", "y" }) {
+      try (MockedStatic<SeatQuotaGuard> seatMock = mockStatic(SeatQuotaGuard.class)) {
+        NeoResponse response = runReactivation(form, false, seatMock);
+
+        assertEquals("active=" + form, 403, response.getHttpStatus());
+        seatMock.verify(() -> SeatQuotaGuard.refusalForReactivation(CLIENT_ID, USER_ID));
+      }
+    }
+  }
+
+  @Test
+  public void handleFailsClosedWhenLoadingTheReactivatedUserThrows() throws Exception {
+    try (MockedStatic<SeatQuotaGuard> seatMock = mockStatic(SeatQuotaGuard.class);
+        MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      int[] adminDepth = { 0 };
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> adminDepth[0]++);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> adminDepth[0]--);
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenThrow(new RuntimeException("DB unavailable"));
+
+      NeoResponse response = new UserRoleAssignmentHandler().handle(reactivationContext(true));
+
+      assertEquals(500, response.getHttpStatus());
+      assertEquals("QUOTA_CHECK_FAILED",
+          response.getBody().getJSONObject("error").getString("code"));
+      assertEquals("admin mode is restored after the failed load", 0, adminDepth[0]);
+      seatMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void handleChecksNoSeatWhenTheTargetIsAlreadyActive() throws Exception {
+    try (MockedStatic<SeatQuotaGuard> seatMock = mockStatic(SeatQuotaGuard.class)) {
+      assertNull(runReactivation(true, true, seatMock));
+      seatMock.verify(() -> SeatQuotaGuard.refusalForReactivation(any(), any()), never());
+    }
+  }
+
+  @Test
+  public void handleChecksNoSeatWhenActiveIsNotSetToTrue() throws Exception {
+    for (Object form : new Object[] { null, false, "N", "false", "yes" }) {
+      JSONObject body = new JSONObject().put("name", "Renamed");
+      if (form != null) {
+        body.put("active", form);
+      }
+      NeoContext ctx = NeoContext.builder()
+          .endpointType(NeoEndpointType.CRUD)
+          .httpMethod("PATCH")
+          .recordId(USER_ID)
+          .requestBody(body)
+          .build();
+      try (MockedStatic<SeatQuotaGuard> seatMock = mockStatic(SeatQuotaGuard.class);
+          MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+          MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+        ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+        // A deactivation reaches the lockout guard; an unknown target lets it through.
+        obDalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+        assertNull("active=" + form, new UserRoleAssignmentHandler().handle(ctx));
+        seatMock.verifyNoInteractions();
+      }
     }
   }
 

@@ -44,7 +44,11 @@ public final class TenantQuotas {
   private final Date periodStart;
   private final Date periodEnd;
   private final boolean closed;
+  private final Date anchor;
   private final List<QuotaDefinition> quotas;
+
+  /** Plan limits are yearly whatever the billing interval: the window every quota reports. */
+  public static final String QUOTA_WINDOW = "year";
 
   /**
    * Creates a tenant view from plain values.
@@ -58,7 +62,25 @@ public final class TenantQuotas {
    */
   public TenantQuotas(String clientId, String planInterval, Date periodStart, Date periodEnd,
       boolean closed, List<QuotaDefinition> quotas) {
+    this(clientId, planInterval, periodStart, periodEnd, closed, null, quotas);
+  }
+
+  /**
+   * Creates a tenant view whose quotas count over the subscription year.
+   *
+   * @param clientId the tenant
+   * @param planInterval the plan's billing interval ({@code month} / {@code year}), or null
+   * @param periodStart {@code CURRENT_PERIOD_START}, or null
+   * @param periodEnd {@code CURRENT_PERIOD_END}, or null
+   * @param closed whether the subscription row is closed ({@code END_DATE} set)
+   * @param anchor {@code START_DATE}, the anniversary of the yearly quota window; null counts over
+   *     the billing period instead
+   * @param quotas the plan's active quota rows; null reads as none
+   */
+  public TenantQuotas(String clientId, String planInterval, Date periodStart, Date periodEnd,
+      boolean closed, Date anchor, List<QuotaDefinition> quotas) {
     this.clientId = clientId;
+    this.anchor = anchor == null ? null : new Date(anchor.getTime());
     this.planInterval = StringUtils.trimToNull(planInterval);
     this.periodStart = periodStart == null ? null : new Date(periodStart.getTime());
     this.periodEnd = periodEnd == null ? null : new Date(periodEnd.getTime());
@@ -113,7 +135,7 @@ public final class TenantQuotas {
     Plan plan = subscription.getPlan();
     return new TenantQuotas(clientId, plan == null ? null : plan.getBillingInterval(),
         subscription.getCurrentPeriodStart(), subscription.getCurrentPeriodEnd(),
-        subscription.getEndDate() != null, definitions);
+        subscription.getEndDate() != null, subscription.getStartDate(), definitions);
   }
 
   /**
@@ -124,16 +146,20 @@ public final class TenantQuotas {
    * @return a new view
    */
   public TenantQuotas withQuotas(List<QuotaDefinition> definitions) {
-    return new TenantQuotas(clientId, planInterval, periodStart, periodEnd, closed, definitions);
+    return new TenantQuotas(clientId, planInterval, periodStart, periodEnd, closed, anchor,
+        definitions);
   }
 
   public String getClientId() {
     return clientId;
   }
 
-  /** @return {@code month}, {@code year} or null: the window a quota is consumed over (§5.8) */
+  /**
+   * @return the window a quota is consumed over: {@link #QUOTA_WINDOW} when the subscription year
+   *     is known, else the plan's billing interval ({@code month}, {@code year} or null)
+   */
   public String getPlanInterval() {
-    return planInterval;
+    return anchor != null ? QUOTA_WINDOW : planInterval;
   }
 
   /** @return whether the subscription row is closed */
@@ -146,12 +172,18 @@ public final class TenantQuotas {
   }
 
   /**
-   * The subscription's billing period in effect at {@code now}, if any.
+   * The quota window in effect at {@code now}: the subscription year containing it. A billing
+   * period in effect is still required, so a subscription with none is not measured (§5.9).
    *
    * @param now the evaluation instant
-   * @return the current period, or null when there is none (§5.9)
+   * @return the current window, or null when there is no billing period in effect (§5.9)
    */
   public QuotaPeriod currentPeriod(Date now) {
-    return QuotaPeriod.current(periodStart, periodEnd, closed, now);
+    QuotaPeriod billing = QuotaPeriod.current(periodStart, periodEnd, closed, now);
+    if (billing == null) {
+      return null;
+    }
+    QuotaPeriod year = QuotaPeriod.yearContaining(anchor, now);
+    return year != null ? year : billing;
   }
 }

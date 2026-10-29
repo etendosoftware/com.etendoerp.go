@@ -34,6 +34,8 @@ import org.junit.jupiter.api.Test;
 /**
  * The current billing period of a subscription: half-open {@code [start, end)}, absent when the
  * row has none, and counted over whole local days from the start day to the end day (exclusive).
+ * And the yearly quota window: the subscription year, from an anniversary of the start date to
+ * the next, that contains the evaluation instant.
  *
  * @covers com.etendoerp.go.usage.quota.QuotaPeriod
  */
@@ -111,5 +113,90 @@ class QuotaPeriodTest {
     // Written half-open, like the period itself.
     assertEquals("QuotaPeriod[" + PERIOD_START.toInstant() + " .. " + PERIOD_END.toInstant()
         + ')', one.toString());
+  }
+
+  // ─── yearContaining: the subscription year (ETP-5051) ──────────────────────
+
+  /** The subscription start: 15 March 2025, 10:00 local. */
+  private static final Date ANCHOR = local(2025, 3, 15, 10, 0);
+
+  private static void assertYear(Date expectedStart, Date expectedEnd, QuotaPeriod year) {
+    assertNotNull(year);
+    assertEquals(expectedStart, year.getStart());
+    assertEquals(expectedEnd, year.getEnd());
+  }
+
+  @Test
+  void theFirstYearStartsAtTheSubscriptionStart() {
+    assertYear(ANCHOR, local(2026, 3, 15, 10, 0), QuotaPeriod.yearContaining(ANCHOR, ANCHOR));
+    assertYear(ANCHOR, local(2026, 3, 15, 10, 0),
+        QuotaPeriod.yearContaining(ANCHOR, local(2025, 12, 31, 23, 59)));
+  }
+
+  @Test
+  void beforeThisCalendarYearsAnniversaryTheYearStartedLastYear() {
+    assertYear(ANCHOR, local(2026, 3, 15, 10, 0),
+        QuotaPeriod.yearContaining(ANCHOR, local(2026, 2, 1, 12, 0)));
+  }
+
+  @Test
+  void afterThisCalendarYearsAnniversaryTheYearStartedThisYear() {
+    assertYear(local(2026, 3, 15, 10, 0), local(2027, 3, 15, 10, 0),
+        QuotaPeriod.yearContaining(ANCHOR, local(2026, 5, 1, 12, 0)));
+  }
+
+  @Test
+  void theAnniversaryInstantOpensTheNextYearAndTheInstantBeforeItClosesThePrevious() {
+    Date anniversary = local(2026, 3, 15, 10, 0);
+
+    assertYear(anniversary, local(2027, 3, 15, 10, 0),
+        QuotaPeriod.yearContaining(ANCHOR, anniversary));
+    assertYear(ANCHOR, anniversary,
+        QuotaPeriod.yearContaining(ANCHOR, new Date(anniversary.getTime() - 1L)));
+  }
+
+  @Test
+  void theYearIsCountedFromTheAnniversaryDayToTheNextOneExclusive() {
+    QuotaPeriod year = QuotaPeriod.yearContaining(ANCHOR, local(2026, 5, 1, 12, 0));
+
+    assertEquals(midnight(2026, 3, 15), year.getWindowFrom());
+    assertEquals(midnight(2027, 3, 15), year.getWindowTo());
+  }
+
+  @Test
+  void aLeapDayAnchorHasItsAnniversaryOnTheTwentyEighthOfANonLeapYear() {
+    Date leapDay = local(2024, 2, 29, 12, 0);
+
+    // Past the 2025 anniversary: the year runs 28 Feb 2025 to 28 Feb 2026.
+    assertYear(local(2025, 2, 28, 12, 0), local(2026, 2, 28, 12, 0),
+        QuotaPeriod.yearContaining(leapDay, local(2025, 3, 1, 12, 0)));
+    // In a leap year the anniversary is the 29th again.
+    assertYear(local(2028, 2, 29, 12, 0), local(2029, 2, 28, 12, 0),
+        QuotaPeriod.yearContaining(leapDay, local(2028, 3, 1, 12, 0)));
+  }
+
+  @Test
+  void theFirstYearOfALeapDayAnchorStartsAtTheAnchorNotOnTheClampedAnniversary() {
+    Date leapDay = local(2024, 2, 29, 12, 0);
+
+    // Before the 2025 anniversary (28 Feb 12:00): still the first year, which starts at the anchor.
+    assertYear(leapDay, local(2025, 2, 28, 12, 0),
+        QuotaPeriod.yearContaining(leapDay, local(2025, 2, 28, 11, 0)));
+  }
+
+  @Test
+  void theYearBeforeALeapAnniversaryEndsOnTheTwentyNinthAndContainsNow() {
+    Date leapDay = local(2024, 2, 29, 12, 0);
+
+    // 28 Feb 2028 13:00 is past the 2027 anniversary and before the 2028 one (29 Feb 12:00).
+    assertYear(local(2027, 2, 28, 12, 0), local(2028, 2, 29, 12, 0),
+        QuotaPeriod.yearContaining(leapDay, local(2028, 2, 28, 13, 0)));
+  }
+
+  @Test
+  void noAnchorNoInstantOrAnInstantBeforeTheStartHasNoYear() {
+    assertNull(QuotaPeriod.yearContaining(null, NOW));
+    assertNull(QuotaPeriod.yearContaining(ANCHOR, null));
+    assertNull(QuotaPeriod.yearContaining(ANCHOR, new Date(ANCHOR.getTime() - 1L)));
   }
 }

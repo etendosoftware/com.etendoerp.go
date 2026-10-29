@@ -32,6 +32,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -61,6 +62,9 @@ class DalQuotaLookupTest {
   private final SubscriptionService subscriptions = mock(SubscriptionService.class);
   private final PlanCatalogService catalog = mock(PlanCatalogService.class);
   private final DalQuotaLookup lookup = new DalQuotaLookup(subscriptions, catalog);
+
+  /** A subscription start in the year before NOW. */
+  private static final Date ANCHOR = QuotaTestFixtures.local(2026, 3, 3, 8, 0);
 
   private static Plan plan(String id) {
     Plan plan = mock(Plan.class);
@@ -116,6 +120,24 @@ class DalQuotaLookupTest {
     assertEquals("DOCS", tenant.getQuotas().get(0).getResourceKey());
     assertEquals("month", tenant.getPlanInterval());
     assertEquals(PERIOD_START, tenant.currentPeriod(NOW).getStart());
+  }
+
+  /** ETP-5051: the subscription's START_DATE anchors the yearly quota window. */
+  @Test
+  void theSubscriptionStartAnchorsTheYearlyWindow() {
+    Plan plan = plan("PLAN-1");
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getPlan()).thenReturn(plan);
+    when(subscription.getStartDate()).thenReturn(ANCHOR);
+    when(subscription.getCurrentPeriodStart()).thenReturn(PERIOD_START);
+    when(subscription.getCurrentPeriodEnd()).thenReturn(PERIOD_END);
+    when(subscriptions.findOpen(CLIENT)).thenReturn(Optional.of(subscription));
+    when(catalog.listActiveQuotas(plan)).thenReturn(Collections.emptyList());
+
+    TenantQuotas tenant = lookup.forTenant(CLIENT);
+
+    assertEquals("year", tenant.getPlanInterval());
+    assertEquals(ANCHOR, tenant.currentPeriod(NOW).getStart());
   }
 
   @Test

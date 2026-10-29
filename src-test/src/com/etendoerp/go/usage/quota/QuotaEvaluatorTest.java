@@ -296,6 +296,28 @@ class QuotaEvaluatorTest {
       assertEquals(PERIOD_START, period.getStart());
     }
 
+    /**
+     * ETP-5051: with a subscription start, the window is the subscription year containing now,
+     * not the monthly billing period, and the evaluation reports it as {@code year}.
+     */
+    @Test
+    void anAnchoredTenantIsMeasuredOverItsSubscriptionYear() {
+      Date anchor = local(2026, 3, 3, 8, 0);
+      TenantQuotas anchored = new TenantQuotas(CLIENT, "month", PERIOD_START, PERIOD_END, false,
+          anchor, List.of(quota("DOCS", "block", 10L, null).build()));
+      when(reader.read(any(), eq(CLIENT), any())).thenReturn(4L);
+
+      QuotaEvaluation evaluation = only(evaluator.evaluate(anchored, Scope.ENFORCEMENT));
+
+      assertEquals("year", evaluation.getPlanInterval());
+      assertEquals(anchor, evaluation.getPeriod().getStart());
+      assertEquals(local(2027, 3, 3, 8, 0), evaluation.getPeriod().getEnd());
+      assertEquals(midnight(2026, 3, 3), evaluation.getPeriod().getWindowFrom());
+      assertEquals(Long.valueOf(4L), evaluation.getConsumed());
+      verify(reader).read(any(), eq(CLIENT), eq(evaluation.getPeriod()));
+      assertEquals(evaluation.getPeriod(), evaluator.writeCheckPeriod(anchored));
+    }
+
     @Test
     void theEndInstantIsAlreadyOutsideIt() {
       clock.set(PERIOD_END);
