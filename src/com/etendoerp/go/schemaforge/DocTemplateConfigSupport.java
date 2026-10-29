@@ -36,10 +36,14 @@ final class DocTemplateConfigSupport {
 
   static final String DEFAULT_VARIANT = "classic";
 
-  /** The spec names of the existing printables ({@code print-<name>}), kebab-case. */
+  /**
+   * The spec names of the existing printables ({@code print-<name>}), kebab-case, plus
+   * {@code listing}: the print of a window's list (PDF, Excel, preview), whose design is chosen
+   * apart from the documents'.
+   */
   static final Set<String> DOC_TYPES = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
       "sales-invoice", "sales-order", "sales-quotation", "purchase-order", "goods-shipment",
-      "payment-in", "return-material-receipt", "return-to-vendor-shipment")));
+      "payment-in", "return-material-receipt", "return-to-vendor-shipment", "listing")));
 
   static final Set<String> VARIANTS = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
       DEFAULT_VARIANT, "compact", "modern")));

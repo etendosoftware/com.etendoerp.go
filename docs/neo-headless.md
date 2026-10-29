@@ -2371,7 +2371,7 @@ Authorization: Bearer {token}
 
 | Field | Values |
 |---|---|
-| `docType` | `sales-invoice`, `sales-order`, `sales-quotation`, `purchase-order`, `goods-shipment`, `payment-in`, `return-material-receipt`, `return-to-vendor-shipment` (the spec names of the `print-*` printables) |
+| `docType` | `sales-invoice`, `sales-order`, `sales-quotation`, `purchase-order`, `goods-shipment`, `payment-in`, `return-material-receipt`, `return-to-vendor-shipment` (the spec names of the `print-*` printables) and `listing` (the print of a window's list: its design is chosen apart from the documents') |
 | `variant` | `classic` (default), `compact`, `modern` — also a CHECK on the table |
 | `logo` | `null`, an absolute `https://` URL (≤ 2000 chars) or a `data:image/(png\|jpeg\|webp);base64,…` URI (≤ 512 KiB). SVG, `http:` and any other scheme are refused: the renderer embeds it in a page that can run script |
 | `footerText` | `null` or text ≤ 500 chars, no control characters except line breaks. Stored as typed; **escaping is the renderer's job** |

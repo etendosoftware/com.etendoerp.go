@@ -39,8 +39,8 @@ class DocTemplateConfigSupportTest {
 
   @ParameterizedTest
   @ValueSource(strings = { "sales-invoice", "sales-order", "sales-quotation", "purchase-order",
-      "goods-shipment", "payment-in", "return-material-receipt", "return-to-vendor-shipment" })
-  @DisplayName("every printable's document type is accepted")
+      "goods-shipment", "payment-in", "return-material-receipt", "return-to-vendor-shipment", "listing" })
+  @DisplayName("every printable's document type, and the list print, is accepted")
   void acceptsTheKnownDocTypes(String docType) {
     assertNull(DocTemplateConfigSupport.docTypeError(docType));
   }
