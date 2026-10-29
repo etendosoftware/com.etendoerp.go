@@ -30,7 +30,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
@@ -53,8 +52,12 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  * Appends {@code invoiceStatus} (0–100 integer) to every GET response by
  * calling the existing {@code C_GETINVOICESTATUSFROMSHIPMENT} DB function.
  * List responses use a single batch IN query to avoid N+1.
+ *
+ * <p><b>Binding (ETP-6002).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code goodsShipmentHeaderHandler}) and the class's {@code @Named} were
+ * removed in the same change (neo-extension-migration).
  */
-@Named("goodsShipmentHeaderHandler")
+@NeoExtension(spec = "goods-shipment", entity = "goodsShipment")
 public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsShipmentHeaderHandler.class);
@@ -289,6 +292,11 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Injects {@code linkedOrders}: the order of the shipment header plus every order the
+   * shipment's lines point at, each with {@code isQuotation} ({@code DocSubTypeSO = 'OB'},
+   * ETP-6002) so a quotation renders as a quotation chip.
+   */
   @SuppressWarnings("java:S2077")
   private void enrichLinkedOrder(JSONObject shipmentRec, String shipmentId) {
     // Union: orders linked via header C_Order_ID + orders linked via imported lines
@@ -297,10 +305,11 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     // "first linked order" resolution instead of duplicating the query.
     String sql =
         "SELECT DISTINCT co.c_order_id, co.documentno, co.grandtotal, co.docstatus, cur.iso_code, " +
-        "  co.m_pricelist_id, pl.name " +
+        "  co.m_pricelist_id, pl.name, dt.docsubtypeso " +
         "FROM c_order co " +
         "LEFT JOIN c_currency cur ON cur.c_currency_id = co.c_currency_id " +
         "LEFT JOIN m_pricelist pl ON pl.m_pricelist_id = co.m_pricelist_id " +
+        "LEFT JOIN c_doctype dt ON dt.c_doctype_id = co.c_doctypetarget_id " +
         "WHERE co.isactive = 'Y' AND co.c_order_id IN (" +
         "  SELECT io.c_order_id FROM m_inout io WHERE io.m_inout_id = ? AND io.c_order_id IS NOT NULL" +
         "  UNION" +
@@ -325,6 +334,11 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
           order.put(FIELD_PRICE_LIST_ID, orderPriceListId != null ? orderPriceListId : JSONObject.NULL);
           String orderPriceListName = rs.getString(7);
           order.put(FIELD_PRICE_LIST_IDENTIFIER, orderPriceListName != null ? orderPriceListName : JSONObject.NULL);
+          // ETP-6002 (IMP-3): a shipment made from an invoice that came straight from a QUOTATION
+          // points at quotation lines, so the "order" here may be a quotation. Same structural
+          // signal as the invoice's linkedOrders (DocSubTypeSO = 'OB'); the chip renders it as a
+          // quotation instead of "Pedido".
+          order.put("isQuotation", "OB".equals(rs.getString(8)));
           orders.put(order);
         }
       }
@@ -433,7 +447,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    * {@link InOutInvoiceLinks#linkedInvoiceIdsSql} — the invoice line's {@code M_InOutLine_ID}
    * (invoice created FROM this shipment, or this shipment created from the invoice), the
    * {@code M_MatchSI} match table (read since ETP-5576: a second partial shipment of an invoice
-   * line can only be linked there), and the pre-existing shared {@code C_OrderLine_ID} arm.
+   * line can only be linked there). Never through a shared {@code C_OrderLine_ID}: ETP-6002
+   * dropped that arm on the sales side, it made a shipment show every invoice of its order.
    */
   // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
@@ -446,7 +461,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         "WHERE i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL')";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      InOutInvoiceLinks.bindRepeated(ps, 1, shipmentId, InOutInvoiceLinks.LINKED_INVOICES_PARAMS);
+      InOutInvoiceLinks.bindRepeated(ps, 1, shipmentId,
+          InOutInvoiceLinks.linkedInvoicesParams(InOutInvoiceLinks.MatchTable.SALES));
       JSONArray invoices = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

@@ -40,7 +40,6 @@ com.etendoerp.go.schemaforge.LineAmountSupportTest
 com.etendoerp.go.schemaforge.MultiDocumentInvoiceSupportTest
 com.etendoerp.go.schemaforge.NeoCloneRecordHandlerTest
 com.etendoerp.go.schemaforge.NeoInvoiceSupportTest
-com.etendoerp.go.schemaforge.OrderCurrencyPriceListGuardTest
 com.etendoerp.go.schemaforge.OrderDocActionSupportTest
 com.etendoerp.go.schemaforge.OrderLineDiscountSupportTest
 com.etendoerp.go.schemaforge.OrderLineHandlerTest

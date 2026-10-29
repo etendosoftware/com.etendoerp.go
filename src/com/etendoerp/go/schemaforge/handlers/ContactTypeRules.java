@@ -31,6 +31,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.MessageKeyedException;
@@ -91,6 +92,14 @@ import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
  * <p>All of the above is behind {@link GoFeatureFlags#FLAG_CONTACT_CATEGORY_TYPE} (default off).
  * Every customization that applies these rules asks {@link #isEnabled()} first and, when it is
  * off, returns {@code null} so the default CRUD runs exactly as before ETP-5791.</p>
+ *
+ * <p>The flag is evaluated <b>per account</b>: {@link #isEnabled()} targets the
+ * {@code ETGO_ACCOUNT} email of the user making the request plus the tenant id. The web client
+ * publishes the same account email (its {@code email} attribute), so a rule written on the email
+ * gives the UI and the server the same answer for the same person; see
+ * {@code docs/feature-flags-and-tenant-upgrade.md} for the rules that do not (identifier, tenant). A caller that does not
+ * run as the account owner — the onboarding hand-over — uses {@link #isEnabled(String, String)}
+ * with the account the tenant is handed to.</p>
  */
 public final class ContactTypeRules {
 
@@ -143,20 +152,55 @@ public final class ContactTypeRules {
   private static final String CONTACT_CATEGORY_SQL =
       "SELECT c_bp_group_id FROM c_bpartner WHERE c_bpartner_id = ?";
 
-  /** Environment-level evaluation: the flag is not targeted per account. */
-  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
-
   private ContactTypeRules() {
   }
 
   /**
-   * Toggle point of {@link GoFeatureFlags#FLAG_CONTACT_CATEGORY_TYPE}. A missing flag, an
-   * unreachable control plane or an evaluation error resolves to {@code false}: the rules stay off.
+   * Toggle point of {@link GoFeatureFlags#FLAG_CONTACT_CATEGORY_TYPE} for the request being served:
+   * evaluated for the {@code ETGO_ACCOUNT} of the user bound to the current {@link OBContext}
+   * ({@link GoAccountResolver#currentAccountEmail()}) and for the current tenant. REST single,
+   * REST batch and MCP all bind the authenticated AD user, so the same person gets the same answer
+   * on every channel.
+   *
+   * <p>A missing flag, an unreachable control plane or an evaluation error resolves to
+   * {@code false}: the rules stay off. A user with no account behind it is evaluated with an
+   * account-less context: it matches no per-account rule and gets the flag's default value — off,
+   * unless the flag is on for everyone (hosted default {@code true}, or the local
+   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}).
    *
    * @return {@code true} when the contact-type rules must be applied
    */
   public static boolean isEnabled() {
-    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE, ENVIRONMENT);
+    return isEnabled(GoAccountResolver.currentAccountEmail(), currentClientId());
+  }
+
+  /**
+   * Toggle point of {@link GoFeatureFlags#FLAG_CONTACT_CATEGORY_TYPE} for an explicit account and
+   * tenant — for a caller whose {@link OBContext} is not the account's own, such as the onboarding
+   * hand-over, which runs as System.
+   *
+   * @param accountEmail the {@code ETGO_ACCOUNT} email the flag is targeted on; blank means no
+   *     account, which no per-account rule matches
+   * @param clientId the tenant ({@code AD_Client_ID}), published as
+   *     {@link FeatureFlagContext#ATTRIBUTE_CLIENT_ID}; blank is omitted
+   * @return {@code true} when the contact-type rules must be applied
+   */
+  public static boolean isEnabled(String accountEmail, String clientId) {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE,
+        FeatureFlagContext.forAccount(accountEmail)
+            .with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, clientId));
+  }
+
+  /** The tenant of the current {@link OBContext}, or {@code null} when there is none. */
+  private static String currentClientId() {
+    try {
+      OBContext obContext = OBContext.getOBContext();
+      return obContext == null || obContext.getCurrentClient() == null
+          ? null
+          : obContext.getCurrentClient().getId();
+    } catch (RuntimeException e) {
+      return null; // targeting enrichment must never fail the write
+    }
   }
 
   /** The two type flags of a contact or a category. */

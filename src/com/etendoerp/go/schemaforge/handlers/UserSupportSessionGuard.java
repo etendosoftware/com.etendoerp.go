@@ -47,7 +47,7 @@ final class UserSupportSessionGuard {
    * ETP-5351 (Vigia H1) — a support session may not create a user, nor write the fields that
    * grant or redirect access to the tenant ({@code email}, {@code username}, roles, a new {@code password},
    * {@code active}/{@code locked}/owner flags; see {@link SupportAccessGuard#changesAccessFields})
-   * on any user, so it cannot leave persistent access behind. Everything else it edits is unchanged.
+   * on any user, nor delete one, so it cannot leave persistent access behind. Everything else it edits is unchanged.
    *
    * @param context the request
    * @return a 403 when refused, {@code null} to continue
@@ -58,7 +58,7 @@ final class UserSupportSessionGuard {
     }
     String method = context.getHttpMethod();
     boolean write = "PUT".equalsIgnoreCase(method) || "PATCH".equalsIgnoreCase(method);
-    if ("POST".equalsIgnoreCase(method)
+    if ("POST".equalsIgnoreCase(method) || "DELETE".equalsIgnoreCase(method)
         || (write && SupportAccessGuard.changesAccessFields(context.getRequestBody(),
             context.getRecordId()))) {
       return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
