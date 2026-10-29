@@ -10142,6 +10142,7 @@
 <!--17B7111BAE424C3684B776A6F4ECFEF4-->  <SEQNO><![CDATA[260]]></SEQNO>
 <!--17B7111BAE424C3684B776A6F4ECFEF4-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
 <!--17B7111BAE424C3684B776A6F4ECFEF4-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--17B7111BAE424C3684B776A6F4ECFEF4-->  <MCP_CONFIG><![CDATA[{"fields":{"visibility":"discarded","included":false,"reason":"Alternative units are not used in Etendo GO: the receipt form hides them and goods-shipment discards them. Exposed to agents, etendo_defaults suggested an unrelated operative UOM (Centímetro for a beer)."}}]]></MCP_CONFIG>
 <!--17B7111BAE424C3684B776A6F4ECFEF4--></ETGO_SF_FIELD>
 
 <!--17C3E503CE2E4F6589C710FBBFAFB037--><ETGO_SF_FIELD>
@@ -99907,6 +99908,7 @@
 <!--F9CB40DDFD6644189AB1DED8ED3863F7-->  <SEQNO><![CDATA[270]]></SEQNO>
 <!--F9CB40DDFD6644189AB1DED8ED3863F7-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
 <!--F9CB40DDFD6644189AB1DED8ED3863F7-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--F9CB40DDFD6644189AB1DED8ED3863F7-->  <MCP_CONFIG><![CDATA[{"fields":{"visibility":"discarded","included":false,"reason":"Alternative units are not used in Etendo GO: the receipt form hides them and goods-shipment discards them. Exposed to agents, etendo_defaults suggested an unrelated operative UOM (Centímetro for a beer)."}}]]></MCP_CONFIG>
 <!--F9CB40DDFD6644189AB1DED8ED3863F7--></ETGO_SF_FIELD>
 
 <!--F9CF8FD574894C5F8B1BBBC54A5D7F01--><ETGO_SF_FIELD>

@@ -1464,6 +1464,8 @@ public class McpToolRouter {
       }
     }
 
+    McpDefaultsView.withoutExcluded(neoResponse, sfEntity, adTab);
+
     // IMP-7: optional lean/grouped view. Without `view` (or view=full) the flat response is
     // returned unchanged; grouped/minimal split writable defaults (confirm) from server-managed
     // compliance flags so the agent isn't buried under ~65 columns it should never touch.
