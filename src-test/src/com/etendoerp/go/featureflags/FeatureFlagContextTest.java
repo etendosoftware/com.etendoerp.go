@@ -75,6 +75,21 @@ class FeatureFlagContextTest {
     assertTrue(FeatureFlagContext.forAccount(null).getAttributes().isEmpty());
   }
 
+  /**
+   * An environment-wide evaluation targets nobody: no key, no email attribute. A per-user rule
+   * must therefore never match it, while a tenant attribute added on top still reaches the rule.
+   */
+  @Test
+  void environmentTargetsNobodyButStillCarriesATenantAttribute() {
+    FeatureFlagContext environment = FeatureFlagContext.environment();
+    assertNull(environment.getTargetingKey());
+    assertTrue(environment.getAttributes().isEmpty());
+
+    FeatureFlagContext tenant = environment.with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "c1");
+    assertNull(tenant.getTargetingKey());
+    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "c1"), tenant.getAttributes());
+  }
+
   @ParameterizedTest
   @NullAndEmptySource
   @ValueSource(strings = { "   " })
