@@ -20,6 +20,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 
@@ -48,6 +49,15 @@ final class DocTemplateConfigSupport {
   static final Set<String> VARIANTS = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
       DEFAULT_VARIANT, "compact", "modern")));
 
+  static final Set<String> FONTS = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
+      "sans", "serif", "mono")));
+  static final Set<String> FONT_SIZES = Collections.unmodifiableSet(new LinkedHashSet<>(
+      Arrays.asList("normal", "large")));
+  static final Set<String> ROW_STRIPES = Collections.unmodifiableSet(new LinkedHashSet<>(
+      Arrays.asList("on", "off")));
+  /** A base color is an exact {@code #RRGGBB}: it ends up inside a stylesheet, so nothing else. */
+  private static final Pattern COLOR = Pattern.compile("#[0-9A-Fa-f]{6}");
+
   static final int MAX_FOOTER_LENGTH = 500;
   static final int MAX_LOGO_URL_LENGTH = 2000;
   /** Cap on a {@code data:} logo, counted on the whole string. */
@@ -73,6 +83,29 @@ final class DocTemplateConfigSupport {
   static String variantError(String variant) {
     return variant != null && VARIANTS.contains(variant) ? null
         : "Unknown variant '" + abbreviate(variant) + "'. Allowed: " + String.join(", ", VARIANTS);
+  }
+
+  /** The base color is optional; null means the design's own. */
+  static String colorError(String color) {
+    return color == null || COLOR.matcher(color).matches() ? null
+        : "color must be a #RRGGBB hex value";
+  }
+
+  static String fontError(String font) {
+    return choiceError("font", font, FONTS);
+  }
+
+  static String fontSizeError(String fontSize) {
+    return choiceError("fontSize", fontSize, FONT_SIZES);
+  }
+
+  static String rowStripesError(String rowStripes) {
+    return choiceError("rowStripes", rowStripes, ROW_STRIPES);
+  }
+
+  private static String choiceError(String key, String value, Set<String> allowed) {
+    return value == null || allowed.contains(value) ? null
+        : "Unknown " + key + " '" + abbreviate(value) + "'. Allowed: " + String.join(", ", allowed);
   }
 
   /** The footer is optional; a blank one means "none" and is normalized by {@link #normalize}. */
@@ -153,6 +186,12 @@ final class DocTemplateConfigSupport {
   /** Blank text is "not set": stored as null, so the column never holds an empty string. */
   static String normalize(String value) {
     return StringUtils.isBlank(value) ? null : value.trim();
+  }
+
+  /** A color is compared and stored in upper case, so {@code #aabbcc} and {@code #AABBCC} are one. */
+  static String normalizeColor(String value) {
+    String color = normalize(value);
+    return color == null ? null : color.toUpperCase(java.util.Locale.ROOT);
   }
 
   private static String abbreviate(String value) {

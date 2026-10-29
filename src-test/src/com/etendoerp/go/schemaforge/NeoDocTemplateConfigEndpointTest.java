@@ -121,7 +121,7 @@ class NeoDocTemplateConfigEndpointTest {
   }
 
   private static DocTemplateConfig saved(String orgId, String docType, String variant) {
-    return new DocTemplateConfig(orgId, docType, variant, null, "Thanks", true);
+    return new DocTemplateConfig(orgId, docType, variant, null, "Thanks", null, true);
   }
 
   // ---------------------------------------------------------------- read
@@ -188,7 +188,7 @@ class NeoDocTemplateConfigEndpointTest {
     assertEquals(400, endpoint.handle(get("0", "sales-invoice")).getHttpStatus());
     assertEquals(400, endpoint.handle(put("{\"orgId\":\"0\",\"docType\":\"sales-invoice\"}"))
         .getHttpStatus());
-    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any());
+    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any(), any());
   }
 
   // ---------------------------------------------------------------- save
@@ -196,31 +196,32 @@ class NeoDocTemplateConfigEndpointTest {
   @Test
   @DisplayName("PUT creates the row from the defaults for the caller's own organization")
   void createsFromDefaults() throws Exception {
-    when(store.save(ORG_A, "sales-invoice", "modern", null, null))
-        .thenReturn(new DocTemplateConfig(ORG_A, "sales-invoice", "modern", null, null, true));
+    when(store.save(ORG_A, "sales-invoice", "modern", null, null, DocTemplateStyle.NONE))
+        .thenReturn(new DocTemplateConfig(ORG_A, "sales-invoice", "modern", null, null, null,
+            true));
 
     NeoResponse response = endpoint
         .handle(put("{\"docType\":\"sales-invoice\",\"variant\":\"modern\"}"));
 
     assertEquals(200, response.getHttpStatus());
     assertEquals("modern", response.getBody().getString("variant"));
-    verify(store).save(ORG_A, "sales-invoice", "modern", null, null);
+    verify(store).save(ORG_A, "sales-invoice", "modern", null, null, DocTemplateStyle.NONE);
   }
 
   @Test
   @DisplayName("PUT keeps what a key left out had saved, and an explicit null or blank clears it")
   void mergesAndClears() throws Exception {
     when(store.find(ORG_A, "sales-invoice")).thenReturn(new DocTemplateConfig(ORG_A,
-        "sales-invoice", "compact", "https://cdn.example.com/l.png", "Old footer", true));
-    when(store.save(anyString(), anyString(), anyString(), any(), any()))
+        "sales-invoice", "compact", "https://cdn.example.com/l.png", "Old footer", null, true));
+    when(store.save(anyString(), anyString(), anyString(), any(), any(), any()))
         .thenReturn(saved(ORG_A, "sales-invoice", "compact"));
 
     endpoint.handle(put("{\"docType\":\"sales-invoice\",\"footerText\":\"New footer\"}"));
     verify(store).save(ORG_A, "sales-invoice", "compact", "https://cdn.example.com/l.png",
-        "New footer");
+        "New footer", DocTemplateStyle.NONE);
 
     endpoint.handle(put("{\"docType\":\"sales-invoice\",\"logo\":null,\"footerText\":\"  \"}"));
-    verify(store).save(ORG_A, "sales-invoice", "compact", null, null);
+    verify(store).save(ORG_A, "sales-invoice", "compact", null, null, DocTemplateStyle.NONE);
   }
 
   @Test
@@ -231,7 +232,7 @@ class NeoDocTemplateConfigEndpointTest {
     NeoResponse response = endpoint.handle(put("{\"docType\":\"sales-invoice\"}"));
 
     assertEquals(403, response.getHttpStatus());
-    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any());
+    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any(), any());
   }
 
   @Test
@@ -243,18 +244,18 @@ class NeoDocTemplateConfigEndpointTest {
         .handle(put("{\"orgId\":\"" + ORG_B + "\",\"docType\":\"sales-invoice\"}"));
 
     assertEquals(403, response.getHttpStatus());
-    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any());
+    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any(), any());
   }
 
   @Test
   @DisplayName("PUT cannot name the client: a clientId in the body is ignored")
   void clientIsNeverTakenFromTheBody() throws Exception {
-    when(store.save(anyString(), anyString(), anyString(), any(), any()))
+    when(store.save(anyString(), anyString(), anyString(), any(), any(), any()))
         .thenReturn(saved(ORG_A, "sales-invoice", "classic"));
 
     endpoint.handle(put("{\"docType\":\"sales-invoice\",\"clientId\":\"OTHER\",\"client\":\"OTHER\"}"));
 
-    verify(store).save(ORG_A, "sales-invoice", "classic", null, null);
+    verify(store).save(ORG_A, "sales-invoice", "classic", null, null, DocTemplateStyle.NONE);
   }
 
   @ParameterizedTest
@@ -277,7 +278,7 @@ class NeoDocTemplateConfigEndpointTest {
     NeoResponse response = endpoint.handle(put(body));
 
     assertEquals(400, response.getHttpStatus(), body);
-    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any());
+    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any(), any());
   }
 
   @Test
@@ -287,7 +288,7 @@ class NeoDocTemplateConfigEndpointTest {
         NeoDocTemplateConfigEndpoint.MAX_BODY_BYTES) + "\"}";
 
     assertEquals(413, endpoint.handle(put(body)).getHttpStatus());
-    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any());
+    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any(), any());
   }
 
   @Test
@@ -298,6 +299,49 @@ class NeoDocTemplateConfigEndpointTest {
 
     assertEquals(405, endpoint.handle(request).getHttpStatus());
     verify(store, never()).list(anyString());
-    verify(store, never()).save(anyString(), anyString(), anyString(), isNull(), isNull());
+    verify(store, never()).save(anyString(), anyString(), anyString(), isNull(), isNull(),
+        any());
+  }
+
+  @Test
+  @DisplayName("PUT stores the base color upper-cased and the other style choices as sent")
+  void savesTheStyle() throws Exception {
+    when(store.save(anyString(), anyString(), anyString(), any(), any(), any()))
+        .thenReturn(saved(ORG_A, "listing", "classic"));
+
+    NeoResponse response = endpoint.handle(put("{\"docType\":\"listing\",\"color\":\"#1a73e8\","
+        + "\"font\":\"serif\",\"fontSize\":\"large\",\"rowStripes\":\"off\"}"));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(store).save(ORG_A, "listing", "classic", null, null,
+        new DocTemplateStyle("#1A73E8", "serif", "large", "off"));
+  }
+
+  @Test
+  @DisplayName("PUT keeps the saved style of a key left out and clears one sent as null")
+  void mergesTheStyle() throws Exception {
+    when(store.find(ORG_A, "listing")).thenReturn(new DocTemplateConfig(ORG_A, "listing",
+        "compact", null, null, new DocTemplateStyle("#112233", "mono", "large", "on"), true));
+    when(store.save(anyString(), anyString(), anyString(), any(), any(), any()))
+        .thenReturn(saved(ORG_A, "listing", "compact"));
+
+    endpoint.handle(put("{\"docType\":\"listing\",\"font\":null,\"rowStripes\":\"off\"}"));
+
+    verify(store).save(ORG_A, "listing", "compact", null, null,
+        new DocTemplateStyle("#112233", null, "large", "off"));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "{\"color\":\"red\"}", "{\"color\":\"#12345\"}",
+      "{\"color\":\"#12345G\"}", "{\"color\":\"#123456;}\"}", "{\"font\":\"comic\"}",
+      "{\"fontSize\":\"huge\"}", "{\"rowStripes\":\"yes\"}", "{\"color\":7}" })
+  @DisplayName("PUT refuses a color or choice outside the vocabulary and saves nothing")
+  void refusesBadStyle(String fragment) throws Exception {
+    String body = "{\"docType\":\"listing\"," + fragment.substring(1);
+
+    NeoResponse response = endpoint.handle(put(body));
+
+    assertEquals(400, response.getHttpStatus());
+    verify(store, never()).save(anyString(), anyString(), anyString(), any(), any(), any());
   }
 }

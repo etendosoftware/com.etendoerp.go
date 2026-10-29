@@ -48,6 +48,10 @@ class DocTemplateConfigStore {
   private static final String P_VARIANT = "templateVariant";
   private static final String P_LOGO = "templateLogo";
   private static final String P_FOOTER = "templateFooter";
+  private static final String P_COLOR = "templateColor";
+  private static final String P_FONT = "templateFont";
+  private static final String P_FONT_SIZE = "templateFontSize";
+  private static final String P_STRIPES = "templateRowStripes";
 
   /** @return the saved configuration, or null when the organization has none for the type */
   DocTemplateConfig find(String orgId, String docType) {
@@ -74,7 +78,7 @@ class DocTemplateConfigStore {
    * The client is the caller's own, never one a request named.
    */
   DocTemplateConfig save(String orgId, String docType, String variant, String logo,
-      String footerText) {
+      String footerText, DocTemplateStyle style) {
     OBCriteria<BaseOBObject> criteria = scoped(orgId);
     criteria.setFilterOnActive(false);
     criteria.add(Restrictions.eq(P_DOC_TYPE, docType));
@@ -90,6 +94,10 @@ class DocTemplateConfigStore {
     row.set(P_VARIANT, variant);
     row.set(P_LOGO, logo);
     row.set(P_FOOTER, footerText);
+    row.set(P_COLOR, style.getColor());
+    row.set(P_FONT, style.getFont());
+    row.set(P_FONT_SIZE, style.getFontSize());
+    row.set(P_STRIPES, style.getRowStripes());
     OBDal.getInstance().save(row);
     OBDal.getInstance().flush();
     return toConfig(row);
@@ -109,6 +117,8 @@ class DocTemplateConfigStore {
   private static DocTemplateConfig toConfig(BaseOBObject row) {
     return new DocTemplateConfig(((Organization) row.get("organization")).getId(),
         (String) row.get(P_DOC_TYPE), (String) row.get(P_VARIANT), (String) row.get(P_LOGO),
-        (String) row.get(P_FOOTER), true);
+        (String) row.get(P_FOOTER), new DocTemplateStyle((String) row.get(P_COLOR),
+            (String) row.get(P_FONT), (String) row.get(P_FONT_SIZE), (String) row.get(P_STRIPES)),
+        true);
   }
 }

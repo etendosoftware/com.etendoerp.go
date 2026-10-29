@@ -134,4 +134,47 @@ class DocTemplateConfigSupportTest {
     assertEquals(true, defaults.toJson().isNull("footerText"));
     assertEquals("ORG1", defaults.toJson().getString("orgId"));
   }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "#000000", "#FFFFFF", "#1a73e8", "#1A73E8" })
+  @DisplayName("a #RRGGBB base color is accepted in either case")
+  void acceptsHexColors(String color) {
+    assertNull(DocTemplateConfigSupport.colorError(color));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "", "red", "#FFF", "#12345", "#1234567", "#12345G", "123456",
+      "#123456;}", "#123456\n", "rgb(0,0,0)", "url(x)" })
+  @DisplayName("anything but #RRGGBB is refused as a color: it ends up inside a stylesheet")
+  void refusesOtherColors(String color) {
+    assertNotNull(DocTemplateConfigSupport.colorError(color));
+  }
+
+  @Test
+  @DisplayName("an unset color or choice is acceptable and means the design's default")
+  void unsetStyleIsAcceptable() {
+    assertNull(DocTemplateConfigSupport.colorError(null));
+    assertNull(DocTemplateConfigSupport.fontError(null));
+    assertNull(DocTemplateConfigSupport.fontSizeError(null));
+    assertNull(DocTemplateConfigSupport.rowStripesError(null));
+  }
+
+  @Test
+  @DisplayName("font, font size and row stripes accept only their vocabulary")
+  void styleChoices() {
+    assertNull(DocTemplateConfigSupport.fontError("serif"));
+    assertNotNull(DocTemplateConfigSupport.fontError("comic"));
+    assertNull(DocTemplateConfigSupport.fontSizeError("large"));
+    assertNotNull(DocTemplateConfigSupport.fontSizeError("huge"));
+    assertNull(DocTemplateConfigSupport.rowStripesError("off"));
+    assertNotNull(DocTemplateConfigSupport.rowStripesError("yes"));
+  }
+
+  @Test
+  @DisplayName("a color is stored upper-cased and trimmed; blank is unset")
+  void normalizesColor() {
+    assertEquals("#1A73E8", DocTemplateConfigSupport.normalizeColor(" #1a73e8 "));
+    assertNull(DocTemplateConfigSupport.normalizeColor("  "));
+    assertNull(DocTemplateConfigSupport.normalizeColor(null));
+  }
 }

@@ -2363,11 +2363,11 @@ Consumed by the UI that edits it (T5) and the renderer that reads it (T6).
 ```
 GET /sws/neo/doctemplateconfig?docType=<type>[&orgId=<org>]
 GET /sws/neo/doctemplateconfig[?orgId=<org>]
-PUT /sws/neo/doctemplateconfig      {"orgId"?, "docType", "variant"?, "logo"?, "footerText"?}
+PUT /sws/neo/doctemplateconfig      {"orgId"?, "docType", "variant"?, "logo"?, "footerText"?, "color"?, "font"?, "fontSize"?, "rowStripes"?}
 Authorization: Bearer {token}
 ```
 
-**Contract.** A configuration is `{orgId, docType, variant, logo, footerText, configured}`.
+**Contract.** A configuration is `{orgId, docType, variant, logo, footerText, color, font, fontSize, rowStripes, configured}`.
 
 | Field | Values |
 |---|---|
@@ -2375,14 +2375,18 @@ Authorization: Bearer {token}
 | `variant` | `classic` (default), `compact`, `modern` — also a CHECK on the table |
 | `logo` | `null`, an absolute `https://` URL (≤ 2000 chars) or a `data:image/(png\|jpeg\|webp);base64,…` URI (≤ 512 KiB). SVG, `http:` and any other scheme are refused: the renderer embeds it in a page that can run script |
 | `footerText` | `null` or text ≤ 500 chars, no control characters except line breaks. Stored as typed; **escaping is the renderer's job** |
+| `color` | `null` (the design's own) or an exact `#RRGGBB`, stored upper-case. Nothing else is accepted (named colors, `rgb()`, a trailing `;}`): it ends up inside a stylesheet |
+| `font` | `null` or `sans`, `serif`, `mono` — also a CHECK on the table |
+| `fontSize` | `null` or `normal`, `large` — also a CHECK on the table |
+| `rowStripes` | `null` or `on`, `off` (striped table rows) — also a CHECK on the table |
 | `configured` | `true` for a saved row; `false` when the defaults are served |
 
 - `GET ?docType=` answers one configuration, or the defaults (`classic`, no logo, no footer,
   `configured:false`) with `200` when none was saved — a consumer never branches on a 404.
 - `GET` without `docType` answers `{orgId, configs:[…]}` with the organization's saved ones only.
 - `PUT` creates or updates the row of the organization and type and answers it. A key left out keeps
-  what was saved (a new row starts from the defaults); `null` or a blank string clears the logo or
-  the footer.
+  what was saved (a new row starts from the defaults); `null` or a blank string clears the logo, the footer
+  or a style choice (back to the design's own). The style choices are common to documents and `listing`; the logo and the footer only make sense for documents.
 
 **Isolation and permissions.** `orgId` defaults to the caller's organization.
 

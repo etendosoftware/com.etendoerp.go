@@ -33,22 +33,24 @@ final class DocTemplateConfig {
   private final String variant;
   private final String logo;
   private final String footerText;
+  private final DocTemplateStyle style;
   private final boolean configured;
 
   DocTemplateConfig(String orgId, String docType, String variant, String logo, String footerText,
-      boolean configured) {
+      DocTemplateStyle style, boolean configured) {
     this.orgId = orgId;
     this.docType = docType;
     this.variant = variant;
     this.logo = logo;
     this.footerText = footerText;
+    this.style = style == null ? DocTemplateStyle.NONE : style;
     this.configured = configured;
   }
 
   /** The configuration served when the organization has saved none for the document type. */
   static DocTemplateConfig defaults(String orgId, String docType) {
     return new DocTemplateConfig(orgId, docType, DocTemplateConfigSupport.DEFAULT_VARIANT, null,
-        null, false);
+        null, DocTemplateStyle.NONE, false);
   }
 
   String getOrgId() {
@@ -71,11 +73,16 @@ final class DocTemplateConfig {
     return footerText;
   }
 
+  DocTemplateStyle getStyle() {
+    return style;
+  }
+
   boolean isConfigured() {
     return configured;
   }
 
-  /** The wire shape: {@code {orgId, docType, variant, logo, footerText, configured}}. */
+  /** The wire shape: {@code {orgId, docType, variant, logo, footerText, color, font, fontSize,
+   * rowStripes, configured}}. */
   JSONObject toJson() throws JSONException {
     JSONObject json = new JSONObject();
     json.put("orgId", orgId);
@@ -83,6 +90,7 @@ final class DocTemplateConfig {
     json.put("variant", variant);
     json.put("logo", logo == null ? JSONObject.NULL : logo);
     json.put("footerText", footerText == null ? JSONObject.NULL : footerText);
+    style.writeTo(json);
     json.put("configured", configured);
     return json;
   }

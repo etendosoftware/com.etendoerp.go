@@ -104,7 +104,7 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
 
   @Test
   public void savesThenReadsBackEveryField() {
-    store.save(orgA, INVOICE, "modern", LOGO, "Thanks");
+    store.save(orgA, INVOICE, "modern", LOGO, "Thanks", DocTemplateStyle.NONE);
     OBDal.getInstance().getSession().clear();
 
     DocTemplateConfig found = store.find(orgA, INVOICE);
@@ -118,9 +118,23 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
   }
 
   @Test
+  public void savesThenReadsBackTheStyle() {
+    store.save(orgA, INVOICE, "classic", null, null,
+        new DocTemplateStyle("#1A73E8", "serif", "large", "off"));
+    OBDal.getInstance().getSession().clear();
+
+    DocTemplateStyle style = store.find(orgA, INVOICE).getStyle();
+
+    assertEquals("#1A73E8", style.getColor());
+    assertEquals("serif", style.getFont());
+    assertEquals("large", style.getFontSize());
+    assertEquals("off", style.getRowStripes());
+  }
+
+  @Test
   public void savingAgainUpdatesTheSameRow() {
-    store.save(orgA, INVOICE, "modern", LOGO, "Thanks");
-    store.save(orgA, INVOICE, "compact", null, null);
+    store.save(orgA, INVOICE, "modern", LOGO, "Thanks", DocTemplateStyle.NONE);
+    store.save(orgA, INVOICE, "compact", null, null, DocTemplateStyle.NONE);
     OBDal.getInstance().getSession().clear();
 
     DocTemplateConfig found = store.find(orgA, INVOICE);
@@ -133,8 +147,8 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
 
   @Test
   public void organizationsKeepTheirOwnChoiceForTheSameDocumentType() {
-    store.save(orgA, INVOICE, "modern", LOGO, "A footer");
-    store.save(orgB, INVOICE, "compact", null, "B footer");
+    store.save(orgA, INVOICE, "modern", LOGO, "A footer", DocTemplateStyle.NONE);
+    store.save(orgB, INVOICE, "compact", null, "B footer", DocTemplateStyle.NONE);
     OBDal.getInstance().getSession().clear();
 
     assertEquals("modern", store.find(orgA, INVOICE).getVariant());
@@ -145,8 +159,8 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
 
   @Test
   public void documentTypesOfAnOrganizationAreIndependent() {
-    store.save(orgA, INVOICE, "modern", null, null);
-    store.save(orgA, ORDER, "compact", null, null);
+    store.save(orgA, INVOICE, "modern", null, null, DocTemplateStyle.NONE);
+    store.save(orgA, ORDER, "compact", null, null, DocTemplateStyle.NONE);
     OBDal.getInstance().getSession().clear();
 
     assertEquals("modern", store.find(orgA, INVOICE).getVariant());
@@ -159,7 +173,7 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
 
   @Test
   public void listAndFindNeverReturnAnotherOrganization() {
-    store.save(orgB, INVOICE, "modern", null, null);
+    store.save(orgB, INVOICE, "modern", null, null, DocTemplateStyle.NONE);
     OBDal.getInstance().getSession().clear();
 
     assertNull(store.find(orgA, INVOICE));
@@ -178,7 +192,7 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
 
   @Test
   public void anInactiveRowIsReadAsNotConfiguredAndSavingReactivatesIt() {
-    store.save(orgA, INVOICE, "modern", null, null);
+    store.save(orgA, INVOICE, "modern", null, null, DocTemplateStyle.NONE);
     OBDal.getInstance().getSession().createNativeQuery(
         "UPDATE etgo_doc_template_config SET isactive = 'N' WHERE ad_org_id = :org")
         .setParameter("org", orgA).executeUpdate();
@@ -186,7 +200,7 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
 
     assertNull(store.find(orgA, INVOICE));
 
-    store.save(orgA, INVOICE, "compact", null, null);
+    store.save(orgA, INVOICE, "compact", null, null, DocTemplateStyle.NONE);
     OBDal.getInstance().getSession().clear();
     assertEquals("compact", store.find(orgA, INVOICE).getVariant());
     assertEquals(1, store.list(orgA).size());
