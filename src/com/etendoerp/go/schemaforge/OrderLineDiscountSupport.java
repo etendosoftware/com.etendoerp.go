@@ -436,11 +436,42 @@ final class OrderLineDiscountSupport {
     // One lazy read of the stored line for the whole update: each step that needs it asks, the
     // first one reads, and a request no step needs it for reads nothing.
     StoredLine storedLine = new StoredLine(ctx);
+    // Judged on what the caller sent: the steps below write lineGrossAmount into the body, which
+    // changesAmountInput would then read as the caller's own gross.
+    boolean sentAmountInput = ctx != null && changesAmountInput(ctx.getRequestBody());
     boolean repriced = applyDiscount(ctx, storedLine) || applyUnitPrice(ctx, storedLine);
     if (!repriced) {
       deriveAmountsOnUpdate(ctx, storedLine);
     }
+    if (sentAmountInput || repriced) {
+      storedLine.carryAmountInputsInto(ctx);
+    }
     deriveAmountsOnCreate(ctx);
+  }
+
+
+  /**
+   * Carries into a sparse update the amount inputs it does not send — quantity, price, gross price
+   * and tax — from the stored line (ETP-6012).
+   *
+   * <p>On REST {@code lineGrossAmount} is read-only, so {@code filterWriteRequest} drops the gross
+   * {@link #deriveAmountsOnUpdate(NeoContext)} wrote, and {@code NeoCrudHandler#executeUpdate}
+   * derives it again over the BODY alone. A public API {@code PATCH} that sends only quantity and
+   * discount has no {@code tax} there, so the gross was stored at a 0 % rate (the net, 67.5 instead
+   * of 81.68 at 21 %); one that sends only the quantity also lacks the price, and the gross was
+   * zeroed. The form never hit it: its inline edit sends the whole row. Writing the stored values
+   * back changes nothing in the line; it only lets that derivation see the line it saves.
+   *
+   * <p>Only when the patch changes an amount input ({@link #changesAmountInput}). In
+   * {@link #applyLineRules} it runs after the re-fires (their price is the body's and is kept), on
+   * what the caller sent. Total: never throws.
+   *
+   * @param ctx the pre-hook context; its request body is mutated in place
+   */
+  static void completeAmountInputsOnUpdate(NeoContext ctx) {
+    if (ctx != null && changesAmountInput(ctx.getRequestBody())) {
+      new StoredLine(ctx).carryAmountInputsInto(ctx);
+    }
   }
 
   /**
@@ -810,6 +841,37 @@ final class OrderLineDiscountSupport {
         read = true;
       }
       return formState;
+    }
+
+    /** Writes into an update's body the stored line's amount inputs it lacks. Never throws. */
+    void carryAmountInputsInto(NeoContext ctx) {
+      if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+          || !isUpdate(ctx.getHttpMethod())) {
+        return;
+      }
+      JSONObject body = ctx.getRequestBody();
+      if (body == null) {
+        return;
+      }
+      try {
+        JSONObject stored = get();
+        if (stored == null) {
+          return;
+        }
+        // A new net price makes the stored gross price stale, and the gross derivation prefers it.
+        // Read before the loop: the loop itself carries the stored unitPrice into the body.
+        boolean sentUnitPrice = body.has(FIELD_UNIT_PRICE);
+        for (String input : AMOUNT_INPUTS) {
+          boolean staleGrossPrice = sentUnitPrice && FIELD_GROSS_UNIT_PRICE.equals(input);
+          if (!staleGrossPrice && !body.has(input) && stored.has(input)
+              && !stored.isNull(input)) {
+            body.put(input, stored.get(input));
+          }
+        }
+      } catch (Exception e) {
+        log.warn("[ORDER-LINE-AMOUNTS] Could not complete the amount inputs on {} {}: {}",
+            ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
+      }
     }
 
     /** Drops the cached overlay, so the next {@link #get} reads the line again. */

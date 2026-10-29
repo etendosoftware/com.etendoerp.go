@@ -46,8 +46,19 @@ abstract class OrderLineCustomization extends OrderLineHandler {
     if (response != null) {
       return response;
     }
-    OrderLineDiscountSupport.applyLineRules(context);
+    applyRules(context);
     return null;
+  }
+
+  /**
+   * The line rules this entity runs once the parent's pre-hook let the request through; by
+   * default all of them ({@link OrderLineDiscountSupport#applyLineRules}). A subclass narrows them
+   * per channel.
+   *
+   * @param context the pre-hook context; its request body is mutated in place
+   */
+  protected void applyRules(NeoContext context) {
+    OrderLineDiscountSupport.applyLineRules(context);
   }
 
   /**

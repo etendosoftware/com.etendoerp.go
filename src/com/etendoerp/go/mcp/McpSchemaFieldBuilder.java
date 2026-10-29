@@ -564,8 +564,12 @@ final class McpSchemaFieldBuilder {
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
       throws JSONException {
     JSONArray fieldsArray = new JSONArray();
+    // ETP-5806 — resolved at most once for the whole walk (and only if a structured column is
+    // actually met), never once per column: the documented invariant is that the account is
+    // resolved once per request and never re-checked.
+    StructuredAddressGate structuredAddressGate = new StructuredAddressGate();
     for (Column col : adTab.getTable().getADColumnList()) {
-      if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata)) {
+      if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata, structuredAddressGate)) {
         JSONObject fieldObj = buildSchemaField(col, adTab, dalEntity,
             fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
             fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs);
@@ -658,13 +662,42 @@ final class McpSchemaFieldBuilder {
   private static final java.util.Set<String> STRUCTURED_ADDRESS_COLUMNS = java.util.Set.of(
       "EM_OBSEPA_STRTNM", "EM_OBSEPA_BLDGNB", "EM_OBSEPA_BLDGNM");
 
+  /**
+   * ETP-5806 — the {@code structured-address-for-sepa} answer for the account making this request,
+   * resolved lazily and then remembered for the rest of the schema walk.
+   *
+   * <p>Two properties at once. <b>Once per walk</b>: the account resolution is a DB lookup
+   * ({@code GoAccountResolver.currentAccountEmail} — up to 2 queries), and a table carrying
+   * all 3 structured columns used to pay for it 3 times, contradicting the "resolved once per
+   * request, never re-resolved per check" invariant the flag's own javadoc and
+   * {@code docs/feature-flags-and-tenant-upgrade.md} assert. <b>Only if needed</b>: it is still
+   * never resolved at all on a table with none of the 3 columns, which is almost every table —
+   * which is why this is lazy rather than computed up front.
+   */
+  static final class StructuredAddressGate {
+
+    private Boolean enabled;
+
+    boolean isEnabled() {
+      if (enabled == null) {
+        enabled = com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled(
+            com.etendoerp.go.common.GoAccountResolver.currentAccountEmail());
+      }
+      return enabled;
+    }
+  }
+
   private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns,
-      FieldMetadata fieldMetadata) {
+      FieldMetadata fieldMetadata, StructuredAddressGate structuredAddressGate) {
     if (!col.isActive() || systemColumns.contains(col.getDBColumnName().toUpperCase())) {
       return false;
     }
+    // ETP-5806 — per-account (staged rollout), same account the capability signal resolves for.
+    // The gate sits AFTER the column-name test on purpose: && short-circuits, so a schema walk
+    // only consults it on the at most 3 columns this set can match, and never at all on a table
+    // that has none of them. The gate itself then resolves the account only once for the walk.
     if (STRUCTURED_ADDRESS_COLUMNS.contains(col.getDBColumnName().toUpperCase())
-        && !com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled()) {
+        && !structuredAddressGate.isEnabled()) {
       return false;
     }
     return McpSchemaActionFields.isButtonColumn(col) || fieldMetadata.exposes(col);
