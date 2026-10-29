@@ -597,9 +597,14 @@ and `NeoFiscalModelsCatalogService` its only caller:
   runtime: without this rule that save would erase the tenant's stored 390. The drawer always sends
   an explicit value for a 390 it offered and the user changed, because it starts from the answer
   and a toggle writes `true`/`false`.
-- **Stored catalog unreadable:** the save is **refused** (an error, nothing written) in both flag
-  states, since both may need to keep the stored 390; it is never merged over `{}`. A stored value
-  that is not valid JSON holds nothing to keep and counts as `{}`.
+- **Stored catalog unreadable:** the save is **refused** in both flag states, since both may need to
+  keep the stored 390; it is never merged over `{}`. When the `ETGO_FiscalModelsCatalog` preference
+  itself cannot be read (a `PropertyException` other than "not found", or a runtime failure),
+  `saveActiveModels` throws `IllegalStateException` ("…could not be read; nothing was saved");
+  `NeoBuiltInEndpointHandler` does not turn it into a 400 and `NeoServlet` answers **HTTP 500**.
+  Nothing is written or flushed. A stored value that is blank or not valid JSON holds nothing to
+  keep and counts as `{}` (that save goes through). The SPA does not surface the 500 yet: its catalog
+  `PUT` is fire-and-forget (open item `refused-save-silent-in-spa` on the registry entry).
 - **Errors fail hidden:** if the GET answer cannot be built, it is `{"_unavailable": ["390"]}`
   (`FiscalModel390Flag.failHiddenAnswer()`), never a bare `{}`.
 
@@ -614,7 +619,11 @@ flag's default; any answer replaces that.
 the flag off. They are already protected by the role's window access; the flag only decides what
 the UI offers. Refusing them would put flag branches in several handlers (more removal cost), and
 would make a tenant's existing 390 declarations unreadable through the API while the flag is off
-for no security gain.
+for no security gain. This includes MCP: the flag is read nowhere in the MCP path, so the generic
+tools (`etendo_list`, `etendo_get`, `etendo_create`, `etendo_update`, …) reach
+`organization/representanteLegal` with the flag off like any other entity the role can access.
+Only the catalog answer is filtered. Making the 390 unreachable outside the UI would be an
+authorization decision, not a widening of this flag (registry open item `mcp-and-api-not-gated`).
 
 **Evaluation context — per user and per tenant.** `FiscalModel390Flag.contextFor` builds
 `FeatureFlagContext.forAccount(<account email>).with(clientId, <tenant>)`:
@@ -644,6 +653,21 @@ Tomcat restart.
 `-Detendo.go.flags.fiscal-model-390=true`, or `ETGO_FLAG_FISCAL_MODEL_390=true` in Tomcat's
 environment), with no Datadog/ConfigCat arm selected, then restart Tomcat. With a hosted arm
 selected the setting must exist in that dashboard; until it does, the flag resolves to `false`.
+
+**Rollout prerequisite:** before targeting anyone on a shared environment, create the
+`fiscal-model-390` **boolean** setting (default `false`) in the hosted arm in use (Datadog, or
+ConfigCat while it is the fallback), then add the `email` / `clientId` rules. The local property is
+inert while a hosted arm is selected (only one provider is installed), and an undefined key simply
+resolves to `false`, so a missing setting looks exactly like "off".
+
+**Retirement (TTL 2027-01-01):** the 390 then ships to everyone and the flag goes. On the ship
+branch: in `NeoFiscalModelsCatalogService`, return the stored catalog from `getActiveModels` and
+persist the parsed body in `saveActiveModels` without `FiscalModel390Flag` (keep the read-failure
+handling); delete `FiscalModel390Flag.java` and its test, and `FLAG_FISCAL_MODEL_390` from
+`GoFeatureFlags`; remove this section and the configuration-table row; delete the hosted setting.
+The `etendo_schema_forge` side (the `catalogAvailability.js` toggle points, the model-id guardrail
+allow-list line, the registry `flag` object) is listed in the registry entry's `ttlNote`.
+`GoAccountResolver.findCurrentAccountEmail()` stays: `bp-portal-link` uses it too.
 
 ## 2. The onboarding paywall
 
