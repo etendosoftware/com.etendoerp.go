@@ -172,6 +172,21 @@ class InMemorySupportAccessStore implements SupportAccessStore {
   }
 
   @Override
+  public synchronized int revokeOpenAccessesOf(String operatorUserId, String endedByUserId,
+      Instant now) {
+    int closed = 0;
+    for (SupportAccessRecord row : rows.values()) {
+      if (row.getEndedAt() == null
+          && (operatorUserId == null || operatorUserId.equals(row.getOperatorUserId()))) {
+        end(row, SupportEndReason.REVOKED, endedByUserId, now);
+        liveSessions.remove(row.getId());
+        closed++;
+      }
+    }
+    return closed;
+  }
+
+  @Override
   public String findClientName(String clientId) {
     return clientNames.get(clientId);
   }

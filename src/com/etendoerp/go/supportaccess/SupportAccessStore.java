@@ -152,4 +152,16 @@ public interface SupportAccessStore {
    * @return its name, or {@code null}
    */
   String findClientName(String clientId);
+
+  /**
+   * Closes as {@link SupportEndReason#REVOKED} every open access of the operator, or of every
+   * operator when {@code operatorUserId} is {@code null}, and revokes the sessions of the accesses
+   * this call closed (same reason and {@code now}), so a lost role takes effect on the next request.
+   *
+   * @param operatorUserId the operator's {@code AD_User_ID}; {@code null} for all operators
+   * @param endedByUserId  who caused it
+   * @param now            the current time
+   * @return the number of accesses closed
+   */
+  int revokeOpenAccessesOf(String operatorUserId, String endedByUserId, Instant now);
 }
