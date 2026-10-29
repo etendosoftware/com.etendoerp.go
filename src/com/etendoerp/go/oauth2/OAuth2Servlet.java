@@ -62,6 +62,7 @@ import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * OAuth2 servlet handling token issuance, client CRUD, revocation, and introspection.
@@ -580,6 +581,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       throws IOException {
     try {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      requireNotSupportUser(context);
       JSONObject body = parseJsonBodyOrWriteError(request, response);
       if (body == null) {
         return;
@@ -706,6 +708,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String id) throws IOException {
     try {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      requireNotSupportUser(context);
       OAuth2Client client = publicApiKeyStore.findOwned(id, context);
       if (client == null) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
@@ -871,6 +874,14 @@ public class OAuth2Servlet extends HttpBaseServlet {
           + PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER;
     }
     return duplicate ? "An active public API key with this name already exists" : null;
+  }
+
+  /**
+   * ETP-5351 (T5): the tenant's "Soporte Etendo" user never mints an API key secret — it would
+   * outlive the support session that created it.
+   */
+  private static void requireNotSupportUser(PublicApiKeyContext context) throws AuthException {
+    OAuth2RequestAuthenticator.requireCredentialMintingAllowed(context.userId, context.clientId);
   }
 
   private PublicApiKeyContext requirePublicApiKeyContext(HttpServletRequest request)

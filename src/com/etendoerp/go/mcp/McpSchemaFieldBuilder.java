@@ -199,6 +199,7 @@ final class McpSchemaFieldBuilder {
     Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
     Map<String, Boolean> readOnlyByColumnId = new HashMap<>();
     java.util.Set<String> excludedColumnIds = new java.util.HashSet<>();
+    Map<String, Boolean> userRequiredByColumnId = new HashMap<>();
     OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
     fieldCrit.add(Restrictions.eq(
         SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
@@ -225,9 +226,12 @@ final class McpSchemaFieldBuilder {
       if (!view.isIncluded()) {
         excludedColumnIds.add(colId);
       }
+      // ETP-5791: only an override that states the flag lands here; an absent entry keeps the
+      // derived userRequired (see McpUserRequiredOverride).
+      view.getUserRequiredOverride().ifPresent(flag -> userRequiredByColumnId.put(colId, flag));
     }
     return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId,
-        excludedColumnIds);
+        excludedColumnIds, userRequiredByColumnId);
   }
 
   static final class FieldMetadata {
@@ -249,15 +253,31 @@ final class McpSchemaFieldBuilder {
      * excluded, so nothing changes for them.</p>
      */
     final java.util.Set<String> excludedColumnIds;
+    /**
+     * AD_Column ids whose {@code userRequired} an {@code MCP_CONFIG.fields.userRequired} override
+     * states (ETP-5791), with the stated value. A column absent from the map keeps the flag
+     * {@link #addVisibility} derives.
+     */
+    final Map<String, Boolean> userRequiredByColumnId;
 
     FieldMetadata(Map<String, String> visibilityByColumnId,
         Map<String, Boolean> businessCriticalByColumnId,
         Map<String, Boolean> readOnlyByColumnId,
         java.util.Set<String> excludedColumnIds) {
+      this(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId, excludedColumnIds,
+          Map.of());
+    }
+
+    FieldMetadata(Map<String, String> visibilityByColumnId,
+        Map<String, Boolean> businessCriticalByColumnId,
+        Map<String, Boolean> readOnlyByColumnId,
+        java.util.Set<String> excludedColumnIds,
+        Map<String, Boolean> userRequiredByColumnId) {
       this.visibilityByColumnId = visibilityByColumnId;
       this.businessCriticalByColumnId = businessCriticalByColumnId;
       this.readOnlyByColumnId = readOnlyByColumnId;
       this.excludedColumnIds = excludedColumnIds;
+      this.userRequiredByColumnId = userRequiredByColumnId;
     }
 
     /**
@@ -552,11 +572,18 @@ final class McpSchemaFieldBuilder {
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
       throws JSONException {
     JSONArray fieldsArray = new JSONArray();
+    // ETP-5806 — resolved at most once for the whole walk (and only if a structured column is
+    // actually met), never once per column: the documented invariant is that the account is
+    // resolved once per request and never re-checked.
+    StructuredAddressGate structuredAddressGate = new StructuredAddressGate();
     for (Column col : adTab.getTable().getADColumnList()) {
-      if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata)) {
-        fieldsArray.put(buildSchemaField(col, adTab, dalEntity,
+      if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata, structuredAddressGate)) {
+        JSONObject fieldObj = buildSchemaField(col, adTab, dalEntity,
             fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
-            fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs));
+            fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs);
+        McpUserRequiredOverride.apply(fieldObj,
+            fieldMetadata.userRequiredByColumnId.get((String) col.getId()));
+        fieldsArray.put(fieldObj);
       }
     }
     return fieldsArray;
@@ -631,9 +658,54 @@ final class McpSchemaFieldBuilder {
     return virtualFields;
   }
 
+  /**
+   * ETP-5806 — the 3 structured SEPA address columns, gated behind the backend-only
+   * {@code structured-address-for-sepa} flag (TTL 2026-11-15). Structural (checked by DB column
+   * name, same set {@link com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicy}
+   * already special-cases for the published-name override), applying identically to any entity
+   * that happens to carry one of these 3 columns directly — e.g. {@code bpLocation}'s own table
+   * walk, the one case {@code resolveVirtualColumns} above does not cover since that entity reads
+   * {@code C_Location} as its own table rather than as a wrapper.
+   */
+  private static final java.util.Set<String> STRUCTURED_ADDRESS_COLUMNS = java.util.Set.of(
+      "EM_OBSEPA_STRTNM", "EM_OBSEPA_BLDGNB", "EM_OBSEPA_BLDGNM");
+
+  /**
+   * ETP-5806 — the {@code structured-address-for-sepa} answer for the account making this request,
+   * resolved lazily and then remembered for the rest of the schema walk.
+   *
+   * <p>Two properties at once. <b>Once per walk</b>: the account resolution is a DB lookup
+   * ({@code GoAccountResolver.currentAccountEmail} — up to 2 queries), and a table carrying
+   * all 3 structured columns used to pay for it 3 times, contradicting the "resolved once per
+   * request, never re-resolved per check" invariant the flag's own javadoc and
+   * {@code docs/feature-flags-and-tenant-upgrade.md} assert. <b>Only if needed</b>: it is still
+   * never resolved at all on a table with none of the 3 columns, which is almost every table —
+   * which is why this is lazy rather than computed up front.
+   */
+  static final class StructuredAddressGate {
+
+    private Boolean enabled;
+
+    boolean isEnabled() {
+      if (enabled == null) {
+        enabled = com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled(
+            com.etendoerp.go.common.GoAccountResolver.currentAccountEmail());
+      }
+      return enabled;
+    }
+  }
+
   private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns,
-      FieldMetadata fieldMetadata) {
+      FieldMetadata fieldMetadata, StructuredAddressGate structuredAddressGate) {
     if (!col.isActive() || systemColumns.contains(col.getDBColumnName().toUpperCase())) {
+      return false;
+    }
+    // ETP-5806 — per-account (staged rollout), same account the capability signal resolves for.
+    // The gate sits AFTER the column-name test on purpose: && short-circuits, so a schema walk
+    // only consults it on the at most 3 columns this set can match, and never at all on a table
+    // that has none of them. The gate itself then resolves the account only once for the walk.
+    if (STRUCTURED_ADDRESS_COLUMNS.contains(col.getDBColumnName().toUpperCase())
+        && !structuredAddressGate.isEnabled()) {
       return false;
     }
     return McpSchemaActionFields.isButtonColumn(col) || fieldMetadata.exposes(col);
@@ -839,6 +911,15 @@ final class McpSchemaFieldBuilder {
   }
 
   private static String resolvePropertyName(Entity dalEntity, String dbColName) {
+    // ETP-5806 naming unification: a handful of columns are published under a name chosen by the
+    // handler that actually reads/writes them, not the raw DAL property name codegen produced for
+    // the column (e.g. EM_OBSEPA_StrtNm -> oBSEPAStreetName). Checked before the DAL lookup, since
+    // it applies the same way whether dbColName belongs to the entity's own table or to a wrapper's
+    // backing table (buildVirtualFieldsArray's callers).
+    String override = NeoSelectorPolicy.publishedNameOverride(dbColName);
+    if (override != null) {
+      return override;
+    }
     if (dalEntity == null) {
       return dbColName;
     }

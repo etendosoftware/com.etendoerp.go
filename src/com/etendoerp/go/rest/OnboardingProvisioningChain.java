@@ -40,6 +40,7 @@ import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
+import com.etendoerp.go.onboarding.OrgInfoInput;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
@@ -68,7 +69,7 @@ public class OnboardingProvisioningChain {
    * changes onboarding never hands out a tenant built by the previous code. <b>Bump it whenever a
    * step is added, removed, reordered or changes what it provisions.</b>
    */
-  public static final String CHAIN_REVISION = "2026-10-14.1";
+  public static final String CHAIN_REVISION = "2026-10-27.1";
 
   /**
    * The provisioning version a pooled tenant is stamped with and claimed by: this chain's revision
@@ -127,10 +128,6 @@ public class OnboardingProvisioningChain {
       new OnboardingForceTestModeService();
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
-
-  /** The signup form's fiscal/address data the {@code orgInfo} step persists. */
-  public record OrgInfoInput(String countryCode, String address, String taxId) {
-  }
 
   /** The admin identity the chain runs under once the client exists. */
   public static final class AdminContext {
@@ -535,11 +532,7 @@ public class OnboardingProvisioningChain {
       String adminUserId, String adminRoleId, OrgInfoInput orgInfo) {
     sink.progress(PROGRESS_ORG_INFO, PROGRESS_IN_PROGRESS, "Setting up organization address...");
     try {
-      String countryCode = orgInfo != null ? orgInfo.countryCode() : null;
-      String address = orgInfo != null ? orgInfo.address() : null;
-      String taxId = orgInfo != null ? orgInfo.taxId() : null;
-      onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId,
-          countryCode, address, taxId);
+      onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId, orgInfo);
       sink.progress(PROGRESS_ORG_INFO, PROGRESS_DONE, "Organization address ready");
       return true;
     } catch (Exception e) {

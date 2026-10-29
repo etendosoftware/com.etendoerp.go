@@ -252,11 +252,20 @@ final class McpHookExecutor {
         .channel(NeoExtensionChannel.MCP)
         .context(ctx)
         .build();
-    // Resolution goes through the MCP resolver, as every other MCP hook site does — NOT the one
-    // the REST paths use. The two are not equivalent (see NeoExtensionDispatcher); keeping the
-    // channel's own resolver is what makes this step a routing change and not a resolution change.
+    // ETP-5806 follow-up — resolved through NeoExtensionDispatcher.resolveOnly (the @NeoExtension
+    // annotation first, Java_Qualifier second), exactly like runReadProvider's own PRE-phase
+    // dispatch above and resolveServerCreateFields below. This used to call resolveEntityHandler
+    // directly, which is NeoHandlerLookup.byQualifier ALONE — it has no annotation fallback. For a
+    // handler bound only through @NeoExtension (no Java_Qualifier, e.g. BpLocationHandler), that
+    // resolved to null, so this POST phase never ran its afterHandle() over an MCP etendo_get/
+    // etendo_list read. The REST CRUD path never had this gap (NeoServletSupport.handleWithHooks
+    // carries the SAME PRE-resolved handler into its post hook), which is why the asymmetry was
+    // read-only and MCP-only: a GET of a record with real structured-address-for-sepa values kept
+    // leaking them through MCP regardless of the flag, with the write path, REST reads, and every
+    // Mockito test that calls afterHandle() directly all looking correct.
+    NeoHandler resolvedHandler = NeoExtensionDispatcher.resolveOnly(request);
     NeoExtensionResult result = NeoExtensionDispatcher.dispatch(request
-        .post(resolveEntityHandler(sfEntity))
+        .post(resolvedHandler)
         .withPreviousResult(NeoResponse.ok(responseJson)));
     NeoResponse response = result.response();
     if (response == null) {
@@ -272,20 +281,6 @@ final class McpHookExecutor {
   }
 
   /**
-   * Resolve the {@link NeoHandler} registered for the entity's Java_Qualifier.
-   *
-   * <p>Delegates to {@link NeoHandlerLookup}, where the CDI lookup was moved (ETP-4793 / IMP-19)
-   * so {@code schemaforge} code — the report-callability gate — can ask a handler what it
-   * supports without depending on this package.</p>
-   *
-   * @return the matching handler, or {@code null} when the entity declares no
-   *         qualifier or no matching {@code @Named} handler is deployed
-   */
-  static NeoHandler resolveEntityHandler(SFEntity sfEntity) {
-    return NeoHandlerLookup.byQualifier(sfEntity.getJavaQualifier());
-  }
-
-  /**
    * ETP-5710: runs the entity customization's {@link NeoHandler#resolveServerCreateFields} on an MCP
    * create body, before the mandatory pre-check (which precedes the pre-hook on this channel).
    * Resolved like the later dispatch ({@code @NeoExtension} first, {@code Java_Qualifier} second);
@@ -295,13 +290,7 @@ final class McpHookExecutor {
   static void resolveServerCreateFields(String specName, String entityName, Tab adTab,
       SFEntity sfEntity, JSONObject body) {
     try {
-      NeoHandler customization = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
-          .qualifier(sfEntity.getJavaQualifier())
-          .specName(specName)
-          .entityName(entityName)
-          .surface(NeoExtensionSurface.CREATE)
-          .channel(NeoExtensionChannel.MCP)
-          .build());
+      NeoHandler customization = NeoHandlerLookup.forEntity(sfEntity);
       if (customization != null) {
         customization.resolveServerCreateFields(
             buildHookContext(specName, entityName, "POST", null, body, adTab, sfEntity));

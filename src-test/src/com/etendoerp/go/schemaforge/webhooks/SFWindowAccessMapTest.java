@@ -40,11 +40,14 @@ import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
@@ -60,6 +63,11 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  * menu entries like "Configuración &gt; Roles" up front), and the {@code isOwner} capability
  * (ETP-5395 — mirrors {@link OwnerSupport#isOwner(String)} back to the frontend, identically in
  * both the bypass and restricted-role branches, since ownership is orthogonal to admin status).
+ * Also the {@code structuredAddressForSepa} capability (ETP-5806) — mirrors
+ * {@link GoFeatureFlags#FLAG_STRUCTURED_ADDRESS_FOR_SEPA} identically in both branches, stubbed
+ * directly so the assertions are independent of the local {@code Openbravo.properties} toggle.
+ *
+ * @covers com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFWindowAccessMapTest {
@@ -555,6 +563,160 @@ class SFWindowAccessMapTest {
             JSONObject result = new JSONObject(responseVars.get(RESULT));
             assertFalse(result.getJSONObject("capabilities").getBoolean("isOwner"));
             assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+    // ── structuredAddressForSepa capability (ETP-5806) ──────────────────────
+
+    /** Restricted role: the capability reflects the flag when it resolves {@code true}. */
+    @Test
+    @DisplayName("Restricted role resolves structuredAddressForSepa true when the flag is on")
+    void testStructuredAddressForSepaTrueForRestrictedRole() throws Exception {
+        givenRestrictedRole("role-sepa-on");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertTrue(result.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+        }
+    }
+
+    /** Restricted role: the capability reflects the flag when it resolves {@code false}. */
+    @Test
+    @DisplayName("Restricted role resolves structuredAddressForSepa false when the flag is off")
+    void testStructuredAddressForSepaFalseForRestrictedRole() throws Exception {
+        givenRestrictedRole("role-sepa-off");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertFalse(result.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+        }
+    }
+
+    /**
+     * Admin/client-admin bypass: the capability still reflects the live flag value rather than
+     * being folded into the bypass's blanket {@code true}s — it is computed once, identically in
+     * both branches (see the production class's comment on this).
+     */
+    @Test
+    @DisplayName("Admin bypass resolves structuredAddressForSepa true when the flag is on")
+    void testStructuredAddressForSepaTrueForAdminBypass() throws Exception {
+        givenSystemAdminRole();
+        stubSpecRows(Collections.emptyList());
+        stubWindowAccessRows(Collections.emptyList());
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertTrue(result.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+            assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+    /** Admin/client-admin bypass: the capability is {@code false} when the flag resolves off. */
+    @Test
+    @DisplayName("Admin bypass resolves structuredAddressForSepa false when the flag is off")
+    void testStructuredAddressForSepaFalseForAdminBypass() throws Exception {
+        givenSystemAdminRole();
+        stubSpecRows(Collections.emptyList());
+        stubWindowAccessRows(Collections.emptyList());
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertFalse(result.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+            assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+    /**
+     * ETP-5806 follow-up — {@code structuredAddressForSepa} is now evaluated against the real
+     * requesting account's email (not an account-less context), the same per-account pattern
+     * {@code bp-portal-link}/{@code PortalLinkPolicy} already uses, so a Datadog targeting rule
+     * can stage the rollout to that account.
+     */
+    @Test
+    @DisplayName("structuredAddressForSepa is evaluated with the real account email as targeting key")
+    void testStructuredAddressForSepaTargetsTheRealAccountEmail() throws Exception {
+        givenRestrictedRole("role-sepa-targeting");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        User user = mock(User.class);
+        when(user.getUsername()).thenReturn("lola@example.com");
+        when(mockContext.getUser()).thenReturn(user);
+
+        Account account = mock(Account.class);
+        when(account.getEmail()).thenReturn("lola@example.com");
+        @SuppressWarnings("unchecked")
+        OBQuery<Account> accountQuery = mock(OBQuery.class);
+        when(mockDal.createQuery(eq(Account.class), anyString())).thenReturn(accountQuery);
+        when(accountQuery.setNamedParameter(anyString(), anyString())).thenReturn(accountQuery);
+        when(accountQuery.uniqueResult()).thenReturn(account);
+        obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(mockDal);
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            flags.verify(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+                    argThat(ctx -> "lola@example.com".equals(ctx.getTargetingKey()))));
+        }
+    }
+
+    /**
+     * No resolvable account for the current user degrades to an untargeted evaluation rather than
+     * throwing — the module's "never block, never fail, default false" flag contract.
+     */
+    @Test
+    @DisplayName("structuredAddressForSepa degrades gracefully when no account resolves for the current user")
+    void testStructuredAddressForSepaDegradesGracefullyWithNoAccount() throws Exception {
+        givenRestrictedRole("role-sepa-no-account");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+        // mockContext.getUser() is unstubbed → null, so GoAccountResolver.currentAccountEmail()
+        // short-circuits to null without ever touching the DAL.
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertFalse(result.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+            flags.verify(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+                    argThat(ctx -> ctx.getTargetingKey() == null)));
         }
     }
 

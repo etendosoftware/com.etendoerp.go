@@ -3,7 +3,7 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Se ejecuta con -Pcell=ventas o -Pcell=compras.
 
-# --- con mocks (42)
+# --- con mocks (44)
 com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerTest
 com.etendoerp.go.schemaforge.AbstractLegacyInvoiceActionHandlerTest
 com.etendoerp.go.schemaforge.AbstractOrderHeaderHandlerTest
@@ -13,11 +13,13 @@ com.etendoerp.go.schemaforge.CompletedInvoiceWriteFenceTest
 com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerLegacyMethodsTest
 com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerTest
 com.etendoerp.go.schemaforge.DiscountLineFilterTest
+com.etendoerp.go.schemaforge.DocumentAvailabilityTest
 com.etendoerp.go.schemaforge.DocumentListTotalsTest
 com.etendoerp.go.schemaforge.FollowUpActionHandlerTest
 com.etendoerp.go.schemaforge.FollowUpDocumentServiceTest
 com.etendoerp.go.schemaforge.FollowUpInputsTest
 com.etendoerp.go.schemaforge.FollowUpSupportTest
+com.etendoerp.go.schemaforge.GoodsPostingContractsTest
 com.etendoerp.go.schemaforge.InOutFollowUpCreatorTest
 com.etendoerp.go.schemaforge.InOutLineFromOrderFactoryTest
 com.etendoerp.go.schemaforge.InOutTargetBuilderTest
@@ -38,7 +40,6 @@ com.etendoerp.go.schemaforge.LineAmountSupportTest
 com.etendoerp.go.schemaforge.MultiDocumentInvoiceSupportTest
 com.etendoerp.go.schemaforge.NeoCloneRecordHandlerTest
 com.etendoerp.go.schemaforge.NeoInvoiceSupportTest
-com.etendoerp.go.schemaforge.OrderCurrencyPriceListGuardTest
 com.etendoerp.go.schemaforge.OrderDocActionSupportTest
 com.etendoerp.go.schemaforge.OrderLineDiscountSupportTest
 com.etendoerp.go.schemaforge.OrderLineHandlerTest
@@ -47,12 +48,13 @@ com.etendoerp.go.schemaforge.ReturnLineQuantityPolicyTest
 com.etendoerp.go.schemaforge.TotalDiscountServiceTest
 com.etendoerp.go.schemaforge.util.DocumentStatusGuardTest
 
-# --- integración (BD) (7)
+# --- integración (BD) (8)
 com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest
 com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest
 com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest
 com.etendoerp.go.schemaforge.DocumentListTotalsIntegrationTest
 com.etendoerp.go.schemaforge.InOutInvoiceLinksPartialReceiptIntegrationTest
 com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest
+com.etendoerp.go.schemaforge.OrderDocumentAvailabilityIntegrationTest
 com.etendoerp.go.schemaforge.ReturnLineQuantitySignIntegrationTest
 

@@ -22,6 +22,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 
@@ -44,6 +45,10 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Region;
 
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
+
 /**
  * NeoHandler for the {@code locationAddress} entity in the {@code contacts} spec.
  *
@@ -61,9 +66,12 @@ import org.openbravo.model.common.geography.Region;
  * </ul>
  *
  * <p>Registered via {@code JAVA_QUALIFIER = 'contactsLocationAddressHandler'} on the
- * ETGO_SF_ENTITY record for {@code locationAddress} in the {@code contacts} spec.
+ * ETGO_SF_ENTITY record for {@code locationAddress} in the {@code contacts} spec, and (ETP-5806)
+ * also via {@link NeoExtension}, resolved first — see the annotation javadoc. Both bindings name
+ * this same class, so {@code NeoExtensionIndex.warnOnQualifierDisagreement} never fires for it.
  */
 @Named("contactsLocationAddressHandler")
+@NeoExtension(spec = "contacts", entity = "locationAddress")
 public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ContactsLocationAddressHandler.class);
@@ -76,6 +84,31 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_ADDRESS_LINE2 = "addressLine2";
   private static final String FIELD_CITY_NAME = "cityName";
   private static final String FIELD_POSTAL_CODE = "postalCode";
+  /**
+   * ETP-5806 — structured SEPA address fields, backed by {@code org.openbravo.sepa.iso20022}'s
+   * typed {@code Location} getters/setters (see {@link #applyGeoLocFields}).
+   */
+  private static final String FIELD_STREET_NAME = "streetName";
+  private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
+  private static final String FIELD_BUILDING_NAME = "buildingName";
+  /**
+   * ETP-5806 follow-up — every spelling of one logical structured-address field a caller can
+   * address it by, in precedence order: the published name first, then the DAL property name,
+   * then the raw AD column name. Mirrors {@code BpLocationHandler#KEYS_STREET_NAME} and its
+   * siblings. Needed here specifically because this handler owns its own body parsing end to
+   * end — {@code handle()} short-circuits generic CRUD entirely and never calls
+   * {@code McpWriteRequestSupport#resolveProperty}, which is what tolerates a raw-column spelling
+   * for most entities — so without this alias list a raw-column or DAL-property spelling was
+   * silently dropped instead of being validated and persisted.
+   */
+  private static final List<String> KEYS_STREET_NAME = List.of(FIELD_STREET_NAME,
+      org.openbravo.model.common.geography.Location.PROPERTY_OBSEPASTREETNAME, "EM_OBSEPA_StrtNm");
+  private static final List<String> KEYS_BUILDING_NUMBER = List.of(FIELD_BUILDING_NUMBER,
+      org.openbravo.model.common.geography.Location.PROPERTY_OBSEPABUILDINGNUMBER,
+      "EM_OBSEPA_BldgNb");
+  private static final List<String> KEYS_BUILDING_NAME = List.of(FIELD_BUILDING_NAME,
+      org.openbravo.model.common.geography.Location.PROPERTY_OBSEPABUILDINGNAME,
+      "EM_OBSEPA_BldgNm");
   /** FK to an existing C_Location, for the "reuse" create mode. See {@link #handleCreate}. */
   private static final String FIELD_LOCATION_ADDRESS = "locationAddress";
   /** Free-text region, resolved server-side against the payload's own country. See {@link #resolveRegionByName}. */
@@ -148,6 +181,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    */
   private NeoResponse handleCreate(NeoContext ctx) throws Exception {
     JSONObject body = ctx.getRequestBody();
+    // ETP-5806 — resolved ONCE per request and threaded through validation, the write mapping and
+    // the response shape, so all three answer for the same account (and the account lookup is not
+    // repeated 4 times on one create). No ordering trap: this runs before the admin-mode block
+    // below, and NEO authenticates before dispatch anyway (see BpLocationHandler#handle).
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
     String bpId = body != null ? body.optString(FIELD_BUSINESS_PARTNER, null) : null;
     if (StringUtils.isBlank(bpId) && ctx.getQueryParams() != null) {
       bpId = ctx.getQueryParams().get("parentId");
@@ -158,7 +197,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
     String locationAddressId = nullIfEmpty(body.optString(FIELD_LOCATION_ADDRESS, null));
     String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
-    NeoResponse rejected = rejectUnusableCreatePayload(body, locationAddressId, countryId);
+    NeoResponse rejected = rejectUnusableCreatePayload(body, locationAddressId, countryId,
+        structuredAddressEnabled);
     if (rejected != null) {
       return rejected;
     }
@@ -206,7 +246,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         geoLoc.setClient(bp.getClient());
         geoLoc.setOrganization(bp.getOrganization());
         geoLoc.setActive(Boolean.TRUE);
-        applyGeoLocFields(body, geoLoc);
+        applyGeoLocFields(body, geoLoc, structuredAddressEnabled);
         OBDal.getInstance().save(geoLoc);
         effectiveCountryId = countryId;
       }
@@ -234,7 +274,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       OBDal.getInstance().flush();
 
       // Build the response record and optionally inject a tax-key warning message
-      JSONObject locationJson = buildRecord(bpLoc, geoLoc);
+      JSONObject locationJson = buildRecord(bpLoc, geoLoc, structuredAddressEnabled);
       checkAndAutoSetTaxKey(locationJson, bpId, effectiveCountryId, preSaveKey);
       return wrapRecord(locationJson, 201);
     } finally {
@@ -261,18 +301,67 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    *
    * <p>Both modes in the same body is refused rather than guessed at: which one would win is not
    * a rule any caller could rely on.
+   *
+   * <p>ETP-5806 — Mode B additionally requires {@code streetName}, {@code buildingNumber} and
+   * {@code cityName} (alongside the pre-existing {@code country} check), a product decision
+   * stricter than Classic (where the 3 SEPA fields are optional): Street, Number, City and Country
+   * are mandatory for any address Etendo Go itself composes, on every channel (REST and MCP reach
+   * this same method). Mode A (reuse) is unaffected — the reused {@code C_Location} is trusted as
+   * already valid.
    */
   private static NeoResponse rejectUnusableCreatePayload(JSONObject body, String locationAddressId,
-      String countryId) {
+      String countryId, boolean structuredAddressEnabled) {
     if (locationAddressId != null && hasRawAddressFields(body)) {
       return NeoResponse.error(400,
           "Ambiguous create: send either locationAddress (to reuse an existing C_Location) or "
               + "raw address fields (country, addressLine1, ...), not both.");
     }
-    if (locationAddressId == null && countryId == null) {
-      return NeoResponse.error(400, "Missing required field: country (C_Country_ID)");
+    if (locationAddressId != null) {
+      return null;
+    }
+    // ETP-5806 — `structured-address-for-sepa` off FOR THIS ACCOUNT: nothing to validate for
+    // fields that do not exist on the wire. Falls back to the pre-ETP-5806 rule, where country was
+    // the only mandatory one and the address line was never enforced server side, matching the
+    // original Mode B check before this feature existed.
+    if (!structuredAddressEnabled) {
+      return countryId == null ? NeoResponse.error(400, "Missing required field: country (C_Country_ID)") : null;
+    }
+    List<String> missing = StructuredAddressComposer.missingMandatoryFields(
+        readAlias(body, KEYS_STREET_NAME),
+        readAlias(body, KEYS_BUILDING_NUMBER),
+        nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
+        countryId);
+    if (!missing.isEmpty()) {
+      return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+    }
+    NeoResponse tooLong = rejectOversizedFields(body, structuredAddressEnabled);
+    if (tooLong != null) {
+      return tooLong;
     }
     return null;
+  }
+
+  /**
+   * The 400 for a body whose structured address fields overflow their DB column (see
+   * {@link StructuredAddressComposer#fieldsExceedingMaxLength}), or {@code null} when none do.
+   * Shared by create and update so a too-long value is rejected cleanly on both instead of
+   * reaching {@code OBDal.flush()} as a raw data-truncation SQL exception (a bare 500).
+   */
+  private static NeoResponse rejectOversizedFields(JSONObject body,
+      boolean structuredAddressEnabled) {
+    // ETP-5806 — fields that do not exist on the wire while the flag is off for this account
+    // cannot overflow.
+    if (!structuredAddressEnabled) {
+      return null;
+    }
+    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
+        readAlias(body, KEYS_STREET_NAME),
+        readAlias(body, KEYS_BUILDING_NUMBER),
+        readAlias(body, KEYS_BUILDING_NAME));
+    if (tooLong.isEmpty()) {
+      return null;
+    }
+    return NeoResponse.error(400, "Field(s) exceed maximum length: " + String.join(", ", tooLong));
   }
 
   /** The C_Country_ID of {@code geoLoc}, or {@code null} when it carries no country. */
@@ -285,6 +374,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private NeoResponse handleUpdate(NeoContext ctx) throws Exception {
     JSONObject body = ctx.getRequestBody();
     String bplId = ctx.getRecordId();
+    // ETP-5806 — resolved before the admin-mode block, for the same reasons as handleCreate.
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
 
     OBContext.setAdminMode(true);
     try {
@@ -301,40 +393,86 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
       // Capture country and pre-save key before applying changes and flushing
       String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+      // ETP-5806 — same mandatory rule as create (Mode B), applied the same way on every update:
+      // an update always resends the full address (see applyGeoLocFields, which overwrites
+      // address1/address2/city/postal unconditionally), so there is no partial-update shape here
+      // to spare. Country falls back to the existing record's own country when the body omits it,
+      // matching applyGeoLocFields' own set-if-provided semantics for that one field.
+      String effectiveCountryForValidation =
+          countryId != null ? countryId : countryIdOf(geoLoc);
+      NeoResponse validationError = validateUpdateMandatoryFields(body,
+          effectiveCountryForValidation, structuredAddressEnabled);
+      if (validationError != null) {
+        return validationError;
+      }
+      NeoResponse tooLong = rejectOversizedFields(body, structuredAddressEnabled);
+      if (tooLong != null) {
+        return tooLong;
+      }
       String bpId = bpLoc.getBusinessPartner() != null ? bpLoc.getBusinessPartner().getId() : null;
       String preSaveKey = (countryId != null && bpId != null) ? queryBPKey(bpId) : null;
 
-      applyGeoLocFields(body, geoLoc);
+      applyGeoLocFields(body, geoLoc, structuredAddressEnabled);
 
       String nameVal = nullIfEmpty(body.optString("name", null));
       if (nameVal != null) {
         bpLoc.setName(nameVal);
       }
-      if (body.has(FIELD_SHIP_TO_ADDRESS)) {
-        bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS,
-            Boolean.TRUE.equals(bpLoc.isShipToAddress())));
-      }
-      if (body.has(FIELD_INVOICE_TO_ADDRESS)) {
-        bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS,
-            Boolean.TRUE.equals(bpLoc.isInvoiceToAddress())));
-      }
-      // Same gap as create, and the same set-if-provided semantics as the two flags above:
-      // this handler never read taxLocation at all, so any caller sending it on an update was
-      // silently ignored just like on create. `body.has(...)`, not a bare boolField call, so an
-      // update that omits it keeps whatever the record already had instead of resetting it.
-      if (body.has(FIELD_TAX_LOCATION)) {
-        bpLoc.setTaxLocation(boolField(body, FIELD_TAX_LOCATION,
-            Boolean.TRUE.equals(bpLoc.isTaxLocation())));
-      }
+      applyLocationFlags(body, bpLoc);
 
       OBDal.getInstance().flush();
 
       // Build the response record and optionally inject a tax-key warning message
-      JSONObject locationJson = buildRecord(bpLoc, geoLoc);
+      JSONObject locationJson = buildRecord(bpLoc, geoLoc, structuredAddressEnabled);
       checkAndAutoSetTaxKey(locationJson, bpId, countryId, preSaveKey);
       return wrapRecord(locationJson, 200);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  // ETP-5806 — mandatory-field validation for an update, same rule as create (Mode B): an update
+  // always resends the full address (see applyGeoLocFields, which overwrites address1/address2/
+  // city/postal unconditionally), so there is no partial-update shape here to spare. Country falls
+  // back to the existing record's own country when the body omits it, matching applyGeoLocFields'
+  // own set-if-provided semantics for that one field. With `structured-address-for-sepa` off,
+  // nothing on the wire needs validating beyond the pre-ETP-5806 rule (country only).
+  private NeoResponse validateUpdateMandatoryFields(JSONObject body,
+      String effectiveCountryForValidation, boolean structuredAddressEnabled) {
+    if (!structuredAddressEnabled) {
+      if (effectiveCountryForValidation == null) {
+        return NeoResponse.error(400, "Missing required field: country (C_Country_ID)");
+      }
+      return null;
+    }
+    List<String> missing = StructuredAddressComposer.missingMandatoryFields(
+        readAlias(body, KEYS_STREET_NAME),
+        readAlias(body, KEYS_BUILDING_NUMBER),
+        nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
+        effectiveCountryForValidation);
+    if (!missing.isEmpty()) {
+      return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+    }
+    return null;
+  }
+
+  // Same gap as create, and the same set-if-provided semantics for all three flags: this handler
+  // never read taxLocation at all, so any caller sending it on an update was silently ignored just
+  // like on create. `body.has(...)`, not a bare boolField call, so an update that omits a flag
+  // keeps whatever the record already had instead of resetting it.
+  private static void applyLocationFlags(JSONObject body,
+      org.openbravo.model.common.businesspartner.Location bpLoc) {
+    if (body.has(FIELD_SHIP_TO_ADDRESS)) {
+      bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS,
+          Boolean.TRUE.equals(bpLoc.isShipToAddress())));
+    }
+    if (body.has(FIELD_INVOICE_TO_ADDRESS)) {
+      bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS,
+          Boolean.TRUE.equals(bpLoc.isInvoiceToAddress())));
+    }
+    if (body.has(FIELD_TAX_LOCATION)) {
+      bpLoc.setTaxLocation(boolField(body, FIELD_TAX_LOCATION,
+          Boolean.TRUE.equals(bpLoc.isTaxLocation())));
     }
   }
 
@@ -351,6 +489,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return null;
     }
 
+    // ETP-5806 — the read path is gated for the same account as the write path, so a targeted
+    // account that can save the 3 fields can also read them back. Resolved here rather than in
+    // afterHandle() so a plain GET list (enrichListDisplayNames, which needs no flag) never pays
+    // for the account lookup, and before the admin-mode block below on the same principle as
+    // SFWindowAccessMap: resolve the caller's account while the caller is still the context.
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
+
     OBContext.setAdminMode(true);
     try {
       org.openbravo.model.common.geography.Location geoLoc =
@@ -358,7 +504,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       if (geoLoc == null) {
         return null;
       }
-      putGeoLocFields(locationJson, geoLoc);
+      putGeoLocFields(locationJson, geoLoc, structuredAddressEnabled);
       return NeoResponse.ok(ctx.getPreviousResult().getBody());
     } finally {
       OBContext.restorePreviousMode();
@@ -443,19 +589,59 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    * exactly the reuse mode, not an ambiguous request.
    */
   private static boolean hasRawAddressFields(JSONObject body) {
+    // ETP-5806 follow-up — the 3 structured fields are checked by EVERY spelling (readAlias),
+    // not just the published one: a reuse body that sends the raw column or DAL property
+    // spelling alongside `locationAddress` is exactly as ambiguous as one that sends the
+    // published spelling, and must be refused the same way.
     return nullIfEmpty(body.optString(FIELD_ADDRESS_LINE1, null)) != null
         || nullIfEmpty(body.optString(FIELD_ADDRESS_LINE2, null)) != null
         || nullIfEmpty(body.optString(FIELD_CITY_NAME, null)) != null
         || nullIfEmpty(body.optString(FIELD_POSTAL_CODE, null)) != null
         || nullIfEmpty(body.optString(FIELD_COUNTRY, null)) != null
         || nullIfEmpty(body.optString(FIELD_REGION, null)) != null
-        || nullIfEmpty(body.optString(FIELD_REGION_NAME, null)) != null;
+        || nullIfEmpty(body.optString(FIELD_REGION_NAME, null)) != null
+        || readAlias(body, KEYS_STREET_NAME) != null
+        || readAlias(body, KEYS_BUILDING_NUMBER) != null
+        || readAlias(body, KEYS_BUILDING_NAME) != null;
   }
 
   private static void applyGeoLocFields(JSONObject body,
-      org.openbravo.model.common.geography.Location geoLoc) throws Exception {
-    geoLoc.setAddressLine1(nullIfEmpty(body.optString(FIELD_ADDRESS_LINE1, null)));
-    geoLoc.setAddressLine2(nullIfEmpty(body.optString(FIELD_ADDRESS_LINE2, null)));
+      org.openbravo.model.common.geography.Location geoLoc, boolean structuredAddressEnabled)
+      throws Exception {
+    // ETP-5806 — `structured-address-for-sepa` backend-only flag (TTL 2026-11-15). While off, the 3
+    // structured fields are ignored entirely: never read off the body (so a stray value from a
+    // stale client is dropped, not persisted and not validated) and never written, so a record
+    // that already has structured data from before the flag was switched off keeps it untouched
+    // instead of being clobbered by this write's absence of the fields. Resolved per account in
+    // handle()'s create/update entry points and threaded here.
+    String streetName = structuredAddressEnabled ? readAlias(body, KEYS_STREET_NAME) : null;
+    String buildingNumber = structuredAddressEnabled
+        ? readAlias(body, KEYS_BUILDING_NUMBER) : null;
+    String buildingName = structuredAddressEnabled ? readAlias(body, KEYS_BUILDING_NAME) : null;
+    if (structuredAddressEnabled) {
+      geoLoc.setOBSEPAStreetName(streetName);
+      geoLoc.setOBSEPABuildingNumber(buildingNumber);
+      geoLoc.setOBSEPABuildingName(buildingName);
+    }
+
+    // ETP-5806 — Address1/Address2 are no longer user-editable in the UI; they are computed here
+    // from the structured fields, replicating Classic's own rule: the lines are (re)computed only
+    // when a street is present (StringUtils.isNotBlank(data.strtNm) in LocationSEPA.getEditVariables),
+    // so a legacy address with no structured breakdown that is merely READ (never re-saved with a
+    // street) keeps its original free-text Address1/Address2 untouched. Once Street+Number become
+    // mandatory for every NEW save (rejectUnusableCreatePayload / the update check above), this
+    // branch is the one every fresh save actually takes; the raw addressLine1/addressLine2 the
+    // client may still send are deliberately ignored in that case — the composed value wins.
+    // With the flag off, `streetName` is always null here, so this always takes the legacy branch.
+    if (streetName != null) {
+      ComposedAddress composed =
+          StructuredAddressComposer.composeAddressLines(streetName, buildingNumber, buildingName);
+      geoLoc.setAddressLine1(composed.getAddress1());
+      geoLoc.setAddressLine2(composed.getAddress2());
+    } else {
+      geoLoc.setAddressLine1(nullIfEmpty(body.optString(FIELD_ADDRESS_LINE1, null)));
+      geoLoc.setAddressLine2(nullIfEmpty(body.optString(FIELD_ADDRESS_LINE2, null)));
+    }
     geoLoc.setCityName(nullIfEmpty(body.optString(FIELD_CITY_NAME, null)));
     geoLoc.setPostalCode(nullIfEmpty(body.optString(FIELD_POSTAL_CODE, null)));
 
@@ -675,7 +861,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   }
 
   private static void putGeoLocFields(JSONObject locationJson,
-      org.openbravo.model.common.geography.Location geoLoc) throws Exception {
+      org.openbravo.model.common.geography.Location geoLoc, boolean structuredAddressEnabled)
+      throws Exception {
     locationJson.put(FIELD_ADDRESS_LINE1, geoLoc.getAddressLine1() != null ? geoLoc.getAddressLine1() : JSONObject.NULL);
     locationJson.put(FIELD_ADDRESS_LINE2, geoLoc.getAddressLine2() != null ? geoLoc.getAddressLine2() : JSONObject.NULL);
     locationJson.put(FIELD_CITY_NAME,     geoLoc.getCityName()     != null ? geoLoc.getCityName()     : JSONObject.NULL);
@@ -710,17 +897,33 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // was added to end.
     locationJson.put(FIELD_REGION_NAME,
         geoLoc.getRegionName() != null ? geoLoc.getRegionName() : JSONObject.NULL);
+
+    // ETP-5806 — structured SEPA address fields, so the modal can pre-populate Street/Number/
+    // Building Name and so an MCP read sees them too (same response shape on every channel).
+    // Gated behind `structured-address-for-sepa` (backend-only flag, TTL 2026-11-15): while off,
+    // the 3 keys are omitted from the response entirely — not nulled, not present-and-empty —
+    // matching the plan's "hide data, not just a UI entry point" requirement.
+    if (structuredAddressEnabled) {
+      putOrNull(locationJson, FIELD_STREET_NAME, geoLoc.getOBSEPAStreetName());
+      putOrNull(locationJson, FIELD_BUILDING_NUMBER, geoLoc.getOBSEPABuildingNumber());
+      putOrNull(locationJson, FIELD_BUILDING_NAME, geoLoc.getOBSEPABuildingName());
+    }
+  }
+
+  private static void putOrNull(JSONObject json, String key, String value) throws Exception {
+    json.put(key, value != null ? value : JSONObject.NULL);
   }
 
   private static JSONObject buildRecord(org.openbravo.model.common.businesspartner.Location bpLoc,
-      org.openbravo.model.common.geography.Location geoLoc) throws Exception {
+      org.openbravo.model.common.geography.Location geoLoc, boolean structuredAddressEnabled)
+      throws Exception {
     JSONObject locationJson = new JSONObject();
     locationJson.put("id",              bpLoc.getId());
     locationJson.put("locationAddress", geoLoc.getId());
     locationJson.put("name",            bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
     locationJson.put(FIELD_SHIP_TO_ADDRESS,    Boolean.TRUE.equals(bpLoc.isShipToAddress()) ? "Y" : "N");
     locationJson.put(FIELD_INVOICE_TO_ADDRESS, Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
-    putGeoLocFields(locationJson, geoLoc);
+    putGeoLocFields(locationJson, geoLoc, structuredAddressEnabled);
     return locationJson;
   }
 
@@ -891,6 +1094,53 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static String nullIfEmpty(String s) {
     return (s == null || s.isEmpty() || "null".equals(s)) ? null : s;
+  }
+
+  /**
+   * The key {@code body} actually carries for {@code alias}, matched exactly first and then
+   * ignoring case, or {@code null} when it carries neither. Mirrors
+   * {@code BpLocationHandler#matchingKey}.
+   *
+   * <p>Case-insensitively because AD column resolution is
+   * ({@code Entity#getPropertyByColumnName}), so a caller may legitimately send
+   * {@code em_obsepa_strtnm}. JSON itself is case-sensitive, so the caller's own spelling is what
+   * gets read — never a normalised one.
+   */
+  private static String matchingKey(JSONObject body, String alias) {
+    if (body.has(alias)) {
+      return alias;
+    }
+    // Jettison's keys() is a raw Iterator; read it as Object and convert, rather than casting to
+    // Iterator<String> and taking an unchecked warning for it.
+    Iterator<?> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      if (key.equalsIgnoreCase(alias)) {
+        return key;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * ETP-5806 follow-up — the resolved value of the first alias {@code body} carries, in
+   * {@code aliases}' own precedence order (so the published spelling wins when more than one
+   * spelling is present in the same body), or {@code null} when {@code body} carries none of
+   * them. See {@link #KEYS_STREET_NAME} for the full rationale.
+   *
+   * @param aliases every spelling of the field, in precedence order
+   */
+  private static String readAlias(JSONObject body, List<String> aliases) {
+    if (body == null) {
+      return null;
+    }
+    for (String alias : aliases) {
+      String present = matchingKey(body, alias);
+      if (present != null) {
+        return nullIfEmpty(body.optString(present, null));
+      }
+    }
+    return null;
   }
 
   private static boolean boolField(JSONObject body, String key, boolean defaultVal) {

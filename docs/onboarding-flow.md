@@ -15,6 +15,18 @@ transactional email best-effort. Email delivery failure is audited by the
 transactional email safety store and does not roll back the already committed
 environment.
 
+### Pre-tenant capability bootstrap (ETP-5806)
+
+`GET /sws/go/session`'s response includes a `capabilities` object (`EtendoGoJwtServlet#buildSessionCapabilities`)
+alongside the environment/role-list payload, for backend-only flags that must be known before any
+tenant or role exists — the signup wizard runs ahead of both, so it cannot use the role-scoped
+`capabilities` map `SFWindowAccessMap` serves elsewhere (§8c of `docs/neo-headless.md`). Today it
+carries a single key, `structuredAddressForSepa` (`GoFeatureFlags.isEnabled(FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ...)`,
+environment-wide, no per-account targeting), which the wizard's Company step reads to decide
+whether to render the structured Street/Number/Building Name/City block or the legacy single
+address field. Add future onboarding-time backend-only flags to this same object rather than
+inventing a second capabilities endpoint.
+
 Client resolution never uses the company name (ETP-5548). The classic path
 creates the client under a **provisioning name** (`ProvisioningClientName`,
 `PEND-<32 hex>`: the checkout `requestId` without hyphens for a paid attempt,
@@ -251,6 +263,31 @@ tenant type by `OnboardingInitialPeriodStateService`, after the onboarding commi
   (search the logs for `ETP-5577 initial period state failed`). The next login of any user of the
   environment retries it.
 
+**Default contact category, after the commit (ETP-5791).** The GOClient dataset
+(`referencedata/sampledata/GOClient/C_BP_GROUP.xml`) ships four contact categories with their
+contact types (`EM_ETGO_ISCUSTOMER`/`EM_ETGO_ISVENDOR`): Proveedor (vendor), Cliente (customer,
+**the dataset default**), Acreedor (vendor) and Cliente/Proveedor (both). With the
+`contact-category-type` feature flag on, `OnboardingDefaultContactCategoryService` makes
+Cliente/Proveedor the tenant's only default category; with it off nothing runs and the tenant keeps
+Cliente, as before ETP-5791.
+
+- **Where.** `EtendoGoJwtServlet.applyDefaultContactCategoryBestEffort`, right after the initial
+  period state, for pooled and classic onboardings alike. The flag is per account, and it is
+  evaluated for the **account the tenant is handed to** (`ContactTypeRules.isEnabled(accountEmail,
+  clientId)` — the hand-over runs as System, so the current user would target nobody), **at hand-over**, never when
+  the pool fills: a pool tenant built with the flag off and claimed with it on gets the new default.
+- **How the category is found.** GOClient id `E075D97EFB264D028E8652E5CA057518` through the
+  import's `AD_REF_DATA_LOADED` mapping, falling back to `Value = 'Cliente/Proveedor'` within the
+  tenant; never by display name. Every other default category of the tenant is un-defaulted (the
+  contact's AD default takes `MAX(c_bp_group_id)` among defaults, so two would be arbitrary).
+- **Idempotent and best effort.** Only rows whose `IsDefault` changes are written. A tenant
+  without the category (a pool tenant built from an older dataset, a renamed or deleted category)
+  logs `ETP-5791 client <id> has no 'Cliente/Proveedor' contact category` and is skipped. Own
+  transaction; any failure rolls back only this step and never fails the onboarding.
+- **Existing tenants.** Tenants created while the flag was off keep Cliente as default when the
+  flag is later turned on — the same "existing data is not re-derived" rule the ticket applies to
+  contacts. No data-fix exists or is needed.
+
 **Demo trial window (ETP-5575).** A demo's trial lasts `etendo.go.demo.trial.days` /
 `ETGO_DEMO_TRIAL_DAYS` (default 14, `TenantEnvironmentLifecycleService.DEFAULT_TRIAL_DAYS`), so a signup at the end of a month must be able to post the
 next month. `openDemoTrialWindow` opens every never-opened period whose start is on or before
@@ -306,6 +343,23 @@ invoice. Runs under the admin user's execution context.
 Step 7. Wires the org's fiscal/address information collected on the signup
 form (country, fiscal ID, address) onto the newly created `AD_Org`/legal
 entity.
+
+**Structured address block (ETP-5806), gated behind `structured-address-for-sepa`.** This
+backend-only flag (TTL 2026-11-15, see "Pre-tenant capability bootstrap" in the Overview above and
+`docs/feature-flags-and-tenant-upgrade.md` §1) controls
+whether the signup wizard's Company step collects Street/Number/Building Name/City instead of a
+single free-text address line. **While off** (default pre-launch), `address` is the only field
+read and `createLocation` populates `Address1` from it exactly as before this ticket — the 3
+structured fields are never read even if a stale client still sends them. **While on**, the wizard
+also sends `streetName`/`buildingNumber`/`buildingName`/`city`; `streetName`/`buildingNumber`/`city`
+are mandatory together **only once the user has started filling the block in**
+(`EtendoGoJwtServlet#validateStructuredAddressBlock`) — a blank block is still accepted, matching
+the step's minimalist, fully-optional-address design. `OnboardingOrgInfoService#applyAddressFields`
+then prioritizes the structured fields over the legacy `address` when both are present, computing
+`addressLine1`/`addressLine2` via `StructuredAddressComposer` (the same algorithm every other
+address popup uses) and persisting the 3 raw columns alongside them. `OnboardingWarehouseAddressService`
+copies the 3 structured columns too, when it mirrors the org's fiscal address onto the default
+warehouse — see `OnboardingWarehouseAddressService`'s `copyLocationFields`.
 
 ### `OnboardingCostingScheduleService`
 Step 8 (ETP-5190; cadence lowered to 30 s by ETP-5370). **Non-fatal**, like
@@ -642,15 +696,22 @@ skipped, not waited for), and a failure anywhere later rolls the claim back and 
   (ETP-5638). The other derived names fit the 40-character company name whole;
 - admin `AD_User`: username (`buildClientUsername`), name (full name, else username),
   description, email, password hash, **active**;
-- the signup address onto the pooled fiscal location's street line.
+- **not** the address (ETP-5806 follow-up). It used to be written here, from the legacy free-text
+  `address` alone, because `OnboardingOrgInfoService` refused to touch a location that already
+  existed — and a pooled tenant always has one, created empty by its pool build. That made the
+  claim the only address writer on the pooled path, and it knew nothing about the structured SEPA
+  fields or the city, so a signup that filled them lost the whole address silently.
+  `ensureOrgInfoLocation` now completes an *existing but still blank* location instead (it never
+  overwrites a populated one), so classic and pooled persist the address through the same code.
 
 After it, the servlet runs its existing calls: owner marking (`resolveAdminContextData`), the paid
-upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id) and
-`warehouseAddress` (re-copies the fiscal address) — the only chain steps that consume signup
-data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
+upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id **and the whole
+address**, see above) and `warehouseAddress` (re-copies the fiscal address) — the only chain steps
+that consume signup data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
 commit, the initial period state (ETP-5577: a demo's trial window, re-evaluated for a pooled demo
 built in an earlier month, or a productive tenant's never-opened signup year; see
-`OnboardingPeriodControlService`), the `environment-ready` email and costing activation. The stream skips the `organization`
+`OnboardingPeriodControlService`), the default contact category (ETP-5791, flag
+`contact-category-type`, evaluated at claim time), the `environment-ready` email and costing activation. The stream skips the `organization`
 and `dataset`…`baseline` steps.
 
 ### Performance observability (ETP-5500)

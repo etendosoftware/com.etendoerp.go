@@ -320,6 +320,61 @@ public class NeoBatchScopeTest {
     }
   }
 
+  /** Outside a batch the write already committed: the after-commit action runs at once. */
+  @Test
+  public void testRunAfterCommitRunsImmediatelyOutsideABatch() {
+    AtomicInteger runs = new AtomicInteger();
+
+    NeoBatchScope.runAfterCommit(runs::incrementAndGet);
+
+    assertEquals(1, runs.get());
+  }
+
+  /**
+   * Inside a batch the action waits for the commit, runs once then, and a failing action neither
+   * propagates nor stops the next one.
+   */
+  @Test
+  public void testRunAfterCommitIsQueuedInsideABatchAndRunsOnceAfterTheCommit() {
+    AtomicInteger runs = new AtomicInteger();
+    NeoBatchScope previous = NeoBatchScope.open(false);
+    try {
+      NeoBatchScope.runAfterCommit(() -> {
+        throw new IllegalStateException("telemetry down");
+      });
+      NeoBatchScope.runAfterCommit(runs::incrementAndGet);
+      assertEquals("nothing runs before the commit", 0, runs.get());
+
+      NeoBatchScope.runAfterCommitActions();
+      assertEquals(1, runs.get());
+
+      NeoBatchScope.runAfterCommitActions();
+      assertEquals("the queue is drained by the commit", 1, runs.get());
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+  }
+
+  /** A batch that rolls back closes its scope without the commit hook: its actions never run. */
+  @Test
+  public void testRunAfterCommitActionsAreDroppedWhenTheBatchRollsBack() {
+    AtomicInteger runs = new AtomicInteger();
+    NeoBatchScope previous = NeoBatchScope.open(false);
+    try {
+      NeoBatchScope.runAfterCommit(runs::incrementAndGet);
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+
+    NeoBatchScope next = NeoBatchScope.open(false);
+    try {
+      NeoBatchScope.runAfterCommitActions();
+    } finally {
+      NeoBatchScope.close(next);
+    }
+    assertEquals("a rolled-back batch leaks nothing into the next one", 0, runs.get());
+  }
+
   @Test
   public void testCurrentMemoStatsIsEmptyOutsideABatch() {
     assertTrue(NeoBatchScope.currentMemoStats().isEmpty());

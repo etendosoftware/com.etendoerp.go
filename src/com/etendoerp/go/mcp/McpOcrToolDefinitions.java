@@ -41,9 +41,9 @@ final class McpOcrToolDefinitions {
 
   /** Description of {@link McpConstants#TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD}; a test pins it. */
   static final String REQUEST_UPLOAD_DESCRIPTION =
-      "First step of creating a purchase invoice FROM a supplier's PDF, as the application's "
-      + "\"Subir factura\" does. Returns a single-use URL to upload the PDF to, plus a ready-to-run "
-      + "curl command: the file bytes never pass through the conversation. Only a PDF, 10 MB at "
+      "First step of creating a purchase invoice FROM a supplier's document (a PDF or a JPG, PNG or WEBP image), as the application's "
+      + "\"Subir factura\" does. Returns a single-use URL to upload the file to, plus a ready-to-run "
+      + "curl command: the file bytes never pass through the conversation. Only a PDF or a JPG, PNG or WEBP image, 10 MB at "
       + "most. The URL works once and expires in 10 minutes; the uploaded file is kept for 60 "
       + "minutes under the returned stagedDocumentId. Nothing is read and nothing is created by "
       + "this call: next is " + McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT + ". Requires write "
@@ -51,7 +51,7 @@ final class McpOcrToolDefinitions {
 
   /** Description of {@link McpConstants#TOOL_NEO_EXTRACT_INVOICE_DOCUMENT}; a test pins it. */
   static final String EXTRACT_DESCRIPTION =
-      "Read a staged supplier-invoice PDF with the application's own extraction (\"Extraer y "
+      "Read a staged supplier-invoice document (PDF or image) with the application's own extraction (\"Extraer y "
       + "completar\") and return what was detected plus every decision the USER must take. This "
       + "sends the document to an external AI model (it costs money and takes up to ~90 seconds; "
       + "the result is cached per staged document, so asking again does not read it again). It "
@@ -92,8 +92,8 @@ final class McpOcrToolDefinitions {
   static McpToolDefinition requestUpload(List<String> offeredSpecs) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_SPEC, enumProp(McpConstants.LABEL_SPEC_NAME, offeredSpecs));
-    props.put(McpAttachmentTools.PARAM_NAME, stringProp("The PDF's file name WITH the .pdf "
-        + "extension, e.g. 'factura-proveedor.pdf'. Only letters (accents are fine), digits, "
+    props.put(McpAttachmentTools.PARAM_NAME, stringProp("The file name WITH its extension: a PDF or an image "
+        + "(pdf, jpg, jpeg, png, webp), e.g. 'factura-proveedor.pdf'. Only letters (accents are fine), digits, "
         + "spaces and . _ ( ) - are accepted."));
     return new McpToolDefinition(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD,
         REQUEST_UPLOAD_DESCRIPTION, buildObjectSchema(props,
@@ -110,11 +110,11 @@ final class McpOcrToolDefinitions {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_SPEC, enumProp(McpConstants.LABEL_SPEC_NAME, offeredSpecs));
     props.put(McpOcrTools.PARAM_STAGED_DOCUMENT_ID, stringProp("The stagedDocumentId returned by "
-        + McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD + ", after the PDF was "
+        + McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD + ", after the file was "
         + "uploaded."));
     props.put(McpOcrTools.PARAM_VENDOR_ID, stringProp("Optional. The vendor the USER chose or "
         + "created: the review is recomputed for it (address, duplicates, taxes) without reading "
-        + "the PDF again."));
+        + "the document again."));
     return new McpToolDefinition(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT,
         EXTRACT_DESCRIPTION, buildObjectSchema(props,
             List.of(McpConstants.PARAM_SPEC, McpOcrTools.PARAM_STAGED_DOCUMENT_ID)));

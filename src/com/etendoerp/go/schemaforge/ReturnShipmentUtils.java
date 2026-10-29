@@ -413,12 +413,13 @@ final class ReturnShipmentUtils {
    * can pass the user-facing POSITIVE quantity and get the same stored NEGATIVE sign. The
    * normalisation is idempotent, so a caller that already negated is not flipped back.
    */
-  static void buildAndSaveReturnLine(ShipmentInOut doc, ShipmentInOutLine sourceLine,
-      long lineNo, BigDecimal qty) {
+  static ShipmentInOutLine buildAndSaveReturnLine(ShipmentInOut doc,
+      ShipmentInOutLine sourceLine, long lineNo, BigDecimal qty) {
     ShipmentInOutLine retLine =
         NeoReturnReceiptService.createReturnLineShell(doc, sourceLine, lineNo);
     retLine.setMovementQuantity(ReturnLineQuantityPolicy.toStoredQuantity(qty));
     OBDal.getInstance().save(retLine);
+    return retLine;
   }
 
   /** One usable entry of an import request: the source line and the quantity to return. */
@@ -467,13 +468,18 @@ final class ReturnShipmentUtils {
     if (refusal != null) {
       return refusal;
     }
+    List<String> createdIds = new ArrayList<>(entries.size());
     for (ImportEntry entry : entries) {
       // ETP-5313: the stored sign is owned by ReturnLineQuantityPolicy, applied inside
       // buildAndSaveReturnLine — pass the user-facing POSITIVE quantity.
-      buildAndSaveReturnLine(returnDoc, entry.sourceLine, nextLineNo, entry.quantity);
+      createdIds.add(buildAndSaveReturnLine(returnDoc, entry.sourceLine, nextLineNo,
+          entry.quantity).getId());
       nextLineNo += 10;
     }
     OBDal.getInstance().flush();
+    // ETP-5051: the plan-quota check of the return lines this import added to the existing return
+    // (importShipmentLines / importReceiptLines), before the answer; the handlers answer a refusal.
+    NeoQuotaCreateCheck.requireAllowed(ShipmentInOutLine.ENTITY_NAME, createdIds);
     JSONObject data = new JSONObject();
     data.put("importedCount", entries.size());
     return wrapOkData(data);

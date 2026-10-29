@@ -64,6 +64,14 @@ a `fields` array is a projection list, whose entries are field names too. The er
 | `Payload` | TEXT | null on every `tool_call` row; reserved for B3 feedback reports |
 | `Status` | VARCHAR(60) | review state: `NULL` = pending, `R` = reviewed (`..._STATUS_CHK`) |
 | `Reviewed_By` | VARCHAR(60) | free-text name or handle of the reviewer; no FK, no reference |
+| `Triage_Cell` | VARCHAR(60) | feedback only: cell label the triage bot chose (`CelulaPlataforma`, …) |
+| `Triage_Assignee` | VARCHAR(60) | feedback only: GitHub login the bot assigned; `NULL` when it was not sure |
+| `Triage_Issue` | VARCHAR(200) | feedback only: URL of the public GitHub pre-ticket the bot opened |
+| `Triage_Task` | VARCHAR(60) | feedback only: key of the private Jira task the bot opened (`ETP-…`); `NULL` when it opened none |
+| `Triaged` | TIMESTAMP | feedback only: when the bot processed the row, assignee or not; `NULL` = pending |
+
+The five `Triage*` columns are written only by the external triage bot, through the
+`McpFeedbackTriage` webhook — see [Triage bot (ETP-5952)](#triage-bot-etp-5952).
 
 `Tool_Name` holds the `neo_*` tool names on rows written before the ETP-5602 deploy and the
 `etendo_*` names after it; a query over both periods must match both prefixes.
@@ -357,6 +365,107 @@ unidentified flooder is the case the limit exists for.
 
 `etendo_feedback` is read-tier (`etendo:read`): gating it behind `etendo:write` would silence exactly the
 read-only sessions most likely to get lost.
+
+## Triage bot (ETP-5952)
+
+An external bot, the bug router (`etendo-bots`, `bin/bug-router`, origin `mcp`; called `bin/bug-triage`
+before it was renamed), classifies every feedback report
+into a cell, assigns it to a person when it is sure, opens a public pre-ticket on GitHub
+(`etendo-ai`) and, optionally, a private Jira task (ETP), and records the result on the row. The
+pre-ticket carries the `ETGO_MCP_USAGE` row id, which leads back to the private detail. It polls every 15
+minutes. **This module decides nothing and calls nobody:** it exposes two webhooks and stores what
+the bot sends. How a feedback row is written (`McpServlet.recordToolCall`) is unchanged.
+
+The triage does not replace the human review: `Status`, `Reviewed_By` and `isactive` are never
+touched by either webhook, and a triaged row is still unreviewed.
+
+### The two webhooks
+
+Both are `BaseWebhookService` classes in `schemaforge/webhooks/`, registered in
+`SMFWHE_DEFINEDWEBHOOK` / `SMFWHE_DEFINEDWEBHOOK_PARAM`. The names, parameters and response keys
+below are the contract the bot consumes; change them only together with the bot.
+
+**`McpFeedbackPending`** — `GET /webhooks/McpFeedbackPending?apikey=<key>&limit=20`
+
+- `limit`: default 20, capped at 100; anything that is not a whole number of at least 1 is an
+  `error`.
+- Lists rows with `row_type = 'feedback'`, `triaged IS NULL` **and a payload**, from every client,
+  oldest `created` first. The payload condition is deliberate: a rejected or rate-limited
+  `etendo_feedback` call is a feedback row with no payload, there is nothing in it to triage, and
+  since the bot reads the oldest rows first such a row would sit at the head of the queue forever.
+- Response: `result` (a JSON array, serialized as a string, as `SFListWindows` does) and `count`.
+  Each element: `id`, `created` (ISO, DB server time), `ad_client_id`, `client` (name),
+  `tool_name`, `verb`, `target_entity`, `outcome`, `error_code`, `client_name`, `client_version`,
+  `payload` (the stored string as is), `triage_cell`, `triage_assignee`, `triage_issue`,
+  `triage_task`, `triaged`.
+- `result` is pure ASCII: every non-ASCII character is a JSON `\u` escape. `webhookevents` sends
+  the body as `application/json;charset=ISO-8859-1`, so without the escapes anything outside
+  Latin-1 (typographic quotes, arrows, emoji) would arrive as `?`. Parsing `result` as JSON
+  restores the original text.
+
+**`McpFeedbackTriage`** — `POST /webhooks/McpFeedbackTriage?apikey=<key>` with
+`Content-Type: application/json` and a JSON body `{"id", "cell", "issue", "task", "assignee"}`.
+The header matters: without it Tomcat reads the body as form data and the servlet finds it empty.
+
+- `id`, `cell`, `issue` are required; `task` and `assignee` are optional (omit them, do not send
+  an empty string). Without `task`, `Triage_Task` stays `NULL` and the row is still marked
+  triaged. A missing required parameter is refused by `webhookevents` itself, before this class
+  runs: HTTP 500 with `{"message": "Missing parameter: …"}`, not an `error` key.
+- Validated before anything is written; a failure answers `error` and writes nothing:
+  `cell` `^Celula[A-Za-z]+$`, `assignee` a GitHub login `^[A-Za-z0-9-]{1,39}$`, `issue`
+  `^https://github\.com/etendosoftware/[A-Za-z0-9._-]+/issues/\d+$`, `task` (when sent)
+  `^[A-Z][A-Z0-9]+-\d+$`, and each value within its column width.
+- One `UPDATE` sets the four `Triage_*` columns, `Triaged = now()`, `Updated = now()` and
+  `UpdatedBy` = the bot's user, conditioned on `row_type = 'feedback' AND triaged IS NULL`. A
+  triaged row is never overwritten, not even by a retry of the same call.
+- Response: `updated` = `"true"`, or `"false"` with `reason` = `already_triaged`, `not_feedback`
+  or `not_found`.
+
+**Every client.** `WebhookServiceHandler` binds the `OBContext` of the token's user and role,
+which belong to one client, so a DAL query would see that client only. Both webhooks use plain SQL
+on the request's connection, which no client filter reaches. That is the point of them, and it is
+why access has to be locked down per instance (below).
+
+**The payload is never logged.** It is agent-written text that can carry tenant data. The only log
+line is `McpFeedbackTriage`'s INFO, with the row id, the cell, the task key and whether an assignee
+was set.
+
+### Access: the bot's token only
+
+The webhook definitions ship with **no grant at all**: no `SMFWHE_DEFINEDWEBHOOK_ROLE` row and
+`ALLOW_GROUP_ACCESS = 'N'`. Unlike the `SF*` webhooks, which role `0` may call, nothing can call
+these two until an instance grants them. The bot's role, user and token are data of each instance
+and never go in sourcedata; the token is loaded by a person on the bots host and never committed.
+
+`webhookevents` authorizes a call in one of two ways (`WebhookServiceHandler.isAllowed`):
+
+- **`apikey` query parameter** → an `SMFWHE_DEFINEDWEBHOOK_TOKEN` (`ROLE_ACCESS = 'N'`) bound to one
+  `AD_USER_ROLES` row, and allowed **only** on the webhooks it has an `SMFWHE_DEFINEDWEBHOOK_ACC`
+  row for. This is the way the bot calls.
+- **Bearer JWT** → allowed when the token's role has an `SMFWHE_DEFINEDWEBHOOK_ROLE` row for the
+  webhook. `ALLOW_GROUP_ACCESS` does not gate this check (it only changes the rejection message),
+  so the only thing keeping every session of a role away from these webhooks is the absence of a
+  role row. **Never add one** for `McpFeedbackPending` or `McpFeedbackTriage`.
+
+Setting it up on an instance:
+
+1. Create a role for the bot only (e.g. *MCP Feedback Triage Bot*) with no window, process or
+   report access, and a user for it with that single role. The client does not matter to the
+   webhooks, which read every client; the System client keeps it out of every tenant's user lists.
+2. Create a webhook token (`SMFWHE_DEFINEDWEBHOOK_TOKEN`) on that user + role, with role access
+   off. Its trigger generates the API key on insert; read it from the token.
+3. Grant the token the two webhooks: one `SMFWHE_DEFINEDWEBHOOK_ACC` row for `McpFeedbackPending`
+   and one for `McpFeedbackTriage`. Nothing else.
+4. Hand the API key to whoever loads it on the bots host. To rotate it, create a second token the
+   same way, grant it, switch the bot over, then deactivate the old token.
+
+A call without an API key, or with the key of a token granted other webhooks only, answers `401`
+(`McpFeedbackTriageWebhooksIntegrationTest` drives the real `WebhookServiceHandler` for both).
+
+| File | Role |
+|---|---|
+| `schemaforge/webhooks/McpFeedbackPending.java` | the queue the bot polls |
+| `schemaforge/webhooks/McpFeedbackTriage.java` | validation and the write-once `UPDATE` |
 
 ---
 

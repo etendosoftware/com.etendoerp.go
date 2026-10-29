@@ -85,6 +85,22 @@ public class NeoTelemetryService {
   private static final String PROP_TOOL = "tool";
   private static final String PROP_VERB = "verb";
 
+  /**
+   * Contact KPI property keys (ETP-5791). {@code account_id} is the tenant ({@code AD_Client_ID}),
+   * the only identifier these events may carry by the PM's legal rule — the same key the web client
+   * already sends; no record id of any kind (contact, category, organization) is ever allowed.
+   */
+  private static final String PROP_ACCOUNT_ID = "account_id";
+  private static final String PROP_IS_CUSTOMER = "is_customer";
+  private static final String PROP_IS_VENDOR = "is_vendor";
+  private static final String PROP_PREVIOUS_IS_CUSTOMER = "previous_is_customer";
+  private static final String PROP_PREVIOUS_IS_VENDOR = "previous_is_vendor";
+  private static final String PROP_FLAG_ENABLED = "flag_enabled";
+  private static final String PROP_TYPES_SOURCE = "types_source";
+  private static final String PROP_CHANGE_TRIGGER = "change_trigger";
+  private static final String PROP_CHANGE_ORIGIN = "change_origin";
+  private static final String PROP_DAYS_SINCE_CREATED = "days_since_created";
+
   private static final Set<String> SAFE_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
       "accuracy",
       "attempt",
@@ -96,6 +112,16 @@ public class NeoTelemetryService {
       PROP_ROW_TYPE,
       PROP_TOOL,
       PROP_VERB,
+      PROP_ACCOUNT_ID,
+      PROP_IS_CUSTOMER,
+      PROP_IS_VENDOR,
+      PROP_PREVIOUS_IS_CUSTOMER,
+      PROP_PREVIOUS_IS_VENDOR,
+      PROP_FLAG_ENABLED,
+      PROP_TYPES_SOURCE,
+      PROP_CHANGE_TRIGGER,
+      PROP_CHANGE_ORIGIN,
+      PROP_DAYS_SINCE_CREATED,
       "category",
       "channel",
       "count",
@@ -122,7 +148,12 @@ public class NeoTelemetryService {
 
   private static final Set<String> BOOLEAN_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
       PROP_CRITICAL,
-      "supportRequested"));
+      "supportRequested",
+      PROP_IS_CUSTOMER,
+      PROP_IS_VENDOR,
+      PROP_PREVIOUS_IS_CUSTOMER,
+      PROP_PREVIOUS_IS_VENDOR,
+      PROP_FLAG_ENABLED));
 
   private static final Map<String, NumericBounds> NUMERIC_PROPERTY_BOUNDS =
       buildNumericBounds();
@@ -349,6 +380,8 @@ public class NeoTelemetryService {
     bounds.put("count", new NumericBounds(0, 1000000000));
     bounds.put(PROP_CORRECT_COUNT, new NumericBounds(0, 1000000000));
     bounds.put(PROP_DURATION_MS, new NumericBounds(0, 86400000));
+    // Whole days; 100 years is far beyond any real contact and rejects a corrupt clock.
+    bounds.put(PROP_DAYS_SINCE_CREATED, new NumericBounds(0, 36500));
     bounds.put(PROP_HTTP_STATUS, new NumericBounds(100, 599));
     bounds.put("position", new NumericBounds(0, 1000000));
     bounds.put(PROP_REQ_BYTES, new NumericBounds(0, 1000000000));

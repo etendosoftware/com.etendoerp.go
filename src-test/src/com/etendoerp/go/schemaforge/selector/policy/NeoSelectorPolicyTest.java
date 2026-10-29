@@ -73,4 +73,31 @@ public class NeoSelectorPolicyTest {
 
     assertNull(NeoSelectorPolicy.resolveContextParamFilter("SomeUnrelatedEntity", ctx, "e"));
   }
+
+  /**
+   * ETP-5806 — {@code publishedNameOverride} is a thin delegate to
+   * {@link AddressVirtualSelectorPolicy#publishedNameOverride}, so {@code etendo_schema}'s naming
+   * unification is reachable through this class too, under whichever name a caller spells the
+   * column.
+   */
+  @Test
+  public void publishedNameOverrideDelegatesToAddressVirtualSelectorPolicy() {
+    org.junit.Assert.assertEquals("streetName",
+        NeoSelectorPolicy.publishedNameOverride("EM_OBSEPA_StrtNm"));
+    assertNull(NeoSelectorPolicy.publishedNameOverride("C_Region_ID"));
+  }
+
+  /**
+   * ETP-5707 — {@code resolveOrgTreeWhere} delegates to {@link OrgTreeWhereSelectorPolicy}, which
+   * answers {@code null} (no rewrite) for an entity it does not handle, without touching the DB.
+   */
+  @Test
+  public void resolveOrgTreeWhereDelegatesAndIgnoresOtherEntities() {
+    Map<String, Object> params = new HashMap<>();
+    params.put("p0", "ORG");
+    params.put("p1", "CLIENT");
+
+    assertNull(NeoSelectorPolicy.resolveOrgTreeWhere("Product", "e",
+        "AD_ORG_ISINNATURALTREE(e.orgwarehouse, :p0, :p1)='Y'", params));
+  }
 }

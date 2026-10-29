@@ -615,6 +615,13 @@ class ContactsLocationAddressParentAndRegionTest {
     Country spain = mockCountry("Spain", Boolean.TRUE);
     body.put("country", "C-Spain");
     when(obDal.get(Country.class, "C-Spain")).thenReturn(spain);
+    // ETP-5806 — streetName, buildingNumber and cityName are mandatory for Mode B alongside
+    // country. Every test using this helper is about parent resolution or region columns, not
+    // about the structured-address validation, so it must clear that check the same way it
+    // clears country.
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     return body;
   }
 
@@ -660,10 +667,12 @@ class ContactsLocationAddressParentAndRegionTest {
   /** Invokes the private static writer, unwrapping reflection's exception wrapper. */
   private void applyGeoLocFields(JSONObject body, Location geoLoc) throws Exception {
     Method method = ContactsLocationAddressHandler.class
-        .getDeclaredMethod("applyGeoLocFields", JSONObject.class, Location.class);
+        .getDeclaredMethod("applyGeoLocFields", JSONObject.class, Location.class, boolean.class);
     method.setAccessible(true);
     try {
-      method.invoke(null, body, geoLoc);
+      // ETP-5806 — see ContactsLocationAddressHandlerTest#invokeApplyGeoLocFields: the per-account
+      // flag is threaded in by the caller; these region cases do not depend on it.
+      method.invoke(null, body, geoLoc, true);
     } catch (InvocationTargetException e) {
       Throwable cause = e.getCause();
       if (cause instanceof RuntimeException) {

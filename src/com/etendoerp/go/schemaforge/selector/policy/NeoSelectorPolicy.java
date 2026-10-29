@@ -16,10 +16,13 @@
  */
 package com.etendoerp.go.schemaforge.selector.policy;
 
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.openbravo.model.ad.datamodel.Column;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -33,12 +36,39 @@ public final class NeoSelectorPolicy {
   private static final SelectorPolicyRegistry REGISTRY = new SelectorPolicyRegistry(
       List.of(new ContextParamSelectorPolicy(), new FinancialAccountPaymentMethodSelectorPolicy(),
           new CurrencyIsoAllowlistSelectorPolicy(), new GoodsMovementProductSelectorPolicy(),
-          new ProductCategorySystemFlagSelectorPolicy(), new PostingAccountCombinationSelectorPolicy()),
+          new ProductCategorySystemFlagSelectorPolicy(), new SupportUserSelectorPolicy(),
+          new PostingAccountCombinationSelectorPolicy()),
       List.of(new ProductPriceSelectorPolicy(), new InventoryProductSelectorPolicy(),
           new InvoiceLineTaxSifSelectorPolicy(), new ProductSystemCategorySelectorPolicy()));
 
 
+  private static final List<SelectorSearchPolicy> SEARCH_POLICIES =
+      List.of(new InvoiceLineTaxSifSelectorPolicy());
+
   private NeoSelectorPolicy() {
+  }
+
+  /**
+   * Ids the search term also matches, beyond the display column (ETP-5948). Empty for a blank
+   * term or when no {@link SelectorSearchPolicy} applies.
+   *
+   * @param meta resolved selector metadata
+   * @param contextParams validated selector context parameters
+   * @param search the raw search term
+   * @return the matching record ids, never {@code null}
+   */
+  public static Set<String> resolveSearchMatchIds(SelectorMeta meta,
+      Map<String, String> contextParams, String search) {
+    if (StringUtils.isBlank(search) || meta == null) {
+      return Collections.emptySet();
+    }
+    Set<String> ids = new LinkedHashSet<>();
+    for (SelectorSearchPolicy policy : SEARCH_POLICIES) {
+      if (policy.supports(meta, contextParams)) {
+        ids.addAll(policy.searchMatchIds(meta, contextParams, search));
+      }
+    }
+    return ids;
   }
 
   /**
@@ -62,6 +92,21 @@ public final class NeoSelectorPolicy {
   public static String resolveContextParamFilter(String entityName,
       Map<String, String> contextParams, String alias) {
     return REGISTRY.resolveContextFilter(entityName, contextParams, alias);
+  }
+
+  /**
+   * Resolve the organization-tree predicates of an entity's dictionary where clause once per
+   * request, instead of once per row (ETP-5707).
+   *
+   * @param entityName target DAL entity name of the selector
+   * @param alias HQL alias of the selector entity
+   * @param hql dictionary where clause with its context placeholders bound to named parameters
+   * @param params the named parameters of {@code hql}
+   * @return the rewritten clause and parameters, or {@code null} when no policy applies
+   */
+  public static OrgTreeWhereSelectorPolicy.Rewrite resolveOrgTreeWhere(String entityName,
+      String alias, String hql, Map<String, Object> params) {
+    return OrgTreeWhereSelectorPolicy.rewrite(entityName, alias, hql, params);
   }
 
   /**
@@ -107,6 +152,18 @@ public final class NeoSelectorPolicy {
    */
   public static Set<String> serverResolvedFieldNames(SFEntity entity) {
     return AddressVirtualSelectorPolicy.serverResolvedFieldNames(entity);
+  }
+
+  /**
+   * The {@code etendo_schema} field name a caller should see for a DB column, when a handler
+   * downstream already publishes it under a different name than the raw DAL property (ETP-5806
+   * naming unification — see {@code AddressVirtualSelectorPolicy#PUBLISHED_NAME_OVERRIDES}).
+   *
+   * @param dbColumnName AD column DB name (any case)
+   * @return the published name override, or {@code null} when the column has none
+   */
+  public static String publishedNameOverride(String dbColumnName) {
+    return AddressVirtualSelectorPolicy.publishedNameOverride(dbColumnName);
   }
 
   /**

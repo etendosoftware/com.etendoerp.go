@@ -33,6 +33,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -98,6 +99,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *       list and write responses (ETP-5087: without it the SIF tab of a purchase invoice sent to
  *       Batuz had no sub-record id and showed neither request nor response XML).</li>
  *   <li>DB error resilience in enrichLinkedReceipts.</li>
+ *   <li>{@code linkedOrders} wiring — detail-only, best-effort (ETP-5828).</li>
  *   <li>{@code followUpFlows()} — the one goods-receipt follow-up and its purchase-side wiring,
  *       and the {@code followUp} annotation written on every GET row (ETP-5576).</li>
  * </ul>
@@ -445,6 +447,139 @@ public class PurchaseInvoiceHeaderHandlerTest {
       JSONArray receipts = enrichedRec.getJSONArray("linkedReceipts");
       assertEquals(1, receipts.length());
       assertEquals("receipt-001", receipts.getJSONObject(0).getString("id"));
+    }
+  }
+
+  // ── afterHandle — linkedOrders (ETP-5828) ────────────────────────────────
+
+  /**
+   * Stubs OBDal so every statement of {@code afterHandle} reads an empty result except
+   * {@link AbstractInvoiceHeaderHandler#LINKED_ORDERS_SQL}, which is answered by
+   * {@code ordersPs}. Returns the connection so a test can verify on it.
+   */
+  private static Connection stubConnectionWithLinkedOrders(MockedStatic<OBDal> dalMock,
+      PreparedStatement ordersPs) throws Exception {
+    OBDal dal = mock(OBDal.class);
+    dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    Connection conn = mock(Connection.class);
+    when(dal.getConnection()).thenReturn(conn);
+    PreparedStatement otherPs = mock(PreparedStatement.class);
+    ResultSet emptyRs = mock(ResultSet.class);
+    when(otherPs.executeQuery()).thenReturn(emptyRs);
+    when(conn.prepareStatement(anyString())).thenReturn(otherPs);
+    when(conn.prepareStatement(AbstractInvoiceHeaderHandler.LINKED_ORDERS_SQL)).thenReturn(ordersPs);
+    return conn;
+  }
+
+  /**
+   * ETP-5828: the detail GET of a purchase invoice built from two orders carries both in
+   * {@code linkedOrders}, next to {@code linkedReceipts}.
+   */
+  @Test
+  public void afterHandle_singleRecord_injectsLinkedOrdersFromInvoiceLines() throws Exception {
+    JSONObject rec = new JSONObject().put("id", "pinv-5828");
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject().put("data", new JSONArray().put(rec)));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .recordId("pinv-5828")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ordersPs = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      stubConnectionWithLinkedOrders(dalMock, ordersPs);
+      when(ordersPs.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("po-a", "po-b");
+      when(rs.getString(2)).thenReturn("PO-001", "PO-002");
+      when(rs.getString(3)).thenReturn("CO", "CL");
+      when(rs.getBigDecimal(4)).thenReturn(new BigDecimal("100.00"), new BigDecimal("200.00"));
+      when(rs.getString(5)).thenReturn("EUR", "EUR");
+      when(rs.getDate(6)).thenReturn(java.sql.Date.valueOf("2026-02-01"),
+          java.sql.Date.valueOf("2026-02-02"));
+      when(rs.getString(7)).thenReturn("OB", "SO");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      JSONObject enriched = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      JSONArray orders = enriched.getJSONArray("linkedOrders");
+      assertEquals(2, orders.length());
+      JSONObject first = orders.getJSONObject(0);
+      assertEquals("po-a", first.getString("id"));
+      assertEquals("PO-001", first.getString("documentNo"));
+      assertEquals("CO", first.getString("documentStatus"));
+      assertEquals("EUR", first.getString("currency$_identifier"));
+      assertEquals("2026-02-01", first.getString("orderDate"));
+      assertTrue(first.getBoolean("isQuotation"));
+      JSONObject second = orders.getJSONObject(1);
+      assertEquals("po-b", second.getString("id"));
+      assertEquals("PO-002", second.getString("documentNo"));
+      assertEquals("CL", second.getString("documentStatus"));
+      assertFalse(second.getBoolean("isQuotation"));
+      Mockito.verify(ordersPs).setString(1, "pinv-5828");
+      Mockito.verify(ordersPs).setString(2, TotalDiscountService.DISCOUNT_PRODUCT_ID);
+    }
+  }
+
+  /** ETP-5828: {@code linkedOrders} is detail-only — a list GET never runs the query. */
+  @Test
+  public void afterHandle_listMode_neverInjectsLinkedOrders() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-1"))
+        .put(new JSONObject().put("id", "pinv-2"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ordersPs = mock(PreparedStatement.class);
+      Connection conn = stubConnectionWithLinkedOrders(dalMock, ordersPs);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+      for (int i = 0; i < resultData.length(); i++) {
+        assertFalse(resultData.getJSONObject(i).has("linkedOrders"));
+      }
+      Mockito.verify(conn, Mockito.never())
+          .prepareStatement(AbstractInvoiceHeaderHandler.LINKED_ORDERS_SQL);
+    }
+  }
+
+  /** ETP-5828: a failing orders query drops only {@code linkedOrders}; the response stays OK. */
+  @Test
+  public void afterHandle_singleRecord_linkedOrdersSqlFailureKeepsResponseOk() throws Exception {
+    JSONObject rec = new JSONObject().put("id", "pinv-5828-fail");
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject().put("data", new JSONArray().put(rec)));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .recordId("pinv-5828-fail")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ordersPs = mock(PreparedStatement.class);
+      stubConnectionWithLinkedOrders(dalMock, ordersPs);
+      when(ordersPs.executeQuery()).thenThrow(new SQLException("boom"));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      JSONObject enriched = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(enriched.has("linkedOrders"));
+      assertTrue("the receipts enrichment still ran", enriched.has("linkedReceipts"));
     }
   }
 
@@ -959,7 +1094,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
     // ETP-4737: persistOriginInvoice now only acts on the value captureOriginInvoice() captured
     // in handle() (the pre-hook) — call it here too so this test actually exercises the persist
     // path instead of vacuously hitting the "not captured" early-return.
-    handler.captureOriginInvoice(ctx);
+    handler.rectificationLinks.captureOriginInvoice(ctx);
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
@@ -1021,7 +1156,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
     // Mirrors the real handle() pre-hook so persistOriginInvoice has a captured value to act on.
-    handler.captureOriginInvoice(ctx);
+    handler.rectificationLinks.captureOriginInvoice(ctx);
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
@@ -1654,6 +1789,73 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
     assertSame(fromOrders, header.handle(orderCtx));
     assertSame(fromReceipts, header.handle(receiptCtx));
+  }
+
+  @Test
+  public void actionContracts_publishTheReturnAndOriginImports() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new PurchaseInvoiceHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(java.util.List.of("availableReturns", "availableReturnLines",
+        "importReturnLines", "availableOriginInvoices", "availableOriginInvoiceLines",
+        "importOriginInvoiceLines")));
+    assertNull(NeoActionContract.validate(contracts,
+        "importReturnLines", new JSONObject().put("returnId", "r1")));
+    assertNull(NeoActionContract.validate(contracts,
+        "importOriginInvoiceLines", new JSONObject().put("invoiceId", "f1")));
+    assertFalse("the purchase origin import does not keep the order line",
+        contracts.get("importOriginInvoiceLines").getDescription().contains("order line"));
+  }
+
+  /**
+   * The import actions go with the KIND of invoice (ETP-5876), judged by this header's own rule:
+   * the order import of a rectificative is refused and never reaches its delegate, a return import
+   * on a normal invoice too, and the delegates are handed the same policy on the request.
+   */
+  @Test
+  public void handle_routesTheImportsByTheKindOfInvoice() throws Exception {
+    ImportOrderLinesIntoInvoiceHandler orders = mock(ImportOrderLinesIntoInvoiceHandler.class);
+    ImportInOutLinesIntoInvoiceHandler receipts = mock(ImportInOutLinesIntoInvoiceHandler.class);
+    PurchaseInvoiceHeaderHandler purchaseHeader = purchaseWithImportDelegates(orders, receipts);
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBContext context = mock(OBContext.class);
+      org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+      when(client.getId()).thenReturn("c1");
+      when(context.getCurrentClient()).thenReturn(client);
+      ctxMock.when(OBContext::getOBContext).thenReturn(context);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getClient()).thenReturn(client);
+      when(invoice.getDocumentNo()).thenReturn("FCR1");
+      DocumentType type = mock(DocumentType.class);
+      when(type.getDocumentCategory()).thenReturn("APC");
+      when(invoice.getTransactionDocument()).thenReturn(type);
+      when(dal.get(Invoice.class, "i1")).thenReturn(invoice);
+
+      NeoContext orderCtx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName("importOrderLines").recordId("i1")
+          .build();
+      NeoResponse refused = purchaseHeader.handle(orderCtx);
+
+      assertEquals("a rectificative takes no order import", 422, refused.getHttpStatus());
+      assertEquals("importNotAvailableOnRectificative",
+          refused.getBody().getJSONObject("error").getString("code"));
+      Mockito.verify(orders, Mockito.never()).handle(any());
+
+      when(type.getDocumentCategory()).thenReturn("API");
+      NeoContext returnCtx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName("importReturnLines").recordId("i1")
+          .build();
+      assertEquals("a normal invoice takes no return import", "importRequiresRectificative",
+          purchaseHeader.handle(returnCtx).getBody().getJSONObject("error").getString("code"));
+      assertNotNull("the policy travels on the request",
+          returnCtx.getAttribute(RectificativeImportPolicy.ATTRIBUTE));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
   }
 
   // ── whole-set list totals (ETP-5757) ──────────────────────────────────────

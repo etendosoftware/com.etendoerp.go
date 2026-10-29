@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -31,6 +32,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import org.openbravo.module.bptaxidkey.ViesService;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -71,6 +73,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBQuery;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+
 /**
  * Unit tests for {@link ContactsLocationAddressHandler}.
  *
@@ -78,6 +82,21 @@ import org.openbravo.dal.service.OBQuery;
  * null BP, successful creation), handleUpdate (null bpLoc, null geoLoc, successful
  * update), afterHandle (non-GET, enrich single record, enrich list display names),
  * and static helper methods (nullIfEmpty, boolField, str, joinNonNull, buildDisplayName).
+ * Also the ETP-5806 structured-address rules on every create/update body passed through this
+ * file's fixtures: mandatory streetName/buildingNumber/cityName/country, and address-line
+ * recomposition over any raw addressLine1 (including one a legacy record already carried).
+ * Also the ETP-5806 {@code structured-address-for-sepa} flag-OFF branch: with
+ * {@link GoFeatureFlags#isEnabled} stubbed to {@code false}, only {@code country} is mandatory,
+ * the 3 structured fields are never read off the body nor written to the record even when the
+ * payload carries them, and a response never carries their keys (absent, not null).
+ * Also the ETP-5806 follow-up wire-format matrix: the 3 structured fields are read by the raw AD
+ * column spelling ({@code EM_OBSEPA_StrtNm}/{@code BldgNb}/{@code BldgNm}) as well as the
+ * published name on both create and update, the published spelling wins when both are sent in
+ * the same body, a raw-column spelling is ignored while the flag is off (same as the published
+ * one already is), and a reuse body ({@code locationAddress}) carrying a raw-column spelling is
+ * just as ambiguous as one carrying the published spelling.
+ *
+ * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -231,7 +250,8 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Test Address");
-    body.put("addressLine1", "123 Main St");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
     body.put("cityName", "Springfield");
     body.put("country", "ES");
 
@@ -250,6 +270,326 @@ class ContactsLocationAddressHandlerTest {
     assertEquals("bp-loc-id", resultRecord.getString("id"));
     assertEquals("geo-loc-id", resultRecord.getString("locationAddress"));
     verify(geoLoc).setCountry(country);
+  }
+
+  /**
+   * ETP-5806 — Mode B (building a new C_Location from raw fields) requires streetName,
+   * buildingNumber and cityName alongside the pre-existing country check. A body missing them
+   * is a clean 400, not a downstream NOT NULL violation at flush.
+   */
+  @Test
+  void testHandleCreateMissingStructuredAddressFieldsReturns400() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    // streetName, buildingNumber and cityName intentionally omitted
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      verify(obDal, never()).save(any());
+    }
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug): a structured-address field longer than its DB
+   * column (EM_OBSEPA_StrtNm/BldgNb/BldgNm) is rejected with a clean 400 before the write is
+   * attempted, instead of reaching {@code OBDal.flush()} as a raw data-truncation SQL exception
+   * surfaced to the caller as an opaque 500.
+   */
+  @Test
+  void testHandleCreateFieldExceedingMaxLengthReturns400NotRawSqlException() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
+    // EM_OBSEPA_BldgNm is VARCHAR(35) — 36 chars overflows it.
+    body.put("buildingName", "A".repeat(36));
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).flush();
+    }
+  }
+
+  // ── ETP-5806: structured-address-for-sepa flag OFF ─────────────────────
+
+  /** Stubs {@link GoFeatureFlags#isEnabled} for the {@code structured-address-for-sepa} flag only. */
+  private MockedStatic<GoFeatureFlags> mockStructuredAddressFlag(boolean enabled) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(enabled);
+    return flags;
+  }
+
+  private BusinessPartner stubCreatableBusinessPartner(String bpId, Location geoLoc,
+      org.openbravo.model.common.businesspartner.Location bpLoc) {
+    BusinessPartner bp = mock(BusinessPartner.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(bp.getClient()).thenReturn(client);
+    when(bp.getOrganization()).thenReturn(org);
+    when(obDal.get(BusinessPartner.class, bpId)).thenReturn(bp);
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+    when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
+    return bp;
+  }
+
+  /**
+   * Flag off: Mode B only requires {@code country} — the 3 structured fields are not mandatory,
+   * even though the pre-ETP-5806 country-only rule is all that still applies.
+   */
+  @Test
+  void testHandleCreateFlagOffOnlyRequiresCountryNotStructuredFields() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("addressLine1", "Legacy free-text line");
+    // streetName, buildingNumber, buildingName and cityName intentionally omitted: none of them
+    // is mandatory while the flag is off.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc).setAddressLine1("Legacy free-text line");
+    }
+  }
+
+  /**
+   * Flag off: a create payload that still carries the 3 structured fields does not persist them
+   * (never read off the body, never written to the record) and does not error on the missing
+   * {@code cityName} that would be mandatory with the flag on.
+   */
+  @Test
+  void testHandleCreateFlagOffNeverPersistsStructuredFieldsEvenWhenPayloadCarriesThem()
+      throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("buildingName", "Local 2");
+    // cityName intentionally omitted — mandatory only when the flag is on.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc, never()).setOBSEPAStreetName(any());
+      verify(geoLoc, never()).setOBSEPABuildingNumber(any());
+      verify(geoLoc, never()).setOBSEPABuildingName(any());
+    }
+  }
+
+  /**
+   * Flag off: the created record's response omits the 3 structured-address keys entirely
+   * (absent, not {@code JSONObject.NULL}) — {@link ContactsLocationAddressHandler} never calls
+   * the SEPA getters at all while the flag is off.
+   */
+  @Test
+  void testHandleCreateFlagOffResponseOmitsStructuredAddressKeysEntirely() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("addressLine1", "Legacy free-text line");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      JSONObject resultRecord = response.getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      assertFalse(resultRecord.has("streetName"), resultRecord.toString());
+      assertFalse(resultRecord.has("buildingNumber"), resultRecord.toString());
+      assertFalse(resultRecord.has("buildingName"), resultRecord.toString());
+      verify(geoLoc, never()).getOBSEPAStreetName();
+      verify(geoLoc, never()).getOBSEPABuildingNumber();
+      verify(geoLoc, never()).getOBSEPABuildingName();
+    }
+  }
+
+  // ── ETP-5806 follow-up: raw AD column / DAL property spellings on create ──
+
+  /**
+   * Flag on: a create body that sends the raw AD column spellings ({@code EM_OBSEPA_StrtNm}/
+   * {@code EM_OBSEPA_BldgNb}) instead of the published {@code streetName}/{@code buildingNumber}
+   * is accepted and persisted — this handler owns its own body parsing end to end and never
+   * falls back to {@code McpWriteRequestSupport#resolveProperty}, which is what tolerates a raw
+   * column name for most entities.
+   */
+  @Test
+  void testHandleCreateAcceptsRawColumnSpellingWhenFlagOn() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("cityName", "Madrid");
+    body.put("EM_OBSEPA_StrtNm", "Gran Via");
+    body.put("EM_OBSEPA_BldgNb", "45");
+    body.put("EM_OBSEPA_BldgNm", "Local 2");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Local 2");
+    }
+  }
+
+  /**
+   * Flag on: when a create body sends BOTH the published spelling and the raw AD column
+   * spelling for the same field, the published spelling wins — same precedence rule as
+   * {@code BpLocationHandler}.
+   */
+  @Test
+  void testHandleCreatePublishedSpellingWinsOverRawColumnWhenBothPresent() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("cityName", "Madrid");
+    body.put("streetName", "Published Street");
+    body.put("EM_OBSEPA_StrtNm", "Raw Column Street");
+    body.put("buildingNumber", "10");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Published Street");
+      verify(geoLoc, never()).setOBSEPAStreetName("Raw Column Street");
+    }
+  }
+
+  /**
+   * Flag off: the raw AD column spelling is ignored exactly like the published spelling already
+   * is — neither read off the body nor persisted, and no mandatory-field error for the omitted
+   * {@code cityName}.
+   */
+  @Test
+  void testHandleCreateRawColumnSpellingIgnoredWhenFlagOff() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-loc-id");
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    stubCreatableBusinessPartner("bp-123", geoLoc, bpLoc);
+    stubCountry("ES");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    body.put("EM_OBSEPA_StrtNm", "Gran Via");
+    body.put("EM_OBSEPA_BldgNb", "45");
+    // cityName intentionally omitted — mandatory only when the flag is on.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(201, response.getHttpStatus());
+      verify(geoLoc, never()).setOBSEPAStreetName(any());
+      verify(geoLoc, never()).setOBSEPABuildingNumber(any());
+    }
+  }
+
+  /**
+   * A reuse body ({@code locationAddress}) that also carries a raw-column-spelling structured
+   * field is just as ambiguous as one that carries the published spelling — {@code
+   * hasRawAddressFields} must recognize both.
+   */
+  @Test
+  void testHandleCreateAmbiguousWithRawColumnSpellingReturns400() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    JSONObject body = new JSONObject();
+    body.put("locationAddress", "existing-geo-loc-id");
+    body.put("EM_OBSEPA_StrtNm", "Gran Via");
+
+    NeoContext ctx = buildContext("POST", null, body, params);
+    NeoResponse response = handler.handle(ctx);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
   }
 
   // ── handleUpdate ────────────────────────────────────────────────────────
@@ -305,19 +645,64 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Updated Name");
+    body.put("streetName", "Calle Mayor");
+    body.put("buildingNumber", "7");
+    body.put("cityName", "Toledo");
+    body.put("country", "ES");
+    // ETP-5806 — a non-blank streetName always recomputes Address1/Address2, so this raw
+    // addressLine1 (as a legacy record might already carry) must be ignored, not stored verbatim.
     body.put("addressLine1", "456 Oak Ave");
     body.put("shipToAddress", "Y");
     body.put("invoiceToAddress", "N");
 
-    NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
-    NeoResponse response = handler.handle(ctx);
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+      NeoResponse response = handler.handle(ctx);
 
-    assertNotNull(response);
-    assertEquals(200, response.getHttpStatus());
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
 
-    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
-    assertEquals(1, data.length());
-    assertEquals("bpl-id", data.getJSONObject(0).getString("id"));
+      JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(1, data.length());
+      assertEquals("bpl-id", data.getJSONObject(0).getString("id"));
+      // ETP-5806 — streetName non-blank always recomputes the lines; the raw "456 Oak Ave" the
+      // caller also sent (as a legacy free-text Address1 might already hold) is never stored as-is.
+      verify(geoLoc).setAddressLine1("Calle Mayor, 7");
+      verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
+    }
+  }
+
+  /**
+   * ETP-5806 follow-up — flag on: an update body sending the raw AD column spelling is accepted
+   * and persisted, the same as on create.
+   */
+  @Test
+  void testHandleUpdateAcceptsRawColumnSpellingWhenFlagOn() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-id");
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bpl-id");
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("EM_OBSEPA_StrtNm", "Calle Mayor");
+    body.put("EM_OBSEPA_BldgNb", "7");
+    body.put("cityName", "Toledo");
+    body.put("country", "ES");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Calle Mayor");
+      verify(geoLoc).setOBSEPABuildingNumber("7");
+    }
   }
 
   /**
@@ -351,6 +736,9 @@ class ContactsLocationAddressHandlerTest {
         .thenReturn(bpLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "country-id");
     body.put("region", "region-id");
 
@@ -382,6 +770,10 @@ class ContactsLocationAddressHandlerTest {
         .thenReturn(bpLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
     body.put("region", "");
 
     NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
@@ -390,6 +782,61 @@ class ContactsLocationAddressHandlerTest {
     assertNotNull(response);
     assertEquals(200, response.getHttpStatus());
     verify(geoLoc).setRegion(null);
+  }
+
+  /**
+   * ETP-5806 — the update path applies the same mandatory rule as create: an update always
+   * resends the full address, so a body missing streetName/buildingNumber/cityName (with the
+   * record carrying no country of its own to fall back to) is a clean 400.
+   */
+  @Test
+  void testHandleUpdateMissingStructuredAddressFieldsReturns400() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    // buildingNumber, cityName and country intentionally omitted, and geoLoc has none either
+
+    NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+    NeoResponse response = handler.handle(ctx);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    verify(obDal, never()).flush();
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug) on the update path: an oversized structured
+   * field is rejected with 400 before {@code OBDal.flush()}.
+   */
+  @Test
+  void testHandleUpdateFieldExceedingMaxLengthReturns400() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "A".repeat(17)); // EM_OBSEPA_BldgNb is VARCHAR(16)
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      verify(obDal, never()).flush();
+    }
   }
 
   // ── handle() exception path ─────────────────────────────────────────────
@@ -1048,6 +1495,9 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Test");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "ES");
 
     NeoContext ctx = buildContext("POST", null, body, params);
@@ -1112,6 +1562,9 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Test");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "US-COUNTRY-ID");
 
     NeoContext ctx = buildContext("POST", null, body, params);
@@ -1184,6 +1637,9 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Test");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "FR-COUNTRY-ID");
 
     NeoContext ctx = buildContext("POST", null, body, params);
@@ -1286,6 +1742,9 @@ class ContactsLocationAddressHandlerTest {
 
       JSONObject body = new JSONObject();
       body.put("name", "Test");
+      body.put("streetName", "Gran Via");
+      body.put("buildingNumber", "45");
+      body.put("cityName", "Madrid");
       body.put("country", "FR-COUNTRY-ID");
 
       NeoContext ctx = buildContext("POST", null, body, params);
@@ -1332,6 +1791,9 @@ class ContactsLocationAddressHandlerTest {
     when(obDal.getConnection()).thenReturn(connMock);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "FR-COUNTRY-ID");
 
     NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
@@ -1361,9 +1823,16 @@ class ContactsLocationAddressHandlerTest {
     return country;
   }
 
-  /** A minimal create body: just the country, the one field the create path requires. */
+  /**
+   * A minimal create body carrying every field Mode B now requires (ETP-5806: streetName,
+   * buildingNumber, cityName and country are mandatory together), so any create test using this
+   * helper exercises the path past validation rather than being rejected with 400.
+   */
   private JSONObject createBodyWithCountry(String countryId) throws Exception {
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", countryId);
     return body;
   }
@@ -1526,10 +1995,13 @@ class ContactsLocationAddressHandlerTest {
 
   private void invokeApplyGeoLocFields(JSONObject body, Location geoLoc) throws Exception {
     Method method = ContactsLocationAddressHandler.class
-        .getDeclaredMethod("applyGeoLocFields", JSONObject.class, Location.class);
+        .getDeclaredMethod("applyGeoLocFields", JSONObject.class, Location.class, boolean.class);
     method.setAccessible(true);
+    // ETP-5806 — the per-account flag is resolved at the handler entry points and threaded in as
+    // the third argument. The region and address cases below are flag-independent, so this helper
+    // always exercises the enabled path, with the structured fields simply absent from the bodies.
     try {
-      method.invoke(null, body, geoLoc);
+      method.invoke(null, body, geoLoc, true);
     } catch (InvocationTargetException e) {
       Throwable cause = e.getCause();
       if (cause instanceof RuntimeException) {

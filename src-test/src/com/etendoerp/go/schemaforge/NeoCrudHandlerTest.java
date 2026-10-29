@@ -1952,6 +1952,39 @@ class NeoCrudHandlerTest {
       }
     }
 
+    /**
+     * ETP-5953: a captured unique violation keeps core's translated wording in every language.
+     * The text guard only recognises the English "must be unique", so under a Spanish session the
+     * classification used to win and replaced core's sentence with the English
+     * {@code DUPLICATE_KEY_ERROR}, which the SPA cannot map to its friendly duplicate message.
+     */
+    @Test
+    @DisplayName("A captured duplicate keeps core's translated wording, with its code, in any language")
+    void capturedDuplicateKeepsCoreWordingInAnyLanguage() throws Exception {
+      String spanish = "Ya existe un/a Categoría del producto con el mismo (Entidad, Organización,"
+          + " Identificador). (Entidad, Organización, Identificador) debe ser único. Cambie los"
+          + " valores introducidos.";
+      JSONObject classification = new JSONObject().put("status", 409)
+          .put("code", "duplicate_key")
+          .put("message", "A record with this value already exists. This value must be unique.");
+      JSONObject response = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE,
+          new JSONObject().put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_FAILURE)
+              .put(JsonConstants.RESPONSE_ERROR, new JSONObject().put("message", spanish)
+                  .put("neoClassification", classification)));
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+          mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        messages.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        NeoResponse result = invokeCheckResponse(response);
+
+        assertEquals(HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals(spanish, error.getString("message"));
+        assertEquals("duplicate_key", error.getString("code"));
+      }
+    }
+
     @Test
     @DisplayName("Returns 500 (not 409) when translated message does not report a duplicate key)")
     void returns500ForNonDuplicateFailureMessage() throws Exception {
@@ -4589,6 +4622,56 @@ class NeoCrudHandlerTest {
         String result = invokeResolveParentFilter(childTab, "X");
         assertNull(result);
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // ETP-5051: the POST create runs inside the plan-quota gate
+  // -------------------------------------------------------------------------
+
+  /**
+   * The REST single and batch create runs its insert inside {@code NeoQuotaWriteGate}: the gate
+   * picks the service, checks the created row after the insert, a refusal is returned, and the
+   * caller goes on with the gate's result (core's error JSON when the gate's own commit failed).
+   * The POST path needs a live DAL and an {@code AD_Tab}, so the wiring is pinned on the source,
+   * anchored on the calls rather than on local variable names.
+   */
+  @Nested
+  @DisplayName("the POST create runs inside the plan-quota gate (ETP-5051)")
+  class QuotaGateWiring {
+
+    /**
+     * Also the ETP-5051 re-review W1 guard: the create ({@code executePostCreate}, callout cascade
+     * and add) is what the handler hands to {@code NeoQuotaWriteGate.run}, so the gate can refuse
+     * before it runs; {@code NeoQuotaWriteGateTest} shows it is never invoked on that refusal. The
+     * gate's {@code begin} is package-private, so no handler can open the gate around a create of
+     * its own.
+     */
+    @Test
+    void theCreateRunsItsInsertInsideTheGate() throws Exception {
+      String source = readSource("com/etendoerp/go/schemaforge/NeoCrudHandler.java")
+          .replaceAll("\\s+", " ");
+
+      int run = source.indexOf("NeoQuotaWriteGate.run(");
+      int insert = source.indexOf("executePostCreate(", run);
+      int refusal = source.indexOf(".refusal()", run);
+      int returned = source.indexOf("return ", refusal);
+      int result = source.indexOf(".result()", returned);
+
+      assertTrue(run >= 0, "NeoCrudHandler no longer runs its create inside the quota gate");
+      assertTrue(insert > run && insert < refusal,
+          "the create is no longer handed to the gate (it must run inside run(...))");
+      assertTrue(returned > refusal, "a quota refusal is no longer returned to the caller");
+      assertTrue(result > returned, "the caller no longer goes on with the gate's result");
+    }
+
+    private String readSource(String relative) throws java.io.IOException {
+      java.nio.file.Path fromRoot = java.nio.file.Paths.get("modules/com.etendoerp.go/src",
+          relative);
+      java.nio.file.Path file = java.nio.file.Files.exists(fromRoot) ? fromRoot
+          : java.nio.file.Paths.get("src", relative);
+      return new String(java.nio.file.Files.readAllBytes(file),
+          java.nio.charset.StandardCharsets.UTF_8);
     }
   }
 }

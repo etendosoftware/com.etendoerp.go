@@ -496,7 +496,8 @@ class NeoActionContractTest {
       when(criteria.addOrder(any())).thenReturn(criteria);
       when(criteria.list()).thenReturn(entities);
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-          MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+          MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class,
+              org.mockito.Mockito.CALLS_REAL_METHODS)) {
         obDal.when(OBDal::getInstance).thenReturn(dal);
         lookup.when(() -> NeoHandlerLookup.byQualifierQuietly(anyString()))
             .thenAnswer(inv -> handlers.get(inv.<String>getArgument(0)));

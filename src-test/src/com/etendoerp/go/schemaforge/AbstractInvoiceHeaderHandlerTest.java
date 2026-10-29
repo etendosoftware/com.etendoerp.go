@@ -35,6 +35,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Collections;
 
 import javax.servlet.http.HttpServletResponse;
@@ -81,11 +82,14 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  *   <li>{@code enrichDocTypeLocked}</li>
  *   <li>{@code completeInvoiceIfNeeded} (ETP-4388 — Verifactu/ProcessInvoiceHook dispatch fix)</li>
  *   <li>{@code isStandardInvoiceDocType} (ETP-5576 — follow-up eligibility, fails closed)</li>
+ *   <li>{@code enrichLinkedOrders} (ETP-5828 — every order reached through the invoice lines)</li>
  *   <li>{@code mirrorInvoiceDateOnUpdate} (ETP-5840 — the invoice-date callout on an API update)</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceRectificationLinkSupport
  * @covers com.etendoerp.go.schemaforge.DocumentRateGuards
+ * @covers com.etendoerp.go.schemaforge.InvoiceDetailEnrichment
  */
 public class AbstractInvoiceHeaderHandlerTest {
 
@@ -124,21 +128,25 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
 
     public void callCaptureOriginInvoice(NeoContext ctx) {
-      captureOriginInvoice(ctx);
+      rectificationLinks.captureOriginInvoice(ctx);
     }
 
     public void callPersistOriginInvoice(NeoContext ctx) {
-      persistOriginInvoice(ctx);
+      rectificationLinks.persistOriginInvoice(ctx);
     }
 
     /** Exposes both capture + persist as a single roundtrip, mirroring real handle()→afterHandle(). */
     public void callCaptureThenPersistOriginInvoice(NeoContext captureCtx, NeoContext persistCtx) {
-      captureOriginInvoice(captureCtx);
-      persistOriginInvoice(persistCtx);
+      rectificationLinks.captureOriginInvoice(captureCtx);
+      rectificationLinks.persistOriginInvoice(persistCtx);
     }
 
     public void callEnrichOriginInvoice(JSONObject rec, String id) throws Exception {
-      enrichOriginInvoice(rec, id);
+      rectificationLinks.enrichOriginInvoice(rec, id);
+    }
+
+    public void callEnrichRectifyingInvoices(JSONObject rec, String id) throws Exception {
+      rectificationLinks.enrichRectifyingInvoices(rec, id);
     }
 
     public void callEnrichInvoiceSubtype(JSONObject rec, String key) throws Exception {
@@ -160,6 +168,10 @@ public class AbstractInvoiceHeaderHandlerTest {
 
     public void callEnrichHasExemptTaxes(JSONObject rec, String id) throws Exception {
       InvoiceExemptTaxes.enrich(rec, id);
+    }
+
+    public void callEnrichHasRectifications(JSONObject rec, String id) throws Exception {
+      rectificationLinks.enrichHasRectifications(rec, id);
     }
   }
 
@@ -939,6 +951,306 @@ public class AbstractInvoiceHeaderHandlerTest {
       handler.callEnrichOriginInvoice(rec, "inv-sql-err");
       // no exception thrown, rec unchanged
       assertEquals(0, rec.length());
+    }
+  }
+
+  // ── enrichRectifyingInvoices (ETP-5745 CP-12) ───────────────────────────────
+
+  /**
+   * Mirror of {@code enrichOriginInvoice}, reading {@code C_Invoice_Reverse} in the opposite
+   * direction: the rectificativa(s) that rectify THIS invoice, not what this invoice rectifies.
+   * Before this method existed, the ORIGINAL invoice's detail GET carried no field a frontend
+   * source could read to show its own rectifications (CP-12: the "Rectificaciones" tab and the
+   * "Documentos relacionados" card both showed empty for the original).
+   */
+  @Test
+  public void enrichRectifyingInvoices_rowsFound_setsArray() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("rect-a", "rect-b");
+      when(rs.getString(2)).thenReturn("FVR-A", "FVR-B");
+
+      handler.callEnrichRectifyingInvoices(rec, "inv-original");
+
+      JSONArray rectifying = rec.getJSONArray("rectifyingInvoices");
+      assertEquals(2, rectifying.length());
+      assertEquals("rect-a", rectifying.getJSONObject(0).getString("id"));
+      assertEquals("FVR-A", rectifying.getJSONObject(0).getString("documentNo"));
+      assertEquals("rect-b", rectifying.getJSONObject(1).getString("id"));
+      assertEquals("FVR-B", rectifying.getJSONObject(1).getString("documentNo"));
+    }
+  }
+
+  @Test
+  public void enrichRectifyingInvoices_noRowFound_setsEmptyArray() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      handler.callEnrichRectifyingInvoices(rec, "inv-no-rectifications");
+
+      assertEquals(0, rec.getJSONArray("rectifyingInvoices").length());
+    }
+  }
+
+  @Test
+  public void enrichRectifyingInvoices_sqlException_silentlyIgnored() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenThrow(new RuntimeException("SQL error"));
+
+      handler.callEnrichRectifyingInvoices(rec, "inv-sql-err");
+      // no exception thrown, rec unchanged (no partial/garbage field written)
+      assertEquals(0, rec.length());
+    }
+  }
+
+  /**
+   * QA finding (ETP-5745): {@code enrichOriginInvoice} and {@code enrichRectifyingInvoices} are
+   * each tested in isolation only elsewhere in this file. The two queries read
+   * {@code C_Invoice_Reverse} in opposite directions with no shared state, so this is very likely
+   * a non-issue — but it had zero direct coverage of the "chain" case: invoice A rectifies origin
+   * B ({@code originInvoices} non-empty) AND is itself rectified by invoice C
+   * ({@code rectifyingInvoices} non-empty) at the same time. Asserted explicitly rather than
+   * assumed safe.
+   */
+  @Test
+  public void enrichOriginInvoiceAndEnrichRectifyingInvoices_bothNonEmpty_areIndependentlyPopulated()
+      throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      // enrichOriginInvoice: invoice A (inv-a) rectifies origin B.
+      PreparedStatement originPs = mock(PreparedStatement.class);
+      ResultSet originRs = mock(ResultSet.class);
+      when(originPs.executeQuery()).thenReturn(originRs);
+      when(originRs.next()).thenReturn(true, false);
+      when(originRs.getString(1)).thenReturn("origin-b");
+      when(originRs.getString(2)).thenReturn("ORIG-B");
+
+      // enrichRectifyingInvoices: invoice A (inv-a) is itself rectified by invoice C.
+      PreparedStatement rectifyingPs = mock(PreparedStatement.class);
+      ResultSet rectifyingRs = mock(ResultSet.class);
+      when(rectifyingPs.executeQuery()).thenReturn(rectifyingRs);
+      when(rectifyingRs.next()).thenReturn(true, false);
+      when(rectifyingRs.getString(1)).thenReturn("rect-c");
+      when(rectifyingRs.getString(2)).thenReturn("FVR-C");
+
+      // Each call opens its own PreparedStatement via conn.prepareStatement(sql); returned in
+      // the same order the two enrichments are invoked below.
+      when(conn.prepareStatement(any())).thenReturn(originPs, rectifyingPs);
+
+      handler.callEnrichOriginInvoice(rec, "inv-a");
+      handler.callEnrichRectifyingInvoices(rec, "inv-a");
+
+      assertEquals("origin-b", rec.getString("originInvoice"));
+      assertEquals("ORIG-B", rec.getString("originInvoice$_identifier"));
+      JSONArray origins = rec.getJSONArray("originInvoices");
+      assertEquals(1, origins.length());
+      assertEquals("origin-b", origins.getJSONObject(0).getString("id"));
+
+      JSONArray rectifying = rec.getJSONArray("rectifyingInvoices");
+      assertEquals(1, rectifying.length());
+      assertEquals("rect-c", rectifying.getJSONObject(0).getString("id"));
+      assertEquals("FVR-C", rectifying.getJSONObject(0).getString("documentNo"));
+    }
+  }
+
+  // ── captureOriginInvoice — plural originInvoices array (ETP-5745 direct coverage) ───
+  //
+  // The multi-origin shape (originInvoices array) was only ever exercised indirectly, through
+  // persistOriginInvoice_pluralOriginInvoices_createsOneLinkPerId above — that test never asserts
+  // what capture itself does to the body. Asserted directly here.
+
+  @Test
+  public void captureOriginInvoice_postWithOriginInvoicesArray_capturesAndStripsFromBody()
+      throws Exception {
+    JSONObject body = new JSONObject()
+        .put("originInvoices", new JSONArray().put("origin-x").put("origin-y"));
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").requestBody(body).build();
+
+    handler.callCaptureOriginInvoice(ctx);
+
+    assertFalse(body.has("originInvoices"));
+  }
+
+  /**
+   * Both the legacy singular {@code originInvoice} and the plural {@code originInvoices} may be
+   * present on the same request body (ETP-4919 javadoc on {@code captureOriginInvoice}) — a
+   * duplicate id shared between the two keys must be folded into one, not persisted twice.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void captureOriginInvoice_bothKeysWithOverlappingId_dedupesAcrossKeys() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("originInvoices", new JSONArray().put("origin-shared").put("origin-only-in-array"))
+        .put("originInvoice", "origin-shared");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").recordId("inv-dedupe").requestBody(body).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-dedupe")).thenReturn(invoice);
+      when(dal.get(Invoice.class, "origin-shared")).thenReturn(mock(Invoice.class));
+      when(dal.get(Invoice.class, "origin-only-in-array")).thenReturn(mock(Invoice.class));
+      when(invoice.getClient()).thenReturn(mock(Client.class));
+      when(invoice.getOrganization()).thenReturn(mock(Organization.class));
+
+      OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ReversedInvoice.class))
+          .thenReturn(mock(ReversedInvoice.class), mock(ReversedInvoice.class));
+
+      handler.callCaptureOriginInvoice(ctx);
+
+      assertFalse(body.has("originInvoices"));
+      assertFalse(body.has("originInvoice"));
+
+      handler.callPersistOriginInvoice(ctx);
+
+      // Exactly 2 distinct ids (origin-shared once, origin-only-in-array once), not 3.
+      verify(dal, times(2)).save(any(ReversedInvoice.class));
+      verify(dal).flush();
+    }
+  }
+
+  // ── enrichHasRectifications (ETP-5745 — zero prior coverage) ─────────────────
+
+  @Test
+  public void enrichHasRectifications_blankInvoiceId_setsFalseWithoutDbCall() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+      handler.callEnrichHasRectifications(rec, "");
+
+      assertFalse(rec.getBoolean("hasRectifications"));
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  public void enrichHasRectifications_nullInvoiceId_setsFalseWithoutDbCall() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+      handler.callEnrichHasRectifications(rec, null);
+
+      assertFalse(rec.getBoolean("hasRectifications"));
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  public void enrichHasRectifications_noRowFound_setsFalse() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      handler.callEnrichHasRectifications(rec, "inv-no-rect");
+
+      assertFalse(rec.getBoolean("hasRectifications"));
+    }
+  }
+
+  @Test
+  public void enrichHasRectifications_rowFound_setsTrue() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+
+      handler.callEnrichHasRectifications(rec, "inv-has-rect");
+
+      assertTrue(rec.getBoolean("hasRectifications"));
+    }
+  }
+
+  @Test
+  public void enrichHasRectifications_sqlException_failsSafeToFalse() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenThrow(new RuntimeException("SQL error"));
+
+      handler.callEnrichHasRectifications(rec, "inv-sql-err");
+
+      // No exception propagates, and the field still fails safe to false rather than being left
+      // absent.
+      assertFalse(rec.getBoolean("hasRectifications"));
     }
   }
 
@@ -3519,6 +3831,174 @@ public class AbstractInvoiceHeaderHandlerTest {
       }
       dalMock.verifyNoInteractions();
     }
+  }
+
+  // ── ETP-5828: enrichLinkedOrders — orders resolved from the invoice lines ────
+
+  /**
+   * Stubs the read-only connection so that {@link AbstractInvoiceHeaderHandler#LINKED_ORDERS_SQL}
+   * is answered by {@code ps}. Returns the connection so a test can verify on it.
+   */
+  private static Connection stubLinkedOrdersConnection(MockedStatic<OBDal> dalMock,
+      PreparedStatement ps) throws Exception {
+    OBDal roInst = mock(OBDal.class);
+    dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+    Connection conn = mock(Connection.class);
+    when(roInst.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(AbstractInvoiceHeaderHandler.LINKED_ORDERS_SQL)).thenReturn(ps);
+    return conn;
+  }
+
+  /**
+   * Two order rows — a quotation ('OB') and a standard order ('SO') — become two
+   * {@code linkedOrders} entries carrying every key the related-documents chip renders.
+   */
+  @Test
+  public void enrichLinkedOrders_twoRows_buildsEveryEntryWithAllKeys() throws Exception {
+    JSONObject rec = new JSONObject();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("ord-a", "ord-b");
+      when(rs.getString(2)).thenReturn("SQ-001", "SO-002");
+      when(rs.getString(3)).thenReturn("CO", "DR");
+      when(rs.getBigDecimal(4)).thenReturn(new BigDecimal("121.00"), new BigDecimal("50.50"));
+      when(rs.getString(5)).thenReturn("EUR", "USD");
+      when(rs.getDate(6)).thenReturn(java.sql.Date.valueOf("2026-03-01"),
+          java.sql.Date.valueOf("2026-03-15"));
+      when(rs.getString(7)).thenReturn("OB", "SO");
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-multi");
+    }
+
+    JSONArray orders = rec.getJSONArray("linkedOrders");
+    assertEquals(2, orders.length());
+
+    JSONObject first = orders.getJSONObject(0);
+    assertEquals("ord-a", first.getString("id"));
+    assertEquals("SQ-001", first.getString("documentNo"));
+    assertEquals("CO", first.getString("documentStatus"));
+    assertEquals(0, new BigDecimal("121.00").compareTo(
+        new BigDecimal(first.get("grandTotalAmount").toString())));
+    assertEquals("EUR", first.getString("currency$_identifier"));
+    assertEquals("2026-03-01", first.getString("orderDate"));
+    assertTrue("'OB' doc subtype is a quotation", first.getBoolean("isQuotation"));
+
+    JSONObject second = orders.getJSONObject(1);
+    assertEquals("ord-b", second.getString("id"));
+    assertEquals("SO-002", second.getString("documentNo"));
+    assertEquals("DR", second.getString("documentStatus"));
+    assertEquals(0, new BigDecimal("50.50").compareTo(
+        new BigDecimal(second.get("grandTotalAmount").toString())));
+    assertEquals("USD", second.getString("currency$_identifier"));
+    assertEquals("2026-03-15", second.getString("orderDate"));
+    assertFalse("'SO' doc subtype is a plain order", second.getBoolean("isQuotation"));
+  }
+
+  /**
+   * Null columns degrade without dropping the entry: no {@code orderDate} key, a zero
+   * {@code grandTotalAmount}, a JSON-null {@code currency$_identifier}, and a null doc subtype
+   * is not a quotation.
+   */
+  @Test
+  public void enrichLinkedOrders_nullColumns_omitDateZeroTotalAndNullCurrency() throws Exception {
+    JSONObject rec = new JSONObject();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("ord-null");
+      when(rs.getString(2)).thenReturn("SO-NULL");
+      when(rs.getString(3)).thenReturn("DR");
+      when(rs.getBigDecimal(4)).thenReturn(null);
+      when(rs.getString(5)).thenReturn(null);
+      when(rs.getDate(6)).thenReturn(null);
+      when(rs.getString(7)).thenReturn(null);
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-nulls");
+    }
+
+    JSONArray orders = rec.getJSONArray("linkedOrders");
+    assertEquals(1, orders.length());
+    JSONObject entry = orders.getJSONObject(0);
+    assertEquals("ord-null", entry.getString("id"));
+    assertFalse("a null DateOrdered must not emit orderDate", entry.has("orderDate"));
+    assertEquals(0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(entry.get("grandTotalAmount").toString())));
+    assertTrue("currency key is present", entry.has("currency$_identifier"));
+    assertTrue("a missing ISO code is a JSON null", entry.isNull("currency$_identifier"));
+    assertFalse(entry.getBoolean("isQuotation"));
+  }
+
+  /** The query binds the invoice id first and the ETGO_DTO total-discount product second. */
+  @Test
+  public void enrichLinkedOrders_bindsInvoiceIdThenDiscountProduct() throws Exception {
+    JSONObject rec = new JSONObject();
+    PreparedStatement ps = mock(PreparedStatement.class);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ResultSet rs = mock(ResultSet.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-binds");
+    }
+
+    verify(ps).setString(1, "inv-binds");
+    verify(ps).setString(2, TotalDiscountService.DISCOUNT_PRODUCT_ID);
+    verify(ps, times(2)).setString(Mockito.anyInt(), anyString());
+  }
+
+  /** An invoice with no order-linked line answers an empty array, not an absent key. */
+  @Test
+  public void enrichLinkedOrders_noRows_setsEmptyArray() throws Exception {
+    JSONObject rec = new JSONObject();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-no-orders");
+    }
+
+    assertTrue(rec.has("linkedOrders"));
+    assertEquals(0, rec.getJSONArray("linkedOrders").length());
+  }
+
+  /** Best-effort: a SQL failure leaves the key absent and does not propagate. */
+  @Test
+  public void enrichLinkedOrders_sqlException_leavesKeyAbsent() throws Exception {
+    JSONObject rec = new JSONObject().put("id", "inv-sql-fail");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      stubLinkedOrdersConnection(dalMock, ps);
+      when(ps.executeQuery()).thenThrow(new SQLException("relation does not exist"));
+
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-sql-fail");
+    }
+
+    assertFalse(rec.has("linkedOrders"));
+    assertEquals("inv-sql-fail", rec.getString("id"));
+  }
+
+  /** A blank invoice id short-circuits before touching the database. */
+  @Test
+  public void enrichLinkedOrders_blankInvoiceId_skipsQueryAndKey() throws Exception {
+    JSONObject rec = new JSONObject();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, " ");
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, null);
+      dalMock.verifyNoInteractions();
+    }
+
+    assertFalse(rec.has("linkedOrders"));
   }
 
 }

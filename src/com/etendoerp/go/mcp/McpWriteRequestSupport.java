@@ -46,12 +46,15 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 import com.etendoerp.go.schemaforge.NeoErrorResponses;
+import com.etendoerp.go.schemaforge.NeoMessageText;
+import com.etendoerp.go.schemaforge.NeoReferenceActiveness;
 import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
 
@@ -88,7 +91,7 @@ final class McpWriteRequestSupport {
     if (tab == null) {
       // ETP-5405: a routing failure, not a server fault — see McpRoutingException.entityHasNoTab.
       throw McpRoutingException.entityHasNoTab(entityName,
-          McpHookExecutor.resolveEntityHandler(sfEntity) != null);
+          NeoHandlerLookup.forEntity(sfEntity) != null);
     }
     return tab;
   }
@@ -603,11 +606,16 @@ final class McpWriteRequestSupport {
             e.getMessage());
       }
     }
-    return cleared.length() == 0 ? null : buildClearedMandatoryError(cleared);
+    return cleared.length() == 0 ? null : buildClearedMandatoryError(cleared, langCode);
   }
 
+  /** {@code AD_MESSAGE} values of the cleared-required-field refusal (ETP-5726, OBS-1). */
+  static final String MSG_REQUIRED_CLEARED = "ETGO_RequiredFieldsCleared";
+  static final String MSG_REQUIRED_CLEARED_HINT = "ETGO_RequiredFieldsClearedHint";
+
   /** The 422 for {@link #rejectClearedMandatoryFields}: same envelope as the create pre-check. */
-  private static JSONObject buildClearedMandatoryError(JSONArray cleared) throws JSONException {
+  private static JSONObject buildClearedMandatoryError(JSONArray cleared, String langCode)
+      throws JSONException {
     StringBuilder names = new StringBuilder();
     for (int i = 0; i < cleared.length(); i++) {
       JSONObject item = cleared.getJSONObject(i);
@@ -623,10 +631,10 @@ final class McpWriteRequestSupport {
     JSONObject error = new JSONObject();
     error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
     error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-    error.put(McpConstants.KEY_DETAIL, "Required fields cannot be cleared: " + names);
+    error.put(McpConstants.KEY_DETAIL,
+        NeoMessageText.text(MSG_REQUIRED_CLEARED, langCode, names.toString()));
     error.put(McpConstants.KEY_MISSING_FIELDS, cleared);
-    error.put(McpConstants.KEY_HINT, "These fields are required: send a value for them, or leave them out of "
-        + "the update to keep the stored one");
+    error.put(McpConstants.KEY_HINT, NeoMessageText.text(MSG_REQUIRED_CLEARED_HINT, langCode));
     error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     return error;
   }
@@ -918,6 +926,38 @@ final class McpWriteRequestSupport {
     return refusal == null ? null
         : checkJsonServiceError(new JSONObject(refusal), McpConstants.SEE_ALSO_WRITING,
             callerProvidedFields);
+  }
+
+  /**
+   * Refuse a write whose request SETS a reference/FK field to a value whose target row is
+   * inactive (ETP-5802).
+   *
+   * <p>The check itself is {@link NeoReferenceActiveness}, shared with the REST CRUD path
+   * ({@code NeoWritePreflight}). Must run after {@link #refuseUnownedReferences}, which already
+   * establishes the reference resolves to a row of the caller's tenant — and, like it, after
+   * FK-by-name resolution: {@code fields} must already carry ids, not search strings.
+   *
+   * @param adTab  the tab being written
+   * @param fields the body keyed by DAL property name, holding only what the caller sent
+   * @return the 422 envelope, or {@code null} when every reference the request sets is active
+   */
+  static JSONObject refuseInactiveReference(Tab adTab, JSONObject fields) throws JSONException {
+    NeoReferenceActiveness.InactiveReference inactive =
+        NeoReferenceActiveness.findInactiveReference(adTab, fields);
+    if (inactive == null) {
+      return null;
+    }
+    JSONObject error = new JSONObject();
+    error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+    error.put(McpConstants.KEY_ERROR, "INACTIVE_REFERENCE_VALUE");
+    error.put(McpConstants.KEY_DETAIL, "Field '" + inactive.fieldName() + "' was set to a record of"
+        + " '" + inactive.targetEntityName() + "' that is inactive; the write was rejected rather"
+        + " than silently accepted.");
+    error.put("field", inactive.fieldName());
+    error.put(McpConstants.KEY_HINT, "Choose an active record for '" + inactive.fieldName()
+        + "' — list or search the entity again; the inactive id is no longer a valid selection.");
+    error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return error;
   }
 
   /**

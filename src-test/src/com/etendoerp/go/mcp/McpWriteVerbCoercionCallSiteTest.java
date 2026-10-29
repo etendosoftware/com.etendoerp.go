@@ -62,9 +62,13 @@ class McpWriteVerbCoercionCallSiteTest {
   private static final String MODULE_SRC = "modules/com.etendoerp.go/src";
   private static final String ROUTER = "com/etendoerp/go/mcp/McpToolRouter.java";
 
-  /** The DAL persist calls that must never be reached with an uncoerced body. */
+  /**
+   * The DAL persist calls that must never be reached with an uncoerced body: on the router's own
+   * {@code jsonService}, or on the {@code service} the ETP-5051 quota gate hands to the create it
+   * runs ({@code NeoQuotaWriteGate.run(..., service -> service.add(...))}).
+   */
   private static final Pattern PERSIST_CALL =
-      Pattern.compile("jsonService\\s*\\.\\s*(add|update)\\s*\\(");
+      Pattern.compile("\\b(?:jsonService|service)\\s*\\.\\s*(add|update)\\s*\\(");
 
   /** The coercion pass that repairs types and canonicalizes dates (IMP-16). */
   private static final Pattern COERCE_CALL = Pattern.compile("coerceFieldTypes\\s*\\(");

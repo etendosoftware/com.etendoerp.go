@@ -1084,11 +1084,32 @@ public class SelectorQueryExecutorTest {
       assertTrue(countHql[0], countHql[0].startsWith("SELECT COUNT(e)"));
       assertEquals(1, dataHqls.size());
       assertFalse(dataHqls.get(0), dataHqls.get(0).contains("GROUP BY"));
+      // ETP-5903: the id breaks display ties so no row sits on two pages or on none.
+      assertTrue(dataHqls.get(0), dataHqls.get(0).endsWith(" ORDER BY e.name, e.id"));
       org.mockito.Mockito.verify(dataQuery).setFirstResult(4);
       org.mockito.Mockito.verify(dataQuery).setMaxResults(2);
       org.mockito.Mockito.verify(obDal, never()).getConnection();
       assertEquals(2, capturedItems[0].length());
     }
+  }
+
+  /** ETP-5903: the row-paged ORDER BY ends with the alias id, so equal display values page stably. */
+  @Test
+  public void testRowPageOrderAddsIdTiebreaker() {
+    assertEquals("p.name, p.id",
+        SelectorQueryExecutor.rowPageOrder("p", "SELECT p.id, p.name", " FROM Product p", "p.name"));
+  }
+
+  /**
+   * ETP-5903: PostgreSQL rejects an ORDER BY item outside a DISTINCT select list or a GROUP BY, and
+   * the failure would mark the transaction rollback-only — those queries keep the display order only.
+   */
+  @Test
+  public void testRowPageOrderSkipsTiebreakerOnDistinctOrGroupBy() {
+    assertEquals("p.name", SelectorQueryExecutor.rowPageOrder("p",
+        "select distinct p.name", " FROM Product p", "p.name"));
+    assertEquals("p.name", SelectorQueryExecutor.rowPageOrder("p",
+        "SELECT p.name, count(l)", " FROM Product p join p.lines l group  by p.name", "p.name"));
   }
 
   // ---------------------------------------------------------------
@@ -1569,7 +1590,7 @@ public class SelectorQueryExecutorTest {
       SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
 
       assertEquals(Arrays.asList("as e where e.active = true",
-          "as e where e.active = true ORDER BY e.name"), capturedWhere);
+          "as e where e.active = true ORDER BY e.name, e.id"), capturedWhere);
       verify(obDal, never()).getSession();
     }
   }

@@ -44,6 +44,7 @@ import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * Service managing company user invitations (ETP-4894).
@@ -228,9 +229,9 @@ public class CompanyInvitationService {
    */
   private JSONObject createInvitationForInviter(InviterContext inviter, String email,
       String appBaseUrl, String language, boolean requireExistingRole) throws JSONException {
-    if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
-      return errorResponse(403, "FORBIDDEN",
-          "Inviter does not have company administration permissions");
+    JSONObject inviterError = rejectInviter(inviter);
+    if (inviterError != null) {
+      return inviterError;
     }
 
     Organization invitationOrganization = inviter.org != null ? inviter.org
@@ -266,6 +267,11 @@ public class CompanyInvitationService {
    */
   private JSONObject issueFreshInvitation(InviterContext inviter, Organization organization,
       User invitedUser, String email, String appBaseUrl, String language) throws JSONException {
+    if (SupportAccessGuard.isSupportEmail(email)) {
+      // ETP-5351 (T5): every invitation (create and resend) is minted here; none may target the
+      // technical support account's address.
+      return errorResponse(400, "INVITATION_EMAIL_RESERVED", "This email address is reserved");
+    }
     String rawToken = generateToken();
     Date expiresAt = Date.from(Instant.now().plus(INVITATION_TTL_DAYS, ChronoUnit.DAYS));
     Invitation invitation = persistInvitation(inviter, organization, invitedUser, email,
@@ -324,9 +330,9 @@ public class CompanyInvitationService {
   public JSONObject resendInvitation(OBContext obContext, String userId, String appBaseUrl,
       String language) throws JSONException {
     InviterContext inviter = resolveInviterFromContext(obContext);
-    if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
-      return errorResponse(403, "FORBIDDEN",
-          "Inviter does not have company administration permissions");
+    JSONObject inviterError = rejectInviter(inviter);
+    if (inviterError != null) {
+      return inviterError;
     }
     if (StringUtils.isBlank(userId)) {
       return errorResponse(400, "MISSING_USER_ID", "AD_User_ID is required");
@@ -375,6 +381,23 @@ public class CompanyInvitationService {
         : OBDal.getInstance().get(Organization.class, "0");
     return issueFreshInvitation(inviter, invitationOrganization, invitedUser, email, appBaseUrl,
         language);
+  }
+
+  /**
+   * Error response when the inviter may not invite (no company, or ETP-5351: the support user,
+   * since an invitation is persistent access), or null when allowed.
+   */
+  private JSONObject rejectInviter(InviterContext inviter) throws JSONException {
+    if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
+      return errorResponse(403, "FORBIDDEN",
+          "Inviter does not have company administration permissions");
+    }
+    if (inviter.user != null
+        && SupportAccessGuard.isSupportUser(inviter.user.getId(), inviter.client.getId())) {
+      return errorResponse(403, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
+          SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
+    return null;
   }
 
   private JSONObject existingInvitationResponse(Invitation existing) throws JSONException {
@@ -598,6 +621,11 @@ public class CompanyInvitationService {
     if (authenticatedAccount == null) {
       return errorResponse(401, "AUTHENTICATION_REQUIRED",
           "Sign in with the invited Etendo account before accepting");
+    }
+    if (SupportAccessGuard.isSupportAccount(authenticatedAccount)) {
+      // ETP-5351 (T5): the technical support account never joins a company.
+      return errorResponse(403, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
+          SupportAccessGuard.MESSAGE_FORBIDDEN);
     }
 
     return withAdminMode(() -> acceptExistingAccountInAdminMode(rawToken, authenticatedAccount));

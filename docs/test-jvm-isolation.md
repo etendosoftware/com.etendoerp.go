@@ -33,7 +33,8 @@ CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest > initializationError F
 The second variant is the same class of leak seen from the other end: the worker never logged
 `OBConfigFileProvider - Found provider config file`, so `getFileLocation()` returned `null` and
 `Paths.get` blew up. A build log that shows more `Dal layer initialized` lines than
-`Found provider config file` lines is the tell.
+`Found provider config file` lines is the tell. The cause of this second variant is known and
+fixed JVM-wide. See [Openbravo.properties preload](#openbravoproperties-preload-the-config-file-location-variant).
 
 ### Symptom 2 — the test passes, then fails on the admin-mode check
 
@@ -86,6 +87,61 @@ Consequences worth knowing:
   plugin and has no editable source in this repository, so both the exclusion and the new task are
   declared from `modules/com.etendoerp.go/build.gradle` against `rootProject`.
 
+## Openbravo.properties preload (the config-file-location variant)
+
+**Symptom.** An `OBBaseTest`/`WeldBaseTest` class fails as `initializationError` with an NPE in
+`OBBaseTest.initializeDisabledTestCases` (`Paths.get(null, ...)`), although it does nothing wrong
+itself. Example: `StorageDetailCostColumnsIntegrationTest > initializationError` in Jenkins
+etendo-go-tests #2487.
+
+**Cause.** `OBPropertiesProvider.getOpenbravoProperties()` loads `Openbravo.properties` only once
+per JVM. It stores the properties first and only then calls
+`OBConfigFileProvider.getInstance().setFileLocation(...)`. `OBConfigFileProvider` resolves itself
+through `OBProvider.getInstance()` and caches the result statically. If the **first** properties
+read of a JVM happens under `mockStatic(OBProvider.class)`, one of two things goes wrong:
+
+- the file location is never set, and nothing retries because the properties are already marked
+  as loaded;
+- a Mockito mock is cached as the `OBConfigFileProvider`.
+
+This usually happens through `ConfigPropertyReader`, `GoRuntimeProperties` or `GoFeatureFlags`,
+which swallow the exception, so the mocked test itself still passes. Every DAL test forked later
+into that JVM then fails. Which class pays depends only on how Gradle shares classes among forks:
+the root `test` task uses `maxParallelForks = 1` and `forkEvery = 100`, and `goIsolatedDalTest`
+uses `forkEvery = 1`. So an unrelated PR that adds or removes test classes can move the failure.
+
+**Fix.** `com.etendoerp.go.testsupport.OpenbravoPropertiesPreloadListener`
+(`src-test/src/com/etendoerp/go/testsupport/`) is a JUnit Platform `LauncherSessionListener`. It
+is registered in
+`src-test/resources/META-INF/services/org.junit.platform.launcher.LauncherSessionListener`. Once
+per test JVM, before any test class is loaded, it reads the properties with the real providers and
+pins the real `OBConfigFileProvider`. It is on the merged root test classpath, so it protects
+every module's tests run by the root `test` task and by `goIsolatedDalTest`, not only this
+module's tests. It tolerates failures: it catches `Throwable` and logs a warning, so a machine
+without `Openbravo.properties` still runs its tests.
+
+- **Do not remove the listener or its `META-INF/services` registration.** Without them the
+  failure returns on whichever class Gradle schedules after the poisoning test.
+- **New tests need no per-class preload.** Two earlier per-class patches are still in place and
+  are harmless: the `@BeforeClass` preload in
+  `TenantEnvironmentLifecycleServiceSubscriptionRowTest` and the properties mock in
+  `EtendoGoJwtDalHelperTest`. Do not copy them into new classes.
+
+**Verify.** `OpenbravoPropertiesPreloadListenerTest` reproduces the worst case on purpose. Its
+first action reads a property while `OBProvider` is statically mocked. It then asserts three
+things: the cached `OBConfigFileProvider` is not a mock, its file location is set, and the listener
+ran exactly once in the JVM. Run it from the Etendo root:
+
+```bash
+./gradlew test --tests com.etendoerp.go.testsupport.OpenbravoPropertiesPreloadListenerTest
+```
+
+Pass full class names to `--tests`. A leading wildcard (`--tests '*PreloadListenerTest'`) also
+matches core `@Suite` classes, which then fail with `NoTestsDiscoveredException`.
+
+This fixes only the config-file-location variant. The JDBC-pool variant of symptom 1 and the
+admin-mode leak of symptom 2 still need `isolatedDalTests` (below).
+
 ## Adding a new DAL integration test
 
 If you add a class that extends `OBBaseTest` and it fails with **either** symptom above, add its
@@ -121,8 +177,9 @@ survived only because it ran behind the goods-receipt class in the same worker, 
 Isolating the class works around the symptom. There are two culprits and neither has been
 identified:
 
-1. Whichever mocked test leaves the JDBC pool singleton without a datasource (or leaves
-   `OBConfigFileProvider` without a file location) — symptom 1.
+1. Whichever mocked test leaves the JDBC pool singleton without a datasource — symptom 1. (The
+   `OBConfigFileProvider` file-location half of symptom 1 is identified and fixed by the
+   [preload listener](#openbravoproperties-preload-the-config-file-location-variant).)
 2. Whichever mocked test calls `OBContext.setAdminMode()` without its matching
    `restorePreviousMode()` — symptom 2.
 

@@ -129,6 +129,26 @@ class PaymentMethodSelectorSupportTest {
 
   // ── direction from request param wins over the declared fallback ─────────
 
+  /** ETP-5903: pages are ordered by name, then id, so equal names cannot shift rows between pages. */
+  @Test
+  void testPagesAreOrderedByNameThenId() throws Exception {
+    NeoContext ctx = selectorCtx("paymentMethod");
+    try (MockedStatic<RequestContext> reqCtx = mockStatic(RequestContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      Map<String, String> params = new HashMap<>();
+      params.put("IsSOTrx", "Y");
+      stubSelectorRequest(reqCtx, params);
+      OBCriteria<FIN_PaymentMethod> criteria = stubCriteria(obDal, Collections.emptyList());
+
+      PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(ctx, DirectionFallback.WINDOW);
+
+      org.mockito.InOrder order = org.mockito.Mockito.inOrder(criteria);
+      order.verify(criteria).addOrderBy(FIN_PaymentMethod.PROPERTY_NAME, true);
+      order.verify(criteria).addOrderBy(FIN_PaymentMethod.PROPERTY_ID, true);
+    }
+  }
+
   @Test
   @SuppressWarnings("unchecked")
   void testIsSOTrxYResolvesPayInEvenThoughFieldNameIsAmbiguous() throws Exception {

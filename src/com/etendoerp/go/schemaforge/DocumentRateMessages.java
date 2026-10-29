@@ -17,19 +17,13 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 
@@ -37,20 +31,12 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * The user-facing texts of the document exchange-rate rules (ETP-5840) and the refusals that carry
  * them.
  *
- * <p><b>Where a text comes from.</b> Every key is an {@code AD_MESSAGE} value of this module. The
- * text is resolved in the request language ({@link NeoLanguage#currentCode()}, the GO locale) in this
- * order:
- * <ol>
- *   <li>an {@code AD_MESSAGE_TRL} row of that language marked {@code IsTranslated = 'Y'} — so an
- *       environment that does carry a translation keeps it (an untranslated copy, which Etendo
- *       creates for every system language, is skipped);</li>
- *   <li>the versioned {@code messages/neo_hints_<lang>.properties} catalog, read through
- *       {@link NeoHints#catalogText} — the Spanish text lives here, because
- *       {@code com.etendoerp.go} is not a translation module and {@code export.database} never
- *       exports its {@code AD_MESSAGE_TRL} rows;</li>
- *   <li>the {@code AD_MESSAGE} base text (English), then the key itself.</li>
- * </ol>
- * {@code AD_MESSAGE} texts use {@code %0..%n} placeholders, the catalog {@code {0}..{n}}.
+ * <p><b>Where a text comes from.</b> Every key is an {@code AD_MESSAGE} value of this module,
+ * resolved in the request language ({@link NeoLanguage#currentCode()}, the GO locale) by
+ * {@link NeoMessageText}: a translated {@code AD_MESSAGE_TRL} row, then the versioned
+ * {@code messages/neo_hints_<lang>.properties} catalog (the Spanish text lives there, because
+ * {@code com.etendoerp.go} exports no {@code AD_MESSAGE_TRL}), then the {@code AD_MESSAGE} base text
+ * (English), then the English catalog, then the key.
  *
  * <p><b>Identity.</b> Every refusal also carries {@code error.messageKeys} and
  * {@code error.messageParams} (the ETP-5175 structured identity), so a client may render its own
@@ -94,20 +80,11 @@ final class DocumentRateMessages {
   }
 
   /**
-   * The text of {@code key} in {@code language}, resolved in the order the class documents.
-   * Total: never throws.
+   * The text of {@code key} in {@code language}, resolved in the order {@link NeoMessageText}
+   * documents. Total: never throws.
    */
   static String text(String key, String language, Object... args) {
-    String translated = translatedRow(key, language);
-    if (translated != null) {
-      return substitute(translated, args);
-    }
-    String catalog = NeoHints.catalogText(key, language, args);
-    if (catalog != null) {
-      return catalog;
-    }
-    String base = baseText(key);
-    return base != null ? substitute(base, args) : key;
+    return NeoMessageText.text(key, language, args);
   }
 
   /**
@@ -202,51 +179,6 @@ final class DocumentRateMessages {
       return NeoResponse.error(SC_UNPROCESSABLE, new JSONObject().put("error", error));
     } catch (Exception e) {
       return NeoResponse.error(SC_UNPROCESSABLE, message);
-    }
-  }
-
-  private static String substitute(String pattern, Object... args) {
-    String result = pattern;
-    if (args != null) {
-      for (int i = args.length - 1; i >= 0; i--) {
-        result = result.replace("%" + i, args[i] != null ? String.valueOf(args[i]) : "");
-      }
-    }
-    return result;
-  }
-
-  /** The {@code IsTranslated = 'Y'} {@code AD_MESSAGE_TRL} text of {@code key}, or {@code null}. */
-  private static String translatedRow(String key, String language) {
-    if (StringUtils.isBlank(language)) {
-      return null;
-    }
-    return queryText("SELECT t.msgtext FROM ad_message_trl t"
-        + " JOIN ad_message m ON m.ad_message_id = t.ad_message_id"
-        + " WHERE m.value = ? AND t.ad_language = ? AND t.isactive = 'Y' AND t.istranslated = 'Y'",
-        key, language);
-  }
-
-  private static String baseText(String key) {
-    return queryText("SELECT msgtext FROM ad_message WHERE value = ?", key);
-  }
-
-  private static String queryText(String sql, String... params) {
-    OBContext.setAdminMode(true);
-    try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        for (int i = 0; i < params.length; i++) {
-          ps.setString(i + 1, params[i]);
-        }
-        try (ResultSet rs = ps.executeQuery()) {
-          return rs.next() ? StringUtils.trimToNull(rs.getString(1)) : null;
-        }
-      }
-    } catch (Exception e) {
-      log.debug("[ETP-5840] Could not read message text: {}", e.getMessage());
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
     }
   }
 }

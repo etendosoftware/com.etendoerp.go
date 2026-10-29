@@ -73,6 +73,8 @@ import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
@@ -93,6 +95,7 @@ import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.PlanNotAvailableException;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.StripeJson;
@@ -101,11 +104,10 @@ import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
-import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
-import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
@@ -125,9 +127,11 @@ import com.etendoerp.go.onboarding.NdjsonOnboardingProgressSink;
 import com.etendoerp.go.onboarding.NdjsonSinkWriter;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.OnboardingStreamWriter;
+import com.etendoerp.go.onboarding.OrgInfoInput;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
+import com.etendoerp.go.onboarding.OnboardingDefaultContactCategoryService;
 import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -146,7 +150,20 @@ import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.usage.IsolatedReader;
+import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
+import com.etendoerp.go.usage.quota.QuotaDefinition;
+import com.etendoerp.go.usage.quota.QuotaEvaluation;
+import com.etendoerp.go.usage.quota.QuotaEvaluator;
+import com.etendoerp.go.usage.quota.QuotaItemJson;
+import com.etendoerp.go.usage.quota.TenantQuotas;
 import com.etendoerp.go.usageevents.SessionLoginUsage;
+import com.etendoerp.go.supportaccess.SupportAccessException;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.supportaccess.SupportAccessService;
+import com.etendoerp.go.supportaccess.SupportHandoffService;
+import com.etendoerp.go.supportaccess.SupportTicketException;
+import com.etendoerp.go.supportaccess.SupportUserProvisioner;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -254,6 +271,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String MISSING_TOKEN_MESSAGE = "Missing required field: token";
   private static final String FIELD_INCLUDE_SAMPLE_DATA = "includeSampleData";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
+  /**
+   * ETP-5806 — backend-only feature flags surfaced to the onboarding bootstrap (no tenant exists
+   * yet at this point, so {@code SFWindowAccessMap}'s role-scoped {@code capabilities} map is not
+   * reachable here). The frontend reads {@code capabilities.<flag>} and never evaluates a flag
+   * itself — see {@code GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA}'s javadoc.
+   */
+  private static final String FIELD_CAPABILITIES = "capabilities";
+  private static final String CAPABILITY_STRUCTURED_ADDRESS = "structuredAddressForSepa";
   private static final String FIELD_CURRENCY = "currency";
   /** Key of the resource a Stripe event carries under {@code data}. */
   private static final String STRIPE_EVENT_OBJECT = "object";
@@ -376,11 +401,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
   private static final String FIELD_FULL_NAME = "fullName";
   private static final String FIELD_ADDRESS = "address";
+  // ETP-5806 — the onboarding company step's address block, replacing the single free-text
+  // `address` field with the same Street/Number/Building Name breakdown used by every other
+  // address popup. `FIELD_ADDRESS` is kept (see parseOnboardingRequest) as a legacy fallback for
+  // any caller still sending plain text (e.g. an MCP/API client not yet updated).
+  private static final String FIELD_STREET_NAME = "streetName";
+  private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
+  private static final String FIELD_BUILDING_NAME = "buildingName";
+  // ETP-5806 — City joins Street/Number as mandatory once the address block is started; see the
+  // mandatoriness rule in parseOnboardingRequest (below) and isAddressBlockStarted/
+  // isCompanyStepValid in the frontend's state.js.
+  private static final String FIELD_CITY_NAME = "city";
   private static final String FIELD_PRODUCTS = "products";
   private static final String FIELD_CONTACTS = "contacts";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
-      FIELD_FISCAL_ID_VALUE, FIELD_ADDRESS, "sector", FIELD_INCLUDE_SAMPLE_DATA };
+      FIELD_FISCAL_ID_VALUE, FIELD_ADDRESS, FIELD_STREET_NAME, FIELD_BUILDING_NUMBER,
+      FIELD_BUILDING_NAME, FIELD_CITY_NAME, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -409,6 +446,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_ONBOARDING_COMPANY_DATA = "/onboarding/company-data";
   private static final String PATH_CALENDAR_REVIEW = "/onboarding/calendar-review";
   private static final String FIELD_COMPANY_DATA = "companyData";
+  /** ETP-5351: the {@code /me} and {@code GET /session} block describing a support session. */
+  private static final String FIELD_SUPPORT_SESSION = "supportSession";
+  private static final String PATH_SUPPORT_HANDOFF = "/session/support-handoff";
+  private static final String ACTION_SUPPORT_HANDOFF = "support handoff";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
@@ -442,6 +483,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
   OnboardingSampleDataService onboardingSampleDataService = new OnboardingSampleDataService();
+  OnboardingDefaultContactCategoryService onboardingDefaultContactCategoryService =
+      new OnboardingDefaultContactCategoryService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
   DevProvisioningFailureFixtureService devProvisioningFailureFixtureService =
       new DevProvisioningFailureFixtureService();
@@ -454,6 +497,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   SubscriptionModelSwitch subscriptionModelSwitch = new SubscriptionModelSwitch();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   PlanCatalogService planCatalogService = new PlanCatalogService();
+  /** ETP-5051 — the one quota evaluator; package-visible for tests. */
+  QuotaEvaluator quotaEvaluator = QuotaEvaluator.forReports();
+  /**
+   * ETP-5051 — runs each quota report as one read in its own session, off the request's
+   * transaction; package-visible so a test runs it inline.
+   */
+  IsolatedReader quotaReads = IsolatedReader.DAL;
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
@@ -478,6 +528,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private final GoSessionService goSessionService;
   // Package-visible so tests can swap the database-backed role lookups for a fake.
   GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
+  // ETP-5351 — support access. Package-visible so tests can replace them with mocks.
+  SupportAccessService supportAccessService = new SupportAccessService();
+  SupportHandoffService supportHandoffService;
 
   /**
    * Creates the default servlet wired to the runtime transactional auth email sender.
@@ -514,6 +567,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     this.goSessionService = goSessionService;
     this.stripePriceService = stripePriceService;
     this.companyInvitationService = new CompanyInvitationService(authEmailSender);
+    this.supportHandoffService = new SupportHandoffService(supportAccessService,
+        new SupportUserProvisioner(), goSessionService);
     this.accountRegistration = new AccountRegistrationService(authEmailSender);
   }
 
@@ -678,6 +733,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSessionLink(request, response);
     } else if (isPath(path, "/session/refresh")) {
       handleSessionRefresh(request, response);
+    } else if (isPath(path, PATH_SUPPORT_HANDOFF)) {
+      handleSupportHandoff(request, response);
     } else if (path != null && path.startsWith("/session/sso/")) {
       handleSessionCreateSso(path.substring("/session/sso/".length()), request, response);
     } else {
@@ -1490,17 +1547,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Returns the authenticated account's live subscription detail plus stored grace state.
+   * Returns the live subscription detail plus stored grace state of the subscription the account
+   * page shows: the entered environment's own one, else the account's newest
+   * ({@link #findShownSubscription}).
    *
    * <p>Only the provider call maps an {@link IllegalStateException} to 503: that is where the
    * Stripe "not configured" condition is raised. The same exception from the stored-state lookup
-   * is a real server fault and reaches {@code runWithPlatformAccount}'s 500 path.
+   * is a real server fault and reaches {@code runWithPlatformContext}'s 500 path.
    */
   private void handleBillingSubscription(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    runWithPlatformAccount(request, response, "billing-subscription", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.findSubscriptionForAccount(account.getId(),
-          account.getEmail());
+    runWithPlatformContext(request, response, "billing-subscription", authenticated -> {
+      CheckoutRequest purchase = findShownSubscription(authenticated);
       if (purchase == null) {
         JSONObject result = new JSONObject();
         result.put("hasSubscription", false);
@@ -1540,14 +1598,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Creates a portal session using only the authenticated account's stored customer id.
    *
-   * <p>The purchase is resolved exactly as the Subscription page resolves it, so the portal always
-   * opens for the customer of the subscription the page shows.
+   * <p>The purchase is resolved exactly as the Subscription page resolves it
+   * ({@link #findShownSubscription}), so the portal always opens for the customer of the
+   * subscription the page shows. ETP-5051 (O-1) — every environment has its own Stripe customer,
+   * so resolving the account's newest purchase here while the page shows the entered one would let
+   * a user look at SPRING7 and change SPRING8.
+   *
+   * <p>ETP-5051 (O-1b) — "Mis empresas" manages each row's own environment, whatever environment
+   * the session is in, so the optional JSON body {@code {"clientId": "<AD_CLIENT_ID>"}} names it
+   * ({@link #findPortalSubscription}). Ownership stays the query's: a client this account did not
+   * buy matches nothing and answers {@code 404 NO_SUBSCRIPTION}. No body, an empty body or no
+   * {@code clientId} keeps the rule above; a body that is not a JSON object answers 400.
    */
   private void handleBillingPortal(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithPlatformAccount(request, response, "billing-portal", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.findSubscriptionForAccount(account.getId(),
-          account.getEmail());
+    runWithPlatformContext(request, response, "billing-portal", authenticated -> {
+      String requestedClientId;
+      try {
+        requestedClientId = requestedPortalClientId(request);
+      } catch (JSONException e) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+        return;
+      }
+      CheckoutRequest purchase = findPortalSubscription(authenticated, requestedClientId);
       if (purchase == null || StringUtils.isBlank(purchase.getStripeCustomer())) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "NO_SUBSCRIPTION",
             "No subscription for this account", "No subscription for this account");
@@ -1570,6 +1643,71 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put("url", session.optString("url", ""));
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the {@code clientId} of the portal's optional JSON body, or {@code null}
+   * when there is no body, the body is blank, or it names no client (an absent key, a JSON null,
+   * a blank string or {@code "0"}, the System client, all count as none).
+   *
+   * @throws JSONException when a non-blank body is not a JSON object
+   */
+  private String requestedPortalClientId(HttpServletRequest request)
+      throws IOException, JSONException {
+    String raw = request.getReader() == null ? null : readRawBody(request);
+    if (StringUtils.isBlank(raw)) {
+      return null;
+    }
+    JSONObject body = BoundedJsonParser.parseObject(raw);
+    // A JSON null is an absent key: optString would turn it into the string "null".
+    if (!body.has(FIELD_CLIENT_ID) || body.isNull(FIELD_CLIENT_ID)) {
+      return null;
+    }
+    String clientId = StringUtils.trimToNull(body.optString(FIELD_CLIENT_ID, ""));
+    return ZERO_ID.equals(clientId) ? null : clientId;
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the purchase the portal opens: the named environment's own one when the
+   * caller names it (a "Mis empresas" row), else the one the account page shows
+   * ({@link #findShownSubscription}). Both lookups keep the account id and email in the query.
+   */
+  private CheckoutRequest findPortalSubscription(AuthenticatedAccount authenticated,
+      String requestedClientId) {
+    if (requestedClientId == null) {
+      return findShownSubscription(authenticated);
+    }
+    Account account = authenticated.account;
+    return checkoutRequestStore.findSubscriptionForAccountClient(account.getId(),
+        account.getEmail(), requestedClientId);
+  }
+
+  /**
+   * ETP-5051 (O-1) — the one purchase the account page shows and acts on, for both
+   * {@code GET /billing/subscription} and the Customer Portal.
+   *
+   * <ul>
+   *   <li>Session entered into an environment ({@code POST /session/environment} wrote its
+   *       client on the cookie session): that environment's own subscription, so plan, quotas
+   *       and their consumption, grace, price and {@code accessEnforced} all describe the
+   *       environment the user is in. When the account has no billable purchase for it (a demo,
+   *       or an environment it was only invited into), the answer is "no subscription" — never
+   *       another environment's subscription, which is the mismatch this fixes.</li>
+   *   <li>Account-level session (no environment entered) or the legacy platform-token bearer,
+   *       which carries no environment: the account's newest subscription, as before.</li>
+   * </ul>
+   *
+   * <p>Ownership is the query's: both lookups carry the account id and email, so a client id that
+   * is not one of the account's own environments resolves to nothing.
+   */
+  private CheckoutRequest findShownSubscription(AuthenticatedAccount authenticated) {
+    Account account = authenticated.account;
+    String enteredClientId = enteredSessionClientId(authenticated);
+    if (enteredClientId == null || ZERO_ID.equals(enteredClientId)) {
+      return checkoutRequestStore.findSubscriptionForAccount(account.getId(), account.getEmail());
+    }
+    return checkoutRequestStore.findSubscriptionForAccountClient(account.getId(),
+        account.getEmail(), enteredClientId);
   }
 
   private JSONObject buildBillingSubscriptionJson(
@@ -1599,6 +1737,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
     // renewal date on that company's row. Additive: existing consumers ignore it.
     result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
+    // ETP-5051 (§4c) — the environment-access kill switch for this tenant, from the same source as
+    // accessEnforced on GET /environments: false while enforcement is switched off for it, so the
+    // grace countdown drops its "before access is paused". With no tenant, enforcing (true).
+    result.put("accessEnforced", clientId == null
+        || !EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId));
     putSubscriptionPlan(result, clientId);
     return result;
   }
@@ -1614,15 +1757,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * which would name a plan catalog row that does not exist. With a plan, an empty
    * {@code planQuotas} means the plan has no quota rows, which is <em>unlimited</em>
    * ({@code open-and-notable-topics.md} §5.1).
+   *
+   * <p>ETP-5051 — each item is the full {@code QuotaItem} ({@code QuotaItemJson}): the consumption
+   * over the subscription's current billing period is measured for every active row, mode
+   * {@code off} included (whose verdict stays null), by the one {@code QuotaEvaluator}. A closed or
+   * periodless row has no current period: {@code consumed}, {@code verdict} and the period bounds
+   * are null. A failed measurement never fails the page: the items are sent without it.
    */
   private void putSubscriptionPlan(JSONObject result, String clientId) throws JSONException {
-    Plan plan = clientId == null ? null
-        : subscriptionService.findLatest(clientId).map(Subscription::getPlan).orElse(null);
+    Subscription subscription = clientId == null ? null
+        : subscriptionService.findLatest(clientId).orElse(null);
+    Plan plan = subscription == null ? null : subscription.getPlan();
     JSONArray quotas = new JSONArray();
     if (plan != null) {
-      for (PlanQuota quota : planCatalogService.listActiveQuotas(plan)) {
-        quotas.put(buildPlanQuotaJson(quota, plan));
-      }
+      TenantQuotas tenant = TenantQuotas.of(clientId, subscription,
+          planCatalogService.listActiveQuotas(plan));
+      quotas = QuotaItemJson.ofAll(evaluateQuotas(tenant));
     }
     result.put(FIELD_PLAN_KEY, plan == null ? JSONObject.NULL : plan.getSearchKey());
     result.put("planName",
@@ -1631,26 +1781,44 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * One included quota, informational only: what the plan includes, not what has been used.
-   * {@code period} is the plan's billing interval, which is the quota's consumption window
-   * ({@code open-and-notable-topics.md} §5.5, §5.8): a quota on a yearly plan is a yearly quota.
+   * Measures the account page's quotas; on a failed measurement, answers the same rows unmeasured
+   * rather than failing the page.
    */
-  private static JSONObject buildPlanQuotaJson(PlanQuota quota, Plan plan) throws JSONException {
-    BillingResource resource = quota.getBillingResource();
-    JSONObject item = new JSONObject();
-    item.put("resourceKey", resource == null ? JSONObject.NULL : resource.getSearchKey());
-    item.put("resourceName", resource == null ? JSONObject.NULL
-        : StringUtils.defaultString(resource.getName()));
-    item.put("unitLabel", resource == null || resource.getUnitLabel() == null ? JSONObject.NULL
-        : resource.getUnitLabel());
-    item.put("includedQty", quota.getIncludedQty() == null ? JSONObject.NULL
-        : quota.getIncludedQty());
-    item.put("enforcementMode", StringUtils.defaultString(quota.getEnforcementMode()));
-    item.put("warningThreshold", quota.getWarningThreshold() == null ? JSONObject.NULL
-        : quota.getWarningThreshold());
-    item.put("period", StringUtils.isBlank(plan.getBillingInterval()) ? JSONObject.NULL
-        : plan.getBillingInterval());
-    return item;
+  private List<QuotaEvaluation> evaluateQuotas(TenantQuotas tenant) {
+    try {
+      return quotaReads.call(() -> quotaEvaluator.evaluate(tenant, QuotaEvaluator.Scope.ACCOUNT));
+    } catch (RuntimeException e) {
+      log.error("Could not measure the quotas of tenant {}; sending them unmeasured",
+          tenant.getClientId(), e);
+      List<QuotaEvaluation> unmeasured = new ArrayList<>();
+      for (QuotaDefinition quota : tenant.getQuotas()) {
+        unmeasured.add(new QuotaEvaluation(quota, tenant.getPlanInterval(), null, null, null));
+      }
+      return unmeasured;
+    }
+  }
+
+  /**
+   * ETP-5051 — the quotas to report on entering an environment (contract §2): only the items whose
+   * verdict is WARN or DENY. Report-only: entering is never refused because of a quota, and a
+   * failed evaluation reports nothing. A tenant with no quota row costs no consumption query.
+   */
+  private JSONArray loginQuotas(String clientId) {
+    try {
+      List<QuotaEvaluation> reportable = new ArrayList<>();
+      List<QuotaEvaluation> evaluations = quotaReads.call(
+          () -> quotaEvaluator.evaluateTenant(clientId, QuotaEvaluator.Scope.ENFORCEMENT));
+      for (QuotaEvaluation evaluation : evaluations) {
+        if (evaluation.isReportable()) {
+          reportable.add(evaluation);
+        }
+      }
+      return QuotaItemJson.ofAll(reportable);
+    } catch (RuntimeException | JSONException e) {
+      log.warn("Could not evaluate the quotas of tenant {} on environment entry; reporting none",
+          clientId, e);
+      return new JSONArray();
+    }
   }
 
   /** Returns one account-scoped purchase projection, with foreign IDs kept indistinguishable. */
@@ -2325,7 +2493,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
 
-      if (EtendoGoJwtDalHelper.findActiveAccountByEmail(email) != null) {
+      // ETP-5351: the support account's address is taken even though the lookup hides that account.
+      if (SupportAccessGuard.isSupportEmail(email)
+          || EtendoGoJwtDalHelper.findActiveAccountByEmail(email) != null) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_EMAIL_ALREADY_REGISTERED,
             "Email already registered", "Email already registered");
         return;
@@ -2489,6 +2659,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private Account resolveSsoAccount(EtendoGoSsoAssertion assertion, String sessionToken,
       HttpServletResponse response) throws IOException {
+    // ETP-5351: nobody signs in as the technical support account, whatever the provider asserts.
+    if (SupportAccessGuard.isSupportEmail(assertion.getEmail())) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
+      return null;
+    }
     Account account = EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
         assertion.getProvider(), assertion.getSubject());
     if (account == null) {
@@ -3180,6 +3355,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_EMAIL_VERIFICATION_PENDING,
           EmailVerificationDalHelper.isEmailVerificationPending(account));
       result.put("authMethods", buildAuthMethods(account));
+      result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(authenticated.sessionRecord));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -3191,23 +3367,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
-  }
-
-  /**
-   * Resolve the platform account for a billing / checkout / upgrade endpoint. Always enters admin
-   * mode (so callers can restore it in their finally block) and writes the error response,
-   * returning null, when the request is not authenticated.
-   *
-   * <p>ETP-5455 — the account surface's single resolver under
-   * {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}. It used to carry its own Bearer branch,
-   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
-   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
-   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
-   */
-  private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    AuthenticatedAccount authenticated =
-        resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
-    return authenticated == null ? null : authenticated.account;
   }
 
   /**
@@ -3277,6 +3436,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return null;
       }
+      // ETP-5351 (T5): a support session keeps the reads and loses every account write
+      // (password, auth methods, invitations, onboarding, billing) — one rule for every endpoint.
+      if (SupportAccessGuard.isSupportSession(sessionAuth.getRecord())
+          && !SupportAccessGuard.isAllowedOnAccountSurface(request.getMethod(),
+              request.getPathInfo())) {
+        writeSupportSessionForbidden(response);
+        return null;
+      }
       return new AuthenticatedAccount(account, sessionAuth.getRecord());
     }
 
@@ -3331,10 +3498,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void runWithPlatformAccount(HttpServletRequest request,
       HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
       throws IOException {
+    runWithPlatformContext(request, response, actionLabel,
+        authenticated -> action.execute(authenticated.account));
+  }
+
+  /**
+   * {@link #runWithPlatformAccount}, but the action also sees the cookie session, if any — for the
+   * billing endpoints that must know which environment the session has entered (ETP-5051 O-1).
+   *
+   * <p>Resolves the platform account for a billing / checkout / upgrade endpoint through
+   * {@link #resolveAccount} under {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}, which
+   * always enters admin mode (restored in the finally block) and writes the error response itself
+   * when the request is not authenticated. ETP-5455 — this used to carry its own Bearer branch,
+   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
+   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
+   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
+   */
+  private void runWithPlatformContext(HttpServletRequest request,
+      HttpServletResponse response, String actionLabel, AuthenticatedContextAction action)
+      throws IOException {
     try {
-      Account account = resolvePlatformAccount(request, response);
-      if (account == null) return;
-      action.execute(account);
+      AuthenticatedAccount authenticated =
+          resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
+      if (authenticated == null) return;
+      action.execute(authenticated);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges(actionLabel, e, log);
       log.error("Platform request failed: {}", actionLabel, e);
@@ -3794,10 +3981,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         demoClientId != null && transfer != null && transfer.optBoolean(FIELD_CONTACTS, false));
   }
 
+  /**
+   * The environment the cookie session has entered: the client {@code POST /session/environment}
+   * wrote on the session record, or {@code null} for an account-level session and for a request
+   * authenticated without a cookie session. A pure read of server-written state; ownership is the
+   * caller's to check.
+   */
+  private static String enteredSessionClientId(AuthenticatedAccount authenticated) {
+    return authenticated.sessionRecord == null ? null
+        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
+  }
+
   private String currentSessionClientId(HttpServletRequest request, HttpServletResponse response,
       AuthenticatedAccount authenticated) throws IOException {
-    String clientId = authenticated.sessionRecord == null ? null
-        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
+    String clientId = enteredSessionClientId(authenticated);
     if (authenticated.sessionRecord == null) {
       DecodedJWT jwt = bearerTenantClaims(request);
       if (jwt != null) clientId = StringUtils.trimToNull(
@@ -4388,8 +4585,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Account account = authenticated.account;
 
       org.codehaus.jettison.json.JSONArray envArray = new org.codehaus.jettison.json.JSONArray();
-      List<User> environmentUsers = new ArrayList<>(
-          EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail()));
+      List<User> environmentUsers = SupportAccessGuard.isSupportSession(
+          authenticated.sessionRecord)
+              ? supportEnvironmentUsers(authenticated.sessionRecord)
+              : new ArrayList<>(
+                  EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail()));
       // One query for every tenant on the page, resolved before the sort rather than inside it.
       // Built per request and passed down as a parameter — never cached in a field or a
       // ThreadLocal, because Tomcat pools request threads and the next request on this thread
@@ -4402,8 +4602,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // retired preference about the tenants that have no subscription row yet. Exactly one extra
       // query, only when at least one tenant is missing, and it keeps this list in agreement with
       // TenantPlanService#resolvePlan. Delete the extra argument in Phase F.
+      Map<String, Subscription> subscriptions =
+          subscriptionService.findLatestForClients(environmentClientIds);
       EnvironmentPlanCache planCache = EnvironmentPlanCache.of(environmentClientIds,
-          subscriptionService.findLatestForClients(environmentClientIds));
+          subscriptions);
+      // ETP-5051 (§4b): every environment carries its WARN/DENY quotas. One batched read of the
+      // listed plans' enforced quota rows, none without a plan; never fails the list.
+      EnvironmentQuotaReport quotaReport = EtendoGoJwtDalHelper.quotaReport(subscriptions);
       // The first environment is entered automatically after account login. Prefer the paid
       // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
       // an account owns both plans. The client repeats this ordering for older backends.
@@ -4415,7 +4620,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Map<String, Date> unfinishedPaidClients = findUnfinishedPaidClients(account);
       for (User environmentUser : environmentUsers) {
         if (!isUnfinishedPaidEnvironment(environmentUser.getClient(), unfinishedPaidClients)) {
-          addEnvironmentEntries(envArray, environmentUser, planCache, withDetails);
+          addEnvironmentEntries(envArray, environmentUser, planCache, quotaReport, withDetails);
         }
       }
 
@@ -4440,10 +4645,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * ETP-5351 (T5): a support session is pinned to its tenant, so its only environment is the one
+   * it entered with.
+   */
+  private static List<User> supportEnvironmentUsers(GoSessionRecord sessionRecord) {
+    User supportUser = sessionRecord.getUserId() == null ? null
+        : OBDal.getInstance().get(User.class, sessionRecord.getUserId());
+    List<User> users = new ArrayList<>();
+    if (supportUser != null && supportUser.getClient() != null
+        && supportUser.getClient().getId().equals(sessionRecord.getCtxClientId())) {
+      users.add(supportUser);
+    }
+    return users;
+  }
+
   /** One entry per business organization of the user's client, or one without when it has none. */
   private static void addEnvironmentEntries(org.codehaus.jettison.json.JSONArray envArray,
-      User environmentUser, EnvironmentPlanCache planCache, boolean withDetails)
-      throws JSONException {
+      User environmentUser, EnvironmentPlanCache planCache, EnvironmentQuotaReport quotaReport,
+      boolean withDetails) throws JSONException {
     Client client = environmentUser.getClient();
     JSONObject details = withDetails
         ? EnvironmentDetails.resolve(client.getId(), environmentUser,
@@ -4453,13 +4673,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
     if (organizations.isEmpty()) {
       envArray.put(withEnvironmentDetails(
-          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache),
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache,
+              quotaReport),
           details));
       return;
     }
     for (Organization organization : organizations) {
       envArray.put(withEnvironmentDetails(EtendoGoJwtDalHelper.buildEnvironmentJson(client,
-          organization, environmentUser, planCache), details));
+          organization, environmentUser, planCache, quotaReport), details));
     }
   }
 
@@ -5012,6 +5233,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         elapsedMillis(residualStartedAt));
     // Before completeCommittedOnboarding and the sample data, which needs a demo's open periods.
     applyInitialPeriodStateBestEffort(clientId);
+    // ETP-5791: on both paths, after the commit, so the flag is read when the tenant is handed over.
+    applyDefaultContactCategoryBestEffort(clientId, accountEmail);
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
     if (paidUpgrade) {
@@ -5115,6 +5338,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
       log.error("ETP-5577 initial period state failed for client {}", clientId, e);
       EtendoGoDalHelper.rollbackDalChanges("initial period state", e, log);
+    }
+  }
+
+  /**
+   * ETP-5791 — with the {@code contact-category-type} flag on, makes "Cliente/Proveedor" the
+   * tenant's default contact category (see {@link OnboardingDefaultContactCategoryService}). Runs
+   * after the onboarding commit, for a classic and a pooled tenant alike, in its own transaction;
+   * never fails the caller — on any failure only this step rolls back and the tenant keeps the
+   * dataset's "Cliente" default.
+   *
+   * @param clientId the tenant just committed
+   * @param accountEmail the {@code ETGO_ACCOUNT} email of the account receiving the tenant — the
+   *     flag is per account, and this step runs as System
+   */
+  void applyDefaultContactCategoryBestEffort(String clientId, String accountEmail) {
+    try {
+      if (onboardingDefaultContactCategoryService.applyIfEnabled(clientId, accountEmail)) {
+        EtendoGoDalHelper.commitDalChanges("default contact category", log);
+      }
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.warn("ETP-5791 default contact category could not be set for client {}; it keeps the "
+          + "dataset default", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("default contact category", e, log);
     }
   }
 
@@ -5231,7 +5477,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     PooledTenantClaimService.ClaimRequest claimRequest =
         new PooledTenantClaimService.ClaimRequest(accountEmail, request.clientName,
             request.fullName, request.currencyIso, request.countryCode, request.language,
-            request.address, adminPassword);
+            adminPassword);
     return fixtureClientId == null
         ? pooledTenantClaimService.claim(sink, claimRequest, correlationId)
         : pooledTenantClaimService.claim(sink, claimRequest, correlationId, fixtureClientId,
@@ -5313,7 +5559,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (rejectWhenEmailNotVerified(authenticated.account, response)) {
       return null;
     }
-    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
+    // ETP-5806 — the account is already resolved just above, so the structured-address flag is
+    // evaluated for the real account here too, exactly like buildSessionCapabilities(accountEmail).
+    OnboardingRequestData onboardingRequest =
+        parseOnboardingRequest(request, response, accountEmail);
     if (onboardingRequest == null) {
       return null;
     }
@@ -5842,6 +6091,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * caller's catch blocks, which would write an error over the answer already sent.
    */
   private static void recordCookieEnvironmentLogin(GoSessionRecord entered, long startNanos) {
+    // ETP-5351: a support entry is not the tenant logging in; it must not move "last login" or the
+    // trial activity signals, so no session.login is recorded for it.
+    if (SupportAccessGuard.isSupportSession(entered)) {
+      return;
+    }
     try {
       SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_COOKIE_LOGIN, entered.getCtxClientId(),
           entered.getCtxOrgId(), entered.getUserId(), entered.getRoleId(),
@@ -5872,7 +6126,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private OnboardingRequestData parseOnboardingRequest(HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
+      HttpServletResponse response, String accountEmail) throws IOException {
     try {
       JSONObject body = readJsonBody(request);
       String clientName = body.getString(FIELD_CLIENT_NAME).trim();
@@ -5886,12 +6140,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return null;
       }
       OnboardingRequestData data = new OnboardingRequestData();
+      // ETP-5806 — carried on the request data so the provisioning chain can evaluate the same
+      // flag, for the same account, when it PERSISTS the address (OnboardingOrgInfoService):
+      // validating per account and then persisting per the global default would drop exactly the
+      // data a targeted account was just allowed to send.
+      data.accountEmail = accountEmail;
       data.clientName = clientName;
       data.currencyIso = body.optString(FIELD_CURRENCY, "EUR").trim();
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
       data.address = body.optString(FIELD_ADDRESS, "").trim();
+      // ETP-5806 — structured address block. Street/Number/City are mandatory together, but ONLY
+      // when the user actually started filling the address in. The block itself stays fully
+      // optional on this minimalist step, same as the legacy `address` field it replaces.
+      // Country is deliberately not asked here — it is already guaranteed by `countryCode` above.
+      data.streetName = body.optString(FIELD_STREET_NAME, "").trim();
+      data.buildingNumber = body.optString(FIELD_BUILDING_NUMBER, "").trim();
+      data.buildingName = body.optString(FIELD_BUILDING_NAME, "").trim();
+      data.city = body.optString(FIELD_CITY_NAME, "").trim();
+      if (!validateStructuredAddressBlock(data, response, accountEmail)) {
+        return null;
+      }
+      if (!validateStructuredAddressLength(data, response, accountEmail)) {
+        return null;
+      }
       // Full name of the person onboarding. Optional in the payload; it becomes the display
       // name of the client admin user. When blank, prepareOnboarding falls back to the account's
       // name, then its email (ETP-5689).
@@ -5914,7 +6187,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OnboardingFieldLimits.LengthViolation violation = OnboardingFieldLimits.firstViolation(
           FIELD_CLIENT_NAME, data.clientName, OnboardingFieldLimits.CLIENT_NAME,
           FIELD_FULL_NAME, data.fullName, OnboardingFieldLimits.FULL_NAME,
-          FIELD_ADDRESS, data.address, OnboardingFieldLimits.ADDRESS);
+          FIELD_ADDRESS, data.address, OnboardingFieldLimits.ADDRESS,
+          FIELD_CITY_NAME, data.city, OnboardingFieldLimits.CITY);
       if (violation != null) {
         writeFieldTooLongError(response, violation);
         return null;
@@ -5930,6 +6204,71 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, message);
       return null;
     }
+  }
+
+  /**
+   * ETP-5806 — Street/Number/City are mandatory together, but ONLY once the user actually
+   * started filling the structured address block in (building name does not gate this, since
+   * it is optional even once the block is started). Extracted out of
+   * {@link #parseOnboardingRequest} to keep its cognitive complexity in check.
+   *
+   * @return {@code true} to continue; {@code false} once an error response has been written
+   */
+  private boolean validateStructuredAddressBlock(OnboardingRequestData data,
+      HttpServletResponse response, String accountEmail) throws IOException {
+    // ETP-5806 — `structured-address-for-sepa` off FOR THIS ACCOUNT: nothing to validate for
+    // fields the onboarding UI does not even render while the flag is off (defense in depth
+    // against a stale client that still sends them — ignored, not rejected, same contract as the
+    // NEO handlers). Evaluated against the caller's own account (staged rollout), the same email
+    // buildSessionCapabilities answers the capability signal with.
+    if (!StructuredAddressComposer.isEnabled(accountEmail)) {
+      return true;
+    }
+    boolean addressBlockStarted = StringUtils.isNotBlank(data.streetName)
+        || StringUtils.isNotBlank(data.buildingNumber)
+        || StringUtils.isNotBlank(data.buildingName)
+        || StringUtils.isNotBlank(data.city);
+    if (!addressBlockStarted) {
+      return true;
+    }
+    List<String> missing = new ArrayList<>();
+    if (StringUtils.isBlank(data.streetName)) {
+      missing.add(FIELD_STREET_NAME);
+    }
+    if (StringUtils.isBlank(data.buildingNumber)) {
+      missing.add(FIELD_BUILDING_NUMBER);
+    }
+    if (StringUtils.isBlank(data.city)) {
+      missing.add(FIELD_CITY_NAME);
+    }
+    if (missing.isEmpty()) {
+      return true;
+    }
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+        "Missing required field(s): " + String.join(", ", missing));
+    return false;
+  }
+
+  /**
+   * ETP-5806 — enforces the structured address block's max column lengths. Extracted out of
+   * {@link #parseOnboardingRequest} to keep its cognitive complexity in check.
+   *
+   * @return {@code true} to continue; {@code false} once an error response has been written
+   */
+  private boolean validateStructuredAddressLength(OnboardingRequestData data,
+      HttpServletResponse response, String accountEmail) throws IOException {
+    // ETP-5806 — same reasoning as validateStructuredAddressBlock above.
+    if (!StructuredAddressComposer.isEnabled(accountEmail)) {
+      return true;
+    }
+    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(data.streetName,
+        data.buildingNumber, data.buildingName);
+    if (tooLong.isEmpty()) {
+      return true;
+    }
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+        "Field(s) exceed maximum length: " + String.join(", ", tooLong));
+    return false;
   }
 
   /**
@@ -6206,11 +6545,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return chain;
   }
 
-  private static OnboardingProvisioningChain.OrgInfoInput orgInfoInput(
+  private static OrgInfoInput orgInfoInput(
       OnboardingRequestData requestData) {
     return requestData == null ? null
-        : new OnboardingProvisioningChain.OrgInfoInput(requestData.countryCode,
-            requestData.address, requestData.taxId);
+        : new OrgInfoInput(requestData.countryCode,
+            requestData.address, requestData.streetName, requestData.buildingNumber,
+            requestData.buildingName, requestData.city, requestData.taxId,
+            requestData.accountEmail);
   }
 
   /** @see OnboardingProvisioningChain#ensureOnboardingDataset */
@@ -6629,6 +6970,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       if (auth.isAuthenticated()) {
         goSessionService.revoke(auth.getRecord());
+        // ETP-5351: the support logout frees the tenant and closes the audit row ('logout').
+        supportAccessService.closeOnLogout(auth.getRecord());
       }
       clearSessionCookies(response);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
@@ -6691,9 +7034,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-      if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(account.getEmail(), userId)) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN,
-            "User does not belong to this account");
+      if (rejectEnvironmentOutsideSession(sessionRecord, account, userId, response)) {
         return;
       }
 
@@ -6748,6 +7089,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (accessDecision != null && accessDecision != EnvironmentAccessPolicy.Decision.ALLOWED) {
         result.put(FIELD_ACCESS_DECISION, accessDecision.name());
       }
+      // ETP-5051 — quotas at WARN or DENY, report-only like accessDecision: never refuses entry.
+      result.put("quotas", loginQuotas(entered.getRecord().getCtxClientId()));
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordCookieEnvironmentLogin(entered.getRecord(), startNanos);
       retryInitialPeriodStateOnLogin(entered.getRecord().getCtxClientId());
@@ -6764,6 +7107,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Whether {@code /session/environment} must refuse the user: an ordinary session may enter the
+   * account's own environment users; a support session (ETP-5351, T5) only its own support user,
+   * so it can switch organization but never tenant. Writes the refusal.
+   */
+  private boolean rejectEnvironmentOutsideSession(GoSessionRecord sessionRecord, Account account,
+      String userId, HttpServletResponse response) throws IOException {
+    if (SupportAccessGuard.isSupportSession(sessionRecord)) {
+      if (userId.equals(sessionRecord.getUserId())) {
+        return false;
+      }
+      writeSupportSessionForbidden(response);
+      return true;
+    }
+    if (EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(account.getEmail(), userId)) {
+      return false;
+    }
+    writeError(response, HttpServletResponse.SC_FORBIDDEN, "User does not belong to this account");
+    return true;
   }
 
   private static JSONObject findRole(JSONArray roleList, String roleId) throws JSONException {
@@ -6962,6 +7326,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(sessionRecord));
       result.put(FIELD_ROLE_LIST, loadSessionRoleList(sessionRecord));
       result.put(FIELD_CSRF_TOKEN, sessionRecord.getCsrfToken());
+      result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(sessionRecord));
+      result.put(FIELD_CAPABILITIES, buildSessionCapabilities(account.getEmail()));
 
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
@@ -6975,6 +7341,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5806 — backend-only flags surfaced to the (pre-tenant) onboarding bootstrap. Currently
+   * only {@code structured-address-for-sepa}; add new backend-only onboarding-time flags here
+   * rather than inventing a second capabilities endpoint.
+   *
+   * <p>Evaluated per-account (staged rollout) using the email of the account the session was just
+   * restored for — {@link #handleSessionRestore} already resolves it a few lines above its own
+   * call into this method, so no extra lookup is needed here.
+   *
+   * @param accountEmail the restored session's account email; may be {@code null}, which {@link
+   *     FeatureFlagContext#forAccount(String)} turns into an untargeted evaluation, never "allow"
+   */
+  private static JSONObject buildSessionCapabilities(String accountEmail) throws JSONException {
+    JSONObject capabilities = new JSONObject();
+    capabilities.put(CAPABILITY_STRUCTURED_ADDRESS,
+        GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA,
+            FeatureFlagContext.forAccount(accountEmail)));
+    return capabilities;
   }
 
   /**
@@ -6999,6 +7385,112 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return new JSONArray();
     }
     return EtendoGoJwtSupport.loadRoleListData(sessionRecord.getUserId()).getRoleArray();
+  }
+
+  /**
+   * POST /sws/go/session/support-handoff — ETP-5351 (T4). Body: {@code {"ticket": "..."}}.
+   *
+   * <p>Redeems a one-time support pass issued from Classic and opens a support session already
+   * inside the tenant. Public like {@code POST /session}: the pass is the credential, so there is no
+   * CSRF token to check, but the same Origin allowlist applies. A session cookie the browser still
+   * carries is never reused: it is revoked once the new session exists.</p>
+   *
+   * <p>200: the {@code /session/environment} shape ({@code status, environment, roleList,
+   * csrfToken}) plus {@code account} and {@code supportSession}, and the session cookies. 401:
+   * {@code {"error": "support_ticket_invalid" | "support_ticket_expired" | "support_ticket_used"}}.
+   */
+  private void handleSupportHandoff(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    if (!GoSessionSecurity.isOriginAllowed(request)) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          GoSessionSecurity.MSG_ORIGIN_NOT_ALLOWED);
+      return;
+    }
+    String ticket;
+    try {
+      ticket = readJsonBody(request).optString("ticket", "");
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+    try {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      SupportHandoffService.SupportHandoff handoff = supportHandoffService.open(ticket,
+          request.getHeader(HEADER_USER_AGENT), request.getRemoteAddr());
+      supportHandoffService.retireBrowserSession(extractSessionCookie(request));
+      IssuedGoSession issued = handoff.getSession();
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(issued.getRecord().getAccountId());
+
+      setSessionCookies(response, issued);
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_ACCOUNT, account == null ? JSONObject.NULL : buildAccountJson(account));
+      result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(issued.getRecord()));
+      result.put(FIELD_ROLE_LIST, loadSessionRoleList(issued.getRecord()));
+      result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+      result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(issued.getRecord()));
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (SupportTicketException e) {
+      EtendoGoDalHelper.rollbackDalChanges(ACTION_SUPPORT_HANDOFF, e, log);
+      writeFlatError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getReason().getErrorCode());
+    } catch (SupportAccessException e) {
+      EtendoGoDalHelper.rollbackDalChanges(ACTION_SUPPORT_HANDOFF, e, log);
+      log.error("Support handoff refused: {}", e.getCode());
+      writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, e.getCode(),
+          e.getMessage(), e.getMessage());
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges(ACTION_SUPPORT_HANDOFF, e, log);
+      log.error("Database error during support handoff", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      EtendoGoDalHelper.rollbackDalChanges(ACTION_SUPPORT_HANDOFF, e, log);
+      log.error("JSON error building support handoff response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The {@code supportSession} block for a session, or JSON {@code null} for an ordinary one. */
+  private Object supportSessionBlock(GoSessionRecord sessionRecord) throws JSONException {
+    JSONObject block = supportAccessService.describeSupportSession(sessionRecord);
+    return block == null ? JSONObject.NULL : block;
+  }
+
+  /** ETP-5351: the one refusal every support-session restriction answers with (403). */
+  private void writeSupportSessionForbidden(HttpServletResponse response) throws IOException {
+    writeError(response, HttpServletResponse.SC_FORBIDDEN, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
+        SupportAccessGuard.MESSAGE_FORBIDDEN, SupportAccessGuard.MESSAGE_FORBIDDEN);
+  }
+
+  /** A {@code {"error": "<code>"}} body, the flat contract shape of the support handoff. */
+  private void writeFlatError(HttpServletResponse response, int status, String code)
+      throws IOException {
+    try {
+      JSONObject body = new JSONObject();
+      body.put(FIELD_ERROR, code);
+      writeResponse(response, status, body);
+    } catch (JSONException e) {
+      log.error("JSON error building error response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /** The {@code __Host-go_session} value the request carries, or {@code null}. */
+  private static String extractSessionCookie(HttpServletRequest request) {
+    Cookie[] cookies = request.getCookies();
+    if (cookies == null) {
+      return null;
+    }
+    for (Cookie cookie : cookies) {
+      if (GoSessionSecurity.COOKIE_NAME.equals(cookie.getName())) {
+        return StringUtils.trimToNull(cookie.getValue());
+      }
+    }
+    return null;
   }
 
   /**
@@ -7244,11 +7736,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private static class OnboardingRequestData {
+    // ETP-5806 — the account this onboarding belongs to, the targeting key the
+    // `structured-address-for-sepa` flag is evaluated with on both the validation side (here) and
+    // the persistence side (OrgInfoInput -> OnboardingOrgInfoService#applyAddressFields).
+    private String accountEmail;
     private String clientName;
     private String currencyIso;
     private String language;
     private String countryCode;
     private String address;
+    // ETP-5806 — structured address fields; non-blank only when the user filled in the
+    // onboarding company step's address block.
+    private String streetName;
+    private String buildingNumber;
+    private String buildingName;
+    // ETP-5806 — City, mandatory together with streetName/buildingNumber whenever the structured
+    // address block was started (see parseOnboardingRequest).
+    private String city;
     private String fullName;
     // Optional Tax ID from the wizard's "Details to start invoicing" step (ETP-4749).
     // Same JSON key as ONBOARDING_DRAFT_FORM_FIELDS ("fiscalIdValue") for consistency.

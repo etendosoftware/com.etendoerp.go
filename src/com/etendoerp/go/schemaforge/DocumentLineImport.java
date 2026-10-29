@@ -94,6 +94,16 @@ final class DocumentLineImport {
   static final String ERROR_NO_STORAGE_BIN = "importNoStorageBin";
   /** The lines created do not add up to what was planned; everything is rolled back. */
   static final String ERROR_QUANTITY_NOT_HONOURED = "importQuantityNotHonoured";
+  /** An order / goods shipment / goods receipt import asked of a rectificative invoice (ETP-5876). */
+  static final String ERROR_RECTIFICATIVE_TARGET = "importNotAvailableOnRectificative";
+  /** A return / origin invoice import asked of an invoice that is not a rectificative (ETP-5876). */
+  static final String ERROR_NOT_RECTIFICATIVE = "importRequiresRectificative";
+  /** The document named as a return is not one (ETP-5876). */
+  static final String ERROR_SOURCE_NOT_RETURN = "importSourceNotReturn";
+  /** The invoice named as origin is the target itself (ETP-5876). */
+  static final String ERROR_SOURCE_IS_TARGET = "importSourceIsTarget";
+  /** The invoice named as origin is itself a rectificative (ETP-5876). */
+  static final String ERROR_SOURCE_NOT_STANDARD = "importSourceInvoiceNotStandard";
 
   static final int SC_UNPROCESSABLE = 422;
   static final int SC_NOT_FOUND = 404;
@@ -127,6 +137,10 @@ final class DocumentLineImport {
   /** Row lock on one movement line, taken before the pending total is read (see above). */
   private static final String LOCK_INOUT_LINE_SQL =
       "SELECT M_InOutLine_ID FROM M_InOutLine WHERE M_InOutLine_ID = ? FOR NO KEY UPDATE";
+
+  /** Row lock on the target invoice of an import that decides from the lines it holds. */
+  private static final String LOCK_INVOICE_SQL =
+      "SELECT C_Invoice_ID FROM C_Invoice WHERE C_Invoice_ID = ? FOR NO KEY UPDATE";
 
   private DocumentLineImport() {
   }
@@ -216,9 +230,12 @@ final class DocumentLineImport {
     return requested;
   }
 
-  /** A body value as text, or {@code null} when absent or blank. */
+  /**
+   * A body value as text, or {@code null} when absent, JSON null or blank. Jettison's
+   * {@code optString} turns a JSON null into the text {@code "null"}, so it is checked first.
+   */
   static String text(JSONObject body, String key) {
-    String value = body == null ? null : body.optString(key, null);
+    String value = body == null || body.isNull(key) ? null : body.optString(key, null);
     return StringUtils.isBlank(value) ? null : value;
   }
 
@@ -292,11 +309,28 @@ final class DocumentLineImport {
    */
   static Map<String, BigDecimal> plan(Map<String, BigDecimal> requested,
       Map<String, String> documentLines, Map<String, BigDecimal> pending) {
+    return plan(requested, documentLines, pending, null, null);
+  }
+
+  /**
+   * {@link #plan(Map, Map, Map)} for a request that names several source documents: the
+   * {@code importNothingPending} and {@code importLineNotInDocument} refusals name the source
+   * ({@code sourceName}, e.g. {@code "order 1000123"}, in place of "this / the source document")
+   * and carry {@code sourceKeys} as extra keys, so the caller knows which document failed.
+   *
+   * @param sourceName the source as the message names it, or {@code null} for the generic wording
+   * @param sourceKeys extra keys of those two refusals (e.g. {@code orderId}, {@code documentNo}),
+   *                   or {@code null}
+   */
+  static Map<String, BigDecimal> plan(Map<String, BigDecimal> requested,
+      Map<String, String> documentLines, Map<String, BigDecimal> pending, String sourceName,
+      Map<String, Object> sourceKeys) {
     Map<String, BigDecimal> planned = new LinkedHashMap<>();
     if (requested == null || requested.isEmpty()) {
       if (pending.isEmpty()) {
-        throw refusal(ERROR_NOTHING_PENDING,
-            "Nothing is left to import from this document: every line is already covered");
+        throw new ImportRefusal(SC_UNPROCESSABLE, ERROR_NOTHING_PENDING, "Nothing is left to "
+            + "import from " + (sourceName == null ? "this document" : sourceName)
+            + ": every line is already covered", sourceKeys);
       }
       planned.putAll(pending);
       return planned;
@@ -304,8 +338,9 @@ final class DocumentLineImport {
     for (Map.Entry<String, BigDecimal> entry : requested.entrySet()) {
       String id = entry.getKey();
       if (!documentLines.containsKey(id)) {
-        throw refusal(ERROR_LINE_NOT_IN_DOCUMENT,
-            "Line " + id + " is not a line of the source document");
+        throw new ImportRefusal(SC_UNPROCESSABLE, ERROR_LINE_NOT_IN_DOCUMENT, "Line " + id
+            + " is not a line of " + (sourceName == null ? "the source document" : sourceName),
+            sourceKeys);
       }
       BigDecimal available = pending.getOrDefault(id, BigDecimal.ZERO);
       if (!fits(entry.getValue(), available)) {
@@ -361,6 +396,15 @@ final class DocumentLineImport {
    */
   static void lockOrderLines(Collection<String> ids) throws SQLException {
     lock(LOCK_ORDER_LINE_SQL, ids);
+  }
+
+  /**
+   * Locks one invoice row ({@code FOR NO KEY UPDATE}) before the lines it already holds are read,
+   * so two calls importing into the same draft (a retry included) serialise and the second one
+   * sees what the first one wrote.
+   */
+  static void lockInvoice(String id) throws SQLException {
+    lock(LOCK_INVOICE_SQL, List.of(id));
   }
 
   /** Same lock on movement (receipt / shipment) lines. */
@@ -476,6 +520,17 @@ final class DocumentLineImport {
    * @param headerOrderId the order the target's header points at after the import, or {@code null}
    */
   static NeoResponse ok(List<ImportedLine> lines, String headerOrderId) throws JSONException {
+    return ok(lines, headerOrderId, Map.of());
+  }
+
+  /**
+   * Same answer with extra keys in {@code data} (the origin invoice import reports the invoices it
+   * linked), written after the standard ones.
+   *
+   * @param extra additional {@code data} entries, in iteration order
+   */
+  static NeoResponse ok(List<ImportedLine> lines, String headerOrderId, Map<String, Object> extra)
+      throws JSONException {
     JSONArray array = new JSONArray();
     boolean linked = false;
     for (ImportedLine line : lines) {
@@ -494,6 +549,9 @@ final class DocumentLineImport {
     data.put("headerLinked", linked);
     if (headerOrderId != null) {
       data.put("salesOrder", headerOrderId);
+    }
+    for (Map.Entry<String, Object> entry : extra.entrySet()) {
+      data.put(entry.getKey(), entry.getValue());
     }
     return wrap(data);
   }

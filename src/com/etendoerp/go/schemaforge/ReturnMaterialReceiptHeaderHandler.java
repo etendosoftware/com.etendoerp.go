@@ -288,6 +288,8 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (Exception e) {
       log.error("Error importing shipment lines into return receipt {}: {}", receiptId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -454,7 +456,9 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
       } finally {
         OBContext.restorePreviousMode();
       }
-        } catch (OBException e) {
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
+    } catch (OBException e) {
       log.warn("Return invoice creation rejected for receipt {}: {}", receiptId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {

@@ -1178,7 +1178,7 @@ public class SalesOrderHeaderHandlerTest {
     String invoice = contracts.get("createDraftInvoice").getDescription();
     assertTrue("must warn that the invoice is completed despite the name",
         invoice.contains("COMPLETES") && invoice.contains("despite the name"));
-    assertEquals(List.of("lines"), contracts.get("createDraftInvoice").getParams().stream()
+    assertEquals(List.of("lines", "allowDuplicate"), contracts.get("createDraftInvoice").getParams().stream()
         .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
   }
 
@@ -1191,6 +1191,11 @@ public class SalesOrderHeaderHandlerTest {
     }
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice", new JSONObject().put("lines",
         new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2")))));
+    // ETP-5714: allowDuplicate is a declared optional boolean; a string is refused before anything runs
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice",
+        new JSONObject().put("allowDuplicate", true)));
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "createDraftInvoice", new JSONObject().put("allowDuplicate", "true")).getHttpStatus());
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
         "createShipment", new JSONObject().put("warehouseId", "W1")).getHttpStatus());
   }
@@ -1359,5 +1364,53 @@ public class SalesOrderHeaderHandlerTest {
             Mockito.never());
       }
     }
+  }
+
+  // ── ETP-5726: a currency change is saved like the window does ─────────────
+
+  /**
+   * An MCP {@code PUT} that moves a stored DRAFT order (EUR, price list in EUR) to another
+   * currency is not refused: the handler lets it through to the default save, adds nothing to the
+   * body (no price list, no converted amount) and never reads a price list. This is exactly the
+   * case the removed currency-vs-price-list guard refused with a 422.
+   */
+  @Test
+  public void mcpCurrencyChangeIsNotRefusedAndLeavesPriceListAndAmountsAlone() throws Exception {
+    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
+    SalesOrderHeaderHandler handler = handlerWithMockClone(mockClone);
+    OBDal dal = mock(OBDal.class);
+    org.openbravo.model.common.currency.Currency eur =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(eur.getId()).thenReturn("EUR_ID");
+    when(eur.getISOCode()).thenReturn("EUR");
+    org.openbravo.model.pricing.pricelist.PriceList eurList =
+        mock(org.openbravo.model.pricing.pricelist.PriceList.class);
+    when(eurList.getName()).thenReturn("Tarifa EUR");
+    when(eurList.getCurrency()).thenReturn(eur);
+    org.openbravo.model.common.order.Order draft =
+        mock(org.openbravo.model.common.order.Order.class);
+    when(draft.getDocumentStatus()).thenReturn("DR");
+    when(draft.getCurrency()).thenReturn(eur);
+    when(draft.getPriceList()).thenReturn(eurList);
+    when(dal.get(org.openbravo.model.common.order.Order.class, "ORD1")).thenReturn(draft);
+    JSONObject body = new JSONObject().put("currency", "USD_ID");
+    NeoContext ctx = NeoContext.builder().specName("sales-order").entityName("header")
+        .httpMethod("PUT").endpointType(NeoEndpointType.CRUD).recordId("ORD1")
+        .requestBody(body).mcpOrigin(true).build();
+    when(mockClone.handle(ctx)).thenReturn(null);
+
+    try (MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      assertNull(handler.handle(ctx));
+    }
+
+    assertEquals(1, body.length());
+    assertEquals("USD_ID", body.getString("currency"));
+    verify(dal, never()).createCriteria(org.openbravo.model.pricing.pricelist.PriceList.class);
+    verify(dal, never()).get(org.mockito.ArgumentMatchers.eq(
+        org.openbravo.model.pricing.pricelist.PriceList.class), anyString());
+    verify(draft, never()).setPriceList(any());
+    verify(draft, never()).setCurrency(any());
   }
 }

@@ -46,6 +46,11 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * instance via OBBaseTest. These tests cover the pure-logic, no-DAL parts
  * plus the authorization guard and exception-wrapping logic of {@code route()}.
  *
+ * <p>ETP-5051: {@code etendo_create} runs its insert inside the plan-quota gate. The router method
+ * needs a live DAL and an {@code AD_Tab}, so that wiring is pinned with {@link McpSourceScanner}
+ * (as the other MCP call-site guards are); the gate's behaviour is covered by
+ * {@code NeoQuotaWriteGateTest} and the refusal's MCP translation by {@code McpHookExecutorTest}.
+ *
  * @covers com.etendoerp.go.mcp.McpToolRouter
  * @covers com.etendoerp.go.mcp.McpToolResponses
  * @covers com.etendoerp.go.mcp.McpResponseSanitizer
@@ -1505,6 +1510,81 @@ public class McpToolRouterTest {
     assertEquals("etendo_list", envelope.getString("tool"));
     assertTrue(envelope.getString("hint").contains("will not help"));
     assertFalse(body.startsWith("Error executing"));
+  }
+
+  /**
+   * ETP-5051 — the quota gate wraps the insert of {@code etendo_create}: the add is the create
+   * handed to {@code NeoQuotaWriteGate.run} (which picks its service, refuses before the write when
+   * the client's quotas cannot be read, and checks the created row right after it), and a refusal
+   * leaves the router through the MCP error translation before anything reads the add result.
+   */
+  @Test
+  public void testCreateRunsItsInsertInsideTheQuotaGate() {
+    String body = McpSourceScanner.stripComments(McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate"));
+
+    // Anchored on the calls, never on local variable names, and each searched after the one
+    // before it, so a rename does not break it and an earlier unrelated call cannot satisfy it.
+    int run = indexOf(body, "NeoQuotaWriteGate.run(", 0);
+    int add = indexOf(body, ".add(", run);
+    int refusal = indexOf(body, "neoResponseToMcpResult(", add);
+    int successRead = indexOf(body, "new JSONObject(", refusal);
+
+    assertTrue("the add is the create handed to the gate (never run before it)", run < add);
+    assertTrue("a refusal returns before the add result is read as a success",
+        add < refusal && refusal < successRead);
+    assertEquals("etendo_create inserts exactly once", 1,
+        body.split("\\.\\s*add\\s*\\(", -1).length - 1);
+  }
+
+  private static int indexOf(String body, String code, int from) {
+    int at = body.replaceAll("\\s+", " ").indexOf(code, from);
+    assertTrue("handleCreate no longer contains `" + code + "`: the ETP-5051 quota gate was"
+        + " dropped from etendo_create, or refactored and this guard needs updating", at >= 0);
+    return at;
+  }
+
+  // ── handleCreate: what the pre-hook can tell about the agent's choices ─
+
+  /**
+   * {@code etendo_create} fills the mandatory defaults into the body BEFORE it dispatches the
+   * entity's pre-hook, so key presence there no longer says what the agent sent (a contact's
+   * {@code customer=true} is the AD default as often as a choice). The pre-hook must therefore be
+   * handed the key set of {@code userProvided} — the snapshot taken before the defaults pass and
+   * never reassigned — on the very context it is dispatched with. The consumer side (a defaulted
+   * key outside that set is not explicit) is specified in {@code ContactTypeRulesTest}.
+   *
+   * <p>Asserted on the source, as the other {@code handleCreate} call-site guards are
+   * ({@link McpSourceScanner}): reaching the dispatch needs {@code DefaultJsonDataService},
+   * {@code ModelProvider} and an {@code AD_Tab}, which cannot run in a unit test.</p>
+   */
+  @Test
+  public void testCreatePreHookIsHandedTheKeysTheAgentSentBeforeDefaults() {
+    String body = McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate")
+        .replaceAll("\\s+", "");
+
+    int snapshot = indexOrFail(body, "JSONObjectuserProvided=newJSONObject(filteredBody.toString());");
+    int defaults = indexOrFail(body, "NeoMandatoryDefaultsService.injectMandatoryDefaults(");
+    int hookContext = indexOrFail(body, "NeoContexthookCtx=McpHookExecutor.buildHookContext(");
+    int attribute = indexOrFail(body, "hookCtx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS,"
+        + "NeoCrudHelper.snapshotBodyFields(userProvided));");
+    int handedOver = indexOrFail(body, ".context(hookCtx)");
+    int dispatch = indexOrFail(body, "NeoExtensionDispatcher.dispatch(");
+
+    assertTrue("userProvided must be captured before injectMandatoryDefaults fills the body",
+        snapshot < defaults);
+    assertEquals("userProvided must not be reassigned after the snapshot", 1,
+        body.split("userProvided=", -1).length - 1);
+    assertTrue("the client-provided keys must be set on the hook context before it is dispatched",
+        hookContext < attribute && attribute < handedOver && handedOver < dispatch);
+  }
+
+  private static int indexOrFail(String body, String anchor) {
+    int index = body.indexOf(anchor);
+    assertTrue("handleCreate no longer contains " + anchor + " — either the call was dropped or"
+        + " the method was refactored and this guard needs updating", index >= 0);
+    return index;
   }
 
   // ── classified failures (ETP-5782) ───────────────────────────────────

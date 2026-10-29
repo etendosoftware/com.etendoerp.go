@@ -236,6 +236,32 @@ public final class GoFeatureFlags {
   public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
 
   /**
+   * ETP-5791 — contact types driven by the contact category. On, a contact category
+   * ({@code C_BP_Group}) must declare Customer and/or Vendor/Creditor, a new contact inherits
+   * those types from its category unless the request sends them explicitly, a contact cannot be
+   * saved with no type, moving a contact to another category re-inherits both types, and a new
+   * tenant gets "Cliente/Proveedor" as its default contact category (decided when the tenant is
+   * handed to the user, pool tenants included). Off (the default), the customizations skip those
+   * rules, every write behaves as before the ticket and new tenants keep "Cliente" as default.
+   *
+   * <p><b>It gates behaviour, not schema.</b> The {@code EM_Etgo_Iscustomer} /
+   * {@code EM_Etgo_Isvendor} columns, their AD metadata, the {@code ETGO_SF_FIELD} rows and the
+   * reference/sample data ship unconditionally; with the flag off nothing enforces or reads them.
+   *
+   * <p><b>Per account, read on both ends.</b> The backend evaluates it only through
+   * {@code ContactTypeRules#isEnabled()} — targeted at the {@code ETGO_ACCOUNT} email of the user
+   * making the request, plus {@value FeatureFlagContext#ATTRIBUTE_CLIENT_ID} — and the onboarding's
+   * {@code OnboardingDefaultContactCategoryService} through {@code ContactTypeRules#isEnabled(String,
+   * String)}, targeted at the account the tenant is handed to (the hand-over runs as System). The
+   * web client reads it too ({@code CONTACT_CATEGORY_TYPE} in {@code flag-keys.js}) and publishes
+   * the same account email as its {@code email} attribute, so a targeting rule must be written on
+   * the email for both ends to agree. Per-account targeting needs a hosted arm (Datadog, or
+   * ConfigCat while it is the fallback); locally {@code etendo.go.flags.contact-category-type} /
+   * {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE} stays a plain per-environment boolean.
+   */
+  public static final String FLAG_CONTACT_CATEGORY_TYPE = "contact-category-type";
+
+  /**
    * ETP-5048 — whether the billing reconciliation is scheduled. Strictly off by default (and off
    * on every failure of this class): while it is off {@code BillingReconciliationScheduleStartup}
    * plants no process request, so turning it on takes effect at the next restart. The process also
@@ -252,6 +278,82 @@ public final class GoFeatureFlags {
    */
   public static final String FLAG_BILLING_RECONCILIATION_SCHEDULE =
       "billing-reconciliation-schedule";
+
+  /**
+   * ETP-5051 — whether the usage aggregation is scheduled ({@code open-and-notable-topics.md}
+   * §5.15). The same shape as {@link #FLAG_BILLING_RECONCILIATION_SCHEDULE}: strictly off by
+   * default (and off on every failure of this class); while it is off
+   * {@code UsageAggregationScheduleStartup} plants no process request, so turning it on takes effect
+   * at the next restart. The process checks it on every scheduled run (a process request with
+   * timing {@code S}), whoever created the request, so turning it off stops all scheduled work
+   * without a restart: a scheduled run with the flag off does nothing and ends as ERROR in Process
+   * Monitor. A run started from the Classic menu or once from a Process Request is not gated.
+   * Environment level, evaluated with an empty context; locally
+   * {@code etendo.go.flags.usage-aggregation-schedule} /
+   * {@code ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE}. Backend-only. Its callers are
+   * {@code UsageAggregationScheduleStartup} and {@code UsageAggregationProcess}.
+   */
+  public static final String FLAG_USAGE_AGGREGATION_SCHEDULE = "usage-aggregation-schedule";
+
+  /**
+   * ETP-5806 — whether the structured address fields (Street/Number/Building Name) are visible,
+   * writable and validated across the 4 address popups (Contacts, Warehouse, Business Partner
+   * location, onboarding's Company step), MCP, and the onboarding mandatory-address check.
+   * Relaunch flag for a feature built, reviewed and QA'd once already, then reverted at product's
+   * request before it shipped (TTL 2026-11-15 — by then the feature must be live, or this flag is
+   * reclassified as a permanent toggle).
+   *
+   * <p><b>Positive polarity, not inverted</b> — unlike {@link #FLAG_MCP_MODERN_ERA_DISABLED} or
+   * {@link #FLAG_BATCH_CALLOUT_SKIP_DISABLED}. {@code true} = feature visible/active; the default
+   * ({@code false}, every failure of this class) is "hidden", which is the required pre-launch
+   * state.
+   *
+   * <p><b>Both ends evaluate it, deliberately against the ETP-4966 "one flag, one evaluator"
+   * default</b> — because it must also hide <em>data</em> (3 fields), not just a UI entry point,
+   * the backend's answer is the single source of truth and the frontend never evaluates the flag
+   * itself: it reads {@code capabilities.structuredAddressForSepa} off {@code SFWindowAccessMap}'s
+   * response (populated here via {@code isEnabled(FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ...)}) and the
+   * onboarding session bootstrap, and never imports a flag key of its own. See
+   * {@code docs/neo-headless.md} §8c and the ETP-5806 plan for the full architecture.
+   *
+   * <p><b>Per-account targeting, staged rollout (ETP-5806 follow-up).</b> <b>Every</b> call site
+   * evaluates it against {@link FeatureFlagContext#forAccount(String)} with a real
+   * {@code ETGO_ACCOUNT} email, never {@code null}, mirroring {@link #FLAG_BP_PORTAL_LINK}'s
+   * pattern. This lets a Datadog targeting rule (e.g. "email is one of [...]") stage the rollout —
+   * localization team first, then the rest of Etendo, then everyone — instead of switching on for
+   * every tenant at once. With no targeting rule configured the answer is still the plain
+   * per-environment boolean default, so the TTL remains a hard global deadline regardless of how
+   * the rollout is staged.
+   * Locally {@code etendo.go.flags.structured-address-for-sepa} / {@code ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA}.
+   * Must also be created as a boolean setting in the ConfigCat dashboard before it can be toggled
+   * in any environment with an SDK key configured — an undeclared ConfigCat setting resolves to
+   * this class's code default ({@code false}) regardless of local configuration.
+   *
+   * <p><b>Where each call site gets the email.</b> Two shapes, because the account is knowable in
+   * two different ways and resolving it implicitly would be wrong for the second:
+   * <ul>
+   *   <li><b>Authenticated request</b> — {@code GoAccountResolver#currentAccountEmail()} at
+   *       the call site: {@code SFWindowAccessMap} (capability),
+   *       {@code ContactsLocationAddressHandler}/{@code WarehouseLocationHandler}/
+   *       {@code BpLocationHandler} (NEO read/write gating),
+   *       {@code AddressVirtualSelectorPolicy}/{@code McpSchemaFieldBuilder} (MCP schema gating).
+   *       Resolved once per request and threaded through the handler's own helpers, never
+   *       re-resolved per check. Where the call site later switches to admin mode, the email is
+   *       resolved <em>before</em> that switch (the {@code SFWindowAccessMap} ordering trap).</li>
+   *   <li><b>Onboarding</b> — the account is already in hand and provisioning runs under an admin
+   *       execution context with no caller identity to recover, so it is passed down explicitly:
+   *       {@code EtendoGoJwtServlet#buildSessionCapabilities} and the two
+   *       {@code validateStructuredAddress*} checks take it as a parameter, and it rides
+   *       {@code OrgInfoInput} to
+   *       {@code OnboardingOrgInfoService#createLocation}, which persists the fields.</li>
+   * </ul>
+   * {@code StructuredAddressComposer#isEnabled(String)} is the one evaluator they all share and
+   * it has <b>no account-less overload</b>, by design: validation, persistence and MCP-schema
+   * exposure therefore resolve for the same account the capability signal did, so a targeted
+   * account can never see the fields in the UI and have the backend silently drop what it fills
+   * in (the gap this follow-up closed).
+   */
+  public static final String FLAG_STRUCTURED_ADDRESS_FOR_SEPA = "structured-address-for-sepa";
 
   /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset

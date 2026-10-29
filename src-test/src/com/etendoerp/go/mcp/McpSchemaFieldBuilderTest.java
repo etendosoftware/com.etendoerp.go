@@ -20,8 +20,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
@@ -41,6 +45,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -56,6 +61,8 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -71,6 +78,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * per-entity field metadata load used by etendo_schema.</p>
  *
  * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ * @covers com.etendoerp.go.mcp.McpUserRequiredOverride
  * @covers com.etendoerp.go.mcp.McpFieldLabels
  */
 @ExtendWith(MockitoExtension.class)
@@ -78,12 +86,14 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 class McpSchemaFieldBuilderTest {
 
   @Test
-  @DisplayName("Utility class hides its constructor")
+  @DisplayName("Utility classes hide their constructor")
   void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<McpSchemaFieldBuilder> constructor = McpSchemaFieldBuilder.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
+    for (Class<?> utility : List.of(McpSchemaFieldBuilder.class, McpUserRequiredOverride.class)) {
+      Constructor<?> constructor = utility.getDeclaredConstructor();
+      assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+      constructor.setAccessible(true);
+      constructor.newInstance();
+    }
   }
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)
@@ -336,6 +346,36 @@ class McpSchemaFieldBuilderTest {
           new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
           entity, "Bad_Col");
       assertEquals("Bad_Col", result);
+    }
+
+    /**
+     * ETP-5806 naming unification: the 3 structured SEPA columns publish the name every handler
+     * agrees on in its own JSON ({@code streetName}/{@code buildingNumber}/{@code buildingName}),
+     * never the raw Hibernate property codegen produced for the column
+     * ({@code oBSEPAStreetName}/...). Checked BEFORE the DAL lookup — a non-null entity whose
+     * {@code getPropertyByColumnName} would answer something else must still be overridden.
+     */
+    @Test
+    void structuredAddressColumnIsOverriddenBeforeTheDalLookup() throws Exception {
+      org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+      Property rawProp = mock(Property.class);
+      when(rawProp.getName()).thenReturn("oBSEPAStreetName");
+      when(entity.getPropertyByColumnName("EM_OBSEPA_StrtNm")).thenReturn(rawProp);
+
+      String result = (String) invokeStatic("resolvePropertyName",
+          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
+          entity, "EM_OBSEPA_StrtNm");
+
+      assertEquals("streetName", result);
+    }
+
+    @Test
+    void structuredAddressColumnIsOverriddenEvenWithANullEntity() throws Exception {
+      String result = (String) invokeStatic("resolvePropertyName",
+          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
+          null, "EM_OBSEPA_BldgNb");
+
+      assertEquals("buildingNumber", result);
     }
   }
 
@@ -726,7 +766,8 @@ class McpSchemaFieldBuilderTest {
 
     private static final Class<?>[] SIGNATURE = {
         org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class,
-        McpSchemaFieldBuilder.FieldMetadata.class };
+        McpSchemaFieldBuilder.FieldMetadata.class,
+        McpSchemaFieldBuilder.StructuredAddressGate.class };
 
     private McpSchemaFieldBuilder.FieldMetadata metadata(String... excludedColumnIds) {
       return new McpSchemaFieldBuilder.FieldMetadata(new HashMap<>(), new HashMap<>(),
@@ -752,8 +793,15 @@ class McpSchemaFieldBuilderTest {
     private boolean include(org.openbravo.model.ad.datamodel.Column col,
         java.util.Set<String> systemCols, McpSchemaFieldBuilder.FieldMetadata fieldMetadata)
         throws Exception {
+      return include(col, systemCols, fieldMetadata,
+          new McpSchemaFieldBuilder.StructuredAddressGate());
+    }
+
+    private boolean include(org.openbravo.model.ad.datamodel.Column col,
+        java.util.Set<String> systemCols, McpSchemaFieldBuilder.FieldMetadata fieldMetadata,
+        McpSchemaFieldBuilder.StructuredAddressGate gate) throws Exception {
       return (boolean) invokeStatic("shouldIncludeSchemaColumn", SIGNATURE, col, systemCols,
-          fieldMetadata);
+          fieldMetadata, gate);
     }
 
     @Test
@@ -819,6 +867,108 @@ class McpSchemaFieldBuilderTest {
           java.util.Set.of(), metadata()));
       assertFalse(include(column("col-button", "ad_org_id", true, "28"),
           java.util.Set.of("AD_ORG_ID"), metadata()));
+    }
+
+    /**
+     * ETP-5806 — the 3 structured SEPA address columns are gated behind
+     * {@code structured-address-for-sepa}: excluded while it is off, whatever the spec/system-column
+     * checks would otherwise decide, stubbed directly so the assertion is independent of the local
+     * {@code Openbravo.properties} toggle.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb", "EM_OBSEPA_BldgNm" })
+    @DisplayName("a structured SEPA address column is excluded when the flag is off")
+    void structuredAddressColumnExcludedWhenFlagOff(String dbColumnName) throws Exception {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+        assertFalse(include(column("col-sepa", dbColumnName, true, null),
+            java.util.Set.of(), metadata()));
+      }
+    }
+
+    /**
+     * ETP-5806 — with the flag on, the same 3 columns are published exactly like any other
+     * exposed, non-system column.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb", "EM_OBSEPA_BldgNm" })
+    @DisplayName("a structured SEPA address column is published when the flag is on")
+    void structuredAddressColumnPublishedWhenFlagOn(String dbColumnName) throws Exception {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+
+        assertTrue(include(column("col-sepa", dbColumnName, true, null),
+            java.util.Set.of(), metadata()));
+      }
+    }
+
+    /**
+     * ETP-5806 follow-up — the gate is PER ACCOUNT: the same environment publishes the column to
+     * a targeted account's agent and withholds it from everyone else. An account-less evaluation
+     * here would have answered the global default to every account, contradicting the per-account
+     * capability signal the SPA already renders from.
+     */
+    @Test
+    @DisplayName("a structured SEPA address column is gated per account")
+    void structuredAddressColumnIsGatedPerAccount() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+            argThat(ctx -> ctx != null
+                && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
+
+        accounts.when(GoAccountResolver::currentAccountEmail)
+            .thenReturn("localization@etendo.software");
+        assertTrue(include(column("col-sepa", "EM_OBSEPA_StrtNm", true, null),
+            java.util.Set.of(), metadata()));
+
+        accounts.when(GoAccountResolver::currentAccountEmail)
+            .thenReturn("someone.else@example.com");
+        assertFalse(include(column("col-sepa", "EM_OBSEPA_StrtNm", true, null),
+            java.util.Set.of(), metadata()));
+      }
+    }
+
+    /**
+     * ETP-5806 follow-up — the account is resolved ONCE for a whole schema walk, and not at all on
+     * a table that carries none of the 3 structured columns. Before the gate was threaded down,
+     * this call site resolved it inline per matching column — up to 3 account lookups (each of
+     * which can issue 2 queries) per address-bearing table — contradicting the "resolved once per
+     * request, never re-resolved per check" invariant stated in {@code GoFeatureFlags} and
+     * {@code docs/feature-flags-and-tenant-upgrade.md}.
+     */
+    @Test
+    @DisplayName("the account is resolved once per walk, and never without a structured column")
+    void theStructuredAddressAccountIsResolvedOncePerWalk() throws Exception {
+      try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+          MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+        accounts.when(GoAccountResolver::currentAccountEmail)
+            .thenReturn("localization@etendo.software");
+
+        McpSchemaFieldBuilder.StructuredAddressGate gate =
+            new McpSchemaFieldBuilder.StructuredAddressGate();
+        for (String dbColumnName : java.util.List.of("EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb",
+            "EM_OBSEPA_BldgNm")) {
+          assertTrue(include(column("col-sepa", dbColumnName, true, null), java.util.Set.of(),
+              metadata(), gate));
+        }
+        accounts.verify(GoAccountResolver::currentAccountEmail, times(1));
+
+        // A table with none of the 3 columns pays nothing at all.
+        McpSchemaFieldBuilder.StructuredAddressGate untouched =
+            new McpSchemaFieldBuilder.StructuredAddressGate();
+        assertTrue(include(column("col-1", "Name", true, null), java.util.Set.of(), metadata(),
+            untouched));
+        accounts.verify(GoAccountResolver::currentAccountEmail, times(1));
+      }
     }
   }
 
@@ -2289,6 +2439,123 @@ class McpSchemaFieldBuilderTest {
       assertFalse(fields.getJSONObject(1).has("requiredWhen"));
       assertFalse(fields.getJSONObject(2).has("userRequired"),
           "field not in preconditions must be left untouched");
+    }
+  }
+
+  // ─── MCP_CONFIG fields.userRequired override (ETP-5791) ─────────────
+
+  @Nested
+  @DisplayName("fields.userRequired override")
+  class UserRequiredOverride {
+
+    /** An editable descriptor whose userRequired is derived exactly as buildSchemaField does. */
+    private JSONObject derivedEditable(boolean mandatory) throws Exception {
+      JSONObject fieldObj = new JSONObject().put("name", "vendor").put("required", mandatory);
+      invokeStatic("addVisibility",
+          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
+          fieldObj, McpSchemaFieldBuilder.VISIBILITY_EDITABLE, mandatory);
+      return fieldObj;
+    }
+
+    /**
+     * The override replaces the structural rule in both directions, and leaves it standing when
+     * unstated. The raw {@code required} (AD NOT NULL) is the contract and is never touched.
+     */
+    @ParameterizedTest(name = "mandatory={0} override={1} -> userRequired={2}")
+    @CsvSource({
+        "true,  false, false",
+        "true,  -,     true",
+        "false, true,  true",
+        "false, -,     false",
+    })
+    void overrideReplacesTheDerivedFlag(boolean mandatory, String override, boolean expected)
+        throws Exception {
+      JSONObject fieldObj = derivedEditable(mandatory);
+      Boolean configured = "-".equals(override) ? null : Boolean.valueOf(override);
+
+      McpUserRequiredOverride.apply(fieldObj, configured);
+
+      assertEquals(expected, fieldObj.getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+      assertEquals(mandatory, fieldObj.getBoolean("required"),
+          "the override changes the advice, never the AD contract");
+    }
+
+    @Test
+    @DisplayName("a button ignores the override — it carries no payload value to require")
+    void buttonIgnoresTheOverride() throws Exception {
+      JSONObject button = new JSONObject().put("name", "docAction").put("type", "button");
+
+      McpUserRequiredOverride.apply(button, Boolean.TRUE);
+
+      assertFalse(button.has(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+
+    @Test
+    @DisplayName("a precondition requirement still forces userRequired over a false override")
+    void preconditionOutranksAFalseOverride() throws Exception {
+      JSONObject fieldObj = derivedEditable(true);
+      McpUserRequiredOverride.apply(fieldObj, Boolean.FALSE);
+      JSONArray fields = new JSONArray().put(fieldObj);
+
+      McpSchemaFieldBuilder.applyPreconditionRequirements(fields, Map.of("vendor", ""));
+
+      assertTrue(fields.getJSONObject(0).getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+
+    @Nested
+    @DisplayName("loadFieldMetadata")
+    class Load {
+
+      private OBDal mockOBDal;
+      private MockedStatic<OBDal> obDalMock;
+
+      @BeforeEach
+      void setUp() {
+        // The real fields section must be registered; see McpFieldViewTest#isolateSectionRegistry.
+        McpConfigSections.resetForTests();
+        McpConfigCache.invalidateAll();
+        mockOBDal = mock(OBDal.class);
+        obDalMock = mockStatic(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+      }
+
+      @AfterEach
+      void tearDown() {
+        obDalMock.close();
+        McpConfigSections.resetForTests();
+        McpConfigCache.invalidateAll();
+      }
+
+      private SFField sfField(String id, String columnId, String fieldConfig) {
+        SFField field = mock(SFField.class);
+        Column col = mock(Column.class);
+        when(col.getId()).thenReturn(columnId);
+        when(field.getId()).thenReturn(id);
+        when(field.getADColumn()).thenReturn(col);
+        when(field.getVisibility()).thenReturn(McpSchemaFieldBuilder.VISIBILITY_EDITABLE);
+        when(field.isIncluded()).thenReturn(Boolean.TRUE);
+        when(field.isReadOnly()).thenReturn(Boolean.FALSE);
+        when(field.get(SFField.PROPERTY_MCPCONFIG)).thenReturn(fieldConfig);
+        return field;
+      }
+
+      @Test
+      @DisplayName("maps only the columns whose override states userRequired")
+      @SuppressWarnings("unchecked")
+      void mapsOnlyStatedOverrides() {
+        SFEntity sfEntity = mock(SFEntity.class);
+        when(sfEntity.getId()).thenReturn("entity-user-required");
+        SFField overridden = sfField("sf-ur-1", "col-vendor",
+            "{\"fields\":{\"userRequired\":false,\"reason\":\"inherited from the category\"}}");
+        SFField plain = sfField("sf-ur-2", "col-name", null);
+        OBCriteria<SFField> crit = mock(OBCriteria.class);
+        when(mockOBDal.createCriteria(SFField.class)).thenReturn(crit);
+        when(crit.list()).thenReturn(List.of(overridden, plain));
+
+        McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+
+        assertEquals(Map.of("col-vendor", Boolean.FALSE), meta.userRequiredByColumnId);
+      }
     }
   }
 

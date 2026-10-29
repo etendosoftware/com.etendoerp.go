@@ -24,7 +24,6 @@ import java.util.Collections;
 import java.util.List;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import org.openbravo.model.common.invoice.Invoice;
 
@@ -79,8 +78,13 @@ import org.openbravo.base.structure.BaseOBObject;
  *   <li>legacy fallback — {@code APC} (Credit Note) or {@code API} + isReturn (Return Invoice) → RECTIFICATIVA</li>
  *   <li>otherwise → FAC (Standard Invoice)</li>
  * </ul>
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5588): the ETGO_SF_ENTITY row carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface — REST single and batch,
+ * MCP, callout, actions, field filter — reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("purchaseInvoiceHeaderHandler")
+@NeoExtension(spec = "purchase-invoice", entity = "header")
 public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(PurchaseInvoiceHeaderHandler.class);
@@ -124,6 +128,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private ImportInOutLinesIntoInvoiceHandler importReceiptLinesHandler;
 
+  @Inject
+  private ImportOriginInvoiceLinesHandler importOriginInvoiceLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -150,6 +157,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     // ETP-5713: import the pending lines of a completed order / goods receipt into this draft.
     contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(false));
     contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(false));
+    // ETP-5876: a DRAFT rectificative takes its lines from a return or from the invoice it
+    // rectifies instead (the window's "Import from return" / "Import from source invoice").
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.returnContracts(false));
+    contracts.putAll(ImportOriginInvoiceLinesHandler.contracts(false));
     return contracts;
   }
 
@@ -164,11 +175,14 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   /**
    * {@inheritDoc} Reactivate is ruled out for an invoice {@link InvoiceReactivationGuard} would
-   * refuse to reactivate (ETP-5714).
+   * refuse to reactivate (ETP-5714), and the import actions that do not suit the kind of invoice
+   * it is: the order and goods ones on a rectificative, the return and origin ones on any other
+   * (ETP-5876).
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
-    return InvoiceDocumentAvailability.unavailable(subject);
+    return InvoiceDocumentAvailability.unavailable(subject,
+        RectificativeImportPolicy.forHeader(this::classifyDocType, false));
   }
 
   /**
@@ -211,7 +225,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (rateRefusal != null) {
       return rateRefusal;
     }
-    captureOriginInvoice(context);
+    rectificationLinks.captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
       return siiAuthError;
@@ -249,6 +263,16 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (reactivationGuard != null) {
       return reactivationGuard;
     }
+    // ETP-5876: the import actions go with the KIND of invoice, as in the window — order and
+    // receipt on a normal one, return and origin invoice on a rectificative — and the delegates
+    // classify through this header's own rule, handed in on the request.
+    RectificativeImportPolicy importPolicy =
+        RectificativeImportPolicy.forHeader(this::classifyDocType, false);
+    context.setAttribute(RectificativeImportPolicy.ATTRIBUTE, importPolicy);
+    NeoResponse importKindRefusal = RectificativeImportGate.refuse(context, importPolicy);
+    if (importKindRefusal != null) {
+      return importKindRefusal;
+    }
     return NeoHeaderActionRouter.dispatch(
         context,
         currencyOptionsHandler,
@@ -258,6 +282,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         tbaiXmlgeneratorHandler,
         importOrderLinesHandler,
         importReceiptLinesHandler,
+        importOriginInvoiceLinesHandler,
         followUp.actionHandler());
   }
 
@@ -310,7 +335,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       // was silently never persisted for that flow (confirmed empty C_Invoice_Reverse table).
       if (NeoEndpointType.CRUD.equals(context.getEndpointType())
           && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-        persistOriginInvoice(context);
+        rectificationLinks.persistOriginInvoice(context);
         persistSiiAuthorizationno(context);
       }
 
@@ -338,10 +363,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichLinkedReceipts(rec, context.getRecordId());
-        enrichOriginInvoice(rec, context.getRecordId());
+        InvoiceDetailEnrichment.enrichLinkedOrders(rec, context.getRecordId()); // ETP-5828
+        rectificationLinks.enrichOriginInvoice(rec, context.getRecordId());
+        rectificationLinks.enrichRectifyingInvoices(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
-        enrichHasRectifications(rec, context.getRecordId());
+        rectificationLinks.enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());

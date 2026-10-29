@@ -205,6 +205,71 @@ class NeoReportCallabilityTest {
         assertFalse(NeoReportCallability.isReportCallable(spec));
       }
     }
+    /**
+     * ETP-5588: a report entity bound only by {@code @NeoExtension} has no qualifier. It is still
+     * the spec's report entity, its handler still answers the contract, and MCP publishes the
+     * handler's class name where it used to publish the qualifier.
+     */
+    @Test
+    @DisplayName("an entity bound only by @NeoExtension is the report entity and names its class")
+    void annotatedEntityWithoutQualifierIsTheReportEntity() {
+      SFSpec spec = mockSpec();
+      SFEntity plain = mock(SFEntity.class);
+      SFEntity annotated = mock(SFEntity.class);
+      NeoHandler handler = new AnnotatedReportHandler();
+
+      try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+          MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+        OBDal obDal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+        stubEntityCriteria(obDal, List.of(plain, annotated));
+        lookup.when(() -> NeoHandlerLookup.hasCustomization(plain)).thenReturn(false);
+        lookup.when(() -> NeoHandlerLookup.hasCustomization(annotated)).thenReturn(true);
+        lookup.when(() -> NeoHandlerLookup.forEntityQuietly(annotated)).thenReturn(handler);
+
+        assertEquals(annotated, NeoReportCallability.resolveReportEntity(spec));
+        assertNull(NeoReportCallability.resolveReportHandlerQualifier(spec),
+            "no qualifier to hand the dispatcher, which resolves the annotation itself");
+        assertEquals(handler, NeoReportCallability.resolveReportHandler(spec));
+        assertEquals("AnnotatedReportHandler", NeoReportCallability.reportHandlerName(spec));
+        assertTrue(NeoReportCallability.isReportCallable(spec));
+        assertEquals("AnnotatedReportHandler",
+            NeoReportCallability.resolveReportContract(spec).get().getQualifier());
+      }
+    }
+
+    @Test
+    @DisplayName("a qualifier-bound report keeps publishing its qualifier as the handler name")
+    void qualifierBoundReportKeepsItsQualifierAsName() {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mock(SFEntity.class);
+      when(entity.getJavaQualifier()).thenReturn("agingReportHandler");
+
+      try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+          MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+        OBDal obDal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+        stubEntityCriteria(obDal, List.of(entity));
+        lookup.when(() -> NeoHandlerLookup.hasCustomization(entity)).thenReturn(true);
+        lookup.when(() -> NeoHandlerLookup.forEntityQuietly(entity))
+            .thenReturn(new AnnotatedReportHandler());
+
+        assertEquals("agingReportHandler", NeoReportCallability.reportHandlerName(spec));
+      }
+    }
+  }
+
+  /** A report generator: declares an (empty) parameter list. */
+  static final class AnnotatedReportHandler implements NeoHandler {
+    @Override
+    public NeoResponse handle(NeoContext context) {
+      return null;
+    }
+
+    @Override
+    public Optional<List<NeoReportParam>> reportParameters() {
+      return Optional.of(List.of());
+    }
   }
 
   // ── declared report contract (ETP-4793 / IMP-19) ───────────────────────

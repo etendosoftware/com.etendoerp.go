@@ -18,14 +18,17 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,6 +53,9 @@ import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
 
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+
 /**
  * Unit tests for {@link WarehouseLocationHandler}.
  *
@@ -57,7 +63,21 @@ import org.openbravo.model.common.geography.Region;
  * {@code NeoSelectorService} can serve selectors — the ETP-4526 regression),
  * unmatched CRUD combos (405), handleCreate, handleUpdate, handleGetById, and the
  * private field-mapping/display-name helpers exercised indirectly through those
- * three public-facing flows.
+ * three public-facing flows. Also the ETP-5806 structured-address rules: mandatory
+ * streetName/buildingNumber/cityName/country, the oversized-field 400 (the former raw-SQL 500),
+ * and address-line recomposition over any raw addressLine1/addressLine2 the body also sends.
+ * Also the ETP-5806 {@code structured-address-for-sepa} flag-OFF branch, with
+ * {@link GoFeatureFlags#isEnabled} stubbed to {@code false} so the suite is independent of the
+ * local {@code Openbravo.properties} toggle: only {@code country} is mandatory, the 3 structured
+ * fields are never read nor written, and a GET response omits their keys entirely.
+ *
+ * <p>Since the ETP-5806 staged-rollout follow-up the flag is evaluated PER ACCOUNT (the requesting
+ * user's {@code ETGO_ACCOUNT} email, resolved by {@code GoAccountResolver}), so the write path
+ * agrees with the capability signal the UI renders from. The two tests at the end of the
+ * flag-OFF section pin exactly that: a targeted account is validated and persisted, an untargeted
+ * one in the same environment still gets the off behaviour.
+ *
+ * @covers com.etendoerp.go.schemaforge.WarehouseLocationHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -224,6 +244,11 @@ class WarehouseLocationHandlerTest {
     when(geoLoc.getRegion()).thenReturn(region);
 
     JSONObject body = new JSONObject();
+    // ETP-5806 — streetName/buildingNumber are now mandatory; once present, applyGeoLocFields
+    // computes addressLine1/addressLine2 from them and ignores any raw value also sent.
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("buildingName", "Torre A");
     body.put("addressLine1", "123 Main St");
     body.put("addressLine2", "Apt 4");
     body.put("cityName", "Springfield");
@@ -231,32 +256,44 @@ class WarehouseLocationHandlerTest {
     body.put("country", "country-id");
     body.put("region", "region-id");
 
-    NeoResponse r = handler.handle(buildContext("POST", null, body));
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
 
-    assertNotNull(r);
-    assertEquals(201, r.getHttpStatus());
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
 
-    verify(geoLoc).setClient(client);
-    verify(geoLoc).setOrganization(organization);
-    verify(geoLoc).setActive(Boolean.TRUE);
-    verify(geoLoc).setAddressLine1("123 Main St");
-    verify(geoLoc).setAddressLine2("Apt 4");
-    verify(geoLoc).setCityName("Springfield");
-    verify(geoLoc).setPostalCode("62704");
-    verify(geoLoc).setCountry(country);
-    verify(geoLoc).setRegion(region);
-    verify(obDal).save(geoLoc);
-    verify(obDal).flush();
-    obContextStaticMock.verify(() -> OBContext.setAdminMode(true));
-    obContextStaticMock.verify(OBContext::restorePreviousMode);
+      verify(geoLoc).setClient(client);
+      verify(geoLoc).setOrganization(organization);
+      verify(geoLoc).setActive(Boolean.TRUE);
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Torre A");
+      // ETP-5806 — composed from street+number+name, NOT the raw addressLine1/addressLine2 sent.
+      verify(geoLoc).setAddressLine1("Gran Via, 45 - Torre A");
+      verify(geoLoc).setAddressLine2(isNull());
+      verify(geoLoc, never()).setAddressLine1("123 Main St");
+      verify(geoLoc).setCityName("Springfield");
+      verify(geoLoc).setPostalCode("62704");
+      verify(geoLoc).setCountry(country);
+      verify(geoLoc).setRegion(region);
+      verify(obDal).save(geoLoc);
+      verify(obDal).flush();
+      // Once: handleCreate's own write block. GoAccountResolver.currentAccountEmail() would be
+      // the second elevation, but OBContext.getOBContext() is unstubbed here (so null) and it
+      // checks that before entering admin mode — no context means no identity to resolve, so it
+      // answers null without elevating. The flag is stubbed on any() context, so the missing
+      // targeting key does not change what this test asserts.
+      obContextStaticMock.verify(() -> OBContext.setAdminMode(true), times(1));
+      obContextStaticMock.verify(OBContext::restorePreviousMode, times(1));
 
-    JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-    assertEquals("geo-1", rec.getString("id"));
-    assertEquals("Springfield, 123 Main St", rec.getString("name"));
-    assertEquals("country-id", rec.getString("country"));
-    assertEquals("España", rec.getString("country$_identifier"));
-    assertEquals("region-id", rec.getString("region"));
-    assertEquals("Catalonia", rec.getString("region$_identifier"));
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("geo-1", rec.getString("id"));
+      assertEquals("Springfield, 123 Main St", rec.getString("name"));
+      assertEquals("country-id", rec.getString("country"));
+      assertEquals("España", rec.getString("country$_identifier"));
+      assertEquals("region-id", rec.getString("region"));
+      assertEquals("Catalonia", rec.getString("region$_identifier"));
+    }
   }
 
   /**
@@ -272,6 +309,9 @@ class WarehouseLocationHandlerTest {
     when(obDal.get(Country.class, "missing-country")).thenReturn(null);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "missing-country");
 
     NeoResponse r = handler.handle(buildContext("POST", null, body));
@@ -290,7 +330,13 @@ class WarehouseLocationHandlerTest {
     when(geoLoc.getId()).thenReturn("geo-3");
     when(obProvider.get(Location.class)).thenReturn(geoLoc);
 
-    NeoResponse r = handler.handle(buildContext("POST", null, new JSONObject()));
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+
+    NeoResponse r = handler.handle(buildContext("POST", null, body));
 
     assertEquals(201, r.getHttpStatus());
     verify(geoLoc, never()).setRegion(any());
@@ -307,6 +353,10 @@ class WarehouseLocationHandlerTest {
     when(obProvider.get(Location.class)).thenReturn(geoLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
     body.put("region", "");
 
     NeoResponse r = handler.handle(buildContext("POST", null, body));
@@ -316,28 +366,77 @@ class WarehouseLocationHandlerTest {
   }
 
   /**
-   * Exercises every branch of {@code nullIfEmpty} in one pass: an absent key,
-   * an empty string, the literal {@code "null"}, and a real value.
+   * ETP-5806 — missing a mandatory field (streetName/buildingNumber/cityName/country) is a
+   * clean 400, not a downstream NOT NULL violation at flush.
    */
   @Test
-  void testCreateNullIfEmptyVariants() throws Exception {
+  void testCreateMissingMandatoryFieldsReturns400() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    // buildingNumber, cityName and country intentionally omitted
+
+    NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+    verify(obDal, never()).save(any());
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug): a structured-address field longer than its DB
+   * column must be rejected with a clean 400 before the write is attempted, never reach
+   * {@code OBDal.flush()} as a raw data-truncation SQL exception.
+   */
+  @Test
+  void testCreateFieldExceedingMaxLengthReturns400NotRawSqlException() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+    // EM_OBSEPA_BldgNm is VARCHAR(35) — 36 chars overflows it.
+    body.put("buildingName", "A".repeat(36));
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).flush();
+    }
+  }
+
+  /**
+   * Once streetName is mandatory, applyGeoLocFields always takes the composed-address branch;
+   * any raw addressLine1/addressLine2 the body also sends is ignored in favor of the composed
+   * value. Also exercises the remaining nullIfEmpty variant (literal {@code "null"}) via
+   * postalCode, the one field left unaffected by the new mandatory rule.
+   */
+  @Test
+  void testCreateIgnoresRawAddressLinesWhenStreetNamePresent() throws Exception {
     Location geoLoc = mock(Location.class);
     when(geoLoc.getId()).thenReturn("geo-5");
     when(obProvider.get(Location.class)).thenReturn(geoLoc);
 
     JSONObject body = new JSONObject();
-    // addressLine1 intentionally absent
-    body.put("addressLine2", "");
-    body.put("cityName", "null");
-    body.put("postalCode", "123 Main");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+    body.put("addressLine1", "RAW LINE — SHOULD BE IGNORED");
+    body.put("addressLine2", "RAW LINE 2 — SHOULD BE IGNORED");
+    body.put("postalCode", "null");
 
-    NeoResponse r = handler.handle(buildContext("POST", null, body));
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
 
-    assertEquals(201, r.getHttpStatus());
-    verify(geoLoc).setAddressLine1(isNull());
-    verify(geoLoc).setAddressLine2(isNull());
-    verify(geoLoc).setCityName(isNull());
-    verify(geoLoc).setPostalCode("123 Main");
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc).setAddressLine1("Gran Via, 45");
+      verify(geoLoc).setAddressLine2(isNull());
+      verify(geoLoc, never()).setAddressLine1("RAW LINE — SHOULD BE IGNORED");
+      verify(geoLoc).setPostalCode(isNull());
+    }
   }
 
   /**
@@ -345,14 +444,110 @@ class WarehouseLocationHandlerTest {
    * and surface as HTTP 500, never leak a stack trace to the caller.
    */
   @Test
-  void testCreateExceptionRollsBackAndReturns500() {
+  void testCreateExceptionRollsBackAndReturns500() throws Exception {
     when(obProvider.get(Location.class)).thenThrow(new RuntimeException("DB exploded"));
 
-    NeoResponse r = handler.handle(buildContext("POST", null, new JSONObject()));
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+
+    NeoResponse r = handler.handle(buildContext("POST", null, body));
 
     assertNotNull(r);
     assertEquals(500, r.getHttpStatus());
     verify(sessionHandler).rollback();
+  }
+
+  // ── ETP-5806: structured-address-for-sepa flag OFF ─────────────────────
+
+  /** Stubs {@link GoFeatureFlags#isEnabled} for the {@code structured-address-for-sepa} flag only. */
+  private MockedStatic<GoFeatureFlags> mockStructuredAddressFlag(boolean enabled) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(enabled);
+    return flags;
+  }
+
+  /**
+   * Flag off: only {@code country} is mandatory on create — streetName/buildingNumber/cityName
+   * are not required, and the legacy raw addressLine1 is used as given.
+   */
+  @Test
+  void testCreateFlagOffOnlyRequiresCountryNotStructuredFields() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-flag-off-1");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("country", "country-x");
+    body.put("addressLine1", "Legacy free-text line");
+    // streetName, buildingNumber, buildingName and cityName intentionally omitted.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc).setAddressLine1("Legacy free-text line");
+      verify(obDal).save(geoLoc);
+    }
+  }
+
+  /**
+   * Flag off: a create payload that still carries the 3 structured fields does not persist them
+   * (never read off the body, never written to the record) and does not error on the missing
+   * {@code cityName} that would be mandatory with the flag on.
+   */
+  @Test
+  void testCreateFlagOffNeverPersistsStructuredFieldsEvenWhenPayloadCarriesThem() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-flag-off-2");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("country", "country-x");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("buildingName", "Torre A");
+    // cityName intentionally omitted — mandatory only when the flag is on.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc, never()).setOBSEPAStreetName(any());
+      verify(geoLoc, never()).setOBSEPABuildingNumber(any());
+      verify(geoLoc, never()).setOBSEPABuildingName(any());
+    }
+  }
+
+  /**
+   * Flag off: a GET-by-id response omits the 3 structured-address keys entirely (absent, not
+   * {@code JSONObject.NULL}) — the SEPA getters are never even called.
+   */
+  @Test
+  void testGetByIdFlagOffOmitsStructuredAddressKeysEntirely() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-flag-off-3");
+    when(obDal.get(Location.class, "geo-flag-off-3")).thenReturn(geoLoc);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse r = handler.handle(buildContext("GET", "geo-flag-off-3", null));
+
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Location", rec.getString("name"));
+      assertFalse(rec.has("streetName"), rec.toString());
+      assertFalse(rec.has("buildingNumber"), rec.toString());
+      assertFalse(rec.has("buildingName"), rec.toString());
+      verify(geoLoc, never()).getOBSEPAStreetName();
+      verify(geoLoc, never()).getOBSEPABuildingNumber();
+      verify(geoLoc, never()).getOBSEPABuildingName();
+    }
   }
 
   // ── handleUpdate ──────────────────────────────────────────────────────────
@@ -369,18 +564,28 @@ class WarehouseLocationHandlerTest {
     when(obDal.get(Location.class, "geo-upd")).thenReturn(geoLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Mayor");
+    body.put("buildingNumber", "7");
+    body.put("cityName", "Toledo");
+    body.put("country", "country-upd");
+    // ETP-5806 — a legacy record may already carry a free-text Address1; a non-blank streetName
+    // on the update always recomputes it, so this raw value must be ignored regardless of
+    // whatever addressLine1 geoLoc already had before this update.
     body.put("addressLine1", "456 Oak Ave");
 
-    NeoResponse r = handler.handle(buildContext("PUT", "geo-upd", body));
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("PUT", "geo-upd", body));
 
-    assertNotNull(r);
-    assertEquals(200, r.getHttpStatus());
-    verify(geoLoc).setAddressLine1("456 Oak Ave");
-    verify(obDal, never()).save(any());
-    verify(obDal).flush();
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      verify(geoLoc).setAddressLine1("Calle Mayor, 7");
+      verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
+      verify(obDal, never()).save(any());
+      verify(obDal).flush();
 
-    JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-    assertEquals("geo-upd", rec.getString("id"));
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("geo-upd", rec.getString("id"));
+    }
   }
 
   /**
@@ -419,6 +624,9 @@ class WarehouseLocationHandlerTest {
     when(obDal.get(Region.class, "region-id")).thenReturn(region);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Paseo del Prado");
+    body.put("buildingNumber", "12");
+    body.put("cityName", "Madrid");
     body.put("country", "country-id");
     body.put("region", "region-id");
 
@@ -439,12 +647,62 @@ class WarehouseLocationHandlerTest {
     when(obDal.get(Location.class, "geo-upd-3")).thenReturn(geoLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Alcala");
+    body.put("buildingNumber", "20");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-any");
     body.put("region", "");
 
     NeoResponse r = handler.handle(buildContext("PUT", "geo-upd-3", body));
 
     assertEquals(200, r.getHttpStatus());
     verify(geoLoc).setRegion(isNull());
+  }
+
+  /**
+   * ETP-5806 — an update that omits the body's mandatory fields falls back to the existing
+   * record's own country, but streetName/buildingNumber/cityName have no such fallback (the
+   * update always resends the full address): a body missing them is rejected with 400.
+   */
+  @Test
+  void testUpdateMissingMandatoryFieldsReturns400() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(obDal.get(Location.class, "geo-upd-4")).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Alcala");
+    // buildingNumber, cityName and country intentionally omitted, and geoLoc has none either
+
+    NeoResponse r = handler.handle(buildContext("PUT", "geo-upd-4", body));
+
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+    verify(obDal, never()).flush();
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug) on the update path: an oversized structured
+   * field is rejected with 400 before {@code OBDal.flush()}, never surfaces as a raw SQL
+   * data-truncation exception.
+   */
+  @Test
+  void testUpdateFieldExceedingMaxLengthReturns400() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(obDal.get(Location.class, "geo-upd-5")).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Alcala");
+    body.put("buildingNumber", "A".repeat(17)); // EM_OBSEPA_BldgNb is VARCHAR(16)
+    body.put("cityName", "Madrid");
+    body.put("country", "country-any");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("PUT", "geo-upd-5", body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+      verify(obDal, never()).flush();
+    }
   }
 
   // ── handleGetById ─────────────────────────────────────────────────────────
@@ -627,6 +885,101 @@ class WarehouseLocationHandlerTest {
     Method m = WarehouseLocationHandler.class.getDeclaredMethod("joinNonNull", String[].class);
     m.setAccessible(true);
     assertNull(m.invoke(null, (Object) new String[]{ null, null }));
+  }
+
+  // ── ETP-5806 follow-up: per-account targeting ─────────────────────────────
+
+  /** The account a (hypothetical) provider-side targeting rule names for the staged rollout. */
+  private static final String TARGETED_ACCOUNT = "localization@etendo.software";
+  private static final String OTHER_ACCOUNT = "someone.else@example.com";
+
+  /**
+   * Stubs the flag so it resolves {@code true} for {@link #TARGETED_ACCOUNT} ONLY — any other
+   * targeting key, including the account-less one the gating used before this follow-up, resolves
+   * {@code false}. That is the staged-rollout shape the whole fix exists for.
+   */
+  private MockedStatic<GoFeatureFlags> mockStructuredAddressFlagTargetedAt(String email) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+        argThat(ctx -> ctx != null && email.equals(ctx.getTargetingKey())))).thenReturn(true);
+    return flags;
+  }
+
+  /**
+   * A targeted account's write is validated and persisted even though the same environment
+   * resolves the flag {@code false} for everyone else — the gap this follow-up closed. Before it,
+   * the backend evaluated an account-less context here, so a targeted user saw the 3 fields in the
+   * UI, filled them in, and had them silently dropped by the "ignore, don't reject" contract.
+   */
+  @Test
+  void testCreateValidatesAndPersistsForATargetedAccount() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-targeted");
+    when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("buildingName", "Torre A");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+
+    try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+        MockedStatic<GoFeatureFlags> flags =
+            mockStructuredAddressFlagTargetedAt(TARGETED_ACCOUNT)) {
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Torre A");
+      verify(geoLoc).setAddressLine1("Gran Via, 45 - Torre A");
+
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Gran Via", rec.getString("streetName"));
+    }
+  }
+
+  /**
+   * The same environment, a different account: the off behaviour is unchanged — the 3 fields are
+   * neither required, nor persisted, nor echoed back.
+   */
+  @Test
+  void testCreateKeepsTheOffBehaviourForAnUntargetedAccount() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-untargeted");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+    body.put("addressLine1", "Legacy free-text line");
+
+    try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+        MockedStatic<GoFeatureFlags> flags =
+            mockStructuredAddressFlagTargetedAt(TARGETED_ACCOUNT)) {
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(OTHER_ACCOUNT);
+
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc, never()).setOBSEPAStreetName(any());
+      verify(geoLoc, never()).setOBSEPABuildingNumber(any());
+      verify(geoLoc).setAddressLine1("Legacy free-text line");
+
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(rec.has("streetName"));
+    }
   }
 
   // ── private helpers ───────────────────────────────────────────────────────
