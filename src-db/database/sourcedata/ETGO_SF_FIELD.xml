@@ -18224,6 +18224,7 @@
 <!--2BDFF79219124786A997EA1A50EB5AF3-->  <JAVA_QUALIFIER><![CDATA[businessPartner]]></JAVA_QUALIFIER>
 <!--2BDFF79219124786A997EA1A50EB5AF3-->  <SEQNO><![CDATA[200]]></SEQNO>
 <!--2BDFF79219124786A997EA1A50EB5AF3-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--2BDFF79219124786A997EA1A50EB5AF3-->  <AGENT_PROMPT><![CDATA[The vendor, as its id plus the name in businessPartner$_identifier. Names can repeat: to tell two apart, read their searchKey and taxID with one etendo_list on contacts/businessPartner filtered by id: {in: [ids]}.]]></AGENT_PROMPT>
 <!--2BDFF79219124786A997EA1A50EB5AF3-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--2BDFF79219124786A997EA1A50EB5AF3--></ETGO_SF_FIELD>
 
@@ -23750,6 +23751,7 @@
 <!--39AB2D9EF4CD49248A0CD531CC0E57B9-->  <JAVA_QUALIFIER><![CDATA[businessPartner]]></JAVA_QUALIFIER>
 <!--39AB2D9EF4CD49248A0CD531CC0E57B9-->  <SEQNO><![CDATA[180]]></SEQNO>
 <!--39AB2D9EF4CD49248A0CD531CC0E57B9-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--39AB2D9EF4CD49248A0CD531CC0E57B9-->  <AGENT_PROMPT><![CDATA[The customer, as its id plus the name in businessPartner$_identifier. Names can repeat: to tell two apart, read their searchKey and taxID with one etendo_list on contacts/businessPartner filtered by id: {in: [ids]}.]]></AGENT_PROMPT>
 <!--39AB2D9EF4CD49248A0CD531CC0E57B9-->  <ISBUSINESSCRITICAL><![CDATA[Y]]></ISBUSINESSCRITICAL>
 <!--39AB2D9EF4CD49248A0CD531CC0E57B9--></ETGO_SF_FIELD>
 
@@ -23963,6 +23965,7 @@
 <!--3A2EFA5429A947AFA89335EB05359639-->  <JAVA_QUALIFIER><![CDATA[businessPartner]]></JAVA_QUALIFIER>
 <!--3A2EFA5429A947AFA89335EB05359639-->  <SEQNO><![CDATA[200]]></SEQNO>
 <!--3A2EFA5429A947AFA89335EB05359639-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--3A2EFA5429A947AFA89335EB05359639-->  <AGENT_PROMPT><![CDATA[The customer, as its id plus the name in businessPartner$_identifier. Names can repeat: to tell two apart, read their searchKey and taxID with one etendo_list on contacts/businessPartner filtered by id: {in: [ids]}.]]></AGENT_PROMPT>
 <!--3A2EFA5429A947AFA89335EB05359639-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--3A2EFA5429A947AFA89335EB05359639--></ETGO_SF_FIELD>
 
@@ -61441,6 +61444,7 @@
 <!--99A00D5BC3374969872E9DC66CBB7C47-->  <JAVA_QUALIFIER><![CDATA[businessPartner]]></JAVA_QUALIFIER>
 <!--99A00D5BC3374969872E9DC66CBB7C47-->  <SEQNO><![CDATA[180]]></SEQNO>
 <!--99A00D5BC3374969872E9DC66CBB7C47-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--99A00D5BC3374969872E9DC66CBB7C47-->  <AGENT_PROMPT><![CDATA[The vendor, as its id plus the name in businessPartner$_identifier. Names can repeat: to tell two apart, read their searchKey and taxID with one etendo_list on contacts/businessPartner filtered by id: {in: [ids]}.]]></AGENT_PROMPT>
 <!--99A00D5BC3374969872E9DC66CBB7C47-->  <ISBUSINESSCRITICAL><![CDATA[Y]]></ISBUSINESSCRITICAL>
 <!--99A00D5BC3374969872E9DC66CBB7C47--></ETGO_SF_FIELD>
 

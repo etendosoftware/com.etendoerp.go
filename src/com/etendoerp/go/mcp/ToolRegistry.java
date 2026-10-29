@@ -1368,7 +1368,7 @@ public class ToolRegistry {
     // other data) reaches the agent the way a window's does, from the spec's AGENT_PROMPT.
     String reportPrompt = spec.getAgentPrompt();
     if (reportPrompt != null && !reportPrompt.isBlank()) {
-      desc += " " + reportPrompt.trim();
+      desc += (desc.endsWith(".") ? " " : ". ") + reportPrompt.trim();
     }
 
     Map<String, Object> paramProps = new LinkedHashMap<>();
