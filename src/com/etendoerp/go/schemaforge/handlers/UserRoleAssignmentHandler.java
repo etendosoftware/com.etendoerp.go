@@ -274,6 +274,12 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_INVITATION = "invitation";
   private static final String FIELD_STATUS = "status";
 
+  /** ETP-5852 (M-201): the read-only {@code roles} action, see {@link UserRolesReadAction}. */
+  @Override
+  public Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> actionContracts() {
+    return UserRolesReadAction.CONTRACTS;
+  }
+
   /**
    * Pre-hook dispatch: on a {@code user} {@code POST} (create), derives a unique {@code
    * username}; on a {@code user} {@code PUT}/{@code PATCH} (update), guards against the
@@ -285,6 +291,9 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    */
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (UserRolesReadAction.isCall(context)) {
+      return UserRolesReadAction.serve(context);
+    }
     if (context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }

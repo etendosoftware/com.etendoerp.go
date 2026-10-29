@@ -2423,6 +2423,7 @@
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <JAVA_QUALIFIER><![CDATA[goodsShipmentHeaderHandler]]></JAVA_QUALIFIER>
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--6882D245E7964685A14DCF0ACD66FB13-->  <AGENT_PROMPT><![CDATA[A goods shipment carries quantities only, no amounts, as in the app. Its value is each line's movementQuantity times the unit price of the sales order line it delivers (salesOrderLine, read in sales-order/lines); once invoiced, the invoice created from it has the amounts.]]></AGENT_PROMPT>
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"Invoicefromshipment":"createDraftInvoice","CreateFrom":"importOrderLines"},"redirectReason":"The classic invoice-from-shipment process is not the path the app uses and bypasses its checks (nothing-left-to-invoice refusal, partial quantities); createDraftInvoice creates and completes the sales invoice from this shipment","reason":"Classic Invoicefromshipment is not the supported agent path; use createDraftInvoice","reasons":{"CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed sales order to this draft goods shipment, with availableOrders and availableOrderLines listing what can be imported","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}},"defaults":{"context":["businessPartner"],"reason":"The partner address comes from the business partner."}}]]></MCP_CONFIG>
 <!--6882D245E7964685A14DCF0ACD66FB13--></ETGO_SF_ENTITY>
 
@@ -4015,6 +4016,7 @@
 <!--B845C674D49D48BF950AE2389C56C49F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--B845C674D49D48BF950AE2389C56C49F-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no shipment or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked documents: close the order (documentAction CL), which closes what is still pending on every line, not on one.]]></AGENT_PROMPT>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search sales order lines by product or category across orders (which orders sold X); allParents keeps them to lines of sales orders, never purchase or quotation lines."}}]]></MCP_CONFIG>
 <!--B845C674D49D48BF950AE2389C56C49F--></ETGO_SF_ENTITY>
 
@@ -5500,6 +5502,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--F391AE6AB4D742DB8A38A8801BE6D513-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no receipt or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked documents: close the order (documentAction CL), which closes what is still pending on every line, not on one.]]></AGENT_PROMPT>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search purchase order lines by product across orders (which orders bought X); allParents keeps them to lines of purchase orders, never sales or return lines."}}]]></MCP_CONFIG>
 <!--F391AE6AB4D742DB8A38A8801BE6D513--></ETGO_SF_ENTITY>
 

@@ -600,10 +600,15 @@ public class ToolRegistry {
     desc.put(McpConstants.WIDGET_ACTIVITY, "Recent activity feed (invoices paid, documents posted, notes).");
     desc.put(McpConstants.WIDGET_RECENT_INVOICES, "The 5 most recent completed/closed sales "
         + "invoices (newest first); amount is the total WITH VAT.");
-    desc.put(McpConstants.WIDGET_BEST_PRODUCTS, "Products ranked by NET sales amount without VAT "
-        + "(invoice line net amounts) of completed/closed sales invoices.");
-    desc.put(McpConstants.WIDGET_BEST_SELLERS, "Products ranked by quantity sold (invoiced "
-        + "quantity of completed/closed sales invoices), with their unit of measure.");
+    // ETP-5852 (M-164): the only sales-by-product figures, as on the dashboard card.
+    desc.put(McpConstants.WIDGET_BEST_PRODUCTS, "Top 10 products ranked by NET sales amount "
+        + "without VAT (invoice line net amounts) of completed/closed sales invoices in the period "
+        + "of params.range. Sales by product for a period are read here (amounts) and in "
+        + "best-sellers (quantities); only the listed ranges exist, as on the dashboard, so a "
+        + "period outside them (one month, a quarter) cannot be read: tell the user.");
+    desc.put(McpConstants.WIDGET_BEST_SELLERS, "Top 10 products ranked by quantity sold "
+        + "(invoiced quantity of completed/closed sales invoices) in the period of params.range, "
+        + "with their unit of measure.");
     desc.put(McpConstants.WIDGET_PENDING_AMOUNTS, "Open receivables and payables NOW: count and "
         + "outstanding amount WITH VAT of completed sales/purchase invoices not fully paid. A "
         + "balance, not a period flow: not comparable with the net revenue of 'kpis'.");
@@ -1358,6 +1363,12 @@ public class ToolRegistry {
     String desc = String.format("Generate the '%s' report", specName);
     if (spec.getDescription() != null) {
       desc += ". " + spec.getDescription();
+    }
+    // ETP-5852 (M-228): a report's own guidance (what its columns mean, how to combine it with
+    // other data) reaches the agent the way a window's does, from the spec's AGENT_PROMPT.
+    String reportPrompt = spec.getAgentPrompt();
+    if (reportPrompt != null && !reportPrompt.isBlank()) {
+      desc += " " + reportPrompt.trim();
     }
 
     Map<String, Object> paramProps = new LinkedHashMap<>();

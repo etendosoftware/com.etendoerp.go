@@ -2222,6 +2222,7 @@
 <!--048B2D8E091A415FAC0A00E0C8582A50-->  <JAVA_QUALIFIER><![CDATA[movementDate]]></JAVA_QUALIFIER>
 <!--048B2D8E091A415FAC0A00E0C8582A50-->  <SEQNO><![CDATA[150]]></SEQNO>
 <!--048B2D8E091A415FAC0A00E0C8582A50-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--048B2D8E091A415FAC0A00E0C8582A50-->  <AGENT_PROMPT><![CDATA[The date the goods left. It can be changed only while the shipment is a draft: a completed shipment cannot be reactivated or edited, in the app either. To correct one, return the goods (a customer return) and make a new shipment with the right date, or tell the user it stays as it is.]]></AGENT_PROMPT>
 <!--048B2D8E091A415FAC0A00E0C8582A50-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--048B2D8E091A415FAC0A00E0C8582A50--></ETGO_SF_FIELD>
 
@@ -21015,6 +21016,7 @@
 <!--32F10158022446E5B43708157FA36B8D-->  <JAVA_QUALIFIER><![CDATA[movementDate]]></JAVA_QUALIFIER>
 <!--32F10158022446E5B43708157FA36B8D-->  <SEQNO><![CDATA[150]]></SEQNO>
 <!--32F10158022446E5B43708157FA36B8D-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--32F10158022446E5B43708157FA36B8D-->  <AGENT_PROMPT><![CDATA[The date the goods arrived. It can be changed only while the receipt is a draft: a completed receipt cannot be reactivated or edited, in the app either. To correct one, return the goods (action createPurchaseReturn) and make a new receipt with the right date, or tell the user it stays as it is.]]></AGENT_PROMPT>
 <!--32F10158022446E5B43708157FA36B8D-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--32F10158022446E5B43708157FA36B8D--></ETGO_SF_FIELD>
 
