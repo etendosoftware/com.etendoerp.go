@@ -3879,22 +3879,33 @@ generation, client/org, active flag) stay on the generic CRUD fallthrough, unint
 `AD_COLUMN_ID` only, so a grep for `EM_OBSEPA` over it finds nothing — which is how the absence
 was "confirmed".) Two consequences, both of which the handler now owns explicitly:
 
-- **The curated API key for these 3 fields is the DAL property name.** `NeoFieldFilter`
-  registers an alias only when `ETGO_SF_FIELD.Java_Qualifier` differs from the property name, and
-  for these rows it does not — so `schema_forge/artifacts/bp-location/contract.json` publishes
-  `"apiKey": "oBSEPAStreetName"` and the generated `BpLocationForm.jsx`/`BpLocationPage.jsx` send
-  exactly that. **The wire format is therefore channel-dependent**: REST/SPA send
-  `oBSEPAStreetName`, an MCP agent sends the published `streetName`
-  (`AddressVirtualSelectorPolicy.PUBLISHED_NAME_OVERRIDES`, which `mapFieldsToDalProperties` passes
-  through untouched because it resolves to no property), and `/batch` + `etendo_batch` run no key
-  mapping at all, so the raw `EM_OBSEPA_StrtNm` reaches the body verbatim. `BpLocationHandler`
-  reads **all three spellings** of each field (plus `City`/`C_Country_ID` for the two legacy
-  mandatory fields, reachable on batch for the same reason), case-insensitively, and removes them
-  from the body once read so it is the sole writer of the 3 columns. Writing the response under
-  both the published name and the curated key is deliberate for the same reason. A revision that
-  read only the published spelling answered a valid REST create with
+- **The curated API key for these 3 fields WAS the DAL property name, until the wire-name rename
+  below.** Originally `NeoFieldFilter` registered an alias only when `ETGO_SF_FIELD.Java_Qualifier`
+  differed from the property name, and for these rows it did not — so
+  `schema_forge/artifacts/bp-location/contract.json` published `"apiKey": "oBSEPAStreetName"` and
+  the generated `BpLocationForm.jsx`/`BpLocationPage.jsx` sent exactly that, while MCP sent the
+  published `streetName`. That channel split caused a real incident: a revision that read only the
+  published spelling answered a valid REST create with
   `400 Missing required field(s): streetName, buildingNumber` and silently reverted a valid REST
   update from the pre-update record.
+  **Fixed by unifying the wire name, not by widening the read.** `decisions.json` now carries a
+  curated `name` override of `streetName`/`buildingNumber`/`buildingName` on the 3 fields
+  (`schema_forge` commit `255925a22`), which `push-to-neo` turns into
+  `ETGO_SF_FIELD.Java_Qualifier = streetName/buildingNumber/buildingName` — matching the sourcedata
+  export in this repo (`src-db/database/sourcedata/ETGO_SF_FIELD.xml`, commit `72b79a2d3`). Because
+  the qualifier now differs from the DAL property name (`oBSEPAStreetName`/…), `NeoFieldFilter`
+  registers the alias and **REST, the SPA, and MCP all read/write `streetName`/`buildingNumber`/
+  `buildingName` now** — the channel split described above no longer exists for a curated instance
+  that has applied `export.database`. `BpLocationHandler` still reads **all three spellings** of
+  each field (published name, raw DAL property, raw AD column — plus `City`/`C_Country_ID` for the
+  two legacy mandatory fields, reachable on `/batch` + `etendo_batch`, which run no key mapping at
+  all and so still deliver the raw `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm` verbatim), case-
+  insensitively, and removes them from the body once read so it remains the sole writer of the 3
+  columns — this multi-spelling tolerance is now defense-in-depth (batch, and any instance that has
+  not yet run `export.database`), not the fix itself. It still writes the response under both the
+  published name and the raw DAL property name (`putStructuredFields`) for the same reason: an MCP
+  agent reads `streetName` from `etendo_schema`, while an instance mid-rollout (SPA built against
+  the old contract) may still expect `oBSEPAStreetName`.
 - **While the flag is off, the handler strips the 3 fields from the response as well as from the
   write body.** Declining to enrich is not enough here: with `ISINCLUDED=Y` the generic projection
   returns them under the curated key with no handler involvement, so an untargeted account could
@@ -3920,6 +3931,47 @@ downstream, so it still reported the raw property name wherever the field reache
 DB column name (upper-cased), consulted identically for any entity that happens to carry one of
 the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
 per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
+
+**ETP-5806 follow-up — `resolveEntityHandler` has no `@NeoExtension` fallback (fixed on the MCP
+read path; two call sites still carry the risk).** `BpLocationHandler` binds only through
+`@NeoExtension(spec = "bp-location", entity = "bpLocation")` — it has no `Java_Qualifier` (see
+the entity's own `decisions.json` note). `McpHookExecutor.runReadHook` resolved the handler for
+its POST phase (the one that runs `afterHandle` and is what strips/enriches the SEPA fields on a
+read) via `McpHookExecutor.resolveEntityHandler`, which is `NeoHandlerLookup.byQualifier` alone —
+it has no annotation fallback and returns `null` for an `@NeoExtension`-only handler. The result:
+`afterHandle` never ran over an MCP `etendo_get`/`etendo_list` read of `bp-location`, so the
+structured SEPA fields leaked through MCP reads regardless of the `structured-address-for-sepa`
+flag, while the write path, REST reads (which carry the PRE-resolved handler straight into the
+post hook — `NeoServletSupport.handleWithHooks`, unaffected by this gap), and every Mockito test
+that calls `afterHandle()` directly all looked correct. Fixed (commit `f0543df32`) by resolving
+`runReadHook`'s POST phase through `NeoExtensionDispatcher.resolveOnly` instead — annotation
+first, `Java_Qualifier` second — matching every other MCP hook site (`runReadProvider`'s own PRE
+dispatch, `resolveServerCreateFields`) and the REST path's resolution.
+
+This is the general lesson for anything extending the `NeoHandler` pattern (§5.3.a) through
+`@NeoExtension` alone: **a resolution call that is literally `NeoHandlerLookup.byQualifier` (or an
+equivalent qualifier-only lookup) will silently no-op for a handler with no `Java_Qualifier`.**
+Line ~9527 above lists `NeoFieldFilter`'s read-only rejection and `protectedCreateCalloutFields` as
+two readers that still resolve the qualifier directly by design, for the `orderLineHandler`
+binding — that is a deliberate, qualifier-set case. The `bp-location` case is different: the
+handler has *no* qualifier at all, so a qualifier-only resolver is not a design choice there, it is
+a dead code path for that handler.
+
+**Two residual call sites, same latent bug class, deliberately left unfixed.** `resolveEntityHandler`
+is still called directly (not through `NeoExtensionDispatcher.resolveOnly`) at:
+- `McpWidgetHandler.java:75` — widget rendering resolves the entity's handler to let it customize
+  widget behaviour; an `@NeoExtension`-only handler resolves to `null` here too.
+- `McpWriteRequestSupport.java:91` — used as a `handler != null` presence check (gating some write
+  guard), with the same qualifier-only blind spot.
+
+Both reviewers and the developer flagged these during the ETP-5806 cycle as carrying the identical
+resolution gap just fixed on the read path, and both recommended a follow-up ticket rather than
+widening the fix in the same change (risk of changing resolution semantics for every qualifier-set
+handler these two sites currently serve, untested). No `@NeoExtension`-only handler currently
+relies on being found through either site in production, which is why this was accepted as a
+follow-up rather than a blocker — but the next handler written as `@NeoExtension`-only (per the
+"use this for anything new" guidance in §5.3.a) that also needs widget support or this write guard
+will hit the same silent `null`. Tracked in `docs/plans/2026-10-29-etp-5806-resolveentityhandler-followup.md`.
 
 **Pending DB update — confirmed still outstanding.** The field-level `AGENT_PROMPT` on
 `ETGO_SF_FIELD` for `C_Location_ID` still has not been updated in the database to mention the 3
@@ -9522,11 +9574,18 @@ annotated: it keeps 0 / 0 on `etendo_create`, as on `develop`.
 ##### Binding: the `Java_Qualifier` stays
 
 `ETGO_SF_ENTITY.Java_Qualifier` still reads `orderLineHandler` on both rows, deliberately. Several
-readers resolve the qualifier directly instead of going through `NeoExtensionDispatcher`: the REST
-CRUD gate (`NeoCrudHandler.dispatchCrudRequestInternal` only calls `handleWithHooks` when a qualifier
-exists), the MCP read post-hook (`McpHookExecutor.resolveEntityHandler`), `NeoFieldFilter`'s
-read-only rejection and `protectedCreateCalloutFields`. Clearing the qualifier would switch the
-customization off on REST single and drop the discount-line filter from MCP reads. With it kept,
+readers resolve the qualifier directly instead of going through `NeoExtensionDispatcher`:
+the REST CRUD gate (`NeoCrudHandler.dispatchCrudRequestInternal` only calls `handleWithHooks` when
+a qualifier exists), `NeoFieldFilter`'s read-only rejection, and `protectedCreateCalloutFields`.
+(The MCP read post-hook used to be in this list via `McpHookExecutor.resolveEntityHandler` too,
+but as of ETP-5806/commit `f0543df32` it resolves through `NeoExtensionDispatcher.resolveOnly`
+instead — see §4.12 "ETP-5806 follow-up — `resolveEntityHandler` has no `@NeoExtension` fallback"
+above for why that changed and which 2 call sites, `McpWidgetHandler` and
+`McpWriteRequestSupport`, still carry the qualifier-only behaviour described here; the MCP read
+post-hook's resolution still falls back to the qualifier when no annotation is present, so this
+paragraph's conclusion is unchanged, only its implementation detail is.) Clearing the
+qualifier would switch the customization off on REST single and drop the discount-line filter
+from MCP reads. With it kept,
 those readers resolve the parent class — whose behaviour the customizations inherit unchanged — and
 the dispatched surfaces resolve the annotation. The cost is one `(warn)` ERROR line per resolution
 from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in `make extension-parity`.
