@@ -4843,9 +4843,10 @@ sales invoice `263`, purchase invoice `290`) now carries a hidden field «Exchan
 (`IsDisplayed = 'N'`, not centrally maintained, same shape as the `EM_Etgo_Total_Discount` fields),
 so Classic does not show it. The column is **not** renamed: the DAL derives the property name from
 `AD_COLUMN.name` (`NamingUtil.getPropName`), so renaming it would turn `eTGOCurrencyRate` into
-`currencyRate`. The module exports no `AD_FIELD_TRL`, so the Spanish label «Tasa de cambio» comes
-from the versioned catalog `mcp/messages/mcp_field_labels_es.properties`
-(`C_Order.EM_ETGO_Currency_Rate`, `C_Invoice.EM_ETGO_Currency_Rate`) — see *Field labels* in §4.12.15.
+`currencyRate`. The module exports no `AD_FIELD_TRL`, so the Spanish label «Tasa de cambio» and its
+Spanish description come from the versioned catalog `mcp/messages/mcp_field_labels_es.properties`
+(`C_Order.EM_ETGO_Currency_Rate[.description]`, `C_Invoice.EM_ETGO_Currency_Rate[.description]`) —
+see *Field labels* in §4.12.15.
 
 **`currencyOptions`** (`CurrencyOptionsHandler`): `GET …/{id|new}/action/currencyOptions?date=yyyy-MM-dd`
 (an MCP call may pass `date` in the action body; an invalid one is a 400, `CurrencyOptionsHandler.InvalidDateParameterException`). `date` is the reference
@@ -5366,19 +5367,22 @@ A title never mentions `neo`. A new fixed tool needs a `title.<tool name>` key i
 and an entry in `McpToolTitlesTest.FIXED_TOOLS`, which checks both. A spec-title lookup failure is swallowed, falling back to the
 humanized name, so a cosmetic field can never drop a tool from the list.
 
-**Field labels** (`etendo_schema` and the `missingFields[].label` of a write refusal, both through
-`McpSchemaFieldBuilder.loadFieldLabels`, ETP-5840). Precedence, in the user's language:
+**Field labels and descriptions** (`etendo_schema`, and the `missingFields[].label` of a write
+refusal, both through `McpSchemaFieldBuilder.loadFieldLabels`, ETP-5840). Precedence, in the user's
+language:
 
-1. `mcp/messages/mcp_field_labels_<lang>.properties`, keyed `<AD_Table.TableName>.<AD_Column.ColumnName>`
-   (`McpFieldLabels`; same no-host-fallback bundle loading as the titles, never throws);
-2. the `AD_FIELD_TRL` name;
-3. `AD_FIELD.name`;
-4. with no `AD_FIELD` in the tab at all, `AD_COLUMN.name` (left by the field builder).
+1. `mcp/messages/mcp_field_labels_<lang>.properties` (`McpFieldLabels`; same no-host-fallback bundle
+   loading as the titles, never throws) — the label keyed `<AD_Table.TableName>.<AD_Column.ColumnName>`,
+   the description keyed `<TableName>.<ColumnName>.description`;
+2. the `AD_FIELD_TRL` name / description;
+3. `AD_FIELD.name` / `AD_FIELD.description`;
+4. with no `AD_FIELD` in the tab at all, `AD_COLUMN.name` and no description (left by the field
+   builder).
 
-The description is not part of the catalog. The catalog exists because `com.etendoerp.go` is not a
+Label and description are looked up independently, so an entry may carry either. The catalog exists because `com.etendoerp.go` is not a
 translation module, so the `AD_FIELD_TRL` of a field it adds is never exported (same reason as the
 `neo_hints_<lang>` catalog for messages). Only a language that needs it has a file — today `es`, which
-serves every Spanish variant; English comes from `AD_FIELD.name`. Add an entry only for a field this
+serves every Spanish variant; English comes from `AD_FIELD`. Add an entry only for a field this
 module adds; the Java names no column. `McpResourceProvider` (field list resource) and
 `McpToolRouterSupport.buildMissingFieldInfo` still read `AD_COLUMN.name` and do not use it.
 

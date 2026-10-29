@@ -412,7 +412,9 @@ final class McpSchemaFieldBuilder {
    * <p><b>Label precedence</b> (ETP-5840): (1) the {@link McpFieldLabels} catalog entry
    * {@code <TableName>.<ColumnName>} for {@code langCode}; (2) the {@code AD_FIELD_TRL} name;
    * (3) {@code AD_FIELD.name}. The catalog exists because this module's {@code AD_FIELD_TRL} rows
-   * are never exported. The description keeps (2) then (3).</p>
+   * are never exported. The description follows the same order: the catalog's
+   * {@code <TableName>.<ColumnName>.description}, then {@code AD_FIELD_TRL}, then
+   * {@code AD_FIELD.description}.</p>
    *
    * <p>A column may back more than one field in the tab; the first active field wins (the tab's
    * field list is sequence-ordered). Never throws — on any failure the base-language label is used,
@@ -444,8 +446,12 @@ final class McpSchemaFieldBuilder {
       if (label == null) {
         label = trl != null && StringUtils.isNotBlank(trl[0]) ? trl[0] : field.getName();
       }
-      String description = trl != null && StringUtils.isNotBlank(trl[1])
-          ? trl[1] : field.getDescription();
+      String description = McpFieldLabels.descriptionOf(tableName,
+          field.getColumn().getDBColumnName(), langCode);
+      if (description == null) {
+        description = trl != null && StringUtils.isNotBlank(trl[1])
+            ? trl[1] : field.getDescription();
+      }
       byColumn.put(entry.getKey(), new String[] { label, description });
     }
     return byColumn;

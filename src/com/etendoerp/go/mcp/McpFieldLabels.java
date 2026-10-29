@@ -23,22 +23,24 @@ import java.util.ResourceBundle;
 import org.apache.commons.lang3.StringUtils;
 
 /**
- * Versioned field labels for agents, in the user's language (ETP-5840, QA CP-12c).
+ * Versioned field labels and descriptions for agents, in the user's language (ETP-5840, QA CP-12c).
  *
  * <p>{@code com.etendoerp.go} is not a translation module, so {@code export.database} never exports
  * its {@code AD_FIELD_TRL} rows: a field the module adds has no versioned Spanish label. This
  * catalog — {@code messages/mcp_field_labels_<language>.properties}, keyed by
- * {@code <TableName>.<ColumnName>} as AD writes them — supplies it, the same way
+ * {@code <TableName>.<ColumnName>} as AD writes them (the description under
+ * {@code <TableName>.<ColumnName>.description}) — supplies it, the same way
  * {@code mcp_titles_<language>.properties} supplies the tool titles ({@link McpToolTitles}).
  *
- * <p>An entry wins over {@code AD_FIELD_TRL} and {@code AD_FIELD.name}
+ * <p>An entry wins over {@code AD_FIELD_TRL} and {@code AD_FIELD.name} / {@code .description}
  * ({@link McpSchemaFieldBuilder#loadFieldLabels}). There is no English fallback here: a language
- * with no entry answers {@code null} and the caller keeps its AD label, so an entry is only needed
+ * with no entry answers {@code null} and the caller keeps its AD text, so an entry is only needed
  * where AD has no usable text. Generic: names no column, the catalog does.
  */
 final class McpFieldLabels {
 
   private static final String BUNDLE = "com.etendoerp.go.mcp.messages.mcp_field_labels";
+  private static final String DESCRIPTION_SUFFIX = ".description";
   /**
    * No-fallback control, as in {@link McpToolTitles}: the default {@code getBundle} consults the
    * JVM's default locale before giving up, so a host running under Spanish would answer every user
@@ -59,13 +61,28 @@ final class McpFieldLabels {
    * @return the label, or {@code null} when the catalog has none. Total: never throws.
    */
   static String of(String tableName, String columnName, String language) {
+    return read(tableName, columnName, "", language);
+  }
+
+  /**
+   * The catalog description of a column in a language, keyed
+   * {@code <TableName>.<ColumnName>.description}.
+   *
+   * @return the description, or {@code null} when the catalog has none. Total: never throws.
+   */
+  static String descriptionOf(String tableName, String columnName, String language) {
+    return read(tableName, columnName, DESCRIPTION_SUFFIX, language);
+  }
+
+  private static String read(String tableName, String columnName, String suffix,
+      String language) {
     if (StringUtils.isAnyBlank(tableName, columnName)) {
       return null;
     }
     try {
-      String label = ResourceBundle.getBundle(BUNDLE, McpToolTitles.toLocale(language),
-          NO_HOST_FALLBACK).getString(tableName + "." + columnName);
-      return StringUtils.trimToNull(label);
+      String text = ResourceBundle.getBundle(BUNDLE, McpToolTitles.toLocale(language),
+          NO_HOST_FALLBACK).getString(tableName + "." + columnName + suffix);
+      return StringUtils.trimToNull(text);
     } catch (MissingResourceException | ClassCastException e) {
       return null;
     }

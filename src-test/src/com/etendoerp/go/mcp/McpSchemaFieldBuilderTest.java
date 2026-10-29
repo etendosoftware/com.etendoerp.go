@@ -2631,7 +2631,8 @@ class McpSchemaFieldBuilderTest {
 
   /**
    * {@code mcp_field_labels_<lang>.properties} wins over {@code AD_FIELD_TRL} / {@code AD_FIELD.name}
-   * for the language it has an entry in; any other language or column keeps the AD label. No
+   * (and, under {@code .description}, over the AD description) for the language it has an entry in;
+   * any other language or column keeps the AD text. No
    * {@code AD_FIELD_TRL} row is stubbed, so the AD label is the field's base name.
    */
   @Nested
@@ -2688,11 +2689,25 @@ class McpSchemaFieldBuilderTest {
       assertEquals(expected, labelDesc[0]);
     }
 
-    @Test
-    @DisplayName("the description is never taken from the catalog")
-    void descriptionKeepsTheAdText() {
-      assertEquals("Exchange rate description",
-          labels("C_Order", "es_ES").get("EM_ETGO_CURRENCY_RATE")[1]);
+    @ParameterizedTest(name = "{0} {1} {2} → catalog description: {3}")
+    @CsvSource({
+        "C_Order,   es_ES, EM_ETGO_CURRENCY_RATE, true",
+        "C_Invoice, es_ES, EM_ETGO_CURRENCY_RATE, true",
+        "C_Order,   en_US, EM_ETGO_CURRENCY_RATE, false",
+        "C_Order,   es_ES, DATEORDERED,           false",
+        "M_InOut,   es_ES, EM_ETGO_CURRENCY_RATE, false",
+    })
+    void catalogDescriptionWinsOnlyForItsLanguageAndColumn(String tableName, String langCode,
+        String columnKey, boolean fromCatalog) {
+      String description = labels(tableName, langCode).get(columnKey)[1];
+
+      if (fromCatalog) {
+        assertTrue(description.startsWith("Tasa de cambio de la moneda de la organizaci\u00f3n"),
+            description);
+      } else {
+        String adName = "DATEORDERED".equals(columnKey) ? "Order Date" : "Exchange rate";
+        assertEquals(adName + " description", description);
+      }
     }
   }
 
