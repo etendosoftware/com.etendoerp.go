@@ -873,7 +873,7 @@ class OrderLineDiscountSupportTest {
       throws Exception {
     JSONObject json = new JSONObject(body);
 
-    OrderLineDiscountSupport.deriveDiscountOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    OrderLineDiscountSupport.deriveDiscountOnCreate(mcpCtx("POST", json));
 
     if (expected == null) {
       assertEquals(new JSONObject(body).toString(), json.toString(), label);
@@ -901,9 +901,24 @@ class OrderLineDiscountSupportTest {
   void deriveDiscountOnCreateIgnoresUpdates(String method) throws Exception {
     JSONObject json = new JSONObject("{\"listPrice\":33,\"unitPrice\":29.7}");
 
-    OrderLineDiscountSupport.deriveDiscountOnCreate(ctx(method, NeoEndpointType.CRUD, json));
+    OrderLineDiscountSupport.deriveDiscountOnCreate(mcpCtx(method, json));
 
     assertTrue(!json.has("discount"));
+  }
+
+  /** A REST create (the app, the public API) keeps the values it sent: MCP only. */
+  @Test
+  void deriveDiscountOnCreateLeavesARestCreateAlone() throws Exception {
+    JSONObject json = new JSONObject("{\"listPrice\":33,\"unitPrice\":29.7}");
+
+    OrderLineDiscountSupport.deriveDiscountOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+
+    assertTrue(!json.has("discount"));
+  }
+
+  private static NeoContext mcpCtx(String method, JSONObject body) {
+    return NeoContext.builder().specName(SPEC).entityName(ENTITY).httpMethod(method)
+        .endpointType(NeoEndpointType.CRUD).mcpOrigin(true).requestBody(body).build();
   }
 
   // ── ETP-5881: a line sent without a price takes the price list's, on every channel ──
