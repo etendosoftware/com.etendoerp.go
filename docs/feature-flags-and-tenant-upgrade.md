@@ -179,8 +179,9 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
 | `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
-| `contact-category-type` | `etendo.go.flags.contact-category-type` | `ETGO_FLAG_CONTACT_CATEGORY_TYPE` | absent ⇒ **`false`** (pre-ETP-5791 contact behaviour) |
+| `contact-category-type` | `etendo.go.flags.contact-category-type` | `ETGO_FLAG_CONTACT_CATEGORY_TYPE` | absent ⇒ **`false`** (pre-ETP-5791 contact behaviour); per account on a hosted arm only — see its section below |
 | `billing-reconciliation-schedule` | `etendo.go.flags.billing-reconciliation-schedule` | `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
+| `usage-aggregation-schedule` | `etendo.go.flags.usage-aggregation-schedule` | `ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | `structured-address-for-sepa` | `etendo.go.flags.structured-address-for-sepa` | `ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA` | absent ⇒ **`false`** (legacy single-line address; TTL 2026-11-15 — SEPA 2025 rulebooks ban unstructured addresses in SEPA remittance files from that date, per [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24)) |
 | `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
@@ -285,10 +286,19 @@ endpoint is served by this module and consumed by app-shell code directly, not t
 package, so it needs no core change and no version bump — which is what unblocked this after the
 `/environments` route stalled on the core helper dropping top-level fields.
 
-**This is not closed until the web client consumes them.** The backend now exposes the identity; the
-frontend half is the remaining scope. Until it lands, the two ends still bucket differently, so **no
-flag with a frontend end may be made targeting-aware**. Full client-side reasoning is in
-`docs/feature-flags.md` in the functional repo.
+**Status (ETP-5791 audit): half closed.** The web client now consumes them —
+`refreshAccountIdentity` in the functional repo's `tools/app-shell/src/lib/flags/bootstrap.js` reads
+`/sws/neo/session` and `buildEvaluationContext` publishes `accountEmail` (lowercased) as `email`. So a
+rule on the account **email** agrees on both ends. The **targeting key** still differs (web: the
+`ETGO_ACCOUNT` id; backend: the email), so identifier rules and percentage rollouts still bucket
+differently, and the tenant attribute is `account_id` on the web and `clientId` on the backend. The
+first two-ended per-account flag, `contact-category-type`, is therefore targeted on email only — see
+its section below.
+
+**What remains open is the targeting key.** Until both ends use the same key, **a flag with a
+frontend end may be made targeting-aware only through rules on the email attribute** — never on the
+identifier, a percentage rollout or a tenant attribute named for one end only. Full client-side
+reasoning is in `docs/feature-flags.md` in the functional repo.
 
 **What ETP-5267 changed, and why it is not a violation of the above.** A targeting-aware provider
 *is* now installed (see **Per-account targeting**), which the previous wording ruled out
@@ -366,7 +376,7 @@ A positively phrased "enforcement enabled" flag would do the opposite — a miss
 open every blocked tenant — so do not flip the polarity.
 
 Evaluated in exactly one place, `EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId)`,
-called only by `EnvironmentAccessGuard` — the one check every tenant entry point shares: the bind
+called by `EnvironmentAccessGuard` — the one check every tenant entry point shares — and, report-only, by the environments list and `GET /sws/go/billing/subscription` (`accessEnforced`, ETP-5051). The guard serves the bind
 step of the shared auth pipeline (`EnvironmentRequestAuthenticator`, ETP-5455) for every surface
 whose `SurfacePolicy` requires commercial access (`NEO_API`: NEO; `NEO_DATA`: favorites, fiscal test
 mode, report selectors, the OAuth2 API-key endpoints), the `/sws/go` endpoints that act on the
@@ -377,7 +387,13 @@ which is informational and backend-only (the SPA's blocked screen is driven by t
 the blocked customer reaches the pay path. The context is
 account-less and carries the tenant as the `clientId` attribute, so a ConfigCat rule can switch
 enforcement off for one tenant or for all. It is consulted **only for a denial**: an allowed request
-never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off=true` /
+never evaluates it. The one exception is a report, never a refusal: since ETP-5051 every environment
+of `GET /sws/go/environments`, and `GET /sws/go/billing/subscription` for its tenant, carry
+`accessEnforced`, the switch evaluated for that tenant whatever today's decision is (`false` while the
+switch is on for it), so the grace banner and the /account grace countdown drop their "will be
+blocked on <date>" / "before access is paused" promise when no block would follow
+(`open-and-notable-topics.md` §4.17).
+Locally: `etendo.go.flags.environment-access-enforcement-off=true` /
 `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF=true`.
 
 | Flag | A tenant whose decision is `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` |
@@ -530,7 +546,7 @@ To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local
 ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
 when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
 
-### `contact-category-type` (ETP-5791) — backend-only, environment level
+### `contact-category-type` (ETP-5791) — per account, read on both ends
 
 Turns on contact types driven by the contact category: a category (`C_BP_Group`) must declare
 Customer and/or Vendor/Creditor, a new contact inherits them unless the request sends them, a
@@ -538,15 +554,50 @@ contact cannot be saved with no type, and moving a contact to another category r
 Unset or `false` (the default) keeps the pre-ETP-5791 behaviour: the contact and contact-category
 customizations return `null` and the default CRUD runs. Only behaviour is gated — the new
 `EM_ETGO_ISCUSTOMER`/`EM_ETGO_ISVENDOR` columns, AD metadata, `ETGO_SF_FIELD` rows and
-reference/sample data ship unconditionally. Environment level (account-less context), always read
-through `ContactTypeRules.isEnabled()`. Nothing in the browser reads it. Full reference:
-[`neo-headless.md`](neo-headless.md) §5.3.6.
+reference/sample data ship unconditionally. Full reference: [`neo-headless.md`](neo-headless.md)
+§5.3.6.
+
+**Targeted per account, like `bp-portal-link`.** The backend always reads it through
+`ContactTypeRules.isEnabled()`, which evaluates `FeatureFlagContext.forAccount(<ETGO_ACCOUNT email
+of the request's user>)` plus `clientId` (the tenant). The email comes from
+`GoAccountResolver.currentAccountEmail()` — the same resolver `/sws/neo/session` and `bp-portal-link`
+use — and REST single, REST batch and MCP all bind the authenticated AD user, so the same person gets
+the same answer on every channel. A user with no account behind it is evaluated with an account-less context: it matches no
+per-account rule and gets the flag's default (catch-all) value — off, unless the flag is on for
+everyone (hosted default `true`, or the local `ETGO_FLAG_CONTACT_CATEGORY_TYPE` / property). Per-account
+targeting needs a **hosted arm** (Datadog, or ConfigCat while it is the fallback); where none is
+selected the flag degrades to the local per-environment boolean above, which can only answer
+"everyone" or "nobody".
+
+**The web client reads it too** (`CONTACT_CATEGORY_TYPE` in the functional repo's `flag-keys.js`:
+the Contact Category window and the contacts import), so this is a two-ended flag and the two ends
+must agree. They agree on a rule written against the **account email**: the web client puts
+`/sws/neo/session`'s `accountEmail` (the same `GoAccountResolver` resolution) lowercased into its
+`email` attribute, which ConfigCat maps to *Email* and Datadog matches as `email`; the backend
+publishes the same address as `Email` (as stored) and `email` (lowercased). Rules that do **not**
+agree, so do not write them for this flag:
+
+- **Identifier / targeting key, and percentage rollouts** — the web client's targeting key is the
+  `ETGO_ACCOUNT` *id*, the backend's is the account *email*, so the two bucket differently.
+- **Per-tenant rules** — the tenant reaches the web client as `account_id` and the backend as
+  `clientId`; a tenant rule must name both attributes.
+- **ConfigCat Email with upper-case letters** — the web client lowercases it, the backend sends it as
+  stored; write the rule value in lowercase (Datadog already compares the lowercased `email`).
 
 It also decides a new tenant's default contact category: on, the onboarding makes
 "Cliente/Proveedor" the default (`OnboardingDefaultContactCategoryService`, read at hand-over, so
 pool tenants built while it was off still get it when claimed); off, the dataset's "Cliente" stays
-default. Tenants created while it was off are never revisited. See
-[`onboarding-flow.md`](onboarding-flow.md) "Default contact category".
+default. The hand-over runs as System, so it is evaluated for the **account the tenant is handed
+to** (`ContactTypeRules.isEnabled(accountEmail, clientId)`), not for the current user. Tenants
+created while it was off are never revisited. See [`onboarding-flow.md`](onboarding-flow.md)
+"Default contact category".
+
+**Before targeting anyone in an environment, the contact-category data-fixes R55 and R56 must have
+run there** (`R55-bp-category-customer-vendor-flags`, `R56-bp-category-custom-flags-from-contacts`,
+in the functional repo's `cli/src/data-fixes/sql/`). Categories created before ETP-5791 have neither
+`EM_ETGO_ISCUSTOMER` nor `EM_ETGO_ISVENDOR` (`N`/`N`); with the flag on, the "at least one type" rule
+rejects saving such a category, and a new contact in it inherits nothing — a targeted user would be
+left with categories they cannot save until someone sets their type.
 
 ### `billing-reconciliation-schedule` (ETP-5048) — backend-only, strictly off by default
 
@@ -629,8 +680,8 @@ authorization decision, not a widening of this flag (registry open item `mcp-and
 `FeatureFlagContext.forAccount(<account email>).with(clientId, <tenant>)`:
 
 - **Account email** — the `ETGO_ACCOUNT` email of the authenticated user, resolved by
-  `GoAccountResolver.findCurrentAccountEmail()` (the same resolution `PortalLinkPolicy` uses for
-  `bp-portal-link`; it was moved there so both gates share it). It is the targeting key and is
+  `GoAccountResolver.currentAccountEmail()` (the same resolution `bp-portal-link` and
+  `contact-category-type` use, so every per-account gate shares it). It is the targeting key and is
   published as `Email` (ConfigCat) and as lowercase `email` (Datadog). On the catalog endpoint the
   user is the one of the NEO bearer session: `NeoServlet` runs the request with that user's
   `OBContext`, the same one `GET /sws/neo/session` resolves its `accountEmail` from.
@@ -667,7 +718,40 @@ handling); delete `FiscalModel390Flag.java` and its test, and `FLAG_FISCAL_MODEL
 `GoFeatureFlags`; remove this section and the configuration-table row; delete the hosted setting.
 The `etendo_schema_forge` side (the `catalogAvailability.js` toggle points, the model-id guardrail
 allow-list line, the registry `flag` object) is listed in the registry entry's `ttlNote`.
-`GoAccountResolver.findCurrentAccountEmail()` stays: `bp-portal-link` uses it too.
+`GoAccountResolver.currentAccountEmail()` stays: `bp-portal-link` and `contact-category-type` use it too.
+
+### `usage-aggregation-schedule` (ETP-5051) — backend-only, strictly off by default
+
+Whether the usage aggregation (`ETGO_UsageAggregation`, menu **Billing Resource Usage
+Aggregation**) runs on a schedule (`open-and-notable-topics.md` §5.15). The same shape as
+`billing-reconciliation-schedule` above:
+
+- **Production schedules it by hand.** Turn the flag on and create a Process Request for **Billing
+  Resource Usage Aggregation** (client System, timing *Schedule*, every two hours) in the same step.
+  A request firing while the flag is off does no work; a flag on with no request does nothing.
+- **Environments that restart:** while the flag is off, `UsageAggregationScheduleStartup` plants no
+  process request; turning it on takes effect at the next restart. The interval is
+  `etendo.go.usage.schedule.interval.minutes` / `ETGO_USAGE_SCHEDULE_INTERVAL_MINUTES` (default
+  **120**, at least 15), read when the request is first planted. A fixed request an operator
+  unscheduled is left as it is, never planted again.
+- **The flag gates every scheduled run** (timing *Schedule*), the planted one or one an
+  administrator created. While it is off such a run does no work and ends as an **ERROR** in
+  Process Monitor, saying to turn the flag on or unschedule the request. Unlike the reconciliation
+  it sends no internal alert.
+- A run started from the Classic menu, or a Process Request run immediately or later once, is never
+  gated.
+- **Lag warning.** A `[USAGE-LAG]` WARN (at most one an hour) is logged when the last successful
+  run in `ETGO_USAGE_RUN_LOG` finished more than twice the cadence ago, or never: at the start of
+  each scheduled run, and whenever a plan quota reads the stored aggregate. A run that counted
+  nothing for any tenant writes no run-log row, so an installation with no usage at all reads as
+  "never ran".
+
+Each run still writes one transaction per resource-day; one transaction per tenant is ETP-5905
+(§5.17). Environment level, evaluated with an empty context; read on every scheduled run, so
+turning it off (ConfigCat, live within one poll) stops the scheduled work without a restart. Its
+callers are `UsageAggregationScheduleStartup` and `UsageAggregationProcess`. What the
+schedule feeds — plan quotas on the stored aggregate — and how stale they may get:
+[`plan-quotas.md`](plan-quotas.md) §5.
 
 ## 2. The onboarding paywall
 
@@ -869,10 +953,50 @@ of the subscription (ETP-5049, additive):
   "planQuotas": [
     { "resourceKey": "POSTED_SALES_INVOICES", "resourceName": "POSTED_SALES_INVOICES",
       "unitLabel": "Inv", "includedQty": 500, "enforcementMode": "warn", "warningThreshold": 80,
-      "period": "month" }
+      "period": "year", "consumptionSource": "aggregate", "consumed": 412, "verdict": "WARN",
+      "periodStart": "2026-04-23", "periodEnd": "2027-04-23" }
   ]
 }
 ```
+
+**Which subscription the page shows (ETP-5051, O-1).** An account can own several environments,
+each paid by its own Stripe subscription and customer. The page and the Customer Portal
+(`POST /sws/go/billing/subscription/portal`) resolve the purchase through the one servlet helper
+`findShownSubscription`, so the portal always acts on the subscription the page shows:
+
+- **Session entered into an environment** (the cookie session's client, written by
+  `POST /sws/go/session/environment`): that environment's own billable purchase,
+  `CheckoutRequestStore#findSubscriptionForAccountClient` — the newest row of this account whose
+  `CREATED_CLIENT_ID` is the entered client and that carries both Stripe ids. Plan, `planQuotas`
+  and their consumption, grace, price and `accessEnforced` all describe the environment the user
+  is in. When the account has no such purchase (a demo, or an environment it was only invited
+  into), the page answers `{"hasSubscription": false}` and the portal `404 NO_SUBSCRIPTION`: it
+  never falls back to another environment's subscription, which was the bug (inside SPRING7 the
+  quota banner's "Ver el uso del plan" opened SPRING8's plan and quotas).
+- **No environment entered** (account-level session, or the legacy platform-token bearer, which
+  carries no environment): the account's newest billable purchase
+  (`CheckoutRequestStore#findSubscriptionForAccount`), as before.
+
+Ownership is the query's: both lookups filter on the account id and email, so a client id that is
+not one of the account's own purchases resolves to nothing, whoever owns that client.
+
+**The portal for a named environment (ETP-5051, O-1b).** "Mis empresas" manages each row's own
+environment, whatever environment the session is in, so the portal takes an optional JSON body:
+
+```json
+{ "clientId": "<AD_CLIENT_ID of the row>" }
+```
+
+- **`clientId` present** (non-blank and not `"0"`): `findSubscriptionForAccountClient(account id,
+  email, clientId)`, the same ownership-carrying query. A client the account did not buy, or a
+  purchase without a Stripe customer, answers `404 NO_SUBSCRIPTION`, as before.
+- **No body, an empty body, or no `clientId`** (absent, JSON `null`, blank or `"0"`): the rule above (`findShownSubscription`). The
+  `/account` Subscription section keeps sending no body.
+- **A body that is not a JSON object:** `400 "Invalid JSON body"`, the servlet's usual envelope,
+  with nothing looked up.
+- The response is unchanged (`{"url": "…"}`), and so are the credential rules: the body is read
+  only after the account is resolved under `PLATFORM_CREDENTIAL_ONLY`, and a cookie-session POST
+  still needs its `Origin` and `X-Go-CSRF` proof.
 
 - **`planKey` / `planName`** come from the tenant's `ETGO_SUBSCRIPTION` row (open, else the latest
   closed one — `SubscriptionService#findLatest`, the row the lifecycle reads) and its `ETGO_PLAN`.
@@ -883,19 +1007,30 @@ of the subscription (ETP-5049, additive):
   informational — what the plan includes, not what has been used. `resourceKey`, `resourceName` and
   `unitLabel` come from `ETGO_BILLING_RESOURCE`; `includedQty`, `enforcementMode`
   (`warn`/`block`/`off`) and `warningThreshold` (percent, may be null) from the quota row; `period`
-  is the plan's billing interval (`month`/`year`, null when the plan has none), which is the quota's
-  consumption window (`open-and-notable-topics.md` §5.5, §5.8). It is empty when there is no plan
-  **and** when the plan has no quota rows — with a `planKey`, empty means **unlimited** (§5.1).
+  is the quota's consumption window: `year` whenever the subscription row has a `START_DATE`, since
+  plan limits count over the subscription year whatever the billing interval (a monthly plan,
+  as in the example, still reports `year`); for a row without one, the plan's billing interval
+  (`month`/`year`, null when the plan has none), over which it then counts
+  (`open-and-notable-topics.md` §5.5, §5.8; `plan-quotas.md` §1). ETP-5051 adds the measurement:
+  `consumptionSource`, `consumed` and `verdict` (null when unmeasured), and `periodStart` /
+  `periodEnd`, the **counted window as date-only strings** (`yyyy-MM-dd`, server-local days): the
+  first counted day and the exclusive end day, so consumption covers `[periodStart, periodEnd)`.
+  They are not the subscription's UTC instants, which can name the day before (a period starting
+  at 00:30 CEST is 22:30 UTC the previous day). Null with no current period. It is empty when there
+  is no plan **and** when the plan has no quota rows — with a `planKey`, empty means **unlimited**
+  (§5.1).
 - **`graceEndsAt`** is computed by `EnvironmentAccessPolicy.graceEndsAt`: the stored renewal due
   date plus `etendo.go.billing.grace.days`, for a `PAST_DUE` subscription only. The access policy
   and the per-environment `graceEndsAt` of `GET /sws/go/environments` use the same method, so the
   page, the banner and the lockout cannot drift apart — except that the kill switch can cancel the
   lockout without the page or the banner knowing (`open-and-notable-topics.md` §4.17).
 
-> **No UI consumer yet for `planKey`, `planName` and `planQuotas`.** ETP-5049 ships them in this
-> response only. The `/account` Subscription section (`SubscriptionSection`, schema_forge) still
-> shows `plan` (the live Stripe product name), the amount, the renewal and the grace state; showing
-> the catalog plan name and the included quotas there was moved to ETP-5051.
+> **UI consumer since ETP-5051.** The `/account` Subscription section (`SubscriptionSection`,
+> schema_forge) shows `planName` (falling back to the live Stripe product name `plan`) and every
+> `planQuotas` item with its consumption, verdict and period, and switches the grace countdown to
+> neutral text when `accessEnforced` is `false`
+> (`schema_forge/docs/generated-custom-windows/app-shell-functional-flows.md` §3.2a-quater).
+> `planKey` still has no UI consumer. Operating quotas: [`plan-quotas.md`](plan-quotas.md).
 
 `POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
 the same account and environment name. A duplicate submission returns the existing purchase only
@@ -1601,7 +1736,7 @@ says no tenant still *needs* one. Phase F deletes `TenantPlanPreferenceFallback`
 
 ### Exposure in `/environments`
 
-The `GET /sws/go/environments` response gained two additive fields:
+The `GET /sws/go/environments` response gained additive fields:
 
 ```json
 {
@@ -1626,14 +1761,40 @@ The `GET /sws/go/environments` response gained two additive fields:
   (ETP-5049). It is `EnvironmentAccessPolicy.graceEndsAt`, the rule the access policy locks the
   tenant out on and `GET /sws/go/billing/subscription` reports, so an in-app grace banner needs no
   copy of `etendo.go.billing.grace.days`. It is the policy's date, not a promise: with the kill
-  switch on for the tenant nothing is locked at that instant, and no field here says so
-  (`open-and-notable-topics.md` §4.17).
+  switch on for the tenant nothing is locked at that instant — `accessEnforced` says so (below,
+  `open-and-notable-topics.md` §4.17).
 - **`accessState`** (per environment, when the tenant has lifecycle metadata) is the
   `EnvironmentAccessPolicy.Decision` name. Since ETP-5047 it is the decision **actually enforced**
   (`EnvironmentAccessGuard.enforcedDecision`): with the kill switch on for that tenant a refusal
   reads `ALLOWED`, while `subscriptionStatus` and the trial fields keep reporting the facts.
+- **`accessEnforced`** (per environment, always present; ETP-5051) is `false` while the
+  `environment-access-enforcement-off` kill switch is on for that tenant, `true` otherwise —
+  whatever today's decision. The grace banner drops its "will be blocked on <date>" when it is
+  `false`. `GET /sws/go/billing/subscription` carries the same field for its tenant.
+- **`renewalAt`** (per environment, always present; ETP-5051 O-1b) is the ISO instant this
+  environment's own subscription next renews, in the same format as the `renewalAt` of
+  `GET /sws/go/billing/subscription`, or JSON null. "Mis empresas" shows it per row. It is read
+  from local state only — the `CURRENT_PERIOD_END` of the tenant's `ETGO_SUBSCRIPTION` row, from
+  the same batched `findLatestForClients` read as `plan`, so no Stripe call per environment — and
+  it is non-null only while that row is renewing: effective status `active` (Stripe `active` and
+  `trialing` are both stored so), not past due, not canceled, not closed, and **not scheduled to
+  cancel** — `ETGO_SUBSCRIPTION.CANCEL_AT_PERIOD_END = 'Y'`. That column is display-only: the
+  lifecycle webhooks (`customer.subscription.updated`/`.deleted`) and the billing reconciliation
+  write Stripe's `cancel_at_period_end` into it, and nothing that decides access, grace or the
+  status reads it. **Rows that existed before the column start at `N`:** a subscription already
+  scheduled to cancel shows its date until its next `customer.subscription.updated` or the next
+  reconciliation run, which re-reads every paying subscription anyway and syncs the flag at no
+  extra provider cost (`CANCEL_FLAGS_SYNCED` in its report). A past-due subscription is left to
+  the webhook, and its `renewalAt` is null regardless. A row that cannot be read reports null,
+  never a failed list.
+- **`quotas`** (per environment, always present, `[]` when nothing to report; ETP-5051) is the
+  tenant's plan quotas at verdict WARN or DENY, as `QuotaItem`s (`neo-headless.md` §4.16 lists
+  the keys). Report-only. The SPA's quota banner reads it for the current environment, because
+  core's `loginEnvironment()` drops the `POST /sws/go/session/environment` body that carries the
+  same items. One batched read of the listed plans' enforced quota rows, none when no tenant has a
+  plan; a failed evaluation reports `[]` with a `[QUOTA]` log line, never a failed list.
 
-Both are backward compatible; clients that ignore them are unaffected.
+All are backward compatible; clients that ignore them are unaffected.
 
 > **`accountEmail` is invisible through the core helper.** `fetchEnvironments` in
 > `@etendosoftware/etendo-go-core` returns `data.environments || []`, so it drops every top-level

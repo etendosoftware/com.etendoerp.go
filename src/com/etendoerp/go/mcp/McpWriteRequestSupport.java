@@ -46,6 +46,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 import com.etendoerp.go.schemaforge.NeoErrorResponses;
+import com.etendoerp.go.schemaforge.NeoMessageText;
 import com.etendoerp.go.schemaforge.NeoReferenceActiveness;
 import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
@@ -605,11 +606,16 @@ final class McpWriteRequestSupport {
             e.getMessage());
       }
     }
-    return cleared.length() == 0 ? null : buildClearedMandatoryError(cleared);
+    return cleared.length() == 0 ? null : buildClearedMandatoryError(cleared, langCode);
   }
 
+  /** {@code AD_MESSAGE} values of the cleared-required-field refusal (ETP-5726, OBS-1). */
+  static final String MSG_REQUIRED_CLEARED = "ETGO_RequiredFieldsCleared";
+  static final String MSG_REQUIRED_CLEARED_HINT = "ETGO_RequiredFieldsClearedHint";
+
   /** The 422 for {@link #rejectClearedMandatoryFields}: same envelope as the create pre-check. */
-  private static JSONObject buildClearedMandatoryError(JSONArray cleared) throws JSONException {
+  private static JSONObject buildClearedMandatoryError(JSONArray cleared, String langCode)
+      throws JSONException {
     StringBuilder names = new StringBuilder();
     for (int i = 0; i < cleared.length(); i++) {
       JSONObject item = cleared.getJSONObject(i);
@@ -625,10 +631,10 @@ final class McpWriteRequestSupport {
     JSONObject error = new JSONObject();
     error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
     error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-    error.put(McpConstants.KEY_DETAIL, "Required fields cannot be cleared: " + names);
+    error.put(McpConstants.KEY_DETAIL,
+        NeoMessageText.text(MSG_REQUIRED_CLEARED, langCode, names.toString()));
     error.put(McpConstants.KEY_MISSING_FIELDS, cleared);
-    error.put(McpConstants.KEY_HINT, "These fields are required: send a value for them, or leave them out of "
-        + "the update to keep the stored one");
+    error.put(McpConstants.KEY_HINT, NeoMessageText.text(MSG_REQUIRED_CLEARED_HINT, langCode));
     error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     return error;
   }

@@ -71,7 +71,7 @@ final class FiscalModel390Flag {
    * Whether Modelo 390 is available to the current user.
    *
    * <p>Targeted on the authenticated <b>account email</b> (the {@code ETGO_ACCOUNT} email of the
-   * context user, resolved by {@link GoAccountResolver#findCurrentAccountEmail()} — the same
+   * context user, resolved by {@link GoAccountResolver#currentAccountEmail()} — the same
    * resolution the other per-account gates use), published as the targeting key and as the
    * {@code Email}/{@code email} attributes, <b>plus</b> {@code clientId}, so a hosted rule can
    * name either users or tenants. When no account resolves, the context carries {@code clientId}
@@ -82,7 +82,7 @@ final class FiscalModel390Flag {
    */
   static boolean isEnabled(String clientId) {
     return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_FISCAL_MODEL_390, contextFor(
-        GoAccountResolver.findCurrentAccountEmail(), clientId));
+        GoAccountResolver.currentAccountEmail(), clientId));
   }
 
   /**

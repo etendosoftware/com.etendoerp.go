@@ -104,6 +104,7 @@ public final class BatchJobService {
    * empty {@code persisted}), the one case in which sending it again cannot duplicate a record.
    */
   static final String KEY_SAFE_TO_RESEND = "safeToResend";
+  private static final String KEY_CODE = "code";
 
   /** The one production instance of the service; {@code null} until the first use. */
   private static final AtomicReference<BatchJobService> INSTANCE = new AtomicReference<>();
@@ -541,9 +542,29 @@ public final class BatchJobService {
       }
     }
     if (!committed) {
-      row.put(KEY_SAFE_TO_RESEND, provenRollback(envelope));
+      row.put(KEY_SAFE_TO_RESEND, provenRollback(envelope) && !isQuotaExceeded(envelope));
     }
     return row;
+  }
+
+  /**
+   * ETP-5051 — a row refused for being over a plan quota was rolled back, but sending it again
+   * cannot succeed until the quota changes, so it is not safe to resend. {@code QUOTA_CHECK_FAILED}
+   * is not this: nothing was saved and the check itself failed, so a resend is legitimate and may
+   * pass. The code sits at {@code error.code} on MCP (flattened) and at
+   * {@code error.detail.error.code} on REST (the operation's own response).
+   */
+  private static boolean isQuotaExceeded(JSONObject envelope) {
+    JSONObject error = envelope.optJSONObject(KEY_ERROR);
+    if (error == null) {
+      return false;
+    }
+    if (NeoQuotaWriteGate.CODE.equals(error.optString(KEY_CODE, null))) {
+      return true;
+    }
+    JSONObject detail = error.optJSONObject("detail");
+    JSONObject nested = detail == null ? null : detail.optJSONObject(KEY_ERROR);
+    return nested != null && NeoQuotaWriteGate.CODE.equals(nested.optString(KEY_CODE, null));
   }
 
   /**

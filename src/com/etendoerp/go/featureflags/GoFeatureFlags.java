@@ -248,11 +248,16 @@ public final class GoFeatureFlags {
    * {@code EM_Etgo_Isvendor} columns, their AD metadata, the {@code ETGO_SF_FIELD} rows and the
    * reference/sample data ship unconditionally; with the flag off nothing enforces or reads them.
    *
-   * <p><b>Environment level and backend-only.</b> Evaluated with an account-less context by
-   * {@code ContactTypeRules#isEnabled()}, the only place it is read (the onboarding's
-   * {@code OnboardingDefaultContactCategoryService} goes through it too); nothing in the browser reads it, so
-   * never add it to the web client's {@code flag-keys.js}. Locally
-   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}.
+   * <p><b>Per account, read on both ends.</b> The backend evaluates it only through
+   * {@code ContactTypeRules#isEnabled()} — targeted at the {@code ETGO_ACCOUNT} email of the user
+   * making the request, plus {@value FeatureFlagContext#ATTRIBUTE_CLIENT_ID} — and the onboarding's
+   * {@code OnboardingDefaultContactCategoryService} through {@code ContactTypeRules#isEnabled(String,
+   * String)}, targeted at the account the tenant is handed to (the hand-over runs as System). The
+   * web client reads it too ({@code CONTACT_CATEGORY_TYPE} in {@code flag-keys.js}) and publishes
+   * the same account email as its {@code email} attribute, so a targeting rule must be written on
+   * the email for both ends to agree. Per-account targeting needs a hosted arm (Datadog, or
+   * ConfigCat while it is the fallback); locally {@code etendo.go.flags.contact-category-type} /
+   * {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE} stays a plain per-environment boolean.
    */
   public static final String FLAG_CONTACT_CATEGORY_TYPE = "contact-category-type";
 
@@ -273,6 +278,22 @@ public final class GoFeatureFlags {
    */
   public static final String FLAG_BILLING_RECONCILIATION_SCHEDULE =
       "billing-reconciliation-schedule";
+
+  /**
+   * ETP-5051 — whether the usage aggregation is scheduled ({@code open-and-notable-topics.md}
+   * §5.15). The same shape as {@link #FLAG_BILLING_RECONCILIATION_SCHEDULE}: strictly off by
+   * default (and off on every failure of this class); while it is off
+   * {@code UsageAggregationScheduleStartup} plants no process request, so turning it on takes effect
+   * at the next restart. The process checks it on every scheduled run (a process request with
+   * timing {@code S}), whoever created the request, so turning it off stops all scheduled work
+   * without a restart: a scheduled run with the flag off does nothing and ends as ERROR in Process
+   * Monitor. A run started from the Classic menu or once from a Process Request is not gated.
+   * Environment level, evaluated with an empty context; locally
+   * {@code etendo.go.flags.usage-aggregation-schedule} /
+   * {@code ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE}. Backend-only. Its callers are
+   * {@code UsageAggregationScheduleStartup} and {@code UsageAggregationProcess}.
+   */
+  public static final String FLAG_USAGE_AGGREGATION_SCHEDULE = "usage-aggregation-schedule";
 
   /**
    * ETP-5806 — whether the structured address fields (Street/Number/Building Name) are visible,

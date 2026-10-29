@@ -396,8 +396,10 @@ public class SupportSessionEndpointsTest {
           SupportAccessGuard.SUPPORT_ACCOUNT_ID)).thenReturn(account);
       dal.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations(CLIENT))
           .thenReturn(Collections.emptyList());
+      // The servlet calls the overload that also takes the quota report (ETP-5051), which is
+      // null here because quotaReport() is statically mocked: any() matches null.
       dal.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(eq(client), isNull(), eq(user),
-          any(EnvironmentPlanCache.class)))
+          any(EnvironmentPlanCache.class), any()))
           .thenReturn(new JSONObject().put("clientId", CLIENT));
       servlet.doGet(request("GET", "/environments", null), resp.response);
       dal.verify(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(anyString()),

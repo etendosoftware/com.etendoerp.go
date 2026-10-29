@@ -1560,7 +1560,9 @@ rejected row does not stop the others. The status carries, per row, `committed:t
 `safeToResend`. A row reported `committed:true` exists. Resend only rows with `committed:false` **and**
 `safeToResend:true` (the batch vouches it was rolled back: `atomic:true`, empty `persisted`); a row with
 `safeToResend:false` (`atomic:false` — a process committed underneath it — or no outcome) may have left
-records, listed in its `persisted`: look them up first.
+records, listed in its `persisted`: look them up first. A row refused for a plan quota
+(`QUOTA_EXCEEDED`, §4.16) is also `safeToResend:false`: nothing of it exists, but a resend is
+refused again until the quota changes.
 
 ```
 { jobId, state, done, channel, totalRows, totalOps, processedRows, committedRows, failedRows,
@@ -4376,7 +4378,6 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | reading the PDF (ETP-5715) | the browser uploads it to `/sws/copilot/file` and runs `/sws/copilot/executeTool`; the copilot module's HTTP client waits **without a timeout** | the MCP uses its **own client** to the same service (same properties, same two calls, same question and schema from the same configuration) with a **90 s** budget in total: a service that does not answer is `503 ocr_unavailable`, and a successful reading is **cached per staged document** so a retry does not pay again (§4.12.40) | an MCP call that waits forever on a paid external model holds a server thread |
 | the supplier's PDF as the invoice's main attachment (ETP-5715) | the panel attaches it to the new record right after the batch commits (`uploadAndMarkMainAttachment`, `?markAsMain=true`); a failure is non-fatal | the agent attaches the **staged** file with `etendo_request_attachment_upload {staged_document_id, main:true}` after creating the invoice (the same store, no second upload); if it never does, the invoice has no PDF — the same non-fatal outcome | the creation is the agent's `etendo_batch`, not a server flow, so the attach is a separate step |
 | clearing a required field on update (ETP-5726) | `PUT`/`PATCH` of a field AD declares mandatory but the table leaves nullable (e.g. an order's `scheduledDeliveryDate`) with `null` is **accepted** by REST single, `/batch` and the SPA's save path | **refused 422 `validation_error`** with `missingFields[{name,column,type,label}]` (label in the user's language), only for keys the caller actually sent as `null` or `""`; a key left out is never refused. Server-resolved fields, the primary key and the system columns are excluded | MCP-only; REST parity is a follow-up, not done. See §4.12.41 |
-| currency change of a draft order whose price list is in another currency (ETP-5726) — `purchase-order` and `sales-order` headers | accepted; the screen keeps the price list as it was (it does not reset it) | **refused 422** naming the requested currency and the price list, saying to send a price list in that currency or keep the current one. The stored price list stands when the body does not carry one (the SPA sends sparse bodies) | MCP-only, by decision: `OrderCurrencyPriceListGuard` acts on `context.isMcpOrigin()` + `PUT` and is called from each header's `handle()`. Etendo core's order completion (`C_Order_Post`) does **not** check the price list's currency either, so on REST the mismatch reaches the document. See §4.12.41 |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -4441,7 +4442,7 @@ Other MCP-only refusals declared in §4.12.6:
 |---|---|---|
 | `etendo_defaults` on an entity whose create `MCP_CONFIG.verbs` hides | defaults served | **405 `method_not_allowed`**, same envelope as `etendo_create` |
 | `etendo_create` — what the entity's pre-hook sees of the mandatory-defaults pass (ETP-5680) | the pre-hook runs first: no placeholder exists yet | the pass runs first; the placeholder keys are forwarded on the hook context (`NeoContext#getFallbackDefaults`), so the product's `taxCategory` follows `productType` and `uOM` takes the `IsDefault` unit on both channels. Declared and closed for the product; any other entity must opt in the same way |
-| `etendo_defaults` input that depends on the record's current values (ETP-5680) | `GET .../defaults?productType=S` | optional `recordContext` object; its scalar entries (≤ 32, ≤ 256 characters each) become `NeoContext#getQueryParams()` of the DEFAULTS hooks, with `parentId`/`assetId`/`view`/`spec`/`entity` never overridden. They reach the entity's DEFAULTS customization exactly as `?key=value` does on REST `/defaults` — there is no allowlist, and some handlers read generic keys (e.g. `action`, `accountId`, `statementId`), so a caller should send only current field values of the record. The generic resolver ignores them; `ProductDefaultsHandler` reads `productType` and returns the defaults of that type: `productType` is set to the requested one (no stale `productType$_identifier`), `taxCategory` becomes the type's named category when the tenant has it, and `typeTaxCategory` repeats it for the UI (absent when the category does not exist, then `taxCategory` is unchanged) — so copying `taxCategory` from these defaults into `etendo_create` stays consistent with the type |
+| `etendo_defaults` input that depends on the record's current values (ETP-5680) | `GET .../defaults?productType=S` | optional `recordContext` object; its scalar entries (≤ 32, ≤ 256 characters each) become `NeoContext#getQueryParams()` of the DEFAULTS hooks, with `parentId`/`assetId`/`view`/`spec`/`entity` never overridden. They reach the entity's DEFAULTS customization exactly as `?key=value` does on REST `/defaults` — there is no allowlist, and some handlers read generic keys (e.g. `action`, `accountId`, `statementId`), so a caller should send only current field values of the record. The generic resolver ignores them; `ProductDefaultsHandler` reads `productType` and returns the defaults of that type: `productType` is set to the requested one (no stale `productType$_identifier`), `taxCategory` becomes the type's named category when the tenant has it, and `typeTaxCategory` repeats it for the UI (absent when the category does not exist, then `taxCategory` is unchanged) — so copying `taxCategory` from these defaults into `etendo_create` stays consistent with the type. For `S`/`E`/`R` (the non-stockable types) `stocked` and `returnable` are `false` too, as `etendo_create` enforces; Item and Online keep the generic `true`/`true` |
 | payment header buttons `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `psd2GenerateBankPayment`, and `retryPisPayment` / `pisPaymentStatus` on the payment record | served | **405** (`MCP_CONFIG.actions.hidden`), absent from `view:"actions"` |
 | payment header *Eliminar* (`eTPRRemovePayment`) on a void (`RPVOID`) or `pisLocked` payment | **served** — the handler does not refuse it; the SPA simply does not offer the button there | **422**, nothing changed (`ReactivatePaymentHandler`, MCP origin only). On any other status it reactivates and deletes on both channels |
 | `financial-account/transaction` buttons `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | served | **405**, not listed; `post` / `unpost` stay |
@@ -5587,6 +5588,171 @@ Recording is the last statement of the success path, after the response is writt
 throws; the INSERT happens on the recorder's writer thread, so a slow or locked
 `ETGO_USAGE_EVENT` does not slow a login.
 
+### 4.16 Plan quota refusal on create (ETP-5051)
+
+A create can be refused because the tenant is over a plan quota in mode `block`
+(`ETGO_PLAN_QUOTA`, `open-and-notable-topics.md` §5.1–§5.9). This section is the API-level
+reference of that refusal. Which points enforce or only report quotas, how an operator caps a
+resource, freshness and the accepted limits: [`plan-quotas.md`](plan-quotas.md).
+
+```json
+HTTP 403
+{ "error": { "message": "Quota exceeded: Posted sales invoices (100/100 Inv)",
+             "status": 403,
+             "code": "QUOTA_EXCEEDED",
+             "quota": { "resourceKey": "...", "resourceName": "...", "unitLabel": "...",
+                        "includedQty": 100, "enforcementMode": "block", "warningThreshold": 80,
+                        "period": "year", "consumptionSource": "live", "consumed": 100,
+                        "verdict": "DENY", "periodStart": "2026-04-23",
+                        "periodEnd": "2027-04-23" } } }
+```
+
+`periodStart` / `periodEnd` are the counted window as date-only strings (`yyyy-MM-dd`,
+server-local days): the first counted day and the exclusive end day, so consumption covers
+`[periodStart, periodEnd)`. Every `QuotaItem` (this refusal, `planQuotas` on the account page,
+`quotas` on environment entry and on the environment list) carries the same two fields. The window
+is the **subscription year** (ETP-5051): the year starting on the anniversary of
+`ETGO_SUBSCRIPTION.START_DATE` that contains now, whatever the billing interval, so `period` is
+`year`; a subscription row without `START_DATE` counts over its billing period and reports the
+plan's interval (`month` / `year`) instead ([`plan-quotas.md`](plan-quotas.md) §1).
+
+The user handler sends the same body when a user create, or the reactivation of a user who is a
+seat once active, would take a seat over a `block` quota on the `tenantSeats` strategy resource (`SeatQuotaGuard`, see the
+`UserRoleAssignmentHandler` example in §5.3 and [`plan-quotas.md`](plan-quotas.md) §2.1); that
+check is not part of the gate described below.
+
+Clients key off `error.code === "QUOTA_EXCEEDED"`, never off the status or the message: it is
+neither the 402 of the commercial access check (§4.1) nor a permission error.
+
+- **Where it runs.** `NeoQuotaWriteGate`, after the insert and before the commit, on every create
+  channel: REST single and `/sws/neo/batch` in `NeoCrudHandler`'s POST branch, MCP `etendo_create`
+  in `McpToolRouter#handleCreate`, and MCP `etendo_batch` and the batch jobs through `BatchService`.
+  Inside a batch the refusal fails the operation (`failedAt`, the body above under
+  `error.detail`) and the batch rolls back as a unit; on MCP — `etendo_create`, `etendo_batch` and
+  the batch jobs alike — the same body arrives flattened (`status`, `error`, `detail`, `code`,
+  `quota`), so `code === "QUOTA_EXCEEDED"` / `"QUOTA_CHECK_FAILED"` survives a batch too. An async
+  batch job row refused with `QUOTA_EXCEEDED` reports `safeToResend:false`: it was rolled back, but
+  a resend is refused again until the quota changes. A `QUOTA_CHECK_FAILED` row keeps the normal
+  rule (`safeToResend:true` for a proven rollback): nothing was saved and the check may pass. A customization whose `handle()` creates the row itself and
+  short-circuits the default create is not checked by the gate — only when it calls
+  `NeoQuotaCreateCheck` (next item); rows created by processes are not checked at all.
+- **NEO actions that create documents (ETP-5051).** The creating actions call
+  `NeoQuotaCreateCheck` right after they saved the new header (and its lines) and **before**
+  anything irreversible — before an invoice completion that commits (`ProcessInvoiceUtil`), before
+  the answer. It runs the same `QuotaWriteGuard` as the gate. `requireAllowedDocument(header)`
+  checks the header and every row of its child collections, found from the DAL model (one-to-many
+  child properties), so a creator passes no list of lines and an uncounted child entity costs no
+  query; `requireAllowed(entity, ids)` checks rows added to an existing document (line imports).
+  A refusal is thrown as `NeoQuotaCreateCheck.Refused`: a handler with a catch-all answers
+  `Refused#toResponse()` from a `catch` placed before it, and `NeoExtensionDispatcher` maps a
+  `Refused` anywhere in the cause chain of an exception that escapes a customization — so REST and
+  MCP `etendo_action` both get the gate's 403 `QUOTA_EXCEEDED` body (or `QUOTA_CHECK_FAILED`), with
+  the transaction rolled back (left to the batch inside a batch). The checked actions are listed in
+  [`plan-quotas.md`](plan-quotas.md) §2.
+- **What it checks.** Structural, driven by catalog data: the `block` quotas of the request's
+  client whose declarative resource's `COUNTED_ENTITY` is the created entity. They come from
+  `QuotaClientCache`, an in-memory map keyed by client id (not by HTTP session: bearer, batch and
+  MCP requests have none). An entry holds the client's open subscription (period, closed flag) and
+  its plan's active `block` quotas on declarative resources, grouped by counted entity; it is built
+  on the request's own session in one `DalQuotaLookup` call and trusted for 60 s, and a client with
+  no block quota gets an empty entry, cached too. So a quota switched on or off, a plan change or
+  a renewal reaches a client within 60 s, no restart, and a create of an entity the client does not
+  cap runs **no query**, whatever other clients cap. The map is bounded: expired entries are swept
+  at most once a minute, and it is cleared if 10 000 entries remain after a sweep. For a capped
+  entity the new row is tested against each resource's HQL restriction **and the current
+  period's counted window** on its date property (`UsageQueryComposer.composeRowMatchInRange`, the
+  same validated composition and day bounds as the counts). A row dated outside the window does not
+  consume this period and stands, at the cap or not. An in-window row is refused when the
+  consumption before the create plus one exceeds the included quantity: for a `live` source a
+  count that leaves out the rows the create inserted (`id not in (:excludedIds)`), for the stored
+  `aggregate` the aggregate (lagged, it never has them); several rows of one create are charged one
+  after the other. The window is day-aligned, `[startOfDay(periodStart), startOfDay(periodEnd))`,
+  so **a row created on a period's last, partial day falls outside it and is not charged to that
+  period** — on that day a block quota does not refuse it. The day belongs to the next period
+  (its window starts at local midnight of the same day), so once the renewal is recorded the row
+  counts there. The
+  periodless-subscription WARN is throttled to one line per tenant per hour across every
+  evaluator.
+- **What it does not see.** A resource that grows through a state change rather than a create —
+  `POSTED_SALES_INVOICES` grows on posting, and the invoice is created unposted — never matches at
+  create time and is never refused here. Accepted; such a quota is reported on every environment
+  of `GET /sws/go/environments` (`quotas`), on entering the environment
+  (`POST /sws/go/session/environment`, `quotas`) and on the account page.
+- **Cost.** An entity no active `block` quota counts costs a map lookup: same service, same commit,
+  no query. When a create is checked and no batch owns the transaction, it runs through the
+  deferred-commit service a batch uses (IMP-23), with the thread marked caller-owned for the
+  duration of the create, and the gate commits or rolls back itself. The mark is required: since
+  ETP-5782 that service commits a single write itself unless a caller owns the transaction, so
+  without it the insert would be committed before the check could refuse it.
+- **When the check itself fails.** Only an error raised before Hibernate sees a query — a
+  restriction fragment `UsageQueryComposer` rejects, a missing strategy counter — is logged
+  (`[QUOTA]`) and lets the create stand: it fails open. Everything else fails **closed**: an error
+  from the database, a transaction Hibernate marked rollback-only — which includes an HQL that
+  fails to parse, e.g. a restriction naming an unknown property (Hibernate marks the transaction
+  rollback-only; `UsageResourceValidator` already rejects such a restriction at save time) — and a
+  client entry that cannot be built. A commit would silently roll the row back while answering
+  success, so the create is rolled back (in a batch, the operation fails and the batch rolls back)
+  and the answer is
+
+  ```json
+  HTTP 500
+  { "error": { "message": "The quota check failed; nothing was saved. Try again.",
+               "status": 500, "code": "QUOTA_CHECK_FAILED" } }
+  ```
+
+  Clients key off `error.code === "QUOTA_CHECK_FAILED"` and show their own translated text.
+- **A failing commit.** When the gate commits a checked create itself and the commit fails (a
+  deferred constraint), the caller gets core's own error JSON for it, classified exactly as before.
+- **Concurrency.** A `live` `block` check takes a PostgreSQL advisory lock per tenant and resource
+  (`pg_advisory_xact_lock`) right before its count, held to commit, so concurrent creates cannot
+  both slip under the cap. The stored `aggregate` takes none: its cap is approximate by the usage
+  job's lag. Inside a batch it is looser still: each operation is its own create, so the charge
+  for rows already created resets per operation, and the aggregate never sees the rows earlier
+  operations of the same batch created — a batch of N creates can exceed an `aggregate` cap by up
+  to N−1 on top of the lag. A `live` count does see them (same transaction).
+- **Two batches can deadlock on those locks.** A batch that creates rows of two quota'd resources
+  takes one lock per resource, in the order its operations run. Two concurrent batches of the same
+  tenant that touch the same two resources in opposite orders wait for each other; PostgreSQL
+  detects it and aborts one of them with `40P01` (deadlock detected). That batch's check fails on
+  the database, so the batch is refused with `QUOTA_CHECK_FAILED` (status 500, carried in the
+  batch's failed operation) and rolls back entirely; the other one goes through. Nothing is
+  half-saved: the client retries the refused batch. A single create takes one lock and cannot
+  deadlock this way.
+- **A client entry that cannot be built** fails the create closed with `QUOTA_CHECK_FAILED`
+  **before the add runs** (`NeoQuotaWriteGate.run`). It was read on the request's session, and
+  nothing says whether the create is capped. How much of the create has run by then depends on the
+  channel, because the gate wraps a different part of each:
+  - **REST single, `/sws/neo/batch`, MCP `etendo_batch` and the batch jobs** (all through
+    `NeoCrudHandler`): the gate wraps `executePostCreate`, which holds the
+    mandatory defaults and the callout cascade, so neither runs: no cascade, no insert. The
+    entity's pre-hook (`handle()`) has already run, as it does before every CRUD operation.
+  - **MCP `etendo_create`:** `McpToolRouter.handleCreate` injects the mandatory defaults (with
+    their callout cascade), runs the compensations and the pre-hook **before** calling the gate,
+    which wraps only the add. Those steps have run; only the insert is skipped, and the gate's
+    rollback (or, inside a batch, the batch's) undoes whatever they wrote to the session.
+
+  Either way nothing is saved. The entry read before the insert is the one checked after it.
+- **Reports never touch the request's transaction.** The quota reports (environment entry, the
+  environment list, the account page) and the usage-lag check read in their own session
+  (`IsolatedDalRead`), so a failing read cannot poison what the request writes afterwards. They run
+  on a bounded pool of 4 named daemon workers (`etgo-isolated-read-N`) with 64 queued reads; a read
+  beyond that is refused at once and the report answers `[]`. Each report is **one** hop: the
+  environment list's batched quota read and all its evaluations together, not one per tenant. The
+  worker sets `statement_timeout` to 25 s for its transaction (PostgreSQL really stops the query;
+  cancelling the Java future would not) and the caller waits at most 30 s. When the caller stops
+  waiting, the worker is interrupted and the report stops before its next tenant or quota. After
+  the first database failure in a hop, the remaining tenants are not read (that session's
+  transaction is aborted) and one log line gives their count. The worker ends like a request thread
+  (`DalThreadCleaner.cleanWithRollback()`, admin-mode stack cleared), with an `OBContext` of its
+  own built from the caller's user, role, client, organization, language and warehouse. Idle
+  workers end after a minute; the pool stops in `NeoServlet.destroy()`, which cancels the reads
+  still queued.
+- **The usage-lag WARN is never checked on a create.** The reports and the usage job check it; a
+  failed lag read is cached for a minute like a successful one. Inside a report the lag read runs
+  in the report's own isolated session, so one that fails on the database aborts that report: it
+  answers `[]`, at most once a minute (the failure is cached), never touching the request.
+- **Write warnings** (a WARN verdict on a create) are not returned on this path.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
@@ -6146,6 +6312,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   - The `handle()` pre-hook no longer reads or validates a `password` field at all — the field, if the frontend still sends one, is simply ignored by this handler (it still reaches `AD_User.Password`, Openbravo's own classic-backend login, unrelated to `etgo_account`). Invite-email is now the only way to activate an admin-created user's account.
   - **Duplicate-email pre-check (ETP-5264).** Before deriving `username` from `email`, `handleCreate`'s `handle()` pre-hook now calls `rejectDuplicateEmail(normalizedEmail, client)`, which queries for another `AD_User` of the SAME client whose `email` already matches (case-insensitive exact match) and, if found, short-circuits with a clear `400` — `"A user with this email address already exists"` — WITHOUT ever writing `username` onto the request body. Previously a duplicate email fell through to username derivation, so both users ended up with colliding derived `username`s and the create failed on the DB's own unique-constraint violation instead — a raw message naming `username`, a field this create form never shows, which read as confusing/misleading to the admin. A `null` client (no `OBContext`) is a no-op, same as before ETP-5264: `handleCreate` still falls through to its best-effort username derivation in that case. On the frontend (`etendo_schema_forge`), this 400 is mapped via `backendErrors.js`'s `backendError.duplicateUserEmail` key to a correctly-worded toast — see that repo's `docs/generated-custom-windows/user.md` step 1a-bis. Covered by `UserRoleAssignmentHandlerTest#handleRejectsDuplicateEmailOnCreateBeforeUsernameIsDerived`/`#handleAllowsCreateWhenNoDuplicateEmailExistsForClient`.
+  - **Seat quota (ETP-5051).** Right after the duplicate-email check, and before `username` is derived, `handleCreate` calls `UserSeatQuotaGuard.rejectSeatOverQuota(client)` (the seat guards live in the package-private helper `UserSeatQuotaGuard`, next to `UserSupportSessionGuard`), which asks `SeatQuotaGuard.refusalForNewSeat(clientId)` whether the tenant may take one more seat; `validateUpdate` calls `UserSeatQuotaGuard.rejectReactivationOverQuota` for a `PUT`/`PATCH` whose body sets `active` to `true` (`true`, `"true"` or `"Y"`) on a user that is inactive now, before `rejectDangerousDeactivation`: it loads the target in admin mode and asks `SeatQuotaGuard.refusalForReactivation(clientId, userId)`, which checks the reactivation as a new seat only when `TenantSeatCounter.isSeatOnceActive(userId)` holds (the owner, or a user holding an invitation not `REVOKED`) — reactivating a user who would be no seat (a contact without invitation, only revoked invitations) is never refused. `isSeatOnceActive` and the tenant count share one rule, `SEAT_CONDITION`. The guard looks for the plan's `block` quotas on a billing resource with Strategy Qualifier `tenantSeats`, counts the seats live with `TenantSeatCounter.seatsOf` (the owner plus every active user with a non-`REVOKED` `ETGO_INVITATION`), and takes the verdict from `QuotaEvaluator.refusalForCreate`. A refusal short-circuits with `NeoQuotaWriteGate.refusalResponse` — the gate's 403 `QUOTA_EXCEEDED` body (§4.16) — and any error — on the reactivation path, a failure to load the target user included — with `NeoQuotaWriteGate.checkFailedResponse` (500 `QUOTA_CHECK_FAILED`): it fails closed. No such quota, no current period, or a mode other than `block` lets the request through. This is the only place a strategy resource is refused: the NEO write gate matches declarative resources only. Operator guide and limits (no lock, no cache): [`plan-quotas.md`](plan-quotas.md) §2.1, §4.6.
   - **Email correction window (ETP-5194).** The logic lives in `UserEmailCorrection` (package-private, next to the handler; split out to keep the handler within its method budget) and the invitation queries in `CompanyInvitationEmailCorrection`. `validateUpdate` used to reject every `email` change after creation. Since ETP-5194 `rejectEmailChange` lets it through while `isEmailEditable` holds: not the owner; the user already has an invitation of its own (`CompanyInvitationEmailCorrection#hasInvitationForUser` — a business-partner contact never has one and must never be invited by any flow, so a blank email also stays locked); and the latest invitation to the current email is `EXPIRED`/`DELIVERY_FAILED` (`CompanyInvitationEmailCorrection#isEmailCorrectableStatus`) — or absent, the recovery state below — with no `ACCEPTED` invitation ever, by this user or to this address (`#hasAcceptedInvitation`). Everything else is a `400` `"Field 'email' can only be changed while the user's invitation has expired or could not be delivered"`. A non-owner with no invitation of its own gets a dedicated `400` instead — `"This user was never invited to Etendo (for example, a business partner contact person): edit its email through spec 'contacts', entity 'contact'"` — because contact persons share the `AD_User` table and are edited, with no lock and no invitation, through `contacts/contact` (`ContactHandler`). The reverse path is guarded too: an Etendo user linked to a business partner is listed among its contact persons, so `ContactHandler` refuses (400 `"This contact is an Etendo user: change its email through spec 'user', entity 'user'"`) an email change on `contacts/contact` when the record is the owner or has an invitation of its own (`UserEmailCorrection#rejectContactPathEmailChangeOnGoUser`, fail-closed); a real contact person's email stays freely editable. `resendInvitation` applies the same contact rule: its lookup is by email, so it now also requires an invitation issued to that very `AD_User` (`NO_INVITATION_TO_RESEND` otherwise). An allowed value must be non-blank (`400` `"Field 'email' is required"`; a JSON `null` counts as blank), well-formed (`400` `"Invalid email format"`, `EmailContractCommandSupport#isValidEmail`) and not another user's address in the client (`400` `"A user with this email address already exists"`, the ETP-5264 guard excluding the user's own row). It is lowercased in the body; a change that only differs in case from the stored value is a no-op (normalized, no re-invite). A real change is marked on the context with `NeoContext#setAttribute` (the pre- and post-hook share the same context instance on REST single, REST batch and MCP — see "Handler behavior" in §5.3). The `PUT`/`PATCH` post-hook (`reinviteAfterEmailChange`) then re-derives `username` **through DAL** — a `username` put in the body would be dropped by `filterWriteRequest`, it is a system field — invites the new address with `createInvitationForNewlyCreatedUser`, and only afterwards — and only when the latest invitation to the new address provably belongs to this user (`latestInvitationBelongsTo`) — revokes the old address's invitations (`revokeSupersededInvitations`). The invite reports most failures as an error result rather than an exception, so without that check a failed re-invite stranded the user; now the old invitations are kept, and a user with invitations of its own but none to its current address stays correctable (never when any invitation of the user, or to the address, was accepted). Only invitations to the **current** address lock it: an open invitation left on an older address (e.g. the email was changed in classic) does not, and a successful correction revokes that dangling link. Every `user` GET row carries the verdict as `emailEditable`, which the SPA's `readOnlyLogicJs` reads; a row on which the owner or invitation-status lookup failed (no `isOwner` or no `invitationStatus` key) gets `false` (fail closed). The update response row of a correction is refreshed the same way — the re-derived `username`, `invitationStatus`, `isOwner` and `emailEditable` — so the form repaints from the save response itself. Correcting an address that already belongs to a Go account removes that account's access to this tenant (environments resolve by email/username value). Known gaps, not fixed by ETP-5194: correcting to an address that no `AD_User` holds but that has another user's open invitation (that user's email was changed in classic) locks the corrected user, because the status is resolved by address and reads the other user's `SENT`; a change that only differs in case is refused with the locked `400` on a user whose email is locked (the equality check runs before normalization), while it is a silent no-op on an editable one. Batch never performs this correction — batch only creates (§4.12.4.1).
   - **Ordering (ETP-4830 human-directed requirement, item #14): "create user → assign personal role → invite."** `afterHandle()`'s `POST` branch FIRST calls `ensurePersonalRoleForNewlyCreatedUser` — which delegates to `UserRoleCompositionService#createFreshPersonalRole(User)`, never the get-or-create `ensurePersonalRole(User)`, so a brand-new user can never end up with someone else's orphaned role (see the org-access/defaults writeup in §8d) — and only THEN calls `CompanyInvitationService#createInvitationForNewlyCreatedUser`, so no other role can ever land on the user before its own personal role exists. The strict ordering is proven by a call-order test, not just "both ran" (`UserRoleAssignmentHandlerTest`'s `afterHandleAssignsPersonalRoleBeforeInvitationOnCreate`). Template-role composition on top of that empty personal role happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save — which is why the invitation intentionally skips the "invited user already has an active role" check below (an empty personal role with no templates composed onto it is not a meaningful "active role" from that check's perspective).
   - `afterHandle()`'s `POST` branch then calls `CompanyInvitationService#createInvitationForNewlyCreatedUser(obContext, email, appBaseUrl, language)` — the same invitation/token/`company-invitation`-contract/dedup/throttle machinery ETP-4894 built for a company administrator inviting an *existing* user (§ `docs/transactional-email-contracts.md`). It resolves the inviter from `context.getObContext()` (captured by the dispatcher before this method's own `OBContext.setAdminMode(true)`, so it still reflects the real acting admin's client/org/user) rather than from an authenticated `etgo_account` bearer token, since this runs from a NeoHandler post-hook, not from the public `/sws/go/invitations` endpoint. It deliberately skips the "invited user already has an active role in the invitation organization" check `createInvitation` otherwise enforces — a freshly `POST`-created `AD_User` has zero roles yet by construction beyond the empty personal role just created above (role composition happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save/`PUT`), so that check would always 400 here and adds no real safety. `CompanyInvitationService` grew a `requireExistingRole` private overload for this rather than a bespoke duplicate of `createInvitationForInviter`, so the new call site still gets dedup-of-an-open-invitation and throttling for free.
@@ -6596,9 +6763,11 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 
 `handlers/PaymentTermHandler`, bound with `@NeoExtension(spec = "payment-term", entity = "header")`
 (no `Java_Qualifier`). A CRUD pre-hook on `C_PaymentTerm` writes (POST / PUT / PATCH), so it runs
-identically on REST single, REST batch and MCP — no channel divergence. It exists because every
-payment-term selector in the SPA offers "+ Crear condición de pago", which creates a term from a
-number of days alone.
+identically on REST single, REST batch and MCP — no channel divergence. On MCP `etendo_create` it
+also runs earlier, through `resolveServerCreateFields`, and the pre-hook discards what the MCP
+defaults pass filled, so a create ends with the same values on every channel (see *MCP
+`etendo_create`* below, ETP-5978). It exists because every payment-term selector in the SPA offers
+"+ Crear condición de pago", which creates a term from a number of days alone.
 
 | Rule | When | Answer |
 |---|---|---|
@@ -6618,6 +6787,77 @@ kept): `name` = `"N Días"` (`"1 Día"`), `searchKey` = `"ND"` (`"12D"`), `offse
 (`"Inmediato"`, `"I"`, `nextBusinessDay` = false). `nextBusinessDay` is an editable field of the
 spec precisely so the injected value is persisted (a discarded field would be dropped by the field
 filter, and the DAL default is `false`).
+
+**Server-derived, read-only `searchKey` and `offsetMonthDue` (ETP-5978).** The Payment Term window
+no longer shows `searchKey` (`Value`) or `offsetMonthDue` (`FixMonthOffset`): both are
+`ETGO_SF_FIELD.Visibility = system`, `IsReadOnly = 'Y'`. Included-but-read-only is enough for the
+create path: `filterCreateRequest` keeps every included field, and the entity has a customization,
+so the IMP-28 rejection of client-sent read-only fields does not apply. Hence:
+
+- **Create:** the hook fills both when absent, as above; a value the caller sends on a REST create
+  (single or batch) or an MCP create is **kept** (never-overwrite-caller policy).
+- **Update** (REST `PATCH`/`PUT`, MCP `etendo_update`): `filterWriteRequest` drops both silently,
+  so neither can be changed after creation.
+- **Duplicate keys are allowed, by decision.** `C_PaymentTerm` has no unique constraint on `Value`
+  (only `C_PAYMENTTERM_NAME` on client + organization + name); the real duplicate case is the 409
+  by days above, and the key is hidden from the user. No key uniqueness check is performed.
+
+`nextBusinessDay` carries `ETGO_SF_FIELD.DefaultValue = 'Y'` (from `decisions.json`
+`defaultExpr: "Y"`), so `GET .../defaults` hands the window's new-record form a ticked box. On REST
+the pre-hook runs before any defaults pass, so a create without the field still derives it from the
+days; on MCP the defaulted `Y` is dropped and re-derived (below). The one visible difference is the
+form itself, which always sends the box: a **0-day** term created from the window keeps `true`
+unless the user unticks it, whereas a selector quick-create or a REST/MCP create without the field
+derives `false`. Accepted: a 0-day create normally gets the 409 by days anyway, because every tenant
+has the seeded `Inmediato`.
+
+**MCP `etendo_create` (ETP-5978).** On MCP the mandatory pre-check runs *before* the pre-hook
+(ETP-5710, §4.12.22), so `searchKey` and `offsetMonthDue` — mandatory in AD, hidden from the window
+and absent from the MCP create contract (`minimumCreate.headerFields = [name,
+overduePaymentDaysRule]`) — were refused with a 422 `missingFields`. The handler therefore
+implements `NeoHandler#resolveServerCreateFields`, which runs the same `enrichCreate` the pre-hook
+runs. An agent may send just `name` + `overduePaymentDaysRule`, or the days alone.
+
+- `resolveServerCreateFields` abstains on an update (record id present), on absent, null or
+  non-whole-number days, and on days it can tell the server filled. Days out of range are still
+  enriched, so the pre-hook answers its keyed 400 rather than a 422 for a key derived from them.
+  Idempotent with the later pre-hook, never overwrites a caller value, never throws.
+- The MCP mandatory-defaults pass runs before both and fills every mandatory field it can — notably
+  a safe-type placeholder `0` for a missing `NetDays`, and defaulted `name`, `searchKey`,
+  `offsetMonthDue` and `nextBusinessDay`. On create the pre-hook first **drops** every days-derived
+  field (`CREATE_DERIVED_FIELDS`: days, `name`, `searchKey`, `offsetMonthDue`, `nextBusinessDay`)
+  the caller did not send (`dropServerFilledCreateFields`), then decides them exactly as on REST.
+  "The caller sent it" is `isCallerValue`: the key is in the body, is not in
+  `NeoContext#getFallbackDefaults()` (ETP-5669, forwarded to the pre-hook since ETP-5680) and, when
+  `NeoContext.ATTR_CLIENT_PROVIDED_FIELDS` is present (§5.3.6), is listed there. Consequences:
+  - Days the agent did not send answer the same 400 `ETGO_PaymentTermDaysInvalid` as REST, before
+    anything is persisted — never a zero-day term built from the placeholder. An explicit `0` is
+    kept.
+  - A defaulted `name`, `searchKey`, `offsetMonthDue` or `nextBusinessDay` is replaced by the
+    days-derived value; the values the agent sent are kept.
+  - REST single and batch hand the pre-hook only what the caller sent, so the drop is a no-op there
+    and the no-divergence statement above holds.
+
+**Renaming syncs the translations (ETP-5978, QA BUG-1).** `C_PaymentTerm.Name` is translatable and
+is the entity's only identifier column, so the `_identifier` core serializes (record title,
+breadcrumb, every payment-term selector) is read from the `C_PaymentTerm_Trl` row of the request
+language. `C_PAYMENTTERM_TRG` copies the name into the translations on insert, but on update only
+sets `IsTranslated = 'N'`, so a rename used to leave the old name in every identifier while `name`
+itself was right. Now:
+
+- the pre-hook records an accepted rename on the context (`ATTR_RENAMED_TO`) — nothing on create,
+  nor when the name is not sent, blank or unchanged, nor when the update is refused;
+- `afterHandle`, only on a successful result, updates the `name` of **every** `C_PaymentTerm_Trl`
+  row of the term with a bulk HQL update, and sets `_identifier` on the echoed record
+  (`{"response":{"data":[…]}}` or flat `{"data":[…]}`), so the SPA repaints from the save response.
+  Every language is overwritten **by design**: the trigger has just flagged them all out of date and
+  Etendo GO has no translation tab for payment terms, so nothing else could correct them.
+- **Not atomic with the rename.** On a single REST or MCP write the rename is already committed by
+  the write service; the translation update runs in a second transaction, committed at the end of
+  the request. A failure is logged at error and leaves the rename saved, the response as it was and
+  the identifier stale until the next rename.
+- Same behaviour on REST `PATCH`/`PUT` and MCP `etendo_update`. Terms renamed before ETP-5978 keep
+  stale translations until they are renamed again.
 
 Every refusal has the `CompletedInvoiceWriteFence` shape, plus a top-level `message`
 (`NeoResponse.ensureTopLevelMessage`). The keys are plain strings, not `AD_MESSAGE` records
@@ -6658,7 +6898,9 @@ the body (server-owned fields stripped, no callout cascade). When that cannot be
 tab in the context) the name rule is skipped and the database constraint stays the backstop.
 
 A days-only create is `POST /sws/neo/payment-term/header` with `{"overduePaymentDaysRule": 12}`;
-the created record (with the derived `name`) is in `response.data[0]`.
+the created record (with the derived `name`) is in `response.data[0]`. Over MCP it is
+`etendo_create(spec:"payment-term", entity:"header", fields:{"overduePaymentDaysRule": 12})` (or with a
+`name` too); since ETP-5978 it no longer needs `searchKey` or `offsetMonthDue`.
 
 Access is the window's: writing needs `AD_Window_Access.IsReadWrite = 'Y'` on window 141 (Payment
 Term) — a role that may edit invoices but holds 141 read-only gets the standard 403.
@@ -6673,8 +6915,10 @@ pass, so there the body holds exactly what the caller sent. MCP `etendo_create` 
 `McpToolRouter#handleCreate` therefore sets `NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`
 (`"neo.clientProvidedFields"`): a `Set<String>` of the DAL property names the agent itself sent,
 snapshotted before defaults. It is the only setter. A customization reads "explicit" as: attribute
-present → the set contains the key; attribute absent → `body.has(key)`. See
-`ContactTypeRules#isExplicit`. Updates never need it (no defaults pass runs on PATCH/PUT or on
+present → the set contains the key; attribute absent → `body.has(key)`. Readers:
+`ContactTypeRules#isExplicit` (contact types, below) and `PaymentTermHandler#isCallerValue`
+(ETP-5978, §5.3.5 — which also treats a key listed in `NeoContext#getFallbackDefaults()` as not
+sent, and drops the days-derived fields the MCP defaults pass filled). Updates never need it (no defaults pass runs on PATCH/PUT or on
 MCP `etendo_update`, so the body handed to the pre-hook is exactly what the caller sent).
 
 **Contact types (ETP-5791).** `C_BP_Group.EM_Etgo_Iscustomer/Isvendor` say whether a category's
@@ -6682,7 +6926,8 @@ contacts are customers, vendors/creditors or both. Rules live in `handlers/Conta
 (an entity util, called only by the customizations below).
 
 **Behind the `contact-category-type` feature flag** (`GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE`,
-environment level, default **off** — `etendo.go.flags.contact-category-type` /
+per account — the `ETGO_ACCOUNT` email of the request's user plus the tenant id, the same account on
+REST single, REST batch and MCP — default **off** — `etendo.go.flags.contact-category-type` /
 `ETGO_FLAG_CONTACT_CATEGORY_TYPE`; see `docs/feature-flags-and-tenant-upgrade.md` §1). Every
 customization in the table asks `ContactTypeRules.isEnabled()` first; off, it returns `null` and the
 default CRUD runs exactly as before ETP-5791 (no inheritance, no "at least one type" rejection, no
@@ -9923,7 +10168,9 @@ wrapper fields. A new generic extension point lets the customization say so:
   missing data (abstain and let the pre-check report the field). REST single and batch do not call
   it — their pre-hook already runs before the create — so a customization usually implements it by
   delegating to the same helper its `handle()` uses. First user: the invoice headers'
-  `partnerAddress` default.
+  `partnerAddress` default. Also `PaymentTermHandler` (ETP-5978, §5.3.5): it fills the days-derived
+  `name`, `searchKey`, `offsetMonthDue` and `nextBusinessDay` so an agent can create a term from its
+  days alone.
 - `NeoHandler#callerRequiredCreateFields()` (ETP-5473) — the opposite declaration: DAL property
   names the customization's pre-hook **refuses a create without**, although AD does not mark the
   column mandatory or `etendo_defaults` answers a value for it (a suggestion for a form, not a
@@ -12105,10 +12352,11 @@ failure, against a stub server on loopback — never the real service), `NeoStag
 
 #### 4.12.41 Header validations on `etendo_update`: required fields (every spec) and the order currency (ETP-5726)
 
-Two refusals, both **MCP `etendo_update` only** — the MCP has to work like the screen, and an agent
-cannot see what a person would notice. Rule 1 (a required field cannot be cleared) applies to
-**every** `etendo_update` on **every** spec; only rule 2 (currency vs price list) is specific to the
-purchase-order and sales-order headers. Neither changes REST single, `/batch` or the SPA.
+One refusal, **MCP `etendo_update` only** — the MCP has to work like the screen, and an agent
+cannot see what a person would notice: a required field cannot be cleared (rule 1, every spec). It
+does not change REST single, `/batch` or the SPA. A second refusal, a currency change that left the
+price list in another currency, existed for a while and was **removed** (rule 2 below): the screen
+accepts that change, and the MCP must behave exactly like the screen.
 
 **1. A required field cannot be cleared.** `McpWriteRequestSupport.rejectClearedMandatoryFields`,
 called once from `McpToolRouter.handleUpdate` right after the type coercion and before the entity
@@ -12127,6 +12375,16 @@ the database) could be saved as `null` through the MCP, which the form never all
   `missingFields[{name, column, type, label}]` carries the label in the user's language
   (`McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode())`, AD name as fallback)
   and a `hint`.
+- **Message language (OBS-1).** `detail` and `hint` are the `AD_MESSAGE` values
+  `ETGO_RequiredFieldsCleared` (`%0` = the cleared fields as `name (label)`, comma separated) and
+  `ETGO_RequiredFieldsClearedHint`, resolved by `NeoMessageText.text(key, langCode, args)` like the
+  ETP-5840 and ETP-5473 refusals: an `IsTranslated='Y'` `AD_MESSAGE_TRL` row of the request
+  language, else `messages/neo_hints_<lang>.properties` (the versioned Spanish; `es_ES` and
+  `es_AR` both read `neo_hints_es`), else the English `AD_MESSAGE` text. The request language is
+  the GO locale (`NeoLanguage.currentCode()`), which on MCP is the AD user's `default_ad_language`
+  (MCP clients send no `Accept-Language`): the user must be `es_ES` to read Spanish. Status, error
+  code and `missingFields` are unchanged. Other 422 messages of `McpToolRouter` (for example the
+  shared write preflight) are still English-only; this change localizes only this rule.
 - **What this newly refuses on every spec:** a GET-then-PUT echo of a mandatory field that is already
   `null` in legacy data, and an AD-mandatory field the form hides that an agent clears on purpose.
   Both match the screen, which cannot save either. Refusing only when the stored value is non-null
@@ -12134,31 +12392,39 @@ the database) could be saved as `null` through the MCP, which the form never all
 - **REST parity (follow-up, not done):** `NeoCrudHandler`/`/batch` still accept the clear. Closing
   it there changes what the SPA and every integration may send, so it needs its own decision.
 
-**2. A currency change must stay coherent with the price list.** For a **draft** order, an MCP
-`PUT` whose `currency` differs from the stored one and whose price list (the body's `priceList`, else
-the **stored** one) is in another currency is refused 422: "The order's price list '<name>' is in
-<ISO>, not in the requested currency <ISO>", with a hint to send a price list of that currency in the
-same update or to keep the current currency. A same-currency price list, an order without a price
-list, an unchanged currency and a non-draft order pass.
+**2. A currency change is saved like the window does (the rejection was removed).** ETP-5726
+first made the MCP refuse (422) the currency change of a draft order whose price list was in another
+currency (`OrderCurrencyPriceListGuard`, called from the purchase-order and sales-order headers).
+QA showed the screen accepts it: it saves the new currency, does **not** change the price list and
+does **not** convert any amount (the line and the total keep their numbers, shown with the new
+symbol; changing back restores everything). The guard made the MCP stricter than the screen, so it
+was deleted: a currency change now goes through the default save on every channel, touching
+neither the price list nor any amount.
 
-- Mechanism: `OrderCurrencyPriceListGuard.refuseCurrencyOutsidePriceList(context)`, a static helper
-  called from `PurchaseOrderHeaderHandler.handle()` and `SalesOrderHeaderHandler.handle()` (the
-  quotation header does not call it). It runs on the existing pre-hook and acts on
-  `context.isMcpOrigin()` + `PUT`, the way other handlers already branch on the origin; it is a
-  separate class, like `DocumentRateGuards`, so `AbstractOrderHeaderHandler` does not grow
-  (java:S1448). No new `NeoHandler` method was needed.
-- Why MCP-only: the screen does not reset the price list when the currency changes, and Etendo core
-  (`C_Order_Post`) does not validate the price list's currency at completion either; changing REST
-  would change what the SPA can save. Declared in the §4.12.9 table above.
-- Not covered on purpose: changing only the price list to one in another currency (the form's
-  price-list callout owns that, and GO blocks its currency write-back).
+**The exchange rate follows the currency, as in the window.** The window stages the picked
+currency's rate with it (the `currencyOptions` option: the conversion on the reference date, and
+`1` for the company's own currency), always, so a previous currency's rate never survives. The MCP
+already did this towards a foreign currency (`DocumentCurrencyRate.rateToSave`: the recalculated
+rate on `orderDate`, `null` and a 422 when none is configured) but returned early for the base
+currency, so an order moved back to EUR kept the previous 1.47. `DocumentCurrencyRate.evaluateWrite`
+now calls `resetRateOnReturnToOrgCurrency`: an **update** whose currency changes to the
+organization's currency writes `eTGOCurrencyRate = 1` into the body (a rate sent in the same body is
+overwritten, there is no conversion to keep); a create and a write that does not change the currency
+are untouched. Base to foreign and foreign to another foreign currency behave as before. The class
+is the shared rate support the invoices and quotations also use, so they get the same reset (the
+window's picker is the same component there). An agent that wants amounts in the new currency sends a
+price list of that currency in the same update; the agent prompts of both orders say so. No
+divergence between channels remains for this (it is not listed in §4.12.9 any more).
 
 **Accounting date (documented, unchanged).** The order's accounting date is the order date by
 design (ETP-4531, "unified date"): `mirrorAccountingDate` copies `orderDate` to `accountingDate` on
 every write. Changing the order date through the MCP therefore also changes the accounting date;
 no separate field is published. The agent prompts of `purchase-order` and `sales-order` say so.
 
-Tests: `McpWriteRequestSupportClearedMandatoryTest`, `OrderCurrencyPriceListGuardTest`.
+Tests: `McpWriteRequestSupportClearedMandatoryTest` (the refusal and its language),
+`PurchaseOrderHeaderHandlerTest` and `SalesOrderHeaderHandlerTest` (a currency change is not refused
+and the price list and amounts are left alone), `DocumentCurrencyRateTest` (the rate follows the
+currency in both directions).
 
 
 #### 4.12.42 Import lines into a draft rectificative invoice (ETP-5876)

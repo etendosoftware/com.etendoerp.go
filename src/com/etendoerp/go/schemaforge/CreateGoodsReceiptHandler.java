@@ -113,6 +113,8 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
         createReceiptLines(receipt, result.getPendingLines(), result.getLocator());
         OBDal.getInstance().flush();
         ensureDocumentNo(receipt);
+        // ETP-5051: the plan-quota check of the created receipt and its lines.
+        NeoQuotaCreateCheck.requireAllowedDocument(receipt);
 
         JSONObject data = new JSONObject();
         data.put("id", receipt.getId());
@@ -128,6 +130,8 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (OBException e) {
       SessionHandler.getInstance().rollback();
       log.warn("Error creating goods receipt from order {}: {}", recordId, e.getMessage());

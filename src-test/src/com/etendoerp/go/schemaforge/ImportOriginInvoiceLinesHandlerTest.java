@@ -51,6 +51,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
@@ -67,6 +70,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * invoice" modal. The DAL and the candidate query are seams, replaced here by a recording double.
  *
  * @covers com.etendoerp.go.schemaforge.ImportOriginInvoiceLinesHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 public class ImportOriginInvoiceLinesHandlerTest {
 
@@ -327,6 +331,34 @@ public class ImportOriginInvoiceLinesHandlerTest {
     assertEquals(10, error.getInt("pending"));
     assertTrue(probe.created.isEmpty());
     assertTrue(probe.links.isEmpty());
+  }
+
+  /**
+   * ETP-5051 — the lines this import added are checked against the plan quotas before the answer
+   * ({@code AbstractLineImportHandler#requireQuotaAllowed}): at a {@code block} limit the
+   * rectificative line import answers 403 {@code QUOTA_EXCEEDED} and the whole import is rolled
+   * back.
+   */
+  @Test
+  public void import_overABlockQuota_answers403AndRollsBackTheImport() throws Exception {
+    Probe probe = purchase();
+    OBDal dal = mock(OBDal.class);
+
+    NeoResponse response;
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      response = probe.run("importOriginInvoiceLines", "{\"invoiceId\":\"src\"}");
+
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowed(
+          org.mockito.ArgumentMatchers.eq(InvoiceLine.ENTITY_NAME),
+          argThat(ids -> ids != null && ids.size() == 2)));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(response);
+    verify(dal).rollbackAndClose();
+    verify(dal, never()).commitAndClose();
   }
 
   /** The same line listed twice counts both. */

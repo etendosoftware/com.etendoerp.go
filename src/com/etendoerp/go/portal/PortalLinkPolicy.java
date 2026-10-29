@@ -72,11 +72,14 @@ public final class PortalLinkPolicy {
   /**
    * Evaluates the gate: is the portal link switched on for the account sending this invoice.
    *
+   * <p>The account is resolved by {@link GoAccountResolver#currentAccountEmail()}; no account, or
+   * any failure resolving it, answers "no link", never "allow".
+   *
    * @return {@code true} only when the flag positively resolves true for the sending account
    */
   public static boolean isLinkEnabled() {
     return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_BP_PORTAL_LINK,
-        FeatureFlagContext.forAccount(GoAccountResolver.findCurrentAccountEmail()));
+        FeatureFlagContext.forAccount(GoAccountResolver.currentAccountEmail()));
   }
 
   /**

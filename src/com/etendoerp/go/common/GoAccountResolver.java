@@ -68,38 +68,6 @@ public final class GoAccountResolver {
   }
 
   /**
-   * Resolves the {@code ETGO_ACCOUNT} email of the user of the current {@link OBContext} — the
-   * identity backend feature flags target (see {@code FeatureFlagContext#forAccount}).
-   *
-   * <p>Runs in admin mode because {@code ETGO_ACCOUNT} is a platform table the user's own role has
-   * no reason to be able to read, and the account being looked up is the user's own. Moved here
-   * from {@code PortalLinkPolicy} (ETP-5716) so every flag gate shares one resolution.
-   *
-   * @return the account email, or {@code null} when there is no context user or no active account
-   *     behind it; never throws — a caller turns {@code null} into its flag's default, never into
-   *     "allow"
-   */
-  public static String findCurrentAccountEmail() {
-    try {
-      OBContext.setAdminMode(true);
-      OBContext ctx = OBContext.getOBContext();
-      User user = ctx == null ? null : ctx.getUser();
-      if (user == null) {
-        return null;
-      }
-      return findAccountByUsername(user.getUsername())
-          .map(Account::getEmail)
-          .orElse(null);
-    } catch (RuntimeException e) {
-      // Resolving the identity must never fail the caller; it only means "no targeted account".
-      log.warn("Could not resolve the current account email: {}", e.getMessage(), e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
    * Resolves the platform account behind an environment username.
    *
    * @param username the AD_User username, which onboarding derives from the account email
@@ -127,6 +95,41 @@ public final class GoAccountResolver {
       log.warn("Could not resolve the platform account for username {}: {}",
           maskUsername(normalized), e.getMessage(), e);
       return Optional.empty();
+    }
+  }
+
+  /**
+   * Resolves the {@code ETGO_ACCOUNT} email of the user bound to the current {@link OBContext} —
+   * the identity a per-account feature flag targets on. Every channel (REST single, REST batch,
+   * MCP) binds the authenticated AD user to the OBContext, so every channel resolves the same
+   * account for the same person.
+   *
+   * <p>Runs in admin mode because {@code ETGO_ACCOUNT} is a platform table the caller's own role
+   * has no reason to be able to read; the account looked up is the caller's own.
+   *
+   * <p>Never throws: no context, no user, no account behind the user (a hand-created ERP user, a
+   * system user) or any failure resolving it all answer {@code null}, which a flag evaluation turns
+   * into "not this account", never into "everyone".
+   *
+   * @return the account email, or {@code null} when no active account resolves
+   */
+  public static String currentAccountEmail() {
+    if (OBContext.getOBContext() == null) {
+      return null;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      OBContext ctx = OBContext.getOBContext();
+      User user = ctx == null ? null : ctx.getUser();
+      if (user == null) {
+        return null;
+      }
+      return findAccountByUsername(user.getUsername()).map(Account::getEmail).orElse(null);
+    } catch (RuntimeException e) {
+      log.warn("Could not resolve the platform account of the current user: {}", e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 

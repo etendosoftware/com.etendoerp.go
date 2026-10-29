@@ -217,7 +217,7 @@ class FiscalModel390FlagTest {
   @Test
   void anUnsetFlagReadsAsHidden() {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class)) {
-      accounts.when(GoAccountResolver::findCurrentAccountEmail).thenReturn(ACCOUNT_EMAIL);
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(ACCOUNT_EMAIL);
 
       assertFalse(FiscalModel390Flag.isEnabled(CLIENT_ID));
       assertFalse(FiscalModel390Flag.isEnabled(null));
@@ -269,7 +269,7 @@ class FiscalModel390FlagTest {
   void isEnabledEvaluatesTheFlagKeyWithTheResolvedAccountEmail() {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
          MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
-      accounts.when(GoAccountResolver::findCurrentAccountEmail).thenReturn(ACCOUNT_EMAIL);
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(ACCOUNT_EMAIL);
       List<FeatureFlagContext> contexts = new ArrayList<>();
       flags.when(() -> GoFeatureFlags.isEnabled(eq("fiscal-model-390"), any()))
           .thenAnswer(invocation -> {
@@ -294,7 +294,7 @@ class FiscalModel390FlagTest {
   @Test
   void theAccountEmailAndTheTenantReachTheProvider() {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class)) {
-      accounts.when(GoAccountResolver::findCurrentAccountEmail).thenReturn(ACCOUNT_EMAIL);
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(ACCOUNT_EMAIL);
       CapturingProvider provider = new CapturingProvider(false, "ana.garcia@example.com");
 
       boolean enabled = withProvider(provider, () -> FiscalModel390Flag.isEnabled(CLIENT_ID));
@@ -313,7 +313,7 @@ class FiscalModel390FlagTest {
   @Test
   void withNoResolvableAccountOnlyTheTenantReachesTheProvider() {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class)) {
-      accounts.when(GoAccountResolver::findCurrentAccountEmail).thenReturn(null);
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(null);
       CapturingProvider provider = new CapturingProvider(false, "ana.garcia@example.com");
 
       boolean enabled = withProvider(provider, () -> FiscalModel390Flag.isEnabled(CLIENT_ID));
@@ -332,7 +332,7 @@ class FiscalModel390FlagTest {
   @Test
   void aProviderThatFailsReadsAsHidden() {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class)) {
-      accounts.when(GoAccountResolver::findCurrentAccountEmail).thenReturn(ACCOUNT_EMAIL);
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(ACCOUNT_EMAIL);
       // The failing provider would have matched this very user: a failure must still hide.
       CapturingProvider provider = new CapturingProvider(true, "ana.garcia@example.com");
 

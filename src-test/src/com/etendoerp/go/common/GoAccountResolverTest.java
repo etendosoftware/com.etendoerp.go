@@ -22,16 +22,23 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockedStatic;
@@ -43,7 +50,7 @@ import org.openbravo.model.ad.access.User;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
- * Tests for {@link GoAccountResolver}.
+ * Specifies how an environment user is traced back to its platform account ({@code ETGO_ACCOUNT}).
  *
  * @covers com.etendoerp.go.common.GoAccountResolver
  */
@@ -187,102 +194,78 @@ class GoAccountResolverTest {
     assertEquals(true, hql.getValue().contains("lower(account.email)"));
   }
 
-  // ------------------------------------------------------------ findCurrentAccountEmail
+  // ── currentAccountEmail(): the account of the OBContext user ───────────────────────────────
+
+  /** No OBContext: nothing to resolve, and admin mode is never entered (so never left dangling). */
+  @Test
+  void currentAccountEmailIsNullWithoutAnOBContext() {
+    try (MockedStatic<OBContext> obContextStatic = mockStatic(OBContext.class)) {
+      obContextStatic.when(OBContext::getOBContext).thenReturn(null);
+
+      assertNull(GoAccountResolver.currentAccountEmail());
+
+      obContextStatic.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+      obContextStatic.verify(OBContext::restorePreviousMode, never());
+    }
+  }
+
+  static Stream<Arguments> contextUsers() {
+    Function<OBContext, String> found = ctx -> {
+      User user = mock(User.class);
+      when(user.getUsername()).thenReturn("owner@example.com+acmeltd");
+      when(ctx.getUser()).thenReturn(user);
+      return "Owner@Example.com"; // as stored on the account, not the username's spelling
+    };
+    Function<OBContext, String> noUser = ctx -> null;
+    Function<OBContext, String> noAccount = ctx -> {
+      User user = mock(User.class);
+      when(user.getUsername()).thenReturn("warehouse-operator");
+      when(ctx.getUser()).thenReturn(user);
+      return null;
+    };
+    Function<OBContext, String> failure = ctx -> {
+      when(ctx.getUser()).thenThrow(new IllegalStateException("no session"));
+      return null;
+    };
+    return Stream.of(
+        Arguments.of("account found by the suffixed username", found),
+        Arguments.of("no user bound", noUser),
+        Arguments.of("user with no account", noAccount),
+        Arguments.of("failure reading the user", failure));
+  }
 
   /**
-   * Runs {@link GoAccountResolver#findCurrentAccountEmail()} with {@code obContext} as the current
-   * context and a DAL that knows one account, registered under {@code registeredEmail}.
+   * The account email of the context user, or {@code null} when none resolves or the lookup fails —
+   * never an exception. Every path enters admin mode once and restores it once.
    */
-  private String currentAccountEmailWith(OBContext obContext, String registeredEmail,
-      String accountEmail) {
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("contextUsers")
+  void currentAccountEmailResolvesTheContextUserAndAlwaysRestoresAdminMode(String scenario,
+      Function<OBContext, String> givenUser) {
+    OBContext ctx = mock(OBContext.class);
+    String expectedEmail = givenUser.apply(ctx);
     Account account = mock(Account.class);
-    when(account.getEmail()).thenReturn(accountEmail);
+    when(account.getEmail()).thenReturn("Owner@Example.com");
     OBDal dal = mock(OBDal.class);
     @SuppressWarnings("unchecked")
     OBQuery<Account> query = mock(OBQuery.class);
     when(dal.createQuery(eq(Account.class), anyString())).thenReturn(query);
-    when(query.uniqueResult()).thenAnswer(invocation -> null);
-    when(query.setNamedParameter(eq("email"), anyString())).thenAnswer(invocation -> {
-      String requested = invocation.getArgument(1);
-      when(query.uniqueResult())
-          .thenReturn(registeredEmail.toLowerCase().equals(requested) ? account : null);
+    when(query.setNamedParameter(anyString(), any())).thenReturn(query);
+    when(query.uniqueResult()).thenReturn(null);
+    when(query.setNamedParameter(eq("email"), eq("owner@example.com"))).thenAnswer(invocation -> {
+      when(query.uniqueResult()).thenReturn(account);
       return query;
     });
 
-    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      String email = GoAccountResolver.findCurrentAccountEmail();
-      // Admin mode is always restored, whatever happened in between.
-      ctxMock.verify(() -> OBContext.setAdminMode(true));
-      ctxMock.verify(OBContext::restorePreviousMode);
-      return email;
-    }
-  }
+    try (MockedStatic<OBContext> obContextStatic = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      obContextStatic.when(OBContext::getOBContext).thenReturn(ctx);
+      dalStatic.when(OBDal::getReadOnlyInstance).thenReturn(dal);
 
-  private static OBContext contextWithUser(String username) {
-    User user = mock(User.class);
-    when(user.getUsername()).thenReturn(username);
-    OBContext obContext = mock(OBContext.class);
-    when(obContext.getUser()).thenReturn(user);
-    return obContext;
-  }
+      assertEquals(expectedEmail, GoAccountResolver.currentAccountEmail(), scenario);
 
-  @Test
-  void theCurrentUserResolvesToItsAccountEmail() {
-    assertEquals("Ana@Example.com", currentAccountEmailWith(
-        contextWithUser("ana@example.com"), "ana@example.com", "Ana@Example.com"));
-  }
-
-  @Test
-  void aCurrentUserWithAClientSuffixResolvesToItsAccountEmail() {
-    assertEquals("ana@example.com", currentAccountEmailWith(
-        contextWithUser("ana@example.com+acmeltd"), "ana@example.com", "ana@example.com"));
-  }
-
-  @Test
-  void aCurrentUserWithNoAccountResolvesToNull() {
-    assertNull(currentAccountEmailWith(
-        contextWithUser("warehouse-operator"), "ana@example.com", "ana@example.com"));
-  }
-
-  @Test
-  void noContextUserResolvesToNull() {
-    OBContext obContext = mock(OBContext.class);
-    when(obContext.getUser()).thenReturn(null);
-
-    assertNull(currentAccountEmailWith(obContext, "ana@example.com", "ana@example.com"));
-  }
-
-  @Test
-  void noOBContextResolvesToNull() {
-    assertNull(currentAccountEmailWith(null, "ana@example.com", "ana@example.com"));
-  }
-
-  /** Resolving the flag identity must never fail the request that asked for it. */
-  @Test
-  void aFailureReadingTheContextUserResolvesToNullWithoutThrowing() {
-    OBContext obContext = mock(OBContext.class);
-    when(obContext.getUser()).thenThrow(new IllegalStateException("no session"));
-
-    assertNull(currentAccountEmailWith(obContext, "ana@example.com", "ana@example.com"));
-  }
-
-  @Test
-  void anAccountLookupFailureResolvesToNullWithoutThrowing() {
-    OBDal dal = mock(OBDal.class);
-    when(dal.createQuery(eq(Account.class), anyString()))
-        .thenThrow(new IllegalStateException("no session"));
-    OBContext obContext = contextWithUser("ana@example.com");
-
-    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-
-      assertNull(GoAccountResolver.findCurrentAccountEmail());
-      ctxMock.verify(OBContext::restorePreviousMode);
+      obContextStatic.verify(() -> OBContext.setAdminMode(true));
+      obContextStatic.verify(OBContext::restorePreviousMode);
     }
   }
 }
