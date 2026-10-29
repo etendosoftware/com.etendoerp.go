@@ -196,6 +196,8 @@ public final class NeoButtonActionHelper {
    * Fails closed: an action that does not resolve to a button process is refused with the
    * error the action itself would answer, so nothing is un-posted for it.
    *
+   * @param entity the entity the action belongs to; {@code null} is refused
+   * @param actionName the action (button) name, as the request names it
    * @return the error the action would answer, or {@code null} when the role may run it
    */
   public static NeoResponse refusalForButtonProcess(SFEntity entity, String actionName) {

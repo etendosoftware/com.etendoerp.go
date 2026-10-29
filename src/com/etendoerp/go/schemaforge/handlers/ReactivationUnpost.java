@@ -107,6 +107,8 @@ public final class ReactivationUnpost {
   }
 
   /**
+   * Whether this request already un-posted the record before reactivating it.
+   *
    * @param context the reactivation request
    * @return whether {@link #unpostFirst} un-posted the record (a committed step) in this request
    */
