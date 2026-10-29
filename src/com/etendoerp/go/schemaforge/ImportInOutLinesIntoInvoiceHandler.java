@@ -40,6 +40,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
@@ -347,6 +348,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       created.forEach(line -> createdIds.add(line.id));
       ReturnLineCredit.clearReferencePrices(invoice, createdIds);
     }
+    requireQuotaAllowed(InvoiceLine.ENTITY_NAME, created);
     return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
         : invoice.getSalesOrder().getId());
   }

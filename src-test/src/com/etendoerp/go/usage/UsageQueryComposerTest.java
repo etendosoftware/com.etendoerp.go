@@ -43,6 +43,10 @@ import org.junit.jupiter.params.provider.ValueSource;
  * therefore positional (where the fragment sits relative to the subquery opener) rather than a
  * full-string equality, which would break on any harmless whitespace change while proving less.
  *
+ * <p>ETP-5051 added a third composition, {@link UsageQueryComposer#composeRowMatch}, which the NEO
+ * quota write check runs on a row it has just inserted. It goes through the same restriction
+ * wrapping, so {@link RowMatchForm} asserts the same containment and the same rejections.
+ *
  * <p>Note the two distinct fragment shapes that must NOT be conflated:
  * <ul>
  *   <li>{@code e.posted = 'Y' or 1=1} is <em>balanced</em>. It is accepted, and containment is
@@ -52,6 +56,8 @@ import org.junit.jupiter.params.provider.ValueSource;
  *       only on the first shape would pass even with the guardrail removed, which is why both
  *       are covered here and kept distinguishable.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.usage.UsageQueryComposer
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -497,6 +503,125 @@ class UsageQueryComposerTest {
           () -> UsageQueryComposer.composeGroupedCount(ENTITY, "order.orderDate", null));
       assertTrue(hql.contains("outer_.order.orderDate >= :"
           + UsageQueryComposer.PARAM_DAY_START), hql);
+    }
+  }
+
+  /** ETP-5051 — the row match the NEO quota write check runs on a created row. */
+  @Nested
+  class RowMatchForm {
+
+    @Test
+    void selectsTheRowsTenantBoundToTheRecordIdWithNoDateBound() {
+      String hql = UsageQueryComposer.composeRowMatch(ENTITY, null);
+
+      assertAll(
+          () -> assertTrue(hql.startsWith("select outer_.client.id from " + ENTITY + " outer_"),
+              hql),
+          () -> assertTrue(hql.contains("outer_.id = :" + UsageQueryComposer.PARAM_RECORD_ID),
+              "the row must be bound, never interpolated: " + hql),
+          () -> assertFalse(hql.contains(':' + UsageQueryComposer.PARAM_DAY_START), hql),
+          () -> assertFalse(hql.contains(SUBQUERY_OPENER),
+              "a blank restriction must add no membership test: " + hql));
+    }
+
+    @Test
+    void wrapsTheRestrictionExactlyLikeTheCounts() {
+      String rowMatch = UsageQueryComposer.composeRowMatch(ENTITY, WIDENING_FRAGMENT);
+      String count = UsageQueryComposer.composePerTenantCount(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+
+      String wrapped = count.substring(count.indexOf(" and outer_.id in (select"));
+      assertAll(
+          () -> assertTrue(rowMatch.endsWith(wrapped),
+              "the restriction must be wrapped by the same subquery as the counts: " + rowMatch),
+          () -> assertTrue(rowMatch.indexOf(WIDENING_FRAGMENT) > rowMatch.indexOf(SUBQUERY_OPENER),
+              "fragment must appear only after the subquery opener: " + rowMatch),
+          () -> assertTrue(rowMatch.indexOf(':' + UsageQueryComposer.PARAM_RECORD_ID)
+              < rowMatch.indexOf(SUBQUERY_OPENER),
+              "the record pin must stay in the outer where-clause: " + rowMatch));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        BREAKOUT_FRAGMENT,
+        BALANCED_ESCAPE_FRAGMENT,
+        "e.posted = 'Y'; delete from Invoice",
+        "e.posted = 'Y' -- ignore the rest",
+        "e.posted = 'Y' /* ignore the rest",
+        "e.name = 'abc"
+    })
+    void rejectsEveryFragmentValidateFragmentRejects(String malicious) {
+      IllegalArgumentException fromValidator = assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.validateFragment(malicious));
+      IllegalArgumentException fromRowMatch = assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.composeRowMatch(ENTITY, malicious));
+
+      assertTrue(fromRowMatch.getMessage().equals(fromValidator.getMessage()),
+          "same rejection as the validator: " + fromRowMatch.getMessage());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = { "", "Invoice where 1=1", "Invoice outer_" })
+    void rejectsAnEntityThatIsNotAPlainIdentifier(String entityName) {
+      assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.composeRowMatch(entityName, null));
+    }
+
+    /**
+     * ETP-5051 re-review W2: the write check charges a created row to the current period only when
+     * its date falls inside the counted window, so the row match carries the same day bounds as
+     * the counts, as bound parameters, with the restriction wrapped exactly as before.
+     */
+    @Test
+    void theInRangeFormAddsTheDayBoundsOfTheCounts() {
+      String hql = UsageQueryComposer.composeRowMatchInRange(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+      String count = UsageQueryComposer.composePerTenantCount(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+
+      int bounds = hql.indexOf("outer_." + DATE_PROPERTY + " >= :"
+          + UsageQueryComposer.PARAM_DAY_START);
+      assertAll(
+          () -> assertTrue(hql.contains("outer_.id = :" + UsageQueryComposer.PARAM_RECORD_ID),
+              hql),
+          () -> assertTrue(bounds > 0 && bounds < hql.indexOf(SUBQUERY_OPENER),
+              "the day bounds must stay in the outer where-clause: " + hql),
+          () -> assertTrue(hql.contains("outer_." + DATE_PROPERTY + " < :"
+              + UsageQueryComposer.PARAM_DAY_END), hql),
+          () -> assertTrue(hql.endsWith(
+              count.substring(count.indexOf(" and outer_.id in (select"))),
+              "the restriction must be wrapped by the same subquery as the counts: " + hql));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { BREAKOUT_FRAGMENT, BALANCED_ESCAPE_FRAGMENT })
+    void theInRangeFormRejectsWhatTheValidatorRejects(String malicious) {
+      assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.composeRowMatchInRange(ENTITY, DATE_PROPERTY, malicious));
+      assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.composeRowMatchInRange(ENTITY, "invoiceDate or 1=1", null));
+    }
+
+    /**
+     * ETP-5051 re-review W2: the count before a create leaves the created rows out, as a bound
+     * collection in the outer where-clause; otherwise it is the per-tenant count.
+     */
+    @Test
+    void theExcludingCountLeavesTheCreatedRowsOut() {
+      String hql = UsageQueryComposer.composePerTenantCountExcluding(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+      String plain = UsageQueryComposer.composePerTenantCount(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+
+      int excluded = hql.indexOf("outer_.id not in (:" + UsageQueryComposer.PARAM_EXCLUDED_IDS
+          + ")");
+      assertAll(
+          () -> assertTrue(excluded > 0 && excluded < hql.indexOf(SUBQUERY_OPENER),
+              "the exclusion must stay in the outer where-clause: " + hql),
+          () -> assertTrue(hql.replace(" and outer_.id not in (:"
+              + UsageQueryComposer.PARAM_EXCLUDED_IDS + ")", "").equals(plain),
+              "otherwise the same count: " + hql));
     }
   }
 }

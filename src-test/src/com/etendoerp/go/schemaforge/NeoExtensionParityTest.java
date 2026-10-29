@@ -75,6 +75,10 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * resolvers apart on purpose and asserts the gate catches it; without that case a green run here
  * would prove only that the mocks agree with each other.</p>
  *
+ * <p>ETP-5051 — {@link QuotaRefusal}: a NEO action whose created rows a plan quota refuses
+ * ({@link NeoQuotaCreateCheck.Refused}) answers the refusal envelope on every channel, whether the
+ * customization let the refusal escape or wrapped it, and the transaction is rolled back.</p>
+ *
  * @covers com.etendoerp.go.schemaforge.NeoExtensionDispatcher
  */
 @DisplayName("E4 — a customization reaches every channel identically (ETP-5415, D7)")
@@ -328,6 +332,111 @@ class NeoExtensionParityTest {
       assertFalse(viaMcp.get(0).reached(), "MCP did not see the bean");
       assertTrue(viaRest.get(0).reached(), "REST did");
       assertTrue(!viaMcp.equals(viaRest), "the mirror divergence must be caught too");
+    }
+  }
+
+  /**
+   * ETP-5051 — the dispatcher maps a {@link NeoQuotaCreateCheck.Refused} anywhere in a
+   * customization's failure to the CRUD gate's 403 {@code QUOTA_EXCEEDED}, identically on REST and
+   * on MCP's {@code etendo_action}: an action whose creates were refused must never surface as a
+   * generic failure on one channel and as a refusal on the other.
+   */
+  @Nested
+  @DisplayName("ETP-5051 — a quota refusal escaping an action answers the refusal on every channel")
+  class QuotaRefusal {
+
+    private MockedStatic<org.openbravo.dal.service.OBDal> obDal;
+    private org.openbravo.dal.service.OBDal dal;
+
+    @BeforeEach
+    void mockDal() {
+      dal = mock(org.openbravo.dal.service.OBDal.class);
+      obDal = mockStatic(org.openbravo.dal.service.OBDal.class);
+      obDal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+    }
+
+    @AfterEach
+    void closeDal() {
+      obDal.close();
+    }
+
+    private NeoQuotaCreateCheck.Refused refused() {
+      com.etendoerp.go.usage.quota.QuotaDefinition quota =
+          com.etendoerp.go.usage.quota.QuotaDefinition.builder().resourceId("RES-INV")
+              .resourceKey("CREATED_SALES_INVOICES").resourceName("Sales invoices")
+              .unitLabel("Inv").enforcementMode("block").includedQty(10L).build();
+      java.util.Date start = new java.util.Date(1_790_000_000_000L);
+      java.util.Date end = new java.util.Date(1_792_600_000_000L);
+      return new NeoQuotaCreateCheck.Refused(NeoQuotaWriteGate.refusalResponse(
+          new com.etendoerp.go.usage.quota.QuotaEvaluation(quota, "month",
+              com.etendoerp.go.usage.quota.QuotaPeriod.current(start, end, false,
+                  new java.util.Date(1_791_000_000_000L)), 10L,
+              com.etendoerp.go.usage.quota.QuotaVerdict.DENY)), null);
+    }
+
+    private NeoExtensionResult dispatchAction(NeoExtensionChannel channel) {
+      NeoExtensionTraceRecorder.beginRecording();
+      return NeoExtensionDispatcher.dispatch(request(NeoExtensionSurface.ACTION, channel));
+    }
+
+    private void assertRefusalEnvelope(NeoExtensionChannel channel, NeoExtensionResult result)
+        throws Exception {
+      assertNotNull(result.response(), channel + " must answer the refusal");
+      assertEquals(403, result.response().getHttpStatus(), channel.name());
+      org.codehaus.jettison.json.JSONObject error =
+          result.response().getBody().getJSONObject("error");
+      assertEquals("QUOTA_EXCEEDED", error.getString("code"), channel.name());
+      assertEquals("CREATED_SALES_INVOICES",
+          error.getJSONObject("quota").getString("resourceKey"), channel.name());
+      assertEquals(NeoExtensionOutcome.RESOLVED_AND_RAN, result.outcome(), channel.name());
+      assertEquals(NeoExtensionOutcome.RESOLVED_AND_RAN,
+          NeoExtensionTraceRecorder.lastRecorded().outcome(), channel.name());
+    }
+
+    @Test
+    @DisplayName("a Refused that escapes the customization")
+    void anEscapedRefusalIsAnsweredOnEveryChannel() throws Exception {
+      for (NeoExtensionChannel channel : ALL_CHANNELS) {
+        org.mockito.Mockito.reset(dal);
+        NeoQuotaCreateCheck.Refused refusal = refused();
+        org.mockito.Mockito.doThrow(refusal).when(customization)
+            .handle(org.mockito.ArgumentMatchers.any());
+
+        assertRefusalEnvelope(channel, dispatchAction(channel));
+        org.mockito.Mockito.verify(dal).rollbackAndClose();
+      }
+    }
+
+    @Test
+    @DisplayName("a Refused wrapped in the customization's own failure")
+    void aWrappedRefusalIsAnsweredOnEveryChannel() throws Exception {
+      for (NeoExtensionChannel channel : ALL_CHANNELS) {
+        org.mockito.Mockito.reset(dal);
+        RuntimeException wrapped = new IllegalStateException("handler failed",
+            new RuntimeException("service failed", refused()));
+        org.mockito.Mockito.doThrow(wrapped).when(customization)
+            .handle(org.mockito.ArgumentMatchers.any());
+
+        assertRefusalEnvelope(channel, dispatchAction(channel));
+        org.mockito.Mockito.verify(dal).rollbackAndClose();
+      }
+    }
+
+    @Test
+    @DisplayName("any other failure is still rethrown and traced FAILED")
+    void anyOtherFailureIsRethrown() {
+      IllegalStateException boom = new IllegalStateException("boom");
+      when(customization.handle(org.mockito.ArgumentMatchers.any())).thenThrow(boom);
+
+      for (NeoExtensionChannel channel : List.of(NeoExtensionChannel.REST_SINGLE,
+          NeoExtensionChannel.MCP)) {
+        IllegalStateException thrown = org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalStateException.class, () -> dispatchAction(channel));
+        org.junit.jupiter.api.Assertions.assertSame(boom, thrown);
+        assertEquals(NeoExtensionOutcome.FAILED,
+            NeoExtensionTraceRecorder.lastRecorded().outcome(), channel.name());
+      }
+      org.mockito.Mockito.verify(dal, org.mockito.Mockito.never()).rollbackAndClose();
     }
   }
 }

@@ -103,7 +103,7 @@
 <!--034B158AFF86416A9F22EF5C5FB9FA3E-->  <NAME><![CDATA[Included Qty]]></NAME>
 <!--034B158AFF86416A9F22EF5C5FB9FA3E-->  <PRINTNAME><![CDATA[Included Qty]]></PRINTNAME>
 <!--034B158AFF86416A9F22EF5C5FB9FA3E-->  <DESCRIPTION><![CDATA[Quantity of the resource included in the plan]]></DESCRIPTION>
-<!--034B158AFF86416A9F22EF5C5FB9FA3E-->  <HELP><![CDATA[Number of units of the billing resource the plan includes. It is mandatory on purpose and has no default: a quota row must always state its number.]]></HELP>
+<!--034B158AFF86416A9F22EF5C5FB9FA3E-->  <HELP><![CDATA[Number of units of the billing resource the plan includes per billing period of the plan: on a yearly plan it is consumed over the whole year, not per month. It is mandatory on purpose and has no default: a quota row must always state its number.]]></HELP>
 <!--034B158AFF86416A9F22EF5C5FB9FA3E-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--034B158AFF86416A9F22EF5C5FB9FA3E-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--034B158AFF86416A9F22EF5C5FB9FA3E--></AD_ELEMENT>
@@ -2175,6 +2175,20 @@
 <!--7E13FE2BFC9A4ACC9F76F4ABEEAD180F-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--7E13FE2BFC9A4ACC9F76F4ABEEAD180F--></AD_ELEMENT>
 
+<!--7E193FB3CD5540C5BC476510595D941C--><AD_ELEMENT>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <AD_ELEMENT_ID><![CDATA[7E193FB3CD5540C5BC476510595D941C]]></AD_ELEMENT_ID>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <COLUMNNAME><![CDATA[Cancel_At_Period_End]]></COLUMNNAME>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <NAME><![CDATA[Cancel At Period End]]></NAME>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <PRINTNAME><![CDATA[Cancel At Period End]]></PRINTNAME>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <DESCRIPTION><![CDATA[Whether the payment provider will cancel the subscription at the end of the current period]]></DESCRIPTION>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <HELP><![CDATA[Display-only: set from the provider subscription (cancel_at_period_end) by the lifecycle webhooks and the billing reconciliation. It never changes access, grace or the subscription status; while it is Y the environment list reports no renewal date.]]></HELP>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--7E193FB3CD5540C5BC476510595D941C-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--7E193FB3CD5540C5BC476510595D941C--></AD_ELEMENT>
+
 <!--7E2DD840193B49618EFE9E3736ABD4BA--><AD_ELEMENT>
 <!--7E2DD840193B49618EFE9E3736ABD4BA-->  <AD_ELEMENT_ID><![CDATA[7E2DD840193B49618EFE9E3736ABD4BA]]></AD_ELEMENT_ID>
 <!--7E2DD840193B49618EFE9E3736ABD4BA-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -3243,8 +3257,8 @@
 <!--AF30A45967AC40ABB7BE25FACEAA8851-->  <COLUMNNAME><![CDATA[Consumption_Source]]></COLUMNNAME>
 <!--AF30A45967AC40ABB7BE25FACEAA8851-->  <NAME><![CDATA[Consumption Source]]></NAME>
 <!--AF30A45967AC40ABB7BE25FACEAA8851-->  <PRINTNAME><![CDATA[Consumption Source]]></PRINTNAME>
-<!--AF30A45967AC40ABB7BE25FACEAA8851-->  <DESCRIPTION><![CDATA[Source the consumption is read from]]></DESCRIPTION>
-<!--AF30A45967AC40ABB7BE25FACEAA8851-->  <HELP><![CDATA[Qualifier of the counter the quota evaluator reads the consumed quantity from.]]></HELP>
+<!--AF30A45967AC40ABB7BE25FACEAA8851-->  <DESCRIPTION><![CDATA[Where the consumed quantity is read from]]></DESCRIPTION>
+<!--AF30A45967AC40ABB7BE25FACEAA8851-->  <HELP><![CDATA[Stored aggregate (the default when empty) reads the daily usage the usage job stores, so it lags by up to one job cadence. Live count counts at evaluation time with the same rule the job uses: exact, but one query per evaluation. How the days combine is set on the billing resource (Aggregation).]]></HELP>
 <!--AF30A45967AC40ABB7BE25FACEAA8851-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--AF30A45967AC40ABB7BE25FACEAA8851-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--AF30A45967AC40ABB7BE25FACEAA8851--></AD_ELEMENT>
@@ -4016,6 +4030,20 @@
 <!--DCDAF03508C34E1186929521857B7DB8-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--DCDAF03508C34E1186929521857B7DB8--></AD_ELEMENT>
 
+<!--DD339BCF8D9F4216AFE806EB5195E382--><AD_ELEMENT>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <AD_ELEMENT_ID><![CDATA[DD339BCF8D9F4216AFE806EB5195E382]]></AD_ELEMENT_ID>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <COLUMNNAME><![CDATA[Aggregation]]></COLUMNNAME>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <NAME><![CDATA[Aggregation]]></NAME>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <PRINTNAME><![CDATA[Aggregation]]></PRINTNAME>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <DESCRIPTION><![CDATA[How the daily usage values of the period combine into the consumed quantity]]></DESCRIPTION>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <HELP><![CDATA[How the daily usage values of a billing period combine into the quantity a quota compares against. Sum adds the days, for a flow such as posted invoices. Max takes the highest day and Last the most recent stored day, for a stock such as active users, where adding the days would count the same users once per day. A live declarative count is always one count over the whole period.]]></HELP>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--DD339BCF8D9F4216AFE806EB5195E382-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--DD339BCF8D9F4216AFE806EB5195E382--></AD_ELEMENT>
+
 <!--DF00885EEB8E4273AB222389669C933A--><AD_ELEMENT>
 <!--DF00885EEB8E4273AB222389669C933A-->  <AD_ELEMENT_ID><![CDATA[DF00885EEB8E4273AB222389669C933A]]></AD_ELEMENT_ID>
 <!--DF00885EEB8E4273AB222389669C933A-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -4052,7 +4080,7 @@
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <NAME><![CDATA[Enforcement Mode]]></NAME>
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <PRINTNAME><![CDATA[Enforcement Mode]]></PRINTNAME>
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <DESCRIPTION><![CDATA[What happens when the quota is exceeded]]></DESCRIPTION>
-<!--DFC9376CF7694C0E96B665B7498CBBF0-->  <HELP><![CDATA[warn only records the overage, block rejects the operation. Mandatory and without default so the policy is always an explicit decision.]]></HELP>
+<!--DFC9376CF7694C0E96B665B7498CBBF0-->  <HELP><![CDATA[off: not evaluated. warn: reported (environment entry, environment list, account page), never refused. block: reported, and a NEO create of the resource's counted entity that would exceed the quota is refused; other operations and Classic UI creates are not refused (see docs/plan-quotas.md). Mandatory and without default so the policy is always an explicit decision.]]></HELP>
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--DFC9376CF7694C0E96B665B7498CBBF0--></AD_ELEMENT>

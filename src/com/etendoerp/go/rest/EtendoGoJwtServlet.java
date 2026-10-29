@@ -95,6 +95,7 @@ import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.PlanNotAvailableException;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.StripeJson;
@@ -103,10 +104,8 @@ import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
-import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
-import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -150,6 +149,13 @@ import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.usage.IsolatedReader;
+import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
+import com.etendoerp.go.usage.quota.QuotaDefinition;
+import com.etendoerp.go.usage.quota.QuotaEvaluation;
+import com.etendoerp.go.usage.quota.QuotaEvaluator;
+import com.etendoerp.go.usage.quota.QuotaItemJson;
+import com.etendoerp.go.usage.quota.TenantQuotas;
 import com.etendoerp.go.usageevents.SessionLoginUsage;
 import com.etendoerp.go.supportaccess.SupportAccessException;
 import com.etendoerp.go.supportaccess.SupportAccessGuard;
@@ -493,6 +499,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   SubscriptionModelSwitch subscriptionModelSwitch = new SubscriptionModelSwitch();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   PlanCatalogService planCatalogService = new PlanCatalogService();
+  /** ETP-5051 — the one quota evaluator; package-visible for tests. */
+  QuotaEvaluator quotaEvaluator = QuotaEvaluator.forReports();
+  /**
+   * ETP-5051 — runs each quota report as one read in its own session, off the request's
+   * transaction; package-visible so a test runs it inline.
+   */
+  IsolatedReader quotaReads = IsolatedReader.DAL;
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
@@ -1536,17 +1549,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Returns the authenticated account's live subscription detail plus stored grace state.
+   * Returns the live subscription detail plus stored grace state of the subscription the account
+   * page shows: the entered environment's own one, else the account's newest
+   * ({@link #findShownSubscription}).
    *
    * <p>Only the provider call maps an {@link IllegalStateException} to 503: that is where the
    * Stripe "not configured" condition is raised. The same exception from the stored-state lookup
-   * is a real server fault and reaches {@code runWithPlatformAccount}'s 500 path.
+   * is a real server fault and reaches {@code runWithPlatformContext}'s 500 path.
    */
   private void handleBillingSubscription(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    runWithPlatformAccount(request, response, "billing-subscription", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.findSubscriptionForAccount(account.getId(),
-          account.getEmail());
+    runWithPlatformContext(request, response, "billing-subscription", authenticated -> {
+      CheckoutRequest purchase = findShownSubscription(authenticated);
       if (purchase == null) {
         JSONObject result = new JSONObject();
         result.put("hasSubscription", false);
@@ -1586,14 +1600,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Creates a portal session using only the authenticated account's stored customer id.
    *
-   * <p>The purchase is resolved exactly as the Subscription page resolves it, so the portal always
-   * opens for the customer of the subscription the page shows.
+   * <p>The purchase is resolved exactly as the Subscription page resolves it
+   * ({@link #findShownSubscription}), so the portal always opens for the customer of the
+   * subscription the page shows. ETP-5051 (O-1) — every environment has its own Stripe customer,
+   * so resolving the account's newest purchase here while the page shows the entered one would let
+   * a user look at SPRING7 and change SPRING8.
+   *
+   * <p>ETP-5051 (O-1b) — "Mis empresas" manages each row's own environment, whatever environment
+   * the session is in, so the optional JSON body {@code {"clientId": "<AD_CLIENT_ID>"}} names it
+   * ({@link #findPortalSubscription}). Ownership stays the query's: a client this account did not
+   * buy matches nothing and answers {@code 404 NO_SUBSCRIPTION}. No body, an empty body or no
+   * {@code clientId} keeps the rule above; a body that is not a JSON object answers 400.
    */
   private void handleBillingPortal(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithPlatformAccount(request, response, "billing-portal", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.findSubscriptionForAccount(account.getId(),
-          account.getEmail());
+    runWithPlatformContext(request, response, "billing-portal", authenticated -> {
+      String requestedClientId;
+      try {
+        requestedClientId = requestedPortalClientId(request);
+      } catch (JSONException e) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+        return;
+      }
+      CheckoutRequest purchase = findPortalSubscription(authenticated, requestedClientId);
       if (purchase == null || StringUtils.isBlank(purchase.getStripeCustomer())) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "NO_SUBSCRIPTION",
             "No subscription for this account", "No subscription for this account");
@@ -1616,6 +1645,71 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put("url", session.optString("url", ""));
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the {@code clientId} of the portal's optional JSON body, or {@code null}
+   * when there is no body, the body is blank, or it names no client (an absent key, a JSON null,
+   * a blank string or {@code "0"}, the System client, all count as none).
+   *
+   * @throws JSONException when a non-blank body is not a JSON object
+   */
+  private String requestedPortalClientId(HttpServletRequest request)
+      throws IOException, JSONException {
+    String raw = request.getReader() == null ? null : readRawBody(request);
+    if (StringUtils.isBlank(raw)) {
+      return null;
+    }
+    JSONObject body = BoundedJsonParser.parseObject(raw);
+    // A JSON null is an absent key: optString would turn it into the string "null".
+    if (!body.has(FIELD_CLIENT_ID) || body.isNull(FIELD_CLIENT_ID)) {
+      return null;
+    }
+    String clientId = StringUtils.trimToNull(body.optString(FIELD_CLIENT_ID, ""));
+    return ZERO_ID.equals(clientId) ? null : clientId;
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the purchase the portal opens: the named environment's own one when the
+   * caller names it (a "Mis empresas" row), else the one the account page shows
+   * ({@link #findShownSubscription}). Both lookups keep the account id and email in the query.
+   */
+  private CheckoutRequest findPortalSubscription(AuthenticatedAccount authenticated,
+      String requestedClientId) {
+    if (requestedClientId == null) {
+      return findShownSubscription(authenticated);
+    }
+    Account account = authenticated.account;
+    return checkoutRequestStore.findSubscriptionForAccountClient(account.getId(),
+        account.getEmail(), requestedClientId);
+  }
+
+  /**
+   * ETP-5051 (O-1) — the one purchase the account page shows and acts on, for both
+   * {@code GET /billing/subscription} and the Customer Portal.
+   *
+   * <ul>
+   *   <li>Session entered into an environment ({@code POST /session/environment} wrote its
+   *       client on the cookie session): that environment's own subscription, so plan, quotas
+   *       and their consumption, grace, price and {@code accessEnforced} all describe the
+   *       environment the user is in. When the account has no billable purchase for it (a demo,
+   *       or an environment it was only invited into), the answer is "no subscription" — never
+   *       another environment's subscription, which is the mismatch this fixes.</li>
+   *   <li>Account-level session (no environment entered) or the legacy platform-token bearer,
+   *       which carries no environment: the account's newest subscription, as before.</li>
+   * </ul>
+   *
+   * <p>Ownership is the query's: both lookups carry the account id and email, so a client id that
+   * is not one of the account's own environments resolves to nothing.
+   */
+  private CheckoutRequest findShownSubscription(AuthenticatedAccount authenticated) {
+    Account account = authenticated.account;
+    String enteredClientId = enteredSessionClientId(authenticated);
+    if (enteredClientId == null || ZERO_ID.equals(enteredClientId)) {
+      return checkoutRequestStore.findSubscriptionForAccount(account.getId(), account.getEmail());
+    }
+    return checkoutRequestStore.findSubscriptionForAccountClient(account.getId(),
+        account.getEmail(), enteredClientId);
   }
 
   private JSONObject buildBillingSubscriptionJson(
@@ -1645,6 +1739,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
     // renewal date on that company's row. Additive: existing consumers ignore it.
     result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
+    // ETP-5051 (§4c) — the environment-access kill switch for this tenant, from the same source as
+    // accessEnforced on GET /environments: false while enforcement is switched off for it, so the
+    // grace countdown drops its "before access is paused". With no tenant, enforcing (true).
+    result.put("accessEnforced", clientId == null
+        || !EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId));
     putSubscriptionPlan(result, clientId);
     return result;
   }
@@ -1660,15 +1759,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * which would name a plan catalog row that does not exist. With a plan, an empty
    * {@code planQuotas} means the plan has no quota rows, which is <em>unlimited</em>
    * ({@code open-and-notable-topics.md} §5.1).
+   *
+   * <p>ETP-5051 — each item is the full {@code QuotaItem} ({@code QuotaItemJson}): the consumption
+   * over the subscription's current billing period is measured for every active row, mode
+   * {@code off} included (whose verdict stays null), by the one {@code QuotaEvaluator}. A closed or
+   * periodless row has no current period: {@code consumed}, {@code verdict} and the period bounds
+   * are null. A failed measurement never fails the page: the items are sent without it.
    */
   private void putSubscriptionPlan(JSONObject result, String clientId) throws JSONException {
-    Plan plan = clientId == null ? null
-        : subscriptionService.findLatest(clientId).map(Subscription::getPlan).orElse(null);
+    Subscription subscription = clientId == null ? null
+        : subscriptionService.findLatest(clientId).orElse(null);
+    Plan plan = subscription == null ? null : subscription.getPlan();
     JSONArray quotas = new JSONArray();
     if (plan != null) {
-      for (PlanQuota quota : planCatalogService.listActiveQuotas(plan)) {
-        quotas.put(buildPlanQuotaJson(quota, plan));
-      }
+      TenantQuotas tenant = TenantQuotas.of(clientId, subscription,
+          planCatalogService.listActiveQuotas(plan));
+      quotas = QuotaItemJson.ofAll(evaluateQuotas(tenant));
     }
     result.put(FIELD_PLAN_KEY, plan == null ? JSONObject.NULL : plan.getSearchKey());
     result.put("planName",
@@ -1677,26 +1783,44 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * One included quota, informational only: what the plan includes, not what has been used.
-   * {@code period} is the plan's billing interval, which is the quota's consumption window
-   * ({@code open-and-notable-topics.md} §5.5, §5.8): a quota on a yearly plan is a yearly quota.
+   * Measures the account page's quotas; on a failed measurement, answers the same rows unmeasured
+   * rather than failing the page.
    */
-  private static JSONObject buildPlanQuotaJson(PlanQuota quota, Plan plan) throws JSONException {
-    BillingResource resource = quota.getBillingResource();
-    JSONObject item = new JSONObject();
-    item.put("resourceKey", resource == null ? JSONObject.NULL : resource.getSearchKey());
-    item.put("resourceName", resource == null ? JSONObject.NULL
-        : StringUtils.defaultString(resource.getName()));
-    item.put("unitLabel", resource == null || resource.getUnitLabel() == null ? JSONObject.NULL
-        : resource.getUnitLabel());
-    item.put("includedQty", quota.getIncludedQty() == null ? JSONObject.NULL
-        : quota.getIncludedQty());
-    item.put("enforcementMode", StringUtils.defaultString(quota.getEnforcementMode()));
-    item.put("warningThreshold", quota.getWarningThreshold() == null ? JSONObject.NULL
-        : quota.getWarningThreshold());
-    item.put("period", StringUtils.isBlank(plan.getBillingInterval()) ? JSONObject.NULL
-        : plan.getBillingInterval());
-    return item;
+  private List<QuotaEvaluation> evaluateQuotas(TenantQuotas tenant) {
+    try {
+      return quotaReads.call(() -> quotaEvaluator.evaluate(tenant, QuotaEvaluator.Scope.ACCOUNT));
+    } catch (RuntimeException e) {
+      log.error("Could not measure the quotas of tenant {}; sending them unmeasured",
+          tenant.getClientId(), e);
+      List<QuotaEvaluation> unmeasured = new ArrayList<>();
+      for (QuotaDefinition quota : tenant.getQuotas()) {
+        unmeasured.add(new QuotaEvaluation(quota, tenant.getPlanInterval(), null, null, null));
+      }
+      return unmeasured;
+    }
+  }
+
+  /**
+   * ETP-5051 — the quotas to report on entering an environment (contract §2): only the items whose
+   * verdict is WARN or DENY. Report-only: entering is never refused because of a quota, and a
+   * failed evaluation reports nothing. A tenant with no quota row costs no consumption query.
+   */
+  private JSONArray loginQuotas(String clientId) {
+    try {
+      List<QuotaEvaluation> reportable = new ArrayList<>();
+      List<QuotaEvaluation> evaluations = quotaReads.call(
+          () -> quotaEvaluator.evaluateTenant(clientId, QuotaEvaluator.Scope.ENFORCEMENT));
+      for (QuotaEvaluation evaluation : evaluations) {
+        if (evaluation.isReportable()) {
+          reportable.add(evaluation);
+        }
+      }
+      return QuotaItemJson.ofAll(reportable);
+    } catch (RuntimeException | JSONException e) {
+      log.warn("Could not evaluate the quotas of tenant {} on environment entry; reporting none",
+          clientId, e);
+      return new JSONArray();
+    }
   }
 
   /** Returns one account-scoped purchase projection, with foreign IDs kept indistinguishable. */
@@ -3248,23 +3372,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Resolve the platform account for a billing / checkout / upgrade endpoint. Always enters admin
-   * mode (so callers can restore it in their finally block) and writes the error response,
-   * returning null, when the request is not authenticated.
-   *
-   * <p>ETP-5455 — the account surface's single resolver under
-   * {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}. It used to carry its own Bearer branch,
-   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
-   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
-   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
-   */
-  private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    AuthenticatedAccount authenticated =
-        resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
-    return authenticated == null ? null : authenticated.account;
-  }
-
-  /**
    * Whether the request carries any credential at all (a session cookie or a bearer header),
    * without touching {@code OBContext} or the DB — lets callers fail fast with 401 for a fully
    * unauthenticated request before ever entering admin mode.
@@ -3393,10 +3500,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void runWithPlatformAccount(HttpServletRequest request,
       HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
       throws IOException {
+    runWithPlatformContext(request, response, actionLabel,
+        authenticated -> action.execute(authenticated.account));
+  }
+
+  /**
+   * {@link #runWithPlatformAccount}, but the action also sees the cookie session, if any — for the
+   * billing endpoints that must know which environment the session has entered (ETP-5051 O-1).
+   *
+   * <p>Resolves the platform account for a billing / checkout / upgrade endpoint through
+   * {@link #resolveAccount} under {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}, which
+   * always enters admin mode (restored in the finally block) and writes the error response itself
+   * when the request is not authenticated. ETP-5455 — this used to carry its own Bearer branch,
+   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
+   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
+   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
+   */
+  private void runWithPlatformContext(HttpServletRequest request,
+      HttpServletResponse response, String actionLabel, AuthenticatedContextAction action)
+      throws IOException {
     try {
-      Account account = resolvePlatformAccount(request, response);
-      if (account == null) return;
-      action.execute(account);
+      AuthenticatedAccount authenticated =
+          resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
+      if (authenticated == null) return;
+      action.execute(authenticated);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges(actionLabel, e, log);
       log.error("Platform request failed: {}", actionLabel, e);
@@ -3856,10 +3983,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         demoClientId != null && transfer != null && transfer.optBoolean(FIELD_CONTACTS, false));
   }
 
+  /**
+   * The environment the cookie session has entered: the client {@code POST /session/environment}
+   * wrote on the session record, or {@code null} for an account-level session and for a request
+   * authenticated without a cookie session. A pure read of server-written state; ownership is the
+   * caller's to check.
+   */
+  private static String enteredSessionClientId(AuthenticatedAccount authenticated) {
+    return authenticated.sessionRecord == null ? null
+        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
+  }
+
   private String currentSessionClientId(HttpServletRequest request, HttpServletResponse response,
       AuthenticatedAccount authenticated) throws IOException {
-    String clientId = authenticated.sessionRecord == null ? null
-        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
+    String clientId = enteredSessionClientId(authenticated);
     if (authenticated.sessionRecord == null) {
       DecodedJWT jwt = bearerTenantClaims(request);
       if (jwt != null) clientId = StringUtils.trimToNull(
@@ -4467,8 +4604,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // retired preference about the tenants that have no subscription row yet. Exactly one extra
       // query, only when at least one tenant is missing, and it keeps this list in agreement with
       // TenantPlanService#resolvePlan. Delete the extra argument in Phase F.
+      Map<String, Subscription> subscriptions =
+          subscriptionService.findLatestForClients(environmentClientIds);
       EnvironmentPlanCache planCache = EnvironmentPlanCache.of(environmentClientIds,
-          subscriptionService.findLatestForClients(environmentClientIds));
+          subscriptions);
+      // ETP-5051 (§4b): every environment carries its WARN/DENY quotas. One batched read of the
+      // listed plans' enforced quota rows, none without a plan; never fails the list.
+      EnvironmentQuotaReport quotaReport = EtendoGoJwtDalHelper.quotaReport(subscriptions);
       // The first environment is entered automatically after account login. Prefer the paid
       // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
       // an account owns both plans. The client repeats this ordering for older backends.
@@ -4480,7 +4622,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Map<String, Date> unfinishedPaidClients = findUnfinishedPaidClients(account);
       for (User environmentUser : environmentUsers) {
         if (!isUnfinishedPaidEnvironment(environmentUser.getClient(), unfinishedPaidClients)) {
-          addEnvironmentEntries(envArray, environmentUser, planCache, withDetails);
+          addEnvironmentEntries(envArray, environmentUser, planCache, quotaReport, withDetails);
         }
       }
 
@@ -4522,8 +4664,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** One entry per business organization of the user's client, or one without when it has none. */
   private static void addEnvironmentEntries(org.codehaus.jettison.json.JSONArray envArray,
-      User environmentUser, EnvironmentPlanCache planCache, boolean withDetails)
-      throws JSONException {
+      User environmentUser, EnvironmentPlanCache planCache, EnvironmentQuotaReport quotaReport,
+      boolean withDetails) throws JSONException {
     Client client = environmentUser.getClient();
     JSONObject details = withDetails
         ? EnvironmentDetails.resolve(client.getId(), environmentUser,
@@ -4533,13 +4675,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
     if (organizations.isEmpty()) {
       envArray.put(withEnvironmentDetails(
-          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache),
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache,
+              quotaReport),
           details));
       return;
     }
     for (Organization organization : organizations) {
       envArray.put(withEnvironmentDetails(EtendoGoJwtDalHelper.buildEnvironmentJson(client,
-          organization, environmentUser, planCache), details));
+          organization, environmentUser, planCache, quotaReport), details));
     }
   }
 
@@ -5093,7 +5236,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Before completeCommittedOnboarding and the sample data, which needs a demo's open periods.
     applyInitialPeriodStateBestEffort(clientId);
     // ETP-5791: on both paths, after the commit, so the flag is read when the tenant is handed over.
-    applyDefaultContactCategoryBestEffort(clientId);
+    applyDefaultContactCategoryBestEffort(clientId, accountEmail);
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
     if (paidUpgrade) {
@@ -5208,10 +5351,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * dataset's "Cliente" default.
    *
    * @param clientId the tenant just committed
+   * @param accountEmail the {@code ETGO_ACCOUNT} email of the account receiving the tenant — the
+   *     flag is per account, and this step runs as System
    */
-  void applyDefaultContactCategoryBestEffort(String clientId) {
+  void applyDefaultContactCategoryBestEffort(String clientId, String accountEmail) {
     try {
-      if (onboardingDefaultContactCategoryService.applyIfEnabled(clientId)) {
+      if (onboardingDefaultContactCategoryService.applyIfEnabled(clientId, accountEmail)) {
         EtendoGoDalHelper.commitDalChanges("default contact category", log);
       }
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
@@ -6935,6 +7080,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (accessDecision != null && accessDecision != EnvironmentAccessPolicy.Decision.ALLOWED) {
         result.put(FIELD_ACCESS_DECISION, accessDecision.name());
       }
+      // ETP-5051 — quotas at WARN or DENY, report-only like accessDecision: never refuses entry.
+      result.put("quotas", loginQuotas(entered.getRecord().getCtxClientId()));
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordCookieEnvironmentLogin(entered.getRecord(), startNanos);
       retryInitialPeriodStateOnLogin(entered.getRecord().getCtxClientId());

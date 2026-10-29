@@ -96,6 +96,7 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * even after a corresponding receipt is completed.
  *
  * @covers com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.OrderInvoiceListSupport
  */
 public class CreatePurchaseInvoiceHandlerTest {
@@ -1961,6 +1962,46 @@ public class CreatePurchaseInvoiceHandlerTest {
         assertEquals("CO", data.getString("documentStatus"));
         verify(completion.processInvoiceUtil, times(1)).process(
             eq("ap-inv-1"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
+      }
+    }
+  }
+
+  /**
+   * ETP-5051 — the generated purchase invoice is checked against the plan quotas BEFORE the
+   * completion commits it: at a {@code block} limit the action answers 403 {@code QUOTA_EXCEEDED},
+   * the generation is rolled back and {@code ProcessInvoiceUtil} never runs.
+   */
+  @Test
+  public void handle_purchaseOrderOverABlockQuota_answers403AndCompletesNothing()
+      throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      Invoice created = mock(Invoice.class);
+      when(created.getId()).thenReturn("ap-inv-quota");
+      CompletingHandler handler = new CompletingHandler();
+      handler.createdInvoice = created;
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .endpointType(NeoEndpointType.ACTION)
+            .httpMethod("POST")
+            .fieldName("createPurchaseInvoice")
+            .specName("purchase-order")
+            .recordId("po-quota")
+            .build());
+
+        QuotaRefusalTestSupport.assertQuotaExceeded(response);
+        quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(created));
+        verify(dal).rollbackAndClose();
+        verify(completion.processInvoiceUtil, never()).process(any(), any(), any(), any(), any(),
+            any(), any());
       }
     }
   }
