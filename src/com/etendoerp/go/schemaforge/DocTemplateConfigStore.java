@@ -44,7 +44,7 @@ class DocTemplateConfigStore {
 
   private static final String P_CLIENT = "client.id";
   private static final String P_ORG = "organization.id";
-  private static final String P_DOC_TYPE = "templateDocType";
+  private static final String P_DOC_TYPE = "templateDocumentType";
   private static final String P_VARIANT = "templateVariant";
   private static final String P_LOGO = "templateLogo";
   private static final String P_FOOTER = "templateFooter";
