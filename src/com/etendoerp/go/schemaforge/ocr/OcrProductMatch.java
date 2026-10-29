@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge.ocr;
 import java.text.Normalizer;
 import java.util.List;
 import java.util.Locale;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import com.etendoerp.go.schemaforge.ocr.OcrLookups.Candidate;
@@ -153,16 +152,30 @@ final class OcrProductMatch {
   }
 
   /**
-   * Whitespace set of ECMAScript {@code String.prototype.trim}, spelled out because neither
-   * {@link String#trim()} (control characters) nor {@link String#strip()} (keeps NBSP) matches it.
+   * Whether the character is in the whitespace set of ECMAScript {@code String.prototype.trim},
+   * spelled out because neither {@link String#trim()} (control characters) nor
+   * {@link String#strip()} (keeps NBSP) matches it.
    */
-  private static final String EDGE_SPACE = "[\\t\\n\\u000B\\f\\r \\u00A0\\u1680\\u2000-\\u200A"
-      + "\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]+";
-  private static final Pattern EDGE_SPACE_PATTERN = Pattern.compile(
-      "(?:^" + EDGE_SPACE + ")|(?:" + EDGE_SPACE + "$)");
+  private static boolean isEdgeSpace(char c) {
+    return c == '\t' || c == '\n' || c == '\u000B' || c == '\f' || c == '\r' || c == ' '
+        || c == '\u00A0' || c == '\u1680' || (c >= '\u2000' && c <= '\u200A') || c == '\u2028'
+        || c == '\u2029' || c == '\u202F' || c == '\u205F' || c == '\u3000' || c == '\uFEFF';
+  }
+
+  private static String edgeStrip(String value) {
+    int start = 0;
+    int end = value.length();
+    while (start < end && isEdgeSpace(value.charAt(start))) {
+      start++;
+    }
+    while (end > start && isEdgeSpace(value.charAt(end - 1))) {
+      end--;
+    }
+    return value.substring(start, end);
+  }
 
   /**
-   * Normalizer of the exact-name step (ETP-5654): NFC, trim (the explicit set above, NBSP
+   * Normalizer of the exact-name step (ETP-5654): NFC, trim ({@link #isEdgeSpace}, NBSP
    * included), lowercase, then diacritics stripped (NFD + removal of combining marks), so "Arnés"
    * equals "Arnes" like "60M" equals "60m". The n-tilde is kept distinct ("año" is not "ano") by
    * protecting it while the marks are stripped. The fold also applies to an identical candidate:
@@ -177,7 +190,7 @@ final class OcrProductMatch {
       return "";
     }
     String composed = Normalizer.normalize(value, Normalizer.Form.NFC);
-    String folded = EDGE_SPACE_PATTERN.matcher(composed).replaceAll("")
+    String folded = edgeStrip(composed)
         .toLowerCase(Locale.ROOT).replace('ñ', '\u0001');
     return Normalizer.normalize(folded, Normalizer.Form.NFD).replaceAll("\\p{M}", "")
         .replace('\u0001', 'ñ');
