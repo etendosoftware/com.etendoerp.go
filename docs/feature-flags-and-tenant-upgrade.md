@@ -594,7 +594,9 @@ and `NeoFiscalModelsCatalogService` its only caller:
 
 The SPA never evaluates the flag (no key in `flag-keys.js`): every 390 surface already shows only
 *active* models, and the catalog drawer also hides the models listed in `_unavailable`
-(`fiscal-models/catalogAvailability.js` in `etendo_schema_forge`).
+(`fiscal-models/catalogAvailability.js` in `etendo_schema_forge`). With no answer to react to (the
+read still in flight, or failed) the drawer hides the 390 too — fail hidden, mirroring this
+flag's default; any answer replaces that.
 
 **A visual gate, not authorization — the endpoints are not refused.** `/sws/neo/fiscal390/*`, the
 `fiscal303/declarations` CRUD for model 390 and the legal-representative entity keep answering with
