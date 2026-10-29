@@ -66,6 +66,8 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  * Also the {@code structuredAddressForSepa} capability (ETP-5806) — mirrors
  * {@link GoFeatureFlags#FLAG_STRUCTURED_ADDRESS_FOR_SEPA} identically in both branches, stubbed
  * directly so the assertions are independent of the local {@code Openbravo.properties} toggle.
+ *
+ * @covers com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFWindowAccessMapTest {

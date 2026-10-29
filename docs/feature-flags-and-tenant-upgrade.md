@@ -214,12 +214,12 @@ implicitly inside the shared evaluator would be wrong for the second group:
 
 | Call site | Gates | Where the email comes from |
 |---|---|---|
-| `SFWindowAccessMap` | the capability signal | `GoAccountResolver.resolveCurrentAccountEmail()`, resolved **before** the webhook's own `OBContext.setAdminMode()` |
-| `ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler` | NEO read/write (validation, persistence, response shape) | `GoAccountResolver.resolveCurrentAccountEmail()`, once per request at the handler's entry point, then threaded through its own helpers |
-| `AddressVirtualSelectorPolicy`, `McpSchemaFieldBuilder` | MCP schema exposure | `GoAccountResolver.resolveCurrentAccountEmail()` (both are request-scoped — nothing is cached across accounts) |
+| `SFWindowAccessMap` | the capability signal | `GoAccountResolver.currentAccountEmail()`, resolved **before** the webhook's own `OBContext.setAdminMode()` |
+| `ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler` | NEO read/write (validation, persistence, response shape) | `GoAccountResolver.currentAccountEmail()`, once per request at the handler's entry point, then threaded through its own helpers |
+| `AddressVirtualSelectorPolicy`, `McpSchemaFieldBuilder` | MCP schema exposure | `GoAccountResolver.currentAccountEmail()` (both are request-scoped — nothing is cached across accounts) |
 | `EtendoGoJwtServlet#buildSessionCapabilities` | the capability signal in the onboarding bootstrap | the restored session's own account |
 | `EtendoGoJwtServlet#validateStructuredAddressBlock` / `…Length` | onboarding validation | passed down from `prepareOnboarding`, which already resolved the account |
-| `OnboardingOrgInfoService#createLocation` | onboarding **persistence** | carried on `OnboardingProvisioningChain.OrgInfoInput` from the same request — provisioning runs under an admin execution context, so there is no caller identity left to recover |
+| `OnboardingOrgInfoService#createLocation` | onboarding **persistence** | carried on `OrgInfoInput` from the same request — provisioning runs under an admin execution context, so there is no caller identity left to recover |
 
 `StructuredAddressComposer.isEnabled(String accountEmail)` is the one evaluator they all share and
 it deliberately has **no account-less overload**. That is what keeps the ends honest: the gap this

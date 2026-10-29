@@ -1997,10 +1997,10 @@ class ContactsLocationAddressHandlerTest {
     Method method = ContactsLocationAddressHandler.class
         .getDeclaredMethod("applyGeoLocFields", JSONObject.class, Location.class, boolean.class);
     method.setAccessible(true);
+    // ETP-5806 — the per-account flag is resolved at the handler entry points and threaded in as
+    // the third argument. The region and address cases below are flag-independent, so this helper
+    // always exercises the enabled path, with the structured fields simply absent from the bodies.
     try {
-      // ETP-5806 — the flag is resolved per account by handle()'s entry points and threaded in;
-      // these region/address cases are flag-independent, so the enabled value is passed as true
-      // (the richer path) and the structured fields are simply absent from the bodies.
       method.invoke(null, body, geoLoc, true);
     } catch (InvocationTargetException e) {
       Throwable cause = e.getCause();
