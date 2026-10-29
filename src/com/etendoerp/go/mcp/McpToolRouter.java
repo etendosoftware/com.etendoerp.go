@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -57,6 +58,8 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
@@ -258,8 +261,7 @@ public class McpToolRouter {
             return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
             // ETP-5945 (in ETP-5852): every action result also carries success + message.
-            return McpActionEnvelope.normalize(
-                McpActionBatchUnpost.runSingle(specName, arguments, this::handleAction));
+            return McpActionEnvelope.normalize(handleAction(specName, arguments));
           case McpConstants.TOOL_NEO_ACTION_BATCH:
             return McpActionBatch.handle(specName, arguments, this::handleAction);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
@@ -2016,6 +2018,7 @@ public class McpToolRouter {
 
   // ── etendo_action ────────────────────────────────────────────────────────
 
+
   /**
    * Fire a button action on a record and return the structured process result.
    * <p>
@@ -2045,12 +2048,18 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    // ETP-5684: posting needs the showAccountingFields capability (same check as REST), judged on
+    // the typed name before anything else can answer, so no other refusal reveals the record.
+    NeoResponse postingRefusal =
+        NeoAccountingAccessPolicy.refusalForPostingAction(sfEntity, actionName);
+    if (postingRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(postingRefusal);
+    }
     // ETP-5558: judged before the customization runs — an action MCP_CONFIG.actions hides or
     // redirects is refused, and a declared one is validated against its contract (422 naming the
     // wrong key). The contract also says which HTTP method the handler answers it on.
     NeoActionContract declared = McpDeclaredActions.precheck(sfEntity, actionName, parameters);
-    String httpMethod = declared != null ? declared.getHttpMethod()
-        : NeoActionContract.DEFAULT_HTTP_METHOD;
+    String httpMethod = NeoActionContract.DEFAULT_HTTP_METHOD;
     // ETP-5587: a contract that describes an AD button is run under its declared name, whichever
     // spelling the agent typed — the customization discriminates on that name.
     // ETP-5710: any other AD button reaches the customization under its field name — what the
@@ -2059,18 +2068,20 @@ public class McpToolRouter {
     // still fired under the typed name, which findButtonColumn resolves either way.
     String firedName = actionName;
     if (declared != null) {
+      httpMethod = declared.getHttpMethod();
       actionName = declared.getName();
       firedName = actionName;
     } else {
       actionName = McpDeclaredActions.customizationNameOf(sfEntity, actionName);
     }
+    // ETP-5684: judged again on the resolved name, so a contract alias for post/unpost is refused too.
+    postingRefusal = NeoAccountingAccessPolicy.refusalForPostingAction(sfEntity, actionName);
+    if (postingRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(postingRefusal);
+    }
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
-    NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
-    if (foreignRecord == null) {
-      // ETP-5715: a document action on an id that is no row of the table answers the same 404.
-      foreignRecord = NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
-    }
+    NeoResponse foreignRecord = McpHookExecutor.actionRecordRefusal(sfEntity, recordId, firedName);
     if (foreignRecord != null) {
       return McpHookExecutor.neoResponseToMcpResult(foreignRecord);
     }
@@ -2107,8 +2118,12 @@ public class McpToolRouter {
       return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
     }
 
-    NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
-        sfEntity, recordId, firedName, actionParams);
+    NeoResponse neoResponse = McpHookExecutor.executeButtonAction(hookCtx, sfEntity, recordId,
+        firedName, actionParams);
+    // ETP-5684: when the customization un-posted the record before reactivating it, say so — on
+    // the error path too, which never reaches the post-hook below.
+    hookCtx.setPreviousResult(neoResponse);
+    ReactivationUnpost.notePartial(hookCtx);
 
     JSONObject actionResult = McpToolRouterSupport.mapNeoResponseToActionResult(neoResponse);
 

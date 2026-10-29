@@ -41,7 +41,9 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
 /**
  * Unit tests for {@link NeoHookDispatcher}.
@@ -63,6 +65,8 @@ class NeoHookDispatcherTest {
   private NeoHookDispatcher dispatcher;
   private MockedStatic<OBContext> obContextStatic;
   private MockedStatic<NeoAuditTokenRefresh> auditTokenRefreshStatic;
+  /** ETP-5684: the accounting gate resolves the action's AD button; no button here by default. */
+  private MockedStatic<NeoButtonActionHelper> buttonHelperStatic;
 
   private SFSpec spec;
   private NeoResponse defaultResponse;
@@ -77,6 +81,7 @@ class NeoHookDispatcherTest {
     obContextStatic = Mockito.mockStatic(OBContext.class);
     auditTokenRefreshStatic = Mockito.mockStatic(NeoAuditTokenRefresh.class);
     servletSupportStatic = Mockito.mockStatic(NeoServletSupport.class);
+    buttonHelperStatic = Mockito.mockStatic(NeoButtonActionHelper.class);
     OBContext mockOBContext = mock(OBContext.class);
     obContextStatic.when(OBContext::getOBContext).thenReturn(mockOBContext);
 
@@ -102,6 +107,9 @@ class NeoHookDispatcherTest {
     }
     if (servletSupportStatic != null) {
       servletSupportStatic.close();
+    }
+    if (buttonHelperStatic != null) {
+      buttonHelperStatic.close();
     }
   }
 
@@ -404,6 +412,29 @@ class NeoHookDispatcherTest {
       assertSame(notFound, result);
       verify(handler, never()).handle(Mockito.any(NeoContext.class));
       assertEquals(false, defaultActionCalled.get(), "the AD button must not run either");
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5684: a posting action without the capability is a 403 before the guard and the customization")
+  void postingActionWithoutCapabilityIsRefusedFirst() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    NeoHandler handler = customizedHeader(entity);
+    NeoResponse forbidden = NeoResponse.error(403, "Access denied to accounting");
+
+    try (MockedStatic<NeoAccountingAccessPolicy> policy =
+        Mockito.mockStatic(NeoAccountingAccessPolicy.class);
+        MockedStatic<NeoActionRecordGuard> guard = Mockito.mockStatic(NeoActionRecordGuard.class)) {
+      policy.when(() -> NeoAccountingAccessPolicy.refusalForPostingAction(entity, "unpost"))
+          .thenReturn(forbidden);
+
+      NeoResponse result = dispatcher.dispatchWithHooks(spec, "Header", NeoEndpointType.ACTION,
+          "unpost", "POST", paramsFor("own-1"), defaultAction);
+
+      assertSame(forbidden, result);
+      guard.verify(() -> NeoActionRecordGuard.refusalFor(Mockito.any(), Mockito.any()), never());
+      verify(handler, never()).handle(Mockito.any(NeoContext.class));
+      assertEquals(false, defaultActionCalled.get());
     }
   }
 

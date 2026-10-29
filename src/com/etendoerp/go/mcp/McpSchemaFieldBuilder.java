@@ -45,6 +45,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * Schema/field-metadata building for MCP discovery (etendo_schema and related tools).
@@ -564,11 +565,23 @@ final class McpSchemaFieldBuilder {
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
       throws JSONException {
     JSONArray fieldsArray = new JSONArray();
+    // ETP-5684: without showAccountingFields the accounting status and the posting buttons are
+    // absent, not listed as invokable:false (IMP-21) — the role is not told accounting exists,
+    // as ETP-5648 does for accounting entities. The role flag is read once, and only if needed.
+    Boolean hideAccounting = null;
     // ETP-5806 — resolved at most once for the whole walk (and only if a structured column is
     // actually met), never once per column: the documented invariant is that the account is
     // resolved once per request and never re-checked.
     StructuredAddressGate structuredAddressGate = new StructuredAddressGate();
     for (Column col : adTab.getTable().getADColumnList()) {
+      if (NeoAccountingAccessPolicy.isAccountingColumn(col)) {
+        if (hideAccounting == null) {
+          hideAccounting = !NeoAccountingAccessPolicy.currentRoleSeesAccounting();
+        }
+        if (hideAccounting) {
+          continue;
+        }
+      }
       if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata, structuredAddressGate)) {
         JSONObject fieldObj = buildSchemaField(col, adTab, dalEntity,
             fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,

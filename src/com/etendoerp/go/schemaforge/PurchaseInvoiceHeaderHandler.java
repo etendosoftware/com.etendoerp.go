@@ -42,6 +42,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import org.openbravo.base.structure.BaseOBObject;
 
@@ -185,15 +186,6 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         RectificativeImportPolicy.forHeader(this::classifyDocType, false));
   }
 
-  /**
-   * {@inheritDoc} The invoice windows un-post a posted invoice before reactivating it
-   * ({@code preUnpost: true} in the SPA), so the MCP does too (ETP-5715).
-   */
-  @Override
-  public boolean unpostBeforeReactivate() {
-    return true;
-  }
-
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
   @Override
   public Set<String> agentExcludedActions() {
@@ -270,6 +262,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (importKindRefusal != null) {
       return importKindRefusal;
     }
+    NeoResponse unpostRefusal = unpostBeforeReactivation(context, postingService);
+    if (unpostRefusal != null) {
+      return unpostRefusal;
+    }
     return NeoHeaderActionRouter.dispatch(
         context,
         currencyOptionsHandler,
@@ -318,6 +314,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5684: say what ran when the reactivation un-posted the invoice first.
+    ReactivationUnpost.notePartial(context);
     // ETP-5840: a create whose currency or accounting date only the create cascade derived; before
     // the rate-document sync, which must see the resolved rate.
     NeoResponse rateRefusal = currencyRate.afterWrite(context);
