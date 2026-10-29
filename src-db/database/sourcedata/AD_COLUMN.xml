@@ -24048,7 +24048,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--E01F12C1B9CE4539B145357B931F49FD-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--E01F12C1B9CE4539B145357B931F49FD-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--E01F12C1B9CE4539B145357B931F49FD-->  <NAME><![CDATA[EM_ETGO_Currency_Rate]]></NAME>
-<!--E01F12C1B9CE4539B145357B931F49FD-->  <DESCRIPTION><![CDATA[Per-order exchange rate override set by the user when changing the header currency. Feeds activeCurrencyConversionRef for line price conversion. When null the system rate is used.]]></DESCRIPTION>
+<!--E01F12C1B9CE4539B145357B931F49FD-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency, valid on the document's reference date. Recalculated when the currency or that date changes, and editable by the user. A foreign-currency document cannot be saved or completed with it empty. Feeds activeCurrencyConversionRef for line price conversion.]]></DESCRIPTION>
 <!--E01F12C1B9CE4539B145357B931F49FD-->  <HELP><![CDATA[]]></HELP>
 <!--E01F12C1B9CE4539B145357B931F49FD-->  <COLUMNNAME><![CDATA[EM_ETGO_Currency_Rate]]></COLUMNNAME>
 <!--E01F12C1B9CE4539B145357B931F49FD-->  <AD_TABLE_ID><![CDATA[259]]></AD_TABLE_ID>
@@ -25425,7 +25425,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--ED7BBE1365C14A93B363EF4B37C4079B-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--ED7BBE1365C14A93B363EF4B37C4079B-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--ED7BBE1365C14A93B363EF4B37C4079B-->  <NAME><![CDATA[EM_ETGO_Currency_Rate]]></NAME>
-<!--ED7BBE1365C14A93B363EF4B37C4079B-->  <DESCRIPTION><![CDATA[Per-order exchange rate override set by the user when changing the header currency. Feeds activeCurrencyConversionRef for line price conversion. When null the system rate is used.]]></DESCRIPTION>
+<!--ED7BBE1365C14A93B363EF4B37C4079B-->  <DESCRIPTION><![CDATA[Exchange rate from the organization currency to the document currency, valid on the document's reference date. Recalculated when the currency or that date changes, and editable by the user. A foreign-currency document cannot be saved or completed with it empty. Feeds activeCurrencyConversionRef for line price conversion.]]></DESCRIPTION>
 <!--ED7BBE1365C14A93B363EF4B37C4079B-->  <HELP><![CDATA[]]></HELP>
 <!--ED7BBE1365C14A93B363EF4B37C4079B-->  <COLUMNNAME><![CDATA[EM_ETGO_Currency_Rate]]></COLUMNNAME>
 <!--ED7BBE1365C14A93B363EF4B37C4079B-->  <AD_TABLE_ID><![CDATA[318]]></AD_TABLE_ID>
