@@ -61,6 +61,7 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
@@ -74,6 +75,8 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 
 /**
  * Unit tests for {@link ContactsLocationAddressHandler}.
@@ -110,6 +113,8 @@ class ContactsLocationAddressHandlerTest {
   private OBProvider obProvider;
   @Mock
   private SessionHandler sessionHandler;
+  @Mock
+  private OBCriteria<Country> countryCriteria;
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
@@ -127,6 +132,8 @@ class ContactsLocationAddressHandlerTest {
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
     sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(sessionHandler);
+    // No country answers to an ISO code unless a test says so (ETP-6012).
+    when(obDal.createCriteria(Country.class)).thenReturn(countryCriteria);
   }
 
   @AfterEach
@@ -457,6 +464,204 @@ class ContactsLocationAddressHandlerTest {
       verify(geoLoc, never()).getOBSEPABuildingNumber();
       verify(geoLoc, never()).getOBSEPABuildingName();
     }
+  }
+
+  // ── ETP-6012: PATCH, concurrency and the version token ─────────────────
+
+  private org.openbravo.model.common.businesspartner.Location stubStoredAddress(Location geoLoc) {
+    when(geoLoc.getId()).thenReturn("geo-id");
+    when(geoLoc.getAddressLine1()).thenReturn("Old street 1");
+    when(geoLoc.getCityName()).thenReturn("Madrid");
+    when(geoLoc.getPostalCode()).thenReturn("28001");
+    Country country = stubCountry("106");
+    when(geoLoc.getCountry()).thenReturn(country);
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bpl-id");
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+    return bpLoc;
+  }
+
+  /** A PATCH changes the field it sends and keeps every address field it omits. */
+  @Test
+  void patchKeepsTheStoredAddressFieldsItOmits() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setPostalCode("28002");
+      verify(geoLoc).setAddressLine1("Old street 1");
+      verify(geoLoc).setCityName("Madrid");
+      verify(geoLoc, never()).setRegion(any());
+    }
+  }
+
+  /** A new country does not carry the stored region, which belongs to the old one. */
+  @Test
+  void mergeSkipsTheStoredRegionWhenTheCountryChanges() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    Region region = mockRegion("Madrid", "client-id");
+    when(region.getId()).thenReturn("region-es");
+    when(geoLoc.getRegion()).thenReturn(region);
+    JSONObject newCountry = new JSONObject().put("country", "AR");
+    JSONObject sameCountry = new JSONObject().put("country", "106");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      ContactsLocationAddressHandler.mergeStoredAddress(newCountry, geoLoc);
+      ContactsLocationAddressHandler.mergeStoredAddress(sameCountry, geoLoc);
+    }
+
+    assertFalse(newCountry.has("region"));
+    assertEquals("Madrid", newCountry.getString("cityName"));
+    assertEquals("region-es", sameCountry.getString("region"));
+  }
+
+  /** Address lines the caller sends are not recomposed from the stored structured fields. */
+  @Test
+  void mergeSkipsTheStoredStructuredFieldsWhenAddressLinesAreSent() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(geoLoc.getOBSEPABuildingNumber()).thenReturn("45");
+    JSONObject lines = new JSONObject().put("addressLine1", "New street 9");
+    JSONObject other = new JSONObject().put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      ContactsLocationAddressHandler.mergeStoredAddress(lines, geoLoc);
+      ContactsLocationAddressHandler.mergeStoredAddress(other, geoLoc);
+    }
+
+    assertFalse(lines.has("streetName"));
+    assertFalse(lines.has("buildingNumber"));
+    assertEquals("Gran Via", other.getString("streetName"));
+  }
+
+  /** A PUT keeps its full-replace meaning: an omitted field is cleared, not merged. */
+  @Test
+  void putStillReplacesTheWholeAddress() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      handler.handle(buildContext("PUT", "bpl-id", body, null));
+
+      verify(geoLoc).setCityName(null);
+    }
+  }
+
+  /** A write whose `updated` no longer matches the stored row is refused before touching it. */
+  @Test
+  void staleUpdatedIsRefusedWithoutWriting() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+    body.put("updated", "2026-10-28T10:00:00.000-03:00");
+
+    try (MockedStatic<NeoRecordVersion> version = mockStatic(NeoRecordVersion.class)) {
+      version.when(() -> NeoRecordVersion.isStale(anyString(), eq("bpl-id"),
+          eq("2026-10-28T10:00:00.000-03:00"), any())).thenReturn(true);
+
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      assertEquals(409, response.getHttpStatus());
+      verify(geoLoc, never()).setPostalCode(any());
+      verify(obDal, never()).flush();
+    }
+  }
+
+  /** The response carries the new version token, and an address-only edit still bumps it. */
+  @Test
+  void updateResponseCarriesTheVersionToken() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    java.util.Date stamp = new java.util.Date(1_761_656_400_123L);
+    when(bpLoc.getUpdated()).thenReturn(stamp);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      JSONObject rec = response.getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0);
+      assertEquals(NeoDateFormat.toAuditToken(stamp), rec.getString("updated"));
+      verify(bpLoc).setUpdated(any());
+    }
+  }
+
+  /** The update response carries the two address flags as JSON booleans, false included. */
+  @Test
+  void updateResponseCarriesTheAddressFlagsAsBooleans() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc = stubStoredAddress(geoLoc);
+    when(bpLoc.isShipToAddress()).thenReturn(Boolean.TRUE);
+    when(bpLoc.isInvoiceToAddress()).thenReturn(Boolean.FALSE);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      JSONObject rec = response.getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0);
+      assertTrue(rec.getBoolean("shipToAddress"));
+      assertFalse(rec.getBoolean("invoiceToAddress"));
+    }
+  }
+
+  /** A write whose `updated` still matches the stored row is not refused and writes the field. */
+  @Test
+  void aCurrentUpdatedTokenLetsThePatchProceed() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    JSONObject body = new JSONObject();
+    body.put("postalCode", "28002");
+    body.put("updated", "2026-10-28T10:00:00.000-03:00");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false);
+        MockedStatic<NeoRecordVersion> version = mockStatic(NeoRecordVersion.class)) {
+      version.when(() -> NeoRecordVersion.isStale(anyString(), eq("bpl-id"),
+          eq("2026-10-28T10:00:00.000-03:00"), any())).thenReturn(false);
+
+      NeoResponse response = handler.handle(buildContext("PATCH", "bpl-id", body, null));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(geoLoc).setPostalCode("28002");
+    }
+  }
+
+  /** A region the body sends (by id or by name) is the caller's: the stored one is not merged in. */
+  @Test
+  void mergeKeepsTheStoredRegionOutWhenTheBodySendsOne() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    Region region = mockRegion("Madrid", "client-id");
+    when(region.getId()).thenReturn("region-es");
+    when(geoLoc.getRegion()).thenReturn(region);
+    JSONObject byId = new JSONObject().put("region", "region-other");
+    JSONObject byName = new JSONObject().put("regionName", "Valencia");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      ContactsLocationAddressHandler.mergeStoredAddress(byId, geoLoc);
+      ContactsLocationAddressHandler.mergeStoredAddress(byName, geoLoc);
+    }
+
+    assertEquals("region-other", byId.getString("region"));
+    assertFalse(byId.has("regionName"));
+    assertEquals("Valencia", byName.getString("regionName"));
+    assertFalse(byName.has("region"));
+    assertEquals("Madrid", byId.getString("cityName"));
   }
 
   // ── ETP-5806 follow-up: raw AD column / DAL property spellings on create ──
@@ -860,6 +1065,45 @@ class ContactsLocationAddressHandlerTest {
     verify(sessionHandler).rollback();
   }
 
+  // ── ISO country code (ETP-6012) ─────────────────────────────────────────
+
+  @Test
+  void isoCountryCodeIsReplacedByTheCountryId() throws Exception {
+    Country spain = mock(Country.class);
+    when(spain.getId()).thenReturn("106");
+    when(countryCriteria.uniqueResult()).thenReturn(spain);
+    JSONObject body = new JSONObject().put("country", "es");
+
+    ContactsLocationAddressHandler.countryIsoCodeToId(body);
+
+    assertEquals("106", body.getString("country"));
+    verify(countryCriteria).add(argThat(criterion -> criterion.toString().contains("ES")));
+  }
+
+  @Test
+  void countryIdIsKeptAndNeverLookedUpAsACode() throws Exception {
+    JSONObject numericId = new JSONObject().put("country", "106");
+    ContactsLocationAddressHandler.countryIsoCodeToId(numericId);
+    assertEquals("106", numericId.getString("country"));
+
+    // A two-letter value that already is a country id wins over the code lookup.
+    when(obDal.get(Country.class, "ES")).thenReturn(mock(Country.class));
+    JSONObject twoLetterId = new JSONObject().put("country", "ES");
+    ContactsLocationAddressHandler.countryIsoCodeToId(twoLetterId);
+    assertEquals("ES", twoLetterId.getString("country"));
+
+    verify(obDal, never()).createCriteria(Country.class);
+  }
+
+  @Test
+  void unknownIsoCountryCodeIsLeftForTheInvalidCountryRefusal() throws Exception {
+    JSONObject body = new JSONObject().put("country", "ZZ");
+
+    ContactsLocationAddressHandler.countryIsoCodeToId(body);
+
+    assertEquals("ZZ", body.getString("country"));
+  }
+
   // ── afterHandle() ───────────────────────────────────────────────────────
 
   /**
@@ -1032,6 +1276,31 @@ class ContactsLocationAddressHandlerTest {
         response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0).getString("name"));
     assertEquals("Already Named",
         response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(1).getString("name"));
+  }
+
+  /** A listed address carries the same address fields a single read returns (ETP-6012). */
+  @Test
+  void listedAddressesCarryTheirAddressFields() throws Exception {
+    Location geoLoc = mock(Location.class);
+    stubStoredAddress(geoLoc);
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-1"))
+        .thenReturn(bpLoc);
+    JSONObject rec = new JSONObject().put("id", "bpl-1").put("name", "Head office");
+    JSONObject wrapper = new JSONObject().put("response",
+        new JSONObject().put("status", 0).put("data", new JSONArray().put(rec)));
+    NeoContext ctx = buildContextWithPrevious("GET", null, NeoResponse.ok(wrapper));
+
+    NeoResponse response = handler.afterHandle(ctx);
+
+    JSONObject listed = response.getBody().getJSONObject("response").getJSONArray("data")
+        .getJSONObject(0);
+    assertEquals("Old street 1", listed.getString("addressLine1"));
+    assertEquals("Madrid", listed.getString("cityName"));
+    assertEquals("106", listed.getString("country"));
+    assertEquals("Head office", listed.getString("name"), "a real name is kept");
   }
 
   /**

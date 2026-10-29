@@ -22,9 +22,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 import javax.inject.Named;
 
@@ -33,12 +35,15 @@ import org.openbravo.module.bptaxidkey.ViesService;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.criterion.Restrictions;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
@@ -46,6 +51,8 @@ import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Region;
 
 import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
@@ -61,6 +68,7 @@ import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddre
  * <ul>
  *   <li>POST /contacts/locationAddress?parentId={bpId} — creates C_Location + C_BPartner_Location</li>
  *   <li>PUT  /contacts/locationAddress/{id}            — updates both records via the FK</li>
+ *   <li>PATCH /contacts/locationAddress/{id}           — same, keeping the address fields it omits</li>
  *   <li>GET  /contacts/locationAddress/{id}            — default fetch enriched with C_Location data</li>
  *   <li>GET  /contacts/locationAddress + DELETE        — fall through to default CRUD unchanged</li>
  * </ul>
@@ -114,6 +122,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   /** Free-text region, resolved server-side against the payload's own country. See {@link #resolveRegionByName}. */
   private static final String FIELD_REGION_NAME = "regionName";
   private static final String FIELD_RESPONSE = "response";
+  private static final String FIELD_UPDATED = "updated";
   private static final String FIELD_DATA = "data";
   /** DAL property holding the parent Business Partner FK on C_BPartner_Location. */
   private static final String FIELD_BUSINESS_PARTNER =
@@ -124,11 +133,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     String method = ctx.getHttpMethod();
     String recordId = ctx.getRecordId();
     try {
+      countryIsoCodeToId(ctx.getRequestBody());
       if ("POST".equals(method) && recordId == null) {
         return handleCreate(ctx);
       }
-      if ("PUT".equals(method) && recordId != null) {
-        return handleUpdate(ctx);
+      if (("PUT".equals(method) || "PATCH".equals(method)) && recordId != null) {
+        return handleUpdate(ctx, "PATCH".equals(method));
       }
     } catch (Exception e) {
       SessionHandler.getInstance().rollback();
@@ -137,6 +147,38 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     }
     // GET list and DELETE fall through to default CRUD
     return null;
+  }
+
+  /** An ISO 3166-1 alpha-2 code ({@code ES}); a {@code C_Country_ID} is never two letters. */
+  private static final Pattern ISO_COUNTRY_CODE = Pattern.compile("^[A-Za-z]{2}$");
+
+  /**
+   * Lets a caller send the country as its ISO code, which is what a public API client knows
+   * (ETP-6012): {@code "ES"} is replaced in the body by Spain's {@code C_Country_ID}. A value that
+   * already is a country id wins, and only a two-letter one is looked up, so every existing caller
+   * — the form's selector sends the id — is untouched; a code no country has is left as sent and
+   * refused as an invalid country below.
+   */
+  static void countryIsoCodeToId(JSONObject body) throws JSONException {
+    String value = body == null ? null : nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+    if (value == null || !ISO_COUNTRY_CODE.matcher(value).matches()) {
+      return;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      if (OBDal.getInstance().get(Country.class, value) != null) {
+        return;
+      }
+      OBCriteria<Country> byCode = OBDal.getInstance().createCriteria(Country.class);
+      byCode.add(Restrictions.eq(Country.PROPERTY_ISOCOUNTRYCODE, value.toUpperCase(Locale.ROOT)));
+      byCode.setMaxResults(1);
+      Country country = (Country) byCode.uniqueResult();
+      if (country != null) {
+        body.put(FIELD_COUNTRY, country.getId());
+      }
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   @Override
@@ -149,8 +191,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         // Enrich GET-by-ID response with C_Location fields so the modal can pre-populate the form
         return enrichWithLocationData(ctx);
       }
-      // Enrich GET list: replace stale "Location" names with a computed display name
-      return enrichListDisplayNames(ctx);
+      // Enrich GET list with the C_Location fields, and replace stale "Location" names
+      return enrichList(ctx);
     } catch (Exception e) {
       log.error("ContactsLocationAddressHandler afterHandle error", e);
       return null;
@@ -371,7 +413,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ update
 
-  private NeoResponse handleUpdate(NeoContext ctx) throws Exception {
+  private NeoResponse handleUpdate(NeoContext ctx, boolean partial) throws Exception {
     JSONObject body = ctx.getRequestBody();
     String bplId = ctx.getRecordId();
     // ETP-5806 — resolved before the admin-mode block, for the same reasons as handleCreate.
@@ -391,12 +433,25 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return NeoResponse.error(500, "BPartner Location has no linked C_Location: " + bplId);
       }
 
+      // This handler short-circuits the default CRUD, so its stale-record check never runs:
+      // compare the caller's `updated` here (ETP-6012). A body without one (the UI form) skips it.
+      String clientUpdated = nullIfEmpty(body.optString(FIELD_UPDATED, null));
+      if (clientUpdated != null && !"null".equals(clientUpdated) && NeoRecordVersion.isStale(
+          org.openbravo.model.common.businesspartner.Location.ENTITY_NAME, bplId, clientUpdated,
+          NeoRecordVersion.routeOf(ctx.getHttpMethod(), ctx.getSpecName(), ctx.getEntityName(),
+              bplId))) {
+        return NeoErrorResponses.staleRecord(NeoCrudHandler.STALE_RECORD_MESSAGE);
+      }
+      if (partial) {
+        mergeStoredAddress(body, geoLoc);
+      }
+
       // Capture country and pre-save key before applying changes and flushing
       String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
       // ETP-5806 — same mandatory rule as create (Mode B), applied the same way on every update:
-      // an update always resends the full address (see applyGeoLocFields, which overwrites
-      // address1/address2/city/postal unconditionally), so there is no partial-update shape here
-      // to spare. Country falls back to the existing record's own country when the body omits it,
+      // a PUT resends the full address and a PATCH was completed from the stored one above (see
+      // applyGeoLocFields, which overwrites address1/address2/city/postal unconditionally), so
+      // there is no partial-update shape here to spare. Country falls back to the existing record's own country when the body omits it,
       // matching applyGeoLocFields' own set-if-provided semantics for that one field.
       String effectiveCountryForValidation =
           countryId != null ? countryId : countryIdOf(geoLoc);
@@ -419,6 +474,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         bpLoc.setName(nameVal);
       }
       applyLocationFlags(body, bpLoc);
+      // The address lives in C_Location, so an address-only edit would leave this row clean and
+      // its `updated` (the ETag) unchanged, letting a second writer with the old ETag through.
+      bpLoc.setUpdated(new Date());
 
       OBDal.getInstance().flush();
 
@@ -428,6 +486,37 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return wrapRecord(locationJson, 200);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * A PATCH changes only what it sends, but the update path overwrites the whole address: fill
+   * every address field the body omits with the stored value first (ETP-6012). Name and the
+   * flags already keep their stored value when omitted, so they are not merged here.
+   */
+  static void mergeStoredAddress(JSONObject body,
+      org.openbravo.model.common.geography.Location geoLoc) throws Exception {
+    JSONObject stored = new JSONObject();
+    // Every stored field, the structured ones too: while the flag is off the update never reads them.
+    putGeoLocFields(stored, geoLoc, true);
+    // A stored region belongs to the stored country, and stored structured fields would recompose
+    // the address lines over the ones the caller sent: neither is carried in those cases.
+    String sentCountry = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+    boolean skipRegion = body.has(FIELD_REGION) || body.has(FIELD_REGION_NAME)
+        || (sentCountry != null && !sentCountry.equals(countryIdOf(geoLoc)));
+    boolean skipStructured = body.has(FIELD_ADDRESS_LINE1) || body.has(FIELD_ADDRESS_LINE2);
+    for (String key : new String[] { FIELD_ADDRESS_LINE1, FIELD_ADDRESS_LINE2, FIELD_CITY_NAME,
+        FIELD_POSTAL_CODE, FIELD_COUNTRY, FIELD_REGION, FIELD_REGION_NAME, FIELD_STREET_NAME,
+        FIELD_BUILDING_NUMBER, FIELD_BUILDING_NAME }) {
+      boolean regionKey = FIELD_REGION.equals(key) || FIELD_REGION_NAME.equals(key);
+      boolean structuredKey = FIELD_STREET_NAME.equals(key) || FIELD_BUILDING_NUMBER.equals(key)
+          || FIELD_BUILDING_NAME.equals(key);
+      if (body.has(key) || (regionKey && skipRegion) || (structuredKey && skipStructured)
+          || !stored.has(key)
+          || stored.isNull(key)) {
+        continue;
+      }
+      body.put(key, stored.get(key));
     }
   }
 
@@ -491,8 +580,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
     // ETP-5806 — the read path is gated for the same account as the write path, so a targeted
     // account that can save the 3 fields can also read them back. Resolved here rather than in
-    // afterHandle() so a plain GET list (enrichListDisplayNames, which needs no flag) never pays
-    // for the account lookup, and before the admin-mode block below on the same principle as
+    // afterHandle(), and before the admin-mode block below on the same principle as
     // SFWindowAccessMap: resolve the caller's account while the caller is still the context.
     boolean structuredAddressEnabled =
         StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
@@ -513,21 +601,24 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ enrich GET list
 
-  private NeoResponse enrichListDisplayNames(NeoContext ctx) throws Exception {
+  // The address fields live in C_Location, so the default list of C_BPartner_Location returns none
+  // of them: every record gets the same fields a single read returns (ETP-6012), and a stale
+  // "Location" name is replaced with a computed one. One lookup per record, bounded by the page size.
+  private NeoResponse enrichList(NeoContext ctx) throws Exception {
     JSONArray dataArr = extractDataArray(ctx);
     if (dataArr == null) {
       return null;
     }
+
+    // ETP-5806: the structured fields follow the caller's account, as on a single read.
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
 
     OBContext.setAdminMode(true);
     try {
       boolean modified = false;
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
-        String name = rec.optString("name", "");
-        if (!"Location".equals(name) && !name.isEmpty()) {
-          continue;
-        }
         String bplId = nullIfEmpty(rec.optString("id", null));
         if (bplId == null) {
           continue;
@@ -537,10 +628,15 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         if (bpLoc == null || bpLoc.getLocationAddress() == null) {
           continue;
         }
+        putGeoLocFields(rec, bpLoc.getLocationAddress(), structuredAddressEnabled);
+        modified = true;
+        String name = rec.optString("name", "");
+        if (!"Location".equals(name) && !name.isEmpty()) {
+          continue;
+        }
         String computed = buildDisplayName(bpLoc.getLocationAddress());
         if (computed != null && !computed.equals(name)) {
           rec.put("name", computed);
-          modified = true;
         }
       }
       return modified ? NeoResponse.ok(ctx.getPreviousResult().getBody()) : null;
@@ -921,8 +1017,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     locationJson.put("id",              bpLoc.getId());
     locationJson.put("locationAddress", geoLoc.getId());
     locationJson.put("name",            bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
-    locationJson.put(FIELD_SHIP_TO_ADDRESS,    Boolean.TRUE.equals(bpLoc.isShipToAddress()) ? "Y" : "N");
-    locationJson.put(FIELD_INVOICE_TO_ADDRESS, Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
+    // JSON booleans, as a read through the default CRUD returns them (ETP-6012); the form accepts both.
+    locationJson.put(FIELD_SHIP_TO_ADDRESS,    Boolean.TRUE.equals(bpLoc.isShipToAddress()));
+    locationJson.put(FIELD_INVOICE_TO_ADDRESS, Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()));
+    // The version token a GET returns, so a create or update response carries an ETag (ETP-6012).
+    String updated = NeoDateFormat.toAuditToken(bpLoc.getUpdated());
+    locationJson.put(FIELD_UPDATED, updated != null ? updated : JSONObject.NULL);
     putGeoLocFields(locationJson, geoLoc, structuredAddressEnabled);
     return locationJson;
   }

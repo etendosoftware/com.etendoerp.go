@@ -280,6 +280,33 @@ class SalesLineCustomizationHandlersTest {
     assertNull(response, "the pre-hook must let default CRUD continue");
   }
 
+  /**
+   * ETP-6012: on an update the purchase line carries the stored price and tax into a sparse patch,
+   * on the same context the pre-hook received.
+   */
+  @Test
+  void purchaseOrderLineHandlerCompletesTheAmountInputsOfAnUpdate() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .specName("purchase-order")
+        .entityName("lines")
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("LINE-1")
+        .requestBody(new JSONObject("{\"orderedQuantity\":3}"))
+        .build();
+
+    NeoResponse response;
+    try (MockedStatic<OrderLineDiscountSupport> pricing = mockStatic(
+        OrderLineDiscountSupport.class)) {
+      response = new PurchaseOrderLineHandler().handle(ctx);
+
+      pricing.verify(() -> OrderLineDiscountSupport.completeAmountInputsOnUpdate(same(ctx)),
+          times(1));
+    }
+
+    assertNull(response, "the pre-hook must let default CRUD continue");
+  }
+
   @Test
   void purchaseOrderLineHandlerIsBoundByAnnotationOnly() {
     NeoExtension binding = PurchaseOrderLineHandler.class.getAnnotation(NeoExtension.class);
