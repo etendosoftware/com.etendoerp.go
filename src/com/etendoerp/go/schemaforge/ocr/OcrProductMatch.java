@@ -159,7 +159,7 @@ final class OcrProductMatch {
   private static final String EDGE_SPACE = "[\\t\\n\\u000B\\f\\r \\u00A0\\u1680\\u2000-\\u200A"
       + "\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]+";
   private static final Pattern EDGE_SPACE_PATTERN = Pattern.compile(
-      "^" + EDGE_SPACE + "|" + EDGE_SPACE + "$");
+      "(?:^" + EDGE_SPACE + ")|(?:" + EDGE_SPACE + "$)");
 
   /**
    * Normalizer of the exact-name step (ETP-5654): NFC, trim (the explicit set above, NBSP
