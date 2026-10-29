@@ -703,8 +703,8 @@ class NeoButtonActionHelperTest {
     }
 
     @Test
-    @DisplayName("ETP-5684: refusalForButtonProcess lets the role through with access, or without a button")
-    void refusalForButtonProcessAllowsWithAccessOrWithoutButton() throws Exception {
+    @DisplayName("ETP-5684: refusalForButtonProcess lets the role through with access, and fails closed without a button")
+    void refusalForButtonProcessAllowsWithAccessFailsClosedWithoutButton() throws Exception {
       SFEntity entity = mock(SFEntity.class);
       doReturn("entity1").when(entity).getId();
       org.openbravo.client.application.Process obuiProc = mock(
@@ -715,8 +715,24 @@ class NeoButtonActionHelperTest {
       accessHelperMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess("proc1")).thenReturn(true);
 
       assertNull(NeoButtonActionHelper.refusalForButtonProcess(entity, "Processed"));
-      assertNull(NeoButtonActionHelper.refusalForButtonProcess(entity, "NoSuchButton"));
-      assertNull(NeoButtonActionHelper.refusalForButtonProcess(null, "Processed"));
+      assertEquals(HttpServletResponse.SC_NOT_FOUND,
+          NeoButtonActionHelper.refusalForButtonProcess(entity, "NoSuchButton").getHttpStatus());
+      assertEquals(HttpServletResponse.SC_NOT_FOUND,
+          NeoButtonActionHelper.refusalForButtonProcess(null, "Processed").getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("ETP-5684: refusalForButtonProcess fails closed on a button with no process")
+    void refusalForButtonProcessFailsClosedWithoutProcess() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      Column btnColumn = createButtonColumn("DocAction", null, null);
+      setupFieldCriteria(new ArrayList<>(List.of(createMockField(btnColumn, "documentAction"))));
+      accessHelperMock.when(() -> NeoAccessHelper.resolveFallbackObuiappProcess(btnColumn))
+          .thenReturn(null);
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST,
+          NeoButtonActionHelper.refusalForButtonProcess(entity, "DocAction").getHttpStatus());
     }
 
     @Test

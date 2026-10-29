@@ -73,6 +73,7 @@ class ReactivationUnpostTest {
   private MockedStatic<OBContext> obContextMock;
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<ModelProvider> modelMock;
+  private MockedStatic<NeoButtonActionHelper> helperMock;
   private BaseOBObject row;
   private DocumentPostingService posting;
   private NeoContext context;
@@ -87,6 +88,8 @@ class ReactivationUnpostTest {
     row = mock(BaseOBObject.class);
     when(obDal.get("Invoice", RECORD_ID)).thenReturn(row);
 
+    // The role may run the reactivation unless a test says otherwise (the static mock answers null).
+    helperMock = mockStatic(NeoButtonActionHelper.class);
     modelMock = mockStatic(ModelProvider.class);
     ModelProvider provider = mock(ModelProvider.class);
     modelMock.when(ModelProvider::getInstance).thenReturn(provider);
@@ -116,6 +119,7 @@ class ReactivationUnpostTest {
     obContextMock.close();
     obDalMock.close();
     modelMock.close();
+    helperMock.close();
   }
 
   @Test
@@ -146,12 +150,10 @@ class ReactivationUnpostTest {
     when(context.getSfEntity()).thenReturn(entity);
     when(context.getFieldName()).thenReturn("DocAction");
     NeoResponse forbidden = NeoResponse.error(403, "Access denied to process for current role");
-    try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
-      helper.when(() -> NeoButtonActionHelper.refusalForButtonProcess(entity, "DocAction"))
-          .thenReturn(forbidden);
+    helperMock.when(() -> NeoButtonActionHelper.refusalForButtonProcess(entity, "DocAction"))
+        .thenReturn(forbidden);
 
-      assertSame(forbidden, ReactivationUnpost.unpostFirst(context, posting));
-    }
+    assertSame(forbidden, ReactivationUnpost.unpostFirst(context, posting));
     verify(posting, never()).unpost(anyString(), anyString());
     assertFalse(ReactivationUnpost.ran(context));
   }

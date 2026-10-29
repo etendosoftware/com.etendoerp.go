@@ -193,18 +193,25 @@ public final class NeoButtonActionHelper {
    * before its process runs, so it asks this first — a role that cannot run the process must not
    * get the un-post either.
    *
-   * @return the 403 the action would answer, or {@code null} when the role may run it (or the
-   *         action has no button process to check, which the action itself then answers)
+   * Fails closed: an action that does not resolve to a button process is refused with the
+   * error the action itself would answer, so nothing is un-posted for it.
+   *
+   * @return the error the action would answer, or {@code null} when the role may run it
    */
   public static NeoResponse refusalForButtonProcess(SFEntity entity, String actionName) {
     Column column = entity == null ? null : findButtonColumn(entity.getId(), actionName);
     if (column == null) {
-      return null;
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Action not found: " + actionName);
     }
     org.openbravo.client.application.Process obuiappProcess = column.getOBUIAPPProcess();
     Process adProcess = column.getProcess();
     if (adProcess == null && obuiappProcess == null) {
       obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(column);
+      if (obuiappProcess == null) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "No process linked to button: " + actionName);
+      }
     }
     return processAccessRefusal(adProcess, obuiappProcess);
   }
