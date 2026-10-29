@@ -4544,6 +4544,17 @@ the reverse rate), rounded HALF_UP to 12 decimals.
 | **Exchange-rates tab mirrors the header** — `autoCreateOrUpdateConversionRateDocument` deletes the `C_Conversion_Rate_Document` rows when the header rate is `null` AND the current header write left it so (body carries `eTGOCurrencyRate` without a positive value — sent by the caller or written by the recalculation) or the generation flow just recomputed it to `null`. A line save (`InvoiceLineHandler`) or a write that does not touch the rate never deletes; posted invoices are still skipped | `AbstractInvoiceHeaderHandler` | all |
 | Org-currency documents and processed documents are never recalculated nor refused | — | — |
 
+**Label for agents (QA CP-12c).** `etendo_schema` labels a field with its tab `AD_FIELD.name` (translated
+through `AD_FIELD_TRL`) and only falls back to `AD_COLUMN.name` when the tab has no field for the
+column. The rate column had none, so agents saw `EM_ETGO_Currency_Rate`. Each header tab that exposes
+the rate (sales quotation `F87F1EB7EB404F1F916EBAFAD1A0A334`, sales order `186`, purchase order `294`,
+sales invoice `263`, purchase invoice `290`) now carries a hidden field «Exchange rate»
+(`IsDisplayed = 'N'`, not centrally maintained, same shape as the `EM_Etgo_Total_Discount` fields),
+so Classic does not show it. The column is **not** renamed: the DAL derives the property name from
+`AD_COLUMN.name` (`NamingUtil.getPropName`), so renaming it would turn `eTGOCurrencyRate` into
+`currencyRate`. The module versions no `AD_FIELD_TRL`, so the Spanish label depends on the
+environment's translation row.
+
 **`currencyOptions`** (`CurrencyOptionsHandler`): `GET …/{id|new}/action/currencyOptions?date=yyyy-MM-dd`
 (an MCP call may pass `date` in the action body; an invalid one is a 400, `CurrencyOptionsHandler.InvalidDateParameterException`). `date` is the reference
 date for new AND saved records; without it, the saved document's reference date (today for a new
