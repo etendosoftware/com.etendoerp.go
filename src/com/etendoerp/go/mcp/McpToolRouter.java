@@ -76,6 +76,7 @@ import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
+import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 import com.etendoerp.go.schemaforge.NeoReadPredicates;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -976,8 +977,17 @@ public class McpToolRouter {
 
     // Wrap for DefaultJsonDataService
     String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, null, log);
-    String result = jsonService.add(params, wrappedBody);
-    JSONObject responseJson = new JSONObject(result);
+    // ETP-5051: the same plan-quota check as the REST create, after the insert and before the
+    // commit. etendo_create does not pass through NeoCrudHandler, so it is wired here; the gate
+    // is structural (catalog data only) and a no-op for every entity no block quota counts. When
+    // the client's quotas cannot be read the add never runs.
+    NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(dalEntityName, jsonService,
+        service -> service.add(params, wrappedBody));
+    if (gated.refusal() != null) {
+      return McpHookExecutor.neoResponseToMcpResult(gated.refusal());
+    }
+    // The gate's own commit may have failed: then this is core's error JSON for it.
+    JSONObject responseJson = new JSONObject(gated.result());
 
     // userProvided is still the pre-defaults snapshot here (ETP-4793 / IMP-24's witness),
     // so it also answers "did the caller actually send this field" for a 422's fieldErrors —

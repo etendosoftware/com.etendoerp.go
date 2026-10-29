@@ -45,10 +45,12 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -56,6 +58,8 @@ import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * Unit tests for {@link NeoSelectorService} utility methods.
@@ -244,6 +248,39 @@ class NeoSelectorServiceTest {
 
     assertNotNull(captured[0]);
     assertFalse(captured[0].containsKey("language"));
+  }
+
+  /** ETP-5351 (T6): the support-user selector filter gets its id bound, never inlined. */
+  @Test
+  @DisplayName("support-user selector filter is bound to the current client's support user")
+  @SuppressWarnings("unchecked")
+  void testSupportUserFilterParameterIsBound() throws Exception {
+    String clientId = "4028E6C72959682B01295A070852010D";
+    SelectorMeta meta = new SelectorMeta("ADUser", "name", null);
+    Map<String, Object>[] captured = new Map[1];
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    try (MockedStatic<NeoSelectorPolicy> pMock = mockStatic(NeoSelectorPolicy.class);
+        MockedStatic<SelectorQueryExecutor> eMock = mockStatic(SelectorQueryExecutor.class);
+        MockedStatic<OBContext> cMock = mockStatic(OBContext.class)) {
+      cMock.when(OBContext::getOBContext).thenReturn(obContext);
+      pMock.when(() -> NeoSelectorPolicy.resolveContextParamFilter(anyString(), any(), anyString()))
+          .thenReturn("e.id <> :" + SupportUserExclusion.HQL_PARAM);
+      eMock.when(() -> SelectorQueryExecutor.execute(any(), anyString(), anyInt(), anyInt(), any(),
+          anyString(), any())).thenAnswer(inv -> {
+            captured[0] = inv.getArgument(6);
+            return null;
+          });
+
+      invokeExecuteSelectorQuery(meta, null);
+    }
+
+    assertNotNull(captured[0]);
+    assertEquals(SupportAccessGuard.supportUserIdFor(clientId),
+        captured[0].get(SupportUserExclusion.HQL_PARAM));
   }
 
   // --------------------------------------------------------------------

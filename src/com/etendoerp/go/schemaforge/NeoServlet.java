@@ -29,6 +29,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
 import com.smf.securewebservices.SWSConfig;
 
@@ -109,6 +110,12 @@ public class NeoServlet extends HttpBaseServlet {
       BatchJobService.shutdownInstance();
     } catch (RuntimeException e) {
       log.debug("Could not stop the batch job threads on servlet destroy.", e);
+    }
+    try {
+      // ETP-5051: the isolated quota-report readers are daemon threads of this webapp too.
+      IsolatedDalRead.shutdown();
+    } catch (RuntimeException e) {
+      log.debug("Could not stop the isolated read threads on servlet destroy.", e);
     }
     super.destroy();
   }

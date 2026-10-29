@@ -251,10 +251,15 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
           newOrder.getDocumentNo(), quotationId);
       reactivateConvertedOrder(newOrder);
       recomputeConvertedOrderRate(newOrder);
+      // ETP-5051: the plan-quota check of the order created from the quotation and its lines.
+      // Nothing is committed before this point, so a refusal rolls the conversion back whole.
+      NeoQuotaCreateCheck.requireAllowedDocument(newOrder);
       JSONObject result = new JSONObject();
       result.put("salesOrderId", newOrder.getId());
       result.put(FIELD_DOCUMENT_STATUS, newOrder.getDocumentStatus());
       return NeoResponse.ok(result);
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (Exception e) {
       log.error("[ETP-4027] handleConvertQuotation failed for quotation {}: {}",
           quotationId, e.getMessage(), e);

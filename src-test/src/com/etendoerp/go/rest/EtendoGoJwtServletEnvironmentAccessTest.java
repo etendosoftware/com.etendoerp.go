@@ -35,7 +35,11 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Date;
+import java.util.List;
 
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
@@ -63,6 +67,12 @@ import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
+import com.etendoerp.go.usage.IsolatedReader;
+import com.etendoerp.go.usage.quota.ConsumptionReader;
+import com.etendoerp.go.usage.quota.QuotaDefinition;
+import com.etendoerp.go.usage.quota.QuotaEvaluator;
+import com.etendoerp.go.usage.quota.QuotaLookup;
+import com.etendoerp.go.usage.quota.TenantQuotas;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -79,6 +89,13 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *
  * <p>The decision comes from the servlet's own lifecycle service (mocked here) through the shared
  * {@code EnvironmentAccessGuard}, so the real kill switch applies.
+ *
+ * <p>ETP-5051: {@code POST /session/environment} also reports {@code quotas}, the tenant's quota
+ * items at WARN or DENY. It is report-only like {@code accessDecision}: a quota never refuses
+ * entry, a tenant without quota rows costs no consumption query, and a failed evaluation reports
+ * {@code []}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletEnvironmentAccessTest {
 
@@ -313,6 +330,79 @@ public class EtendoGoJwtServletEnvironmentAccessTest {
 
     assertEquals(HttpServletResponse.SC_OK, resp.status);
     assertFalse(new JSONObject(resp.body.toString()).has("accessDecision"));
+  }
+
+  // ===================== POST /session/environment: quotas (ETP-5051) =====================
+
+  private static final Date PERIOD_START = Date.from(Instant.parse("2026-10-17T09:30:00Z"));
+  private static final Date PERIOD_END = Date.from(Instant.parse("2026-11-17T09:30:00Z"));
+
+  private final QuotaLookup quotaLookup = mock(QuotaLookup.class);
+  private final ConsumptionReader consumption = mock(ConsumptionReader.class);
+
+  private void evaluateQuotasWith(TenantQuotas tenant) {
+    when(quotaLookup.forTenant(CLIENT_ID)).thenReturn(tenant);
+    servlet.quotaEvaluator = new QuotaEvaluator(quotaLookup, consumption,
+        Clock.fixed(Instant.parse("2026-10-24T12:00:00Z"), ZoneOffset.UTC));
+    servlet.quotaReads = IsolatedReader.INLINE;
+  }
+
+  private static QuotaDefinition blockQuota(String key, long included) {
+    return QuotaDefinition.builder().resourceId("RES-" + key).resourceKey(key)
+        .resourceName("Name of " + key).unitLabel("units").enforcementMode("block")
+        .includedQty(included).warningThreshold(80L).build();
+  }
+
+  private JSONObject enter() throws Exception {
+    decide(Decision.ALLOWED);
+    Captured resp = new Captured();
+    servlet.doPost(sessionEnvironmentRequest(), resp.response);
+    assertEquals("a quota never refuses entry", HttpServletResponse.SC_OK, resp.status);
+    return new JSONObject(resp.body.toString());
+  }
+
+  @Test
+  public void enteringReportsOnlyTheQuotasAtWarnOrDeny() throws Exception {
+    QuotaDefinition allowed = blockQuota("ALLOWED", 100L);
+    QuotaDefinition warned = blockQuota("WARNED", 100L);
+    QuotaDefinition denied = blockQuota("DENIED", 100L);
+    evaluateQuotasWith(new TenantQuotas(CLIENT_ID, "month", PERIOD_START, PERIOD_END, false,
+        List.of(allowed, warned, denied)));
+    when(consumption.read(eq(allowed), eq(CLIENT_ID), any())).thenReturn(1L);
+    when(consumption.read(eq(warned), eq(CLIENT_ID), any())).thenReturn(85L);
+    when(consumption.read(eq(denied), eq(CLIENT_ID), any())).thenReturn(120L);
+
+    JSONArray quotas = enter().getJSONArray("quotas");
+
+    assertEquals(2, quotas.length());
+    assertEquals("WARNED", quotas.getJSONObject(0).getString("resourceKey"));
+    assertEquals("WARN", quotas.getJSONObject(0).getString("verdict"));
+    assertEquals(85L, quotas.getJSONObject(0).getLong("consumed"));
+    assertEquals("DENIED", quotas.getJSONObject(1).getString("resourceKey"));
+    assertEquals("DENY", quotas.getJSONObject(1).getString("verdict"));
+  }
+
+  @Test
+  public void aTenantWithoutQuotaRowsReportsAnEmptyListAndRunsNoConsumptionQuery()
+      throws Exception {
+    evaluateQuotasWith(TenantQuotas.none(CLIENT_ID));
+
+    JSONObject body = enter();
+
+    assertEquals(0, body.getJSONArray("quotas").length());
+    verify(quotaLookup).forTenant(CLIENT_ID);
+    org.mockito.Mockito.verifyNoInteractions(consumption);
+  }
+
+  @Test
+  public void aFailedQuotaEvaluationReportsAnEmptyListAndStillEnters() throws Exception {
+    evaluateQuotasWith(null);
+    when(quotaLookup.forTenant(CLIENT_ID)).thenThrow(new IllegalStateException("db down"));
+
+    JSONObject body = enter();
+
+    assertEquals(0, body.getJSONArray("quotas").length());
+    assertTrue(body.has("environment"));
   }
 
   // ===================== fixtures =====================

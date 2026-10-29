@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -66,6 +67,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * {@code CreateInvoiceShipmentHandlerTest}.
  *
  * @covers com.etendoerp.go.schemaforge.InOutTargetBuilder
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 class InOutTargetBuilderTest {
 
@@ -208,6 +210,32 @@ class InOutTargetBuilderTest {
     sequence.verify(dal).flush();
     sequence.verify(linker).link(stocked, created.get(0));
     sequence.verify(linker).link(service, created.get(1));
+  }
+
+  // ── plan quota (ETP-5051) ─────────────────────────────────────────────────
+
+  /**
+   * ETP-5051 — every follow-up's movement is checked with its lines once they are flushed and
+   * linked; a refusal escapes the builder, so the follow-up handler answers it and rolls back.
+   */
+  @Test
+  void theBuiltMovementIsQuotaCheckedAndARefusalEscapesTheBuilder() {
+    factoryStatic.when(() -> NeoCommercialDocumentFactory.findInOutDocType(any(), anyString(),
+        anyBoolean())).thenReturn(docType);
+    ShipmentInOut inout = newInOut();
+    ShipmentInOutLine created = newLines(1).get(0);
+    InOutTargetBuilder.Line service = line("il-svc", false);
+
+    try (MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      assertThrows(NeoQuotaCreateCheck.Refused.class, () -> InOutTargetBuilder.build(
+          InOutTargetBuilder.Direction.SALES, header(warehouse),
+          Collections.singletonList(service), linker));
+
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(inout));
+    }
+    verify(dal).save(created);
+    verify(dal, atLeastOnce()).flush();
+    verify(linker).link(service, created);
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

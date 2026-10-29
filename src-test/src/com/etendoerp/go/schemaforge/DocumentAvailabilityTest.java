@@ -49,6 +49,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
@@ -68,6 +69,10 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  * @covers com.etendoerp.go.schemaforge.InOutInvoiceAvailability
  * @covers com.etendoerp.go.schemaforge.InvoiceDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.ReturnDocumentAvailability
+ *
+ * <p>ETP-5876 adds, per invoice, the import actions that do not suit its kind (see
+ * {@code RectificativeImportGate}): a normal invoice rules out the return and origin imports, a
+ * rectificative the order and goods ones.
  */
 // Test methods live in the @Nested inner classes below.
 @SuppressWarnings("java:S2187")
@@ -430,6 +435,17 @@ class DocumentAvailabilityTest {
       return invoice;
     }
 
+    /** The import actions a NORMAL invoice rules out: the rectificative ones. */
+    private final Set<String> importActionsOfANormalInvoice =
+        RectificativeImportGate.RECTIFICATIVE_ACTIONS;
+
+    private Map<String, String> withoutTheImportActions(Map<String, String> unavailable) {
+      Map<String, String> rest = new java.util.LinkedHashMap<>(unavailable);
+      rest.keySet().removeAll(RectificativeImportGate.RECTIFICATIVE_ACTIONS);
+      rest.keySet().removeAll(RectificativeImportGate.STANDARD_ACTIONS);
+      return rest;
+    }
+
     @Test
     @DisplayName("a completed invoice the reactivation guard would refuse rules Reactivate out")
     void guardedInvoiceRulesOutReactivate() {
@@ -440,7 +456,7 @@ class DocumentAvailabilityTest {
         Map<String, String> unavailable = new SalesInvoiceHeaderHandler()
             .unavailableActions(invoice("CO"));
 
-        assertEquals(Set.of("documentAction:RE"), unavailable.keySet());
+        assertEquals(Set.of("documentAction:RE"), withoutTheImportActions(unavailable).keySet());
         assertTrue(unavailable.get("documentAction:RE").contains("SII"));
         assertTrue(unavailable.get("documentAction:RE").contains("R-1, R-2"));
         assertEquals(unavailable, new PurchaseInvoiceHeaderHandler()
@@ -453,12 +469,58 @@ class DocumentAvailabilityTest {
     void otherwiseNothing() {
       try (MockedStatic<InvoiceReactivationGuard> guard = mockStatic(InvoiceReactivationGuard.class)) {
         guard.when(() -> InvoiceReactivationGuard.computeBlock("I1")).thenReturn(null);
-        assertTrue(new SalesInvoiceHeaderHandler().unavailableActions(invoice("CO")).isEmpty());
-        assertTrue(new SalesInvoiceHeaderHandler().unavailableActions(invoice("DR")).isEmpty());
+        assertTrue(withoutTheImportActions(
+            new SalesInvoiceHeaderHandler().unavailableActions(invoice("CO"))).isEmpty());
+        assertTrue(withoutTheImportActions(
+            new SalesInvoiceHeaderHandler().unavailableActions(invoice("DR"))).isEmpty());
         assertTrue(InvoiceDocumentAvailability.unavailable(mock(Order.class)).isEmpty());
         guard.when(() -> InvoiceReactivationGuard.computeBlock("I1"))
             .thenThrow(new IllegalStateException("boom"));
         assertTrue(InvoiceDocumentAvailability.unavailable(invoice("CO")).isEmpty());
+      }
+    }
+
+    @Test
+    @DisplayName("a normal invoice rules out the return and origin imports, with the reason")
+    void aNormalInvoiceRulesOutTheRectificativeImports() {
+      Invoice normal = invoice("DR");
+      when(normal.getDocumentNo()).thenReturn("FV-1");
+
+      for (Map<String, String> unavailable : List.of(
+          new SalesInvoiceHeaderHandler().unavailableActions(normal),
+          new PurchaseInvoiceHeaderHandler().unavailableActions(normal))) {
+        assertEquals(importActionsOfANormalInvoice, unavailable.keySet());
+        assertTrue(unavailable.get("importReturnLines").contains("FV-1"));
+        assertTrue(unavailable.get("importOriginInvoiceLines").contains("is not a rectificative"));
+      }
+    }
+
+    @Test
+    @DisplayName("a rectificative rules out the order and goods imports, whichever side it is on")
+    void aRectificativeRulesOutTheOrderAndGoodsImports() {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+      try {
+        Invoice salesRectificative = invoice("DR");
+        when(salesRectificative.getDocumentNo()).thenReturn("FVR-1");
+        DocumentType arc = mock(DocumentType.class);
+        when(arc.getDocumentCategory()).thenReturn("ARC");
+        when(salesRectificative.getTransactionDocument()).thenReturn(arc);
+        Invoice purchaseRectificative = invoice("DR");
+        DocumentType apc = mock(DocumentType.class);
+        when(apc.getDocumentCategory()).thenReturn("APC");
+        when(purchaseRectificative.getTransactionDocument()).thenReturn(apc);
+
+        Map<String, String> sales = new SalesInvoiceHeaderHandler()
+            .unavailableActions(salesRectificative);
+        Map<String, String> purchase = new PurchaseInvoiceHeaderHandler()
+            .unavailableActions(purchaseRectificative);
+
+        assertEquals(RectificativeImportGate.STANDARD_ACTIONS, sales.keySet());
+        assertEquals(RectificativeImportGate.STANDARD_ACTIONS, purchase.keySet());
+        assertTrue(sales.get("importOrderLines").contains("FVR-1"));
+        assertTrue(sales.get("importShipmentLines").contains("importReturnLines"));
+      } finally {
+        AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
       }
     }
   }

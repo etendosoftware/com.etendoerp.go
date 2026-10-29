@@ -109,6 +109,12 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * conditional HQL {@code UPDATE} is only meaningful against committed rows and a real concurrent writer, so it
  * runs here with only the Stripe period reader mocked.
  *
+ * <p>Group 5 (ETP-5051 O-1b) covers {@code CANCEL_AT_PERIOD_END}: a new row starts at {@code N},
+ * {@code ETGO_SUB_CANCELPE_CHK} refuses anything but {@code Y}/{@code N}, and a real
+ * {@code customer.subscription.updated} carrying {@code cancel_at_period_end} stores the flag
+ * through {@link SubscriptionService#applyLifecycleOutcome} — after which the environment list's
+ * {@code renewalAt} ({@link EnvironmentPlanCache}) is null while the status stays active.
+ *
  * @covers com.etendoerp.go.payment.SubscriptionService
  */
 public class SubscriptionServiceIntegrationTest extends OBBaseTest {
@@ -587,6 +593,132 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
   private Instant rawInstant(String subscriptionId, String column) {
     Timestamp value = (Timestamp) rawColumn(subscriptionId, column);
     return value == null ? null : value.toInstant();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 5 — CANCEL_AT_PERIOD_END, display-only (ETP-5051 O-1b)
+  // ---------------------------------------------------------------------------------------------
+
+  private static final String CANCEL_CHECK = "etgo_sub_cancelpe_chk";
+
+  @Test
+  public void testANewSubscriptionIsNotCancellingAndTheFlagAcceptsOnlyYOrN() {
+    String tenant = createTenant("cancel-chk");
+    String subscriptionId = openCommitted(tenant, createPricedPlan());
+
+    assertEquals("N", String.valueOf(rawColumn(subscriptionId, "CANCEL_AT_PERIOD_END")));
+
+    Throwable failure = nativeUpdateExpectingFailure("UPDATE ETGO_SUBSCRIPTION "
+        + "SET CANCEL_AT_PERIOD_END = 'X' WHERE ETGO_SUBSCRIPTION_ID = :id", "id",
+        subscriptionId);
+    assertNotNull("A value other than Y/N must be refused by the database", failure);
+    assertTrue("The failure must name " + CANCEL_CHECK + ". Chain was: " + describe(failure),
+        chainNames(failure, CANCEL_CHECK));
+    assertEquals("N", String.valueOf(rawColumn(subscriptionId, "CANCEL_AT_PERIOD_END")));
+  }
+
+  /**
+   * The customer schedules a cancellation in the portal: Stripe sends
+   * {@code customer.subscription.updated} with {@code cancel_at_period_end: true} while the status
+   * stays {@code active}. The flag is stored, the renewal date disappears from the environment
+   * list, and nothing else changes; clearing it brings the date back.
+   */
+  @Test
+  public void testAScheduledCancellationClearsTheRenewalDateButNotTheStatus() throws Exception {
+    String tenant = createTenant("cancel-evt");
+    String subscriptionId = openCommitted(tenant, createPricedPlan());
+    nativeUpdateCommitted("UPDATE ETGO_SUBSCRIPTION SET CURRENT_PERIOD_START = :start, "
+            + "CURRENT_PERIOD_END = :end WHERE ETGO_SUBSCRIPTION_ID = :id",
+        "start", Timestamp.from(PROVIDER_START), "end", Timestamp.from(PROVIDER_END),
+        "id", subscriptionId);
+    assertEquals("Baseline: a renewing subscription reports its period end", PROVIDER_END,
+        renewalAtOf(tenant));
+
+    applyCommitted(subscriptionId, cancelEvent(true, PROVIDER_START.plusSeconds(60)));
+
+    assertEquals("Y", String.valueOf(rawColumn(subscriptionId, "CANCEL_AT_PERIOD_END")));
+    assertEquals(SubscriptionService.STATUS_ACTIVE,
+        String.valueOf(rawColumn(subscriptionId, "STATUS")));
+    assertNull("A scheduled cancellation must not report a renewal", renewalAtOf(tenant));
+    assertTrue("Display-only: the tenant is still productive", productive(tenant));
+
+    applyCommitted(subscriptionId, cancelEvent(false, PROVIDER_START.plusSeconds(120)));
+
+    assertEquals("N", String.valueOf(rawColumn(subscriptionId, "CANCEL_AT_PERIOD_END")));
+    assertEquals(PROVIDER_END, renewalAtOf(tenant));
+  }
+
+  private static org.codehaus.jettison.json.JSONObject cancelEvent(boolean cancel,
+      Instant created) throws Exception {
+    return new org.codehaus.jettison.json.JSONObject("{\"type\":\"customer.subscription.updated\","
+        + "\"created\":" + created.getEpochSecond() + ",\"data\":{\"object\":{"
+        + "\"id\":\"sub_fixture\",\"status\":\"active\",\"cancel_at_period_end\":" + cancel
+        + "}}}");
+  }
+
+  /** Evaluates the event with the real applier and applies it to the row, committed. */
+  private void applyCommitted(String subscriptionId, org.codehaus.jettison.json.JSONObject event) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
+          SubscriptionLifecycleApplier.SUBSCRIPTION_UPDATED, event,
+          SubscriptionLifecycleApplier.StoredState.NONE);
+      assertTrue("Sanity: the update must apply", outcome.isApplied());
+      Subscription row = OBDal.getInstance().get(Subscription.class, subscriptionId);
+      service.applyLifecycleOutcome(row, outcome,
+          Instant.ofEpochSecond(event.getLong("created")));
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } catch (org.codehaus.jettison.json.JSONException e) {
+      throw new IllegalStateException(e);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The environment list's view of the tenant, from a fresh session. */
+  private EnvironmentPlanCache.PlanView viewOf(String tenant) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      return EnvironmentPlanCache.of(service.findLatestForClients(List.of(tenant)))
+          .viewFor(tenant);
+    } finally {
+      OBContext.restorePreviousMode();
+      OBDal.getInstance().rollbackAndClose();
+    }
+  }
+
+  private Instant renewalAtOf(String tenant) {
+    return viewOf(tenant).renewalAt();
+  }
+
+  private boolean productive(String tenant) {
+    return TenantPlanService.PLAN_PRODUCTIVE.equals(viewOf(tenant).legacyPlan());
+  }
+
+  /**
+   * Same write as {@link #nativeUpdateCommitted}, expecting the database to refuse it; the broken
+   * session is rolled back and closed before the caller asserts on committed state.
+   */
+  @SuppressWarnings("rawtypes")
+  private Throwable nativeUpdateExpectingFailure(String sql, Object... nameValuePairs) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(sql);
+      bind(query, nameValuePairs);
+      query.executeUpdate();
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+      return null;
+    } catch (RuntimeException expected) {
+      OBDal.getInstance().rollbackAndClose();
+      return expected;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   // ---------------------------------------------------------------------------------------------

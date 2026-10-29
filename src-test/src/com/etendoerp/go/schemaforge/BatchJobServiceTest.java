@@ -330,6 +330,41 @@ public class BatchJobServiceTest {
     assertTrue(status(ALICE, id).getString("hint").contains("safeToResend:true"));
   }
 
+  /**
+   * REPRO (ETP-5051 QA BUG-3): a row refused for being over a plan quota was rolled back, yet
+   * resending it is refused again until the quota changes — not safe to resend, on either the MCP
+   * (flattened {@code error.code}) or the REST shape ({@code error.detail.error.code}). A failed
+   * quota check saved nothing and may pass next time, so it stays safe to resend.
+   */
+  @Test
+  public void aQuotaRefusalIsNeverSafeToResendButAFailedQuotaCheckIs() throws Exception {
+    BatchJobService.RowRunner runner = rowOps -> {
+      String id = rowOps.getJSONObject(0).getString("id");
+      JSONObject row = rejected(id);
+      if ("p0".equals(id)) {
+        row.getJSONObject("error").put("code", NeoQuotaWriteGate.CODE);
+      } else if ("p1".equals(id)) {
+        row.getJSONObject("error").put("detail", NeoQuotaWriteGate.refusalResponse(
+            new com.etendoerp.go.usage.quota.QuotaEvaluation(
+                com.etendoerp.go.usage.quota.QuotaDefinition.builder().resourceKey("DOCS")
+                    .enforcementMode("block").includedQty(1L).build(),
+                "month", null, 1L, com.etendoerp.go.usage.quota.QuotaVerdict.DENY)).getBody());
+      } else {
+        row.getJSONObject("error").put("code", NeoQuotaWriteGate.CHECK_FAILED_CODE);
+      }
+      return row;
+    };
+    String id = submit(ALICE, rows(3), runner);
+
+    executor.runAll();
+
+    JSONArray rowResults = status(ALICE, id).getJSONArray("rows");
+    assertFalse("MCP shape", rowResults.getJSONObject(0).getBoolean("safeToResend"));
+    assertFalse("REST shape", rowResults.getJSONObject(1).getBoolean("safeToResend"));
+    assertTrue("nothing saved, the check may pass", rowResults.getJSONObject(2)
+        .getBoolean("safeToResend"));
+  }
+
   @Test
   public void aRowWhoseRunnerThrewIsNeverMarkedSafeToResend() throws Exception {
     String id = submit(ALICE, rows(1), rowOps -> {

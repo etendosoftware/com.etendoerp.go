@@ -17,7 +17,9 @@
 package com.etendoerp.go.schemaforge;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
@@ -81,6 +83,8 @@ abstract class AbstractLineImportHandler implements NeoHandler {
       } finally {
         leaveAdminMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (DocumentLineImport.ImportRefusal refusal) {
       log.info("Import refused ({}): {}", refusal.code(), refusal.getMessage());
       return refusal.response();
@@ -90,6 +94,22 @@ abstract class AbstractLineImportHandler implements NeoHandler {
       rollback();
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERR_INTERNAL);
     }
+  }
+
+  /**
+   * ETP-5051: the plan-quota check of the lines this import added to the document, before the
+   * answer is built ({@link NeoQuotaCreateCheck}); a refusal rolls the whole import back.
+   *
+   * @param entityName the DAL entity of the created lines
+   * @param created the lines the import created
+   */
+  protected void requireQuotaAllowed(String entityName,
+      List<DocumentLineImport.ImportedLine> created) {
+    List<String> ids = new ArrayList<>(created.size());
+    for (DocumentLineImport.ImportedLine line : created) {
+      ids.add(line.id);
+    }
+    NeoQuotaCreateCheck.requireAllowed(entityName, ids);
   }
 
   /** Seam: admin mode for the DAL reads and writes of the action. */

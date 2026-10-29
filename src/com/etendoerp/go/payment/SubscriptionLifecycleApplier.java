@@ -32,6 +32,8 @@ public class SubscriptionLifecycleApplier {
   static final String INVOICE_PAID = "invoice.paid";
   static final String INVOICE_PAYMENT_FAILED = "invoice.payment_failed";
   static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
+  /** The provider's scheduled-cancellation flag on a subscription object (display-only). */
+  static final String CANCEL_AT_PERIOD_END = "cancel_at_period_end";
   static final String SUBSCRIPTION_DELETED = "customer.subscription.deleted";
   /** The prefix of every {@code customer.subscription.*} event type. */
   public static final String SUBSCRIPTION_EVENT_PREFIX = "customer.subscription.";
@@ -91,11 +93,13 @@ public class SubscriptionLifecycleApplier {
             EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
             .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
                 subscriptionPeriodBoundary(object, CURRENT_PERIOD_END))
+            .withCancelAtPeriodEnd(cancelAtPeriodEndOf(object))
             .closing(subscriptionEndedAt(object));
       case SUBSCRIPTION_UPDATED:
         return fromSubscriptionStatus(object, current)
             .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
-                subscriptionPeriodBoundary(object, CURRENT_PERIOD_END));
+                subscriptionPeriodBoundary(object, CURRENT_PERIOD_END))
+            .withCancelAtPeriodEnd(cancelAtPeriodEndOf(object));
       default:
         return SubscriptionEventOutcome.ignore("unhandled event type");
     }
@@ -278,6 +282,34 @@ public class SubscriptionLifecycleApplier {
     JSONObject first = data == null ? null : data.optJSONObject(0);
     return first == null ? null : epochSeconds(first, field);
   }
+
+  /**
+   * ETP-5051 (O-1b) — the subscription object's {@code cancel_at_period_end}, or null when the
+   * object does not carry it. Display-only (it feeds {@code renewalAt} on the environment list);
+   * {@link #fromSubscriptionStatus} never reads it, so it cannot change the status mapping.
+   *
+   * @param subscription a Stripe subscription object
+   * @return the flag; {@link CancelAtPeriodEnd#NOT_REPORTED} when absent, null or not a boolean
+   */
+  static CancelAtPeriodEnd cancelAtPeriodEndOf(JSONObject subscription) {
+    if (subscription == null || !subscription.has(CANCEL_AT_PERIOD_END)
+        || subscription.isNull(CANCEL_AT_PERIOD_END)) {
+      return CancelAtPeriodEnd.NOT_REPORTED;
+    }
+    Object value = subscription.opt(CANCEL_AT_PERIOD_END);
+    if (value instanceof Boolean) {
+      return CancelAtPeriodEnd.of((Boolean) value);
+    }
+    String text = String.valueOf(value);
+    if ("true".equalsIgnoreCase(text)) {
+      return CancelAtPeriodEnd.SET;
+    }
+    if ("false".equalsIgnoreCase(text)) {
+      return CancelAtPeriodEnd.CLEARED;
+    }
+    return CancelAtPeriodEnd.NOT_REPORTED;
+  }
+
 
   /**
    * Reads the subscription's own status.
