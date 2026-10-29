@@ -21,6 +21,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -31,6 +33,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.service.json.JsonConstants;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoExtensionChannel;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
@@ -44,6 +47,8 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
@@ -652,6 +657,36 @@ final class McpHookExecutor {
     JSONObject flat = McpToolRouterSupport.flattenCoreResponse(served.getBody());
     McpRecordUrls.addRecordUrl(flat, specName, recordId, McpToolRouterSupport.isPrimaryTab(adTab));
     return McpToolRouter.wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));
+  }
+
+  /**
+   * Both record refusals an action answers before anything runs: another tenant's record (ETP-5558),
+   * then an id that is no row of the table for a document action (ETP-5715).
+   */
+  static NeoResponse actionRecordRefusal(SFEntity sfEntity, String recordId, String firedName) {
+    NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
+    return foreignRecord != null ? foreignRecord
+        : NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
+  }
+
+  /**
+   * Fires the action's button process. ETP-5684: when the customization un-posted the record
+   * before a reactivation that then throws, the un-post is committed and stays, so the error is
+   * answered (the router rolls an error answer back) instead of thrown, for the note to reach the
+   * caller.
+   */
+  static NeoResponse executeButtonAction(NeoContext hookCtx, SFEntity sfEntity, String recordId,
+      String firedName, JSONObject actionParams) throws Exception {
+    try {
+      return NeoButtonActionHelper.executeButtonActionCore(sfEntity, recordId, firedName,
+          actionParams);
+    } catch (Exception e) {
+      if (!ReactivationUnpost.ran(hookCtx)) {
+        throw e;
+      }
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          McpActionBatch.parseBody(McpActionBatch.errorBodyOf(e, McpConstants.TOOL_NEO_ACTION)));
+    }
   }
 
   /**

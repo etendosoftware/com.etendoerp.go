@@ -32,7 +32,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -2019,16 +2018,6 @@ public class McpToolRouter {
 
   // ── etendo_action ────────────────────────────────────────────────────────
 
-  /**
-   * ETP-5558: another tenant's record is a 404 before the customization or the button sees it.
-   * ETP-5715: a document action on an id that is no row of the table answers the same 404.
-   */
-  private static NeoResponse actionRecordRefusal(SFEntity sfEntity, String recordId,
-      String firedName) {
-    NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
-    return foreignRecord != null ? foreignRecord
-        : NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
-  }
 
   /**
    * Fire a button action on a record and return the structured process result.
@@ -2092,7 +2081,7 @@ public class McpToolRouter {
     }
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
-    NeoResponse foreignRecord = actionRecordRefusal(sfEntity, recordId, firedName);
+    NeoResponse foreignRecord = McpHookExecutor.actionRecordRefusal(sfEntity, recordId, firedName);
     if (foreignRecord != null) {
       return McpHookExecutor.neoResponseToMcpResult(foreignRecord);
     }
@@ -2129,19 +2118,8 @@ public class McpToolRouter {
       return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
     }
 
-    NeoResponse neoResponse;
-    try {
-      neoResponse = NeoButtonActionHelper.executeButtonActionCore(
-          sfEntity, recordId, firedName, actionParams);
-    } catch (Exception e) {
-      if (!ReactivationUnpost.ran(hookCtx)) {
-        throw e;
-      }
-      // ETP-5684: the un-post was committed before the reactivation threw, so the caller must hear
-      // that it stays: answer the error with the note (the router rolls an error answer back).
-      neoResponse = NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          McpActionBatch.parseBody(McpActionBatch.errorBodyOf(e, McpConstants.TOOL_NEO_ACTION)));
-    }
+    NeoResponse neoResponse = McpHookExecutor.executeButtonAction(hookCtx, sfEntity, recordId,
+        firedName, actionParams);
     // ETP-5684: when the customization un-posted the record before reactivating it, say so — on
     // the error path too, which never reaches the post-hook below.
     hookCtx.setPreviousResult(neoResponse);
