@@ -26,8 +26,6 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import javax.inject.Named;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -52,6 +50,7 @@ import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoExtension;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.Invitation;
@@ -62,8 +61,9 @@ import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * NeoHandler for the {@code user} spec. Three independent concerns share this one class because
- * only one {@code JAVA_QUALIFIER} can be registered per {@code ETGO_SF_ENTITY} row (see
- * {@code docs/neo-headless-extensibility.md} §2.2), and this entity's qualifier was already
+ * only one customization can be bound per {@code (spec, entity)} pair (originally one
+ * {@code JAVA_QUALIFIER} per {@code ETGO_SF_ENTITY} row, see
+ * {@code docs/neo-headless-extensibility.md} §2.2), and this entity's binding was already
  * claimed by the role-sync concern below (ETP-4512):
  *
  * <ol>
@@ -216,10 +216,12 @@ import com.etendoerp.go.supportaccess.SupportUserExclusion;
  *   guards in this class.</li>
  * </ol>
  *
- * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
- * {@code docs/neo-headless-extensibility.md} §2.2.
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5051, migrated from the {@code user}
+ * qualifier per ETP-5588): the ETGO_SF_ENTITY row carries no {@code Java_Qualifier} and the class
+ * no {@code @Named}. Every surface — REST single and batch, MCP, read predicates — reaches it
+ * through the annotation. Never give it a normal CDI scope. See {@code neo-headless.md} §5.3.a.
  */
-@Named("user")
+@NeoExtension(spec = "user", entity = "user")
 public class UserRoleAssignmentHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(UserRoleAssignmentHandler.class);
