@@ -23,25 +23,29 @@ import org.codehaus.jettison.json.JSONObject;
 
 /**
  * The common appearance options of a printable, apart from its variant, logo and footer: the base
- * color, the font family, the font size and whether table rows are striped. Every option is
+ * color, the font family, the font size, whether table rows are striped and whether the list print
+ * shows the company logo. Every option is
  * optional and {@code null} means "the design's own default", so an organization that never touches
  * one prints exactly what it printed before. Values are the vocabulary of
  * {@link DocTemplateConfigSupport}; this class only carries them.
  */
 final class DocTemplateStyle {
 
-  static final DocTemplateStyle NONE = new DocTemplateStyle(null, null, null, null);
+  static final DocTemplateStyle NONE = new DocTemplateStyle(null, null, null, null, null);
 
   private final String color;
   private final String font;
   private final String fontSize;
   private final String rowStripes;
+  private final String showLogo;
 
-  DocTemplateStyle(String color, String font, String fontSize, String rowStripes) {
+  DocTemplateStyle(String color, String font, String fontSize, String rowStripes,
+      String showLogo) {
     this.color = color;
     this.font = font;
     this.fontSize = fontSize;
     this.rowStripes = rowStripes;
+    this.showLogo = showLogo;
   }
 
   String getColor() {
@@ -60,12 +64,17 @@ final class DocTemplateStyle {
     return rowStripes;
   }
 
-  /** Adds {@code color, font, fontSize, rowStripes} (JSON null when unset) to the wire object. */
+  String getShowLogo() {
+    return showLogo;
+  }
+
+  /** Adds {@code color, font, fontSize, rowStripes, showLogo} (JSON null when unset) to the wire object. */
   void writeTo(JSONObject json) throws JSONException {
     json.put("color", orNull(color));
     json.put("font", orNull(font));
     json.put("fontSize", orNull(fontSize));
     json.put("rowStripes", orNull(rowStripes));
+    json.put("showLogo", orNull(showLogo));
   }
 
   @Override
@@ -78,12 +87,13 @@ final class DocTemplateStyle {
     }
     DocTemplateStyle o = (DocTemplateStyle) other;
     return Objects.equals(color, o.color) && Objects.equals(font, o.font)
-        && Objects.equals(fontSize, o.fontSize) && Objects.equals(rowStripes, o.rowStripes);
+        && Objects.equals(fontSize, o.fontSize) && Objects.equals(rowStripes, o.rowStripes)
+        && Objects.equals(showLogo, o.showLogo);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(color, font, fontSize, rowStripes);
+    return Objects.hash(color, font, fontSize, rowStripes, showLogo);
   }
 
   private static Object orNull(String value) {

@@ -2363,11 +2363,11 @@ Consumed by the UI that edits it (T5) and the renderer that reads it (T6).
 ```
 GET /sws/neo/doctemplateconfig?docType=<type>[&orgId=<org>]
 GET /sws/neo/doctemplateconfig[?orgId=<org>]
-PUT /sws/neo/doctemplateconfig      {"orgId"?, "docType", "variant"?, "logo"?, "footerText"?, "color"?, "font"?, "fontSize"?, "rowStripes"?}
+PUT /sws/neo/doctemplateconfig      {"orgId"?, "docType", "variant"?, "logo"?, "footerText"?, "color"?, "font"?, "fontSize"?, "rowStripes"?, "showLogo"?}
 Authorization: Bearer {token}
 ```
 
-**Contract.** A configuration is `{orgId, docType, variant, logo, footerText, color, font, fontSize, rowStripes, configured}`.
+**Contract.** A configuration is `{orgId, docType, variant, logo, footerText, color, font, fontSize, rowStripes, showLogo, configured}`.
 
 | Field | Values |
 |---|---|
@@ -2379,6 +2379,7 @@ Authorization: Bearer {token}
 | `font` | `null` or `sans`, `serif`, `mono` — also a CHECK on the table |
 | `fontSize` | `null` or `normal`, `large` — also a CHECK on the table |
 | `rowStripes` | `null` or `on`, `off` (striped table rows) — also a CHECK on the table |
+| `showLogo` | `null` (no logo) or `on`, `off` — whether the list print (`listing`) shows the company logo in its header; ignored by documents, which always print theirs — also a CHECK on the table |
 | `configured` | `true` for a saved row; `false` when the defaults are served |
 
 - `GET ?docType=` answers one configuration, or the defaults (`classic`, no logo, no footer,

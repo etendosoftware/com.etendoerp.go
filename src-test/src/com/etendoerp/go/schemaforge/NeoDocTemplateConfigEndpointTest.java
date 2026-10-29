@@ -310,31 +310,31 @@ class NeoDocTemplateConfigEndpointTest {
         .thenReturn(saved(ORG_A, "listing", "classic"));
 
     NeoResponse response = endpoint.handle(put("{\"docType\":\"listing\",\"color\":\"#1a73e8\","
-        + "\"font\":\"serif\",\"fontSize\":\"large\",\"rowStripes\":\"off\"}"));
+        + "\"font\":\"serif\",\"fontSize\":\"large\",\"rowStripes\":\"off\",\"showLogo\":\"on\"}"));
 
     assertEquals(200, response.getHttpStatus());
     verify(store).save(ORG_A, "listing", "classic", null, null,
-        new DocTemplateStyle("#1A73E8", "serif", "large", "off"));
+        new DocTemplateStyle("#1A73E8", "serif", "large", "off", "on"));
   }
 
   @Test
   @DisplayName("PUT keeps the saved style of a key left out and clears one sent as null")
   void mergesTheStyle() throws Exception {
     when(store.find(ORG_A, "listing")).thenReturn(new DocTemplateConfig(ORG_A, "listing",
-        "compact", null, null, new DocTemplateStyle("#112233", "mono", "large", "on"), true));
+        "compact", null, null, new DocTemplateStyle("#112233", "mono", "large", "on", "on"), true));
     when(store.save(anyString(), anyString(), anyString(), any(), any(), any()))
         .thenReturn(saved(ORG_A, "listing", "compact"));
 
     endpoint.handle(put("{\"docType\":\"listing\",\"font\":null,\"rowStripes\":\"off\"}"));
 
     verify(store).save(ORG_A, "listing", "compact", null, null,
-        new DocTemplateStyle("#112233", null, "large", "off"));
+        new DocTemplateStyle("#112233", null, "large", "off", "on"));
   }
 
   @ParameterizedTest
   @ValueSource(strings = { "{\"color\":\"red\"}", "{\"color\":\"#12345\"}",
       "{\"color\":\"#12345G\"}", "{\"color\":\"#123456;}\"}", "{\"font\":\"comic\"}",
-      "{\"fontSize\":\"huge\"}", "{\"rowStripes\":\"yes\"}", "{\"color\":7}" })
+      "{\"fontSize\":\"huge\"}", "{\"rowStripes\":\"yes\"}", "{\"showLogo\":\"true\"}", "{\"color\":7}" })
   @DisplayName("PUT refuses a color or choice outside the vocabulary and saves nothing")
   void refusesBadStyle(String fragment) throws Exception {
     String body = "{\"docType\":\"listing\"," + fragment.substring(1);

@@ -65,6 +65,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="TEMPLATE_SHOW_LOGO" primaryKey="false" required="false" type="VARCHAR" size="3" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_DOCTPLCFG_AD_CLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -81,5 +85,6 @@
       <check name="ETGO_DOCTPLCFG_FONT_CHK"><![CDATA[TEMPLATE_FONT IS NULL OR TEMPLATE_FONT IN ('sans', 'serif', 'mono')]]></check>
       <check name="ETGO_DOCTPLCFG_FSIZE_CHK"><![CDATA[TEMPLATE_FONT_SIZE IS NULL OR TEMPLATE_FONT_SIZE IN ('normal', 'large')]]></check>
       <check name="ETGO_DOCTPLCFG_STRIPES_CHK"><![CDATA[TEMPLATE_ROW_STRIPES IS NULL OR TEMPLATE_ROW_STRIPES IN ('on', 'off')]]></check>
+      <check name="ETGO_DOCTPLCFG_SHOWLOGO_CHK"><![CDATA[TEMPLATE_SHOW_LOGO IS NULL OR TEMPLATE_SHOW_LOGO IN ('on', 'off')]]></check>
     </table>
   </database>

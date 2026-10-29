@@ -120,7 +120,7 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
   @Test
   public void savesThenReadsBackTheStyle() {
     store.save(orgA, INVOICE, "classic", null, null,
-        new DocTemplateStyle("#1A73E8", "serif", "large", "off"));
+        new DocTemplateStyle("#1A73E8", "serif", "large", "off", "on"));
     OBDal.getInstance().getSession().clear();
 
     DocTemplateStyle style = store.find(orgA, INVOICE).getStyle();
@@ -129,6 +129,7 @@ public class DocTemplateConfigStoreIntegrationTest extends OBBaseTest {
     assertEquals("serif", style.getFont());
     assertEquals("large", style.getFontSize());
     assertEquals("off", style.getRowStripes());
+    assertEquals("on", style.getShowLogo());
   }
 
   @Test

@@ -82,7 +82,7 @@ final class DocTemplateConfig {
   }
 
   /** The wire shape: {@code {orgId, docType, variant, logo, footerText, color, font, fontSize,
-   * rowStripes, configured}}. */
+   * rowStripes, showLogo, configured}}. */
   JSONObject toJson() throws JSONException {
     JSONObject json = new JSONObject();
     json.put("orgId", orgId);

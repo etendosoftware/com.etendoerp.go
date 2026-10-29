@@ -168,6 +168,9 @@ class DocTemplateConfigSupportTest {
     assertNotNull(DocTemplateConfigSupport.fontSizeError("huge"));
     assertNull(DocTemplateConfigSupport.rowStripesError("off"));
     assertNotNull(DocTemplateConfigSupport.rowStripesError("yes"));
+    assertNull(DocTemplateConfigSupport.showLogoError("on"));
+    assertNull(DocTemplateConfigSupport.showLogoError(null));
+    assertNotNull(DocTemplateConfigSupport.showLogoError("true"));
   }
 
   @Test

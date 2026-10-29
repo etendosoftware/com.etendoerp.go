@@ -72,6 +72,7 @@ class NeoDocTemplateConfigEndpoint {
   private static final String K_FONT = "font";
   private static final String K_FONT_SIZE = "fontSize";
   private static final String K_STRIPES = "rowStripes";
+  private static final String K_SHOW_LOGO = "showLogo";
   private static final String MSG_FORBIDDEN = "Not allowed to access the template configuration "
       + "of this organization";
 
@@ -164,13 +165,15 @@ class NeoDocTemplateConfigEndpoint {
         pickColor(body, saved.getColor()),
         pick(body, K_FONT, saved.getFont(), true),
         pick(body, K_FONT_SIZE, saved.getFontSize(), true),
-        pick(body, K_STRIPES, saved.getRowStripes(), true));
+        pick(body, K_STRIPES, saved.getRowStripes(), true),
+        pick(body, K_SHOW_LOGO, saved.getShowLogo(), true));
     error = firstNonNull(DocTemplateConfigSupport.variantError(variant),
         DocTemplateConfigSupport.logoError(logo), DocTemplateConfigSupport.footerError(footer),
         DocTemplateConfigSupport.colorError(style.getColor()),
         DocTemplateConfigSupport.fontError(style.getFont()),
         DocTemplateConfigSupport.fontSizeError(style.getFontSize()),
-        DocTemplateConfigSupport.rowStripesError(style.getRowStripes()));
+        DocTemplateConfigSupport.rowStripesError(style.getRowStripes()),
+        DocTemplateConfigSupport.showLogoError(style.getShowLogo()));
     if (error != null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, error);
     }
@@ -192,7 +195,7 @@ class NeoDocTemplateConfigEndpoint {
   /** A field that is present must be a string or null: a number must not clear a logo by accident. */
   private static String nonStringError(JSONObject body) {
     for (String key : new String[] { K_DOC_TYPE, K_VARIANT, K_LOGO, K_FOOTER, K_COLOR, K_FONT,
-        K_FONT_SIZE, K_STRIPES }) {
+        K_FONT_SIZE, K_STRIPES, K_SHOW_LOGO }) {
       Object value = body.opt(key);
       if (body.has(key) && value != null && !JSONObject.NULL.equals(value)
           && !(value instanceof String)) {

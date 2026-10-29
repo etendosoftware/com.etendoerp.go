@@ -52,6 +52,7 @@ class DocTemplateConfigStore {
   private static final String P_FONT = "templateFont";
   private static final String P_FONT_SIZE = "templateFontSize";
   private static final String P_STRIPES = "templateRowStripes";
+  private static final String P_SHOW_LOGO = "templateShowLogo";
 
   /** @return the saved configuration, or null when the organization has none for the type */
   DocTemplateConfig find(String orgId, String docType) {
@@ -98,6 +99,7 @@ class DocTemplateConfigStore {
     row.set(P_FONT, style.getFont());
     row.set(P_FONT_SIZE, style.getFontSize());
     row.set(P_STRIPES, style.getRowStripes());
+    row.set(P_SHOW_LOGO, style.getShowLogo());
     OBDal.getInstance().save(row);
     OBDal.getInstance().flush();
     return toConfig(row);
@@ -118,7 +120,8 @@ class DocTemplateConfigStore {
     return new DocTemplateConfig(((Organization) row.get("organization")).getId(),
         (String) row.get(P_DOC_TYPE), (String) row.get(P_VARIANT), (String) row.get(P_LOGO),
         (String) row.get(P_FOOTER), new DocTemplateStyle((String) row.get(P_COLOR),
-            (String) row.get(P_FONT), (String) row.get(P_FONT_SIZE), (String) row.get(P_STRIPES)),
+            (String) row.get(P_FONT), (String) row.get(P_FONT_SIZE), (String) row.get(P_STRIPES),
+            (String) row.get(P_SHOW_LOGO)),
         true);
   }
 }

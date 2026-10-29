@@ -53,7 +53,7 @@ final class DocTemplateConfigSupport {
       "sans", "serif", "mono")));
   static final Set<String> FONT_SIZES = Collections.unmodifiableSet(new LinkedHashSet<>(
       Arrays.asList("normal", "large")));
-  static final Set<String> ROW_STRIPES = Collections.unmodifiableSet(new LinkedHashSet<>(
+  static final Set<String> ON_OFF = Collections.unmodifiableSet(new LinkedHashSet<>(
       Arrays.asList("on", "off")));
   /** A base color is an exact {@code #RRGGBB}: it ends up inside a stylesheet, so nothing else. */
   private static final Pattern COLOR = Pattern.compile("#[0-9A-Fa-f]{6}");
@@ -100,7 +100,12 @@ final class DocTemplateConfigSupport {
   }
 
   static String rowStripesError(String rowStripes) {
-    return choiceError("rowStripes", rowStripes, ROW_STRIPES);
+    return choiceError("rowStripes", rowStripes, ON_OFF);
+  }
+
+  /** Whether the list print shows the company logo; null means the design's own (no logo). */
+  static String showLogoError(String showLogo) {
+    return choiceError("showLogo", showLogo, ON_OFF);
   }
 
   private static String choiceError(String key, String value, Set<String> allowed) {
