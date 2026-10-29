@@ -397,6 +397,10 @@ below are the contract the bot consumes; change them only together with the bot.
   `tool_name`, `verb`, `target_entity`, `outcome`, `error_code`, `client_name`, `client_version`,
   `payload` (the stored string as is), `triage_cell`, `triage_assignee`, `triage_issue`,
   `triage_task`, `triaged`.
+- `result` is pure ASCII: every non-ASCII character is a JSON `\u` escape. `webhookevents` sends
+  the body as `application/json;charset=ISO-8859-1`, so without the escapes anything outside
+  Latin-1 (typographic quotes, arrows, emoji) would arrive as `?`. Parsing `result` as JSON
+  restores the original text.
 
 **`McpFeedbackTriage`** — `POST /webhooks/McpFeedbackTriage?apikey=<key>` with
 `Content-Type: application/json` and a JSON body `{"id", "cell", "issue", "task", "assignee"}`.
