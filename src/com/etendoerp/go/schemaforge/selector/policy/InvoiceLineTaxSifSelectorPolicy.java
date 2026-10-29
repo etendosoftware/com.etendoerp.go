@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.schemaforge.selector.policy;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -24,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -34,8 +36,10 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.NeoCurrencyFormatConfig;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
@@ -122,9 +126,21 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * APPENDS those child rows as extra {@code items} on the SAME response — fully enriched with the
  * same structural + SIF value columns. This is strictly additive: nothing is removed or hidden
  * from the picker, and the flag defaults to off.
+ *
+ * <p><b>ETP-5902 — not only SIF:</b> every enriched item also carries {@link #LABEL_PREFIX_KEY}
+ * (e.g. {@code "21 %"}), which the pickers render before the label. {@code label} itself is left
+ * untouched. The MCP {@code etendo_selectors} tool passes the source entity too, so it gets the
+ * same columns as the REST selector.
+ *
+ * <p><b>ETP-5948 — the rate is searchable:</b> as {@link SelectorSearchPolicy}, a numeric term
+ * ({@code "11,4"}, {@code "11.4"}, {@code "21%"}) also matches the taxes whose shown rate
+ * starts with it, computed with the same {@code LABEL_RATE_SQL} as the prefix, so what the user
+ * reads is what the user can type.
  */
-public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichmentPolicy {
+public final class InvoiceLineTaxSifSelectorPolicy
+    implements SelectorEnrichmentPolicy, SelectorSearchPolicy {
 
+  private static final String TAX_ID_COLUMN = "c_tax_id";
   private static final Logger log = LogManager.getLogger(InvoiceLineTaxSifSelectorPolicy.class);
 
   // AD_Window_Id — sales-invoice (167), purchase-invoice (183), sales-order (143),
@@ -206,6 +222,19 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
   // sends it, so the picker's own live search-as-you-type is completely unaffected by the
   // extra child rows this flag causes enrich() to append.
   private static final String INCLUDE_CHILDREN_PARAM = "includeTaxChildren";
+
+  // ETP-5902 — JSON key of the rate the pickers render before the label ("21% - <label>").
+  // A separate key, not a prefixed `label`: the picker finds its committed value again by
+  // searching the plain label (ETP-5846), which a prefixed label would never match.
+  static final String LABEL_PREFIX_KEY = "labelPrefix";
+
+  // ETP-5902 — rate shown in `labelPrefix`. A summary tax's own `rate` is unreliable (IVA+RE
+  // parents carry the sum, intra-community/ISP parents carry 0), so it shows the sum of its
+  // active POSITIVE children (VAT + RE, retention not subtracted), 0 when there is none.
+  private static final String LABEL_RATE_COLUMN = "label_rate";
+  private static final String LABEL_RATE_SQL = "CASE WHEN t.issummary = 'Y' THEN COALESCE("
+      + "(SELECT SUM(c.rate) FROM c_tax c WHERE c.parent_tax_id = t.c_tax_id"
+      + " AND c.isactive = 'Y' AND c.rate > 0), 0) ELSE t.rate END";
 
   public InvoiceLineTaxSifSelectorPolicy() {
     // Stateless policy; public constructor supports registry composition without CDI.
@@ -363,7 +392,7 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          childIds.add(rs.getString("c_tax_id"));
+          childIds.add(rs.getString(TAX_ID_COLUMN));
         }
       }
     }
@@ -397,6 +426,7 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
     boolean withOverride = StringUtils.isNotBlank(organizationId);
     String sql = buildSifColumnsSql(placeholders.toString(), withOverride);
 
+    String decimalSeparator = NeoCurrencyFormatConfig.fromRuntime().getDecimalSeparator();
     Map<String, Map<String, Object>> result = new HashMap<>();
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -409,7 +439,7 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          result.put(rs.getString("c_tax_id"), extractRow(rs));
+          result.put(rs.getString(TAX_ID_COLUMN), extractRow(rs, decimalSeparator));
         }
       }
     }
@@ -421,6 +451,7 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
     for (String col : STRUCTURAL_COLUMNS.keySet()) {
       select.append(", t.").append(col).append(" AS ").append(col);
     }
+    select.append(", ").append(LABEL_RATE_SQL).append(" AS ").append(LABEL_RATE_COLUMN);
     for (String col : SIF_VALUE_COLUMNS.keySet()) {
       if (withOverride) {
         select.append(", COALESCE(NULLIF(TRIM(t.").append(col).append("), ''), NULLIF(TRIM(ovr.")
@@ -439,7 +470,8 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
     return sql.toString();
   }
 
-  private static Map<String, Object> extractRow(ResultSet rs) throws SQLException {
+  private static Map<String, Object> extractRow(ResultSet rs, String decimalSeparator)
+      throws SQLException {
     Map<String, Object> row = new HashMap<>();
     for (Map.Entry<String, String> entry : COLUMN_TO_JSON_KEY.entrySet()) {
       String value = rs.getString(entry.getKey());
@@ -447,6 +479,61 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
         row.put(entry.getValue(), value);
       }
     }
+    BigDecimal rate = rs.getBigDecimal(LABEL_RATE_COLUMN);
+    if (rate != null) {
+      row.put(LABEL_PREFIX_KEY, formatRate(rate, decimalSeparator));
+    }
     return row;
+  }
+
+  /** {@code 21.00} → {@code "21%"}, {@code 5.2} → {@code "5,2%"} with a {@code ","} separator. */
+  static String formatRate(BigDecimal rate, String decimalSeparator) {
+    return plainRate(rate).replace(".", decimalSeparator) + "%";
+  }
+
+  private static String plainRate(BigDecimal rate) {
+    return rate.stripTrailingZeros().toPlainString();
+  }
+
+  @Override
+  public Set<String> searchMatchIds(SelectorMeta meta, Map<String, String> contextParams,
+      String search) {
+    String term = normalizeRateTerm(search);
+    if (term == null) {
+      return Collections.emptySet();
+    }
+    // Same scope as the picker offers: the client's and System's active top-level taxes. The
+    // selector's own filters still apply around this match, so it can only narrow, never widen.
+    String sql = "SELECT t.c_tax_id, " + LABEL_RATE_SQL + " AS " + LABEL_RATE_COLUMN
+        + " FROM c_tax t WHERE t.isactive = 'Y' AND t.parent_tax_id IS NULL"
+        + " AND t.ad_client_id IN (?, '0')";
+    Set<String> ids = new LinkedHashSet<>();
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, OBContext.getOBContext().getCurrentClient().getId());
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          BigDecimal rate = rs.getBigDecimal(LABEL_RATE_COLUMN);
+          if (rate != null && plainRate(rate).startsWith(term)) {
+            ids.add(rs.getString(TAX_ID_COLUMN));
+          }
+        }
+      }
+    } catch (SQLException e) {
+      log.warn("[InvoiceLineTaxSifSelectorPolicy] Rate search failed: {}", e.getMessage(), e);
+      return Collections.emptySet();
+    }
+    return ids;
+  }
+
+  /**
+   * A search term read as a rate prefix, in plain form ({@code "11,4 %"} → {@code "11.4"}), or
+   * {@code null} when it is not a number — then it stays a plain name search.
+   */
+  static String normalizeRateTerm(String search) {
+    String term = StringUtils.deleteWhitespace(StringUtils.defaultString(search));
+    term = StringUtils.removeEnd(StringUtils.removeEnd(term, "%"), ".").replace(',', '.');
+    term = StringUtils.removeEnd(term, ".");
+    return term.matches("\\d+(\\.\\d+)?") ? term : null;
   }
 }

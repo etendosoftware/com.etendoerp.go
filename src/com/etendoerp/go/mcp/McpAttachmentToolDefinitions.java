@@ -53,7 +53,7 @@ final class McpAttachmentToolDefinitions {
       + "extensions. Works on a document in any status, completed ones included, but not on document types the app gives no Attachments tab. Set main:true to "
       + "make it the document's MAIN attachment — the one used as the supplier's document of a "
       + "purchase invoice; the previous main one is replaced. The URL works exactly once and "
-      + "expires in 10 minutes. To attach the PDF the user already uploaded to create the "
+      + "expires in 10 minutes. To attach the document the user already uploaded to create the "
       + "invoice (" + McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD + "), pass its "
       + "staged_document_id instead of name: it is attached right away, with no link and no second "
       + "upload (use main:true for a supplier invoice). Requires write access to the document's window.";
@@ -126,7 +126,7 @@ final class McpAttachmentToolDefinitions {
         + "file the document's main attachment (replacing the previous main one) — what the "
         + "supplier's document of a purchase invoice is."));
     props.put(McpOcrTools.PARAM_STAGED_DOCUMENT_ID, stringProp("Optional. The stagedDocumentId "
-        + "of a PDF already uploaded for extraction: it is attached to this document directly "
+        + "of a document already uploaded for extraction: it is attached to this document directly "
         + "(then name is not needed and no link is returned)."));
     return new McpToolDefinition(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
         REQUEST_UPLOAD_DESCRIPTION, buildObjectSchema(props, List.of(McpConstants.PARAM_SPEC,

@@ -42,14 +42,20 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
+import com.etendoerp.go.usage.quota.QuotaEvaluator;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -90,7 +96,10 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ASSOCIATED_WITH_PRODUCTIVE = "associatedWithProductive";
   private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
   private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
+  private static final String FIELD_RENEWAL_AT = "renewalAt";
   private static final String FIELD_GRACE_ENDS_AT = "graceEndsAt";
+  private static final String FIELD_ACCESS_ENFORCED = "accessEnforced";
+  private static final String FIELD_QUOTAS = "quotas";
   private static final String FIELD_RELATIONSHIP = "relationship";
   private static final String FIELD_OWNED_BY_ACCOUNT = "ownedByAccount";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
@@ -132,13 +141,22 @@ final class EtendoGoJwtDalHelper {
   private EtendoGoJwtDalHelper() {
   }
 
+  /**
+   * ETP-5351 (T5) — the lookups a credential is checked against (email, legacy token, reset token,
+   * SSO identity) never return the technical support account: it has no way in but a support pass.
+   * Only {@link #findActiveAccountById} returns it, for the sessions it already owns.
+   */
+  private static Account hideSupportAccount(Account account) {
+    return SupportAccessGuard.isSupportAccount(account) ? null : account;
+  }
+
   static Account findActiveAccountByEmail(String email) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
         "as account where lower(account.email) = :" + PARAM_EMAIL + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_EMAIL, email.toLowerCase());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
+    return hideSupportAccount(query.uniqueResult());
   }
 
   static Account findActiveAccountById(String accountId) {
@@ -155,7 +173,7 @@ final class EtendoGoJwtDalHelper {
     query.setNamedParameter(PARAM_TOKEN, token);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
+    return hideSupportAccount(query.uniqueResult());
   }
 
   /** Resolves only an account session token; environment JWTs are rejected for billing mutations. */
@@ -188,7 +206,7 @@ final class EtendoGoJwtDalHelper {
             user.getClient().getId());
         return null;
       }
-      return account;
+      return hideSupportAccount(account);
     } catch (Exception e) {
       log.debug("Bearer token could not be resolved to an account: {}", e.getMessage(), e);
       return null;
@@ -220,7 +238,7 @@ final class EtendoGoJwtDalHelper {
   // The lookup, the legacy-column fallback and the one-off migration all live in
   // AccountIdentityDalHelper; this stays as the name every caller already uses.
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
-    return AccountIdentityDalHelper.findAccountByIdentity(provider, subject);
+    return hideSupportAccount(AccountIdentityDalHelper.findAccountByIdentity(provider, subject));
   }
 
   static Account createAccount(String email, String passwordHash, String name, String sessionToken) {
@@ -464,7 +482,7 @@ final class EtendoGoJwtDalHelper {
     query.setNamedParameter("now", now);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
+    return hideSupportAccount(query.uniqueResult());
   }
 
   static void consumePasswordReset(Account account, String passwordHash, Date changedAt) {
@@ -574,8 +592,11 @@ final class EtendoGoJwtDalHelper {
             + " and (user.email = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
-            + "and user.active = true");
+            + "and user.active = true and user.id <> :" + SupportUserExclusion.HQL_PARAM);
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    // ETP-5351: the support user is never paired with a GO account.
+    query.setNamedParameter(SupportUserExclusion.HQL_PARAM,
+        StringUtils.defaultString(SupportUserExclusion.supportUserIdOrNull(clientId)));
     query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
     query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
@@ -594,7 +615,11 @@ final class EtendoGoJwtDalHelper {
     query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    return query.list();
+    List<User> users = new ArrayList<>(query.list());
+    // ETP-5351: the support user is never paired with a GO account (id derived per client).
+    users.removeIf(u -> u.getClient() != null
+        && SupportAccessGuard.isSupportUser(u.getId(), u.getClient().getId()));
+    return users;
   }
 
   static List<Organization> findNonStarOrganizations(String clientId) {
@@ -727,9 +752,51 @@ final class EtendoGoJwtDalHelper {
     // ETP-5046-TRANSITIONAL-FALLBACK — the id is passed so this single-environment path resolves
     // the plan exactly as the list endpoint does, including the retired-preference fallback for a
     // tenant the R37 backfill has not reached. Delete the extra argument in Phase F.
+    Map<String, Subscription> subscriptions =
+        SUBSCRIPTION_SERVICE.findLatestForClients(List.of(client.getId()));
     return buildEnvironmentJson(client, organization, environmentUser,
-        EnvironmentPlanCache.of(List.of(client.getId()),
-            SUBSCRIPTION_SERVICE.findLatestForClients(List.of(client.getId()))));
+        EnvironmentPlanCache.of(List.of(client.getId()), subscriptions),
+        quotaReport(subscriptions));
+  }
+
+  /**
+   * ETP-5051 (§4b) — the per-request quota report of a set of tenants, from the subscriptions the
+   * caller already loaded. One extra query at most (the enforced quota rows of the listed plans),
+   * none when no tenant has a plan; consumption only for a tenant with an enforced quota. Never
+   * throws: a failure reports {@code []}.
+   *
+   * @param subscriptionsByClient {@code SubscriptionService#findLatestForClients}
+   * @return the report
+   */
+  static EnvironmentQuotaReport quotaReport(Map<String, Subscription> subscriptionsByClient) {
+    try {
+      return EnvironmentQuotaReport.build(subscriptionsByClient, QuotaEvaluatorHolder.INSTANCE);
+    } catch (RuntimeException e) {
+      log.error("[QUOTA] Could not build the environment quota report; reporting none", e);
+      return EnvironmentQuotaReport.empty();
+    }
+  }
+
+  /** Built on first use, so loading this class wires no quota service. */
+  private static final class QuotaEvaluatorHolder {
+    private static final QuotaEvaluator INSTANCE = QuotaEvaluator.forReports();
+  }
+
+  /**
+   * Serialises one environment with no quota evaluation: {@code quotas} is {@code []}. For callers
+   * that never report quotas; the environment list passes its report to the five-argument form.
+   *
+   * @param client the tenant
+   * @param organization the organization inside it, may be null
+   * @param environmentUser the tenant's admin user linked to the account
+   * @param planCache the per-request plan cache, never null
+   * @return the environment object
+   * @throws JSONException when the object cannot be built
+   */
+  static JSONObject buildEnvironmentJson(Client client, Organization organization,
+      User environmentUser, EnvironmentPlanCache planCache) throws JSONException {
+    return buildEnvironmentJson(client, organization, environmentUser, planCache,
+        EnvironmentQuotaReport.empty());
   }
 
   /**
@@ -758,11 +825,13 @@ final class EtendoGoJwtDalHelper {
    * @param organization the organization inside it, may be null
    * @param environmentUser the tenant's admin user linked to the account
    * @param planCache the per-request plan cache, never null
+   * @param quotaReport the per-request quota report (ETP-5051 §4b), never null
    * @return the environment object
    * @throws JSONException when the object cannot be built
    */
   static JSONObject buildEnvironmentJson(Client client, Organization organization,
-      User environmentUser, EnvironmentPlanCache planCache) throws JSONException {
+      User environmentUser, EnvironmentPlanCache planCache, EnvironmentQuotaReport quotaReport)
+      throws JSONException {
     JSONObject env = new JSONObject();
     env.put(FIELD_CLIENT_ID, client.getId());
     env.put(FIELD_CLIENT_NAME, client.getName());
@@ -780,6 +849,11 @@ final class EtendoGoJwtDalHelper {
     // and a free tenant has none, so reporting "free" would invent an entry nothing could look up.
     env.put(FIELD_PLAN_KEY,
         planView.planKey() == null ? JSONObject.NULL : planView.planKey());
+    // ETP-5051 (O-1b): when this environment's own subscription next renews, so "Mis empresas"
+    // shows each row's date. Local ETGO_SUBSCRIPTION state from the same batched read as the plan
+    // (no Stripe call per environment); JSON null unless the subscription is renewing.
+    env.put(FIELD_RENEWAL_AT,
+        planView.renewalAt() == null ? JSONObject.NULL : planView.renewalAt().toString());
     boolean flaggedOwner = OwnerSupport.isOwner(environmentUser.getId());
     env.put(FIELD_RELATIONSHIP, flaggedOwner ? "OWNER" : "INVITED");
     // ETP-5743: only an owned demo may be a purchase source. Unlike `relationship`, a legacy tenant
@@ -795,6 +869,16 @@ final class EtendoGoJwtDalHelper {
     if (access != null) {
       env.put(FIELD_ACCESS_STATE, access.name());
     }
+    // ETP-5051 (§4.17): whether a refusal would be enforced for this tenant — false while the
+    // environment-access kill switch is on for it. Independent of today's decision: during payment
+    // grace accessState reads ALLOWED either way, and the grace banner reads this to drop its
+    // "will be blocked on <date>" promise when no block would follow.
+    env.put(FIELD_ACCESS_ENFORCED,
+        !EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(client.getId()));
+    // ETP-5051 (§4b): the tenant's quotas at WARN or DENY, report-only; [] when none. Core's
+    // loginEnvironment() drops the session/environment body, so the SPA's quota banner reads
+    // this field, like graceEndsAt.
+    env.put(FIELD_QUOTAS, quotaReport.quotasJsonFor(client.getId()));
     // ETP-5548: a demo that already originated a productive environment is not offered as the
     // source of another purchase; the picker reads this to leave it out.
     env.put(FIELD_ASSOCIATED_WITH_PRODUCTIVE,
@@ -840,13 +924,25 @@ final class EtendoGoJwtDalHelper {
     return query.uniqueResult();
   }
 
+  /**
+   * The user-role row of the tenant's provisioning admin (the user a pooled tenant's claim and the
+   * onboarding chain personalize). Never the tenant's "Soporte Etendo" user (ETP-5351, T6): it
+   * also holds the admin role, and personalizing it would hand the support identity to the owner.
+   *
+   * @param clientId the tenant
+   * @return the admin's user-role row, or {@code null} when the tenant has none
+   */
   static UserRoles findClientAdminUserRole(String clientId) {
     OBQuery<UserRoles> query = OBDal.getInstance().createQuery(UserRoles.class,
         "as userrole where userrole.role.client.id = :" + PARAM_CLIENT_ID
             + " and userrole.userContact.id <> :" + PARAM_SYSTEM_USER_ID
+            + " and userrole.userContact.id <> :" + SupportUserExclusion.HQL_PARAM
             + " order by userrole.role.creationDate");
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
     query.setNamedParameter(PARAM_SYSTEM_USER_ID, SYSTEM_USER_ID);
+    // A blank client matches no row anyway; bind a value that never is an id rather than null.
+    query.setNamedParameter(SupportUserExclusion.HQL_PARAM,
+        StringUtils.defaultString(SupportUserExclusion.supportUserIdOrNull(clientId)));
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);

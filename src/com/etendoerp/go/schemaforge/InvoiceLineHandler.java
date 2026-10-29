@@ -343,7 +343,7 @@ public class InvoiceLineHandler implements NeoHandler {
   /**
    * Injects {@code sourceInvoiceLineId} (the id of the source line this line was imported
    * from, or {@code null}) into every GET record — mirrors
-   * {@link AbstractInvoiceHeaderHandler#enrichOriginInvoice}'s injection pattern at the line
+   * {@link InvoiceRectificationLinkSupport#enrichOriginInvoice}'s injection pattern at the line
    * level. Read by the "Import from Source Invoice" popup to mark already-imported source
    * lines so the user cannot pick the same one twice.
    */

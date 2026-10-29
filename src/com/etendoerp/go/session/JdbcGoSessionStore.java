@@ -39,18 +39,20 @@ public class JdbcGoSessionStore implements GoSessionStore {
       + "(etgo_go_session_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby, "
       + "etgo_account_id, session_token_hash, csrf_token, refresh_token_hash, auth_method, "
       + "ad_user_id, ad_role_id, ctx_client_id, ctx_org_id, m_warehouse_id, "
-      + "expires_at, absolute_expires_at, is_revoked, rotated_from_id, user_agent, ip_hash) "
+      + "expires_at, absolute_expires_at, is_revoked, rotated_from_id, user_agent, ip_hash, "
+      + "etgo_support_access_id) "
       + "VALUES (?, '0', '0', 'Y', now(), '0', now(), '0', "
       + "?, ?, ?, ?, ?, "
       + "?, ?, ?, ?, ?, "
-      + "?, ?, ?, ?, ?, ?)";
+      + "?, ?, ?, ?, ?, ?, ?)";
 
   private static final String UPDATE_SQL =
       "UPDATE etgo_go_session SET "
       + "session_token_hash = ?, csrf_token = ?, refresh_token_hash = ?, auth_method = ?, "
       + "ad_user_id = ?, ad_role_id = ?, ctx_client_id = ?, ctx_org_id = ?, m_warehouse_id = ?, "
       + "expires_at = ?, absolute_expires_at = ?, is_revoked = ?, rotated_from_id = ?, "
-      + "user_agent = ?, ip_hash = ?, updated = now(), updatedby = '0' "
+      + "user_agent = ?, ip_hash = ?, etgo_support_access_id = ?, updated = now(), "
+      + "updatedby = '0' "
       + "WHERE etgo_go_session_id = ?";
 
   private static final String REVOKE_ACTIVE_SQL =
@@ -65,7 +67,8 @@ public class JdbcGoSessionStore implements GoSessionStore {
   private static final String SELECT_COLUMNS =
       "SELECT etgo_go_session_id, etgo_account_id, session_token_hash, csrf_token, refresh_token_hash, "
       + "auth_method, ad_user_id, ad_role_id, ctx_client_id, ctx_org_id, m_warehouse_id, "
-      + "expires_at, absolute_expires_at, is_revoked, rotated_from_id, user_agent, ip_hash "
+      + "expires_at, absolute_expires_at, is_revoked, rotated_from_id, user_agent, ip_hash, "
+      + "etgo_support_access_id "
       + "FROM etgo_go_session ";
 
   private static final String FIND_BY_TOKEN_HASH_SQL = SELECT_COLUMNS + "WHERE session_token_hash = ?";
@@ -154,6 +157,8 @@ public class JdbcGoSessionStore implements GoSessionStore {
     ps.setString(i++, sessionRecord.getRotatedFromId());
     ps.setString(i++, sessionRecord.getUserAgent());
     ps.setString(i++, sessionRecord.getIpHash());
+    // ETP-5351: part of the mutable block so insert, update and rotation all carry the mark.
+    ps.setString(i++, sessionRecord.getSupportAccessId());
     return i;
   }
 
@@ -205,6 +210,7 @@ public class JdbcGoSessionStore implements GoSessionStore {
     sessionRecord.setRotatedFromId(rs.getString("rotated_from_id"));
     sessionRecord.setUserAgent(rs.getString("user_agent"));
     sessionRecord.setIpHash(rs.getString("ip_hash"));
+    sessionRecord.setSupportAccessId(rs.getString("etgo_support_access_id"));
     return sessionRecord;
   }
 

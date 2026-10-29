@@ -36,6 +36,7 @@ import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Optional;
 
 import javax.servlet.ReadListener;
@@ -344,7 +345,7 @@ class NeoAttachmentUploadEndpointTest {
 
       @Override
       public int read(byte[] buffer, int offset, int length) {
-        java.util.Arrays.fill(buffer, offset, offset + length, (byte) 'x');
+        Arrays.fill(buffer, offset, offset + length, (byte) 'x');
         return length;
       }
 
@@ -613,6 +614,54 @@ class NeoAttachmentUploadEndpointTest {
       assertTrue(body.toString().contains("File exceeds the maximum allowed size of 10 MB"),
           body.toString());
       assertTrue(tickets.claim(token).isPresent());
+    });
+  }
+
+  private static final byte[] PNG_BYTES = new byte[] { (byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A,
+      0x1A, 0x0A, 0x00 };
+    @Test
+  @DisplayName("staged: WEBP bytes named .webp are kept, answered 201")
+  void stagedWebpIsKept() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "foto.webp");
+      String stagedId = tickets.peek(token).orElseThrow().getSubject().getStagedDocumentId();
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, NeoAttachmentTestFixtures.WEBP, NeoAttachmentTestFixtures.WEBP.length), response);
+
+      verify(response).setStatus(201);
+      JSONObject answer = new JSONObject(body.toString());
+      assertEquals("foto.webp", answer.getString("name"));
+      assertTrue(staged.find(stagedId, new Session(CLIENT, ORG, USER, ROLE, WAREHOUSE))
+          .orElseThrow().isStored());
+    });
+  }
+
+  @Test
+  @DisplayName("staged: PNG bytes named .pdf are refused as a mismatch, link not burned")
+  void stagedPngNamedPdfIsAMismatch() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "x.pdf");
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PNG_BYTES, PNG_BYTES.length), response);
+
+      verify(response).setStatus(400);
+      assertTrue(body.toString().contains("File content does not match its .pdf extension"),
+          body.toString());
+      assertTrue(tickets.claim(token).isPresent());
+    });
+  }
+
+  @Test
+  @DisplayName("staged: a .docx is refused with the PDF-or-image message")
+  void stagedDocxIsRefused() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "x.docx");
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+
+      verify(response).setStatus(400);
+      assertTrue(body.toString().contains("Only a PDF or an image (pdf, png, jpg, jpeg, webp)"),
+          body.toString());
     });
   }
 

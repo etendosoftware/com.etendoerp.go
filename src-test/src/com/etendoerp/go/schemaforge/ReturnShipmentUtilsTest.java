@@ -97,6 +97,7 @@ import static org.mockito.Mockito.when;
  *
  * @covers com.etendoerp.go.schemaforge.ReturnShipmentUtils
  * @covers com.etendoerp.go.schemaforge.ReturnInvoiceSupport
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 public class ReturnShipmentUtilsTest {
 
@@ -1242,6 +1243,48 @@ public class ReturnShipmentUtilsTest {
         assertEquals("ret-inv-1", data.getString("id"));
         assertEquals("REC-1000001", data.getString("documentNo"));
         assertEquals("CO", data.getString("documentStatus"));
+      }
+    }
+  }
+
+  /**
+   * ETP-5051 — the rectificative invoice is checked against the plan quotas once its lines exist
+   * and its rectified invoices are linked, and BEFORE the completion commits it: a refusal escapes
+   * to the handler (which answers it and rolls back) and {@code ProcessInvoiceUtil} never runs.
+   */
+  @Test
+  public void finalizeReturnInvoice_overABlockQuota_refusesBeforeCompleting() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("ret-inv-quota");
+      when(dal.get(eq(Invoice.class), eq("inv-origin-1"))).thenReturn(mock(Invoice.class));
+      stubNoExistingReversedInvoiceLink(dal);
+      ReversedInvoice link = mock(ReversedInvoice.class);
+      when(provider.get(ReversedInvoice.class)).thenReturn(link);
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = mock(CreateDraftInvoiceHandler.class);
+      when(createDraftInvoiceHandler.getSupport()).thenReturn(mock(InvoiceFromOrderSupport.class));
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        try {
+          ReturnInvoiceSupport.finalizeReturnInvoice(invoice,
+              Collections.<ShipmentInOutLine>emptyList(), createDraftInvoiceHandler,
+              Collections.singletonList("inv-origin-1"), null);
+          fail("the refusal must escape to the handler that answers it");
+        } catch (NeoQuotaCreateCheck.Refused expected) {
+          QuotaRefusalTestSupport.assertQuotaExceeded(expected.response());
+        }
+
+        verify(dal).save(link);
+        quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(invoice));
+        verify(completion.processInvoiceUtil, Mockito.never()).process(any(), any(), any(),
+            any(), any(), any(), any());
       }
     }
   }

@@ -32,6 +32,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * Single point of access to an account's linked SSO identities (ETP-5115).
@@ -92,9 +93,14 @@ final class AccountIdentityDalHelper {
     }
     AccountIdentity identity = findIdentity(provider, subject);
     if (identity != null) {
-      return identity.getAccount();
+      // ETP-5351 (T5): an identity row pointing at the technical support account is ignored.
+      return SupportAccessGuard.isSupportAccount(identity.getAccount()) ? null
+          : identity.getAccount();
     }
     Account legacy = findAccountByLegacyIdentity(provider, subject);
+    if (SupportAccessGuard.isSupportAccount(legacy)) {
+      return null;
+    }
     if (legacy != null) {
       materialiseLegacyIdentity(legacy);
     }
@@ -154,6 +160,10 @@ final class AccountIdentityDalHelper {
    */
   static AccountIdentity link(Account account, String provider, String subject, String externalEmail,
       Date linkedAt) {
+    if (SupportAccessGuard.isSupportAccount(account)) {
+      // ETP-5351 (T5): the technical support account never gets an SSO identity.
+      throw new IllegalArgumentException("The support account cannot be linked to an identity");
+    }
     AccountIdentity identity = OBProvider.getInstance().get(AccountIdentity.class);
     identity.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
     identity.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
@@ -204,6 +214,9 @@ final class AccountIdentityDalHelper {
    */
   static boolean linkIfCompatible(Account account, String provider, String subject,
       String externalEmail) {
+    if (SupportAccessGuard.isSupportAccount(account)) {
+      return false;
+    }
     List<AccountIdentity> existing = identitiesFor(account);
     if (existing.isEmpty()) {
       link(account, provider, subject, externalEmail, new Date());

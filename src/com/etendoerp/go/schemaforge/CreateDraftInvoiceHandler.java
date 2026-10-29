@@ -64,6 +64,7 @@ import org.openbravo.base.weld.WeldUtils;
 
 import com.etendoerp.go.schemaforge.util.DocumentStatusGuard;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
+import com.etendoerp.go.usage.quota.QuotaWriteGuard;
 
 /**
  * NeoHandler that creates a Sales Invoice in Draft status from a Sales Order,
@@ -111,8 +112,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           + "second call does not duplicate the invoice and, once nothing is pending, answers "
           + "400 'No hay líneas a facturar en este pedido'. Without lines, a line with completed, "
           + "not-yet-invoiced shipments is invoiced for the quantity of those shipments. Only "
-          + "COMPLETED invoices count as "
-          + "invoiced: an invoice left in draft by other means does not reduce what is pending.",
+          + "COMPLETED invoices count as invoiced, but an order that already has a DRAFT invoice "
+          + "is refused with 409 draftInvoiceExists, creating nothing (one draft per order, as on "
+          + "the screen, which hides the button): the refusal lists the draft numbers in "
+          + "existingDraftInvoices, and allowDuplicate:true creates the invoice anyway and lists "
+          + "the drafts the order had.",
       NeoActionContract.Param.array(PARAM_LINES, NeoActionContract.TYPE_OBJECT, false,
           "Partial invoicing: [{orderLineId, quantity}] with the quantity to invoice per order "
               + "line. Honoured only for order lines that have NO completed shipment not yet "
@@ -125,7 +129,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "nothing pending, is refused with 400 naming the line and its pending quantity "
               + "(it is never capped silently), and so is a list none of whose entries has an "
               + "orderLineId and a quantity above zero. Omit to invoice the pending quantity of "
-              + "every line."))
+              + "every line."),
+      OrderInvoiceDuplicateGuard.allowDuplicateParam())
       .withIdDescription("the id of the sales order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -314,26 +319,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         MultiDocumentInvoiceSupport.requireParsedLines(body, PARAM_LINES, lineOverrides,
             ERR_LINES_UNUSABLE);
 
-        Invoice invoice;
-        if (SPEC_SALES_ORDER.equals(specName)) {
-          // ETP-5709: only the direct-from-order route. createFromOrder is also what the
-          // quotation route calls, so the check cannot live there; a quotation never reaches CO
-          // and keeps its own flow unchanged.
-          requireOrderCompleted(recordId);
-          invoice = createFromOrder(recordId, lineOverrides, null);
-        } else if (SPEC_SALES_QUOTATION.equals(specName)) {
-          // ETP-5709: the SPA offers this only from UE or CO; the route used to accept any
-          // status (a draft or rejected quotation could be invoiced by guessing the action).
-          requireQuotationInvoiceable(recordId);
-          if (body != null && body.has(PARAM_LINES)) {
-            throw new OBException(ERR_QUOTATION_LINES);
-          }
-          invoice = createFromOrder(recordId, lineOverrides, null);
-        } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
-          List<String> shipmentIds = parseShipmentIds(body, recordId);
-          String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
-          invoice = createFromShipments(shipmentIds, lineOverrides, priceListId);
-        } else {
+        List<String> existingDrafts = new ArrayList<>();
+        Invoice invoice =
+            createFromSource(specName, recordId, body, lineOverrides, existingDrafts);
+        if (invoice == null) {
           return null;
         }
 
@@ -346,6 +335,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           getSupport().alignLineListPrices(invoice, null);
           OBDal.getInstance().flush();
         }
+        // ETP-5051: the plan-quota check of the generated invoice and its lines, BEFORE the
+        // completion below commits (ProcessInvoiceUtil): a refusal rolls the whole generation back.
+        requireQuotaAllowed(invoice);
 
         // ETP-5381: create and confirm in a single atomic step. A draft invoice reserves nothing
         // — c_orderline.qtyinvoiced and m_inoutline.isinvoiced are only written by C_Invoice_Post
@@ -375,6 +367,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         data.put("id", invoiceId);
         data.put(FIELD_DOCUMENT_NO, completed.getDocumentNo());
         data.put("documentStatus", completed.getDocumentStatus());
+        OrderInvoiceDuplicateGuard.listExisting(data, existingDrafts);
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -386,10 +379,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (DocumentCurrencyRate.MissingRateException e) {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
       return e.toResponse();
+    } catch (OrderInvoiceDuplicateGuard.Refusal e) {
+      // ETP-5714: a draft invoice already covers the order; nothing was created
+      return e.getResponse();
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
       return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
@@ -398,6 +396,61 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the invoice");
     }
+  }
+
+  /**
+   * Creates the invoice from the source the spec names (order, quotation or goods shipment),
+   * after that source's own precondition. Split out of {@link #handleCreate}, which was past the
+   * cognitive-complexity limit.
+   *
+   * @param specName       the spec of the source document
+   * @param recordId       the source document id
+   * @param body           the request body
+   * @param lineOverrides  the parsed {@code lines} quantities
+   * @param existingDrafts out: the draft invoice numbers a sales order already had (ETP-5714)
+   * @return the created (not yet completed) invoice, or {@code null} for a spec this handler does
+   *     not serve
+   */
+  private Invoice createFromSource(String specName, String recordId, JSONObject body,
+      Map<String, BigDecimal> lineOverrides, List<String> existingDrafts) {
+    if (SPEC_SALES_ORDER.equals(specName)) {
+      // ETP-5709: only the direct-from-order route. createFromOrder is also what the
+      // quotation route calls, so the check cannot live there; a quotation never reaches CO
+      // and keeps its own flow unchanged.
+      requireOrderCompleted(recordId);
+      // ETP-5714: one draft invoice per order, as on the screen (it hides the button then)
+      existingDrafts.addAll(OrderInvoiceDuplicateGuard.draftsOf(recordId, true));
+      OrderInvoiceDuplicateGuard.requireNoDraft(body, existingDrafts);
+      return createFromOrder(recordId, lineOverrides, null);
+    }
+    if (SPEC_SALES_QUOTATION.equals(specName)) {
+      // ETP-5709: the SPA offers this only from UE or CO; the route used to accept any
+      // status (a draft or rejected quotation could be invoiced by guessing the action).
+      requireQuotationInvoiceable(recordId);
+      if (body != null && body.has(PARAM_LINES)) {
+        throw new OBException(ERR_QUOTATION_LINES);
+      }
+      return createFromOrder(recordId, lineOverrides, null);
+    }
+    if (SPEC_GOODS_SHIPMENT.equals(specName)) {
+      List<String> shipmentIds = parseShipmentIds(body, recordId);
+      String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
+      return createFromShipments(shipmentIds, lineOverrides, priceListId);
+    }
+    return null;
+  }
+
+  /**
+   * Seam for tests: the plan-quota check of a generated invoice and its lines
+   * ({@link NeoQuotaCreateCheck}).
+   */
+  protected void requireQuotaAllowed(Invoice invoice) {
+    NeoQuotaCreateCheck.requireAllowedDocument(invoice, quotaGuard());
+  }
+
+  /** Seam for tests: the plan-quota guard of {@link #requireQuotaAllowed}. */
+  protected QuotaWriteGuard quotaGuard() {
+    return QuotaWriteGuard.getDefault();
   }
 
   /**

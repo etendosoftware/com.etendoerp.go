@@ -67,6 +67,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -79,7 +80,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * replaced here by a recording double that creates one invoice line per entry it is handed.
  *
  * @covers com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractLineImportHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceLineImportHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceGlobalDiscountRule
+ * @covers com.etendoerp.go.schemaforge.OrderImportRequest
  */
 public class ImportOrderLinesIntoInvoiceHandlerTest {
 
@@ -103,6 +108,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   private static final class Probe extends ImportOrderLinesIntoInvoiceHandler {
     Invoice invoice;
     Order order;
+    /** Further orders a multi-order import can name, by id. */
+    final Map<String, Order> otherOrders = new HashMap<>();
     Map<String, BigDecimal> drafts = new HashMap<>();
     /** Completed movement lines of each order line, oldest first. */
     Map<String, List<ShipmentInOutLine>> movements = new HashMap<>();
@@ -149,7 +156,7 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
     @Override
     protected Order loadOrder(String id) {
-      return order != null && order.getId().equals(id) ? order : null;
+      return order != null && order.getId().equals(id) ? order : otherOrders.get(id);
     }
 
     @Override
@@ -222,6 +229,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
               : new BigDecimal(entry.getString("orderedQuantity"));
           InvoiceLine created = invoiceLine("il-" + target.getInvoiceLineList().size(),
               source.getProduct(), qty.toPlainString());
+          // Active, as a real new line: so a check run after creation would count it.
+          when(created.isActive()).thenReturn(true);
           when(created.getSalesOrderLine()).thenReturn(source);
           java.util.concurrent.atomic.AtomicReference<ShipmentInOutLine> link =
               new java.util.concurrent.atomic.AtomicReference<>(entry.has("shipmentInOutLine")
@@ -323,6 +332,30 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   }
 
   // ── the happy paths ───────────────────────────────────────────────────────
+
+  /**
+   * ETP-5051 — the lines this import added are checked against the plan quotas before the answer
+   * ({@code AbstractLineImportHandler#requireQuotaAllowed}): at a {@code block} limit the
+   * order-lines import into an invoice answers 403 {@code QUOTA_EXCEEDED} and the whole import is rolled back.
+   */
+  @Test
+  public void importOrderLines_overABlockQuota_answers403AndRollsBackTheImport() throws Exception {
+    Probe probe = scenario();
+
+    NeoResponse response;
+    try (MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      response = run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
+
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowed(
+          org.mockito.ArgumentMatchers.eq(InvoiceLine.ENTITY_NAME),
+          org.mockito.ArgumentMatchers.argThat(ids -> ids != null && ids.size() == 2)));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(response);
+    verify(dal).rollbackAndClose();
+    verify(dal, org.mockito.Mockito.never()).commitAndClose();
+  }
+
 
   /** Without lines: every pending line, in full, through the native process, on the draft. */
   @Test
@@ -837,25 +870,289 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertFalse(mixed.has("salesOrder"));
   }
 
+  private static final String CARRIED = "carried";
+  private static final String UNTOUCHED = "untouched";
+  private static final String CONFLICT_B = ImportOrderLinesIntoInvoiceHandler
+      .CONFLICT_INVOICE_OTHER_DISCOUNT;
+  private static final String CONFLICT_C = ImportOrderLinesIntoInvoiceHandler
+      .CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT;
+
+  /**
+   * What the import does with the order's global discount, judged on the invoice BEFORE the call:
+   * which lines count as "the invoice had lines" (the total-discount line and inactive lines do not,
+   * a line without product does; the lines this import creates never do), and that a conflict
+   * creates nothing while {@code carryGlobalDiscount:false} imports and leaves the header alone.
+   * The decision itself is {@link #discountConflict_decidesWhetherTheOrdersDiscountCanBeCarried};
+   * these rows are what only the full handler shows. One sales row proves the same rule reaches a
+   * sales invoice.
+   */
   @Test
-  public void importOrderLines_carriesThePositiveOrderDiscount_onlyWhenTheInvoiceHasNone()
+  public void importOrderLines_carriesTheOrderDiscount_refusesAConflict_orSkipsItOnRequest()
+      throws Exception {
+    Product sal = product("p9", "Sal", false);
+    InvoiceLine productLine = existingLine("pre-product", sal, true);
+    Product discountProduct = product(TotalDiscountService.DISCOUNT_PRODUCT_ID, "Descuento",
+        false);
+    InvoiceLine discountLine = existingLine("pre-discount", discountProduct, true);
+    Product te = product("p10", "Té", false);
+    InvoiceLine inactiveLine = existingLine("pre-inactive", te, false);
+    InvoiceLine noProductLine = existingLine("pre-no-product", null, true);
+    InvoiceLine sameRateLine = existingLine("pre-same", sal, true);
+
+    assertDiscountOutcome("empty invoice, no %: the lines of this import do not count",
+        false, null, "10", null, CARRIED);
+    assertDiscountOutcome("a product line already there, no %", false, null, "10", null,
+        CONFLICT_C, productLine);
+    assertDiscountOutcome("only the total-discount line, no %", false, null, "10", null, CARRIED,
+        discountLine);
+    assertDiscountOutcome("only an inactive line, no %", false, null, "10", null, CARRIED,
+        inactiveLine);
+    assertDiscountOutcome("a line without product, no %", false, null, "10", null, CONFLICT_C,
+        noProductLine);
+    assertDiscountOutcome("the same %, with lines", false, null, "10", "10", CARRIED,
+        sameRateLine);
+    assertDiscountOutcome("another %", false, null, "10", "5", CONFLICT_B);
+    assertDiscountOutcome("order at 0 %", false, null, "0", null, UNTOUCHED);
+    assertDiscountOutcome("order without %", false, null, null, null, UNTOUCHED);
+    assertDiscountOutcome("order at 0 %, invoice at 5 %", false, null, "0", "5", CONFLICT_B);
+    assertDiscountOutcome("carry=false, order at 0 %, invoice at 5 %", false, false, "0", "5",
+        UNTOUCHED);
+    assertDiscountOutcome("sales: empty invoice, no %", true, null, "10", null, CARRIED);
+    assertDiscountOutcome("carry=false, a product line already there", false, false, "10", null,
+        UNTOUCHED, existingLine("pre-product-2", sal, true));
+    assertDiscountOutcome("carry=false, another %", false, false, "10", "5", UNTOUCHED);
+    assertDiscountOutcome("carry=false, empty invoice: not carried even when it could be",
+        false, false, "10", null, UNTOUCHED);
+  }
+
+  /** A line the draft invoice already holds before the import. */
+  private static InvoiceLine existingLine(String id, Product product, boolean active) {
+    InvoiceLine line = invoiceLine(id, product, "1");
+    when(line.isActive()).thenReturn(active);
+    return line;
+  }
+
+  /**
+   * Imports the whole order onto the scenario's invoice and checks the outcome: {@link #CARRIED}
+   * (imported, header set to the order's %), {@link #UNTOUCHED} (imported, header never set), or a
+   * conflict code (422 {@code globalDiscountConflict}, nothing created, header never set).
+   *
+   * @param carry {@code carryGlobalDiscount} to send, {@code null} to omit it (the default)
+   */
+  private void assertDiscountOutcome(String label, boolean sales, Boolean carry, String orderPct,
+      String invoicePct, String expected, InvoiceLine... existing) throws Exception {
+    Probe probe = scenario();
+    when(probe.invoice.isSalesTransaction()).thenReturn(sales);
+    when(probe.order.isSalesTransaction()).thenReturn(sales);
+    BigDecimal orderDiscount = orderPct == null ? null : bd(orderPct);
+    BigDecimal invoiceDiscount = invoicePct == null ? null : bd(invoicePct);
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(orderDiscount);
+    when(probe.invoice.getEtgoTotalDiscount()).thenReturn(invoiceDiscount);
+    probe.invoice.getInvoiceLineList().addAll(List.of(existing));
+    String body = carry == null ? "{\"orderId\":\"o1\"}"
+        : "{\"orderId\":\"o1\",\"carryGlobalDiscount\":" + carry + "}";
+
+    NeoResponse response = run(probe, "importOrderLines", body);
+
+    try {
+      if (CARRIED.equals(expected) || UNTOUCHED.equals(expected)) {
+        assertEquals("the import goes through", 2, data(response).getInt("importedCount"));
+      } else {
+        assertEquals(422, response.getHttpStatus());
+        assertEquals("globalDiscountConflict", errorCode(response));
+        assertEquals(expected, response.getBody().getJSONObject("error").getString("conflict"));
+        assertTrue("a conflict creates nothing", probe.batches.isEmpty());
+      }
+      if (CARRIED.equals(expected)) {
+        verify(probe.invoice).setEtgoTotalDiscount(orderDiscount);
+      } else {
+        verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+      }
+    } catch (AssertionError e) {
+      throw new AssertionError(label, e);
+    }
+  }
+
+  /**
+   * The pure decision, one row per case: nothing to carry, (a) the orders differ (0 or none counts
+   * as different), (b) the invoice has another %, (c) it has lines without a %, else carry.
+   */
+  @Test
+  public void discountConflict_decidesWhetherTheOrdersDiscountCanBeCarried() {
+    String a = ImportOrderLinesIntoInvoiceHandler.CONFLICT_ORDERS_DIFFER;
+    Object[][] rows = {
+        // label, order discounts, invoice discount, hadLines, expected conflict
+        { "two orders at 10, empty invoice: carry", pcts("10", "10"), null, false, null },
+        { "10 and 0: the orders differ", pcts("10", "0"), null, false, a },
+        { "10 and none: the orders differ", pcts("10", null), null, false, a },
+        { "10 and 5: the orders differ", pcts("10", "5"), null, false, a },
+        { "orders differ wins over the invoice's state", pcts("10", "5"), bd("3"), true, a },
+        { "invoice at 5, orders at 10", pcts("10"), bd("5"), false, CONFLICT_B },
+        { "lines and no % on the invoice", pcts("10"), null, true, CONFLICT_C },
+        { "lines and an invoice at 0 %", pcts("10"), bd("0"), true, CONFLICT_C },
+        { "same % on the invoice, with lines: carry", pcts("10"), bd("10.00"), true, null },
+        { "orders without %, invoice at 5 with lines", pcts("0", null), bd("5"), true,
+            CONFLICT_B },
+        { "orders and invoice without %, with lines: nothing", pcts("0", null), null, true,
+            null },
+        { "a negative order % counts as 0", pcts("-5", "0"), null, true, null },
+        { "same % once rounded to 4 decimals: carry", pcts("10.00004", "10"), bd("9.99996"),
+            true, null },
+        { "a difference at the 4th decimal: the orders differ", pcts("10.0001", "10"), null,
+            false, a },
+    };
+    for (Object[] row : rows) {
+      @SuppressWarnings("unchecked")
+      List<BigDecimal> orders = (List<BigDecimal>) row[1];
+      assertEquals((String) row[0], row[4], InvoiceGlobalDiscountRule.discountConflict(
+          orders, (BigDecimal) row[2], (Boolean) row[3]));
+    }
+  }
+
+  private static List<BigDecimal> pcts(String... values) {
+    List<BigDecimal> list = new ArrayList<>();
+    for (String value : values) {
+      list.add(value == null ? null : bd(value));
+    }
+    return list;
+  }
+
+  // ── several orders ────────────────────────────────────────────────────────
+
+  /** A second completed order of the scenario's partner: Sal 4, registered with the probe. */
+  private static Order secondOrder(Probe probe, String discount) {
+    OrderLine sal = orderLine("ol3", 10, product("p3", "Sal", false), "4", "0", "0");
+    Order second = order("o2", false, sal);
+    BigDecimal pct = discount == null ? null : bd(discount);
+    when(second.getEtgoTotalDiscount()).thenReturn(pct);
+    probe.lineById.put("ol3", sal);
+    probe.otherOrders.put("o2", second);
+    return second;
+  }
+
+  /**
+   * {@code orders:[...]}: the lines of both orders in one call, the lines of all of them locked in
+   * one pass, and their shared % carried. The header link is set by the native process, which the
+   * probe does not run, so it is not asserted here.
+   */
+  @Test
+  public void importOrderLines_severalOrders_importsTheLinesOfAll_inOneCall() throws Exception {
+    Probe probe = scenario();
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
+    secondOrder(probe, "10");
+
+    NeoResponse response = run(probe, "importOrderLines", "{\"orders\":[{\"orderId\":\"o1\"},"
+        + "{\"orderId\":\"o2\",\"lines\":[{\"sourceLineId\":\"ol3\",\"quantity\":3}]}]}");
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject data = data(response);
+    assertEquals(3, data.getInt("importedCount"));
+    List<String> sources = new ArrayList<>();
+    for (int i = 0; i < data.getJSONArray("lines").length(); i++) {
+      sources.add(data.getJSONArray("lines").getJSONObject(i).getString("sourceLineId"));
+    }
+    assertEquals(List.of("ol1", "ol2", "ol3"), sources);
+    assertEquals(0, bd("3").compareTo(qtyOf(probe.batches.get(1).getJSONObject(0))));
+    assertEquals("one lock pass for every order", 1,
+        probe.calls.stream().filter("lock"::equals).count());
+    verify(probe.invoice).setEtgoTotalDiscount(bd("10"));
+  }
+
+  /**
+   * A conflict answers what the caller needs to ask the user: each order's %, the invoice's state
+   * before the call and how to import anyway; and it creates nothing.
+   */
+  @Test
+  public void importOrderLines_aDiscountConflict_answersWhatToAskTheUser_andCreatesNothing()
       throws Exception {
     Probe probe = scenario();
     when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
-    when(probe.invoice.getEtgoTotalDiscount()).thenReturn(null);
-    run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
-    verify(probe.invoice).setEtgoTotalDiscount(bd("10"));
+    secondOrder(probe, null);
 
-    probe = scenario();
+    NeoResponse response = run(probe, "importOrderLines",
+        "{\"orders\":[{\"orderId\":\"o1\"},{\"orderId\":\"o2\"}]}");
+
+    assertEquals(422, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("globalDiscountConflict", error.getString("code"));
+    assertEquals(ImportOrderLinesIntoInvoiceHandler.CONFLICT_ORDERS_DIFFER,
+        error.getString("conflict"));
+    JSONArray orders = error.getJSONArray("orders");
+    assertEquals(2, orders.length());
+    assertEquals("o1", orders.getJSONObject(0).getString("orderId"));
+    assertEquals("PO-o1", orders.getJSONObject(0).getString("documentNo"));
+    assertEquals(0, bd("10").compareTo(
+        new BigDecimal(orders.getJSONObject(0).getString("globalDiscount"))));
+    assertEquals("o2", orders.getJSONObject(1).getString("orderId"));
+    assertEquals("no % reads as 0", 0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(orders.getJSONObject(1).getString("globalDiscount"))));
+    JSONObject invoice = error.getJSONObject("invoice");
+    assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(invoice.getString("totalDiscount"))));
+    assertFalse(invoice.getBoolean("hadLines"));
+    assertTrue(error.getString("hint"), error.getString("hint").contains("carryGlobalDiscount:false"));
+    assertTrue(probe.batches.isEmpty());
+    verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+  }
+
+  /**
+   * One transaction for every order: an order refused while planning (here nothing pending) leaves
+   * nothing created for the others and the header's discount untouched, and the refusal names the
+   * order that failed.
+   */
+  @Test
+  public void importOrderLines_severalOrders_oneRefused_createsNothingAndNamesTheOrder()
+      throws Exception {
+    Probe probe = scenario();
     when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
-    when(probe.invoice.getEtgoTotalDiscount()).thenReturn(bd("5"));
-    run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
-    verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+    secondOrder(probe, "10");
+    doReturn(bd("4")).when(probe.lineById.get("ol3")).getInvoicedQuantity();
 
-    probe = scenario();
-    when(probe.order.getEtgoTotalDiscount()).thenReturn(BigDecimal.ZERO);
-    run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
+    NeoResponse response = run(probe, "importOrderLines",
+        "{\"orders\":[{\"orderId\":\"o1\"},{\"orderId\":\"o2\"}]}");
+
+    assertEquals(422, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("importNothingPending", error.getString("code"));
+    assertTrue(error.getString("message"), error.getString("message").contains("PO-o2"));
+    assertEquals("o2", error.getString("orderId"));
+    assertEquals("PO-o2", error.getString("documentNo"));
+    assertTrue("nothing created for o1 either", probe.batches.isEmpty());
     verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+  }
+
+  /** A request whose shape is not understood is a 400 before any order is loaded or locked. */
+  @Test
+  public void importOrderLines_aMalformedOrdersRequest_is400AndTouchesNothing() throws Exception {
+    StringBuilder tooMany = new StringBuilder("{\"orders\":[");
+    for (int i = 0; i <= 50; i++) {
+      tooMany.append(i == 0 ? "" : ",").append("{\"orderId\":\"o").append(i).append("\"}");
+    }
+    tooMany.append("]}");
+    String[][] rows = {
+        { "orderId and orders", "{\"orderId\":\"o1\",\"orders\":[{\"orderId\":\"o1\"}]}" },
+        { "top-level lines and orders", "{\"lines\":[{\"sourceLineId\":\"ol1\",\"quantity\":1}],"
+            + "\"orders\":[{\"orderId\":\"o1\"}]}" },
+        { "empty orders", "{\"orders\":[]}" },
+        { "orders not an array", "{\"orders\":\"o1\"}" },
+        { "more than 50 orders", tooMany.toString() },
+        { "an entry without orderId", "{\"orders\":[{\"lines\":[]}]}" },
+        { "an entry that is not an object", "{\"orders\":[\"o1\"]}" },
+        { "the same order twice", "{\"orders\":[{\"orderId\":\"o1\"},{\"orderId\":\"o1\"}]}" },
+        { "carryGlobalDiscount not a boolean", "{\"orderId\":\"o1\",\"carryGlobalDiscount\":\"yes\"}" },
+    };
+    for (String[] row : rows) {
+      Probe probe = scenario();
+
+      NeoResponse response = run(probe, "importOrderLines", row[1]);
+
+      assertEquals(row[0], 400, response.getHttpStatus());
+      assertEquals(row[0], "importInvalidLine", errorCode(response));
+      assertTrue(row[0], probe.calls.isEmpty());
+    }
+    // MCP clients fill optional parameters with null: a null key is absent, never "both shapes".
+    NeoResponse nulls = run(scenario(), "importOrderLines", "{\"orderId\":null,\"lines\":null,"
+        + "\"orders\":[{\"orderId\":\"o1\"}],\"carryGlobalDiscount\":null}");
+    assertEquals("null keys count as absent", 200, nulls.getHttpStatus());
   }
 
   // ── what the native process produced ──────────────────────────────────────
@@ -916,6 +1213,11 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
   // ── contracts ─────────────────────────────────────────────────────────────
 
+  /**
+   * importOrderLines takes orderId (now optional: orders may replace it), orders and
+   * carryGlobalDiscount (a boolean); the one-or-the-other rule is the handler's 400, not the
+   * contract's.
+   */
   @Test
   public void contracts_declareTheThreeActions_withOptionalLines() throws Exception {
     for (boolean sales : new boolean[] { false, true }) {
@@ -924,8 +1226,13 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
           List.copyOf(contracts.keySet()));
       assertNull(NeoActionContract.validate(contracts, "importOrderLines",
           new JSONObject().put("orderId", "o1")));
+      assertNull("orderId is optional", NeoActionContract.validate(contracts, "importOrderLines",
+          new JSONObject()));
+      assertNull(NeoActionContract.validate(contracts, "importOrderLines", new JSONObject(
+          "{\"orders\":[{\"orderId\":\"o1\"}],\"carryGlobalDiscount\":false}")));
       assertEquals(422, NeoActionContract.validate(contracts, "importOrderLines",
-          new JSONObject()).getHttpStatus());
+          new JSONObject().put("orderId", "o1").put("carryGlobalDiscount", "yes"))
+          .getHttpStatus());
       assertEquals(422, NeoActionContract.validate(contracts, "availableOrderLines",
           new JSONObject()).getHttpStatus());
       assertNull(NeoActionContract.validate(contracts, "availableOrders", new JSONObject()));

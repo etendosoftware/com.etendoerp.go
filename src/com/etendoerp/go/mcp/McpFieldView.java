@@ -64,13 +64,24 @@ final class McpFieldView {
   private final boolean readOnly;
   private final boolean businessCritical;
   private final boolean included;
+  /**
+   * {@code null} unless {@code MCP_CONFIG.fields.userRequired} states it: the SFField row has no such
+   * flag. Exposed only as an {@link Optional}, see {@link #getUserRequiredOverride()}.
+   */
+  private final Boolean userRequired;
 
   private McpFieldView(String visibility, boolean readOnly, boolean businessCritical,
       boolean included) {
+    this(visibility, readOnly, businessCritical, included, null);
+  }
+
+  private McpFieldView(String visibility, boolean readOnly, boolean businessCritical,
+      boolean included, Boolean userRequired) {
     this.visibility = visibility;
     this.readOnly = readOnly;
     this.businessCritical = businessCritical;
     this.included = included;
+    this.userRequired = userRequired;
   }
 
   /**
@@ -116,7 +127,10 @@ final class McpFieldView {
     // exposes - for the MCP alone. Same merge rule as the flags above: an unstated key leaves the
     // SFField row's own value standing.
     included = McpFieldsSection.included(fields).orElse(included);
-    return new McpFieldView(visibility, readOnly, businessCritical, included);
+    // ETP-5791: no SFField column carries userRequired - the schema builder derives it - so the
+    // override is kept as stated (empty when unstated) and applied over the derived flag there.
+    return new McpFieldView(visibility, readOnly, businessCritical, included,
+        McpFieldsSection.userRequired(fields).orElse(null));
   }
 
   /**
@@ -171,6 +185,20 @@ final class McpFieldView {
    */
   boolean isBusinessCritical() {
     return businessCritical;
+  }
+
+  /**
+   * The {@code MCP_CONFIG.fields.userRequired} override, if one is configured (ETP-5791).
+   *
+   * <p>Unlike the other flags this has no {@code SFField} counterpart to fall back to:
+   * {@code userRequired} is derived by {@code McpSchemaFieldBuilder} from AD (editable, mandatory,
+   * no default). So the view reports only what the override states, and the builder applies it
+   * over its own derivation. See {@link McpFieldsSection#userRequired}.</p>
+   *
+   * @return the configured flag, or {@link Optional#empty()} when no override states one
+   */
+  Optional<Boolean> getUserRequiredOverride() {
+    return Optional.ofNullable(userRequired);
   }
 
   /**

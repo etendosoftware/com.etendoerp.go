@@ -236,6 +236,27 @@ public final class GoFeatureFlags {
   public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
 
   /**
+   * ETP-5791 — contact types driven by the contact category. On, a contact category
+   * ({@code C_BP_Group}) must declare Customer and/or Vendor/Creditor, a new contact inherits
+   * those types from its category unless the request sends them explicitly, a contact cannot be
+   * saved with no type, moving a contact to another category re-inherits both types, and a new
+   * tenant gets "Cliente/Proveedor" as its default contact category (decided when the tenant is
+   * handed to the user, pool tenants included). Off (the default), the customizations skip those
+   * rules, every write behaves as before the ticket and new tenants keep "Cliente" as default.
+   *
+   * <p><b>It gates behaviour, not schema.</b> The {@code EM_Etgo_Iscustomer} /
+   * {@code EM_Etgo_Isvendor} columns, their AD metadata, the {@code ETGO_SF_FIELD} rows and the
+   * reference/sample data ship unconditionally; with the flag off nothing enforces or reads them.
+   *
+   * <p><b>Environment level and backend-only.</b> Evaluated with an account-less context by
+   * {@code ContactTypeRules#isEnabled()}, the only place it is read (the onboarding's
+   * {@code OnboardingDefaultContactCategoryService} goes through it too); nothing in the browser reads it, so
+   * never add it to the web client's {@code flag-keys.js}. Locally
+   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}.
+   */
+  public static final String FLAG_CONTACT_CATEGORY_TYPE = "contact-category-type";
+
+  /**
    * ETP-5048 — whether the billing reconciliation is scheduled. Strictly off by default (and off
    * on every failure of this class): while it is off {@code BillingReconciliationScheduleStartup}
    * plants no process request, so turning it on takes effect at the next restart. The process also
@@ -252,6 +273,22 @@ public final class GoFeatureFlags {
    */
   public static final String FLAG_BILLING_RECONCILIATION_SCHEDULE =
       "billing-reconciliation-schedule";
+
+  /**
+   * ETP-5051 — whether the usage aggregation is scheduled ({@code open-and-notable-topics.md}
+   * §5.15). The same shape as {@link #FLAG_BILLING_RECONCILIATION_SCHEDULE}: strictly off by
+   * default (and off on every failure of this class); while it is off
+   * {@code UsageAggregationScheduleStartup} plants no process request, so turning it on takes effect
+   * at the next restart. The process checks it on every scheduled run (a process request with
+   * timing {@code S}), whoever created the request, so turning it off stops all scheduled work
+   * without a restart: a scheduled run with the flag off does nothing and ends as ERROR in Process
+   * Monitor. A run started from the Classic menu or once from a Process Request is not gated.
+   * Environment level, evaluated with an empty context; locally
+   * {@code etendo.go.flags.usage-aggregation-schedule} /
+   * {@code ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE}. Backend-only. Its callers are
+   * {@code UsageAggregationScheduleStartup} and {@code UsageAggregationProcess}.
+   */
+  public static final String FLAG_USAGE_AGGREGATION_SCHEDULE = "usage-aggregation-schedule";
 
   /**
    * ETP-5806 — whether the structured address fields (Street/Number/Building Name) are visible,

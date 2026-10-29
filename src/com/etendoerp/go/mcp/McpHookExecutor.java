@@ -281,20 +281,6 @@ final class McpHookExecutor {
   }
 
   /**
-   * Resolve the {@link NeoHandler} registered for the entity's Java_Qualifier.
-   *
-   * <p>Delegates to {@link NeoHandlerLookup}, where the CDI lookup was moved (ETP-4793 / IMP-19)
-   * so {@code schemaforge} code — the report-callability gate — can ask a handler what it
-   * supports without depending on this package.</p>
-   *
-   * @return the matching handler, or {@code null} when the entity declares no
-   *         qualifier or no matching {@code @Named} handler is deployed
-   */
-  static NeoHandler resolveEntityHandler(SFEntity sfEntity) {
-    return NeoHandlerLookup.byQualifier(sfEntity.getJavaQualifier());
-  }
-
-  /**
    * ETP-5710: runs the entity customization's {@link NeoHandler#resolveServerCreateFields} on an MCP
    * create body, before the mandatory pre-check (which precedes the pre-hook on this channel).
    * Resolved like the later dispatch ({@code @NeoExtension} first, {@code Java_Qualifier} second);
@@ -304,13 +290,7 @@ final class McpHookExecutor {
   static void resolveServerCreateFields(String specName, String entityName, Tab adTab,
       SFEntity sfEntity, JSONObject body) {
     try {
-      NeoHandler customization = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
-          .qualifier(sfEntity.getJavaQualifier())
-          .specName(specName)
-          .entityName(entityName)
-          .surface(NeoExtensionSurface.CREATE)
-          .channel(NeoExtensionChannel.MCP)
-          .build());
+      NeoHandler customization = NeoHandlerLookup.forEntity(sfEntity);
       if (customization != null) {
         customization.resolveServerCreateFields(
             buildHookContext(specName, entityName, "POST", null, body, adTab, sfEntity));

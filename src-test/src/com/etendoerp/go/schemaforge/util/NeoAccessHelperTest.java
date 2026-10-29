@@ -66,6 +66,10 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  */
 public class NeoAccessHelperTest {
 
+  /** Real resolver over stubbed qualifier lookups: the report path asks NeoHandlerLookup itself. */
+  private static final org.mockito.stubbing.Answer<Object> CALLS_REAL =
+      org.mockito.Mockito.CALLS_REAL_METHODS;
+
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
   private OBDal dal;
@@ -752,7 +756,7 @@ public class NeoAccessHelperTest {
     NeoHandler handler = mock(NeoHandler.class);
     when(handler.isAccessibleForCurrentRole()).thenReturn(false);
 
-    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class, CALLS_REAL)) {
       lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("taxReportHandler"))
           .thenReturn(handler);
 
@@ -769,7 +773,7 @@ public class NeoAccessHelperTest {
     NeoHandler handler = mock(NeoHandler.class);
     when(handler.isAccessibleForCurrentRole()).thenReturn(true);
 
-    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class, CALLS_REAL)) {
       lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("taxReportHandler"))
           .thenReturn(handler);
 
@@ -791,7 +795,7 @@ public class NeoAccessHelperTest {
 
     NeoHandler undeclaring = neoContext -> null;
 
-    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class, CALLS_REAL)) {
       lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("someUiHandler"))
           .thenReturn(undeclaring);
 
@@ -799,16 +803,16 @@ public class NeoAccessHelperTest {
     }
   }
 
-  /** No {@code Java_Qualifier} on any entity: there is no handler to ask, so nothing changes. */
+  /** No customization on any entity: there is no handler to ask, so nothing changes. */
   @Test
   public void hasReportSpecAccess_specWithoutQualifier_returnsTrue() {
     when(role.getId()).thenReturn("role-id-report-no-qualifier");
     SFSpec spec = reportSpec("spec-report-no-qualifier");
     givenSpecEntities(Collections.singletonList(reportEntity(null)));
 
-    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class, CALLS_REAL)) {
       assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
-      lookupMock.verifyNoInteractions();
+      lookupMock.verify(() -> NeoHandlerLookup.byQualifierQuietly(anyString()), times(0));
     }
   }
 
@@ -819,7 +823,7 @@ public class NeoAccessHelperTest {
     SFSpec spec = reportSpec("spec-report-handler-missing");
     givenSpecEntities(Collections.singletonList(reportEntity("goneHandler")));
 
-    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class, CALLS_REAL)) {
       lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("goneHandler")).thenReturn(null);
 
       assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
@@ -846,7 +850,7 @@ public class NeoAccessHelperTest {
     when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
     when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
 
-    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class, CALLS_REAL)) {
       assertFalse(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
       lookupMock.verifyNoInteractions();
     }
@@ -866,7 +870,7 @@ public class NeoAccessHelperTest {
     NeoHandler handler = mock(NeoHandler.class);
     when(handler.isAccessibleForCurrentRole()).thenThrow(new IllegalStateException("no OBContext"));
 
-    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class, CALLS_REAL)) {
       lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("brokenHandler"))
           .thenReturn(handler);
 

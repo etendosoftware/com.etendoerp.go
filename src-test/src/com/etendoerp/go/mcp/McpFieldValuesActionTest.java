@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -79,8 +80,13 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * parameter: openClose", and firing the button by its column name ({@code OpenClose}) skipped the
  * handler and failed in the OBUIAPP process behind it.</p>
  *
+ * <p>ETP-5051 — the same real path, with the real {@code NeoExtensionDispatcher}: an action whose
+ * created rows a plan quota refuses answers the CRUD gate's 403 {@code QUOTA_EXCEEDED} over
+ * {@code etendo_action}, rolled back, and the AD button behind it is never fired.</p>
+ *
  * @covers com.etendoerp.go.mcp.McpActionsView
  * @covers com.etendoerp.go.schemaforge.util.NeoActionContract
+ * @covers com.etendoerp.go.schemaforge.NeoExtensionDispatcher
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects the outer class.
 @SuppressWarnings("java:S2187")
@@ -105,7 +111,7 @@ class McpFieldValuesActionTest {
     McpConfigSections.resetForTests();
     McpConfigCache.invalidateAll();
     indexMock = mockStatic(NeoExtensionIndex.class);
-    lookupMock = mockStatic(NeoHandlerLookup.class);
+    lookupMock = mockStatic(NeoHandlerLookup.class, org.mockito.Mockito.CALLS_REAL_METHODS);
     lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly(anyString()))
         .thenReturn(new PeriodOpenCloseHandler());
     buttonMock = mockStatic(NeoButtonActionHelper.class,
@@ -484,6 +490,70 @@ class McpFieldValuesActionTest {
       JSONObject body = dispatched.get(0).context().getRequestBody();
       assertEquals("O", body.getJSONObject(FIELD_VALUES).getString(ACTION), body.toString());
       assertFalse(body.has(ACTION), "the value travels under fieldValues only: " + body);
+    }
+
+    /**
+     * ETP-5051 — the customization creates a row a {@code block} quota refuses
+     * ({@code NeoQuotaCreateCheck}) and lets the refusal escape: the real dispatcher maps it, the
+     * caller gets the refusal envelope, the transaction is rolled back and the button never fires.
+     */
+    @Test
+    @DisplayName("a quota refusal escaping the action answers QUOTA_EXCEEDED over etendo_action")
+    void aQuotaRefusalEscapingTheActionAnswersTheRefusal() throws Exception {
+      com.etendoerp.go.usage.quota.QuotaWriteGuard guard =
+          mock(com.etendoerp.go.usage.quota.QuotaWriteGuard.class);
+      com.etendoerp.go.usage.quota.QuotaClientCache.Entry entry =
+          mock(com.etendoerp.go.usage.quota.QuotaClientCache.Entry.class);
+      when(guard.entryIfChecked("Invoice")).thenReturn(java.util.Optional.of(entry));
+      when(guard.refusalFor(entry, "Invoice", List.of("INV-NEW")))
+          .thenReturn(java.util.Optional.of(atLimit()));
+      org.openbravo.base.structure.BaseOBObject created =
+          mock(org.openbravo.base.structure.BaseOBObject.class);
+      when(created.getEntityName()).thenReturn("Invoice");
+      when(created.getId()).thenReturn("INV-NEW");
+      NeoHandler creating = new NeoHandler() {
+        @Override
+        public com.etendoerp.go.schemaforge.NeoResponse handle(
+            com.etendoerp.go.schemaforge.NeoContext context) {
+          com.etendoerp.go.schemaforge.NeoQuotaCreateCheck.requireAllowed(created);
+          return null;
+        }
+      };
+      lookupMock.when(() -> NeoHandlerLookup.byQualifier("period-openclose")).thenReturn(creating);
+
+      String result;
+      OBDal dal = mock(OBDal.class);
+      try (MockedStatic<NeoActionRecordGuard> recordGuard = mockStatic(NeoActionRecordGuard.class);
+          MockedStatic<com.etendoerp.go.usage.quota.QuotaWriteGuard> defaults =
+              mockStatic(com.etendoerp.go.usage.quota.QuotaWriteGuard.class);
+          MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+          MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        defaults.when(com.etendoerp.go.usage.quota.QuotaWriteGuard::getDefault).thenReturn(guard);
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "PERIOD-NOV-26")
+            .put("action", ACTION).put(PARAMETERS, new JSONObject().put(ACTION, "O"));
+        result = new McpToolRouter().handleAction(SPEC, args).toString();
+      }
+
+      assertTrue(result.contains("QUOTA_EXCEEDED"), result);
+      assertTrue(result.contains("CREATED_SALES_INVOICES"), result);
+      verify(dal).flush();
+      verify(dal).rollbackAndClose();
+      buttonMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(any(), anyString(),
+          anyString(), any()), org.mockito.Mockito.never());
+    }
+
+    private com.etendoerp.go.usage.quota.QuotaEvaluation atLimit() {
+      com.etendoerp.go.usage.quota.QuotaDefinition quota =
+          com.etendoerp.go.usage.quota.QuotaDefinition.builder().resourceId("RES-INV")
+              .resourceKey("CREATED_SALES_INVOICES").resourceName("Sales invoices")
+              .unitLabel("Inv").enforcementMode("block").includedQty(10L).build();
+      java.util.Date start = new java.util.Date(1_790_000_000_000L);
+      java.util.Date end = new java.util.Date(1_792_600_000_000L);
+      return new com.etendoerp.go.usage.quota.QuotaEvaluation(quota, "month",
+          com.etendoerp.go.usage.quota.QuotaPeriod.current(start, end, false,
+              new java.util.Date(1_791_000_000_000L)), 10L,
+          com.etendoerp.go.usage.quota.QuotaVerdict.DENY);
     }
 
     @Test

@@ -78,18 +78,21 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * per-entity field metadata load used by etendo_schema.</p>
  *
  * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ * @covers com.etendoerp.go.mcp.McpUserRequiredOverride
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpSchemaFieldBuilderTest {
 
   @Test
-  @DisplayName("Utility class hides its constructor")
+  @DisplayName("Utility classes hide their constructor")
   void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<McpSchemaFieldBuilder> constructor = McpSchemaFieldBuilder.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
+    for (Class<?> utility : List.of(McpSchemaFieldBuilder.class, McpUserRequiredOverride.class)) {
+      Constructor<?> constructor = utility.getDeclaredConstructor();
+      assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+      constructor.setAccessible(true);
+      constructor.newInstance();
+    }
   }
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)
@@ -2435,6 +2438,123 @@ class McpSchemaFieldBuilderTest {
       assertFalse(fields.getJSONObject(1).has("requiredWhen"));
       assertFalse(fields.getJSONObject(2).has("userRequired"),
           "field not in preconditions must be left untouched");
+    }
+  }
+
+  // ─── MCP_CONFIG fields.userRequired override (ETP-5791) ─────────────
+
+  @Nested
+  @DisplayName("fields.userRequired override")
+  class UserRequiredOverride {
+
+    /** An editable descriptor whose userRequired is derived exactly as buildSchemaField does. */
+    private JSONObject derivedEditable(boolean mandatory) throws Exception {
+      JSONObject fieldObj = new JSONObject().put("name", "vendor").put("required", mandatory);
+      invokeStatic("addVisibility",
+          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
+          fieldObj, McpSchemaFieldBuilder.VISIBILITY_EDITABLE, mandatory);
+      return fieldObj;
+    }
+
+    /**
+     * The override replaces the structural rule in both directions, and leaves it standing when
+     * unstated. The raw {@code required} (AD NOT NULL) is the contract and is never touched.
+     */
+    @ParameterizedTest(name = "mandatory={0} override={1} -> userRequired={2}")
+    @CsvSource({
+        "true,  false, false",
+        "true,  -,     true",
+        "false, true,  true",
+        "false, -,     false",
+    })
+    void overrideReplacesTheDerivedFlag(boolean mandatory, String override, boolean expected)
+        throws Exception {
+      JSONObject fieldObj = derivedEditable(mandatory);
+      Boolean configured = "-".equals(override) ? null : Boolean.valueOf(override);
+
+      McpUserRequiredOverride.apply(fieldObj, configured);
+
+      assertEquals(expected, fieldObj.getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+      assertEquals(mandatory, fieldObj.getBoolean("required"),
+          "the override changes the advice, never the AD contract");
+    }
+
+    @Test
+    @DisplayName("a button ignores the override — it carries no payload value to require")
+    void buttonIgnoresTheOverride() throws Exception {
+      JSONObject button = new JSONObject().put("name", "docAction").put("type", "button");
+
+      McpUserRequiredOverride.apply(button, Boolean.TRUE);
+
+      assertFalse(button.has(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+
+    @Test
+    @DisplayName("a precondition requirement still forces userRequired over a false override")
+    void preconditionOutranksAFalseOverride() throws Exception {
+      JSONObject fieldObj = derivedEditable(true);
+      McpUserRequiredOverride.apply(fieldObj, Boolean.FALSE);
+      JSONArray fields = new JSONArray().put(fieldObj);
+
+      McpSchemaFieldBuilder.applyPreconditionRequirements(fields, Map.of("vendor", ""));
+
+      assertTrue(fields.getJSONObject(0).getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+
+    @Nested
+    @DisplayName("loadFieldMetadata")
+    class Load {
+
+      private OBDal mockOBDal;
+      private MockedStatic<OBDal> obDalMock;
+
+      @BeforeEach
+      void setUp() {
+        // The real fields section must be registered; see McpFieldViewTest#isolateSectionRegistry.
+        McpConfigSections.resetForTests();
+        McpConfigCache.invalidateAll();
+        mockOBDal = mock(OBDal.class);
+        obDalMock = mockStatic(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+      }
+
+      @AfterEach
+      void tearDown() {
+        obDalMock.close();
+        McpConfigSections.resetForTests();
+        McpConfigCache.invalidateAll();
+      }
+
+      private SFField sfField(String id, String columnId, String fieldConfig) {
+        SFField field = mock(SFField.class);
+        Column col = mock(Column.class);
+        when(col.getId()).thenReturn(columnId);
+        when(field.getId()).thenReturn(id);
+        when(field.getADColumn()).thenReturn(col);
+        when(field.getVisibility()).thenReturn(McpSchemaFieldBuilder.VISIBILITY_EDITABLE);
+        when(field.isIncluded()).thenReturn(Boolean.TRUE);
+        when(field.isReadOnly()).thenReturn(Boolean.FALSE);
+        when(field.get(SFField.PROPERTY_MCPCONFIG)).thenReturn(fieldConfig);
+        return field;
+      }
+
+      @Test
+      @DisplayName("maps only the columns whose override states userRequired")
+      @SuppressWarnings("unchecked")
+      void mapsOnlyStatedOverrides() {
+        SFEntity sfEntity = mock(SFEntity.class);
+        when(sfEntity.getId()).thenReturn("entity-user-required");
+        SFField overridden = sfField("sf-ur-1", "col-vendor",
+            "{\"fields\":{\"userRequired\":false,\"reason\":\"inherited from the category\"}}");
+        SFField plain = sfField("sf-ur-2", "col-name", null);
+        OBCriteria<SFField> crit = mock(OBCriteria.class);
+        when(mockOBDal.createCriteria(SFField.class)).thenReturn(crit);
+        when(crit.list()).thenReturn(List.of(overridden, plain));
+
+        McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+
+        assertEquals(Map.of("col-vendor", Boolean.FALSE), meta.userRequiredByColumnId);
+      }
     }
   }
 

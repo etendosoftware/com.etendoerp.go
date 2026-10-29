@@ -33,8 +33,12 @@ import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.ad.ui.ProcessRequest;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.DalBaseProcess;
+
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 
 /**
  * Recomputes usage. With no parameters it covers the settling window, which is what the
@@ -51,6 +55,15 @@ import org.openbravo.service.db.DalBaseProcess;
  * {@code dateFormat.java} property, which is what the parameter window sends) or
  * {@code yyyy-MM-dd} (what a scheduled request's JSON parameters naturally carry) is
  * accepted.
+ *
+ * <p><b>Scheduling (ETP-5051, §5.15).</b> A run the Process Scheduler fires for a request whose
+ * timing is <em>Schedule</em> ({@code S}) — the one {@code UsageAggregationScheduleStartup} plants
+ * or one an administrator created — does nothing while the
+ * {@value GoFeatureFlags#FLAG_USAGE_AGGREGATION_SCHEDULE} flag is off, and ends as an ERROR so
+ * Process Monitor shows that a scheduled request is firing for nothing (the ETP-5048 shape). A launch
+ * from the menu, or a Process Request run immediately or later once, is never gated. A scheduled run
+ * also checks the freshness of the stored usage first ({@link UsageFreshness}), so a schedule that
+ * falls behind its cadence is logged.
  */
 public class UsageAggregationProcess extends DalBaseProcess {
 
@@ -67,9 +80,26 @@ public class UsageAggregationProcess extends DalBaseProcess {
   static final String LABEL_DATE_FROM = "Starting Date";
   static final String LABEL_DATE_TO = "Ending Date";
   private static final String DATE_FORMAT = "yyyy-MM-dd";
+  /** {@code AD_PROCESS_REQUEST.TIMING_OPTION} of a recurring schedule. */
+  static final String TIMING_SCHEDULED = "S";
+  private static final String TITLE_SCHEDULE_OFF = "Usage Aggregation Schedule Is Off";
 
   @Override
   public void doExecute(ProcessBundle bundle) throws Exception {
+    if (isScheduledRun(bundle)) {
+      if (!scheduleEnabled()) {
+        String message = "The " + GoFeatureFlags.FLAG_USAGE_AGGREGATION_SCHEDULE
+            + " flag is off, so this scheduled request did nothing. Turn the flag on, or"
+            + " unschedule the request in the Process Request window.";
+        log.warn("Scheduled run of process request {} skipped: {}", bundle.getProcessRequestId(),
+            message);
+        fail(bundle, TITLE_SCHEDULE_OFF, message);
+      }
+      // Before this run writes anything: a last success older than twice the cadence means the
+      // schedule has been falling behind (or failing) and every quota on the stored aggregate has
+      // been reading stale usage.
+      UsageFreshness.getDefault().checkLag();
+    }
     OBContext.setAdminMode(false);
     try {
       Date from = readDate(bundle, PARAM_DATE_FROM, LABEL_DATE_FROM);
@@ -120,6 +150,44 @@ public class UsageAggregationProcess extends DalBaseProcess {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Whether this run was fired by a recurring schedule: the Process Scheduler channel, for a request
+   * whose timing is <em>Schedule</em>. Every scheduler-run bundle is on
+   * {@link ProcessBundle.Channel#SCHEDULED}, an immediate Process Request run included, so the
+   * request's timing is what tells a schedule apart (the ETP-5048 rule).
+   *
+   * @param bundle the run's bundle
+   * @return {@code true} for a recurring scheduled run
+   */
+  boolean isScheduledRun(ProcessBundle bundle) {
+    String requestId = bundle.getProcessRequestId();
+    return bundle.getChannel() == ProcessBundle.Channel.SCHEDULED && requestId != null
+        && TIMING_SCHEDULED.equals(timingOf(requestId));
+  }
+
+  /**
+   * The timing option of a process request. Package-visible so tests can answer it without a
+   * database.
+   *
+   * @param requestId the process request
+   * @return {@code I}, {@code L} or {@code S}; null when the request does not exist
+   */
+  String timingOf(String requestId) {
+    OBContext.setAdminMode(true);
+    try {
+      ProcessRequest request = OBDal.getInstance().get(ProcessRequest.class, requestId);
+      return request == null ? null : request.getTiming();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** @return whether scheduled runs may work; package-visible so tests can decide it */
+  boolean scheduleEnabled() {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_USAGE_AGGREGATION_SCHEDULE,
+        FeatureFlagContext.forAccount(null));
   }
 
   /**

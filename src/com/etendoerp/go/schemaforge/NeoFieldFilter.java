@@ -44,6 +44,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Filters JSON request/response bodies based on ETGO_SF_FIELD configuration.
@@ -254,12 +255,12 @@ public class NeoFieldFilter {
       Map<String, String> apiKeyMap = new HashMap<>();
       Map<String, String> propToApiMap = new HashMap<>();
 
-      // An entity with a Java_Qualifier has a NeoHandler that runs as a pre-hook before this
-      // filter (NeoServletSupport.handleWithHooks) and may legitimately inject a read-only
-      // field's value itself — e.g. InventoryLineHandler sets bookQuantity. Such entities are
-      // exempt from clause-2 rejection entirely (see rejectableOnCreateFields javadoc).
-      boolean entityHasHandler = sfEntity.getJavaQualifier() != null
-          && !sfEntity.getJavaQualifier().trim().isEmpty();
+      // A customized entity (bound by @NeoExtension or by Java_Qualifier) has a NeoHandler that
+      // runs as a pre-hook before this filter (NeoServletSupport.handleWithHooks) and may
+      // legitimately inject a read-only field's value itself — e.g. InventoryLineHandler sets
+      // bookQuantity. Such entities are exempt from clause-2 rejection entirely (see
+      // rejectableOnCreateFields javadoc).
+      boolean entityHasHandler = NeoHandlerLookup.hasCustomization(sfEntity);
 
       processFieldMappings(allFields, dalEntity, included, writable, rejectableOnCreate,
           apiKeyMap, propToApiMap, dalEntityName, entityHasHandler);

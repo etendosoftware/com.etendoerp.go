@@ -57,6 +57,7 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
@@ -586,7 +587,18 @@ class NeoCrudHandler {
         if (earlyError != null) {
           return earlyError;
         }
-        result = executePostCreate(context, adTab, dalEntityName, fieldFilter, jsonService, params);
+        // ETP-5051: the plan-quota check runs after the insert, in the same transaction. The gate
+        // decides from catalog data alone whether this entity is checked; when it is not, the
+        // create runs exactly as before (same service, same commit, no query). When the client's
+        // quotas cannot be read the create is refused before it runs: no callout, no insert.
+        NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(dalEntityName, jsonService,
+            service -> executePostCreate(context, adTab, dalEntityName, fieldFilter, service,
+                params));
+        if (gated.refusal() != null) {
+          return gated.refusal();
+        }
+        // The gate's own commit may have failed: then this is core's error JSON for it.
+        result = gated.result();
         break;
       }
       case "PUT":
@@ -840,9 +852,14 @@ class NeoCrudHandler {
       }
       // ETP-5782: a failure NEO's write service captured carries the classification of its
       // throwable — a trigger refusal (422), a row still in use (409), a deadlock (409), a lost
-      // connection (503)… Unique violations are left to the branch below, which keeps Etendo's own
-      // wording. Captured 5xx failures use the sanitized classification message. An uncaptured
-      // failure keeps the legacy answer; its class is never guessed from its text.
+      // connection (503)… A unique violation keeps Etendo's own translated wording, in whatever
+      // language the request runs (ETP-5953). Captured 5xx failures use the sanitized
+      // classification message. An uncaptured failure keeps the legacy answer; its class is never
+      // guessed from its text.
+      NeoResponse duplicate = NeoErrorResponses.duplicateWithCoreWording(innerResponse, translated);
+      if (duplicate != null) {
+        return duplicate;
+      }
       if (!NeoErrorSanitizer.isDuplicateKeyMessage(translated)) {
         NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse);
         if (classified != null) {
@@ -911,20 +928,17 @@ class NeoCrudHandler {
     // declares the stronger "must not populate or overwrite", and its fields are precisely the
     // ones NOT in the body, so merging the two made every such declaration a silent no-op.
     Set<String> suppressedCalloutFields = new HashSet<>();
-    String javaQualifier = context.getSfEntity() != null
-        ? context.getSfEntity().getJavaQualifier() : null;
-    if (StringUtils.isNotBlank(javaQualifier)) {
-      // Resolved statically, NOT through `servlet`. This runs in the DEFAULT create path, which
-      // BatchService.forBatchOnly() is allowed to reach with a null servlet — its javadoc states
-      // that contract ("only handleWithHooks touches the owning servlet"). Going through
-      // servlet.lookupHandler here broke it: every etendo_batch create on an entity with a
-      // Java_Qualifier died with an NPE on `this.servlet`. NeoServlet.lookupHandler is itself a
-      // one-line delegation to this same static, so the behaviour is identical on both paths
-      // (same precedent as NeoActionSurface's CDI_RESOLVER).
-      NeoHandler handler = NeoServletSupport.lookupHandler(javaQualifier);
-      if (handler != null) {
-        suppressedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
-      }
+    // Resolved statically, NOT through `servlet`. This runs in the DEFAULT create path, which
+    // BatchService.forBatchOnly() is allowed to reach with a null servlet — its javadoc states
+    // that contract ("only handleWithHooks touches the owning servlet"). Going through
+    // servlet.lookupHandler here broke it: every etendo_batch create on an entity with a
+    // Java_Qualifier died with an NPE on `this.servlet`. NeoServlet.lookupHandler is itself a
+    // one-line delegation to this same static, so the behaviour is identical on both paths
+    // (same precedent as NeoActionSurface's CDI_RESOLVER). Annotation first, like every hook.
+    NeoHandler handler = NeoHandlerLookup.forEntity(context.getSfEntity(),
+        NeoServletSupport::lookupHandler);
+    if (handler != null) {
+      suppressedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
     }
     executePostCalloutCascade(filteredBody, adTab, context, protectedCalloutFields,
         suppressedCalloutFields);
@@ -1134,6 +1148,9 @@ class NeoCrudHandler {
     // API key ("accountingDate") — filterWriteRequest already remapped every other field to
     // its DAL name via NeoFieldFilter#remapApiKeys, and DefaultJsonDataService only recognizes
     // DAL property names; injecting under the API key would silently no-op.
+    // Pending: move to the @NeoExtension of each entity that needs it (invoice, order and in/out
+    // headers) through a NeoHandler hook that declares the read-only fields its pre-hook writes on
+    // update; kept here until those entities are migrated (ETP-5588, skill neo-extension-migration).
     if (hadAccountingDate) {
       filteredBody.put(fieldFilter.resolveWritablePropName(FIELD_ACCOUNTING_DATE), accountingDateBeforeFilter);
     }

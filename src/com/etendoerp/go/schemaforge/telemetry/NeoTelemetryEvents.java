@@ -73,6 +73,23 @@ public final class NeoTelemetryEvents {
       "backend_mcp_tool_call_completed";
 
   /**
+   * ETP-5791 — a contact ({@code C_BPartner}) create was committed, on any NEO channel (REST,
+   * MCP, REST/MCP batch). Emitted by {@code ContactTypeTelemetry}; properties {@code account_id},
+   * {@code is_customer}, {@code is_vendor}, {@code types_source}, {@code channel},
+   * {@code flag_enabled}. Never a record identifier.
+   */
+  public static final String BACKEND_CONTACT_CREATED = "backend_contact_created";
+
+  /**
+   * ETP-5791 — an existing contact's {@code IsCustomer}/{@code IsVendor} actually changed and the
+   * write was committed. Emitted by {@code ContactTypeTelemetry}; properties {@code account_id},
+   * {@code previous_is_customer}, {@code previous_is_vendor}, {@code is_customer},
+   * {@code is_vendor}, {@code days_since_created}, {@code change_trigger}, {@code change_origin},
+   * {@code channel}, {@code flag_enabled}. Never a record identifier.
+   */
+  public static final String BACKEND_CONTACT_TYPE_CHANGED = "backend_contact_type_changed";
+
+  /**
    * Generic backend write-operation timing event emitted by NEO CRUD.
    */
   public static final String BACKEND_WRITE_OPERATION_COMPLETED =

@@ -29,6 +29,7 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Handles the {@code etendo_widget} MCP tool (gap G4, ETP-4284), extracted from
@@ -72,10 +73,10 @@ final class McpWidgetHandler {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(McpConstants.SPEC_DASHBOARD);
     SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
 
-    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoHandler handler = NeoHandlerLookup.forEntity(sfEntity);
     if (handler == null) {
       return McpToolRouter.wrapAsErrorContent("No handler registered for widget '" + widget
-          + "' (entity '" + entityName + "', qualifier '" + sfEntity.getJavaQualifier() + "').");
+          + "' (spec '" + McpConstants.SPEC_DASHBOARD + "', entity '" + entityName + "').");
     }
 
     // Forward the optional params object as the query-param map (e.g. range), mirroring

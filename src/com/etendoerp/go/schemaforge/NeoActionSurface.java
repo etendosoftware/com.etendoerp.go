@@ -24,6 +24,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Reports whether an entity exposes an {@code /action} route
@@ -102,22 +103,22 @@ public final class NeoActionSurface {
       return true;
     }
     String qualifier = entity.getJavaQualifier();
-    if (StringUtils.isBlank(qualifier)) {
-      // No qualifier means no handler, so no handler-served action route. A tab-backed entity
-      // reaches its AD process actions through the generic path instead — but this class is
-      // only ever asked about tab-less entities, where no AD process exists.
-      return false;
-    }
     try {
-      NeoHandler handler = resolver.resolve(qualifier);
-      if (handler == null) {
-        log.warn("No NeoHandler registered for qualifier '{}' — assuming an action surface",
-            qualifier);
-        return true;
+      NeoHandler handler = NeoHandlerLookup.forEntity(entity, resolver::resolve);
+      if (handler != null) {
+        return handler.servesActions();
       }
-      return handler.servesActions();
+      if (StringUtils.isBlank(qualifier)) {
+        // Neither an annotation nor a qualifier: no handler, so no handler-served action route.
+        // A tab-backed entity reaches its AD process actions through the generic path instead —
+        // but this class is only ever asked about tab-less entities, where no AD process exists.
+        return false;
+      }
+      log.warn("No NeoHandler registered for qualifier '{}' — assuming an action surface",
+          qualifier);
+      return true;
     } catch (Exception e) {
-      log.warn("Could not probe the action surface of qualifier '{}': {}", qualifier,
+      log.warn("Could not probe the action surface of entity '{}': {}", entity.getName(),
           e.getMessage());
       return true;
     }
