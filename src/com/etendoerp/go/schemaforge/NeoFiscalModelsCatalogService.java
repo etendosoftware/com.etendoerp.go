@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.businessUtility.Preferences;
@@ -46,6 +47,10 @@ import com.etendoerp.go.common.MalformedJsonException;
  * <p>When nothing has been saved yet for the client, GET returns an empty JSON object
  * ({@code {}}); the frontend treats any model absent from the response as inactive,
  * giving an "all models inactive" default with no server-side special-casing.
+ *
+ * <p>ETP-5716: while the {@code fiscal-model-390} flag is off for the tenant, GET also carries
+ * {@code "_unavailable": ["390"]} (and never {@code "390"}), and PUT keeps the stored 390 value —
+ * see {@link FiscalModel390Flag}.
  */
 class NeoFiscalModelsCatalogService {
 
@@ -58,25 +63,45 @@ class NeoFiscalModelsCatalogService {
   /**
    * Returns the active-models JSON object for the current OBContext client.
    * Returns an empty JSON object when no preference has been stored yet for this client.
+   *
+   * <p>ETP-5716 toggle point ({@code FiscalModel390Flag}): with the {@code fiscal-model-390}
+   * flag off, model 390 is dropped from the answer and listed under {@code _unavailable}.
    */
   static NeoResponse getActiveModels() {
-    OBContext ctx = OBContext.getOBContext();
-    Client client = ctx.getCurrentClient();
+    Client client = OBContext.getOBContext().getCurrentClient();
+    JSONObject stored = readStoredModels(client);
+    try {
+      return NeoResponse.ok(FiscalModel390Flag.applyToRead(stored,
+          FiscalModel390Flag.isEnabled(clientIdOf(client))));
+    } catch (Exception e) {
+      log.error("Error building fiscal models catalog answer: {}", e.getMessage(), e);
+      return NeoResponse.ok(new JSONObject());
+    }
+  }
+
+  /**
+   * Reads the stored catalog of {@code client}; {@code {}} when nothing was saved yet or the
+   * stored value cannot be read or parsed.
+   */
+  private static JSONObject readStoredModels(Client client) {
     try {
       String raw = Preferences.getPreferenceValue(
           PREF_KEY, false,
           client, null, null, null, null);
-      return NeoResponse.ok(new JSONObject(raw));
+      return new JSONObject(raw);
     } catch (PropertyNotFoundException e) {
-      return NeoResponse.ok(new JSONObject());
+      return new JSONObject();
     } catch (PropertyException e) {
-      String clientId = (client != null) ? client.getId() : "0";
-      log.warn("Could not read {} for client {}: {}", PREF_KEY, clientId, e.getMessage());
-      return NeoResponse.ok(new JSONObject());
+      log.warn("Could not read {} for client {}: {}", PREF_KEY, clientIdOf(client), e.getMessage());
+      return new JSONObject();
     } catch (Exception e) {
       log.error("Error parsing stored fiscal models catalog: {}", e.getMessage(), e);
-      return NeoResponse.ok(new JSONObject());
+      return new JSONObject();
     }
+  }
+
+  private static String clientIdOf(Client client) {
+    return (client != null) ? client.getId() : "0";
   }
 
   /**
@@ -96,6 +121,16 @@ class NeoFiscalModelsCatalogService {
     }
     OBContext ctx = OBContext.getOBContext();
     Client client = ctx.getCurrentClient();
-    Preferences.setPreferenceValue(PREF_KEY, parsed.toString(), false, client, null, null, null, null, null);
+    // ETP-5716 toggle point (FiscalModel390Flag): the `_unavailable` marker is never stored, and
+    // with the fiscal-model-390 flag off the stored value of model 390 is kept as it was.
+    JSONObject toSave;
+    try {
+      toSave = FiscalModel390Flag.applyToWrite(parsed, readStoredModels(client),
+          FiscalModel390Flag.isEnabled(clientIdOf(client)));
+    } catch (JSONException e) {
+      log.warn("Invalid fiscal models catalog JSON: {}", e.getMessage());
+      throw new IllegalArgumentException("Invalid JSON body");
+    }
+    Preferences.setPreferenceValue(PREF_KEY, toSave.toString(), false, client, null, null, null, null, null);
   }
 }

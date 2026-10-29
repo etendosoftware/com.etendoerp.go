@@ -45,6 +45,7 @@ import com.etendoerp.go.common.BoundedJsonParserTest;
  * Tests for {@link NeoFiscalModelsCatalogService}.
  *
  * @covers com.etendoerp.go.schemaforge.NeoFiscalModelsCatalogService
+ * @covers com.etendoerp.go.schemaforge.FiscalModel390Flag
  */
 public class NeoFiscalModelsCatalogServiceTest {
 
@@ -89,7 +90,7 @@ public class NeoFiscalModelsCatalogServiceTest {
       NeoResponse result = NeoFiscalModelsCatalogService.getActiveModels();
 
       assertEquals(200, result.getHttpStatus());
-      assertEquals(0, result.getBody().length());
+      assertEquals(0, modelCount(result.getBody()));
     }
   }
 
@@ -112,7 +113,7 @@ public class NeoFiscalModelsCatalogServiceTest {
       NeoResponse result = NeoFiscalModelsCatalogService.getActiveModels();
 
       assertEquals(200, result.getHttpStatus());
-      assertEquals(0, result.getBody().length());
+      assertEquals(0, modelCount(result.getBody()));
     }
   }
 
@@ -163,5 +164,13 @@ public class NeoFiscalModelsCatalogServiceTest {
       ctxMock.verifyNoInteractions();
       prefMock.verifyNoInteractions();
     }
+  }
+
+  /**
+   * Model entries of a catalog answer: every key but the ETP-5716 {@code _unavailable} marker,
+   * which the answer carries while the {@code fiscal-model-390} flag is off (its default).
+   */
+  private static int modelCount(org.codehaus.jettison.json.JSONObject body) {
+    return body.length() - (body.has(FiscalModel390Flag.UNAVAILABLE_KEY) ? 1 : 0);
   }
 }

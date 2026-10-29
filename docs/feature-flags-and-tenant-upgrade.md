@@ -182,6 +182,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `contact-category-type` | `etendo.go.flags.contact-category-type` | `ETGO_FLAG_CONTACT_CATEGORY_TYPE` | absent ⇒ **`false`** (pre-ETP-5791 contact behaviour) |
 | `billing-reconciliation-schedule` | `etendo.go.flags.billing-reconciliation-schedule` | `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | `structured-address-for-sepa` | `etendo.go.flags.structured-address-for-sepa` | `ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA` | absent ⇒ **`false`** (legacy single-line address; TTL 2026-11-15 — SEPA 2025 rulebooks ban unstructured addresses in SEPA remittance files from that date, per [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24)) |
+| `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -571,6 +572,47 @@ Environment level, evaluated with an empty context; read on every scheduled run,
 reconciliation (scheduling, settings, alerts, procedures):
 [`billing-reconciliation.md`](billing-reconciliation.md). Design of record:
 [`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).
+
+### `fiscal-model-390` (ETP-5716) — backend-only, per tenant, off by default
+
+Whether Modelo 390 (the annual VAT summary) is available in the Fiscal Models catalog. Off (the
+default, and every failure of the flag stack) hides the whole 390 in Etendo GO: the catalog drawer
+toggle, the declarations list and "Nueva declaración", the 390 page, and the Organization window's
+"Representante legal / Modelo 390" section. TTL **2027-01-01**: by then the 390 ships unconditionally
+and the flag retires (registry entry `fiscal-model-390` in `etendo_schema_forge`
+`flags-registry.json`).
+
+**One gate, one toggle point.** `FiscalModel390Flag` (`schemaforge/`) is the only reader of the flag
+and `NeoFiscalModelsCatalogService` its only caller:
+
+- **`GET /sws/neo/fiscal-models-catalog`, flag off:** the stored catalog without the `390` key plus
+  `"_unavailable": ["390"]`, e.g. `{"303": true, "_unavailable": ["390"]}`; a never-saved catalog
+  answers `{"_unavailable": ["390"]}`. Flag on: exactly the stored catalog, no marker.
+- **`PUT /sws/neo/fiscal-models-catalog`, flag off:** the client's `390` value is ignored and the
+  stored one kept, so a save can neither switch 390 on nor erase the tenant's earlier choice
+  (turning the flag back on restores it). `_unavailable` is never persisted, flag on or off.
+
+The SPA never evaluates the flag (no key in `flag-keys.js`): every 390 surface already shows only
+*active* models, and the catalog drawer also hides the models listed in `_unavailable`
+(`fiscal-models/catalogAvailability.js` in `etendo_schema_forge`).
+
+**A visual gate, not authorization — the endpoints are not refused.** `/sws/neo/fiscal390/*`, the
+`fiscal303/declarations` CRUD for model 390 and the legal-representative entity keep answering with
+the flag off. They are already protected by the role's window access; the flag only decides what
+the UI offers. Refusing them would put flag branches in several handlers (more removal cost), and
+would make a tenant's existing 390 declarations unreadable through the API while the flag is off
+for no security gain.
+
+**Evaluation context:** `clientId` of the current tenant (`FeatureFlagContext.ATTRIBUTE_CLIENT_ID`),
+so a hosted targeting rule (Datadog, or ConfigCat while it remains a fallback) can open the 390 to
+one tenant; the local arm is a plain per-environment boolean. Evaluated on every catalog GET/PUT,
+so a hosted change takes effect on the next catalog read (the SPA reads it when the Fiscal Models or
+Organization page mounts); a local property change needs a Tomcat restart.
+
+**Turning it on locally:** `etendo.go.flags.fiscal-model-390=true` in `Openbravo.properties` (or
+`-Detendo.go.flags.fiscal-model-390=true`, or `ETGO_FLAG_FISCAL_MODEL_390=true` in Tomcat's
+environment), with no Datadog/ConfigCat arm selected, then restart Tomcat. With a hosted arm
+selected the setting must exist in that dashboard; until it does, the flag resolves to `false`.
 
 ## 2. The onboarding paywall
 
