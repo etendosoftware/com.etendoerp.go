@@ -56,6 +56,12 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * <p>Response, as {@link SFListWindows}: {@code result} is a JSON array serialized as a string and
  * {@code count} its size; {@code error} on a bad {@code limit} or a failed read. The payload is
  * agent-written text that can carry tenant data: it is returned, never logged.
+ *
+ * <p><b>{@code result} is pure ASCII.</b> {@code WebhookServiceHandler} writes the body as
+ * {@code application/json;charset=ISO-8859-1}, so any character outside Latin-1 (typographic
+ * quotes, arrows, emoji) would reach the bot as {@code ?}. Every non-ASCII character is therefore
+ * written as a JSON {@code \}{@code uXXXX} escape, which any JSON parser turns back into the
+ * original text whatever charset the body travelled in.
  */
 public class McpFeedbackPending extends BaseWebhookService {
 
@@ -87,13 +93,32 @@ public class McpFeedbackPending extends BaseWebhookService {
     }
     try {
       JSONArray rows = readPending(OBDal.getInstance().getConnection(), limit);
-      responseVars.put("result", rows.toString());
+      responseVars.put("result", asciiJson(rows.toString()));
       responseVars.put("count", String.valueOf(rows.length()));
       log.debug("McpFeedbackPending returned {} row(s)", rows.length());
     } catch (Exception e) {
       log.error("Error in McpFeedbackPending", e);
       responseVars.put(McpFeedbackTriage.KEY_ERROR, "Could not read the pending MCP feedback");
     }
+  }
+
+  /**
+   * @param json serialized JSON
+   * @return the same JSON with every character above U+007F written as a {@code \}{@code uXXXX}
+   *         escape (a character outside the BMP becomes its two surrogate escapes, as JSON
+   *         requires); valid only because non-ASCII characters can appear only inside strings
+   */
+  static String asciiJson(String json) {
+    StringBuilder out = new StringBuilder(json.length());
+    for (int i = 0; i < json.length(); i++) {
+      char c = json.charAt(i);
+      if (c < 0x80) {
+        out.append(c);
+      } else {
+        out.append(String.format("\\u%04x", (int) c));
+      }
+    }
+    return out.toString();
   }
 
   /**

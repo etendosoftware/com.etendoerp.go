@@ -34,6 +34,7 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -92,12 +93,14 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  *
  * <p>{@code capabilities.structuredAddressForSepa} (ETP-5806, TTL 2026-11-15) mirrors the backend-only
  * {@code structured-address-for-sepa} flag ({@link GoFeatureFlags#FLAG_STRUCTURED_ADDRESS_FOR_SEPA}). It is
- * environment-level, not role-scoped — the same value regardless of which branch above resolved
- * — and is the only signal the frontend ever reads for this flag: it never evaluates the flag
- * key itself. The 4 address popups and the onboarding Company step render the structured
- * Street/Number/Building Name fields only while this is {@code true}; off, they fall back to the
- * pre-ETP-5806 single-line address editor, matching what the backend accepts/returns for the
- * same flag state.</p>
+ * the only signal the frontend ever reads for this flag: it never evaluates the flag key itself.
+ * The 4 address popups and the onboarding Company step render the structured Street/Number/
+ * Building Name fields only while this is {@code true}; off, they fall back to the pre-ETP-5806
+ * single-line address editor, matching what the backend accepts/returns for the same flag state.
+ * Evaluated per-account (the requesting user's {@code ETGO_ACCOUNT} email, resolved via {@link
+ * GoAccountResolver#currentAccountEmail()}) so a Datadog targeting rule can stage the
+ * rollout — the value is still computed once, identically regardless of which branch below
+ * resolved, since it does not itself depend on role/admin status.</p>
  *
  * GET /webhooks/SFWindowAccessMap
  */
@@ -125,14 +128,11 @@ public class SFWindowAccessMap extends BaseWebhookService {
 
   /**
    * JSON key used for the {@code structured-address-for-sepa} backend-only flag's capability signal
-   * (ETP-5806, TTL 2026-11-15). Environment-level, not role-scoped — evaluated with an
-   * account-less context, same value in both branches of {@link #buildAccessMap}, unlike
-   * {@code showAccountingFields}/{@code isAdminOrClientAdmin} which do vary by branch.
+   * (ETP-5806, TTL 2026-11-15). Evaluated per-account (ETP-5806 staged rollout); same value in
+   * both branches of {@link #buildAccessMap}, unlike {@code showAccountingFields}/
+   * {@code isAdminOrClientAdmin} which do vary by branch — it does not itself depend on role.
    */
   private static final String STRUCTURED_ADDRESS = "structuredAddressForSepa";
-
-  /** Account-less evaluation context for the environment-level {@code structured-address-for-sepa} flag. */
-  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
 
   /** Access-tier value for a role with full (read+write) access to a window. */
   private static final String FULL = "full";
@@ -163,9 +163,15 @@ public class SFWindowAccessMap extends BaseWebhookService {
     String currentUserId = currentContext != null && currentContext.getUser() != null
         ? currentContext.getUser().getId() : null;
 
+    // ETP-5806 — same reasoning as currentUserId above: the account whose email is the
+    // structured-address-for-sepa targeting key must be the one actually making this request, not
+    // whatever OBContext exposes once admin mode (below) has replaced the user. Resolved here,
+    // before that switch, and threaded through to buildAccessMap.
+    String currentAccountEmail = GoAccountResolver.currentAccountEmail();
+
     OBContext.setAdminMode();
     try {
-      JSONObject result = buildAccessMap(currentRole, currentUserId);
+      JSONObject result = buildAccessMap(currentRole, currentUserId, currentAccountEmail);
       responseVars.put("result", result.toString());
     } catch (Exception e) {
       log.error("Error in SFWindowAccessMap", e);
@@ -198,8 +204,13 @@ public class SFWindowAccessMap extends BaseWebhookService {
    * @param userId the user resolved for this request, used only for the {@code isOwner}
    *     capability (ETP-5395) — ownership is orthogonal to admin status, so it is resolved the
    *     same way in both branches below rather than only for the non-bypass role
+   * @param accountEmail the {@code ETGO_ACCOUNT} email resolved for this request (ETP-5806),
+   *     used only for the {@code structuredAddressForSepa} capability's targeting key; {@code
+   *     null} when no account resolves, which {@link FeatureFlagContext#forAccount(String)}
+   *     turns into an untargeted evaluation, never into "allow"
    */
-  private JSONObject buildAccessMap(Role role, String userId) throws JSONException {
+  private JSONObject buildAccessMap(Role role, String userId, String accountEmail)
+      throws JSONException {
     JSONObject windowAccess = new JSONObject();
     JSONObject capabilities = new JSONObject();
     boolean isOwner = OwnerSupport.isOwner(userId);
@@ -222,10 +233,11 @@ public class SFWindowAccessMap extends BaseWebhookService {
       capabilities.put(IS_OWNER, isOwner);
     }
 
-    // ETP-5806 — environment-level, identical in both branches above (unlike the per-role
-    // capabilities), so computed once here rather than duplicated in each arm.
+    // ETP-5806 — identical in both branches above (unlike the per-role capabilities), so computed
+    // once here rather than duplicated in each arm. Per-account targeting key (staged rollout).
     capabilities.put(STRUCTURED_ADDRESS,
-        GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ENVIRONMENT));
+        GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA,
+            FeatureFlagContext.forAccount(accountEmail)));
 
     JSONObject result = new JSONObject();
     result.put(WINDOW_ACCESS, windowAccess);
