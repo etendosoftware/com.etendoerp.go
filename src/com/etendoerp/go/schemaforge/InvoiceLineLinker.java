@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -131,34 +132,58 @@ final class InvoiceLineLinker {
       return;
     }
     List<InvoiceLine> lines = invoice.getInvoiceLineList();
+    Set<String> taken = shipmentLinesAlreadyLinked(lines);
+    boolean changed = false;
+    for (InvoiceLine line : lines) {
+      // Non-short-circuit on purpose: every line gets its chance, in invoice order.
+      changed |= linkToFirstFreePlannedShipment(line, plan, taken);
+    }
+    if (changed) {
+      OBDal.getInstance().flush();
+    }
+  }
+
+  /** The shipment lines some line of the invoice already points at (the native process's). */
+  private static Set<String> shipmentLinesAlreadyLinked(List<InvoiceLine> lines) {
     Set<String> taken = new HashSet<>();
     for (InvoiceLine line : lines) {
       if (line.getGoodsShipmentLine() != null) {
         taken.add(line.getGoodsShipmentLine().getId());
       }
     }
-    boolean changed = false;
-    for (InvoiceLine line : lines) {
-      if (line.getGoodsShipmentLine() != null || line.getSalesOrderLine() == null) {
-        continue;
-      }
-      List<OrderLineMovementAllocation.Allocation> allocations =
-          plan.get(line.getSalesOrderLine().getId());
-      if (allocations == null) {
-        continue;
-      }
-      for (OrderLineMovementAllocation.Allocation allocation : allocations) {
-        if (taken.add(allocation.line.getId())) {
-          line.setGoodsShipmentLine(allocation.line);
-          OBDal.getInstance().save(line);
-          changed = true;
-          break;
-        }
+    return taken;
+  }
+
+  /**
+   * Links {@code line} to the first planned shipment line of its order line that no line of the
+   * invoice uses yet, and marks it taken.
+   *
+   * @return {@code true} when the line was linked (and saved)
+   */
+  private static boolean linkToFirstFreePlannedShipment(InvoiceLine line,
+      Map<String, List<OrderLineMovementAllocation.Allocation>> plan, Set<String> taken) {
+    for (OrderLineMovementAllocation.Allocation allocation : plannedAllocationsOf(line, plan)) {
+      if (taken.add(allocation.line.getId())) {
+        line.setGoodsShipmentLine(allocation.line);
+        OBDal.getInstance().save(line);
+        return true;
       }
     }
-    if (changed) {
-      OBDal.getInstance().flush();
+    return false;
+  }
+
+  /**
+   * The planned allocations of an unlinked line's order line; none for a line that already has a
+   * shipment line, has no order line, or whose order line was not planned.
+   */
+  private static List<OrderLineMovementAllocation.Allocation> plannedAllocationsOf(
+      InvoiceLine line, Map<String, List<OrderLineMovementAllocation.Allocation>> plan) {
+    if (line.getGoodsShipmentLine() != null || line.getSalesOrderLine() == null) {
+      return Collections.emptyList();
     }
+    List<OrderLineMovementAllocation.Allocation> allocations =
+        plan.get(line.getSalesOrderLine().getId());
+    return allocations == null ? Collections.emptyList() : allocations;
   }
 
   private static final String SHIPMENT_INOUT_LINE = "shipmentInOutLine";

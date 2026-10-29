@@ -897,12 +897,10 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     String firstLineId = probe.source.getMaterialMgmtShipmentInOutLineList().get(0).getId();
     probe.rectifiedByLine.put(firstLineId, List.of(original));
     probe.linkRefusal = new OBException("@NotEqualBPartner@");
-    OBDal dal = mock(OBDal.class);
 
+    // OBDal is already mocked for every case (mockDal): the refusal's rollback reaches that mock.
     NeoResponse response;
-    try (MockedStatic<OBDal> obdal = mockStatic(OBDal.class);
-        MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
-      obdal.when(OBDal::getInstance).thenReturn(dal);
+    try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
       response = importReturn(probe, RETURN_ID);
     }
 
