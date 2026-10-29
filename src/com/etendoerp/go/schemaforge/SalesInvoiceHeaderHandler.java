@@ -250,13 +250,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (importKindRefusal != null) {
       return importKindRefusal;
     }
-    // ETP-5684: a posted invoice is un-posted on the server, as the last step before it is
-    // reactivated — callers no longer send an unpost first (it needs showAccountingFields).
-    if (InvoiceReactivationGuard.isReactivateAction(context)) {
-      NeoResponse unpostRefusal = ReactivationUnpost.unpostFirst(context, postingService);
-      if (unpostRefusal != null) {
-        return unpostRefusal;
-      }
+    NeoResponse unpostRefusal = unpostBeforeReactivation(context, postingService);
+    if (unpostRefusal != null) {
+      return unpostRefusal;
     }
     return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
         registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, importOrderLinesHandler,

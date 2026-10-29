@@ -1954,6 +1954,17 @@ public class McpToolRouter {
   // ── etendo_action ────────────────────────────────────────────────────────
 
   /**
+   * ETP-5558: another tenant's record is a 404 before the customization or the button sees it.
+   * ETP-5715: a document action on an id that is no row of the table answers the same 404.
+   */
+  private static NeoResponse actionRecordRefusal(SFEntity sfEntity, String recordId,
+      String firedName) {
+    NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
+    return foreignRecord != null ? foreignRecord
+        : NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
+  }
+
+  /**
    * Fire a button action on a record and return the structured process result.
    * <p>
    * Resolves the SFEntity from spec+entity arguments, validates the action column
@@ -1993,8 +2004,7 @@ public class McpToolRouter {
     // redirects is refused, and a declared one is validated against its contract (422 naming the
     // wrong key). The contract also says which HTTP method the handler answers it on.
     NeoActionContract declared = McpDeclaredActions.precheck(sfEntity, actionName, parameters);
-    String httpMethod = declared != null ? declared.getHttpMethod()
-        : NeoActionContract.DEFAULT_HTTP_METHOD;
+    String httpMethod = NeoActionContract.DEFAULT_HTTP_METHOD;
     // ETP-5587: a contract that describes an AD button is run under its declared name, whichever
     // spelling the agent typed — the customization discriminates on that name.
     // ETP-5710: any other AD button reaches the customization under its field name — what the
@@ -2003,6 +2013,7 @@ public class McpToolRouter {
     // still fired under the typed name, which findButtonColumn resolves either way.
     String firedName = actionName;
     if (declared != null) {
+      httpMethod = declared.getHttpMethod();
       actionName = declared.getName();
       firedName = actionName;
     } else {
@@ -2015,11 +2026,7 @@ public class McpToolRouter {
     }
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
-    NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
-    if (foreignRecord == null) {
-      // ETP-5715: a document action on an id that is no row of the table answers the same 404.
-      foreignRecord = NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
-    }
+    NeoResponse foreignRecord = actionRecordRefusal(sfEntity, recordId, firedName);
     if (foreignRecord != null) {
       return McpHookExecutor.neoResponseToMcpResult(foreignRecord);
     }
