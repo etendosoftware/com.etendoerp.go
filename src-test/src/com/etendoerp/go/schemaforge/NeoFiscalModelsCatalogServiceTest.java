@@ -27,8 +27,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.businessUtility.Preferences;
@@ -172,5 +175,128 @@ public class NeoFiscalModelsCatalogServiceTest {
    */
   private static int modelCount(org.codehaus.jettison.json.JSONObject body) {
     return body.length() - (body.has(FiscalModel390Flag.UNAVAILABLE_KEY) ? 1 : 0);
+  }
+
+  // ---------------------------------------------------------------- fiscal-model-390 flag
+
+  private static final String CLIENT_ID = "48F0981053084BC49CCEEFEC296E2A3D";
+
+  private static OBContext contextFor(Client client) {
+    when(client.getId()).thenReturn(CLIENT_ID);
+    OBContext obCtx = mock(OBContext.class);
+    when(obCtx.getCurrentClient()).thenReturn(client);
+    return obCtx;
+  }
+
+  /** The flag gate with only its evaluation stubbed; the read/write shaping stays real. */
+  private static MockedStatic<FiscalModel390Flag> flag(boolean enabled) {
+    MockedStatic<FiscalModel390Flag> flag =
+        mockStatic(FiscalModel390Flag.class, Mockito.CALLS_REAL_METHODS);
+    flag.when(() -> FiscalModel390Flag.isEnabled(Mockito.any())).thenReturn(enabled);
+    return flag;
+  }
+
+  private static void storeCatalog(MockedStatic<Preferences> prefMock, Client client, String raw) {
+    prefMock.when(() -> Preferences.getPreferenceValue(
+        eq("ETGO_FiscalModelsCatalog"), eq(false),
+        eq(client), (Organization) isNull(), (User) isNull(), (Role) isNull(), (Window) isNull()))
+        .thenReturn(raw);
+  }
+
+  private static JSONObject savedCatalog(MockedStatic<Preferences> prefMock, Client client)
+      throws Exception {
+    ArgumentCaptor<String> saved = ArgumentCaptor.forClass(String.class);
+    prefMock.verify(() -> Preferences.setPreferenceValue(
+        eq("ETGO_FiscalModelsCatalog"), saved.capture(),
+        eq(false), eq(client),
+        (Organization) isNull(), (User) isNull(), (Role) isNull(), (Window) isNull(),
+        (VariablesSecureApp) isNull()));
+    return new JSONObject(saved.getValue());
+  }
+
+  @Test
+  public void getActiveModelsWithTheFlagOnReturnsTheStoredCatalogUnchanged() throws Exception {
+    Client client = mock(Client.class);
+    OBContext obCtx = contextFor(client);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<Preferences> prefMock = mockStatic(Preferences.class);
+         MockedStatic<FiscalModel390Flag> flag = flag(true)) {
+      ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+      storeCatalog(prefMock, client, "{\"303\":true,\"390\":true}");
+
+      NeoResponse result = NeoFiscalModelsCatalogService.getActiveModels();
+
+      assertEquals(200, result.getHttpStatus());
+      assertEquals(new JSONObject("{\"303\":true,\"390\":true}").toString(),
+          result.getBody().toString());
+      assertFalse(result.getBody().has(FiscalModel390Flag.UNAVAILABLE_KEY));
+      flag.verify(() -> FiscalModel390Flag.isEnabled(CLIENT_ID));
+    }
+  }
+
+  @Test
+  public void getActiveModelsWithTheFlagOffHidesAStored390AndMarksItUnavailable()
+      throws Exception {
+    Client client = mock(Client.class);
+    OBContext obCtx = contextFor(client);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<Preferences> prefMock = mockStatic(Preferences.class);
+         MockedStatic<FiscalModel390Flag> flag = flag(false)) {
+      ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+      storeCatalog(prefMock, client, "{\"303\":true,\"390\":true}");
+
+      NeoResponse result = NeoFiscalModelsCatalogService.getActiveModels();
+
+      assertEquals(200, result.getHttpStatus());
+      assertTrue(result.getBody().getBoolean("303"));
+      assertFalse(result.getBody().has("390"));
+      assertEquals("[\"390\"]",
+          result.getBody().getJSONArray(FiscalModel390Flag.UNAVAILABLE_KEY).toString());
+    }
+  }
+
+  @Test
+  public void saveActiveModelsWithTheFlagOffKeepsTheStored390() throws Exception {
+    Client client = mock(Client.class);
+    OBContext obCtx = contextFor(client);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<Preferences> prefMock = mockStatic(Preferences.class);
+         MockedStatic<FiscalModel390Flag> flag = flag(false)) {
+      ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+      storeCatalog(prefMock, client, "{\"303\":false,\"390\":true}");
+
+      NeoFiscalModelsCatalogService.saveActiveModels("{\"303\":true,\"390\":false}");
+
+      JSONObject saved = savedCatalog(prefMock, client);
+      assertTrue(saved.getBoolean("303"));
+      assertTrue("the tenant's stored 390 survives a save while the flag is off",
+          saved.getBoolean("390"));
+      flag.verify(() -> FiscalModel390Flag.isEnabled(CLIENT_ID));
+    }
+  }
+
+  @Test
+  public void saveActiveModelsNeverStoresTheUnavailableMarker() throws Exception {
+    for (boolean enabled : new boolean[] { true, false }) {
+      Client client = mock(Client.class);
+      OBContext obCtx = contextFor(client);
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<Preferences> prefMock = mockStatic(Preferences.class);
+           MockedStatic<FiscalModel390Flag> flag = flag(enabled)) {
+        ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+        storeCatalog(prefMock, client, "{}");
+
+        NeoFiscalModelsCatalogService.saveActiveModels(
+            "{\"303\":true,\"_unavailable\":[\"390\"]}");
+
+        JSONObject saved = savedCatalog(prefMock, client);
+        assertFalse("flag " + enabled, saved.has(FiscalModel390Flag.UNAVAILABLE_KEY));
+        assertTrue(saved.getBoolean("303"));
+      }
+    }
   }
 }
