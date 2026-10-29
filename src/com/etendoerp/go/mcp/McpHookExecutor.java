@@ -252,11 +252,20 @@ final class McpHookExecutor {
         .channel(NeoExtensionChannel.MCP)
         .context(ctx)
         .build();
-    // Resolution goes through the MCP resolver, as every other MCP hook site does — NOT the one
-    // the REST paths use. The two are not equivalent (see NeoExtensionDispatcher); keeping the
-    // channel's own resolver is what makes this step a routing change and not a resolution change.
+    // ETP-5806 follow-up — resolved through NeoExtensionDispatcher.resolveOnly (the @NeoExtension
+    // annotation first, Java_Qualifier second), exactly like runReadProvider's own PRE-phase
+    // dispatch above and resolveServerCreateFields below. This used to call resolveEntityHandler
+    // directly, which is NeoHandlerLookup.byQualifier ALONE — it has no annotation fallback. For a
+    // handler bound only through @NeoExtension (no Java_Qualifier, e.g. BpLocationHandler), that
+    // resolved to null, so this POST phase never ran its afterHandle() over an MCP etendo_get/
+    // etendo_list read. The REST CRUD path never had this gap (NeoServletSupport.handleWithHooks
+    // carries the SAME PRE-resolved handler into its post hook), which is why the asymmetry was
+    // read-only and MCP-only: a GET of a record with real structured-address-for-sepa values kept
+    // leaking them through MCP regardless of the flag, with the write path, REST reads, and every
+    // Mockito test that calls afterHandle() directly all looking correct.
+    NeoHandler resolvedHandler = NeoExtensionDispatcher.resolveOnly(request);
     NeoExtensionResult result = NeoExtensionDispatcher.dispatch(request
-        .post(resolveEntityHandler(sfEntity))
+        .post(resolvedHandler)
         .withPreviousResult(NeoResponse.ok(responseJson)));
     NeoResponse response = result.response();
     if (response == null) {
