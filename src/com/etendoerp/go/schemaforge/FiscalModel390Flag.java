@@ -21,6 +21,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 
@@ -61,14 +62,30 @@ final class FiscalModel390Flag {
   }
 
   /**
-   * Whether Modelo 390 is available to a tenant.
+   * Whether Modelo 390 is available to the current user.
    *
-   * @param clientId the tenant, published as {@link FeatureFlagContext#ATTRIBUTE_CLIENT_ID} so a
-   *     hosted targeting rule can name it; may be null
+   * <p>Targeted on the authenticated <b>account email</b> (the {@code ETGO_ACCOUNT} email of the
+   * context user, resolved by {@link GoAccountResolver#findCurrentAccountEmail()} — the same
+   * resolution the other per-account gates use), published as the targeting key and as the
+   * {@code Email}/{@code email} attributes, <b>plus</b> {@code clientId}, so a hosted rule can
+   * name either users or tenants. When no account resolves, the context carries {@code clientId}
+   * only: a tenant rule still matches, an email rule does not, and the default stays hidden.
+   *
+   * @param clientId the tenant, published as {@link FeatureFlagContext#ATTRIBUTE_CLIENT_ID}; may
+   *     be null
    */
   static boolean isEnabled(String clientId) {
-    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_FISCAL_MODEL_390,
-        FeatureFlagContext.forAccount(null).with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, clientId));
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_FISCAL_MODEL_390, contextFor(
+        GoAccountResolver.findCurrentAccountEmail(), clientId));
+  }
+
+  /**
+   * The evaluation context: account email (when known) and tenant. Never throws; a blank email or
+   * client id is simply left out (see {@link FeatureFlagContext#forAccount}).
+   */
+  static FeatureFlagContext contextFor(String accountEmail, String clientId) {
+    return FeatureFlagContext.forAccount(accountEmail)
+        .with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, clientId);
   }
 
   /**

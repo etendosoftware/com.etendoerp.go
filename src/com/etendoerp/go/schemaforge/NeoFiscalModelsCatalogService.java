@@ -72,7 +72,7 @@ class NeoFiscalModelsCatalogService {
     JSONObject stored = readStoredModels(client);
     try {
       return NeoResponse.ok(FiscalModel390Flag.applyToRead(stored,
-          FiscalModel390Flag.isEnabled(clientIdOf(client))));
+          FiscalModel390Flag.isEnabled(client != null ? client.getId() : null)));
     } catch (Exception e) {
       log.error("Error building fiscal models catalog answer: {}", e.getMessage(), e);
       return NeoResponse.ok(new JSONObject());
@@ -126,7 +126,7 @@ class NeoFiscalModelsCatalogService {
     JSONObject toSave;
     try {
       toSave = FiscalModel390Flag.applyToWrite(parsed, readStoredModels(client),
-          FiscalModel390Flag.isEnabled(clientIdOf(client)));
+          FiscalModel390Flag.isEnabled(client != null ? client.getId() : null));
     } catch (JSONException e) {
       log.warn("Invalid fiscal models catalog JSON: {}", e.getMessage());
       throw new IllegalArgumentException("Invalid JSON body");

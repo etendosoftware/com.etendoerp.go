@@ -573,7 +573,7 @@ reconciliation (scheduling, settings, alerts, procedures):
 [`billing-reconciliation.md`](billing-reconciliation.md). Design of record:
 [`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).
 
-### `fiscal-model-390` (ETP-5716) — backend-only, per tenant, off by default
+### `fiscal-model-390` (ETP-5716) — backend-only, per user and tenant, off by default
 
 Whether Modelo 390 (the annual VAT summary) is available in the Fiscal Models catalog. Off (the
 default, and every failure of the flag stack) hides the whole 390 in Etendo GO: the catalog drawer
@@ -603,11 +603,29 @@ the UI offers. Refusing them would put flag branches in several handlers (more r
 would make a tenant's existing 390 declarations unreadable through the API while the flag is off
 for no security gain.
 
-**Evaluation context:** `clientId` of the current tenant (`FeatureFlagContext.ATTRIBUTE_CLIENT_ID`),
-so a hosted targeting rule (Datadog, or ConfigCat while it remains a fallback) can open the 390 to
-one tenant; the local arm is a plain per-environment boolean. Evaluated on every catalog GET/PUT,
-so a hosted change takes effect on the next catalog read (the SPA reads it when the Fiscal Models or
-Organization page mounts); a local property change needs a Tomcat restart.
+**Evaluation context — per user and per tenant.** `FiscalModel390Flag.contextFor` builds
+`FeatureFlagContext.forAccount(<account email>).with(clientId, <tenant>)`:
+
+- **Account email** — the `ETGO_ACCOUNT` email of the authenticated user, resolved by
+  `GoAccountResolver.findCurrentAccountEmail()` (the same resolution `PortalLinkPolicy` uses for
+  `bp-portal-link`; it was moved there so both gates share it). It is the targeting key and is
+  published as `Email` (ConfigCat) and as lowercase `email` (Datadog). On the catalog endpoint the
+  user is the one of the NEO bearer session: `NeoServlet` runs the request with that user's
+  `OBContext`, the same one `GET /sws/neo/session` resolves its `accountEmail` from.
+- **`clientId`** — the current tenant, so a rule can also open the 390 to a whole tenant.
+- **No resolvable account** (a hand-created ERP user, a system user, a lookup error): the context
+  carries `clientId` only. A tenant rule still matches, an email rule does not, and nothing throws;
+  with no matching rule the flag stays `false` (hidden).
+
+**Writing the Datadog rule:** target the attribute **`email`** (lowercase name) with
+**lowercase values** — e.g. `email` *is one of* `ana.garcia@example.com`. The backend lowercases the
+address before publishing it and Datadog matches case-sensitively, so a rule written with capitals
+never matches. A tenant rule uses the `clientId` attribute with the `AD_Client_ID`. In ConfigCat
+the equivalent attribute is `Email`. The local arm is a plain per-environment boolean (no targeting).
+
+Evaluated on every catalog GET/PUT, so a hosted change takes effect on the next catalog read (the
+SPA reads it when the Fiscal Models or Organization page mounts); a local property change needs a
+Tomcat restart.
 
 **Turning it on locally:** `etendo.go.flags.fiscal-model-390=true` in `Openbravo.properties` (or
 `-Detendo.go.flags.fiscal-model-390=true`, or `ETGO_FLAG_FISCAL_MODEL_390=true` in Tomcat's

@@ -325,8 +325,13 @@ public final class GoFeatureFlags {
    *
    * <p><b>A visual gate, not authorization.</b> The {@code /fiscal390/*} and
    * legal-representative endpoints keep answering whatever the flag says; they stay protected
-   * by the role's window access. Evaluated per tenant ({@code clientId}), so a hosted
-   * targeting rule can open it to one tenant. Locally {@code etendo.go.flags.fiscal-model-390} /
+   * by the role's window access.
+   *
+   * <p><b>Targeted per user and per tenant</b> on the hosted arms: the context carries the
+   * authenticated account email (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; with no resolvable account, {@code clientId} only. A Datadog rule matches the
+   * lowercase {@code email} attribute against a lowercase value. The local arm is a plain
+   * per-environment boolean: {@code etendo.go.flags.fiscal-model-390} /
    * {@code ETGO_FLAG_FISCAL_MODEL_390}.
    */
   public static final String FLAG_FISCAL_MODEL_390 = "fiscal-model-390";

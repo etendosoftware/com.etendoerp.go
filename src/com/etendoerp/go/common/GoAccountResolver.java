@@ -22,7 +22,9 @@ import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.schemaforge.data.Account;
@@ -63,6 +65,38 @@ public final class GoAccountResolver {
       "as account where lower(account.email) = :" + PARAM_EMAIL + " and account.active = true";
 
   private GoAccountResolver() {
+  }
+
+  /**
+   * Resolves the {@code ETGO_ACCOUNT} email of the user of the current {@link OBContext} — the
+   * identity backend feature flags target (see {@code FeatureFlagContext#forAccount}).
+   *
+   * <p>Runs in admin mode because {@code ETGO_ACCOUNT} is a platform table the user's own role has
+   * no reason to be able to read, and the account being looked up is the user's own. Moved here
+   * from {@code PortalLinkPolicy} (ETP-5716) so every flag gate shares one resolution.
+   *
+   * @return the account email, or {@code null} when there is no context user or no active account
+   *     behind it; never throws — a caller turns {@code null} into its flag's default, never into
+   *     "allow"
+   */
+  public static String findCurrentAccountEmail() {
+    try {
+      OBContext.setAdminMode(true);
+      OBContext ctx = OBContext.getOBContext();
+      User user = ctx == null ? null : ctx.getUser();
+      if (user == null) {
+        return null;
+      }
+      return findAccountByUsername(user.getUsername())
+          .map(Account::getEmail)
+          .orElse(null);
+    } catch (RuntimeException e) {
+      // Resolving the identity must never fail the caller; it only means "no targeted account".
+      log.warn("Could not resolve the current account email: {}", e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
