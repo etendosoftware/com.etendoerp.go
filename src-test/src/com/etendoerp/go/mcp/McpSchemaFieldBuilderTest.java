@@ -71,6 +71,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * per-entity field metadata load used by etendo_schema.</p>
  *
  * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ * @covers com.etendoerp.go.mcp.McpFieldLabels
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -2356,6 +2357,75 @@ class McpSchemaFieldBuilderTest {
       assertEquals("EM_Aeatsii_Descripcion_Sii", fields.getJSONObject(0).getString("label"));
       McpSchemaFieldBuilder.applyCuratedLabels(fields, null);
       assertEquals("EM_Aeatsii_Descripcion_Sii", fields.getJSONObject(0).getString("label"));
+    }
+  }
+
+  // ─── loadFieldLabels: versioned label catalog (ETP-5840, QA CP-12c) ─
+
+  /**
+   * {@code mcp_field_labels_<lang>.properties} wins over {@code AD_FIELD_TRL} / {@code AD_FIELD.name}
+   * for the language it has an entry in; any other language or column keeps the AD label. No
+   * {@code AD_FIELD_TRL} row is stubbed, so the AD label is the field's base name.
+   */
+  @Nested
+  @DisplayName("loadFieldLabels catalog")
+  class LoadFieldLabelsCatalog {
+
+    private org.openbravo.model.ad.ui.Field field(String id, String colName, String name) {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDBColumnName()).thenReturn(colName);
+      org.openbravo.model.ad.ui.Field f = mock(org.openbravo.model.ad.ui.Field.class);
+      when(f.getId()).thenReturn(id);
+      when(f.isActive()).thenReturn(true);
+      when(f.getColumn()).thenReturn(col);
+      when(f.getName()).thenReturn(name);
+      when(f.getDescription()).thenReturn(name + " description");
+      return f;
+    }
+
+    private Map<String, String[]> labels(String tableName, String langCode) {
+      org.openbravo.model.ad.ui.Field rate = field("f1", "EM_ETGO_Currency_Rate", "Exchange rate");
+      org.openbravo.model.ad.ui.Field other = field("f2", "DateOrdered", "Order Date");
+      org.openbravo.model.ad.datamodel.Table table = mock(
+          org.openbravo.model.ad.datamodel.Table.class);
+      when(table.getDBTableName()).thenReturn(tableName);
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(tab.getTable()).thenReturn(table);
+      when(tab.getADFieldList()).thenReturn(java.util.Arrays.asList(rate, other));
+      @SuppressWarnings("unchecked")
+      OBCriteria<org.openbravo.model.ad.ui.FieldTrl> crit = mock(OBCriteria.class);
+      when(crit.list()).thenReturn(java.util.Collections.emptyList());
+      OBDal dal = mock(OBDal.class);
+      when(dal.createCriteria(org.openbravo.model.ad.ui.FieldTrl.class)).thenReturn(crit);
+      try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
+          MockedStatic<OBContext> ctxStatic = mockStatic(OBContext.class)) {
+        dalStatic.when(OBDal::getInstance).thenReturn(dal);
+        return McpSchemaFieldBuilder.loadFieldLabels(tab, langCode);
+      }
+    }
+
+    @ParameterizedTest(name = "{0} {1} → {3}")
+    @CsvSource({
+        "C_Order,   es_ES, EM_ETGO_CURRENCY_RATE, Tasa de cambio",
+        "C_Invoice, es_ES, EM_ETGO_CURRENCY_RATE, Tasa de cambio",
+        "C_Order,   es_AR, EM_ETGO_CURRENCY_RATE, Tasa de cambio",
+        "C_Order,   en_US, EM_ETGO_CURRENCY_RATE, Exchange rate",
+        "C_Order,   es_ES, DATEORDERED,           Order Date",
+        "M_InOut,   es_ES, EM_ETGO_CURRENCY_RATE, Exchange rate",
+    })
+    void catalogEntryWinsOnlyForItsLanguageAndColumn(String tableName, String langCode,
+        String columnKey, String expected) {
+      String[] labelDesc = labels(tableName, langCode).get(columnKey);
+
+      assertEquals(expected, labelDesc[0]);
+    }
+
+    @Test
+    @DisplayName("the description is never taken from the catalog")
+    void descriptionKeepsTheAdText() {
+      assertEquals("Exchange rate description",
+          labels("C_Order", "es_ES").get("EM_ETGO_CURRENCY_RATE")[1]);
     }
   }
 

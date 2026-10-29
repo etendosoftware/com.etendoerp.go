@@ -389,6 +389,11 @@ final class McpSchemaFieldBuilder {
    * functional label the Etendo UI shows instead of the raw {@code AD_Column} name
    * (e.g. "SII Description" rather than "EM_Aeatsii_Descripcion_Sii"). (IMP-1, ref §7.1)
    *
+   * <p><b>Label precedence</b> (ETP-5840): (1) the {@link McpFieldLabels} catalog entry
+   * {@code <TableName>.<ColumnName>} for {@code langCode}; (2) the {@code AD_FIELD_TRL} name;
+   * (3) {@code AD_FIELD.name}. The catalog exists because this module's {@code AD_FIELD_TRL} rows
+   * are never exported. The description keeps (2) then (3).</p>
+   *
    * <p>A column may back more than one field in the tab; the first active field wins (the tab's
    * field list is sequence-ordered). Never throws — on any failure the base-language label is used,
    * and columns with no field fall back to the {@code AD_Column} name kept by the array builder.</p>
@@ -410,10 +415,15 @@ final class McpSchemaFieldBuilder {
       }
     }
     Map<String, String[]> trlById = loadFieldTranslations(fieldIds, langCode);
+    String tableName = adTab.getTable() != null ? adTab.getTable().getDBTableName() : null;
     for (Map.Entry<String, Field> entry : fieldByColumnName.entrySet()) {
       Field field = entry.getValue();
       String[] trl = trlById.get((String) field.getId());
-      String label = trl != null && StringUtils.isNotBlank(trl[0]) ? trl[0] : field.getName();
+      // ETP-5840: the versioned catalog wins for the fields whose translation is not versioned.
+      String label = McpFieldLabels.of(tableName, field.getColumn().getDBColumnName(), langCode);
+      if (label == null) {
+        label = trl != null && StringUtils.isNotBlank(trl[0]) ? trl[0] : field.getName();
+      }
       String description = trl != null && StringUtils.isNotBlank(trl[1])
           ? trl[1] : field.getDescription();
       byColumn.put(entry.getKey(), new String[] { label, description });
