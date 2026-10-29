@@ -6764,9 +6764,11 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 
 `handlers/PaymentTermHandler`, bound with `@NeoExtension(spec = "payment-term", entity = "header")`
 (no `Java_Qualifier`). A CRUD pre-hook on `C_PaymentTerm` writes (POST / PUT / PATCH), so it runs
-identically on REST single, REST batch and MCP — no channel divergence. It exists because every
-payment-term selector in the SPA offers "+ Crear condición de pago", which creates a term from a
-number of days alone.
+identically on REST single, REST batch and MCP — no channel divergence. On MCP `etendo_create` it
+also runs earlier, through `resolveServerCreateFields`, and the pre-hook discards what the MCP
+defaults pass filled, so a create ends with the same values on every channel (see *MCP
+`etendo_create`* below, ETP-5978). It exists because every payment-term selector in the SPA offers
+"+ Crear condición de pago", which creates a term from a number of days alone.
 
 | Rule | When | Answer |
 |---|---|---|
@@ -6786,6 +6788,77 @@ kept): `name` = `"N Días"` (`"1 Día"`), `searchKey` = `"ND"` (`"12D"`), `offse
 (`"Inmediato"`, `"I"`, `nextBusinessDay` = false). `nextBusinessDay` is an editable field of the
 spec precisely so the injected value is persisted (a discarded field would be dropped by the field
 filter, and the DAL default is `false`).
+
+**Server-derived, read-only `searchKey` and `offsetMonthDue` (ETP-5978).** The Payment Term window
+no longer shows `searchKey` (`Value`) or `offsetMonthDue` (`FixMonthOffset`): both are
+`ETGO_SF_FIELD.Visibility = system`, `IsReadOnly = 'Y'`. Included-but-read-only is enough for the
+create path: `filterCreateRequest` keeps every included field, and the entity has a customization,
+so the IMP-28 rejection of client-sent read-only fields does not apply. Hence:
+
+- **Create:** the hook fills both when absent, as above; a value the caller sends on a REST create
+  (single or batch) or an MCP create is **kept** (never-overwrite-caller policy).
+- **Update** (REST `PATCH`/`PUT`, MCP `etendo_update`): `filterWriteRequest` drops both silently,
+  so neither can be changed after creation.
+- **Duplicate keys are allowed, by decision.** `C_PaymentTerm` has no unique constraint on `Value`
+  (only `C_PAYMENTTERM_NAME` on client + organization + name); the real duplicate case is the 409
+  by days above, and the key is hidden from the user. No key uniqueness check is performed.
+
+`nextBusinessDay` carries `ETGO_SF_FIELD.DefaultValue = 'Y'` (from `decisions.json`
+`defaultExpr: "Y"`), so `GET .../defaults` hands the window's new-record form a ticked box. On REST
+the pre-hook runs before any defaults pass, so a create without the field still derives it from the
+days; on MCP the defaulted `Y` is dropped and re-derived (below). The one visible difference is the
+form itself, which always sends the box: a **0-day** term created from the window keeps `true`
+unless the user unticks it, whereas a selector quick-create or a REST/MCP create without the field
+derives `false`. Accepted: a 0-day create normally gets the 409 by days anyway, because every tenant
+has the seeded `Inmediato`.
+
+**MCP `etendo_create` (ETP-5978).** On MCP the mandatory pre-check runs *before* the pre-hook
+(ETP-5710, §4.12.22), so `searchKey` and `offsetMonthDue` — mandatory in AD, hidden from the window
+and absent from the MCP create contract (`minimumCreate.headerFields = [name,
+overduePaymentDaysRule]`) — were refused with a 422 `missingFields`. The handler therefore
+implements `NeoHandler#resolveServerCreateFields`, which runs the same `enrichCreate` the pre-hook
+runs. An agent may send just `name` + `overduePaymentDaysRule`, or the days alone.
+
+- `resolveServerCreateFields` abstains on an update (record id present), on absent, null or
+  non-whole-number days, and on days it can tell the server filled. Days out of range are still
+  enriched, so the pre-hook answers its keyed 400 rather than a 422 for a key derived from them.
+  Idempotent with the later pre-hook, never overwrites a caller value, never throws.
+- The MCP mandatory-defaults pass runs before both and fills every mandatory field it can — notably
+  a safe-type placeholder `0` for a missing `NetDays`, and defaulted `name`, `searchKey`,
+  `offsetMonthDue` and `nextBusinessDay`. On create the pre-hook first **drops** every days-derived
+  field (`CREATE_DERIVED_FIELDS`: days, `name`, `searchKey`, `offsetMonthDue`, `nextBusinessDay`)
+  the caller did not send (`dropServerFilledCreateFields`), then decides them exactly as on REST.
+  "The caller sent it" is `isCallerValue`: the key is in the body, is not in
+  `NeoContext#getFallbackDefaults()` (ETP-5669, forwarded to the pre-hook since ETP-5680) and, when
+  `NeoContext.ATTR_CLIENT_PROVIDED_FIELDS` is present (§5.3.6), is listed there. Consequences:
+  - Days the agent did not send answer the same 400 `ETGO_PaymentTermDaysInvalid` as REST, before
+    anything is persisted — never a zero-day term built from the placeholder. An explicit `0` is
+    kept.
+  - A defaulted `name`, `searchKey`, `offsetMonthDue` or `nextBusinessDay` is replaced by the
+    days-derived value; the values the agent sent are kept.
+  - REST single and batch hand the pre-hook only what the caller sent, so the drop is a no-op there
+    and the no-divergence statement above holds.
+
+**Renaming syncs the translations (ETP-5978, QA BUG-1).** `C_PaymentTerm.Name` is translatable and
+is the entity's only identifier column, so the `_identifier` core serializes (record title,
+breadcrumb, every payment-term selector) is read from the `C_PaymentTerm_Trl` row of the request
+language. `C_PAYMENTTERM_TRG` copies the name into the translations on insert, but on update only
+sets `IsTranslated = 'N'`, so a rename used to leave the old name in every identifier while `name`
+itself was right. Now:
+
+- the pre-hook records an accepted rename on the context (`ATTR_RENAMED_TO`) — nothing on create,
+  nor when the name is not sent, blank or unchanged, nor when the update is refused;
+- `afterHandle`, only on a successful result, updates the `name` of **every** `C_PaymentTerm_Trl`
+  row of the term with a bulk HQL update, and sets `_identifier` on the echoed record
+  (`{"response":{"data":[…]}}` or flat `{"data":[…]}`), so the SPA repaints from the save response.
+  Every language is overwritten **by design**: the trigger has just flagged them all out of date and
+  Etendo GO has no translation tab for payment terms, so nothing else could correct them.
+- **Not atomic with the rename.** On a single REST or MCP write the rename is already committed by
+  the write service; the translation update runs in a second transaction, committed at the end of
+  the request. A failure is logged at error and leaves the rename saved, the response as it was and
+  the identifier stale until the next rename.
+- Same behaviour on REST `PATCH`/`PUT` and MCP `etendo_update`. Terms renamed before ETP-5978 keep
+  stale translations until they are renamed again.
 
 Every refusal has the `CompletedInvoiceWriteFence` shape, plus a top-level `message`
 (`NeoResponse.ensureTopLevelMessage`). The keys are plain strings, not `AD_MESSAGE` records
@@ -6826,7 +6899,9 @@ the body (server-owned fields stripped, no callout cascade). When that cannot be
 tab in the context) the name rule is skipped and the database constraint stays the backstop.
 
 A days-only create is `POST /sws/neo/payment-term/header` with `{"overduePaymentDaysRule": 12}`;
-the created record (with the derived `name`) is in `response.data[0]`.
+the created record (with the derived `name`) is in `response.data[0]`. Over MCP it is
+`etendo_create(spec:"payment-term", entity:"header", fields:{"overduePaymentDaysRule": 12})` (or with a
+`name` too); since ETP-5978 it no longer needs `searchKey` or `offsetMonthDue`.
 
 Access is the window's: writing needs `AD_Window_Access.IsReadWrite = 'Y'` on window 141 (Payment
 Term) — a role that may edit invoices but holds 141 read-only gets the standard 403.
@@ -6841,8 +6916,10 @@ pass, so there the body holds exactly what the caller sent. MCP `etendo_create` 
 `McpToolRouter#handleCreate` therefore sets `NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`
 (`"neo.clientProvidedFields"`): a `Set<String>` of the DAL property names the agent itself sent,
 snapshotted before defaults. It is the only setter. A customization reads "explicit" as: attribute
-present → the set contains the key; attribute absent → `body.has(key)`. See
-`ContactTypeRules#isExplicit`. Updates never need it (no defaults pass runs on PATCH/PUT or on
+present → the set contains the key; attribute absent → `body.has(key)`. Readers:
+`ContactTypeRules#isExplicit` (contact types, below) and `PaymentTermHandler#isCallerValue`
+(ETP-5978, §5.3.5 — which also treats a key listed in `NeoContext#getFallbackDefaults()` as not
+sent, and drops the days-derived fields the MCP defaults pass filled). Updates never need it (no defaults pass runs on PATCH/PUT or on
 MCP `etendo_update`, so the body handed to the pre-hook is exactly what the caller sent).
 
 **Contact types (ETP-5791).** `C_BP_Group.EM_Etgo_Iscustomer/Isvendor` say whether a category's
@@ -6850,7 +6927,8 @@ contacts are customers, vendors/creditors or both. Rules live in `handlers/Conta
 (an entity util, called only by the customizations below).
 
 **Behind the `contact-category-type` feature flag** (`GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE`,
-environment level, default **off** — `etendo.go.flags.contact-category-type` /
+per account — the `ETGO_ACCOUNT` email of the request's user plus the tenant id, the same account on
+REST single, REST batch and MCP — default **off** — `etendo.go.flags.contact-category-type` /
 `ETGO_FLAG_CONTACT_CATEGORY_TYPE`; see `docs/feature-flags-and-tenant-upgrade.md` §1). Every
 customization in the table asks `ContactTypeRules.isEnabled()` first; off, it returns `null` and the
 default CRUD runs exactly as before ETP-5791 (no inheritance, no "at least one type" rejection, no
@@ -10091,7 +10169,9 @@ wrapper fields. A new generic extension point lets the customization say so:
   missing data (abstain and let the pre-check report the field). REST single and batch do not call
   it — their pre-hook already runs before the create — so a customization usually implements it by
   delegating to the same helper its `handle()` uses. First user: the invoice headers'
-  `partnerAddress` default.
+  `partnerAddress` default. Also `PaymentTermHandler` (ETP-5978, §5.3.5): it fills the days-derived
+  `name`, `searchKey`, `offsetMonthDue` and `nextBusinessDay` so an agent can create a term from its
+  days alone.
 - `NeoHandler#callerRequiredCreateFields()` (ETP-5473) — the opposite declaration: DAL property
   names the customization's pre-hook **refuses a create without**, although AD does not mark the
   column mandatory or `etendo_defaults` answers a value for it (a suggestion for a form, not a

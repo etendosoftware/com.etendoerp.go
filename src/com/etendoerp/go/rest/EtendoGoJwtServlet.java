@@ -5236,7 +5236,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Before completeCommittedOnboarding and the sample data, which needs a demo's open periods.
     applyInitialPeriodStateBestEffort(clientId);
     // ETP-5791: on both paths, after the commit, so the flag is read when the tenant is handed over.
-    applyDefaultContactCategoryBestEffort(clientId);
+    applyDefaultContactCategoryBestEffort(clientId, accountEmail);
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
     if (paidUpgrade) {
@@ -5351,10 +5351,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * dataset's "Cliente" default.
    *
    * @param clientId the tenant just committed
+   * @param accountEmail the {@code ETGO_ACCOUNT} email of the account receiving the tenant — the
+   *     flag is per account, and this step runs as System
    */
-  void applyDefaultContactCategoryBestEffort(String clientId) {
+  void applyDefaultContactCategoryBestEffort(String clientId, String accountEmail) {
     try {
-      if (onboardingDefaultContactCategoryService.applyIfEnabled(clientId)) {
+      if (onboardingDefaultContactCategoryService.applyIfEnabled(clientId, accountEmail)) {
         EtendoGoDalHelper.commitDalChanges("default contact category", log);
       }
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
