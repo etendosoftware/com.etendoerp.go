@@ -968,6 +968,426 @@ class BpLocationHandlerTest {
     }
   }
 
+  // ── ETP-5806 follow-up: wire-format symmetry across channels ─────────────
+
+  /**
+   * The key spelling a caller actually sends, per channel — the trap the earlier revisions kept
+   * falling into. The flag-OFF path has stripped all 3 spellings since {@code 7ed80a64d}; the
+   * flag-ON path read only the PUBLISHED one, and the curated API key for this entity is the DAL
+   * property name, so REST and the SPA ({@code BpLocationForm.jsx}) send
+   * {@code oBSEPAStreetName} — which the ON path did not read at all.
+   *
+   * <p>Every test here deliberately sends a spelling the handler did NOT previously expect: a
+   * suite that mirrors the handler's own assumption about the wire format cannot catch a
+   * wire-format bug.
+   *
+   * <ul>
+   *   <li>REST / SPA → the curated API key: {@code oBSEPAStreetName}…</li>
+   *   <li>MCP single → the published name {@code etendo_schema} advertises: {@code streetName}…
+   *       (already covered by {@link Create}/{@link Update})</li>
+   *   <li>{@code /batch} + {@code etendo_batch} → no key mapping runs, so the raw AD column
+   *       reaches the body verbatim: {@code EM_OBSEPA_StrtNm}, {@code City},
+   *       {@code C_Country_ID}</li>
+   * </ul>
+   */
+  @Nested
+  class WireFormatMatrix {
+
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOn() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
+
+    /**
+     * The reported blocker, create half: a REST/SPA create carrying both structured values under
+     * the curated API key was answered {@code 400 Missing required field(s): streetName,
+     * buildingNumber} on a body that carried both.
+     */
+    @Test
+    void restCreateWithTheCuratedApiKeysIsAccepted() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Gran Via");
+      body.put("oBSEPABuildingNumber", "45");
+      body.put("oBSEPABuildingName", "Torre A");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+    }
+
+    /** And the mandatory rule still fires when a curated-key body genuinely omits a field. */
+    @Test
+    void restCreateWithTheCuratedApiKeysStillRejectsAMissingNumber() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Gran Via");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      NeoResponse r = handler.handle(buildCrudContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().toString().contains("buildingNumber"));
+    }
+
+    /** A curated-key body is length-checked like any other spelling. */
+    @Test
+    void restCreateWithTheCuratedApiKeysIsLengthChecked() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Gran Via");
+      body.put("oBSEPABuildingNumber", "A".repeat(17)); // VARCHAR(16)
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      NeoResponse r = handler.handle(buildCrudContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+    }
+
+    /**
+     * Read, then remove: once the pre-hook has resolved the values, the keys are gone from the
+     * body so generic CRUD cannot write them too. One writer, one resolved value.
+     */
+    @Test
+    void theCuratedApiKeysAreRemovedFromTheBodyOnceRead() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Gran Via");
+      body.put("oBSEPABuildingNumber", "45");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+
+      assertFalse(body.has("oBSEPAStreetName"));
+      assertFalse(body.has("oBSEPABuildingNumber"));
+      // The legacy fields are untouched: they belong to generic CRUD.
+      assertEquals("Madrid", body.getString("cityName"));
+      assertEquals("ES", body.getString("country"));
+    }
+
+    /** The published spelling is stripped on the ON path too, for the same reason. */
+    @Test
+    void thePublishedKeysAreRemovedFromTheBodyOnceRead() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("streetName", "Gran Via");
+      body.put("buildingNumber", "45");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+
+      assertFalse(body.has("streetName"));
+      assertFalse(body.has("buildingNumber"));
+    }
+
+    /**
+     * The reported blocker, update half: generic CRUD persisted "Calle Nueva" (the key is curated
+     * editable), then {@code afterHandle} overwrote it with the PRE-update value resolved from
+     * the published key the body never carried — a silent revert, 200 OK, no log line.
+     */
+    @Test
+    void restUpdateWithTheCuratedApiKeyPersistsTheNewValueNotTheOldOne() throws Exception {
+      Location existing = mock(Location.class);
+      when(existing.getOBSEPAStreetName()).thenReturn("Calle Vieja");
+      when(existing.getOBSEPABuildingNumber()).thenReturn("9");
+      when(existing.getCityName()).thenReturn("Sevilla");
+      org.openbravo.model.common.geography.Country country =
+          mock(org.openbravo.model.common.geography.Country.class);
+      when(country.getId()).thenReturn("ES");
+      when(existing.getCountry()).thenReturn(country);
+      when(obDal.get(Location.class, "loc-1")).thenReturn(existing);
+
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Calle Nueva");
+
+      assertNull(handler.handle(buildCrudContext("PUT", "loc-1", body)));
+
+      NeoContext postCtx = buildCrudContext("PUT", "loc-1", body);
+      postCtx.setPreviousResult(wrapRecord("loc-1"));
+      NeoResponse result = handler.afterHandle(postCtx);
+
+      assertNotNull(result);
+      verify(existing).setOBSEPAStreetName("Calle Nueva");
+      verify(existing, never()).setOBSEPAStreetName("Calle Vieja");
+      verify(existing).setAddressLine1("Calle Nueva, 9");
+    }
+
+    /** PATCH is the same verb for this handler, and {@code 3e2d8bbe3} widened the bug onto it. */
+    @Test
+    void restPatchWithTheCuratedApiKeyPersistsTheNewValueNotTheOldOne() throws Exception {
+      Location existing = mock(Location.class);
+      when(existing.getOBSEPAStreetName()).thenReturn("Calle Vieja");
+      when(existing.getOBSEPABuildingNumber()).thenReturn("9");
+      when(existing.getCityName()).thenReturn("Sevilla");
+      org.openbravo.model.common.geography.Country country =
+          mock(org.openbravo.model.common.geography.Country.class);
+      when(country.getId()).thenReturn("ES");
+      when(existing.getCountry()).thenReturn(country);
+      when(obDal.get(Location.class, "loc-1")).thenReturn(existing);
+
+      JSONObject body = new JSONObject();
+      body.put("oBSEPABuildingNumber", "45");
+
+      assertNull(handler.handle(buildCrudContext("PATCH", "loc-1", body)));
+
+      NeoContext postCtx = buildCrudContext("PATCH", "loc-1", body);
+      postCtx.setPreviousResult(wrapRecord("loc-1"));
+      assertNotNull(handler.afterHandle(postCtx));
+
+      verify(existing).setOBSEPABuildingNumber("45");
+      verify(existing, never()).setOBSEPABuildingNumber("9");
+    }
+
+    /** The {@code data} envelope carries the curated keys just as it carries the published ones. */
+    @Test
+    void dataWrappedCreateWithTheCuratedApiKeysIsAccepted() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("oBSEPAStreetName", "Gran Via");
+      inner.put("oBSEPABuildingNumber", "45");
+      inner.put("cityName", "Madrid");
+      inner.put("country", "ES");
+      JSONObject body = new JSONObject();
+      body.put("data", inner);
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+      assertFalse(inner.has("oBSEPAStreetName"));
+    }
+
+    /**
+     * {@code /batch} and {@code etendo_batch} run no key mapping, so the raw AD column names — and
+     * {@code City}/{@code C_Country_ID} for the two legacy mandatory fields — are what reaches the
+     * body. Reading only the published spelling rejected this body as missing-mandatory on all
+     * four fields.
+     */
+    @Test
+    void batchCreateWithTheRawColumnNamesIsAccepted() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("EM_OBSEPA_StrtNm", "Gran Via");
+      body.put("EM_OBSEPA_BldgNb", "45");
+      body.put("EM_OBSEPA_BldgNm", "Torre A");
+      body.put("City", "Madrid");
+      body.put("C_Country_ID", "ES");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+      assertFalse(body.has("EM_OBSEPA_StrtNm"));
+    }
+
+    /** Column resolution downstream is case-insensitive, so the key match has to be too. */
+    @Test
+    void batchCreateWithLowerCasedRawColumnNamesIsAccepted() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("em_obsepa_strtnm", "Gran Via");
+      body.put("em_obsepa_bldgnb", "45");
+      body.put("city", "Madrid");
+      body.put("c_country_id", "ES");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+      assertFalse(body.has("em_obsepa_strtnm"));
+    }
+
+    /** Precedence is declaration order, not iteration luck: published name first. */
+    @Test
+    void thePublishedSpellingWinsOverTheCuratedOneInTheSameSection() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("streetName", "Published");
+      body.put("oBSEPAStreetName", "Curated");
+      body.put("buildingNumber", "45");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+
+      Location saved = mock(Location.class);
+      when(obDal.get(Location.class, "new-loc-id")).thenReturn(saved);
+      NeoContext postCtx = buildCrudContext("POST", null, body);
+      postCtx.setPreviousResult(wrapRecord("new-loc-id"));
+      assertNotNull(handler.afterHandle(postCtx));
+
+      verify(saved).setOBSEPAStreetName("Published");
+    }
+
+    /**
+     * The response carries the value under BOTH spellings, because both are on the wire: MCP reads
+     * {@code streetName} from {@code etendo_schema}, the SPA reads {@code oBSEPAStreetName} from
+     * the contract. Writing only one left the other showing the pre-write value.
+     */
+    @Test
+    void theResponseCarriesBothSpellingsOfEachStructuredField() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("oBSEPAStreetName", "Gran Via");
+      body.put("oBSEPABuildingNumber", "45");
+      body.put("oBSEPABuildingName", "Torre A");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+
+      Location saved = mock(Location.class);
+      when(obDal.get(Location.class, "new-loc-id")).thenReturn(saved);
+      NeoContext postCtx = buildCrudContext("POST", null, body);
+      postCtx.setPreviousResult(wrapRecord("new-loc-id"));
+
+      JSONObject rec = handler.afterHandle(postCtx)
+          .getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+      assertEquals("Gran Via", rec.getString("streetName"));
+      assertEquals("Gran Via", rec.getString("oBSEPAStreetName"));
+      assertEquals("45", rec.getString("oBSEPABuildingNumber"));
+      assertEquals("Torre A", rec.getString("oBSEPABuildingName"));
+    }
+
+    /** A GET enrichment publishes both spellings for the same reason. */
+    @Test
+    void aGetIsEnrichedUnderBothSpellings() throws Exception {
+      Location geoLoc = mock(Location.class);
+      when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+      when(geoLoc.getOBSEPABuildingNumber()).thenReturn("45");
+      when(obDal.get(Location.class, "loc-get")).thenReturn(geoLoc);
+
+      NeoContext ctx = buildCrudContext("GET", "loc-get", null);
+      ctx.setPreviousResult(wrapRecord("loc-get"));
+
+      JSONObject rec = handler.afterHandle(ctx)
+          .getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+      assertEquals("Gran Via", rec.getString("streetName"));
+      assertEquals("Gran Via", rec.getString("oBSEPAStreetName"));
+    }
+  }
+
+  // ── ETP-5806 follow-up: flag OFF must also make the fields UNREADABLE ────
+
+  /**
+   * "Off" has to mean unreadable as well as unwritable — the user's requirement is one invariant,
+   * not two. Declining to enrich was not enough on this entity: unlike the 3 wrapper handlers, the
+   * 3 columns ARE curated here with {@code ISINCLUDED=Y}, so {@code NeoFieldFilter} projects them
+   * on its own under the curated API key, with no handler involvement at all. An untargeted
+   * account could therefore read every structured value back out of a plain GET.
+   */
+  @Nested
+  class FlagOffReadsAreStripped {
+
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOff() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
+
+    @Test
+    void getStripsTheCuratedApiKeysFromEveryRow() throws Exception {
+      NeoResponse projected = wrapRecord("loc-get");
+      JSONObject row = projected.getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      row.put("oBSEPAStreetName", "Gran Via");
+      row.put("oBSEPABuildingNumber", "45");
+      row.put("oBSEPABuildingName", "Torre A");
+      row.put("addressLine1", "Gran Via, 45 - Torre A");
+      row.put("cityName", "Madrid");
+      row.put("postalCode", "28013");
+      row.put("country", "ES");
+      row.put("region", "M");
+
+      NeoContext ctx = buildCrudContext("GET", "loc-get", null);
+      ctx.setPreviousResult(projected);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      assertFalse(row.has("oBSEPAStreetName"));
+      assertFalse(row.has("oBSEPABuildingNumber"));
+      assertFalse(row.has("oBSEPABuildingName"));
+      // Everything that existed before ETP-5806 behaves exactly as it did.
+      assertEquals("Gran Via, 45 - Torre A", row.getString("addressLine1"));
+      assertEquals("Madrid", row.getString("cityName"));
+      assertEquals("28013", row.getString("postalCode"));
+      assertEquals("ES", row.getString("country"));
+      assertEquals("M", row.getString("region"));
+      verify(obDal, never()).get(eq(Location.class), any());
+    }
+
+    /** A list GET strips every row, not just the first. */
+    @Test
+    void getStripsEveryRowOfAList() throws Exception {
+      JSONArray dataArr = new JSONArray();
+      for (int i = 0; i < 3; i++) {
+        JSONObject row = new JSONObject();
+        row.put("id", "loc-" + i);
+        row.put("oBSEPAStreetName", "Gran Via " + i);
+        dataArr.put(row);
+      }
+      JSONObject responseData = new JSONObject();
+      responseData.put("status", 0);
+      responseData.put("data", dataArr);
+      JSONObject wrapper = new JSONObject();
+      wrapper.put("response", responseData);
+
+      NeoContext ctx = buildCrudContext("GET", null, null);
+      ctx.setPreviousResult(new NeoResponse(200, wrapper));
+
+      assertNotNull(handler.afterHandle(ctx));
+      for (int i = 0; i < 3; i++) {
+        assertFalse(dataArr.getJSONObject(i).has("oBSEPAStreetName"));
+      }
+    }
+
+    /** A create answers with the persisted row through the same projection, so it is stripped too. */
+    @Test
+    void createResponseIsStrippedToo() throws Exception {
+      NeoResponse projected = wrapRecord("new-loc-id");
+      JSONObject row = projected.getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      row.put("oBSEPAStreetName", "Gran Via");
+
+      NeoContext ctx = buildCrudContext("POST", null, new JSONObject());
+      ctx.setPreviousResult(projected);
+
+      assertNotNull(handler.afterHandle(ctx));
+      assertFalse(row.has("oBSEPAStreetName"));
+    }
+
+    /** The published spelling is withheld as well, whatever put it there. */
+    @Test
+    void getStripsThePublishedSpellingToo() throws Exception {
+      NeoResponse projected = wrapRecord("loc-get");
+      JSONObject row = projected.getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      row.put("streetName", "Gran Via");
+
+      NeoContext ctx = buildCrudContext("GET", "loc-get", null);
+      ctx.setPreviousResult(projected);
+
+      assertNotNull(handler.afterHandle(ctx));
+      assertFalse(row.has("streetName"));
+    }
+
+    /** A response that never carried the fields is left strictly untouched. */
+    @Test
+    void aResponseWithoutTheStructuredFieldsIsLeftAlone() throws Exception {
+      NeoContext ctx = buildCrudContext("GET", "loc-get", null);
+      ctx.setPreviousResult(wrapRecord("loc-get"));
+
+      assertNull(handler.afterHandle(ctx));
+    }
+  }
+
   private NeoContext buildCrudContext(String method, String recordId, JSONObject body) {
     return NeoContext.builder()
         .specName(SPEC)

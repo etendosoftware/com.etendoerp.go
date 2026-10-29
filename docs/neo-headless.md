@@ -3868,20 +3868,45 @@ intercepts POST/PUT the same way the other two handlers do: a pre-hook validates
 `streetName`/`buildingNumber`/`cityName`/`country` as mandatory-together and the 3 structured
 fields against their max lengths, computes `addressLine1`/`addressLine2` via the same
 `StructuredAddressComposer`, and a post-hook persists all 5 columns directly via DAL — bypassing
-`NeoFieldFilter`, which has no curated `ETGO_SF_FIELD` row for any of them on this entity — before
-mirroring the final values back into the response under the published names
-(`streetName`/`buildingNumber`/`buildingName`). Every GET (list or by id) is enriched the same way.
-Country/Region/City/Postal and the base record lifecycle (id generation, client/org, active flag)
-stay on the generic CRUD fallthrough, unintercepted.
+`NeoFieldFilter` — before mirroring the final values back into the response. Every GET (list or by
+id) is enriched the same way. Country/Region/City/Postal and the base record lifecycle (id
+generation, client/org, active flag) stay on the generic CRUD fallthrough, unintercepted.
 
-Unlike `contacts/locationAddress` and `warehouse/location`, `bp-location` was **not** given curated
-`MCP_CONFIG`/`ETGO_SF_FIELD` visibility for these 3 columns through a push-to-neo run: the live
-`ETGO_SF_ENTITY.Name = 'bpLocation'` row was found to be a hand-populated pipeline orphan (see
-`schema_forge/artifacts/bp-location/`), too risky to rewrite as part of this fix. The handler
-therefore owns the 3 fields entirely outside the curated schema — which is also why
-`etendo_schema`/`etendo_get` still report `streetName`/`buildingNumber`/`buildingName` as
-`unknownFields` for this entity even though the handler accepts, persists and returns them under
-those exact names.
+**The 3 columns ARE curated on this entity — an earlier revision of this note said otherwise.**
+`src-db/database/sourcedata/ETGO_SF_FIELD.xml` carries three committed rows for entity
+`643B950E1F62480D87DD5D0C2437139A` with `ISINCLUDED=Y`, `VISIBILITY=editable`, `ISREADONLY=N`, so
+`update.database` reproduces them on every instance. (The file references columns by
+`AD_COLUMN_ID` only, so a grep for `EM_OBSEPA` over it finds nothing — which is how the absence
+was "confirmed".) Two consequences, both of which the handler now owns explicitly:
+
+- **The curated API key for these 3 fields is the DAL property name.** `NeoFieldFilter`
+  registers an alias only when `ETGO_SF_FIELD.Java_Qualifier` differs from the property name, and
+  for these rows it does not — so `schema_forge/artifacts/bp-location/contract.json` publishes
+  `"apiKey": "oBSEPAStreetName"` and the generated `BpLocationForm.jsx`/`BpLocationPage.jsx` send
+  exactly that. **The wire format is therefore channel-dependent**: REST/SPA send
+  `oBSEPAStreetName`, an MCP agent sends the published `streetName`
+  (`AddressVirtualSelectorPolicy.PUBLISHED_NAME_OVERRIDES`, which `mapFieldsToDalProperties` passes
+  through untouched because it resolves to no property), and `/batch` + `etendo_batch` run no key
+  mapping at all, so the raw `EM_OBSEPA_StrtNm` reaches the body verbatim. `BpLocationHandler`
+  reads **all three spellings** of each field (plus `City`/`C_Country_ID` for the two legacy
+  mandatory fields, reachable on batch for the same reason), case-insensitively, and removes them
+  from the body once read so it is the sole writer of the 3 columns. Writing the response under
+  both the published name and the curated key is deliberate for the same reason. A revision that
+  read only the published spelling answered a valid REST create with
+  `400 Missing required field(s): streetName, buildingNumber` and silently reverted a valid REST
+  update from the pre-update record.
+- **While the flag is off, the handler strips the 3 fields from the response as well as from the
+  write body.** Declining to enrich is not enough here: with `ISINCLUDED=Y` the generic projection
+  returns them under the curated key with no handler involvement, so an untargeted account could
+  read back every structured value from a plain GET. "Off" means unreadable and unwritable by any
+  spelling, on every verb, while `addressLine1`/`addressLine2`/`postalCode`/`cityName`/`country`/
+  `region` behave exactly as they did before ETP-5806.
+
+`etendo_schema`/`etendo_get` still report `streetName`/`buildingNumber`/`buildingName` in
+`unknownFields` for this entity — not because the columns are uncurated, but because the published
+name resolves to no DAL property and `bpLocation` is a direct table, not a wrapper, so
+`McpWriteRequestSupport.virtualFieldNames` is empty for it. The value is accepted and persisted
+regardless (IMP-18 reports, it does not refuse).
 
 **MCP naming unification.** The three handlers that read/write the SEPA columns
 (`ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler`) all agree on
