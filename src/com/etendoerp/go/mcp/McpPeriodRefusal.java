@@ -124,12 +124,12 @@ final class McpPeriodRefusal {
         || !entity.hasProperty(PROPERTY_ORGANIZATION)) {
       return null;
     }
-    BaseOBObject record = OBDal.getInstance().get(entity.getName(), recordId);
-    if (record == null) {
+    BaseOBObject document = OBDal.getInstance().get(entity.getName(), recordId);
+    if (document == null) {
       return null;
     }
-    Date date = (Date) record.get(PROPERTY_ACCOUNTING_DATE);
-    Organization org = (Organization) record.get(PROPERTY_ORGANIZATION);
+    Date date = (Date) document.get(PROPERTY_ACCOUNTING_DATE);
+    Organization org = (Organization) document.get(PROPERTY_ORGANIZATION);
     if (date == null || org == null) {
       return null;
     }
@@ -146,8 +146,8 @@ final class McpPeriodRefusal {
     out.put("id", period.getId());
     out.put("name", period.getIdentifier());
     String category = entity.hasProperty(PROPERTY_DOCUMENT_TYPE)
-        && record.get(PROPERTY_DOCUMENT_TYPE) != null
-            ? ((DocumentType) record.get(PROPERTY_DOCUMENT_TYPE)).getDocumentCategory()
+        && document.get(PROPERTY_DOCUMENT_TYPE) != null
+            ? ((DocumentType) document.get(PROPERTY_DOCUMENT_TYPE)).getDocumentCategory()
             : null;
     if (category != null) {
       out.put("documentCategory", category);
