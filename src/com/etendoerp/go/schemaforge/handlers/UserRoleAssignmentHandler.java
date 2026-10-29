@@ -22,7 +22,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -54,15 +53,12 @@ import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
-import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 import com.etendoerp.go.supportaccess.SupportAccessGuard;
 import com.etendoerp.go.supportaccess.SupportUserExclusion;
-import com.etendoerp.go.usage.quota.QuotaEvaluation;
-import com.etendoerp.go.usage.quota.SeatQuotaGuard;
 
 /**
  * NeoHandler for the {@code user} spec. Three independent concerns share this one class because
@@ -269,7 +265,6 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_INVITATION_STATUS = "invitationStatus";
   private static final String FIELD_IS_OWNER = "isOwner";
-  private static final String FIELD_ACTIVE_FLAG = "active";
   /** ETP-5277: fields patched onto the create response by {@link #patchUserDefaultsOntoRow}. */
   private static final String FIELD_DEFAULT_ROLE = "defaultRole";
   private static final String FIELD_DEFAULT_CLIENT = "defaultClient";
@@ -698,7 +693,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (duplicateEmailGuard != null) {
       return duplicateEmailGuard;
     }
-    NeoResponse seatGuard = rejectSeatOverQuota(client);
+    NeoResponse seatGuard = UserSeatQuotaGuard.rejectSeatOverQuota(client);
     if (seatGuard != null) {
       return seatGuard;
     }
@@ -740,66 +735,12 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (emailGuard != null) {
       return emailGuard;
     }
-    NeoResponse reactivationGuard = rejectReactivationOverQuota(requestBody, userId);
+    NeoResponse reactivationGuard =
+        UserSeatQuotaGuard.rejectReactivationOverQuota(requestBody, userId);
     if (reactivationGuard != null) {
       return reactivationGuard;
     }
     return rejectDangerousDeactivation(requestBody, userId, context.getObContext());
-  }
-
-  /**
-   * ETP-5051 — refuses a new seat when the tenant already uses every seat of its plan (see
-   * {@link SeatQuotaGuard}), with the NEO write path's 403 {@code QUOTA_EXCEEDED}. Fails closed.
-   */
-  private NeoResponse rejectSeatOverQuota(Client client) {
-    if (client == null) {
-      return null;
-    }
-    try {
-      Optional<QuotaEvaluation> refusal = SeatQuotaGuard.refusalForNewSeat(client.getId());
-      return refusal.map(NeoQuotaWriteGate::refusalResponse).orElse(null);
-    } catch (Exception e) {
-      log.error("UserRoleAssignmentHandler.rejectSeatOverQuota error for client {}: {}",
-          client.getId(), e.getMessage(), e);
-      return NeoQuotaWriteGate.checkFailedResponse();
-    }
-  }
-
-  /**
-   * ETP-5051 — reactivating an inactive user that is a seat once active takes that seat back, so
-   * it is checked as a new one (see {@link SeatQuotaGuard#refusalForReactivation}); any other
-   * reactivation passes. Fails closed, loading the target included, as the create path does.
-   */
-  private NeoResponse rejectReactivationOverQuota(JSONObject requestBody, String userId) {
-    if (!isExplicitlyActivating(requestBody)) {
-      return null;
-    }
-    OBContext.setAdminMode(true);
-    try {
-      User target = OBDal.getInstance().get(User.class, userId);
-      if (target == null || Boolean.TRUE.equals(target.isActive())
-          || target.getClient() == null) {
-        return null;
-      }
-      Optional<QuotaEvaluation> refusal = SeatQuotaGuard.refusalForReactivation(
-          target.getClient().getId(), userId);
-      return refusal.map(NeoQuotaWriteGate::refusalResponse).orElse(null);
-    } catch (Exception e) {
-      log.error("UserRoleAssignmentHandler.rejectReactivationOverQuota error for user {}: {}",
-          userId, e.getMessage(), e);
-      return NeoQuotaWriteGate.checkFailedResponse();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  private static boolean isExplicitlyActivating(JSONObject body) {
-    if (body == null || !body.has(FIELD_ACTIVE_FLAG)) {
-      return false;
-    }
-    Object value = body.opt(FIELD_ACTIVE_FLAG);
-    return Boolean.TRUE.equals(value) || "true".equalsIgnoreCase(String.valueOf(value))
-        || "Y".equalsIgnoreCase(String.valueOf(value));
   }
 
   /**
