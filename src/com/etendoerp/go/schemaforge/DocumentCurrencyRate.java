@@ -314,7 +314,11 @@ final class DocumentCurrencyRate {
       return null;
     }
     String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-    if (orgCurrencyId == null || orgCurrencyId.equals(currencyId)) {
+    if (orgCurrencyId == null) {
+      return null;
+    }
+    if (orgCurrencyId.equals(currencyId)) {
+      resetRateOnReturnToOrgCurrency(body, stored, create, currencyId);
       return null;
     }
     boolean changed = create || !currencyId.equals(idOf(stored, PROP_CURRENCY))
@@ -327,6 +331,22 @@ final class DocumentCurrencyRate {
         ? DocumentRateMessages.missingOnComplete(isoCode(orgCurrencyId), isoCode(currencyId))
         : DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId), date,
             type.referenceDateLabelKey(), type.referenceDateProperty());
+  }
+
+  /**
+   * An update that moves a stored document to its organization's own currency leaves the rate at
+   * {@code 1}, as the window does: its currency picker stages the picked option's rate, and the
+   * organization currency's option is {@code rate = 1} ({@link CurrencyOptionsHandler}). Without
+   * this the previous foreign currency's rate (for example 1.47) would stay on a document that is
+   * back in the base currency. A rate sent in the same body is overwritten: in the organization's
+   * currency there is no conversion to keep. A write that does not change the currency, and a
+   * create, are left alone.
+   */
+  private void resetRateOnReturnToOrgCurrency(JSONObject body, BaseOBObject stored,
+      boolean create, String currencyId) throws JSONException {
+    if (!create && !currencyId.equals(idOf(stored, PROP_CURRENCY))) {
+      body.put(type.rateProperty(), BigDecimal.ONE.setScale(RATE_SCALE));
+    }
   }
 
   /**
