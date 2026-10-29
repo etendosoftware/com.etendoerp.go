@@ -2377,7 +2377,7 @@ Authorization: Bearer {token}
 | `footerText` | `null` or text ≤ 500 chars, no control characters except line breaks. Stored as typed; **escaping is the renderer's job** |
 | `color` | `null` (the design's own) or an exact `#RRGGBB`, stored upper-case. Nothing else is accepted (named colors, `rgb()`, a trailing `;}`): it ends up inside a stylesheet |
 | `font` | `null` or `sans`, `serif`, `mono` — also a CHECK on the table |
-| `fontSize` | `null` or `normal`, `large` — also a CHECK on the table |
+| `fontSize` | `null` or `small`, `normal`, `large` — also a CHECK on the table |
 | `rowStripes` | `null` or `on`, `off` (striped table rows) — also a CHECK on the table |
 | `showLogo` | `null` (no logo) or `on`, `off` — whether the list print (`listing`) shows the company logo in its header; ignored by documents, which always print theirs — also a CHECK on the table |
 | `configured` | `true` for a saved row; `false` when the defaults are served |

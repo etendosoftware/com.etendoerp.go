@@ -83,7 +83,7 @@
       <check name="ETGO_DOCTPLCFG_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_DOCTPLCFG_VARIANT_CHK"><![CDATA[TEMPLATE_VARIANT IN ('classic', 'compact', 'modern')]]></check>
       <check name="ETGO_DOCTPLCFG_FONT_CHK"><![CDATA[TEMPLATE_FONT IS NULL OR TEMPLATE_FONT IN ('sans', 'serif', 'mono')]]></check>
-      <check name="ETGO_DOCTPLCFG_FSIZE_CHK"><![CDATA[TEMPLATE_FONT_SIZE IS NULL OR TEMPLATE_FONT_SIZE IN ('normal', 'large')]]></check>
+      <check name="ETGO_DOCTPLCFG_FSIZE_CHK"><![CDATA[TEMPLATE_FONT_SIZE IS NULL OR TEMPLATE_FONT_SIZE IN ('small', 'normal', 'large')]]></check>
       <check name="ETGO_DOCTPLCFG_STRIPES_CHK"><![CDATA[TEMPLATE_ROW_STRIPES IS NULL OR TEMPLATE_ROW_STRIPES IN ('on', 'off')]]></check>
       <check name="ETGO_DOCTPLCFG_SHOWLOGO_CHK"><![CDATA[TEMPLATE_SHOW_LOGO IS NULL OR TEMPLATE_SHOW_LOGO IN ('on', 'off')]]></check>
     </table>

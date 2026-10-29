@@ -52,7 +52,7 @@ final class DocTemplateConfigSupport {
   static final Set<String> FONTS = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
       "sans", "serif", "mono")));
   static final Set<String> FONT_SIZES = Collections.unmodifiableSet(new LinkedHashSet<>(
-      Arrays.asList("normal", "large")));
+      Arrays.asList("small", "normal", "large")));
   static final Set<String> ON_OFF = Collections.unmodifiableSet(new LinkedHashSet<>(
       Arrays.asList("on", "off")));
   /** A base color is an exact {@code #RRGGBB}: it ends up inside a stylesheet, so nothing else. */

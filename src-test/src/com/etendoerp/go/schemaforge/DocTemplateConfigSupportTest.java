@@ -164,6 +164,7 @@ class DocTemplateConfigSupportTest {
   void styleChoices() {
     assertNull(DocTemplateConfigSupport.fontError("serif"));
     assertNotNull(DocTemplateConfigSupport.fontError("comic"));
+    assertNull(DocTemplateConfigSupport.fontSizeError("small"));
     assertNull(DocTemplateConfigSupport.fontSizeError("large"));
     assertNotNull(DocTemplateConfigSupport.fontSizeError("huge"));
     assertNull(DocTemplateConfigSupport.rowStripesError("off"));
