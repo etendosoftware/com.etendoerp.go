@@ -12315,6 +12315,8 @@ SPA, §4.12.9); `line_i_product` = `classifyProductMatch` + the product popup (`
 address). **Not ported, on purpose:** totals (neither side compares them); creating the contact or the product (the agent does it, with the user's OK, through the
 existing tools); the SPA's modal navigation.
 
+**When a product line is `auto_matched`.** (1) Exactly one candidate whose name equals the line description after normalization (trim including Unicode edge whitespace, lowercase, accents folded; `ñ` stays distinct); two or more such candidates give `suggested`. (2) Otherwise, the single highest `similarity`, when it is >= 90 and no other candidate shares that top value; a tie at the top (>= 90) gives `suggested` with the first candidate, and below 90 or an unparseable value also gives `suggested`. (3) The `similarity` on a candidate is the raw pg_trgm score computed by the database, which is accent-sensitive, so a line can be `auto_matched` with a `similarity` below 90 (e.g. 82.35 for "Arnes ..." vs "Arnés ...") because it matched by normalized name equality, not by the percentage: consumers must rely on `state` and never recompute the threshold from `similarity`. The rule is mirrored by the application's `classifyProductMatch`, so the UI and MCP agree.
+
 **Supervision and prompt injection.** The text of a document is untrusted and can address the agent. What the server does: only keys the schema declares survive, **held to the type
 the schema declares** (a number field keeps only a finite number of sane size or a plain numeric string of at most 30 digits and no exponent — `1e999999999`, `Infinity`, `NaN` and
 a ten-thousand-digit number become null, they are never converted); every
