@@ -59,7 +59,7 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * ETP-5175 structured identity), so a client renders its own wording by key instead of matching
  * the prose, which now changes with the request language.
  */
-final class NeoMessageText {
+public final class NeoMessageText {
 
   private static final Logger log = LogManager.getLogger(NeoMessageText.class);
   private static final String ENGLISH = "en";
@@ -76,7 +76,7 @@ final class NeoMessageText {
    * The text of {@code key} in {@code language}, resolved in the order the class documents.
    * Total: never throws.
    */
-  static String text(String key, String language, Object... args) {
+  public static String text(String key, String language, Object... args) {
     String translated = translatedRow(key, language);
     if (translated != null) {
       return substitute(translated, args);
