@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -37,6 +38,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.client.kernel.KernelUtils;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
@@ -305,5 +307,34 @@ class McpParentScopeUnresolvableTest {
     McpParentScope.publishInto(described, McpParentScope.forEntity(child));
 
     assertEquals("lists are global", described.getString("parentOptionalReason"));
+  }
+
+  /**
+   * ETP-6036: the parent tab comes from a cache shared by every request, so the copy it holds was
+   * loaded in an earlier request's session; reading its lazy table in a later request threw
+   * {@code LazyInitializationException} (the second {@code allParents} read of
+   * {@code fiscal-calendar/year} answered 500). The scope must hand out the tab as loaded now.
+   */
+  @Test
+  @DisplayName("allParents hands out the parent tab loaded in the current session, not the cached one")
+  void allParentsTabIsLoadedInTheCurrentSession() {
+    Entity lineEntity = ModelProvider.getInstance().getEntityByTableId("tbl-psd");
+    Property link = lineEntity.getPropertyByColumnName("FIN_Payment_Detail_ID");
+    when(lineEntity.getProperty("paymentDetails", false)).thenReturn(link);
+    when(child.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(
+        "{\"parent\":{\"field\":\"paymentDetails\",\"allParents\":true,\"reason\":\"r\"}}");
+    Tab currentSessionTab = mock(Tab.class);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-header")).thenReturn(currentSessionTab);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      McpParentScope.Scope scope = McpParentScope.forEntity(child);
+
+      assertEquals(McpParentScope.Kind.RESOLVED, scope.getKind());
+      assertTrue(scope.allowsAllParents());
+      assertSame(currentSessionTab, scope.getAllParentsTab());
+    }
   }
 }
