@@ -76,13 +76,12 @@ final class DocTemplateConfigSupport {
     if (StringUtils.isBlank(docType)) {
       return "docType is required";
     }
-    return DOC_TYPES.contains(docType) ? null
-        : "Unknown docType '" + abbreviate(docType) + "'. Allowed: " + String.join(", ", DOC_TYPES);
+    return DOC_TYPES.contains(docType) ? null : unknownValue("docType", docType, DOC_TYPES);
   }
 
   static String variantError(String variant) {
     return variant != null && VARIANTS.contains(variant) ? null
-        : "Unknown variant '" + abbreviate(variant) + "'. Allowed: " + String.join(", ", VARIANTS);
+        : unknownValue("variant", variant, VARIANTS);
   }
 
   /** The base color is optional; null means the design's own. */
@@ -109,8 +108,11 @@ final class DocTemplateConfigSupport {
   }
 
   private static String choiceError(String key, String value, Set<String> allowed) {
-    return value == null || allowed.contains(value) ? null
-        : "Unknown " + key + " '" + abbreviate(value) + "'. Allowed: " + String.join(", ", allowed);
+    return value == null || allowed.contains(value) ? null : unknownValue(key, value, allowed);
+  }
+
+  private static String unknownValue(String key, String value, Set<String> allowed) {
+    return "Unknown " + key + " '" + abbreviate(value) + "'. Allowed: " + String.join(", ", allowed);
   }
 
   /** The footer is optional; a blank one means "none" and is normalized by {@link #normalize}. */
