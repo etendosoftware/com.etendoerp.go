@@ -88,7 +88,8 @@ public class ImportOriginInvoiceLinesHandlerTest {
     int rowLimit = 50;
     /** Which invoices are rectificatives for the header that would serve the action. */
     final Set<String> rectificatives = new java.util.HashSet<>();
-    boolean keepsOrderLink;
+    /** The sales window's modal rules (currency comparison, return caps); no longer an order link. */
+    boolean salesModalRules;
 
     @Override
     protected void enterAdminMode() {
@@ -164,7 +165,7 @@ public class ImportOriginInvoiceLinesHandlerTest {
     NeoResponse run(String action, String body) throws Exception {
       NeoContext context = action(action, "i1", body);
       context.setAttribute(RectificativeImportPolicy.ATTRIBUTE, new RectificativeImportPolicy(
-          invoice -> rectificatives.contains(invoice.getId()), keepsOrderLink));
+          invoice -> rectificatives.contains(invoice.getId()), salesModalRules));
       return handle(context);
     }
   }
@@ -237,7 +238,7 @@ public class ImportOriginInvoiceLinesHandlerTest {
         sourceLine("sl2", 20, product("p2", "Pan", false), "4", "1.25"));
     probe.invoices.put("src", source);
     probe.invoiceFromOrderSupport = mock(InvoiceFromOrderSupport.class);
-    probe.keepsOrderLink = true;
+    probe.salesModalRules = true;
     return probe;
   }
 
@@ -529,9 +530,14 @@ public class ImportOriginInvoiceLinesHandlerTest {
     }
   }
 
-  /** The sales modal sends the order line along; the purchase one does not. */
+  /**
+   * Repro (ETP-6002, as ETP-5729 for the return path): neither side copies the source line's order
+   * line, and the header's order reference is left untouched — the sales modal no longer sends it,
+   * and on the negative line C_INVOICE_POST would lower the order's invoiced quantity and match the
+   * rectificative to the order's shipment.
+   */
   @Test
-  public void import_salesKeepsTheOrderLineOfTheSourceLine_purchaseDoesNot() throws Exception {
+  public void import_neitherSideKeepsTheOrderLineOfTheSourceLine() throws Exception {
     Probe salesProbe = sales();
     Order order = mock(Order.class);
     when(order.getId()).thenReturn("o1");
@@ -543,9 +549,10 @@ public class ImportOriginInvoiceLinesHandlerTest {
     JSONObject data = data(salesProbe.run("importOriginInvoiceLines", "{\"invoiceId\":\"src\","
         + "\"lines\":[{\"sourceLineId\":\"sl1\",\"quantity\":2}]}"));
 
-    verify(salesProbe.created.get(0)).setSalesOrderLine(orderLine);
-    verify(salesProbe.target).setSalesOrder(order);
-    assertEquals("o1", data.getString("salesOrder"));
+    verify(salesProbe.created.get(0), never()).setSalesOrderLine(any());
+    verify(salesProbe.target, never()).setSalesOrder(any());
+    assertFalse("the header points at no order the import introduced",
+        data.has("salesOrder") && !data.isNull("salesOrder"));
     assertEquals("a sales source that has an order is linked all the same", List.of("i1->src"),
         salesProbe.links);
 
@@ -740,9 +747,11 @@ public class ImportOriginInvoiceLinesHandlerTest {
     String text = ImportOriginInvoiceLinesHandler.contracts(true).get("importOriginInvoiceLines")
         .getDescription();
     assertTrue(text, text.contains("NEGATIVE") && text.contains("Rectificaciones")
-        && text.contains("NOT deducted") && text.contains("order line"));
-    assertFalse(ImportOriginInvoiceLinesHandler.contracts(false).get("importOriginInvoiceLines")
-        .getDescription().contains("order line"));
+        && text.contains("NOT deducted") && text.contains("never its order line"));
+    // ETP-6002: neither side keeps the source line's order line, and both contracts say so.
+    String purchase = ImportOriginInvoiceLinesHandler.contracts(false)
+        .get("importOriginInvoiceLines").getDescription();
+    assertTrue(purchase, purchase.contains("never its order line"));
   }
 
   @Test

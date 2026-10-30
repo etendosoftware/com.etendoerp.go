@@ -108,6 +108,10 @@ class FinancialAccountMovementActions {
   static final String P_PRODUCT_ID = "productId";
   static final String P_PROCESS = "process";
   static final String P_SEARCH = "search";
+  static final String P_FROM_DATE = "fromDate";
+  static final String P_TO_DATE = "toDate";
+  static final String P_LIMIT = "limit";
+  static final String P_OFFSET = "offset";
 
   static final String TRX_DEPOSIT = "BPD";
   static final String TRX_WITHDRAWAL = "BPW";
@@ -166,7 +170,19 @@ class FinancialAccountMovementActions {
             + "withdrawalAmount, description, processed (false = draft), posted ('Y' = posted), "
             + "paymentStatus, paymentId (set when the movement belongs to a payment or a "
             + "collection), transferTxnId (set on a leg of a funds transfer), glItemId, "
-            + "bpartnerId, the dimensions, and the account totals.")
+            + "bpartnerId, the dimensions, and the account totals. Optional fromDate/toDate "
+            + "(inclusive) narrow the movements to a date range and limit/offset page them; "
+            + "totalRows is the number of movements in the range and balanceAtToDate the account "
+            + "balance at the end of toDate (the current balance when toDate is not sent).",
+        Param.optional(P_FROM_DATE, NeoActionContract.TYPE_DATE,
+            "First day of the range, inclusive (yyyy-MM-dd). Default: no lower bound."),
+        Param.optional(P_TO_DATE, NeoActionContract.TYPE_DATE,
+            "Last day of the range, inclusive (yyyy-MM-dd). Default: no upper bound. "
+                + "balanceAtToDate is the balance at the end of this day."),
+        Param.optional(P_LIMIT, NeoActionContract.TYPE_NUMBER,
+            "Maximum movements to return (whole number, 1 or more). Default: all of the range."),
+        Param.optional(P_OFFSET, NeoActionContract.TYPE_NUMBER,
+            "Movements to skip, newest first (whole number, 0 or more). Default: 0."))
         .withIdDescription(idDescription));
     contracts.put(GL_ITEMS_ACTION, NeoActionContract.read(GL_ITEMS_ACTION,
         "Lists the G/L items (concepts) a movement or a transfer can be booked against: id, "
@@ -287,7 +303,13 @@ class FinancialAccountMovementActions {
   private NeoResponse dispatch(String action, FIN_FinancialAccount account, JSONObject params,
       boolean mcp) throws JSONException {
     if (LIST_ACTION.equals(action)) {
-      return callEndpoint("GET", null, Map.of(B_ACCOUNT_ID, account.getId()), null, mcp);
+      NeoResponse invalid = checkListWindow(params);
+      if (invalid != null) {
+        return invalid;
+      }
+      NeoResponse listed =
+          callEndpoint("GET", null, Map.of(B_ACCOUNT_ID, account.getId()), null, mcp);
+      return listed.getHttpStatus() < 400 ? MovementWindow.apply(listed, params) : listed;
     }
     if (GL_ITEMS_ACTION.equals(action)) {
       return callEndpoint("GET", "glitem-lookup",
@@ -311,6 +333,33 @@ class FinancialAccountMovementActions {
       return reactivate(movement, mcp);
     }
     return delete(movement, mcp);
+  }
+
+  /**
+   * limit and offset, when sent, are whole numbers (limit ≥ 1, offset ≥ 0) no larger than
+   * {@link Integer#MAX_VALUE}; 422 otherwise. A larger value used to pass and then fail paging as a
+   * 500.
+   */
+  private static NeoResponse checkListWindow(JSONObject params) {
+    for (String key : new String[] { P_LIMIT, P_OFFSET }) {
+      long min = P_LIMIT.equals(key) ? 1 : 0;
+      if (params != null && params.has(key) && !isWholeInRange(params.opt(key), min)) {
+        return NeoResponse.error(422, "'" + key + "' must be a whole number from " + min
+            + " to " + Integer.MAX_VALUE + ", got '" + params.opt(key) + "'");
+      }
+    }
+    return null;
+  }
+
+  private static boolean isWholeInRange(Object value, long min) {
+    try {
+      java.math.BigDecimal n = new java.math.BigDecimal(String.valueOf(value).trim());
+      return n.stripTrailingZeros().scale() <= 0
+          && n.compareTo(java.math.BigDecimal.valueOf(min)) >= 0
+          && n.compareTo(java.math.BigDecimal.valueOf(Integer.MAX_VALUE)) <= 0;
+    } catch (NumberFormatException e) {
+      return false;
+    }
   }
 
   // ── writes ─────────────────────────────────────────────────────────────

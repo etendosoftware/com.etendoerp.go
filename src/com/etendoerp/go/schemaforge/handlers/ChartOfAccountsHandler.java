@@ -253,6 +253,13 @@ public class ChartOfAccountsHandler implements NeoHandler {
   private NeoResponse handleCrudRequest(NeoContext context) throws Exception {
     String method = context.getHttpMethod();
     if ("GET".equals(method)) {
+      // ETP-5852 (M-135): an MCP read goes through the generic list/get, which honours the
+      // agent's filters, sort and parent scope and returns the record's accountingElement (the
+      // parentId a write needs). The native SQL below reads only the SPA's `criteria`, so an MCP
+      // filter was dropped in silence. The post-hook enrichment still runs on MCP reads.
+      if (context.isMcpOrigin()) {
+        return null;
+      }
       return context.getRecordId() == null
           ? fetchElementValuesDirectly(context)
           : fetchElementValueByIdDirectly(context);

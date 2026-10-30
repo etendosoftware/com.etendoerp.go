@@ -163,6 +163,22 @@ public class McpFeedbackTriageWebhooksIntegrationTest extends OBBaseTest {
   }
 
   @Test
+  public void pendingSendsNonAsciiPayloadsAsAsciiEscapes() throws Exception {
+    String text = "{\"summary\":\"ignoró “comillas” → 😀\"}";
+    String id = insertRow(otherClient, FEEDBACK, text, 0, false);
+
+    Map<String, String> response = call(new McpFeedbackPending(), new HashMap<>());
+
+    String result = response.get("result");
+    assertTrue("result survives a Latin-1 body: " + result,
+        result.chars().allMatch(c -> c < 0x80));
+    JSONArray rows = new JSONArray(result);
+    assertEquals(id, rows.getJSONObject(0).getString("id"));
+    assertEquals("the parser restores the original text", text,
+        rows.getJSONObject(0).getString("payload"));
+  }
+
+  @Test
   public void pendingDefaultsToTwentyAndCapsAtOneHundred() {
     assertEquals(Integer.valueOf(20), McpFeedbackPending.parseLimit(null));
     assertEquals(Integer.valueOf(20), McpFeedbackPending.parseLimit(" "));

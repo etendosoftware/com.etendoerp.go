@@ -24,7 +24,7 @@ coverage-check: ## Compare local coverage vs epic, mirrors Jenkins (vars: REPORT
 # count: above it fails (the old binding mechanism was chosen with the new one available), below
 # it fails too (the PR that migrates a handler lowers this value in the same change, so the freed
 # slack can never be spent on a new qualifier). CI rejects any PR that raises it.
-EXTENSION_CEILING ?= 90
+EXTENSION_CEILING ?= 88
 
 extension-parity: ## Report which mechanism binds each (spec, entity); fails unless distinct Java_Qualifier == EXTENSION_CEILING (vars: ALL=1 HOOKS=1)
 	@python3 ./extension-parity.py --exact --ceiling $(EXTENSION_CEILING) $(if $(ALL),--all,) $(if $(HOOKS),--hooks,)

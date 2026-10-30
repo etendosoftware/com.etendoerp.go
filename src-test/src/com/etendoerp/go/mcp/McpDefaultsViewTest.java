@@ -89,6 +89,25 @@ class McpDefaultsViewTest {
   }
 
   @Nested
+  @DisplayName("withoutExcluded")
+  class WithoutExcluded {
+
+    @Test
+    @DisplayName("drops a field the agent may not send, with its label, and keeps the rest")
+    void dropsExcludedFieldAndItsCompanion() throws JSONException {
+      JSONObject response = sampleResponse();
+
+      McpDefaultsView.withoutExcluded(response, editable("paymentTerms"));
+
+      JSONObject defaults = response.getJSONObject("defaults");
+      assertFalse(defaults.has("paymentTerms"));
+      assertFalse(defaults.has("paymentTerms$_identifier"));
+      assertEquals("21-07-2026", defaults.getString("invoiceDate"));
+      assertTrue(defaults.has("docbasetype"));
+    }
+  }
+
+  @Nested
   @DisplayName("apply")
   class Apply {
 

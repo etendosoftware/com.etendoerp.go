@@ -23,11 +23,20 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
@@ -37,13 +46,19 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 /**
  * Unit tests for {@link InvoiceLineLinker}.
  *
  * <p>Covers the link methods plus the null-safety fallback used when the
- * current {@link OBContext} has no user (background processes / system init).
+ * current {@link OBContext} has no user (background processes / system init), and the sales
+ * "create invoice from order" planning: the shipment lines are planned before the invoice lines
+ * exist, then each new line takes the oldest planned shipment line no line of the invoice holds.
+ * The allocation rule itself is {@code OrderLineMovementAllocationTest}'s.
  *
  * @covers com.etendoerp.go.schemaforge.InvoiceLineLinker
  */
@@ -253,6 +268,91 @@ public class InvoiceLineLinkerTest {
       assertTrue(insert, insert.contains("NOT EXISTS (SELECT 1 FROM " + table + " mt"));
       assertFalse(insert, insert.contains(other));
     }
+  }
+
+  /**
+   * The plan covers only the plain order-line entries: an entry the selection already binds to a
+   * shipment line ({@code shipmentInOutLine}) is neither read nor allocated again.
+   */
+  @Test
+  public void planSalesShipmentLinesSkipsEntriesAlreadyBoundToAShipmentLine() throws Exception {
+    OrderLine plain = mock(OrderLine.class);
+    ShipmentInOutLine oldest = shipmentLine("SL-OLD");
+    List<OrderLineMovementAllocation.Allocation> allocations = new ArrayList<>();
+    allocations.add(new OrderLineMovementAllocation.Allocation(oldest, new BigDecimal("3")));
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(OrderLine.class, "OL-PLAIN")).thenReturn(plain);
+    JSONArray selection = new JSONArray()
+        .put(new JSONObject().put("id", "OL-BOUND").put("orderedQuantity", "2")
+            .put("shipmentInOutLine", "SL-BOUND"))
+        .put(new JSONObject().put("id", "OL-PLAIN").put("orderedQuantity", "3"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OrderLineMovementAllocation> rule =
+            Mockito.mockStatic(OrderLineMovementAllocation.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      rule.when(() -> OrderLineMovementAllocation.allocateOrderLine(same(plain),
+          eq(new BigDecimal("3")))).thenReturn(allocations);
+
+      Map<String, List<OrderLineMovementAllocation.Allocation>> plan =
+          InvoiceLineLinker.planSalesShipmentLines(selection);
+
+      assertEquals(List.of("OL-PLAIN"), new ArrayList<>(plan.keySet()));
+      assertEquals(allocations, plan.get("OL-PLAIN"));
+      verify(dal, never()).get(OrderLine.class, "OL-BOUND");
+      rule.verify(() -> OrderLineMovementAllocation.allocateOrderLine(any(), any()), times(1));
+    }
+  }
+
+  /**
+   * Each unlinked line takes the oldest planned shipment line that no line of THIS invoice holds:
+   * one the native process already bound is skipped, and a line linked earlier in the same pass
+   * takes its shipment line out of the plan for the next. With nothing left, the line stays
+   * unlinked.
+   */
+  @Test
+  public void linkSalesInvoiceLinesToPlannedShipmentsSkipsShipmentLinesTheInvoiceAlreadyHolds() {
+    ShipmentInOutLine first = shipmentLine("SL-1");
+    ShipmentInOutLine second = shipmentLine("SL-2");
+    OrderLine orderLine = mock(OrderLine.class);
+    when(orderLine.getId()).thenReturn("OL-1");
+    InvoiceLine boundByNative = invoiceLine(orderLine, first);
+    InvoiceLine takesSecond = invoiceLine(orderLine, null);
+    InvoiceLine nothingLeft = invoiceLine(orderLine, null);
+    List<InvoiceLine> lines = new ArrayList<>(List.of(boundByNative, takesSecond, nothingLeft));
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getInvoiceLineList()).thenReturn(lines);
+    List<OrderLineMovementAllocation.Allocation> planned = List.of(
+        new OrderLineMovementAllocation.Allocation(first, new BigDecimal("2")),
+        new OrderLineMovementAllocation.Allocation(second, new BigDecimal("2")));
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      InvoiceLineLinker.linkSalesInvoiceLinesToPlannedShipments(invoice,
+          Map.of("OL-1", planned));
+
+      verify(takesSecond).setGoodsShipmentLine(second);
+      verify(nothingLeft, never()).setGoodsShipmentLine(any());
+      verify(boundByNative, never()).setGoodsShipmentLine(any());
+      verify(dal).save(takesSecond);
+      verify(dal, times(1)).save(any());
+      verify(dal).flush();
+    }
+  }
+
+  private static ShipmentInOutLine shipmentLine(String id) {
+    ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+    when(line.getId()).thenReturn(id);
+    return line;
+  }
+
+  private static InvoiceLine invoiceLine(OrderLine orderLine, ShipmentInOutLine shipmentLine) {
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getSalesOrderLine()).thenReturn(orderLine);
+    when(line.getGoodsShipmentLine()).thenReturn(shipmentLine);
+    return line;
   }
 
   /**

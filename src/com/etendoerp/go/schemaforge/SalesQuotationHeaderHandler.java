@@ -22,14 +22,12 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
-import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
@@ -72,8 +70,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * <p>Currency / price-list / exchange-rate behaviors are inherited from
  * {@link AbstractOrderHeaderHandler#afterCallout}.
+ *
+ * <p><b>Binding (ETP-6002).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code salesQuotationHeaderHandler}) and the class's {@code @Named} were
+ * removed in the same change (neo-extension-migration).
  */
-@Named("salesQuotationHeaderHandler")
+@NeoExtension(spec = "sales-quotation", entity = "quotation")
 public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
@@ -106,6 +108,39 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   @Inject
   private TotalDiscountService totalDiscountService;
 
+  /**
+   * The order-header post-hook, plus, on the detail GET, the quotation's goods movements
+   * ({@code linkedShipments}, ETP-6002 IMP-3: shipments whose lines point at this quotation's lines)
+   * so its related documents list them — see {@link QuotationShipmentLinks}.
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    NeoResponse result = super.afterHandle(context);
+    if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() == null) {
+      return result;
+    }
+    NeoResponse effective = result != null ? result : context.getPreviousResult();
+    if (effective == null || effective.getBody() == null || effective.getHttpStatus() >= 400) {
+      return result;
+    }
+    JSONObject wrapper = effective.getBody().optJSONObject("response");
+    org.codehaus.jettison.json.JSONArray data = wrapper == null ? null : wrapper.optJSONArray("data");
+    JSONObject rec = data == null || data.length() == 0 ? null : data.optJSONObject(0);
+    if (rec == null) {
+      return result;
+    }
+    QuotationShipmentLinks.enrich(rec, context.getRecordId());
+    return NeoResponse.ok(effective.getBody());
+  }
+
+  /** {@code linkedShipments} is injected on every detail record (ETP-6002). */
+  @Override
+  public java.util.Set<String> responseEnrichedFields() {
+    java.util.Set<String> fields = new java.util.LinkedHashSet<>(super.responseEnrichedFields());
+    fields.add(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS);
+    return fields;
+  }
+
   @Inject
   private ConvertQuotationIntoOrder convertQuotationProcess;
 
@@ -131,15 +166,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
-    // ETP-5703: a create that names a business partner but no address (an agent; the SPA always
-    // sends one) gets the partner's only ship-to location — the AD rule of
-    // C_Order.C_BPartner_Location_ID is "C_BPartner Location - Ship To" — and, only then, a bill-to
-    // for BillTo_ID ("C_BPartner Location - Bill To") that is never left empty (see
-    // PartnerLocationDefaults#alignBillTo). REST single and batch; etendo_create keeps its 422
-    // (declared divergence, neo-headless.md §4.12.9).
-    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
-        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
-        Location.PROPERTY_INVOICETOADDRESS);
+    // ETP-5703: the partner's only ship-to (and its bill-to) on a create without an address.
+    PartnerLocationDefaults.fillOrderLocations(context);
     // ETP-5535: ahead of the total-discount sync, which recalculates on every DocAction — a
     // rejection does not touch the lines, exactly as the UI's rejectQuotation does not.
     if (isRejectDocAction(context)) {

@@ -50,6 +50,7 @@ import com.etendoerp.go.common.MalformedJsonException;
  * {@code mockConstruction} so the routed call can be made to throw.
  *
  * @covers com.etendoerp.go.schemaforge.NeoServlet
+ * @covers com.etendoerp.go.schemaforge.NeoErrorResponses
  */
 class NeoServletProcessRequestTest {
 
@@ -131,6 +132,27 @@ class NeoServletProcessRequestTest {
     servlet.doPost(mock(HttpServletRequest.class), response);
 
     verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+  }
+
+  /**
+   * ETP-5716 — the fiscal models catalog PUT refused because the stored catalog cannot be read
+   * (an {@link IllegalStateException} out of the built-in endpoint, wrapping the preference
+   * failure) is a 500: a server fault the client cannot fix by changing its body, not a 400, and
+   * never a 200/204 that would read as saved.
+   */
+  @Test
+  void aRefusedFiscalModelsCatalogSaveIsA500() throws Exception {
+    when(builtIns.constructed().get(0).handle(any(), anyString(), any(), any()))
+        .thenThrow(new IllegalStateException(
+            "The stored fiscal models catalog could not be read; nothing was saved",
+            new org.openbravo.erpCommon.utility.PropertyException("conflict", null)));
+
+    servlet.doPut(mock(HttpServletRequest.class), response);
+
+    verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+    verify(response, org.mockito.Mockito.never()).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+    verify(response, org.mockito.Mockito.never()).setStatus(HttpServletResponse.SC_OK);
+    verify(response, org.mockito.Mockito.never()).setStatus(HttpServletResponse.SC_NO_CONTENT);
   }
 
   /** A refused DAL access is a decision about the role, not a server failure. */
