@@ -65,6 +65,36 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   /** Row key for the operator's tax base amount, as produced by AEAT3492010ReportDao. */
   private static final String BP_TAX_BASE_AMOUNT = "BPTaxBaseAmount";
 
+  /**
+   * Row key of a corrective row's previously-declared base, as produced by
+   * {@code AEAT3492010ReportDao#getCorrectiveTaxBaseAmountPerBusinessPartner} (built in that
+   * DAO's {@code buildCorrectiveBpAmountList}, summing {@code ri.aEAT349BPBaseAmount}/
+   * {@code aEAT349BPBaseAmountS}). ETP-5725 real-world follow-up (QA CP-19): already present on
+   * every corrective row, just never forwarded into the JSON until {@link #CORRECTED_BASE}.
+   */
+  private static final String BP_FORMER_AMOUNT = "BPFormerAmount";
+
+  /**
+   * Row key of a corrective row's RESTATED total ("Base imponible rectificada" in AEAT terms) —
+   * the exact per-record quantity the AEAT itself sums into "Importe de las rectificaciones" on
+   * its own "Resumen de la declaración" screen. Computed as {@code former + delta}, where
+   * {@code delta} is the signed value already exposed as {@link #BP_TAX_BASE_AMOUNT} (negated by
+   * {@link #toSignedDeltaRows}) — algebraically identical to
+   * {@code AEAT3492010Report#generateLine2_Corrections}' own {@code former.subtract(unsigned)},
+   * since {@code delta == -unsigned}. Verified against a real multi-record declaration
+   * (ETP-5725): former 2.010,00 + delta -402,00 = corrected 1.608,00; 264,00 + -88,00 = 176,00;
+   * 230,00 + 138,00 = 368,00 — summing to the AEAT's own 2.152,00, where the OLD list figure
+   * (abs-per-key sum of the deltas, {@code sumAbsRectificativeTotals} on the frontend) read
+   * 452,00: a wrong base quantity, not an aggregation-strategy bug — no combination of the
+   * signed deltas alone can ever reproduce the AEAT's restated total.
+   *
+   * <p>Does NOT replace {@link #BP_TAX_BASE_AMOUNT}/{@code base} on the row — the Operadores
+   * tab's per-row "Base imponible" display for a corrective row still shows the signed delta
+   * (e.g. {@code -402,00}, "what this one record changed"), a legitimately different view from
+   * the restated total this field carries. Additive only.
+   */
+  static final String CORRECTED_BASE = "correctedBase";
+
   /** POST-only verb that re-runs VIES validation for the declaration's pending operators. */
   private static final String VALIDATE_VIES = "validate-vies";
 
@@ -504,6 +534,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       op.put(RECTIFICATIVE, rectificative);
       putIfNotBlank(op, "declaredYear",   row.get("Year"));
       putIfNotBlank(op, "declaredPeriod", row.get("Period"));
+      putCorrectedBaseIfRectificative(op, row, rectificative, base);
       arr.put(op);
       if (key != null && totalsByKey.containsKey(key)) {
         totalsByKey.put(key, totalsByKey.get(key).add(base));
@@ -521,6 +552,30 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     if (StringUtils.isNotBlank(text)) {
       json.put(key, text);
     }
+  }
+
+  /**
+   * Writes {@link #CORRECTED_BASE} (the restated "Base imponible rectificada" total,
+   * {@code former + delta}) onto a corrective row, or does nothing — a no-op for the regular
+   * path, and defensively a no-op if the row has no {@link #BP_FORMER_AMOUNT} at all. Extracted
+   * out of {@link #appendOperators} (java:S3776 cognitive-complexity fix): two independent
+   * early-exit guards here replace what would otherwise be two more levels of nesting inside
+   * that method's already-busy per-row loop.
+   *
+   * @param delta
+   *          the row's signed delta (already negated by {@link #toSignedDeltaRows}) — the SAME
+   *          {@code BigDecimal} {@code appendOperators} writes as the row's {@code base}
+   */
+  private static void putCorrectedBaseIfRectificative(JSONObject op, Map<String, Object> row,
+      boolean rectificative, BigDecimal delta) throws Exception {
+    if (!rectificative) {
+      return;
+    }
+    BigDecimal former = (BigDecimal) row.get(BP_FORMER_AMOUNT);
+    if (former == null) {
+      return;
+    }
+    op.put(CORRECTED_BASE, former.add(delta).setScale(2, RoundingMode.HALF_UP).toString());
   }
 
   /** A zeroed E/S/A/I accumulator, one per subtotal being computed. */
