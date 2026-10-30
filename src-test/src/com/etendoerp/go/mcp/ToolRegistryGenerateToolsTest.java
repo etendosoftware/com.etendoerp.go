@@ -929,6 +929,28 @@ class ToolRegistryGenerateToolsTest {
       assertNotNull(tool);
       assertTrue(tool.getDescription().contains("Generates a PDF invoice"));
     }
+
+    /** ETP-5852 (M-228): the report's own guidance reaches the agent with the tool. */
+    @Test
+    @DisplayName("report tool description carries the spec's agent prompt as its own sentence")
+    void reportToolCarriesAgentPrompt() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      when(spec.getProcess()).thenReturn(null);
+      when(spec.getDescription()).thenReturn("Report: Print Invoice");
+      when(spec.getAgentPrompt()).thenReturn("  unitCost is the valuation cost. ");
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(NO_INPUT_CONTRACT);
+      mockEmptyEntities();
+      mockSpecCriteria(List.of(spec));
+
+      McpToolDefinition tool = registry.generateTools(scopesOf("neo:report")).stream()
+          .filter(t -> "generate_print_invoice".equals(t.getName()))
+          .findFirst()
+          .orElseThrow();
+
+      assertTrue(tool.getDescription().endsWith(
+          "Report: Print Invoice. unitCost is the valuation cost."), tool.getDescription());
+    }
   }
 
   // ── generateTools: mixed specs ────────────────────────────────────────

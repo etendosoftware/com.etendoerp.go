@@ -537,6 +537,18 @@ public class DocumentPostingService {
     String recordId = context.getRecordId();
     PostResult result =
         "post".equals(action) ? post(adTableId, recordId) : unpost(adTableId, recordId);
+    return toResponse(result, recordId);
+  }
+
+  /**
+   * The action-endpoint answer for a post/unpost result: 200 on success, 422 (or the costing
+   * stall answers) on failure, always the flat {@code success/message[/messageKeys]} body.
+   *
+   * @param result   the post/unpost outcome
+   * @param recordId the record, for the log only
+   * @return the response to send
+   */
+  public NeoResponse toResponse(PostResult result, String recordId) {
     try {
       JSONObject body = new JSONObject();
       body.put("success", result.ok());
@@ -554,7 +566,7 @@ public class DocumentPostingService {
       // every NEO client that only reads a top-level `message` field (ETP-4706).
       return result.ok() ? NeoResponse.ok(body) : NeoResponse.error(422, body);
     } catch (Exception e) {
-      log.error("Posting action error for record {}", context.getRecordId(), e);
+      log.error("Posting action error for record {}", recordId, e);
       return NeoResponse.error(500, "Posting action error");
     }
   }

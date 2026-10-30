@@ -46,6 +46,9 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.utils.SIIUtils;
 
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
+
 /**
  * Abstract base class for AP and AR invoice header handlers.
  *
@@ -1185,5 +1188,19 @@ public abstract class AbstractInvoiceHeaderHandler {
       log.warn("[ETP-4029] autoCreateOrUpdateConversionRateDocument failed for invoice {}: {}",
           invoiceId, e.getMessage());
     }
+  }
+
+  /**
+   * ETP-5684: a posted invoice is un-posted on the server, as the last step before it is
+   * reactivated — callers no longer send an unpost first (it needs showAccountingFields).
+   *
+   * @param context the request
+   * @param posting the header's posting service
+   * @return the un-post refusal, or {@code null} when it is not a reactivation or the un-post ran
+   */
+  static NeoResponse unpostBeforeReactivation(NeoContext context, DocumentPostingService posting) {
+    return InvoiceReactivationGuard.isReactivateAction(context)
+        ? ReactivationUnpost.unpostFirst(context, posting)
+        : null;
   }
 }

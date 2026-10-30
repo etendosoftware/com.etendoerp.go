@@ -58,7 +58,7 @@ public final class NeoBatchScope {
   private static final Logger log = LogManager.getLogger(NeoBatchScope.class);
   private static final ThreadLocal<NeoBatchScope> CURRENT = new ThreadLocal<>();
   /** The kill switch is environment level: no targeting key, no attributes. */
-  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
+  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.environment();
 
   /** {@code null} unless the request opted in and the kill switch is off. */
   private final NeoCalloutDiscardMemory calloutDiscardMemory;

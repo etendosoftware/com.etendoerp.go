@@ -92,6 +92,47 @@ final class McpDefaultsView {
   }
 
   /**
+   * ETP-5852 (M-119): drops from the {@code defaults} the fields the agent surface excludes
+   * ({@link McpQuerySupport#excludedPropertyNames}, which honours an {@code MCP_CONFIG}
+   * {@code fields.included:false}), with their {@code $}-companions. A field the agent may not send
+   * is not a default to offer it: an excluded alternative unit was proposed as "Centímetro" for a
+   * beer. Mutates {@code response} in place.
+   */
+  static void withoutExcluded(JSONObject response, Set<String> excluded) {
+    JSONObject defaults = response == null ? null : response.optJSONObject(KEY_DEFAULTS);
+    if (defaults == null || excluded.isEmpty()) {
+      return;
+    }
+    java.util.List<String> drop = new java.util.ArrayList<>();
+    for (java.util.Iterator<?> keys = defaults.keys(); keys.hasNext();) {
+      String key = String.valueOf(keys.next());
+      if (excluded.contains(baseProperty(key))) {
+        drop.add(key);
+      }
+    }
+    drop.forEach(defaults::remove);
+  }
+
+  /**
+   * {@link #withoutExcluded(JSONObject, Set)} on a defaults answer, for the fields the agent
+   * surface excludes and — ETP-5852 (M-106) — those the entity's customization leaves empty on
+   * create ({@link McpServerResolvedFields#unsetOnCreate}). A refusal is left as is.
+   */
+  static void withoutExcluded(com.etendoerp.go.schemaforge.NeoResponse answer,
+      com.etendoerp.go.schemaforge.data.SFEntity sfEntity,
+      org.openbravo.model.ad.ui.Tab adTab) {
+    if (answer.getHttpStatus() >= 400 || answer.getBody() == null
+        || answer.getBody().optJSONObject(KEY_DEFAULTS) == null) {
+      return;
+    }
+    Set<String> dropped = new java.util.HashSet<>(McpQuerySupport.excludedPropertyNames(sfEntity,
+        org.openbravo.base.model.ModelProvider.getInstance()
+            .getEntityByTableName(adTab.getTable().getDBTableName())));
+    dropped.addAll(McpServerResolvedFields.unsetOnCreate(sfEntity));
+    withoutExcluded(answer.getBody(), dropped);
+  }
+
+  /**
    * Whether a defaults value means "the server knows this field and has no value for it".
    *
    * <p>{@code null}, JSON {@code null} and a blank string all mean the agent still has to supply the
@@ -230,8 +271,9 @@ final class McpDefaultsView {
    * {@code DEFAULTS} hooks read through {@code NeoContext#getQueryParams()}, as the REST
    * {@code /defaults?key=value} form does. The tool's own arguments always win; nulls, objects and
    * arrays are ignored; at most {@link #MAX_RECORD_CONTEXT_ENTRIES} entries of at most
-   * {@link #MAX_RECORD_CONTEXT_VALUE_LENGTH} characters are taken. The generic defaults resolver
-   * does not read query params, so only a customization that asks for a key sees it.
+   * {@link #MAX_RECORD_CONTEXT_VALUE_LENGTH} characters are taken. The generic resolver applies
+   * every entry that names an included field before the callout cascade (ETP-5852), and a
+   * customization may read any key.
    */
   static void copyRecordContext(JSONObject recordContext, Map<String, String> queryParams) {
     if (recordContext == null) {

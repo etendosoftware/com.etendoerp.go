@@ -43,6 +43,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * Schema/field-metadata building for MCP discovery (etendo_schema and related tools).
@@ -66,9 +67,11 @@ final class McpSchemaFieldBuilder {
    */
   private static final Map<String, String> VIRTUAL_FIELD_PROMPTS = Map.of(
       "C_COUNTRY_ID",
-      "The country of the address. Also the argument the region selector needs: call etendo_selectors "
-          + "for 'region' with recordContext {\"country\": \"<this id>\"}, since province names "
-          + "exist only relative to a country.",
+      "The country of the address, as an ID ONLY (e.g. '106' for Spain) — resolve it with "
+          + "etendo_selectors for 'country'; a country NAME sent here is refused, not resolved. "
+          + "Also the argument the region selector needs: call etendo_selectors for "
+          + "'region' with recordContext {\"country\": \"<this id>\"}, since province names exist "
+          + "only relative to a country.",
       "C_REGION_ID",
       "The province, as an ID ONLY — resolve it with etendo_selectors, passing the country in "
           + "recordContext. A province NAME sent here is refused, not resolved; send it in "
@@ -524,11 +527,23 @@ final class McpSchemaFieldBuilder {
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
       throws JSONException {
     JSONArray fieldsArray = new JSONArray();
+    // ETP-5684: without showAccountingFields the accounting status and the posting buttons are
+    // absent, not listed as invokable:false (IMP-21) — the role is not told accounting exists,
+    // as ETP-5648 does for accounting entities. The role flag is read once, and only if needed.
+    Boolean hideAccounting = null;
     // ETP-5806 — resolved at most once for the whole walk (and only if a structured column is
     // actually met), never once per column: the documented invariant is that the account is
     // resolved once per request and never re-checked.
     StructuredAddressGate structuredAddressGate = new StructuredAddressGate();
     for (Column col : adTab.getTable().getADColumnList()) {
+      if (NeoAccountingAccessPolicy.isAccountingColumn(col)) {
+        if (hideAccounting == null) {
+          hideAccounting = !NeoAccountingAccessPolicy.currentRoleSeesAccounting();
+        }
+        if (hideAccounting) {
+          continue;
+        }
+      }
       if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata, structuredAddressGate)) {
         JSONObject fieldObj = buildSchemaField(col, adTab, dalEntity,
             fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
@@ -709,6 +724,9 @@ final class McpSchemaFieldBuilder {
         businessCriticalByColumnId.get((String) col.getId()));
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
+    if ("list".equals(type)) {
+      McpSchemaActionFields.addListOptions(fieldObj, col);
+    }
     addWritableVia(fieldObj, dalEntity, dbColName);
     if (isButton) {
       addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));

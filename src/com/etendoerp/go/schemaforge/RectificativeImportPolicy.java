@@ -25,8 +25,8 @@ import org.openbravo.model.common.invoice.Invoice;
 
 /**
  * What the invoice header customization tells the rectificative-import delegates about its own
- * side of the trade (ETP-5876): which invoices are rectificatives, and whether a line copied from
- * an origin invoice keeps its order line.
+ * side of the trade (ETP-5876): which invoices are rectificatives, and which window's modal rules
+ * (currency comparison, return caps) the side mirrors.
  *
  * <p><b>Why it is handed in and not decided here.</b> "Rectificative" is each header's own
  * {@code classifyDocType} rule (the one behind {@code arInvoiceSubtype} / {@code apInvoiceSubtype},
@@ -36,11 +36,13 @@ import org.openbravo.model.common.invoice.Invoice;
  * request context ({@link #ATTRIBUTE}), and the delegates never classify anything themselves.
  *
  * <p>{@code salesModalRules} says which window's modals the side mirrors, because the two sides'
- * modals differ and the server follows each one exactly (ETP-5876): the sales ones send the source
- * line's order line along ({@link #keepsOrderLink}, ETP-5381), compare the currency
- * ({@link #comparesCurrency}) and net every invoice line linked to a return line from its quantity;
- * the purchase ones do none of that and only skip a return line this invoice already holds
- * ({@link #capsReturnsByPresence}).
+ * modals differ and the server follows each one exactly (ETP-5876): the sales ones compare the
+ * currency ({@link #comparesCurrency}) and net every invoice line linked to a return line from its
+ * quantity, and link a return import to the invoices it rectifies
+ * ({@link #linksReturnsToRectifiedInvoices}, ETP-6002); the purchase ones do none of that and only
+ * skip a return line this invoice already holds ({@link #capsReturnsByPresence}). Neither side keeps the source line's order line on a copied
+ * line any more (ETP-6002, as ETP-5729 for the return path): the sales modal stopped sending it,
+ * so there is no policy for it.
  */
 final class RectificativeImportPolicy {
 
@@ -64,8 +66,13 @@ final class RectificativeImportPolicy {
     return invoice != null && rectificative.test(invoice);
   }
 
-  /** Whether a line copied from an origin invoice keeps the order line of its source line. */
-  boolean keepsOrderLink() {
+  /**
+   * Whether a return import links the rectificative to the invoices the imported return lines
+   * rectify ({@code C_Invoice_Reverse}, ETP-6002): the sales window does it on every line it creates
+   * from a return line (the lines CRUD pre-hook), so the sales action does too; the purchase side
+   * does not, as before.
+   */
+  boolean linksReturnsToRectifiedInvoices() {
     return salesModalRules;
   }
 

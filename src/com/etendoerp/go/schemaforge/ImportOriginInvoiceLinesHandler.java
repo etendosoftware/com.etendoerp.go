@@ -37,7 +37,6 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
-import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
@@ -62,9 +61,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *       would.</li>
  *   <li><b>The lines.</b> Created NEGATIVE, with the product, unit of measure, tax, unit price, list
  *       price, gross prices and discount of the source line, the source line in
- *       {@code EM_ETGO_Source_Invoiceline_ID}, and, when the header says so (the sales modal does,
- *       the purchase one does not; see {@link RectificativeImportPolicy#keepsOrderLink}), its order
- *       line, so the order's invoiced quantity moves when the rectificative completes.</li>
+ *       {@code EM_ETGO_Source_Invoiceline_ID}, and NEVER its order line, on either side (ETP-6002,
+ *       as ETP-5729 for the return path: the order's invoiced quantity must not move and the
+ *       rectificative must not be matched to the order's shipment).</li>
  *   <li><b>The link.</b> The origin invoice is linked in {@code C_Invoice_Reverse} (the
  *       "Rectificaciones" tab), one row per distinct origin, never duplicated: what the modal's
  *       {@code originInvoices} PATCH is meant to do. It is written here, after the target is locked,
@@ -137,9 +136,8 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
         "Adds lines of a completed " + doc + " invoice (the one this rectificative corrects) to this "
             + "DRAFT rectificative, in ONE transaction, WITHOUT completing it. The lines come in "
             + "NEGATIVE (a credit), with the product, unit of measure, tax, price and discount of "
-            + "the source line"
-            + (sales ? " and its order line (so the order's invoiced quantity moves when the "
-                + "rectificative is completed)" : "")
+            + "the source line but never its order line (completing the rectificative must not "
+            + "change the order's invoiced quantity)"
             + ", and the source invoice is linked in the Rectificaciones tab (once per invoice). "
             + "Partial quantities are accepted: without lines it imports every offered line in "
             + "full; with lines, exactly those, quantity a positive number (the sign is applied) "
@@ -153,7 +151,8 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
             + (sales ? "" : " (the purchase window does not compare currency)") + ". The total discount of the header is not carried. Returns {data:"
             + "{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], "
             + "headerLinked, salesOrder?, originInvoices:[{id, documentNo}]}} (quantity is "
-            + "negative; headerLinked and salesOrder refer to the order link of a sales import). "
+            + "negative; the lines never carry the source line's order line, so the invoice's order "
+            + "reference is left as it was). "
             + "Step 3."
             + flow,
         NeoActionContract.Param.required(PARAM_INVOICE_ID, NeoActionContract.TYPE_STRING,
@@ -225,11 +224,10 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
     }
     Map<String, BigDecimal> planned = DocumentLineImport.plan(requested, documentLines, pending);
 
-    List<DocumentLineImport.ImportedLine> created = copyLines(invoice, offered, planned,
-        policy.keepsOrderLink());
+    List<DocumentLineImport.ImportedLine> created = copyLines(invoice, offered, planned);
     linkOrigin(invoice, source);
-    String headerOrderId = policy.keepsOrderLink() ? syncHeaderOrder(invoice)
-        : orderIdOf(invoice);
+    // ETP-6002: the copied lines carry no order line, so the header's order is left as it is.
+    String headerOrderId = orderIdOf(invoice);
     requireQuotaAllowed(InvoiceLine.ENTITY_NAME, created);
     Map<String, Object> extra = new LinkedHashMap<>();
     extra.put(KEY_ORIGIN_INVOICES, new JSONArray().put(new JSONObject().put("id", source.getId())
@@ -242,7 +240,7 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
    * the source line's, exactly: a price is never re-derived from a discount here.
    */
   private List<DocumentLineImport.ImportedLine> copyLines(Invoice invoice,
-      Map<String, InvoiceLine> offered, Map<String, BigDecimal> planned, boolean keepsOrderLink) {
+      Map<String, InvoiceLine> offered, Map<String, BigDecimal> planned) {
     int precision = invoice.getCurrency() == null ? DEFAULT_PRECISION
         : invoice.getCurrency().getStandardPrecision().intValue();
     long lineNo = lastLineNo(invoice);
@@ -252,8 +250,7 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
       InvoiceLine source = offered.get(entry.getKey());
       lineNo += LINE_STEP;
       InvoiceLine line = newLine();
-      copyInto(line, source, invoice, lineNo, entry.getValue().negate(), precision,
-          keepsOrderLink);
+      copyInto(line, source, invoice, lineNo, entry.getValue().negate(), precision);
       save(line);
       invoice.getInvoiceLineList().add(line);
       newIds.add(line.getId());
@@ -269,7 +266,7 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
   }
 
   private static void copyInto(InvoiceLine line, InvoiceLine source, Invoice invoice, long lineNo,
-      BigDecimal quantity, int precision, boolean keepsOrderLink) {
+      BigDecimal quantity, int precision) {
     BigDecimal unitPrice = orZero(source.getUnitPrice());
     BigDecimal netAmount = quantity.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP);
     line.setClient(invoice.getClient());
@@ -296,9 +293,10 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
     if (isNonZero(source.getEtgoDiscount())) {
       line.setEtgoDiscount(source.getEtgoDiscount());
     }
-    if (keepsOrderLink) {
-      line.setSalesOrderLine(source.getSalesOrderLine());
-    }
+    // ETP-6002 (as ETP-5729 for the return path): never the source line's order line, on either
+    // side. On the negative line C_INVOICE_POST would lower the order's invoiced quantity (the
+    // returned quantity turns invoiceable again) and match the rectificative to the order's
+    // shipment (M_MatchSI), a transitive relation. Same as the sales modal and the lines CRUD.
     line.setETGOSourceInvoiceLine(source);
   }
 
@@ -324,36 +322,6 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
   private void linkOrigin(Invoice invoice, Invoice origin) {
     if (linkIfMissing(invoice, origin)) {
       flush();
-    }
-  }
-
-  /**
-   * The header points at the order of the imported lines under the rule the window's line save
-   * applies: only while every line of the invoice comes from that one order.
-   *
-   * @return the order the header points at now, or {@code null}
-   */
-  private String syncHeaderOrder(Invoice invoice) {
-    Map<String, Order> orders = new LinkedHashMap<>();
-    for (InvoiceLine line : activeLines(invoice)) {
-      if (line.getSalesOrderLine() != null && line.getSalesOrderLine().getSalesOrder() != null) {
-        Order order = line.getSalesOrderLine().getSalesOrder();
-        orders.put(order.getId(), order);
-      }
-    }
-    DocumentLineImport.HeaderLink link = DocumentLineImport.resolveHeaderLink(orderIdOf(invoice),
-        orders.keySet());
-    switch (link.action()) {
-      case LINK:
-        invoice.setSalesOrder(orders.get(link.orderId()));
-        save(invoice);
-        return link.orderId();
-      case CLEAR:
-        invoice.setSalesOrder(null);
-        save(invoice);
-        return null;
-      default:
-        return orderIdOf(invoice);
     }
   }
 
@@ -530,7 +498,7 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
 
   /** The {@code C_Invoice_Reverse} row, created unless the pair is already linked. */
   protected boolean linkIfMissing(Invoice invoice, Invoice origin) {
-    return OriginInvoiceLinks.linkIfMissing(invoice, origin);
+    return InvoiceRectificationLinkSupport.ensureReverseLink(invoice, origin);
   }
 
   protected InvoiceLine newLine() {

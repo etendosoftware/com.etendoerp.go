@@ -980,6 +980,10 @@ public class AbstractInvoiceHeaderHandlerTest {
       when(rs.next()).thenReturn(true, true, false);
       when(rs.getString(1)).thenReturn("rect-a", "rect-b");
       when(rs.getString(2)).thenReturn("FVR-A", "FVR-B");
+      // ETP-6002: the chip fields every invoice chip renders.
+      when(rs.getString(3)).thenReturn("CO", "DR");
+      when(rs.getBigDecimal(4)).thenReturn(new java.math.BigDecimal("-12.10"), null);
+      when(rs.getString(5)).thenReturn("EUR", "EUR");
 
       handler.callEnrichRectifyingInvoices(rec, "inv-original");
 
@@ -989,6 +993,11 @@ public class AbstractInvoiceHeaderHandlerTest {
       assertEquals("FVR-A", rectifying.getJSONObject(0).getString("documentNo"));
       assertEquals("rect-b", rectifying.getJSONObject(1).getString("id"));
       assertEquals("FVR-B", rectifying.getJSONObject(1).getString("documentNo"));
+      // ETP-6002: amount, currency and status reach the chip, as for every other invoice chip.
+      assertEquals("CO", rectifying.getJSONObject(0).getString("documentStatus"));
+      assertEquals(-12.10, rectifying.getJSONObject(0).getDouble("grandTotalAmount"), 0.001);
+      assertEquals("EUR", rectifying.getJSONObject(0).getString("currency$_identifier"));
+      assertTrue(rectifying.getJSONObject(1).isNull("grandTotalAmount"));
     }
   }
 
