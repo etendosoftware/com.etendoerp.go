@@ -540,7 +540,9 @@ class CalloutRequestBuilder {
         return;
       }
       Object parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
-      if (parentRecord == null) {
+      // ETP-5819: parentId comes from the request; another tenant's parent injects nothing.
+      if (parentRecord == null
+          || !TenantOwnership.isVisibleToCurrentTenant((BaseOBObject) parentRecord)) {
         log.debug("[NEO-CALLOUT] Parent record not found: {} / {}", parentEntity.getName(), parentId);
         return;
       }
@@ -723,6 +725,46 @@ class CalloutRequestBuilder {
   }
 
   /** First value of a multi-valued param, or {@code null} when absent/empty. */
+  /**
+   * Blanks every inp* value of the tab's own columns that names a row of another tenant
+   * (ETP-5819). Callouts are legacy code that resolve these ids with bare DAL/SQL lookups in admin
+   * mode, so an id chosen by the request would make them read, and answer with, that tenant's data.
+   * A missing row is left alone: callouts already handle it, and an unsaved record's own id is one.
+   *
+   * @param adTab  the tab whose callout is about to run
+   * @param params the inp* parameters built for it; changed in place
+   */
+  static void blankForeignReferences(Tab adTab, Map<String, String[]> params) {
+    Entity entity = adTab == null || adTab.getTable() == null ? null
+        : ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+    if (entity == null) {
+      return;
+    }
+    for (Property property : entity.getProperties()) {
+      Entity target = property.isId() ? entity : property.getTargetEntity();
+      if (target == null || property.isOneToMany() || property.getColumnName() == null) {
+        continue;
+      }
+      String inpName = NeoCalloutService.toInpName(property.getColumnName());
+      String value = paramValue(params, inpName);
+      if (value == null || value.isEmpty() || isOwnedOrMissing(target, value)) {
+        continue;
+      }
+      log.warn("[NEO-CALLOUT] Dropped {}: it names a row of another client", inpName);
+      params.put(inpName, new String[] { "" });
+    }
+  }
+
+  private static boolean isOwnedOrMissing(Entity target, String id) {
+    try {
+      BaseOBObject row = (BaseOBObject) OBDal.getInstance().get(target.getName(), id);
+      return row == null || TenantOwnership.isVisibleToCurrentTenant(row);
+    } catch (RuntimeException e) {
+      // Not an id of that entity at all: it names no row, so there is nothing to leak.
+      return true;
+    }
+  }
+
   private static String paramValue(Map<String, String[]> params, String key) {
     String[] holder = params.get(key);
     return holder != null && holder.length > 0 ? holder[0] : null;

@@ -213,7 +213,9 @@ public final class NeoAttachmentsHelper {
     try {
       String tableId = resolveTableId(tableName);
       Attachment main = findMainAttachment(tableId, recordId);
-      if (main == null) {
+      // ETP-5819: another tenant's main attachment reads as "none marked". Checked here and not
+      // in findMainAttachment, which the signed email download link also uses.
+      if (main == null || !TenantOwnership.isVisibleToCurrentTenant(main)) {
         return NeoResponse.ok(new JSONObject());
       }
       return NeoResponse.ok(toAttachmentJson(main));

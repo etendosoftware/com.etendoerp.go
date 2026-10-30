@@ -54,7 +54,7 @@ import org.openbravo.model.common.enterprise.Organization;
  * <p>The NEO write paths use the client-only variant, {@link #loadOwnedByClient(String, String)},
  * for every reference a request sets (ETP-5785, see {@link NeoReferenceOwnership}).
  */
-final class TenantOwnership {
+public final class TenantOwnership {
 
   private TenantOwnership() {
   }
@@ -67,7 +67,7 @@ final class TenantOwnership {
    * @param <T>         the entity type
    * @return the entity, or {@code null} when the id is blank, unknown, or owned by another tenant
    */
-  static <T extends BaseOBObject> T loadOwned(Class<T> entityClass, String id) {
+  public static <T extends BaseOBObject> T loadOwned(Class<T> entityClass, String id) {
     if (StringUtils.isBlank(id)) {
       return null;
     }

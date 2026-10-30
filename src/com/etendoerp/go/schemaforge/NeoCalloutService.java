@@ -141,6 +141,7 @@ public class NeoCalloutService {
         Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
             adTab, value, formState, calloutInfo.inpFieldName,
             auxValues);
+        CalloutRequestBuilder.blankForeignReferences(adTab, params);
         long perfParamsEnd = System.nanoTime();
 
         // Build session attributes from a fully populated VariablesSecureApp
@@ -707,7 +708,8 @@ public class NeoCalloutService {
       // Look up the record to get its identifier
       BaseOBObject referenced = OBDal.getInstance().get(
           prop.getTargetEntity().getName(), strVal);
-      if (referenced != null) {
+      // ETP-5819: never label another tenant's row.
+      if (referenced != null && TenantOwnership.isVisibleToCurrentTenant(referenced)) {
         String identifier = referenced.getIdentifier();
         if (identifier != null && !identifier.isEmpty()) {
           entry.put(IDENTIFIER_KEY, identifier);

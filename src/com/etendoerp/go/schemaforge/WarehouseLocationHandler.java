@@ -158,7 +158,8 @@ public class WarehouseLocationHandler implements NeoHandler {
 
     OBContext.setAdminMode(true);
     try {
-      Location geoLoc = OBDal.getInstance().get(Location.class, locId);
+      // ETP-5819: another tenant's address is a 404, like a missing one.
+      Location geoLoc = TenantOwnership.loadOwned(Location.class, locId);
       if (geoLoc == null) {
         return NeoResponse.error(404, "Location not found: " + locId);
       }
@@ -194,7 +195,8 @@ public class WarehouseLocationHandler implements NeoHandler {
       throws Exception {
     OBContext.setAdminMode(true);
     try {
-      Location geoLoc = OBDal.getInstance().get(Location.class, locId);
+      // ETP-5819: another tenant's address is a 404, like a missing one.
+      Location geoLoc = TenantOwnership.loadOwned(Location.class, locId);
       if (geoLoc == null) {
         return NeoResponse.error(404, "Location not found: " + locId);
       }

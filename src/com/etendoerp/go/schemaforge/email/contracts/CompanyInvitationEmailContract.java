@@ -156,7 +156,11 @@ public final class CompanyInvitationEmailContract implements EmailContract {
     if (StringUtils.isBlank(recordId)) {
       return Optional.empty();
     }
-    return Optional.ofNullable(OBDal.getInstance().get(Invitation.class, recordId));
+    // ETP-5819: recordId comes from the request; another tenant's invitation reads as not found,
+    // the same rule every other contract resolver applies.
+    return Optional.ofNullable(OBDal.getInstance().get(Invitation.class, recordId))
+        .filter(invitation -> invitation.getClient() != null
+            && DalEmailContractDataResolver.isReadableClient(invitation.getClient().getId()));
   }
 
   /**

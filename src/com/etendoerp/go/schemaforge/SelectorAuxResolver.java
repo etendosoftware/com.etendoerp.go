@@ -309,6 +309,12 @@ class SelectorAuxResolver {
    * If valueProperty is "id", loads directly. Otherwise, queries by property value.
    */
   static BaseOBObject loadEntityForAux(SelectorMeta meta, String recordId) {
+    BaseOBObject entity = loadEntityForAuxUnchecked(meta, recordId);
+    // ETP-5819: recordId can come from the request; both lookups below are unfiltered.
+    return entity != null && TenantOwnership.isVisibleToCurrentTenant(entity) ? entity : null;
+  }
+
+  private static BaseOBObject loadEntityForAuxUnchecked(SelectorMeta meta, String recordId) {
     if ("id".equals(meta.valueProperty)) {
       return (BaseOBObject) OBDal.getInstance().get(meta.entityName, recordId);
     }

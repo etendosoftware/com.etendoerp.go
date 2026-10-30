@@ -29,6 +29,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.plm.Product;
 
 
 /**
@@ -92,7 +93,10 @@ public class ProductStockWarehouseHandler implements NeoHandler {
         NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(SQL);
         query.setParameter("productId", parentId);
 
-        List<Object[]> rows = query.list();
+        // ETP-5819: the SQL has no tenant filter; another tenant's product lists like a missing one.
+        List<Object[]> rows = TenantOwnership.loadOwned(Product.class, parentId) == null
+            ? List.of()
+            : query.list();
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {

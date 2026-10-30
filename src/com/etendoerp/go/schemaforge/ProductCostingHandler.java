@@ -557,7 +557,8 @@ public class ProductCostingHandler implements NeoHandler {
       }
       OBContext.setAdminMode();
       try {
-        Product product = OBDal.getInstance().get(Product.class, productId);
+        // ETP-5819: productId comes from the request.
+        Product product = TenantOwnership.loadOwned(Product.class, productId);
         if (product != null && product.getCreationDate() != null) {
           defaults.put(FIELD_STARTING_DATE, NeoDateFormat.toWireDate(product.getCreationDate()));
         }

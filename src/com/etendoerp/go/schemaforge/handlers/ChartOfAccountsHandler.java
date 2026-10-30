@@ -45,6 +45,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.TenantOwnership;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -1155,7 +1156,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
 
     OBContext.setAdminMode(true);
     try {
-      ElementValue parent = OBDal.getInstance().get(ElementValue.class, parentAccountId);
+      // ETP-5819: parentAccountId comes from the request.
+      ElementValue parent = TenantOwnership.loadOwned(ElementValue.class, parentAccountId);
       if (parent == null) {
         log.debug("ChartOfAccountsHandler: parent account not found id={}", parentAccountId);
         return null;
