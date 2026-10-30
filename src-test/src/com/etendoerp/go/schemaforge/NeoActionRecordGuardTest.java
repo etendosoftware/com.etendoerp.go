@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -45,6 +46,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * @covers com.etendoerp.go.schemaforge.NeoActionRecordGuard
@@ -58,6 +60,10 @@ import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
  *
  * <p>ETP-5715 — {@code refusalForMissingDocument}: the document-action button on an id that is no
  * row of the table answers the same 404 as a foreign id.</p>
+ *
+ * <p>ETP-6062 — {@code updateRefusalFor}: an update the customization declares consumed into
+ * tenant-owned storage only needs a READABLE target (a System row); every other case keeps the
+ * strict answer, and a waived request that reaches the default step is refused.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoActionRecordGuard
  */
@@ -318,6 +324,128 @@ class NeoActionRecordGuardTest {
     assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(entity, RECORD));
   }
 
+
+  // ── ETP-6062: updateRefusalFor — an update consumed into tenant-owned storage ──
+
+  private NeoContext update(String method, SFEntity entity) {
+    return NeoContext.builder().httpMethod(method).recordId(RECORD).entityName("finPayment")
+        .sfEntity(entity).build();
+  }
+
+  /** A System row the caller can read but not write: the shape of a shared tax. */
+  private void readableSystemRow() {
+    when(OBContext.getOBContext().getReadableClients()).thenReturn(new String[] {OWN_CLIENT, "0"});
+    when(OBContext.getOBContext().getReadableOrganizations())
+        .thenReturn(new String[] {OWN_ORG, "0"});
+    payment("0", "0");
+  }
+
+  private static NeoHandler consuming(boolean answer) {
+    NeoHandler customization = mock(NeoHandler.class);
+    when(customization.consumesTargetWrite(any())).thenReturn(answer);
+    return customization;
+  }
+
+  @Test
+  @DisplayName("ETP-6062: a consumed update of a readable System row is let through and marked")
+  void consumedUpdateOfReadableSystemRowIsWaived() {
+    SFEntity entity = paymentEntity();
+    readableSystemRow();
+    NeoContext request = update("PATCH", entity);
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      NeoHandler customization = consuming(true); // stubbed before, not inside, the static stubbing
+      lookup.when(() -> NeoHandlerLookup.forEntityQuietly(entity)).thenReturn(customization);
+
+      assertNull(NeoActionRecordGuard.updateRefusalFor(entity, request));
+    }
+    assertEquals(Boolean.TRUE,
+        request.getAttribute(NeoActionRecordGuard.ATTR_TARGET_WRITE_DELEGATED));
+  }
+
+  @Test
+  @DisplayName("ETP-6062: an update the customization does not declare consumed stays refused")
+  void notConsumedUpdateOfSystemRowIsRefused() throws Exception {
+    SFEntity entity = paymentEntity();
+    readableSystemRow();
+    NeoContext request = update("PUT", entity);
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      NeoHandler customization = consuming(false); // stubbed before, not inside, the static stubbing
+      lookup.when(() -> NeoHandlerLookup.forEntityQuietly(entity)).thenReturn(customization);
+
+      assertRecordNotFound(NeoActionRecordGuard.updateRefusalFor(entity, request));
+    }
+    assertNull(request.getAttribute(NeoActionRecordGuard.ATTR_TARGET_WRITE_DELEGATED));
+  }
+
+  @Test
+  @DisplayName("ETP-6062: no customization, or one that fails to answer, keeps the strict 404")
+  void missingOrFailingCustomizationKeepsTheGuard() throws Exception {
+    SFEntity entity = paymentEntity();
+    readableSystemRow();
+    NeoHandler failing = mock(NeoHandler.class);
+    when(failing.consumesTargetWrite(any()))
+        .thenThrow(new IllegalStateException("broken"));
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      lookup.when(() -> NeoHandlerLookup.forEntityQuietly(entity)).thenReturn(null);
+      assertRecordNotFound(NeoActionRecordGuard.updateRefusalFor(entity, update("PATCH", entity)));
+
+      lookup.when(() -> NeoHandlerLookup.forEntityQuietly(entity)).thenReturn(failing);
+      assertRecordNotFound(NeoActionRecordGuard.updateRefusalFor(entity, update("PATCH", entity)));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6062: another tenant's row or an unknown id is never waived, consumed or not")
+  void foreignOrMissingRowIsNeverWaived() throws Exception {
+    SFEntity entity = paymentEntity();
+    NeoHandler customization = consuming(true);
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      lookup.when(() -> NeoHandlerLookup.forEntityQuietly(entity)).thenReturn(customization);
+
+      payment(OTHER_CLIENT, OWN_ORG);
+      assertRecordNotFound(NeoActionRecordGuard.updateRefusalFor(entity, update("PATCH", entity)));
+
+      when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(null);
+      assertRecordNotFound(NeoActionRecordGuard.updateRefusalFor(entity, update("PATCH", entity)));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6062: only an update can be waived; a delete gets the strict answer")
+  void deleteIsNeverWaived() throws Exception {
+    SFEntity entity = paymentEntity();
+    readableSystemRow();
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      NeoHandler customization = consuming(true); // stubbed before, not inside, the static stubbing
+      lookup.when(() -> NeoHandlerLookup.forEntityQuietly(entity)).thenReturn(customization);
+
+      assertRecordNotFound(NeoActionRecordGuard.updateRefusalFor(entity, update("DELETE", entity)));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-6062: a writable row passes without asking the customization")
+  void writableRowPassesWithoutWaiver() {
+    SFEntity entity = paymentEntity();
+    payment(OWN_CLIENT, OWN_ORG);
+    NeoContext request = update("PATCH", entity);
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      assertNull(NeoActionRecordGuard.updateRefusalFor(entity, request));
+      lookup.verifyNoInteractions();
+    }
+    assertNull(request.getAttribute(NeoActionRecordGuard.ATTR_TARGET_WRITE_DELEGATED));
+  }
+
+  @Test
+  @DisplayName("ETP-6062: a waived request that reaches the default write is refused with the 404")
+  void undeliveredDelegationIsRefused() throws Exception {
+    NeoContext waived = update("PATCH", null);
+    waived.setAttribute(NeoActionRecordGuard.ATTR_TARGET_WRITE_DELEGATED, Boolean.TRUE);
+
+    assertRecordNotFound(NeoActionRecordGuard.refusalForUndeliveredDelegation(waived));
+    assertNull(NeoActionRecordGuard.refusalForUndeliveredDelegation(update("PATCH", null)));
+    assertNull(NeoActionRecordGuard.refusalForUndeliveredDelegation(null));
+  }
 
   // ── ETP-5715: refusalForMissingDocument ──────────────────────────────────
 

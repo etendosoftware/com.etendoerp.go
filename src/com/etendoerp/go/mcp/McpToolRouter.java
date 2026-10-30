@@ -1058,7 +1058,13 @@ public class McpToolRouter {
     // role-level check — so the entity-level flag consulted here is ISPUT.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_PUT);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
-    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    // ETP-6062: same target guard as the REST update preflight, including the waiver a
+    // customization may declare (NeoHandler#consumesTargetWrite). It is asked about the fields as
+    // the agent sent them — the same API keys a REST body carries — on a context of its own, so
+    // the decision is made before any DAL work, exactly where the strict guard ran.
+    NeoContext targetProbe = McpHookExecutor.buildHookContext(specName, entityName,
+        HTTP_METHOD_PUT, recordId, new JSONObject(fields.toString()), adTab, sfEntity);
+    NeoResponse targetRefusal = NeoActionRecordGuard.updateRefusalFor(sfEntity, targetProbe);
     if (targetRefusal != null) {
       return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
     }
@@ -1164,6 +1170,12 @@ public class McpToolRouter {
     if (preDispatch.response() != null) {
       return McpHookExecutor.servedRecordResult(preDispatch.response(), specName, recordId,
           adTab);
+    }
+    // ETP-6062: the target guard was waived for a customization that declared this update
+    // consumed, and it declined after all — the target row must not be written.
+    NeoResponse undelivered = NeoActionRecordGuard.refusalForUndeliveredDelegation(targetProbe);
+    if (undelivered != null) {
+      return McpHookExecutor.neoResponseToMcpResult(undelivered);
     }
 
     // ETP-5073 / DOC-04: the conflict is detected before the write, for the same reason the REST

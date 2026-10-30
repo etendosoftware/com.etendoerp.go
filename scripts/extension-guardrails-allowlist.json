@@ -86,7 +86,6 @@
     "SiiSendHandler",
     "TaxAccountingHandler",
     "TaxReportHandler",
-    "TaxSifOverrideHandler",
     "TbaiConfigSequenceHandler",
     "TbaiXmlgeneratorHandler",
     "TransactionTypeHandler",
