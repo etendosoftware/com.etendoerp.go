@@ -42,6 +42,7 @@ import org.openbravo.client.application.process.BaseProcessActionHandler;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Attachment;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 
 import com.etendoerp.sif.general.data.DigitalCertificate;
@@ -99,6 +100,9 @@ public class NeoCertificateHelper {
       if (orgId == null || orgId.isBlank()) {
         return NeoResponse.error(400, "Required parameter: orgId");
       }
+      if (!isCallersOrg(orgId)) {
+        return NeoResponse.ok(new JSONObject().put("exists", false));
+      }
       var session = OBDal.getInstance().getSession();
       @SuppressWarnings("unchecked")
       var q = session.createNativeQuery(
@@ -135,6 +139,9 @@ public class NeoCertificateHelper {
       String orgId = request.getParameter(PARAM_ORG_ID);
       if (orgId == null || orgId.isBlank()) {
         return NeoResponse.error(400, "Required parameter: orgId");
+      }
+      if (!isCallersOrg(orgId)) {
+        return NeoResponse.ok(new JSONObject().put("deleted", 0));
       }
 
       int deleted = deleteCertificatesForOrg(orgId);
@@ -174,6 +181,9 @@ public class NeoCertificateHelper {
       if (filePart == null || orgId == null || orgId.isBlank()
           || password == null || password.isBlank()) {
         return NeoResponse.error(400, "Required fields: certificate (file), orgId, password");
+      }
+      if (!isCallersOrg(orgId)) {
+        return NeoResponse.error(404, "Organization not found");
       }
 
       String fileName = resolveFileName(filePart);
@@ -322,6 +332,15 @@ public class NeoCertificateHelper {
     for (Attachment attachment : attachCrit.list()) {
       SifGeneralUtils.attachManager.delete(attachment);
     }
+  }
+
+  /**
+   * ETP-5819: {@code orgId} comes from the request and every certificate route writes or reads by it
+   * with native SQL, which neither the DAL's filters nor the write guard see. Another tenant's
+   * organization answers exactly like a missing one.
+   */
+  private static boolean isCallersOrg(String orgId) {
+    return TenantOwnership.loadOwned(Organization.class, orgId) != null;
   }
 
   /**

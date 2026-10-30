@@ -39,11 +39,13 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.TenantOwnership;
 
 /**
  * NeoHandler for the {@code tax} entity (Tax window) implementing the ETP-5122 storage
@@ -239,7 +241,9 @@ public class TaxSifOverrideHandler implements NeoHandler {
 
   private static String resolveContextOrganizationId(NeoContext context) {
     String sifContextOrgId = resolveSifContextOrgIdParam(context);
-    if (sifContextOrgId != null) {
+    // ETP-5819: a request-supplied org of another tenant is ignored, as if it had not been sent.
+    if (sifContextOrgId != null
+        && TenantOwnership.loadOwned(Organization.class, sifContextOrgId) != null) {
       return sifContextOrgId;
     }
     OBContext obContext = context.getObContext() != null ? context.getObContext() : OBContext.getOBContext();
