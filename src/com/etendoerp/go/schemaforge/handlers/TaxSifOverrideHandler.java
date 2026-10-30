@@ -20,11 +20,11 @@ package com.etendoerp.go.schemaforge.handlers;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -39,9 +39,11 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoExtension;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
@@ -62,8 +64,10 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * body, upserts them into {@code etsg_tax_sif_config} keyed by
  * {@code (c_tax_id, AD_GET_ORG_LE_BU(writeOrg, 'LE'))} (the legal entity of the ACTING
  * organization, not the raw org itself — matching the read-side precedence join, see below),
- * and lets the (possibly now-empty) remainder of the body flow through to the default CRUD for
- * {@code c_tax} itself. Only the columns actually present in the request are written to
+ * and lets the remainder of the body flow through to the default CRUD for {@code c_tax} itself
+ * — unless nothing but the {@code updated} version token is left, in which case the handler
+ * answers the request itself and {@code c_tax} is not written (ETP-6062). Only the columns
+ * actually present in the request are written to
  * {@code etsg_tax_sif_config} — an UPDATE never blanks a sibling column the caller did not
  * send. POST (create) is deliberately NOT intercepted: a brand-new {@code c_tax} row has no id
  * yet to key the override table on, and in practice these fields are only edited once a tax
@@ -82,6 +86,13 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * {@link #resolveWriteOrganizationId} for the full precedence and the standalone Tax-window
  * fallback that keeps working unchanged when the param is absent.
  *
+ * <p><b>ETP-6062 — the context organization must belong to the caller.</b> {@code
+ * sifContextOrgId} is honoured only when it names an organization of the caller's own client,
+ * other than {@code *}: on a write it must also be one of the caller's writable organizations,
+ * otherwise the write is refused with {@code 404 Record not found} before anything is stored; on
+ * a read it must be readable, otherwise it is ignored and the session organization is used, the
+ * same as a request without the param.
+ *
  * <h3>GET afterHandle — effective value (D5)</h3>
  * <p>Overwrites the 8 properties on every row of a {@code tax} GET response (single or list)
  * with the EFFECTIVE value: {@code c_tax.<col>} wins when non-blank, otherwise the active
@@ -94,11 +105,19 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * CRUD {@code response.data}) and a shared helper would need to abstract that away for a single
  * 8-column SELECT.
  *
- * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
- * {@code docs/neo-headless-extensibility.md} §2.2 (this qualifier silently stops being
- * discovered if a scope annotation such as {@code @ApplicationScoped} is added).
+ * <h3>A System tax is not written, so it is not refused (ETP-6062)</h3>
+ * <p>Taxes are System rows shared by every client, which the CRUD target guard refuses to let a
+ * tenant write. A SIF-only update never writes the row — it lands in the tenant's own
+ * {@code etsg_tax_sif_config} — so {@link #consumesTargetWrite} declares it, and the guard then
+ * only requires the tax to be readable. A body that also carries a plain {@code c_tax} field
+ * is not declared, and stays refused on a System tax BEFORE {@link #handle} runs, so nothing
+ * is upserted for it either.
+ *
+ * <p>Bound by {@code @NeoExtension} (ETP-6062 migrated it off the {@code taxSifOverrideHandler}
+ * {@code Java_Qualifier}). No {@code @Named} and never a normal CDI scope: the class stays a
+ * {@code @Dependent} bean under {@code bean-discovery-mode="all"}.
  */
-@Named("taxSifOverrideHandler")
+@NeoExtension(spec = "tax", entity = "tax")
 public class TaxSifOverrideHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(TaxSifOverrideHandler.class);
@@ -108,6 +127,9 @@ public class TaxSifOverrideHandler implements NeoHandler {
   private static final String METHOD_GET = "GET";
   private static final String TAX_ENTITY_NAME = "tax";
   private static final String FIELD_ID = "id";
+  // The optimistic-locking token the SPA's apiFetch adds to every update it sends (ETP-5073). It
+  // versions the c_tax row, which a SIF-only update never writes, so it is not a field to persist.
+  private static final String FIELD_UPDATED = "updated";
   private static final String PARAM_ORG_ID = "orgId";
 
   // ETP-5229: optional query param the frontend sends when the SIF modal is opened from an
@@ -124,6 +146,11 @@ public class TaxSifOverrideHandler implements NeoHandler {
   // falls back to the pre-ETP-5229 behavior: `obContext.getCurrentOrganization()`. Both
   // behaviors are intentional and permanent, not a transition — see resolveWriteOrganizationId.
   private static final String PARAM_SIF_CONTEXT_ORG_ID = "sifContextOrgId";
+
+  // ETP-6062: the answer to a write whose context organization does not belong to the caller —
+  // the same text and status the CRUD target guard gives an unknown record.
+  private static final String MSG_RECORD_NOT_FOUND = "Record not found";
+  private static final String SYSTEM_ORG_ID = "0";
 
   // JSON field name (camelCase, as exposed on the `tax` entity contract) -> DB column, shared by
   // both c_tax and etsg_tax_sif_config (same column name on both tables). Confirmed against
@@ -164,22 +191,31 @@ public class TaxSifOverrideHandler implements NeoHandler {
           + "for tax {}", taxId);
       return null;
     }
+    if (!carriesSifField(body)) {
+      // Nothing SIF-related in this request — fall through unchanged.
+      return null;
+    }
+    // ETP-6062: the context organization must belong to the caller, checked before anything is
+    // written. An unacceptable one is refused, never replaced by the session org in silence.
+    String sifContextOrgId = resolveSifContextOrgIdParam(context);
+    if (sifContextOrgId != null && !isWritableContextOrganization(sifContextOrgId, obContext)) {
+      // The client-supplied value is not echoed into the log.
+      log.warn("TaxSifOverrideHandler.handle: the context organization does not belong to the "
+          + "caller, tax {} not saved", taxId);
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_RECORD_NOT_FOUND);
+    }
     try {
       Map<String, String> overrideValues = extractAndStripOverrideFields(body);
-      if (overrideValues.isEmpty()) {
-        // Nothing SIF-related in this request — fall through unchanged.
-        return null;
-      }
       // ETP-5229: resolve ONCE and reuse for both the write and the immediate read-back below,
       // so a request carrying sifContextOrgId is fully self-consistent end to end.
-      String writeOrganizationId = resolveWriteOrganizationId(context, obContext);
+      String writeOrganizationId = resolveWriteOrganizationId(sifContextOrgId, obContext);
       OBContext.setAdminMode(true);
       try {
         upsertOverride(taxId, overrideValues, obContext, writeOrganizationId);
       } finally {
         OBContext.restorePreviousMode();
       }
-      if (body.length() > 0) {
+      if (carriesTaxFields(body)) {
         // Remaining fields still need the default CRUD to persist them onto c_tax.
         return null;
       }
@@ -189,6 +225,53 @@ public class TaxSifOverrideHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "SIF override upsert failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * ETP-6062: an update whose body carries SIF fields and nothing of {@code c_tax} itself (the
+   * version token aside) is stored entirely in {@code etsg_tax_sif_config} by {@link #handle},
+   * which answers it with its own response — the tax row is never written. Declaring it lets a
+   * tenant save its override of a System tax, which the CRUD target guard otherwise refuses.
+   *
+   * <p>Must agree with {@link #handle}: every body this answers {@code true} for is one
+   * {@code handle} short-circuits. Pure — the body is only read.
+   */
+  @Override
+  public boolean consumesTargetWrite(NeoContext context) {
+    String method = context.getHttpMethod();
+    if (!TAX_ENTITY_NAME.equals(context.getEntityName())
+        || (!METHOD_PUT.equalsIgnoreCase(method) && !METHOD_PATCH.equalsIgnoreCase(method))) {
+      return false;
+    }
+    JSONObject body = context.getRequestBody();
+    if (StringUtils.isBlank(context.getRecordId()) || body == null) {
+      return false;
+    }
+    boolean hasSifField = false;
+    Iterator<?> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      if (SIF_FIELD_TO_COLUMN.containsKey(key)) {
+        hasSifField = true;
+      } else if (!FIELD_UPDATED.equals(key)) {
+        return false;
+      }
+    }
+    return hasSifField;
+  }
+
+  /**
+   * Whether the body, with the SIF fields already stripped, still carries a field the default
+   * CRUD must persist onto {@code c_tax}. The version token alone is not one.
+   */
+  private static boolean carriesTaxFields(JSONObject body) {
+    Iterator<?> keys = body.keys();
+    while (keys.hasNext()) {
+      if (!FIELD_UPDATED.equals(String.valueOf(keys.next()))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -237,16 +320,80 @@ public class TaxSifOverrideHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * The organization the read-side overlay resolves the legal entity from: {@code
+   * sifContextOrgId} when it is an organization of the caller's client that the caller may read
+   * (ETP-6062), otherwise the session organization — the same value a request without the param
+   * gets. A read never fails on the param; it just does not honour one that does not belong to
+   * the caller.
+   */
   private static String resolveContextOrganizationId(NeoContext context) {
+    OBContext obContext = context.getObContext() != null ? context.getObContext()
+        : OBContext.getOBContext();
     String sifContextOrgId = resolveSifContextOrgIdParam(context);
-    if (sifContextOrgId != null) {
+    if (sifContextOrgId != null && isReadableContextOrganization(sifContextOrgId, obContext)) {
       return sifContextOrgId;
     }
-    OBContext obContext = context.getObContext() != null ? context.getObContext() : OBContext.getOBContext();
+    if (sifContextOrgId != null) {
+      // The client-supplied value is not echoed into the log.
+      log.warn("TaxSifOverrideHandler.afterHandle: the context organization does not belong to "
+          + "the caller, using the session organization");
+    }
     if (obContext == null || obContext.getCurrentOrganization() == null) {
       return null;
     }
     return obContext.getCurrentOrganization().getId();
+  }
+
+  /**
+   * ETP-6062: a context organization a write may key the override on — not {@code *} ({@code
+   * 0}), one of the caller's writable organizations, and an organization of the caller's own
+   * client. The last condition also keeps the legal entity {@code AD_GET_ORG_LE_BU} resolves from
+   * it inside the caller's client.
+   */
+  private static boolean isWritableContextOrganization(String organizationId, OBContext obContext) {
+    return obContext != null && obContext.getWritableOrganizations() != null
+        && obContext.getWritableOrganizations().contains(organizationId)
+        && belongsToCurrentClient(organizationId, obContext);
+  }
+
+  /**
+   * ETP-6062: a context organization a read may resolve the overlay from — not {@code *}, one of
+   * the caller's readable organizations, and an organization of the caller's own client.
+   */
+  private static boolean isReadableContextOrganization(String organizationId, OBContext obContext) {
+    return obContext != null && obContext.getReadableOrganizations() != null
+        && java.util.Arrays.asList(obContext.getReadableOrganizations()).contains(organizationId)
+        && belongsToCurrentClient(organizationId, obContext);
+  }
+
+  /** Whether the organization exists and belongs to the current client; never {@code *}. */
+  private static boolean belongsToCurrentClient(String organizationId, OBContext obContext) {
+    if (SYSTEM_ORG_ID.equals(organizationId) || obContext.getCurrentClient() == null) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Organization organization = OBDal.getInstance().get(Organization.class, organizationId);
+      return organization != null && organization.getClient() != null
+          && StringUtils.equals(organization.getClient().getId(),
+              obContext.getCurrentClient().getId());
+    } catch (RuntimeException e) {
+      log.warn("TaxSifOverrideHandler: could not check the context organization: {}",
+          e.getClass().getSimpleName());
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static boolean carriesSifField(JSONObject body) {
+    for (String jsonKey : SIF_FIELD_TO_COLUMN.keySet()) {
+      if (body.has(jsonKey)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -269,12 +416,16 @@ public class TaxSifOverrideHandler implements NeoHandler {
    *       keeps working unmodified for the case this handler was originally built for.</li>
    * </ul>
    *
+   * <p>ETP-6062: the param must name an organization that belongs to the caller ({@link
+   * #isWritableContextOrganization}); {@link #handle} checks it first and refuses the write
+   * otherwise, so the value handed in here is already accepted.
+   *
+   * @param sifContextOrgId the accepted {@code sifContextOrgId}, or {@code null} when absent
    * @return the organization id to resolve the legal entity from; never null (falls back to the
    *     session organization's id, which the {@code obContext == null} early-return in
    *     {@link #handle} already guarantees is present)
    */
-  private static String resolveWriteOrganizationId(NeoContext context, OBContext obContext) {
-    String sifContextOrgId = resolveSifContextOrgIdParam(context);
+  private static String resolveWriteOrganizationId(String sifContextOrgId, OBContext obContext) {
     return sifContextOrgId != null ? sifContextOrgId : obContext.getCurrentOrganization().getId();
   }
 

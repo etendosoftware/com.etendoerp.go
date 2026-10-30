@@ -175,6 +175,47 @@ public interface NeoHandler {
   }
 
   /**
+   * Whether this update writes nothing onto the row it addresses: the customization's
+   * {@link #handle} stores the whole request elsewhere, in rows the current tenant owns, and
+   * answers it itself (ETP-6062).
+   *
+   * <p><b>Why.</b> The CRUD target guard ({@code NeoActionRecordGuard.writeRefusalFor}) refuses,
+   * before any customization runs, an update whose target row the current tenant cannot write —
+   * a System row shared by every client, for one. That is right whenever the update writes the
+   * row, and wrong for a customization that redirects the write: a tenant setting its own
+   * override of a System row never touches the System row. Only the customization knows its
+   * redirection covers the whole body, so it is the one that says so; shared code never names
+   * the entity.</p>
+   *
+   * <p><b>What the engine does with a {@code true}.</b> Asked only for a {@code PUT}/{@code PATCH}
+   * whose target the strict guard refuses, and only when the row exists and the current tenant
+   * can READ it. Then — and only then — the target-row guard is waived for this request; every
+   * other preflight check (reference ownership, activeness) still runs. A row of another tenant,
+   * an unknown id and a {@code DELETE} are refused as before, whatever this method answers.</p>
+   *
+   * <p><b>Contract.</b> Pure: no side effect, the body is read and never modified. Answer
+   * {@code true} only when {@link #handle} will answer this very request with a response of its
+   * own and leave the target row untouched. The engine holds the customization to it: when
+   * {@link #handle} declines (returns {@code null}) after a waiver, the default write step
+   * refuses with the same 404 the guard would have given, so a wrong answer can never write the
+   * row. Answer {@code false} for a body that also carries a field of the row itself.</p>
+   *
+   * <p>The decision is made on the keys as the request body carries them. On MCP the engine asks
+   * this method about the agent's raw fields, while {@link #handle} later receives the
+   * DAL-mapped body; if the two disagree, the backstop above refuses the write.</p>
+   *
+   * <p>Readers: {@code NeoWritePreflight} (REST single), MCP {@code etendo_update}. Batch
+   * writes are creates and have no target row.</p>
+   *
+   * @param context the update request context, carrying the request body as sent
+   * @return {@code true} when this update is entirely consumed into tenant-owned storage;
+   *         {@code false} by default
+   */
+  default boolean consumesTargetWrite(NeoContext context) {
+    return false;
+  }
+
+  /**
    * Declares DAL property names that the create-time callout cascade must not populate or
    * overwrite for this entity. The default is empty so handlers opt in only when a legacy
    * callout differs from the entity's NEO contract.
