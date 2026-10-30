@@ -28,6 +28,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
@@ -164,20 +165,7 @@ public class ProductTransactionsHandler implements NeoHandler {
       Map<String, BigDecimal> stockAfter = movementsTab && !isCountOnly(context)
           ? resolveStockAfter(txIds, isFilteredByWarehouse(context)) : new HashMap<>();
       for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject rec = dataArr.getJSONObject(i);
-        String id = rec.optString("id", null);
-        String[] target = targets.get(id);
-        if (target != null && target[0] != null && target[1] != null) {
-          rec.put("etgoDocHeaderId", target[0]);
-          rec.put("etgoDocWindow", target[1]);
-          if (target[2] != null) {
-            rec.put("etgoDocLabel", target[2]);
-          }
-        }
-        BigDecimal stock = stockAfter.get(id);
-        if (stock != null) {
-          rec.put("etgoStockAfter", stock);
-        }
+        enrichRow(dataArr.getJSONObject(i), targets, stockAfter);
       }
       if (movementsTab) {
         addTotalRows(context, previousResult.getBody());
@@ -186,6 +174,24 @@ public class ProductTransactionsHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error enriching product transactions with document targets", e);
       return context.getPreviousResult();
+    }
+  }
+
+  /** Adds the source document and, when resolved, the stock after the movement to one list row. */
+  private static void enrichRow(JSONObject rec, Map<String, String[]> targets, Map<String, BigDecimal> stockAfter)
+      throws JSONException {
+    String id = rec.optString("id", null);
+    String[] target = targets.get(id);
+    if (target != null && target[0] != null && target[1] != null) {
+      rec.put("etgoDocHeaderId", target[0]);
+      rec.put("etgoDocWindow", target[1]);
+      if (target[2] != null) {
+        rec.put("etgoDocLabel", target[2]);
+      }
+    }
+    BigDecimal stock = stockAfter.get(id);
+    if (stock != null) {
+      rec.put("etgoStockAfter", stock);
     }
   }
 
