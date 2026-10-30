@@ -392,6 +392,8 @@ final class McpConstants {
           + "who build this API find out what it is like to use.";
   /** Tool an agent calls to report friction in its own words (B3). */
   static final String TOOL_NEO_FEEDBACK = "etendo_feedback";
+  /** Tool that tells the agent the user, role, client and organization of its connection (G17). */
+  static final String TOOL_NEO_WHOAMI = "etendo_whoami";
   /**
    * Told to the agent by etendo_get and etendo_create so it knows a ready-made link is in the response
    * and never has to invent one (ETP-5200). Emitted only for header records, and only when the

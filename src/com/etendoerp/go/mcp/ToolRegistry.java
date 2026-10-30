@@ -94,6 +94,8 @@ public class ToolRegistry {
 
     // Always add etendo_discover if user can read
     if (permissions.canRead) {
+      // etendo-ai#53: first, because it is the call an agent should make first.
+      tools.add(buildWhoamiTool());
       tools.add(buildDiscoverTool());
       tools.add(buildDocsTool());
       // etendo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
@@ -340,7 +342,8 @@ public class ToolRegistry {
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
     // Static tools (e.g. docs) are not tied to any spec
     if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)
-        || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)) {
+        || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)
+        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)) {
       return null;
     }
     // IMP-53: etendo_discover's optional 'spec' narrows the catalog, it does not address a spec.
@@ -408,6 +411,30 @@ public class ToolRegistry {
       default:
         return false;
     }
+  }
+
+  // ── Whoami tool (etendo-ai#53, gap G17) ───────────────────────────────
+
+  /** The {@code etendo_whoami} tool, served by {@link McpWhoamiTool}. */
+  McpToolDefinition buildWhoamiTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put(McpWhoamiTool.PARAM_INCLUDE_PERMISSIONS, booleanProp(
+        "Optional, default false. true also lists the Etendo GO windows and reports your role "
+            + "can reach, grouped by menu category, each with its access (full or read-only) and "
+            + "the spec names to use with the other tools (specs for a window, spec for a "
+            + "report; an empty specs means the window is not in this catalog). Anything not "
+            + "listed is not reachable with this role. Use it to tell whether a refusal comes "
+            + "from the role before trying anything else."));
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_WHOAMI,
+        "Who this connection is: the user, the role (and whether it is an administrator), the "
+            + "client, the organization and the default warehouse every other tool runs under, "
+            + "plus what the role and token can do (showAccountingFields, the granted scopes), "
+            + "today's server date and time zone, the organization's currency and the user's "
+            + "language. Changes nothing and is cheap: call it first, and again whenever a call "
+            + "is refused unexpectedly. Each connection can use a different role, so never "
+            + "assume the role of a previous session.",
+        buildObjectSchema(props, List.of()));
   }
 
   // ── Discovery tool ─────────────────────────────────────────────────────
@@ -759,6 +786,8 @@ public class ToolRegistry {
         definition = McpOcrToolDefinitions.requestUpload(List.of()); break;
       case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
         definition = McpOcrToolDefinitions.extract(List.of()); break;
+      // etendo-ai#53: only includePermissions; anything else is refused.
+      case McpConstants.TOOL_NEO_WHOAMI: definition = registry.buildWhoamiTool(); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
