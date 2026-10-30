@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -42,6 +43,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -55,6 +57,9 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
+import org.openbravo.base.validation.ValidationException;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -62,6 +67,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
@@ -87,9 +93,14 @@ import org.openbravo.model.common.order.Order;
  * <p>ETP-5840: {@code Convertquotation} is refused for a foreign quotation without a rate, and the
  * created order's rate is recomputed from its own date instead of copied.
  *
+ * <p>ETP-5704: {@code DocAction} {@code RE} is refused unless the quotation is voided, through
+ * {@link DocActionRefusalGuard}; the DocAction cases resolve the effective action against a mocked
+ * DAL, so they reach the sync and the router for the right reason.
+ *
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
+ * @covers com.etendoerp.go.schemaforge.DocActionRefusalGuard
  */
 public class SalesQuotationHeaderHandlerTest {
 
@@ -183,41 +194,202 @@ public class SalesQuotationHeaderHandlerTest {
   // ── syncTotalDiscountOnDocAction wiring ───────────────────────────────────
 
   /**
-   * ACTION DocAction fires recalculate via syncTotalDiscountOnDocAction
-   * (mirrors the SendToEvaluationModal DR→UE path).
+   * ACTION DocAction fires recalculate via syncTotalDiscountOnDocAction — the SendToEvaluationModal
+   * DR→UE path: {@code fieldValues: {}} on a draft whose stored DocAction is {@code CO}. The
+   * Reactivate refusal (ETP-5704) resolves that action, finds CO and lets the request through to
+   * the sync and the router.
    */
   @Test
   public void testHandle_actionDocAction_triggersRecalculate() throws Exception {
     TotalDiscountService svc = mock(TotalDiscountService.class);
     NeoCloneRecordHandler clone = mock(NeoCloneRecordHandler.class);
-    when(clone.handle(any())).thenReturn(null);
+    Tab tab = mock(Tab.class);
+    OBDal dal = quotationDal(tab, "CO", "DR");
+    NeoContext ctx = docActionCtx("DocAction", "{\"fieldValues\":{}}", tab);
 
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("DocAction")
-        .recordId(QUOTATION_ID).build();
+    NeoResponse result = handleWithDal(handlerWith(svc, clone), ctx, dal);
 
-    handlerWith(svc, clone).handle(ctx);
-
+    assertNull(result);
     verify(svc).recalculate(QUOTATION_ID, false);
+    verify(clone).handle(ctx);
   }
 
   /**
-   * ACTION documentAction with empty body → neither path fires recalculate.
+   * ACTION documentAction with empty body → neither path fires recalculate: the body asks for no
+   * completion and, outside the MCP, the field-name spelling is not the sync's button name. The
+   * stored CO resolves, so the request reaches the router instead of failing closed.
    */
   @Test
   public void testHandle_actionDocumentActionNoBody_noRecalculate() throws Exception {
     TotalDiscountService svc = mock(TotalDiscountService.class);
     NeoCloneRecordHandler clone = mock(NeoCloneRecordHandler.class);
-    when(clone.handle(any())).thenReturn(null);
+    Tab tab = mock(Tab.class);
+    OBDal dal = quotationDal(tab, "CO", "DR");
+    NeoContext ctx = docActionCtx("documentAction", "{}", tab);
 
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("documentAction")
-        .recordId(QUOTATION_ID).requestBody(new JSONObject())
-        .build();
+    NeoResponse result = handleWithDal(handlerWith(svc, clone), ctx, dal);
 
-    handlerWith(svc, clone).handle(ctx);
-
+    assertNull(result);
+    verify(clone).handle(ctx);
     verify(svc, never()).recalculate(anyString(), anyBoolean());
+  }
+
+  // ── Reactivate (DocAction RE) refused unless the quotation is voided ──────
+
+  private static final String TAB_ID = "tab-quotation";
+  /** Stored-DocAction sentinel: the context carries no tab, so the action cannot be resolved. */
+  private static final String NO_TAB = "<no tab>";
+  /** Stored-DocAction sentinel: the tab resolves, no quotation has this id. */
+  private static final String RECORD_NOT_FOUND = "<record not found>";
+  /** Status sentinel: the DocAction resolves, but the quotation cannot be loaded for its status. */
+  private static final String STATUS_UNREADABLE = "<status unreadable>";
+  /** The DocAction list the stubbed property accepts, exact case, as the AD list does. */
+  private static final Set<String> DOC_ACTION_LIST = Set.of("CO", "RE", "RJ", "CL", "VO", "--");
+
+  /** A POST of the DocAction button (named {@code fieldName}) on the quotation, through {@code tab}. */
+  private static NeoContext docActionCtx(String fieldName, String body, Tab tab) throws Exception {
+    return NeoContext.builder()
+        .specName("sales-quotation").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName(fieldName).recordId(QUOTATION_ID).adTab(tab)
+        .requestBody(new JSONObject(body))
+        .build();
+  }
+
+  /**
+   * A DAL that resolves the quotation the way {@code DocActionResolution} and
+   * {@code SalesQuotationHeaderHandler.isNotVoided} read it: {@code tab} → its table → the
+   * quotation, whose stored DocAction is {@code stored} and whose status is {@code status}. A root
+   * {@code docAction} is written only when it is in {@link #DOC_ACTION_LIST}. Configures
+   * {@code tab}; call it on its own line, never inside a {@code thenReturn}.
+   */
+  private static OBDal quotationDal(Tab tab, String stored, String status) {
+    OBDal dal = mock(OBDal.class);
+    Table table = mock(Table.class);
+    Property documentAction = mock(Property.class);
+    Entity entity = mock(Entity.class);
+    Order quotation = mock(Order.class);
+    when(tab.getId()).thenReturn(TAB_ID);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getName()).thenReturn("Order");
+    doAnswer(invocation -> {
+      if (!DOC_ACTION_LIST.contains(invocation.getArgument(0))) {
+        throw new ValidationException();
+      }
+      return null;
+    }).when(documentAction).checkIsValidValue(any());
+    when(entity.hasProperty("documentAction")).thenReturn(true);
+    when(entity.getProperty("documentAction")).thenReturn(documentAction);
+    when(quotation.getEntity()).thenReturn(entity);
+    when(quotation.get("documentAction")).thenReturn(stored);
+    when(quotation.getDocumentStatus()).thenReturn(status);
+    when(dal.get(Tab.class, TAB_ID)).thenReturn(tab);
+    if (!RECORD_NOT_FOUND.equals(stored)) {
+      when(dal.get("Order", QUOTATION_ID)).thenReturn(quotation);
+    }
+    if (!STATUS_UNREADABLE.equals(status)) {
+      when(dal.get(Order.class, QUOTATION_ID)).thenReturn(quotation);
+    }
+    return dal;
+  }
+
+  /** Runs {@code handler.handle(ctx)} with {@code dal} as the DAL and admin mode a no-op. */
+  private static NeoResponse handleWithDal(SalesQuotationHeaderHandler handler, NeoContext ctx,
+      OBDal dal) {
+    try (MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      return handler.handle(ctx);
+    }
+  }
+
+  /**
+   * Reactivate guard through {@code handle()}: {@code RE} is refused with 400
+   * {@code ETGO_QuotationReactivateNotVoided} unless the stored {@code documentStatus} is
+   * {@code VO}, decided on the DocAction that will actually run (root {@code docAction} when the
+   * DAL accepts it, else the stored value — never {@code fieldValues}). An unknown id answers 404
+   * whatever the action; an action or status that cannot be read fails closed with 500
+   * {@code ETGO_DocActionCheckFailed}. A refusal reaches neither the total-discount sync nor the
+   * router. {@code RJ} keeps going to the reject flow, also from {@code fieldValues} on a quotation
+   * whose stored action is RE.
+   */
+  @Test
+  public void testHandle_reactivateIsRefusedUnlessVoided_table() throws Exception {
+    final String reject = "<reject flow>";
+    final String routed = "<router>";
+    final String notVoided = SalesQuotationHeaderHandler.MSG_REACTIVATE_NOT_VOIDED;
+    final String checkFailed = DocActionRefusalGuard.MSG_CHECK_FAILED;
+    // Columns: the label, the button name, the body, the stored DocAction, the stored status, the
+    // expected status (null when it is not refused) and the expected outcome: the refusal's
+    // messageKeys entry (else its error message), or the flow that answered.
+    Object[][] cases = {
+        { "root RE on a quotation under evaluation is refused",
+            "DocAction", "{\"docAction\":\"RE\"}", "CO", "UE", 400, notVoided },
+        { "root RE on a voided quotation runs",
+            "DocAction", "{\"docAction\":\"RE\"}", "RE", "VO", null, routed },
+        { "empty body runs the stored RE of a draft and is refused",
+            "DocAction", "{}", "RE", "DR", 400, notVoided },
+        { "root RE wins over fieldValues CO",
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}",
+            "CO", "UE", 400, notVoided },
+        { "fieldValues RE without root runs the stored CO",
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", "UE", null,
+            routed },
+        { "root re outside the list is not written, the stored RE runs and is refused",
+            "DocAction", "{\"docAction\":\"re\"}", "RE", "UE", 400, notVoided },
+        { "the button named by its field name is guarded too",
+            "documentAction", "{\"docAction\":\"RE\"}", "CO", "UE", 400, notVoided },
+        { "an unknown quotation id answers 404 whatever the action",
+            "DocAction", "{\"docAction\":\"CO\"}", RECORD_NOT_FOUND, "UE", 404,
+            NeoActionRecordGuard.MSG_RECORD_NOT_FOUND },
+        { "an action that cannot be resolved fails closed",
+            "DocAction", "{\"docAction\":\"RE\"}", NO_TAB, "UE", 500, checkFailed },
+        { "a status that cannot be read fails closed",
+            "DocAction", "{\"docAction\":\"RE\"}", "RE", STATUS_UNREADABLE, 500, checkFailed },
+        { "fieldValues RJ with a stored RE still goes to the reject flow",
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"RJ\"}}", "RE", "UE", null,
+            reject },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      String stored = (String) c[3];
+      Integer expectedStatus = (Integer) c[5];
+      String expected = (String) c[6];
+
+      TotalDiscountService svc = mock(TotalDiscountService.class);
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      RejectQuotationHandler rejectHandler = mock(RejectQuotationHandler.class);
+      SalesQuotationHeaderHandler handler = fullyWiredHandler(svc, router,
+          mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class), rejectHandler,
+          mock(CreateRejectReasonHandler.class));
+      Tab tab = mock(Tab.class);
+      OBDal dal = quotationDal(tab, stored, (String) c[4]);
+      NeoContext ctx = docActionCtx((String) c[1], (String) c[2],
+          NO_TAB.equals(stored) ? null : tab);
+      NeoResponse rejected = NeoResponse.ok(new JSONObject().put("documentStatus", "CJ"));
+      when(rejectHandler.reject(ctx)).thenReturn(rejected);
+
+      NeoResponse result = handleWithDal(handler, ctx, dal);
+
+      if (reject.equals(expected)) {
+        assertSame(label, rejected, result);
+        verify(router, never()).handle(any());
+      } else if (routed.equals(expected)) {
+        assertNull(label, result);
+        verify(rejectHandler, never()).reject(any());
+        verify(router).handle(ctx);
+      } else {
+        assertNotNull(label, result);
+        assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        JSONArray keys = error.optJSONArray(NeoProcessService.MESSAGE_KEYS);
+        assertEquals(label, expected,
+            keys != null && keys.length() > 0 ? keys.getString(0) : error.getString("message"));
+        verify(rejectHandler, never()).reject(any());
+        verify(router, never()).handle(any());
+        Mockito.verifyNoInteractions(svc);
+      }
+    }
   }
 
   // ── clone dispatch ────────────────────────────────────────────────────────
