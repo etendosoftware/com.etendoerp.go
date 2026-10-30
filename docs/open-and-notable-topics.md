@@ -1102,8 +1102,8 @@ missing-plan abort guard, the backfill `INSERT` and the `@report` contract. It p
 says, not what it does when run — idempotency and the convergence of `@check` are no longer checked
 by any test.
 
-**If restored:** the removed class is recoverable from git (`66f7489c6^`), with its two entries in
-`build.gradle`'s `isolatedDalTests` / `isolatedDalTestClasses`. It skips itself when the sibling
+**If restored:** the removed class is recoverable from git (`66f7489c6^`). As an
+`*IntegrationTest` it runs in `goIsolatedDalTest` with no `build.gradle` entry. It skips itself when the sibling
 schema_forge checkout is absent.
 
 ### 🟡 4.19 A block quota is enforced on creates only — a resource that grows otherwise is never refused (ETP-5051)
