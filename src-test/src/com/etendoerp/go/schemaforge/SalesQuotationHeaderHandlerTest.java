@@ -675,64 +675,67 @@ public class SalesQuotationHeaderHandlerTest {
    * <p>Passing {@code false} ensures the prices agreed in the quotation are kept in the
    * new sales order. The default behaviour ({@code true}) would re-fetch prices from the
    * active price list.
+   *
+   * <p>The button is reached under three names: its column ({@code Convertquotation}, the SPA),
+   * its field name ({@code convertquotation}, ETP-5710) and its DAL property name
+   * ({@code createOrder}), which is what every MCP call carries (ETP-5704 — until then it fell
+   * through to core's classic process, which recalculates prices and leaves the order Completed).
+   * None of them reaches the generic router, and none is taken for the DocAction button by the
+   * Reactivate refusal: no DAL is mocked here, so a DocAction resolution would fail closed.
    */
   @Test
   public void testHandle_convertQuotationAction_preservesQuotationPrices() throws Exception {
-    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
-    Order order = mock(Order.class);
-    when(order.getId()).thenReturn("order-001");
-    when(order.getDocumentNo()).thenReturn("SO-001");
-    when(process.convertQuotationIntoSalesOrder(eq(false), eq("q-001"))).thenReturn(order);
+    for (String action : new String[] { "Convertquotation", "convertquotation", "createOrder" }) {
+      ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      Order order = mock(Order.class);
+      when(order.getId()).thenReturn("order-001");
+      when(order.getDocumentNo()).thenReturn("SO-001");
+      when(process.convertQuotationIntoSalesOrder(eq(false), eq("q-001"))).thenReturn(order);
 
-    SalesQuotationHeaderHandler handler = fullyWiredHandler(
-        mock(TotalDiscountService.class),
-        mock(NeoCloneRecordHandler.class),
-        mock(CurrencyOptionsHandler.class),
-        mock(CreateDraftInvoiceHandler.class),
-        mock(RejectQuotationHandler.class),
-        mock(CreateRejectReasonHandler.class));
-    setField(handler, "convertQuotationProcess", process);
+      SalesQuotationHeaderHandler handler = fullyWiredHandler(
+          mock(TotalDiscountService.class),
+          router,
+          mock(CurrencyOptionsHandler.class),
+          mock(CreateDraftInvoiceHandler.class),
+          mock(RejectQuotationHandler.class),
+          mock(CreateRejectReasonHandler.class));
+      setField(handler, "convertQuotationProcess", process);
 
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-        .fieldName("Convertquotation").recordId("q-001").build();
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName(action).recordId("q-001").build();
 
-    NeoResponse result = handler.handle(ctx);
+      NeoResponse result = handler.handle(ctx);
 
-    // Non-null proves handle() short-circuited the default button handler.
-    assertNotNull(result);
-    // recalculatePrices=false is the critical invariant — quotation prices must be kept.
-    verify(process).convertQuotationIntoSalesOrder(false, "q-001");
+      // Non-null proves handle() short-circuited the default button handler.
+      assertNotNull(action, result);
+      // recalculatePrices=false is the critical invariant — quotation prices must be kept.
+      verify(process).convertQuotationIntoSalesOrder(false, "q-001");
+      verify(router, never()).handle(any());
+    }
   }
 
-  /** ETP-5710: an MCP etendo_action call reaches the handler under the button's field name. */
+  /**
+   * Which action names are the conversion button: its column, its DAL property name and its field
+   * name, exactly as spelled — never another casing, another button, a blank or a missing name.
+   */
   @Test
-  public void testHandle_convertQuotationByFieldName_preservesQuotationPrices() throws Exception {
-    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
-    Order order = mock(Order.class);
-    when(order.getId()).thenReturn("order-001");
-    when(order.getDocumentNo()).thenReturn("SO-001");
-    when(process.convertQuotationIntoSalesOrder(eq(false), eq("q-001"))).thenReturn(order);
-
-    SalesQuotationHeaderHandler handler = fullyWiredHandler(
-        mock(TotalDiscountService.class),
-        mock(NeoCloneRecordHandler.class),
-        mock(CurrencyOptionsHandler.class),
-        mock(CreateDraftInvoiceHandler.class),
-        mock(RejectQuotationHandler.class),
-        mock(CreateRejectReasonHandler.class));
-    setField(handler, "convertQuotationProcess", process);
-
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-        .fieldName("convertquotation").recordId("q-001").build();
-
-    NeoResponse result = handler.handle(ctx);
-
-    // Non-null proves handle() short-circuited the default button handler.
-    assertNotNull(result);
-    // recalculatePrices=false is the critical invariant — quotation prices must be kept.
-    verify(process).convertQuotationIntoSalesOrder(false, "q-001");
+  public void testIsConvertQuotationAction_table() {
+    Object[][] cases = {
+        { "Convertquotation", true },
+        { "createOrder", true },
+        { "convertquotation", true },
+        { "CreateOrder", false },
+        { "createorder", false },
+        { "DocAction", false },
+        { "", false },
+        { null, false },
+    };
+    for (Object[] c : cases) {
+      assertEquals(String.valueOf(c[0]), c[1],
+          SalesQuotationHeaderHandler.isConvertQuotationAction((String) c[0]));
+    }
   }
 
   // ── ETP-5528: the converted order is reactivated to Draft ─────────────────
@@ -742,16 +745,28 @@ public class SalesQuotationHeaderHandlerTest {
    * {@link OrderDocActionSupport} statically mocked by the caller.
    */
   private static NeoResponse convertQuotation(Order order) throws Exception {
-    return convertQuotation(order, (rates, session) -> { });
+    return convertQuotation("Convertquotation", order, (rates, session) -> { });
+  }
+
+  /** {@link #convertQuotation(Order)} reached under the action name {@code action}. */
+  private static NeoResponse convertQuotation(String action, Order order) throws Exception {
+    return convertQuotation(action, order, (rates, session) -> { });
+  }
+
+  /** {@link #convertQuotation(String, Order, java.util.function.BiConsumer)} as Convertquotation. */
+  private static NeoResponse convertQuotation(Order order,
+      java.util.function.BiConsumer<List<DocumentCurrencyRate>, Session> verifier)
+      throws Exception {
+    return convertQuotation("Convertquotation", order, verifier);
   }
 
   /**
-   * {@link #convertQuotation(Order)} with the DAL mocked (the quotation itself is not found, so the
-   * pre-conversion rate check lets it through) and every {@link DocumentCurrencyRate} built during
-   * the conversion mocked; {@code verifier} receives those and the session the order is refreshed
-   * on.
+   * {@link #convertQuotation(Order)} under the action name {@code action}, with the DAL mocked (the
+   * quotation itself is not found, so the pre-conversion rate check lets it through) and every
+   * {@link DocumentCurrencyRate} built during the conversion mocked; {@code verifier} receives
+   * those and the session the order is refreshed on.
    */
-  private static NeoResponse convertQuotation(Order order,
+  private static NeoResponse convertQuotation(String action, Order order,
       java.util.function.BiConsumer<List<DocumentCurrencyRate>, Session> verifier)
       throws Exception {
     ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
@@ -771,7 +786,7 @@ public class SalesQuotationHeaderHandlerTest {
       dalStatic.when(OBDal::getInstance).thenReturn(dal);
       NeoResponse result = handler.handle(NeoContext.builder()
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("Convertquotation").recordId("q-5528").build());
+          .fieldName(action).recordId("q-5528").build());
       verifier.accept(rates.constructed(), session);
       return result;
     }
@@ -788,21 +803,24 @@ public class SalesQuotationHeaderHandlerTest {
 
   /**
    * Core completes the order it creates: a CO order is reactivated through C_Order_Post 'RE' and
-   * the response reports the Draft status the procedure left.
+   * the response reports the Draft status the procedure left — also when the MCP reaches the
+   * button as {@code createOrder}, its property name (ETP-5704).
    */
   @Test
   public void testConvertQuotation_completedOrder_isReactivatedToDraft() throws Exception {
-    Order order = orderWithStatus("CO", "DR");
-    try (MockedStatic<OrderDocActionSupport> docAction =
-             Mockito.mockStatic(OrderDocActionSupport.class)) {
-      docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
+    for (String action : new String[] { "Convertquotation", "createOrder" }) {
+      Order order = orderWithStatus("CO", "DR");
+      try (MockedStatic<OrderDocActionSupport> docAction =
+               Mockito.mockStatic(OrderDocActionSupport.class)) {
+        docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
 
-      NeoResponse result = convertQuotation(order);
+        NeoResponse result = convertQuotation(action, order);
 
-      docAction.verify(() -> OrderDocActionSupport.runDocAction(order, "RE"));
-      assertEquals(200, result.getHttpStatus());
-      assertEquals("order-5528", result.getBody().getString("salesOrderId"));
-      assertEquals("DR", result.getBody().getString("documentStatus"));
+        docAction.verify(() -> OrderDocActionSupport.runDocAction(order, "RE"));
+        assertEquals(action, 200, result.getHttpStatus());
+        assertEquals(action, "order-5528", result.getBody().getString("salesOrderId"));
+        assertEquals(action, "DR", result.getBody().getString("documentStatus"));
+      }
     }
   }
 
@@ -932,7 +950,8 @@ public class SalesQuotationHeaderHandlerTest {
   /**
    * A foreign-currency quotation without a rate is not converted: the request answers the 422
    * completion refusal (organization and document ISO codes as params) and the conversion process
-   * is never called — on every channel, since both REST and MCP reach this pre-hook.
+   * is never called — on every channel, since both REST and MCP reach this pre-hook, the MCP under
+   * the button's property name {@code createOrder} (ETP-5704).
    */
   @Test
   public void testConvertQuotation_foreignQuotationWithoutRate_isRefused() throws Exception {
@@ -960,16 +979,19 @@ public class SalesQuotationHeaderHandlerTest {
       dalStatic.when(OBDal::getInstance).thenReturn(dal);
       currencies.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
 
-      NeoResponse result = handler.handle(NeoContext.builder()
-          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("Convertquotation").recordId("q-fx").build());
+      for (String action : new String[] { "Convertquotation", "createOrder" }) {
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName(action).recordId("q-fx").build());
 
-      assertEquals(422, result.getHttpStatus());
-      JSONObject error = result.getBody().getJSONObject("error");
-      assertEquals(DocumentRateMessages.CODE_MISSING_ON_COMPLETE, error.getString("code"));
-      JSONObject params = error.getJSONObject(NeoProcessService.MESSAGE_PARAMS);
-      assertEquals("eur-id", params.getString("orgCurrency"));
-      assertEquals("usd-id", params.getString("documentCurrency"));
+        assertEquals(action, 422, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals(action, DocumentRateMessages.CODE_MISSING_ON_COMPLETE,
+            error.getString("code"));
+        JSONObject params = error.getJSONObject(NeoProcessService.MESSAGE_PARAMS);
+        assertEquals(action, "eur-id", params.getString("orgCurrency"));
+        assertEquals(action, "usd-id", params.getString("documentCurrency"));
+      }
       verify(process, never()).convertQuotationIntoSalesOrder(anyBoolean(), anyString());
     }
   }
