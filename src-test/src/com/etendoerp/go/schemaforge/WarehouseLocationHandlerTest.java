@@ -22,11 +22,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -51,6 +53,7 @@ import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 
 /**
@@ -67,6 +70,12 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * {@link GoFeatureFlags#isEnabled} stubbed to {@code false} so the suite is independent of the
  * local {@code Openbravo.properties} toggle: only {@code country} is mandatory, the 3 structured
  * fields are never read nor written, and a GET response omits their keys entirely.
+ *
+ * <p>Since the ETP-5806 staged-rollout follow-up the flag is evaluated PER ACCOUNT (the requesting
+ * user's {@code ETGO_ACCOUNT} email, resolved by {@code GoAccountResolver}), so the write path
+ * agrees with the capability signal the UI renders from. The two tests at the end of the
+ * flag-OFF section pin exactly that: a targeted account is validated and persisted, an untargeted
+ * one in the same environment still gets the off behaviour.
  *
  * @covers com.etendoerp.go.schemaforge.WarehouseLocationHandler
  */
@@ -269,8 +278,13 @@ class WarehouseLocationHandlerTest {
       verify(geoLoc).setRegion(region);
       verify(obDal).save(geoLoc);
       verify(obDal).flush();
-      obContextStaticMock.verify(() -> OBContext.setAdminMode(true));
-      obContextStaticMock.verify(OBContext::restorePreviousMode);
+      // Once: handleCreate's own write block. GoAccountResolver.currentAccountEmail() would be
+      // the second elevation, but OBContext.getOBContext() is unstubbed here (so null) and it
+      // checks that before entering admin mode — no context means no identity to resolve, so it
+      // answers null without elevating. The flag is stubbed on any() context, so the missing
+      // targeting key does not change what this test asserts.
+      obContextStaticMock.verify(() -> OBContext.setAdminMode(true), times(1));
+      obContextStaticMock.verify(OBContext::restorePreviousMode, times(1));
 
       JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertEquals("geo-1", rec.getString("id"));
@@ -871,6 +885,101 @@ class WarehouseLocationHandlerTest {
     Method m = WarehouseLocationHandler.class.getDeclaredMethod("joinNonNull", String[].class);
     m.setAccessible(true);
     assertNull(m.invoke(null, (Object) new String[]{ null, null }));
+  }
+
+  // ── ETP-5806 follow-up: per-account targeting ─────────────────────────────
+
+  /** The account a (hypothetical) provider-side targeting rule names for the staged rollout. */
+  private static final String TARGETED_ACCOUNT = "localization@etendo.software";
+  private static final String OTHER_ACCOUNT = "someone.else@example.com";
+
+  /**
+   * Stubs the flag so it resolves {@code true} for {@link #TARGETED_ACCOUNT} ONLY — any other
+   * targeting key, including the account-less one the gating used before this follow-up, resolves
+   * {@code false}. That is the staged-rollout shape the whole fix exists for.
+   */
+  private MockedStatic<GoFeatureFlags> mockStructuredAddressFlagTargetedAt(String email) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+        argThat(ctx -> ctx != null && email.equals(ctx.getTargetingKey())))).thenReturn(true);
+    return flags;
+  }
+
+  /**
+   * A targeted account's write is validated and persisted even though the same environment
+   * resolves the flag {@code false} for everyone else — the gap this follow-up closed. Before it,
+   * the backend evaluated an account-less context here, so a targeted user saw the 3 fields in the
+   * UI, filled them in, and had them silently dropped by the "ignore, don't reject" contract.
+   */
+  @Test
+  void testCreateValidatesAndPersistsForATargetedAccount() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-targeted");
+    when(geoLoc.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("buildingName", "Torre A");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+
+    try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+        MockedStatic<GoFeatureFlags> flags =
+            mockStructuredAddressFlagTargetedAt(TARGETED_ACCOUNT)) {
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(TARGETED_ACCOUNT);
+
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Gran Via");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Torre A");
+      verify(geoLoc).setAddressLine1("Gran Via, 45 - Torre A");
+
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Gran Via", rec.getString("streetName"));
+    }
+  }
+
+  /**
+   * The same environment, a different account: the off behaviour is unchanged — the 3 fields are
+   * neither required, nor persisted, nor echoed back.
+   */
+  @Test
+  void testCreateKeepsTheOffBehaviourForAnUntargetedAccount() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-untargeted");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+    body.put("addressLine1", "Legacy free-text line");
+
+    try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+        MockedStatic<GoFeatureFlags> flags =
+            mockStructuredAddressFlagTargetedAt(TARGETED_ACCOUNT)) {
+      accounts.when(GoAccountResolver::currentAccountEmail).thenReturn(OTHER_ACCOUNT);
+
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc, never()).setOBSEPAStreetName(any());
+      verify(geoLoc, never()).setOBSEPABuildingNumber(any());
+      verify(geoLoc).setAddressLine1("Legacy free-text line");
+
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(rec.has("streetName"));
+    }
   }
 
   // ── private helpers ───────────────────────────────────────────────────────

@@ -138,6 +138,10 @@ public class ContactHandler extends AbstractPersonNameHandler {
       return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
     }
     String method = ctx.getHttpMethod();
+    // ETP-5351 (Vigia M1): deleting an AD_User (owner or admin included) is never a support action.
+    if ("DELETE".equals(method) && SupportAccessGuard.isActingSupportUser(ctx.getObContext())) {
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
     boolean isWrite = METHOD_POST.equals(method) || "PATCH".equals(method) || "PUT".equals(method);
     if (!isWrite) {
       return null;

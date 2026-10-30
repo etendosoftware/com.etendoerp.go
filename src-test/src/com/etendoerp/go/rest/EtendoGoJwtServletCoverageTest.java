@@ -1852,6 +1852,13 @@ public class EtendoGoJwtServletCoverageTest {
     field.set(data, value);
   }
 
+  /**
+   * ETP-5806 follow-up — the onboarding validators take the requesting account's email and
+   * evaluate {@code structured-address-for-sepa} for it (staged rollout), instead of the
+   * account-less constant they used to share with {@code StructuredAddressComposer}.
+   */
+  private static final String ACCOUNT_EMAIL_FOR_FLAG = "lola@example.com";
+
   private static MockedStatic<GoFeatureFlags> mockStructuredAddressFlag(boolean enabled) {
     MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
     flags.when(() -> GoFeatureFlags.isEnabled(
@@ -1872,12 +1879,13 @@ public class EtendoGoJwtServletCoverageTest {
     // check with the flag on.
 
     Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class);
+        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class,
+        String.class);
     validate.setAccessible(true);
     ResponseCapture resp = mockResponse();
 
     try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
-      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response, ACCOUNT_EMAIL_FOR_FLAG);
 
       assertTrue("flag off: validation never runs, so the incomplete block is accepted", result);
       verify(resp.response, never()).setStatus(anyInt());
@@ -1892,18 +1900,87 @@ public class EtendoGoJwtServletCoverageTest {
     setOnboardingField(data, "streetName", "Gran Via");
 
     Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class);
+        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class,
+        String.class);
     validate.setAccessible(true);
     ResponseCapture resp = mockResponse();
 
     try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
-      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response, ACCOUNT_EMAIL_FOR_FLAG);
 
       assertFalse(result);
       assertEquals(400, resp.status);
       assertTrue(resp.body(), resp.body().contains("buildingNumber"));
       assertTrue(resp.body(), resp.body().contains("city"));
     }
+  }
+
+  /**
+   * ETP-5806 follow-up — the onboarding validation resolves the flag for the REQUESTING ACCOUNT.
+   * A provider rule that names only the localization team turns the structured block on for that
+   * account while every other account in the same environment, and the account-less evaluation
+   * this used to do, resolve false.
+   */
+  @Test
+  public void validateStructuredAddressBlockIsTargetedAtTheGivenAccount() throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "Gran Via");
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class,
+        String.class);
+    validate.setAccessible(true);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlagTargetedAt()) {
+      ResponseCapture targeted = mockResponse();
+      assertFalse("targeted account: the incomplete block is validated and rejected",
+          (boolean) validate.invoke(servlet, data, targeted.response, ACCOUNT_EMAIL_FOR_FLAG));
+      assertEquals(400, targeted.status);
+
+      ResponseCapture other = mockResponse();
+      assertTrue("untargeted account: unchanged off behaviour, nothing is validated",
+          (boolean) validate.invoke(servlet, data, other.response, "someone.else@example.com"));
+      verify(other.response, never()).setStatus(anyInt());
+    }
+  }
+
+  /** Same per-account targeting for the length check, which gates the same 3 fields. */
+  @Test
+  public void validateStructuredAddressLengthIsTargetedAtTheGivenAccount() throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "A".repeat(71)); // EM_OBSEPA_StrtNm is VARCHAR(70)
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class,
+        String.class);
+    validate.setAccessible(true);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlagTargetedAt()) {
+      ResponseCapture targeted = mockResponse();
+      assertFalse("targeted account: the oversized street is rejected",
+          (boolean) validate.invoke(servlet, data, targeted.response, ACCOUNT_EMAIL_FOR_FLAG));
+      assertEquals(400, targeted.status);
+
+      ResponseCapture other = mockResponse();
+      assertTrue("untargeted account: the oversized field is never checked",
+          (boolean) validate.invoke(servlet, data, other.response, "someone.else@example.com"));
+      verify(other.response, never()).setStatus(anyInt());
+    }
+  }
+
+  /**
+   * Stubs the flag true for {@link #ACCOUNT_EMAIL_FOR_FLAG} ONLY — any other targeting key, and
+   * the account-less context the gating used before this follow-up, resolve false.
+   */
+  private static MockedStatic<GoFeatureFlags> mockStructuredAddressFlagTargetedAt() {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+        argThat(ctx -> ctx != null && ACCOUNT_EMAIL_FOR_FLAG.equals(ctx.getTargetingKey()))))
+        .thenReturn(true);
+    return flags;
   }
 
   /**
@@ -1916,12 +1993,13 @@ public class EtendoGoJwtServletCoverageTest {
     setOnboardingField(data, "streetName", "A".repeat(71)); // EM_OBSEPA_StrtNm is VARCHAR(70)
 
     Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class);
+        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class,
+        String.class);
     validate.setAccessible(true);
     ResponseCapture resp = mockResponse();
 
     try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
-      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response, ACCOUNT_EMAIL_FOR_FLAG);
 
       assertTrue("flag off: the oversized field is never checked", result);
       verify(resp.response, never()).setStatus(anyInt());
@@ -1936,12 +2014,13 @@ public class EtendoGoJwtServletCoverageTest {
     setOnboardingField(data, "streetName", "A".repeat(71));
 
     Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class);
+        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class,
+        String.class);
     validate.setAccessible(true);
     ResponseCapture resp = mockResponse();
 
     try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
-      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response, ACCOUNT_EMAIL_FOR_FLAG);
 
       assertFalse(result);
       assertEquals(400, resp.status);
@@ -1950,27 +2029,65 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   /**
-   * {@code buildSessionCapabilities()} (the onboarding session-bootstrap response) mirrors the
-   * live flag value in both directions.
+   * {@code buildSessionCapabilities(String)} (the onboarding session-bootstrap response) mirrors
+   * the live flag value in both directions.
    */
   @Test
   public void buildSessionCapabilitiesReflectsTheFlagOn() throws Exception {
-    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities");
+    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities", String.class);
     build.setAccessible(true);
 
     try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
-      JSONObject capabilities = (JSONObject) build.invoke(null);
+      JSONObject capabilities = (JSONObject) build.invoke(null, "user@example.com");
       assertTrue(capabilities.getBoolean("structuredAddressForSepa"));
     }
   }
 
   @Test
   public void buildSessionCapabilitiesReflectsTheFlagOff() throws Exception {
-    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities");
+    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities", String.class);
     build.setAccessible(true);
 
     try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
-      JSONObject capabilities = (JSONObject) build.invoke(null);
+      JSONObject capabilities = (JSONObject) build.invoke(null, "user@example.com");
+      assertFalse(capabilities.getBoolean("structuredAddressForSepa"));
+    }
+  }
+
+  /**
+   * ETP-5806 follow-up — {@code buildSessionCapabilities} now targets the flag on the restored
+   * session's real account email (not an account-less context), the same per-account pattern
+   * {@code bp-portal-link} already uses, so a Datadog targeting rule can match it.
+   */
+  @Test
+  public void buildSessionCapabilitiesTargetsTheRealAccountEmail() throws Exception {
+    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities", String.class);
+    build.setAccessible(true);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+      build.invoke(null, "lola@example.com");
+
+      flags.verify(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+          argThat(ctx -> "lola@example.com".equals(ctx.getTargetingKey()))));
+    }
+  }
+
+  /**
+   * A session restored with no resolvable account email (should not happen in practice, but the
+   * flag-evaluation contract is "never block, never fail, default false") degrades to an
+   * untargeted context instead of throwing.
+   */
+  @Test
+  public void buildSessionCapabilitiesDegradesGracefullyWithNoAccountEmail() throws Exception {
+    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities", String.class);
+    build.setAccessible(true);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      JSONObject capabilities = (JSONObject) build.invoke(null, (Object) null);
       assertFalse(capabilities.getBoolean("structuredAddressForSepa"));
     }
   }
@@ -4311,8 +4428,7 @@ public class EtendoGoJwtServletCoverageTest {
       throws Exception {
     PaidOnboardingStage stage = stagePaidOnboarding(pooled);
     doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
-        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any(),
-            any(), any(), any(), any());
+        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any());
     when(servlet.tenantPlanService.resolvePlan("own-productive"))
         .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
@@ -4395,12 +4511,12 @@ public class EtendoGoJwtServletCoverageTest {
     }
     assertEquals("Company data never fails the provisioning",
         PaidProvisioningService.Status.PROVISIONED, outcome[0].status());
-    ArgumentCaptor<String> address = ArgumentCaptor.forClass(String.class);
-    ArgumentCaptor<String> taxId = ArgumentCaptor.forClass(String.class);
+    ArgumentCaptor<com.etendoerp.go.onboarding.OrgInfoInput> orgInfo =
+        ArgumentCaptor.forClass(com.etendoerp.go.onboarding.OrgInfoInput.class);
     verify(servlet.onboardingOrgInfoService).ensureOrgInfo(anyString(), anyString(), anyString(),
-        anyString(), eq(input.countryCode()), address.capture(), any(), any(), any(), any(),
-        taxId.capture());
-    return new String[] { address.getValue(), taxId.getValue() };
+        anyString(), orgInfo.capture());
+    assertEquals(input.countryCode(), orgInfo.getValue().countryCode());
+    return new String[] { orgInfo.getValue().address(), orgInfo.getValue().taxId() };
   }
 
   /** ETP-5048 S4 — the draft's address and fiscal identifier reach the organization. */

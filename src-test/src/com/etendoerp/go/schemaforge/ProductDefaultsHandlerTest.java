@@ -2123,4 +2123,87 @@ public class ProductDefaultsHandlerTest {
       }
     }
   }
+
+  // ── the stocked / returnable defaults follow the product type ──
+
+  private static JSONObject stockDefaults(String productType) throws Exception {
+    JSONObject d = new JSONObject().put("stocked", true).put("returnable", true);
+    return productType == null ? d : d.put("productType", productType);
+  }
+
+  private static JSONObject afterDefaults(ProductDefaultsHandler handler, String asked,
+      JSONObject defaults) throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+      return handler.afterHandle(defaultsCtxAsking(asked, defaults))
+          .getBody().getJSONObject("defaults");
+    }
+  }
+
+  @Test
+  public void testDefaultsOfANonStockableTypeAreNotStockedNorReturnable() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+    for (String type : new String[] { "S", "E", "R" }) {
+      JSONObject d = afterDefaults(handler, type, stockDefaults("I"));
+      assertFalse(type, d.getBoolean("stocked"));
+      assertFalse(type, d.getBoolean("returnable"));
+    }
+  }
+
+  @Test
+  public void testDefaultsOfItemAndNoTypeKeepTheStockFlags() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject item = afterDefaults(handler, "I", stockDefaults("S"));
+    assertTrue(item.getBoolean("stocked"));
+    assertTrue(item.getBoolean("returnable"));
+
+    JSONObject none = afterDefaults(handler, null, stockDefaults("I"));
+    assertTrue(none.getBoolean("stocked"));
+    assertTrue(none.getBoolean("returnable"));
+
+    JSONObject noType = afterDefaults(handler, null, stockDefaults(null));
+    assertTrue(noType.getBoolean("stocked"));
+  }
+
+  @Test
+  public void testRequestedTypeOverridesTheTypeOfThePayloadForTheStockFlags() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    // The payload says Service, the caller asks for Item: Item wins and keeps true/true.
+    JSONObject asksItem = afterDefaults(handler, "I", stockDefaults("S"));
+    assertTrue(asksItem.getBoolean("stocked"));
+    // The payload says Item, the caller asks for Service.
+    JSONObject asksService = afterDefaults(handler, "S", stockDefaults("I"));
+    assertFalse(asksService.getBoolean("stocked"));
+    // Without a request the payload's own non-stockable type applies.
+    JSONObject payloadService = afterDefaults(handler, null, stockDefaults("S"));
+    assertFalse(payloadService.getBoolean("stocked"));
+    assertFalse(payloadService.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testOnlineTypeAndAnInvalidRequestedTypeLeaveTheStockFlagsAlone() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject online = afterDefaults(handler, "O", stockDefaults("I"));
+    assertTrue(online.getBoolean("stocked"));
+    assertTrue(online.getBoolean("returnable"));
+
+    // An unknown asked type is ignored, so the payload's Item stands.
+    JSONObject invalid = afterDefaults(handler, "ZZ", stockDefaults("I"));
+    assertTrue(invalid.getBoolean("stocked"));
+  }
+
+  @Test
+  public void testNonStockableDefaultsAreForcedEvenWithoutTheTypesTaxCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, null);
+
+    JSONObject d = afterDefaults(handler, "S", stockDefaults("I"));
+    assertFalse(d.getBoolean("stocked"));
+    assertFalse(d.getBoolean("returnable"));
+    assertFalse(d.has("typeTaxCategory"));
+  }
 }

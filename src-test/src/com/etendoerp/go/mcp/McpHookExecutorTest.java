@@ -43,6 +43,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -654,6 +656,87 @@ public class McpHookExecutorTest {
     assertFalse(result.has(FIELD_IS_ERROR));
     assertTrue(result.getJSONArray(FIELD_CONTENT).getJSONObject(0)
         .getString(FIELD_TEXT).contains("replaced"));
+  }
+
+  // ── runReadHook resolution (ETP-5806 follow-up) ───────────────────────
+
+  /**
+   * Repro for the live regression: an {@code @NeoExtension}-only handler (no
+   * {@code Java_Qualifier}, exactly {@code BpLocationHandler}'s binding) must still have its
+   * {@code afterHandle} run over an MCP {@code etendo_get}/{@code etendo_list} read.
+   *
+   * <p>Before the fix, {@code runReadHook} resolved its POST-phase handler with
+   * {@code resolveEntityHandler(sfEntity)} — {@code NeoHandlerLookup.byQualifier} alone, no
+   * annotation fallback. With a blank qualifier that always resolved to {@code null}, so the real
+   * dispatch call ({@code NeoExtensionDispatcher.dispatch}, left unmocked here) short-circuited on
+   * {@code NO_CUSTOMIZATION} and {@code afterHandle} never ran — the response the caller built
+   * came back unchanged. This test proves the opposite: with only
+   * {@code NeoExtensionDispatcher.resolveOnly} stubbed to return a handler (standing in for what
+   * the {@code @NeoExtension} annotation index would resolve) and {@code dispatch} itself real, the
+   * handler's {@code afterHandle} is invoked and its replacement body is what the read returns. A
+   * Mockito test that calls {@code handler.afterHandle(ctx)} directly — the shape
+   * {@code BpLocationHandlerTest}'s existing flag-off suite uses — would stay green through this
+   * exact regression, because it never exercises how {@code runReadHook} resolves the handler in
+   * the first place.
+   */
+  @Test
+  public void testRunReadHookInvokesAfterHandleOnAnAnnotationOnlyHandler() throws Exception {
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getJavaQualifier()).thenReturn(null); // @NeoExtension-only, no Java_Qualifier
+    Tab adTab = mock(Tab.class);
+    NeoHandler handler = mock(NeoHandler.class);
+    JSONObject originalBody = new JSONObject().put("id", "loc-1")
+        .put("response", new JSONObject().put("data",
+            new JSONArray().put(new JSONObject().put("id", "loc-1")
+                .put("streetName", "Real St"))));
+    JSONObject strippedBody = new JSONObject().put("id", "loc-1")
+        .put("response", new JSONObject().put("data", new JSONArray().put(new JSONObject()
+            .put("id", "loc-1"))));
+    when(handler.afterHandle(any(NeoContext.class))).thenReturn(NeoResponse.ok(strippedBody));
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<NeoExtensionDispatcher> dispatcher =
+            mockStatic(NeoExtensionDispatcher.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenReturn(handler);
+
+      McpHookExecutor.ReadHookOutcome outcome = McpHookExecutor.runReadHook(
+          "bp-location", "bpLocation", "loc-1", adTab, sfEntity, originalBody);
+
+      verify(handler).afterHandle(any(NeoContext.class));
+      assertNull(outcome.mcpError());
+      assertEquals(strippedBody, outcome.body());
+      assertFalse(outcome.body().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0).has("streetName"));
+    }
+  }
+
+  /**
+   * Symmetric case: when resolution finds nothing (no annotation, no qualifier — the ordinary
+   * entity with no customization at all), the read's own body is returned unchanged, exactly as
+   * before this fix.
+   */
+  @Test
+  public void testRunReadHookWithNoResolvedHandlerKeepsTheOriginalBody() throws Exception {
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getJavaQualifier()).thenReturn(null);
+    Tab adTab = mock(Tab.class);
+    JSONObject originalBody = new JSONObject().put("id", "x");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<NeoExtensionDispatcher> dispatcher =
+            mockStatic(NeoExtensionDispatcher.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenReturn(null);
+
+      McpHookExecutor.ReadHookOutcome outcome = McpHookExecutor.runReadHook(
+          "product", "product", "p-1", adTab, sfEntity, originalBody);
+
+      assertNull(outcome.mcpError());
+      assertEquals(originalBody, outcome.body());
+    }
   }
 
   // ── buildActionHookContext (ETP-4285) ─────────────────────────────────

@@ -82,6 +82,30 @@ final class McpQuerySupport {
   }
 
   /**
+   * ETP-5852 (M-188): appends {@code id} to an agent's {@code orderBy} so paging over a value many
+   * rows share (a date) is stable. Core sorts only by the fields it is given, and the database may
+   * return tied rows in a different order on each page, so a row could repeat on page 2 or never
+   * appear. Left as is when the caller already sorts by {@code id}.
+   *
+   * @param orderBy the caller's {@code orderBy}: comma-separated, each optionally {@code -}prefixed
+   *                or followed by {@code asc}/{@code desc}
+   * @return the same order with {@code id} as the last key
+   */
+  static String withIdTieBreak(String orderBy) {
+    if (StringUtils.isBlank(orderBy)) {
+      return orderBy;
+    }
+    for (String part : orderBy.split(",")) {
+      String name = StringUtils.removeStart(part.trim(), "-");
+      int space = name.indexOf(' ');
+      if ("id".equals(space < 0 ? name : name.substring(0, space))) {
+        return orderBy;
+      }
+    }
+    return orderBy + ",id";
+  }
+
+  /**
    * {@link #buildWhereFromFilters(JSONObject, Tab, SFEntity, org.apache.logging.log4j.Logger)},
    * with the customization's {@code filterAliases} honoured (ETP-5705).
    *
@@ -107,7 +131,13 @@ final class McpQuerySupport {
 
     // IMP-39: resolved once per request, not once per key - it costs one query, and the previous
     // contract was that the happy path pays nothing for the failure path's `available` list.
-    java.util.Set<String> excluded = excludedPropertyNames(sfEntity, dalEntity);
+    java.util.Set<String> excluded = new java.util.HashSet<>(
+        excludedPropertyNames(sfEntity, dalEntity));
+    // ETP-5852 (M-118): the link to the parent is how parentId scopes a child list (and the
+    // filter that satisfies the parent gate), so it stays filterable even when the spec does not
+    // publish it as a field: period control's documents excluded `period`, and every
+    // etendo_list(parentId) on them was refused as an unknown filter.
+    excluded.remove(McpParentScope.forEntity(sfEntity).getParentField());
 
     StringBuilder where = new StringBuilder();
     java.util.Iterator<String> keys = filters.keys();
@@ -123,7 +153,7 @@ final class McpQuerySupport {
       if (value instanceof JSONObject) {
         appendOperatorConditions(where, prop, target, key, (JSONObject) value);
       } else {
-        appendEqualityCondition(where, prop, target, value);
+        appendEqualityCondition(where, key, prop, target, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
@@ -566,15 +596,16 @@ final class McpQuerySupport {
    * Append {@code <path> = value} (or {@code <path>.id = 'value'} for a FK), type-aware, where
    * {@code <path>} is the expression from {@link #filterPath}.
    */
-  private static void appendEqualityCondition(StringBuilder where, Property prop, Property target,
+  private static void appendEqualityCondition(StringBuilder where, String key, Property prop,
+      Property target,
       Object value) {
     appendAnd(where);
     if (!prop.isPrimitive()) {
       where.append(filterPath(prop, target, ".id")).append('=')
-          .append(McpBusinessFilters.formatHqlValue(String.class, false, value));
+          .append(McpBusinessFilters.formatHqlValue(key, String.class, false, value));
     } else {
       where.append(filterPath(prop, target, "")).append('=').append(
-          McpBusinessFilters.formatHqlValue(prop.getPrimitiveObjectType(), true, value));
+          McpBusinessFilters.formatHqlValue(key, prop.getPrimitiveObjectType(), true, value));
     }
   }
 
@@ -586,31 +617,71 @@ final class McpQuerySupport {
     java.util.Iterator<String> ops = operators.keys();
     while (ops.hasNext()) {
       String op = ops.next();
+      appendAnd(where);
       if (McpBusinessFilters.OP_BETWEEN.equals(op)) {
-        JSONArray bounds = operators.optJSONArray(op);
-        if (bounds == null || bounds.length() != 2) {
-          // ETP-5184: same silent-drop shape as an unknown key. A malformed between used to be
-          // logged and skipped, so `{"amount":{"between":[100]}}` answered 200 with every row —
-          // the opposite of the narrowing the caller asked for.
-          throw McpRoutingException.malformedFilterOperator(key, op,
-              "the 'between' operator takes a two-element [from, to] array");
-        }
-        appendAnd(where);
-        where.append(path).append(" between ")
-            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
-            .append(" and ")
-            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
+        where.append(betweenCondition(path, prop, type, key, operators.optJSONArray(op)));
+      } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
+        where.append(containsCondition(path, prop, type, key, operators.get(op)));
+      } else if (McpBusinessFilters.OP_IN.equals(op)) {
+        String inPath = prop.isPrimitive() ? path : filterPath(prop, target, ".id");
+        where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(),
+            inValues(key, operators.optJSONArray(op))));
       } else {
         String sql = McpBusinessFilters.operatorToSql(op);
         if (sql == null) {
           throw McpRoutingException.unknownFilterOperator(key, op,
               McpBusinessFilters.operatorKeys());
         }
-        appendAnd(where);
         where.append(path).append(' ').append(sql).append(' ')
-            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), operators.get(op)));
+            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), operators.get(op)));
       }
     }
+  }
+
+  private static String betweenCondition(String path, Property prop, Class<?> type, String key,
+      JSONArray bounds) throws JSONException {
+    if (bounds == null || bounds.length() != 2) {
+      // ETP-5184: same silent-drop shape as an unknown key. A malformed between used to be
+      // logged and skipped, so `{"amount":{"between":[100]}}` answered 200 with every row —
+      // the opposite of the narrowing the caller asked for.
+      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_BETWEEN,
+          "the 'between' operator takes a two-element [from, to] array");
+    }
+    return path + " between "
+        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(0))
+        + " and "
+        + McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(1));
+  }
+
+  /**
+   * ETP-5852: partial text search. Only on a text column — on a number, date, boolean or foreign
+   * key a substring match is meaningless, so it is refused instead of guessed.
+   */
+  private static String containsCondition(String path, Property prop, Class<?> type, String key,
+      Object text) {
+    if (!prop.isPrimitive() || !String.class.equals(type)) {
+      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
+          "'contains' works only on text fields; use exact match, 'in' or a range here");
+    }
+    if (!(text instanceof String) || ((String) text).isEmpty()) {
+      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
+          "the 'contains' operator takes a non-empty text value");
+    }
+    return McpBusinessFilters.containsCondition(path, text);
+  }
+
+  /** ETP-5852: the values of an {@code in}, one request for several exact values. */
+  private static java.util.List<Object> inValues(String key, JSONArray values)
+      throws JSONException {
+    if (values == null || values.length() == 0) {
+      throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_IN,
+          "the 'in' operator takes a non-empty array of values");
+    }
+    java.util.List<Object> list = new java.util.ArrayList<>();
+    for (int i = 0; i < values.length(); i++) {
+      list.add(values.get(i));
+    }
+    return list;
   }
 
   /**

@@ -53,6 +53,14 @@ final class McpSelectorContextHelper {
   private static final String KEY_FIELD = "field";
   private static final String PARAM_IS_SO_TRX = "IsSOTrx";
   private static final String PARAM_IS_SO_TRX_LOWER = "isSOTrx";
+  /** ETP-5852 (M-57): the payment direction, as core's selector rules read it (@Isreceipt@). */
+  private static final String PARAM_IS_RECEIPT = "IsReceipt";
+  /**
+   * The spelling core's payment rules use ({@code C_DocType.IsSOTrx='@Isreceipt@'}). ComboTableData
+   * looks a rule parameter up by its exact spelling, so IsReceipt alone never reached it.
+   */
+  private static final String PARAM_IS_RECEIPT_RULE = "Isreceipt";
+  private static final String FIELD_RECEIPT = "receipt";
   private static final String PARAM_BPARTNER = "C_BPartner_ID";
   private static final String PARAM_BPARTNER_LOCATION = "C_BPartner_Location_ID";
   private static final String PARAM_IS_CUSTOMER = "isCustomer";
@@ -277,6 +285,19 @@ final class McpSelectorContextHelper {
     }
     copyContextIfPresent(context, PARAM_IS_CUSTOMER, contextParams, PARAM_IS_CUSTOMER);
     copyContextIfPresent(context, PARAM_IS_VENDOR, contextParams, PARAM_IS_VENDOR);
+    // ETP-5852 (M-57): the payment's direction (the record's `receipt` field, or the classic
+    // IsReceipt), as Y/N. It was not copied, so a rule on @Isreceipt@ found nothing.
+    String receipt = firstNonBlank(context, FIELD_RECEIPT, PARAM_IS_RECEIPT, "isReceipt",
+        PARAM_IS_RECEIPT_RULE);
+    if (StringUtils.isNotBlank(receipt)) {
+      contextParams.put(PARAM_IS_RECEIPT, toYesNo(receipt));
+      contextParams.put(PARAM_IS_RECEIPT_RULE, toYesNo(receipt));
+    }
+  }
+
+  private static String toYesNo(String value) {
+    String v = value.trim();
+    return "true".equalsIgnoreCase(v) || "Y".equalsIgnoreCase(v) ? "Y" : "N";
   }
 
   private static void copyDateContext(JSONObject context, Map<String, String> contextParams) {
@@ -327,6 +348,11 @@ final class McpSelectorContextHelper {
     if (isSOTrx != null) {
       contextParams.put(PARAM_IS_SO_TRX, isSOTrx);
       contextParams.put(PARAM_IS_SO_TRX_LOWER, isSOTrx);
+      // ETP-5852 (M-57): a payment window's sales flag is its direction — payments in are the
+      // sales side (receipts), payments out the purchase side — so the direction defaults from it
+      // when the caller did not send it, as the form's own context does.
+      contextParams.putIfAbsent(PARAM_IS_RECEIPT, isSOTrx);
+      contextParams.putIfAbsent(PARAM_IS_RECEIPT_RULE, contextParams.get(PARAM_IS_RECEIPT));
     }
   }
 

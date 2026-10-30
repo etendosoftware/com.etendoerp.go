@@ -26,6 +26,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
@@ -685,6 +687,55 @@ class NeoButtonActionHelperTest {
     }
 
     @Test
+    @DisplayName("ETP-5684: refusalForButtonProcess answers 403 when the role cannot run the button process")
+    void refusalForButtonProcessDeniesWithoutProcessAccess() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      Process classicProc = mock(Process.class);
+      doReturn("cproc1").when(classicProc).getId();
+      Column btnColumn = createButtonColumn("DocAction", classicProc, null);
+      setupFieldCriteria(new ArrayList<>(List.of(createMockField(btnColumn, "documentAction"))));
+      accessHelperMock.when(() -> NeoAccessHelper.hasProcessAccess("cproc1")).thenReturn(false);
+
+      NeoResponse response = NeoButtonActionHelper.refusalForButtonProcess(entity, "DocAction");
+
+      assertEquals(HttpServletResponse.SC_FORBIDDEN, response.getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("ETP-5684: refusalForButtonProcess lets the role through with access, and fails closed without a button")
+    void refusalForButtonProcessAllowsWithAccessFailsClosedWithoutButton() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      org.openbravo.client.application.Process obuiProc = mock(
+          org.openbravo.client.application.Process.class);
+      doReturn("proc1").when(obuiProc).getId();
+      Column btnColumn = createButtonColumn("Processed", null, obuiProc);
+      setupFieldCriteria(new ArrayList<>(List.of(createMockField(btnColumn, "processed"))));
+      accessHelperMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess("proc1")).thenReturn(true);
+
+      assertNull(NeoButtonActionHelper.refusalForButtonProcess(entity, "Processed"));
+      assertEquals(HttpServletResponse.SC_NOT_FOUND,
+          NeoButtonActionHelper.refusalForButtonProcess(entity, "NoSuchButton").getHttpStatus());
+      assertEquals(HttpServletResponse.SC_NOT_FOUND,
+          NeoButtonActionHelper.refusalForButtonProcess(null, "Processed").getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("ETP-5684: refusalForButtonProcess fails closed on a button with no process")
+    void refusalForButtonProcessFailsClosedWithoutProcess() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      Column btnColumn = createButtonColumn("DocAction", null, null);
+      setupFieldCriteria(new ArrayList<>(List.of(createMockField(btnColumn, "documentAction"))));
+      accessHelperMock.when(() -> NeoAccessHelper.resolveFallbackObuiappProcess(btnColumn))
+          .thenReturn(null);
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST,
+          NeoButtonActionHelper.refusalForButtonProcess(entity, "DocAction").getHttpStatus());
+    }
+
+    @Test
     @DisplayName("should return 403 when Classic process access denied")
     void shouldReturn403WhenClassicAccessDenied() throws Exception {
       SFEntity entity = mock(SFEntity.class);
@@ -958,6 +1009,7 @@ class NeoButtonActionHelperTest {
     private static final String BANK_STATEMENT_TABLE = "FIN_BankStatement";
     private static final String DERIVED_KEY = "FIN_BankStatement_ID";
     private static final String REAL_KEY = "FIN_Bankstatement_ID";
+    private static final String TABLE_ID = "table-1";
 
     private JSONObject invoke() throws Exception {
       Method method = NeoButtonActionHelper.class.getDeclaredMethod("addTabParamsCore",
@@ -973,6 +1025,8 @@ class NeoButtonActionHelperTest {
       doReturn(TAB_ID).when(tab).getId();
       when(tab.getTable()).thenReturn(table);
       when(table.getDBTableName()).thenReturn(dbTableName);
+      doReturn(TABLE_ID).when(table).getId();
+      when(dal.get(Table.class, TABLE_ID)).thenReturn(table);
       when(table.getADColumnList()).thenReturn(columns);
     }
 
@@ -1031,6 +1085,21 @@ class NeoButtonActionHelperTest {
 
       assertEquals(RECORD_ID, params.getString(DERIVED_KEY));
       assertEquals(2, params.length());
+    }
+
+    @Test
+    @DisplayName("ETP-5684: reads the key from the table re-read by id, not the detached one")
+    void testReadsTheKeyColumnFromTheReloadedTable() throws Exception {
+      givenKeyColumn(REAL_KEY);
+      givenTable(BANK_STATEMENT_TABLE, null);
+      Table reloaded = mock(Table.class);
+      when(reloaded.getADColumnList()).thenReturn(List.of(keyColumn));
+      when(dal.get(Table.class, TABLE_ID)).thenReturn(reloaded);
+
+      JSONObject params = invoke();
+
+      assertEquals(RECORD_ID, params.getString(REAL_KEY));
+      verify(table, never()).getADColumnList();
     }
 
     @Test

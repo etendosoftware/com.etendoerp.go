@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static com.etendoerp.go.schemaforge.LineAmountTestSupport.assertAmount;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -44,6 +45,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -635,6 +637,119 @@ class OrderLineDiscountSupportTest {
     verify(dal, times(expectedReads)).get(OrderLine.class, LINE_ID);
   }
 
+  /**
+   * ETP-6012: a public API {@code PATCH} of the quantity alone. {@code lineGrossAmount} is read-only
+   * on REST, so the save derives it again over the body: the body must carry the stored price and
+   * tax, or the gross is zeroed (no price) or taken at 0 % (no tax).
+   */
+  @Test
+  void sparseUpdateCarriesTheStoredPriceAndTax() throws Exception {
+    JSONObject json = new JSONObject("{\"orderedQuantity\":3}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals(3, json.getInt(OrderLineDiscountSupport.FIELD_ORDERED_QTY), "the caller's quantity is kept");
+    assertEquals(240, json.getInt(OrderLineDiscountSupport.FIELD_UNIT_PRICE));
+    assertEquals(TAX_ID, json.getString(OrderLineDiscountSupport.FIELD_TAX));
+    verify(dal, times(1)).get(OrderLine.class, LINE_ID);
+  }
+
+  @Test
+  void sparseUpdateNeverOverwritesAnInputTheCallerSent() throws Exception {
+    JSONObject json = new JSONObject("{\"orderedQuantity\":3,\"tax\":\"OTHER\"}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals("OTHER", json.getString(OrderLineDiscountSupport.FIELD_TAX));
+    assertEquals(240, json.getInt(OrderLineDiscountSupport.FIELD_UNIT_PRICE));
+  }
+
+  /**
+   * On a tax-included line the stored gross price would win the gross derivation, so a new net
+   * price must not carry it; a new quantity still does.
+   */
+  @Test
+  void aNewUnitPriceNeverCarriesTheStoredGrossPrice() throws Exception {
+    String taxIncludedLine = "{\"orderedQuantity\":2,\"unitPrice\":10,\"grossUnitPrice\":12.1,"
+        + "\"tax\":\"" + TAX_ID + "\"}";
+    JSONObject priceOnly = new JSONObject("{\"unitPrice\":20}");
+    JSONObject qtyOnly = new JSONObject("{\"orderedQuantity\":3}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, taxIncludedLine)) {
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", priceOnly, null));
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", qtyOnly, null));
+    }
+
+    assertFalse(priceOnly.has(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE));
+    assertEquals(2, priceOnly.getInt(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertEquals(12.1, qtyOnly.getDouble(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE));
+  }
+
+  @Test
+  void updateWithoutAnAmountInputCarriesNothingAndReadsNothing() throws Exception {
+    JSONObject json = new JSONObject("{\"description\":\"x\"}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.completeAmountInputsOnUpdate(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals(1, json.length());
+    verify(dal, times(0)).get(OrderLine.class, LINE_ID);
+  }
+
+  /** Through {@code applyLineRules}: a patch with no amount input carries nothing into the body. */
+  @Test
+  void applyLineRulesCarriesNoAmountInputIntoAnUpdateWithoutOne() throws Exception {
+    JSONObject json = new JSONObject("{\"description\":\"x\"}");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", json, null));
+    }
+
+    assertEquals(1, json.length());
+    assertFalse(json.has(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertFalse(json.has(OrderLineDiscountSupport.FIELD_TAX));
+  }
+
+  /**
+   * ETP-6012: a patch that sends only {@code discount} sends no amount input itself, but it
+   * reprices the line, so the stored quantity and tax are carried for the save's gross derivation.
+   */
+  @Test
+  void aDiscountOnlyUpdateCarriesTheStoredQuantityAndTax() throws Exception {
+    JSONObject json = new JSONObject("{\"discount\":10}");
+    OBDal dal = mock(OBDal.class);
+    Tab tab = mock(Tab.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE);
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class);
+        MockedStatic<NeoTypeCoercionHelper> coercion = mockStatic(NeoTypeCoercionHelper.class)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", json, tab));
+
+      cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(any(), any(),
+          any(), any(), any(), any(), any()), times(1));
+    }
+
+    assertEquals(10, json.getInt(OrderLineDiscountSupport.FIELD_ORDERED_QTY));
+    assertEquals(TAX_ID, json.getString(OrderLineDiscountSupport.FIELD_TAX));
+    assertEquals(10, json.getInt(OrderLineDiscountSupport.FIELD_DISCOUNT));
+  }
+
   // ── CP-9: an update of the price alone derives the discount ───────────
 
   /** Stored: list 300, discount 20, price 240, qty 5. */
@@ -745,6 +860,65 @@ class OrderLineDiscountSupportTest {
 
   static Stream<String> priceUpdateMethods() {
     return Stream.of("PATCH", "PUT");
+  }
+
+  /**
+   * ETP-5852: a new line priced by the agent below its list price gets the discount that price
+   * implies (33 → 29.70 is 10 %), with two decimals; a price on the list, a body that already says
+   * its discount (every form write), and a line with no list price are left alone.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("discountOnCreateCases")
+  void deriveDiscountOnCreateFollowsTheAgentPrice(String label, String body, String expected)
+      throws Exception {
+    JSONObject json = new JSONObject(body);
+
+    OrderLineCreateDiscount.derive(mcpCtx("POST", json));
+
+    if (expected == null) {
+      assertEquals(new JSONObject(body).toString(), json.toString(), label);
+    } else {
+      assertEquals(0, new BigDecimal(expected).compareTo(new BigDecimal(json.get("discount").toString())),
+          label + ": " + json);
+    }
+  }
+
+  static Stream<Arguments> discountOnCreateCases() {
+    return Stream.of(
+        Arguments.of("negotiated below list", "{\"listPrice\":33,\"unitPrice\":29.7}", "10"),
+        Arguments.of("non-round discount", "{\"listPrice\":12,\"unitPrice\":10}", "16.67"),
+        Arguments.of("price above list", "{\"listPrice\":10,\"unitPrice\":11}", "-10"),
+        Arguments.of("price on the list", "{\"listPrice\":33,\"unitPrice\":33.004}", null),
+        Arguments.of("form sends its discount", "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":10}", null),
+        Arguments.of("defaulted zero discount", "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":0}", "10"),
+        Arguments.of("no list price", "{\"listPrice\":0,\"unitPrice\":29.7}", null),
+        Arguments.of("no unit price", "{\"listPrice\":33}", null));
+  }
+
+  /** Only a CRUD create is a new line; an update or another endpoint is never touched. */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("priceUpdateMethods")
+  void deriveDiscountOnCreateIgnoresUpdates(String method) throws Exception {
+    JSONObject json = new JSONObject("{\"listPrice\":33,\"unitPrice\":29.7}");
+
+    OrderLineCreateDiscount.derive(mcpCtx(method, json));
+
+    assertTrue(!json.has("discount"));
+  }
+
+  /** A REST create (the app, the public API) keeps the values it sent: MCP only. */
+  @Test
+  void deriveDiscountOnCreateLeavesARestCreateAlone() throws Exception {
+    JSONObject json = new JSONObject("{\"listPrice\":33,\"unitPrice\":29.7}");
+
+    OrderLineCreateDiscount.derive(ctx("POST", NeoEndpointType.CRUD, json));
+
+    assertTrue(!json.has("discount"));
+  }
+
+  private static NeoContext mcpCtx(String method, JSONObject body) {
+    return NeoContext.builder().specName(SPEC).entityName(ENTITY).httpMethod(method)
+        .endpointType(NeoEndpointType.CRUD).mcpOrigin(true).requestBody(body).build();
   }
 
   // ── ETP-5881: a line sent without a price takes the price list's, on every channel ──

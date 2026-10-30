@@ -64,7 +64,8 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 /**
  * The handlers migrated to {@link NeoExtension} by ETP-5588: the financial-account, sales-invoice,
  * purchase-invoice and period-control headers, and the payment Reactivate/Confirm/Remove handler
- * split into one binding per entity. Their rows carry no {@code Java_Qualifier} and the classes no
+ * split into one binding per entity, later joined by the goods-shipment and sales-quotation
+ * headers. Their rows carry no {@code Java_Qualifier} and the classes no
  * {@code @Named}, so the annotation is the only binding. What can regress is the binding itself (a
  * wrong {@code (spec, entity)} pair, a {@code @Named} creeping back) and the resolution: every
  * channel and every entity-level reader must find the class with no qualifier to fall back on.
@@ -78,6 +79,8 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * @covers com.etendoerp.go.schemaforge.PeriodOpenCloseHandler
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentInReactivateHandler
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler
+ * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
  * @covers com.etendoerp.go.schemaforge.util.NeoHandlerLookup
  */
 @DisplayName("ETP-5588 — migrated handlers resolve through @NeoExtension alone")
@@ -93,7 +96,9 @@ class NeoExtensionMigrationTest {
       new Binding(PurchaseInvoiceHeaderHandler.class, "purchase-invoice", "header"),
       new Binding(PeriodOpenCloseHandler.class, "open-close-period-control", "periodControl"),
       new Binding(PaymentInReactivateHandler.class, "payment-in", "finPayment"),
-      new Binding(PaymentOutReactivateHandler.class, "payment-out", "header") };
+      new Binding(PaymentOutReactivateHandler.class, "payment-out", "header"),
+      new Binding(GoodsShipmentHeaderHandler.class, "goods-shipment", "goodsShipment"),
+      new Binding(SalesQuotationHeaderHandler.class, "sales-quotation", "quotation") };
 
   /** The bean classes to deploy in the mocked CDI container, one per migrated binding. */
   private static final List<Class<? extends NeoHandler>> MIGRATED_TYPES = Stream.of(MIGRATED)

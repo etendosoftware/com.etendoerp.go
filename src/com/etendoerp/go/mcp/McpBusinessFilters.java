@@ -30,7 +30,7 @@ import java.util.Map;
  * <ul>
  *   <li><b>Range operators</b> — {@code gt / lt / gte / lte / between} on any real property.
  *       {@link #operatorToSql(String)} maps the operator key to its SQL symbol and
- *       {@link #formatHqlValue(Class, boolean, Object)} renders the value for the property's Java
+ *       {@link #formatHqlValue(String, Class, boolean, Object)} renders the value for the property's Java
  *       type (numbers unquoted, booleans as {@code true/false}, dates via
  *       {@code to_date(...,'YYYY-MM-DD')}, everything else quoted &amp; escaped).</li>
  * </ul>
@@ -52,7 +52,22 @@ final class McpBusinessFilters {
   /** {@code between} range operator — its value is a two-element {@code [from, to]} array. */
   static final String OP_BETWEEN = "between";
 
+  /**
+   * {@code contains} text operator (ETP-5852) — case-insensitive substring match on a text
+   * property; its value is the text to look for.
+   */
+  static final String OP_CONTAINS = "contains";
+
+  /** {@code in} set operator (ETP-5852) — its value is a non-empty array of exact values. */
+  static final String OP_IN = "in";
+
   /** Range-operator keys mapped to their SQL comparison symbol (insertion order = doc order). */
+  /** ETP-5914: the type names an invalid filter value is reported against. */
+  static final String TYPE_NUMBER = "number";
+  static final String TYPE_DATE = "date";
+  static final String TYPE_BOOLEAN = "boolean";
+  private static final String NUMBER_PATTERN = "-?\\d+(\\.\\d+)?";
+
   private static final Map<String, String> OPERATORS = new LinkedHashMap<>();
 
   static {
@@ -75,12 +90,42 @@ final class McpBusinessFilters {
    * (ETP-5184). {@code between} is appended because it is handled outside {@link #OPERATORS} but
    * is just as valid a thing for a caller to have meant.
    *
-   * @return the operator keys in documentation order, {@code between} last
+   * @return the operator keys in documentation order, then {@code between}, {@code contains}, {@code in}
    */
   static java.util.List<String> operatorKeys() {
     java.util.List<String> keys = new java.util.ArrayList<>(OPERATORS.keySet());
     keys.add(OP_BETWEEN);
+    keys.add(OP_CONTAINS);
+    keys.add(OP_IN);
     return keys;
+  }
+
+  /**
+   * HQL for {@code contains}: {@code upper(path) like upper('%text%') escape '\'}. The text's own
+   * {@code \ % _} are escaped so they match literally instead of acting as wildcards, and the
+   * literal is quoted like every other value, so the caller's text can neither widen the match
+   * nor inject HQL.
+   */
+  static String containsCondition(String path, Object value) {
+    String text = value == null ? "" : String.valueOf(value);
+    String escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+    return "upper(" + path + ") like upper(" + quote("%" + escaped + "%") + ") escape '\\'";
+  }
+
+  /**
+   * HQL for {@code in}: {@code path in (v1, v2, ...)}, each value rendered by
+   * {@link #formatHqlValue} for the property's type, exactly like an equality filter.
+   */
+  static String inCondition(String key, String path, Class<?> javaType, boolean primitive,
+      java.util.List<Object> values) {
+    StringBuilder sb = new StringBuilder(path).append(" in (");
+    for (int i = 0; i < values.size(); i++) {
+      if (i > 0) {
+        sb.append(", ");
+      }
+      sb.append(formatHqlValue(key, javaType, primitive, values.get(i)));
+    }
+    return sb.append(')').toString();
   }
 
   /** @return {@code true} if {@code key} is any recognized range operator (including {@code between}). */
@@ -94,25 +139,65 @@ final class McpBusinessFilters {
    * {@code to_date(...,'YYYY-MM-DD')} (Openbravo registers {@code to_date} as an HQL function), and
    * anything else — including foreign keys — is single-quoted with quotes escaped.
    *
+   * <p>ETP-5914: a value that is not of the property's type is refused with a 422 naming the filter,
+   * the expected type and the value, instead of reaching the query: a quoted non-number failed it
+   * with a 500, a non-date was cleaned to an empty date that dropped the filter, and any non-"true"
+   * boolean was read as {@code false}.</p>
+   *
+   * @param key       the filter key, named by the refusal
    * @param javaType  the property's Java type ({@link org.openbravo.base.model.Property#getPrimitiveObjectType()}); may be {@code null}
    * @param primitive whether the property is primitive (a non-primitive is a FK compared by id string)
    * @param value     the raw filter value
    * @return the HQL literal, never {@code null}
+   * @throws McpRoutingException {@code 422 validation_error} for a value of the wrong type
    */
-  static String formatHqlValue(Class<?> javaType, boolean primitive, Object value) {
-    String raw = value == null ? "" : String.valueOf(value);
-    if (primitive && javaType != null) {
-      if (Number.class.isAssignableFrom(javaType)) {
-        return sanitizeNumber(raw);
-      }
-      if (Boolean.class.equals(javaType)) {
-        return Boolean.parseBoolean(raw) ? "true" : "false";
-      }
-      if (Date.class.isAssignableFrom(javaType)) {
-        return "to_date('" + sanitizeDate(raw) + "','YYYY-MM-DD')";
-      }
+  static String formatHqlValue(String key, Class<?> javaType, boolean primitive, Object value) {
+    String raw = value == null ? "" : String.valueOf(value).trim();
+    if (!primitive || javaType == null) {
+      return quote(raw);
+    }
+    if (Number.class.isAssignableFrom(javaType)) {
+      return number(key, raw, value);
+    }
+    if (Boolean.class.equals(javaType)) {
+      return bool(key, raw, value);
+    }
+    if (Date.class.isAssignableFrom(javaType)) {
+      return "to_date('" + isoDate(key, raw, value) + "','YYYY-MM-DD')";
     }
     return quote(raw);
+  }
+
+  private static String number(String key, String raw, Object value) {
+    if (!raw.matches(NUMBER_PATTERN)) {
+      throw McpRequestRefusals.invalidFilterValue(key, TYPE_NUMBER, value);
+    }
+    return raw;
+  }
+
+  private static String bool(String key, String raw, Object value) {
+    if (!"true".equalsIgnoreCase(raw) && !"false".equalsIgnoreCase(raw)) {
+      throw McpRequestRefusals.invalidFilterValue(key, TYPE_BOOLEAN, value);
+    }
+    return raw.toLowerCase(java.util.Locale.ROOT);
+  }
+
+  /**
+   * ETP-5914: the {@code YYYY-MM-DD} part of an ISO date or date-time, validated as a real date. A
+   * value that is not one is refused rather than cleaned: stripping it to its digits used to turn
+   * {@code "ayer"} into an empty date that silently dropped the filter. Parsed by
+   * {@code java.time}, so a well-shaped but impossible date (2026-02-30) is refused too.
+   */
+  private static String isoDate(String key, String raw, Object value) {
+    try {
+      if (raw.indexOf('T') < 0) {
+        return java.time.LocalDate.parse(raw).toString();
+      }
+      return java.time.LocalDate.from(
+          java.time.format.DateTimeFormatter.ISO_DATE_TIME.parse(raw)).toString();
+    } catch (java.time.DateTimeException e) {
+      throw McpRequestRefusals.invalidFilterValue(key, TYPE_DATE, value);
+    }
   }
 
   /** Quote and escape a value as an HQL string literal. */
@@ -120,16 +205,4 @@ final class McpBusinessFilters {
     return "'" + raw.replace("'", "''") + "'";
   }
 
-  /**
-   * Keep only a numeric literal; if the value is not a clean number fall back to a quoted string so
-   * a malformed input can never inject HQL.
-   */
-  private static String sanitizeNumber(String raw) {
-    return raw.matches("-?\\d+(\\.\\d+)?") ? raw : quote(raw);
-  }
-
-  /** Reject anything that is not an ISO-ish date so the {@code to_date} literal stays safe. */
-  private static String sanitizeDate(String raw) {
-    return raw.replaceAll("[^0-9-]", "");
-  }
 }

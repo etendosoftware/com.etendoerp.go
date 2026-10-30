@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mockStatic;
 
@@ -42,9 +43,11 @@ import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddre
  * {@code LocationSEPA.java::fillAddressLines}: these tests pin that algorithm (everything fits
  * on line 1, overflow to line 2 with a truncated building name, a street alone longer than the
  * line gets truncated, separators), not a reinterpretation of the ticket's simplified wording.
- * Also {@link #isEnabled}, which mirrors {@code GoFeatureFlags.isEnabled} for
- * {@code FLAG_STRUCTURED_ADDRESS_FOR_SEPA}, stubbed directly so the assertion is independent of
- * the local {@code Openbravo.properties} toggle.
+ * Also {@link StructuredAddressComposer#isEnabled(String)}, which mirrors
+ * {@code GoFeatureFlags.isEnabled} for {@code FLAG_STRUCTURED_ADDRESS_FOR_SEPA}, stubbed directly
+ * so the assertion is independent of the local {@code Openbravo.properties} toggle. Since the
+ * ETP-5806 staged-rollout follow-up it takes the account email and targets the evaluation at it,
+ * so the tests below also pin the targeting key reaching the provider.
  *
  * @covers com.etendoerp.go.schemaforge.util.StructuredAddressComposer
  */
@@ -196,32 +199,31 @@ class StructuredAddressComposerTest {
   @Nested
   class IsEnabled {
 
-    /** {@code isEnabled()} reflects {@link GoFeatureFlags#isEnabled} resolving {@code true}. */
+    /** Reflects {@link GoFeatureFlags#isEnabled} resolving {@code true}. */
     @Test
     void reflectsTheFlagResolvingTrue() {
       try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
         flags.when(() -> GoFeatureFlags.isEnabled(
             eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
 
-        assertTrue(StructuredAddressComposer.isEnabled());
+        assertTrue(StructuredAddressComposer.isEnabled("lola@example.com"));
       }
     }
 
-    /** {@code isEnabled()} reflects {@link GoFeatureFlags#isEnabled} resolving {@code false}. */
+    /** Reflects {@link GoFeatureFlags#isEnabled} resolving {@code false}. */
     @Test
     void reflectsTheFlagResolvingFalse() {
       try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
         flags.when(() -> GoFeatureFlags.isEnabled(
             eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
 
-        assertFalse(StructuredAddressComposer.isEnabled());
+        assertFalse(StructuredAddressComposer.isEnabled("lola@example.com"));
       }
     }
 
     /**
-     * {@code isEnabled()} queries exactly {@code FLAG_STRUCTURED_ADDRESS_FOR_SEPA} with a
-     * non-null (account-less/environment) context — never a different flag key, never a null
-     * context.
+     * Queries exactly {@code FLAG_STRUCTURED_ADDRESS_FOR_SEPA} with a non-null context — never a
+     * different flag key, never a null context.
      */
     @Test
     void queriesExactlyTheStructuredAddressFlagKey() {
@@ -229,10 +231,69 @@ class StructuredAddressComposerTest {
         flags.when(() -> GoFeatureFlags.isEnabled(
             eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
 
-        StructuredAddressComposer.isEnabled();
+        StructuredAddressComposer.isEnabled("lola@example.com");
 
         flags.verify(() -> GoFeatureFlags.isEnabled(
             eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any()));
+      }
+    }
+
+    /**
+     * ETP-5806 follow-up — the account email becomes the evaluation's targeting key, so a
+     * provider-side rule written against one account can turn the backend's own
+     * validate/persist/expose gating on for exactly that account.
+     */
+    @Test
+    void targetsTheGivenAccountEmail() {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+        StructuredAddressComposer.isEnabled("lola@example.com");
+
+        flags.verify(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+            argThat(ctx -> "lola@example.com".equals(ctx.getTargetingKey()))));
+      }
+    }
+
+    /**
+     * A targeted account resolves {@code true} while an untargeted one resolves {@code false} in
+     * the very same environment — the staged rollout this gating exists for. A global, account-less
+     * evaluation could not tell the two apart, which is what left the write path accepting per the
+     * global default while the UI already rendered the fields for the targeted account.
+     */
+    @Test
+    void resolvesPerAccountWithinTheSameEnvironment() {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+            argThat(ctx -> "lola@example.com".equals(ctx.getTargetingKey())))).thenReturn(true);
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+            argThat(ctx -> !"lola@example.com".equals(ctx.getTargetingKey())))).thenReturn(false);
+
+        assertTrue(StructuredAddressComposer.isEnabled("lola@example.com"));
+        assertFalse(StructuredAddressComposer.isEnabled("someone@example.com"));
+      }
+    }
+
+    /**
+     * A blank or {@code null} email is "no account", never "everyone": the context carries no
+     * targeting key at all, so an account-scoped rule cannot match it.
+     */
+    @Test
+    void blankEmailYieldsAnUntargetedEvaluation() {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+        assertFalse(StructuredAddressComposer.isEnabled(null));
+        assertFalse(StructuredAddressComposer.isEnabled("   "));
+
+        flags.verify(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+            argThat(ctx -> ctx.getTargetingKey() == null)), org.mockito.Mockito.times(2));
       }
     }
   }

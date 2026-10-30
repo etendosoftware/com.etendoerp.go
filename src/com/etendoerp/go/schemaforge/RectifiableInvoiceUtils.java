@@ -224,9 +224,9 @@ final class RectifiableInvoiceUtils {
   /**
    * Lists the invoices auto-detected from the return document's own chain: walks
    * {@code M_InOutLine.Canceled_Inoutline_ID} back to the original shipment/receipt line and from
-   * there to the invoices that billed it — the same navigation
-   * {@code SalesInvoiceHeaderHandler.enrichSourceInvoice} uses, only starting from the return
-   * document instead of the invoice. There is no header-level link between a return and its
+   * there to the invoices that billed it — the per-document form of the per-line navigation
+   * {@link SalesRectificativeLineLinkSupport} uses to link a rectificative (ETP-6002). There is
+   * no header-level link between a return and its
    * original document, so this has to go line by line.
    *
    * <p>These are only a <b>suggestion</b>. The chain exists just for returns created from a
