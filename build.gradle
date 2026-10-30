@@ -122,107 +122,69 @@ dependencies {
 }
 
 /**
- * ETP-4766 — run DAL-backed integration tests in their own JVM.
+ * ETP-4766 — run this module's DAL-backed tests in a JVM of their own, apart from the mocked ones.
  *
- * <p>{@code ReactivatePaymentHandlerRemoveIntegrationTest} extends {@code OBBaseTest}, whose
- * {@code @BeforeClass} initializes the DAL layer. When it shares a Gradle test worker with the
- * mocked handler tests that run before it, the Apache JDBC pool singleton is left without a
- * datasource, and DAL initialization dies with:</p>
+ * <p>Mocked tests leave JVM-wide state behind that a DAL test cannot survive. Three leaks are
+ * known, and the first two are reported by {@code StaticStateLeakListener}:</p>
+ * <ul>
+ * <li>an unbalanced {@code OBContext.setAdminMode()}: {@code OBBaseTest}'s
+ * {@code TestWatcher.finished()} then throws {@code IllegalStateException: Test case should take
+ * care of reseting admin mode correctly...} on whichever DAL test runs next;</li>
+ * <li>a {@code JdbcExternalConnectionPool} whose first {@code initPool()} ran under mocked
+ * properties and kept an empty pool map: DAL setup then dies with {@code "datasource" is
+ * null};</li>
+ * <li>a static initializer that failed without a CDI container, such as
+ * {@code DefaultJsonDataService}'s {@code WeldUtils.getInstanceFromStaticBeanManager(...)}: the
+ * class stays unusable for the rest of the JVM ({@code NoClassDefFoundError: Could not initialize
+ * class}). Nothing can repair this one from outside the JVM.</li>
+ * </ul>
  *
- * <pre>
- *   OBException: Failed to load reference classes
- *    └─ NPE: DataSource.getConnection() — "datasource" is null
- *       at OBBaseTest.staticInitializeDalLayer(OBBaseTest.java:447)
- * </pre>
+ * <p>Gradle packs classes into workers in an order that changes whenever a class is added or
+ * removed, so which DAL test paid for a leak moved from one merge block to the next. The earlier
+ * fix gave each affected class a JVM of its own ({@code forkEvery = 1}) and listed them here by
+ * hand; it grew to 18 classes, about half a minute of JVM and DAL start-up each.</p>
  *
- * <p>This is state leaking across classes inside one JVM, not a missing database: the other
- * {@code OBBaseTest} subclasses in this module initialize the DAL fine in the very same run. It
- * surfaced when this merge block added enough test classes to change how Gradle distributes them
- * across workers, which is also why it reproduces identically instead of coming and going.</p>
+ * <p>The DAL tests do not leak into each other: all of them pass together in a single JVM. So the
+ * split is by kind instead of by class: the root {@code test} task skips every
+ * {@code com.etendoerp.go} {@code *IntegrationTest}, and {@code goIsolatedDalTest} runs them all
+ * in one JVM, finalizing {@code test}. Membership is the same naming convention that
+ * {@code goTestUnit} and {@code scripts/check-unit-test-classification.sh} already rely on, so a
+ * new DAL test needs no entry here. The task keeps its old name because CI publishes its report
+ * from {@code build/reports/tests/goIsolatedDalTest}.</p>
  *
- * <p>ETP-4722 added a second symptom of the same contamination: a test whose assertions all
- * PASSED still fails because {@code OBBaseTest}'s {@code TestWatcher.finished()} finds the
- * admin-mode stack dirty and throws {@code IllegalStateException: Test case should take care of
- * reseting admin mode correctly...}. {@code OBContext.adminModeStack} is a static
- * {@code ThreadLocal} that {@code OBContext.setOBContext()} does not reset, and Gradle reuses one
- * "Test worker" thread across classes, so an unbalanced {@code setAdminMode()} left by any earlier
- * test in the worker is charged to whichever {@code OBBaseTest} subclass runs next. See
- * {@code docs/test-jvm-isolation.md} for both symptoms.</p>
- *
- * <p>The fix isolates the affected class into its own {@code Test} task with {@code forkEvery = 1},
- * so it always gets a pristine JVM. It is wired as {@code finalizedBy} the root {@code test} task
- * rather than as a separate CI step, so it keeps running in Jenkins without touching the pipeline
- * definition, and its failures still fail the build. A focused test run whose command-line filter
- * cannot select any of these Go tests skips this unrelated finalizer; an unfiltered run or a
- * filter that reaches a Go isolated test still executes it. JaCoCo coverage is preserved: the root
- * {@code jacocoRootReport} globs {@code build/jacoco/ ** /*.exec}, which picks up the new task's
- * execution data automatically.</p>
+ * <p>A {@code --tests} filter given to {@code test} also selects what this task runs, and
+ * {@code test} does not fail when such a filter only matches DAL tests, which it no longer runs.
+ * A filter that matches no Go DAL test skips this task. JaCoCo coverage is preserved: the root
+ * {@code jacocoRootReport} globs {@code build/jacoco/ ** /*.exec}.</p>
  *
  * <p>The root {@code test} task is contributed by the Etendo Gradle plugin and has no editable
  * source in this repository, so both the exclusion and the new task are declared here against
- * {@code rootProject}.</p>
+ * {@code rootProject}. See {@code docs/test-jvm-isolation.md}.</p>
  */
 // Declared as a local so the closures below capture it lexically, instead of relying on
 // property resolution against a delegate that is the root project / the task, not this module.
-def isolatedDalTests = [
-        '**/ReactivatePaymentHandlerRemoveIntegrationTest.class',
-        '**/CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest.class',
-        '**/CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest.class',
-        '**/CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest.class',
-        '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
-        '**/AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest.class',
-        '**/SubscriptionServiceIntegrationTest.class',
-        '**/GrandfatheredSubscriptionIntegrationTest.class',
-        '**/SubscriptionResubscriptionIntegrationTest.class',
-        '**/SubscriptionModelSwitchIntegrationTest.class',
-        '**/NeoCloneRecordHandlerInvoiceLinksIntegrationTest.class',
-        '**/ImportOrderLinesIntoInvoiceHandlerIntegrationTest.class',
-        // ETP-5778: passes alone but trips OBBaseTest's admin-mode check after other classes ran
-        // in the same worker (a leaked setAdminMode() from an earlier test), so it gets its own JVM.
-        '**/NeoListAggregateQueryIntegrationTest.class',
-        // ETP-5757: same WeldBaseTest + DefaultJsonDataService path, same admin-mode leak risk.
-        '**/DocumentListTotalsIntegrationTest.class',
-        // ETP-5863: same symptom in the merge-block cut; neither the class nor the selector path it
-        // runs calls setAdminMode() unbalanced, so the leak comes from an earlier class in the worker.
-        '**/NeoSelectorServiceValuePagingIntegrationTest.class',
-        // ETP-5051: commits on purpose (the quota gate's real commit/rollback) and its action case
-        // reads the JVM-wide default quota guard, whose 60 s client cache must start empty.
-        '**/NeoQuotaWriteGateIntegrationTest.class',
-        // ETP-5894: same symptom in the merge-block cut; the class and the receipt path it runs keep
-        // setAdminMode() balanced, so the leak comes from an earlier class in the worker.
-        '**/GoodsReceiptWarehouseSwitchReanchorIntegrationTest.class',
-        // ETP-5953: same symptom in the merge-block cut. Traced this time: NeoDefaultsServiceTest
-        // and NeoProcessServiceTest reach OBContext.setAdminMode() with no DAL, which pushes and
-        // then throws before the production try/finally, so the push leaks in the worker. Both
-        // now clear the stack after each test; the isolation keeps any other leaker away from it.
-        '**/NeoReferenceOwnershipIntegrationTest.class',
+def dbBackedGoTests = [
+        '**/com/etendoerp/go/**/*IntegrationTest.class',
 ]
 
-def isolatedDalTestClasses = [
-        'com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandlerRemoveIntegrationTest',
-        'com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest',
-        'com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest',
-        'com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest',
-        'com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest',
-        'com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest',
-        'com.etendoerp.go.payment.SubscriptionServiceIntegrationTest',
-        'com.etendoerp.go.payment.GrandfatheredSubscriptionIntegrationTest',
-        'com.etendoerp.go.payment.SubscriptionResubscriptionIntegrationTest',
-        'com.etendoerp.go.payment.SubscriptionModelSwitchIntegrationTest',
-        'com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest',
-        'com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandlerIntegrationTest',
-        'com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest',
-        'com.etendoerp.go.schemaforge.DocumentListTotalsIntegrationTest',
-        'com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest',
-        'com.etendoerp.go.schemaforge.NeoQuotaWriteGateIntegrationTest',
-        'com.etendoerp.go.schemaforge.GoodsReceiptWarehouseSwitchReanchorIntegrationTest',
-        'com.etendoerp.go.schemaforge.NeoReferenceOwnershipIntegrationTest',
-]
+// Class names of the Go DAL tests, read from the sources, to tell whether a --tests filter reaches any.
+def goIntegrationTestClasses = {
+    def root = file('src-test/src')
+    def names = []
+    if (root.isDirectory()) {
+        root.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+            if (f.name.endsWith('IntegrationTest.java')) {
+                names << (root.toPath().relativize(f.toPath()).toString() - '.java').replace(File.separator, '.')
+            }
+        }
+    }
+    names
+}
 
-def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->
+def commandLineFilterReachesGoIntegrationTest = { requestedTestPatterns, classNames ->
     requestedTestPatterns.isEmpty() || requestedTestPatterns.any { pattern ->
         String regex = '^' + pattern.replace('.', '\\.').replace('*', '.*') + '$'
-        isolatedDalTestClasses.any { className ->
+        classNames.any { className ->
             className ==~ regex || pattern.startsWith(className + '.')
         }
     }
@@ -234,23 +196,23 @@ rootProject.afterEvaluate { rootProj ->
         return
     }
 
-    isolatedDalTests.each { pattern -> rootTest.exclude(pattern) }
+    dbBackedGoTests.each { pattern -> rootTest.exclude(pattern) }
 
     def isolated = rootProj.tasks.findByName('goIsolatedDalTest')
     if (isolated == null) {
         isolated = rootProj.tasks.create('goIsolatedDalTest', Test) { Test t ->
             t.group = 'verification'
-            t.description = 'Runs com.etendoerp.go DAL integration tests one per JVM (see modules/com.etendoerp.go/build.gradle).'
+            t.description = 'Runs the com.etendoerp.go DAL integration tests together in one JVM, apart from the mocked tests (see modules/com.etendoerp.go/build.gradle).'
 
             t.testClassesDirs = rootTest.testClassesDirs
             t.classpath = rootTest.classpath
 
-            // A fresh JVM per class — the whole point of this task.
-            t.forkEvery = 1
+            // One JVM for every DAL test, none shared with mocked tests — the whole point of this task.
+            t.forkEvery = 0
             t.maxParallelForks = 1
 
             t.useJUnitPlatform()
-            isolatedDalTests.each { pattern -> t.include(pattern) }
+            dbBackedGoTests.each { pattern -> t.include(pattern) }
 
             // Nothing to run is not an error: the module may be absent from a given build.
             t.filter.failOnNoMatchingTests = false
@@ -265,11 +227,22 @@ rootProject.afterEvaluate { rootProj ->
         }
     }
 
-    // Command-line --tests patterns are applied to the root Test task after project configuration.
-    // Inspect them at execution time: run the finalizer only when its own Go tests are eligible.
-    isolated.onlyIf {
-        commandLineFilterReachesIsolatedGoTest(rootTest.filter.commandLineIncludePatterns)
+    // Command-line --tests patterns reach the root Test task after project configuration, so they
+    // are read once the task graph is ready, before either task runs.
+    boolean reachesGoDalTest = true
+    rootProj.gradle.taskGraph.whenReady { graph ->
+        if (!graph.hasTask(rootTest)) {
+            return
+        }
+        def requested = rootTest.filter.commandLineIncludePatterns
+        reachesGoDalTest = commandLineFilterReachesGoIntegrationTest(requested, goIntegrationTestClasses())
+        if (!requested.isEmpty() && reachesGoDalTest) {
+            requested.each { pattern -> isolated.filter.includeTestsMatching(pattern) }
+            // The DAL tests this filter selects run in goIsolatedDalTest, not here.
+            rootTest.filter.failOnNoMatchingTests = false
+        }
     }
+    isolated.onlyIf { reachesGoDalTest }
 
     rootTest.finalizedBy isolated
 }
@@ -294,14 +267,10 @@ rootProject.afterEvaluate { rootProj ->
  * that does not follow the convention fails that check, instead of failing inside a
  * database-less pipeline with a DAL stack trace that looks like an infrastructure problem.</p>
  *
- * <p>Declared against {@code rootProject} for the same reason as {@code goIsolatedDalTest} above:
- * the {@code test} task is contributed by the Etendo Gradle plugin and has no editable source in
+ * <p>It excludes {@code dbBackedGoTests}, declared above with {@code goIsolatedDalTest}. Declared
+ * against {@code rootProject} for the same reason as that task: the {@code test} task is contributed by the Etendo Gradle plugin and has no editable source in
  * this repository.</p>
  */
-def dbBackedGoTests = [
-        '**/*IntegrationTest.class',
-]
-
 rootProject.afterEvaluate { rootProj ->
     def rootTest = rootProj.tasks.findByName('test')
     if (rootTest == null || rootProj.tasks.findByName('goTestUnit') != null) {
@@ -385,8 +354,8 @@ rootProject.afterEvaluate { rootProj ->
  *   ./gradlew goCellCheck                                   # falla si hay tests sin célula
  * </pre>
  *
- * <p>Los de integración se ejecutan en {@code goCellIntegrationTest} con una JVM por clase, por
- * el mismo motivo que {@code goIsolatedDalTest} (ver arriba). Los de mocks, en
+ * <p>Los de integración se ejecutan en {@code goCellIntegrationTest}, en una JVM sin tests de mocks,
+ * por el mismo motivo que {@code goIsolatedDalTest} (ver arriba). Los de mocks, en
  * {@code goCellMockTest}.</p>
  */
 def cellsDir = file('src-test/cells')
@@ -457,17 +426,13 @@ rootProject.afterEvaluate { rootProj ->
         return
     }
 
-    def cellTask = { String name, String kind, boolean ownJvmPerClass ->
+    def cellTask = { String name, String kind ->
         rootProj.tasks.create(name, Test) { Test t ->
             t.group = 'verification'
             t.description = "Tests de schemaforge (${kind}) de las células indicadas con -Pcell."
             t.testClassesDirs = rootTest.testClassesDirs
             t.classpath = rootTest.classpath
             t.useJUnitPlatform()
-            if (ownJvmPerClass) {
-                t.forkEvery = 1
-                t.maxParallelForks = 1
-            }
             t.systemProperties = rootTest.systemProperties
             t.jvmArgs = rootTest.jvmArgs
             t.minHeapSize = rootTest.minHeapSize
@@ -488,8 +453,8 @@ rootProject.afterEvaluate { rootProj ->
         }
     }
 
-    def mockTask = cellTask('goCellMockTest', 'mock', false)
-    def integrationTask = cellTask('goCellIntegrationTest', 'integration', true)
+    def mockTask = cellTask('goCellMockTest', 'mock')
+    def integrationTask = cellTask('goCellIntegrationTest', 'integration')
     integrationTask.mustRunAfter mockTask
 
     rootProj.tasks.create('goCellTest') { t ->
