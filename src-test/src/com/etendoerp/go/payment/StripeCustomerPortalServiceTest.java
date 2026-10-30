@@ -6,6 +6,7 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -77,6 +78,32 @@ class StripeCustomerPortalServiceTest {
     assertEquals(2900L, detail.getAmountMinor());
     assertEquals("active", detail.getStatus());
     assertTrue(detail.isCancelAtPeriodEnd());
+  }
+
+  /**
+   * ETP-6060 — a portal cancellation of recent API versions: {@code cancel_at} set and
+   * {@code cancel_at_period_end} false. The page must still say it cancels, not that it renews.
+   */
+  @Test
+  void aCancelAtDateIsAScheduledCancellation() throws Exception {
+    StripeCustomerPortalService.SubscriptionDetail detail =
+        StripeCustomerPortalService.SubscriptionDetail.fromProviderJson(new JSONObject(
+            "{\"status\":\"active\",\"cancel_at_period_end\":false,\"cancel_at\":"
+                + PERIOD_END + ",\"items\":{\"data\":[{\"price\":{\"id\":\"price_1\","
+                + "\"nickname\":\"Productive\",\"unit_amount\":2900,\"currency\":\"eur\"}}]}}"));
+
+    assertTrue(detail.isCancelAtPeriodEnd());
+  }
+
+  @Test
+  void neitherFieldMeansTheSubscriptionRenews() throws Exception {
+    StripeCustomerPortalService.SubscriptionDetail detail =
+        StripeCustomerPortalService.SubscriptionDetail.fromProviderJson(new JSONObject(
+            "{\"status\":\"active\",\"cancel_at_period_end\":false,\"cancel_at\":null,"
+                + "\"items\":{\"data\":[{\"price\":{\"id\":\"price_1\","
+                + "\"nickname\":\"Productive\",\"unit_amount\":2900,\"currency\":\"eur\"}}]}}"));
+
+    assertFalse(detail.isCancelAtPeriodEnd());
   }
 
   // ===================== Plan name (nickname vs. product vs. price id) =====================

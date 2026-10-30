@@ -171,7 +171,9 @@ public class StripeCustomerPortalService {
       return new SubscriptionDetail(plan, price.optLong("unit_amount", 0L),
           StripeJson.text(price, "currency").toUpperCase(Locale.ROOT),
           StripeJson.text(subscription, "status"), renewalAt,
-          subscription.optBoolean("cancel_at_period_end", false));
+          // ETP-6060 — the portal of recent API versions schedules the period-end cancellation
+          // with a cancel_at date and leaves cancel_at_period_end false; either one counts.
+          SubscriptionLifecycleApplier.cancelAtPeriodEndOf(subscription).isSet());
     }
 
     public String getPlan() {

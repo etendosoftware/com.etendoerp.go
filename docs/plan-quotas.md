@@ -103,7 +103,7 @@ not checked.
 Read the NEO write path row literally:
 
 - **Only a create** is checked. An update, a delete, a process or a state change that makes an
-  existing row count is not.
+  existing row count is not — with one exception, invoice completion (§2.2).
 - **Only the counted entity.** The gate matches the created row's DAL entity against the
   resource's `COUNTED_ENTITY`; a create of anything else costs one in-memory map lookup and no
   query.
@@ -118,7 +118,8 @@ Read the NEO write path row literally:
 - **Only restrictions that hold at create time.** The row is matched as it is created. A
   restriction on a property that changes after the create — `e.posted = 'Y'`, a document status
   such as `e.documentStatus = 'CO'` — matches no new row, so a `block` quota on it is measured and
-  reported but **never refused on create** (§6). For a refusable cap, restrict on properties the
+  reported but **never refused on create** (§6). A restriction on an **invoice's**
+  `documentStatus` is refused at completion instead (§2.2). For a refusable cap, restrict on properties the
   row already has when it is created, for example `e.salesTransaction = true`, and use the `live`
   source for an exact cap (§4.5). Excluding a later state (`e.documentStatus <> 'VO'`) is fine:
   the new row does not have it yet, so it still matches.
@@ -193,6 +194,28 @@ nothing is saved.
 an invitation sent through `POST /sws/go/company-invitations` to an existing `AD_User` of the
 tenant that had none (that user starts taking a seat without the check). Both are still counted
 and reported.
+
+### 2.2 Invoice completion (ETP-6060)
+
+The shipped `SALES_INVOICES` resource counts **completed** sales invoices
+(`e.salesTransaction = true and e.documentStatus in ('CO', 'CL')`). A draft matches no such
+restriction, so the create check never refused one, and completing invoices past the cap went
+through. `InvoiceCompletionQuotaHook`, a `ProcessInvoiceHook`, checks every completion that runs
+through `ProcessInvoiceUtil` — NEO REST, batch and MCP (all complete through
+`InvoiceCompletionService`) and the backoffice:
+
+- **When:** in `preProcess`, before `C_Invoice_Post` and before any other hook can register the
+  invoice with a tax authority (TicketBAI sends in its `postProcess`, and hooks run in no
+  guaranteed order). Nothing is written to check.
+- **What:** the invoice *as the completion will leave it*: the restriction's `e.documentStatus` is
+  bound to `CO` (`UsageQueryComposer.composeRowMatchInRangeAs`, still validated and contained like
+  any restriction). Only a `block` quota whose restriction reads `e.documentStatus` is concerned;
+  an invoice that already counts is not charged again, and one the completion would not make
+  count (a purchase invoice) is let through.
+- **Answer:** the gate's 403 `QUOTA_EXCEEDED` (or 500 `QUOTA_CHECK_FAILED`), the invoice stays a
+  draft. The creation handlers that complete what they create (from an order, a shipment, a
+  return…) answer the same 403. The backoffice gets the quota sentence as the process error.
+- **Not covered:** posting, and the completion of any other document.
 
 ---
 
@@ -273,7 +296,15 @@ once (`LAST_VALIDATION_MS`).
 | Enforcement Mode | `off` / `warn` / `block`, **required, no default** | See the verdict table below |
 | Warning Threshold | 1–100 (percent) or empty | Empty: no early warning, only at the limit |
 | Consumption Source | `aggregate` (also when empty) or `live` | §5. The legacy value `sum` still stored on old rows reads as `aggregate` |
+| Warning Alert | `pinned` / `dismissible` / `hidden`, or empty | How the in-app banner shows this quota once the warning threshold is reached. Empty: `dismissible` (ETP-6060) |
+| Limit Alert | `pinned` / `dismissible` / `hidden`, or empty | How the banner shows it once the included quantity is reached (a DENY, or a `warn` quota past its limit). Empty: `pinned` for a DENY, `dismissible` for a `warn` quota (ETP-6060) |
 | Active | Y/N | An inactive row is no row: the resource is unlimited for the plan |
+
+**Warning Alert / Limit Alert are presentation only.** `pinned`: the banner has no close button;
+`dismissible`: the user closes it for the browser session (it comes back when a verdict changes);
+`hidden`: the quota never appears in the banner. None of them changes the verdict, the refusal of a
+`block` quota or what `/account` lists. They travel as `warningAlert` / `limitAlert` on every
+quota item; the SPA applies them (`quotaAlertBehavior`, schema_forge `lib/planQuotas.js`).
 
 The verdict, computed by `QuotaRules.verdict` from the consumption over the period:
 
@@ -470,9 +501,10 @@ Flag details: [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-u
 
 Each was accepted during ETP-5051; none is a bug to fix silently.
 
-- **A resource that grows through a state change is only warned about.** A restriction on a
-  property that changes after the create (`e.posted = 'Y'`, a document status) matches no row at
-  create time — an invoice is created unposted — so a `block` quota on it is never refused. It is
+- **A resource that grows through a state change is only warned about** — except an invoice
+  completed past the cap, refused since ETP-6060 (§2.2). A restriction on a
+  property that changes after the create (`e.posted = 'Y'`, another document's status) matches no
+  row at create time — an invoice is created unposted — so a `block` quota on it is never refused. It is
   measured and reported at the three report points. Refusing it at the state change means
   enforcing at posting: tier 4 (register §4.19). The configuration route to a refusable cap is a
   restriction that holds at create time, such as `e.salesTransaction = true` with `live` (§4.5).

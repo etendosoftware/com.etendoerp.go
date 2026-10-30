@@ -178,6 +178,57 @@ public final class NeoQuotaCreateCheck {
     checkAll(guard, checked, idsByEntity);
   }
 
+  /**
+   * ETP-6060 — checks a row before a status change that may make a {@code block} quota start
+   * counting it: completing an invoice, when the resource counts completed invoices only. Called
+   * before the change runs, so a refusal leaves nothing behind (no posting, no registration sent to
+   * a tax authority). Same failure handling as the create checks.
+   *
+   * @param row the row about to change, saved in the current transaction
+   * @param property the changed property, as the restrictions name it after {@code e.}
+   * @param targetValue the value the change will leave in it
+   * @throws Refused when the change would take its tenant over a {@code block} quota, or when the
+   *     check failed in a way that lost the transaction
+   */
+  public static void requireAllowedStatusChange(BaseOBObject row, String property,
+      String targetValue) {
+    requireAllowedStatusChange(row, property, targetValue, QuotaWriteGuard.getDefault());
+  }
+
+  static void requireAllowedStatusChange(BaseOBObject row, String property, String targetValue,
+      QuotaWriteGuard guard) {
+    Object id = row == null ? null : row.getId();
+    if (id == null || StringUtils.isBlank(row.getEntityName())) {
+      return;
+    }
+    String entityName = row.getEntityName();
+    Optional<QuotaClientCache.Entry> entry = entryIfChecked(guard, entityName);
+    if (entry.isEmpty()) {
+      return;
+    }
+    flush();
+    Optional<QuotaEvaluation> refusal;
+    try {
+      refusal = guard.refusalForStatusChange(entry.get(), entityName, id.toString(), property,
+          targetValue);
+    } catch (RuntimeException e) {
+      if (NeoQuotaWriteGate.isTransactionPoisoned(e)) {
+        log.error("[QUOTA] The quota check of a {} status change failed on the database; the "
+            + "transaction is lost, so nothing is saved ({})", entityName,
+            NeoQuotaWriteGate.CHECK_FAILED_CODE, e);
+        throw new Refused(NeoQuotaWriteGate.checkFailedResponse(), e);
+      }
+      log.error("[QUOTA] The quota check of a {} status change failed before reaching the "
+          + "database; the change runs", entityName, e);
+      return;
+    }
+    if (refusal.isPresent()) {
+      log.info("[QUOTA] Refused a {} status change to {}: {}", entityName, targetValue,
+          refusal.get());
+      throw new Refused(NeoQuotaWriteGate.refusalResponse(refusal.get()), null);
+    }
+  }
+
   /** The entities among {@code entityNames} a {@code block} quota of the client counts. */
   private static Map<String, QuotaClientCache.Entry> checkedEntities(QuotaWriteGuard guard,
       Collection<String> entityNames) {

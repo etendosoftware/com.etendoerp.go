@@ -65,6 +65,14 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="INCLUDES_API" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="HIGHLIGHT" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_PLAN_CLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -84,6 +92,8 @@
       <unique name="ETGO_PLAN_VALUE_UQ">
         <unique-column name="VALUE"/>
       </unique>
+      <check name="ETGO_PLAN_HIGHLIGHT_CHK"><![CDATA[HIGHLIGHT IS NULL OR (HIGHLIGHT IN ('popular', 'recommended'))]]></check>
+      <check name="ETGO_PLAN_INCLUDESAPI_CHK"><![CDATA[INCLUDES_API IN ('Y', 'N')]]></check>
       <check name="ETGO_PLAN_INTERVAL_CHK"><![CDATA[BILLING_INTERVAL IS NULL OR (BILLING_INTERVAL IN ('month', 'year'))]]></check>
       <check name="ETGO_PLAN_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_PLAN_PRICED_CHK"><![CDATA[PROVIDER_PRICE_ID IS NULL AND DISPLAY_PRICE IS NULL AND CURRENCY_CODE IS NULL OR PROVIDER_PRICE_ID IS NOT NULL]]></check>

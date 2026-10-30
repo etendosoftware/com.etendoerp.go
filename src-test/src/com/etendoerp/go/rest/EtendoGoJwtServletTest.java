@@ -86,7 +86,9 @@ import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.StripeResponse;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
@@ -2411,6 +2413,58 @@ public class EtendoGoJwtServletTest {
     assertEquals("month", plan.getString("billingInterval"));
   }
 
+  /**
+   * The plan chooser builds its cards from the catalog alone: what each plan includes (its quotas),
+   * whether it carries API access, and its storefront highlight. A seat quota is a headcount, any
+   * other is counted per subscription year, so the card can phrase each one.
+   */
+  @Test
+  public void plansCarryTheirQuotasApiAccessAndHighlight() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/plans", "valid-token");
+
+    Plan plan = mockPlan("pro", "Pro", "", new BigDecimal("45.00"), "EUR", "month");
+    when(plan.isIncludesAPI()).thenReturn(true);
+    when(plan.getHighlight()).thenReturn("popular");
+    Plan plain = mockPlan("start", "Start", "", new BigDecimal("11.00"), "EUR", "month");
+    PlanQuota invoices = mockQuota("SALES_INVOICES", "Facturas", "facturas", 3000L, null);
+    PlanQuota seats = mockQuota("USERS", "Usuarios", "usuarios", 4L, "tenantSeats");
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.listPurchasablePlans()).thenReturn(List.of(plain, plan));
+    when(catalog.listActiveQuotas(plan)).thenReturn(List.of(invoices, seats));
+    servlet.planCatalogService = catalog;
+
+    Account account = mockAccount();
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONArray plans = new JSONObject(resp.body()).getJSONArray("plans");
+    // No flag, no highlight, no quota rows: false, null and an empty list, never absent keys.
+    JSONObject start = plans.getJSONObject(0);
+    assertFalse(start.getBoolean("includesApi"));
+    assertTrue(start.isNull("highlight"));
+    assertEquals(0, start.getJSONArray("quotas").length());
+
+    JSONObject pro = plans.getJSONObject(1);
+    assertTrue(pro.getBoolean("includesApi"));
+    assertEquals("popular", pro.getString("highlight"));
+    JSONArray quotas = pro.getJSONArray("quotas");
+    assertEquals(2, quotas.length());
+    assertEquals("SALES_INVOICES", quotas.getJSONObject(0).getString("resourceKey"));
+    assertEquals("facturas", quotas.getJSONObject(0).getString("unitLabel"));
+    assertEquals(3000L, quotas.getJSONObject(0).getLong("includedQty"));
+    assertEquals("perYear", quotas.getJSONObject(0).getString("kind"));
+    assertEquals("USERS", quotas.getJSONObject(1).getString("resourceKey"));
+    assertEquals(4L, quotas.getJSONObject(1).getLong("includedQty"));
+    assertEquals("seats", quotas.getJSONObject(1).getString("kind"));
+  }
+
   @Test
   public void plansNeverExposeTheProviderPriceId() throws Exception {
     ResponseCapture resp = mockResponse();
@@ -2497,6 +2551,20 @@ public class EtendoGoJwtServletTest {
     when(plan.getCurrencyCode()).thenReturn(currencyCode);
     when(plan.getBillingInterval()).thenReturn(billingInterval);
     return plan;
+  }
+
+  private static PlanQuota mockQuota(String resourceKey, String resourceName, String unitLabel,
+      Long includedQty, String strategyQualifier) {
+    BillingResource resource = mock(BillingResource.class);
+    when(resource.getSearchKey()).thenReturn(resourceKey);
+    when(resource.getName()).thenReturn(resourceName);
+    when(resource.getUnitLabel()).thenReturn(unitLabel);
+    when(resource.getStrategyQualifier()).thenReturn(strategyQualifier);
+    PlanQuota quota = mock(PlanQuota.class);
+    when(quota.getBillingResource()).thenReturn(resource);
+    when(quota.getIncludedQty()).thenReturn(includedQty);
+    when(quota.getEnforcementMode()).thenReturn("block");
+    return quota;
   }
 
   // ===================== Helpers =====================
