@@ -184,6 +184,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `usage-aggregation-schedule` | `etendo.go.flags.usage-aggregation-schedule` | `ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | `structured-address-for-sepa` | `etendo.go.flags.structured-address-for-sepa` | `ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA` | absent ⇒ **`false`** (legacy single-line address; TTL 2026-11-15 — SEPA 2025 rulebooks ban unstructured addresses in SEPA remittance files from that date, per [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24)) |
 | `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
+| `product-movements-tab` | `etendo.go.flags.product-movements-tab` | `ETGO_FLAG_PRODUCT_MOVEMENTS_TAB` | absent ⇒ **`false`** (no Movements tab on the Product window; placeholder TTL 2027-01-31) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -209,6 +210,17 @@ Datadog targeting rule (e.g. "email is one of [...]") roll the feature out to th
 first, then the rest of Etendo, then everyone, instead of flipping it for every tenant at once; with
 no targeting rule configured it is still the plain per-environment boolean default, so the TTL stays
 a hard global deadline.
+
+`product-movements-tab` (ETP-5889) decides whether an account gets the read-only Movements tab of the
+Product window. One evaluator only, the backend: `ProductMovementsPolicy` evaluates the flag with the
+`ETGO_ACCOUNT` email as targeting key and the tenant as `clientId` attribute, `SFWindowAccessMap`
+publishes the answer as `capabilities.productMovements`, and the tab reads that capability. The
+browser never evaluates the flag, so a rule on email, tenant or percentage cannot make the two ends
+disagree; a change reaches a user when the access map is next loaded. `ProductTransactionsHandler`
+asks the same policy before adding `etgoStockAfter` and `etgoTotalRows`. A request with no account is
+evaluated account-less and gets the default (off). Only behaviour is gated: the stored computed
+columns of `M_Transaction`, their triggers and the `ETGO_SF_*` configuration ship unconditionally, so
+run `update.database` and check `ad_scd_check` = 0 before targeting any account. The flag is not access control: with it off the `/transactions` rows (and the new `etgoWarehouse`, `etgoDocKind` and `etgoDocHeaderId` fields) stay readable under the role's entity and organization access; it only withholds `etgoStockAfter` and `etgoTotalRows` and hides the tab.
 
 The email reaches each call site in one of two ways, and the split is the point — resolving it
 implicitly inside the shared evaluator would be wrong for the second group:

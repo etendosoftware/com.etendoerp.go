@@ -16,12 +16,15 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -53,6 +56,29 @@ import org.openbravo.dal.service.OBDal;
  * <p>Movement types with no GO window yet (production) are left without these
  * fields, so the frontend renders them as plain, non-navigable text. A single
  * batched native query resolves every row in the page.
+ *
+ * <p>It also serves the {@code transactions} entity of the Product window (the "Movements" tab,
+ * ETP-5889), where it adds one more field per row:
+ *
+ * <ul>
+ *   <li>{@code etgoStockAfter} &mdash; the stock of the product, across every warehouse, once that
+ *       movement is applied. It is a running sum of {@code MovementQty} over the whole history of
+ *       the product, in the order movement date, processing time, id, so it does not depend on the
+ *       filters, the sort or the page of the list. M_Transaction has no such column, and a field
+ *       injected here cannot be filtered or sorted, which is why the tab does not offer to.</li>
+ *   <li>{@code response.etgoTotalRows} &mdash; the exact number of movements of the product, only when
+ *       the request has no criteria. NEO's own {@code totalRows} is a lower bound on a partial page
+ *       (the rows returned plus one), so the tab counter cannot read it.</li>
+ * </ul>
+ *
+ * <p>All of that is behind {@link ProductMovementsPolicy} (the {@code product-movements-tab} flag,
+ * evaluated per account): off, the handler adds the document fields only, exactly as before ETP-5889.
+ *
+ * <p>Both only count what the user can read: the native queries filter by the readable
+ * organizations of the session, which a native query would otherwise bypass.
+ *
+ * <p>The stock is resolved apart from the document: if it fails, the rows keep their document
+ * fields and simply carry no {@code etgoStockAfter} (the tab shows a dash, never a zero).
  */
 @Named("productTransactionsHandler")
 public class ProductTransactionsHandler implements NeoHandler {
@@ -87,6 +113,31 @@ public class ProductTransactionsHandler implements NeoHandler {
       + "  LEFT JOIN m_internal_consumption ic ON ic.m_internal_consumption_id = icl.m_internal_consumption_id "
       + "WHERE t.m_transaction_id IN (:ids)";
 
+  // tx id -> stock of the product after that movement (all warehouses) and stock of the movement's own
+  // warehouse after it; the caller picks one by whether the list is filtered by warehouse. The window runs over the history of the
+  // products in the page up to the newest movement date of the page (a movement after every row of the
+  // page cannot change their running sum), then only the page rows are kept. The order key ends
+  // in the transaction id, so two movements never tie and the sum is deterministic.
+  private static final String STOCK_AFTER_SQL =
+      "SELECT s.m_transaction_id AS tx_id, s.stock_after AS stock_after, "
+      + "  s.stock_after_warehouse AS stock_after_warehouse "
+      + "FROM ( "
+      + "  SELECT t.m_transaction_id, "
+      + "    SUM(t.movementqty) OVER (PARTITION BY t.m_product_id "
+      + "      ORDER BY t.movementdate, t.trxprocessdate, t.m_transaction_id) AS stock_after, "
+      + "    SUM(t.movementqty) OVER (PARTITION BY t.m_product_id, t.em_etgo_warehouse_id "
+      + "      ORDER BY t.movementdate, t.trxprocessdate, t.m_transaction_id) AS stock_after_warehouse "
+      + "  FROM m_transaction t "
+      + "  WHERE t.m_product_id IN (SELECT p.m_product_id FROM m_transaction p WHERE p.m_transaction_id IN (:ids)) "
+      + "    AND t.ad_org_id IN (:orgs) "
+      + "    AND t.movementdate <= (SELECT MAX(q.movementdate) FROM m_transaction q WHERE q.m_transaction_id IN (:ids)) "
+      + ") s "
+      + "WHERE s.m_transaction_id IN (:ids)";
+
+  // Every movement of a product the session can read; the exact total the list cannot report.
+  private static final String TOTAL_ROWS_SQL =
+      "SELECT COUNT(*) FROM m_transaction t WHERE t.m_product_id = :productId AND t.ad_org_id IN (:orgs)";
+
   @Override
   public NeoResponse handle(NeoContext context) {
     return null;
@@ -105,9 +156,17 @@ public class ProductTransactionsHandler implements NeoHandler {
         return null;
       }
       Map<String, String[]> targets = resolveDocumentTargets(txIds);
+      // The extra work of the Product "Movements" tab (ETP-5889) runs only for the Product window and
+      // only for an account the flag is on for: the Warehouse window shares this handler and has no use
+      // for it, and an account that is off must not pay for it on the requests the side panel makes.
+      boolean movementsTab = isMovementsTab(context);
+      // The tab also asks for a single row only to read etgoTotalRows; that row needs no running sum.
+      Map<String, BigDecimal> stockAfter = movementsTab && !isCountOnly(context)
+          ? resolveStockAfter(txIds, isFilteredByWarehouse(context)) : new HashMap<>();
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
-        String[] target = targets.get(rec.optString("id", null));
+        String id = rec.optString("id", null);
+        String[] target = targets.get(id);
         if (target != null && target[0] != null && target[1] != null) {
           rec.put("etgoDocHeaderId", target[0]);
           rec.put("etgoDocWindow", target[1]);
@@ -115,11 +174,153 @@ public class ProductTransactionsHandler implements NeoHandler {
             rec.put("etgoDocLabel", target[2]);
           }
         }
+        BigDecimal stock = stockAfter.get(id);
+        if (stock != null) {
+          rec.put("etgoStockAfter", stock);
+        }
+      }
+      if (movementsTab) {
+        addTotalRows(context, previousResult.getBody());
       }
       return NeoResponse.ok(previousResult.getBody());
     } catch (Exception e) {
       log.error("Error enriching product transactions with document targets", e);
       return context.getPreviousResult();
+    }
+  }
+
+  /**
+   * Resolves, for each transaction id, the stock of its product once the movement is applied.
+   *
+   * <p>Never throws: a failure here must not cost the rows their document fields, so it is logged and
+   * an empty map is returned. A row with no value, or an unreadable one, is left out rather than
+   * reported as zero stock.
+   *
+   * @param txIds the M_Transaction ids visible in the current page
+   * @param perWarehouse {@code true} when the list is filtered by warehouse: the stock of that
+   *     warehouse after each movement instead of the stock of the product as a whole
+   * @return a map of transaction id to the stock after that movement
+   */
+  private Map<String, BigDecimal> resolveStockAfter(List<String> txIds, boolean perWarehouse) {
+    Map<String, BigDecimal> result = new HashMap<>();
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        @SuppressWarnings("unchecked")
+        NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(STOCK_AFTER_SQL);
+        query.setParameterList("ids", txIds);
+        query.setParameterList("orgs", readableOrganizations());
+        for (Object[] row : query.list()) {
+          BigDecimal stock = toStock(perWarehouse ? row[2] : row[1]);
+          if (stock != null) {
+            result.put((String) row[0], stock);
+          }
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error resolving the stock after each product transaction", e);
+      return new HashMap<>();
+    }
+    return result;
+  }
+
+  /**
+   * Whether this request is served for the Product "Movements" tab: the Product window's spec, for an
+   * account the {@code product-movements-tab} flag is on for ({@link ProductMovementsPolicy}).
+   */
+  private static boolean isMovementsTab(NeoContext context) {
+    return "product".equals(context.getSpecName()) && ProductMovementsPolicy.isEnabled();
+  }
+
+  /**
+   * Whether the list is filtered by warehouse: its {@code criteria} carry an {@code etgoWarehouse}
+   * equality. Then the resulting stock is the one of that warehouse, so it agrees with the rows shown.
+   * Anything that cannot be read as that criterion means "not filtered" (the stock of the product).
+   */
+  private static boolean isFilteredByWarehouse(NeoContext context) {
+    Map<String, String> params = context.getQueryParams();
+    String criteria = params == null ? null : params.get("criteria");
+    if (StringUtils.isBlank(criteria)) {
+      return false;
+    }
+    try {
+      JSONArray list = new JSONArray(criteria);
+      for (int i = 0; i < list.length(); i++) {
+        JSONObject criterion = list.optJSONObject(i);
+        if (criterion != null && "etgoWarehouse".equals(criterion.optString("fieldName"))
+            && "equals".equals(criterion.optString("operator"))
+            && StringUtils.isNotBlank(criterion.optString("value"))) {
+          return true;
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Unreadable criteria; the resulting stock stays the one of the product", e);
+    }
+    return false;
+  }
+
+  /**
+   * Whether the request is the tab's counter probe: one row ({@code _endRow=0}), asked only to read
+   * {@code etgoTotalRows}. A page of the list is never this small.
+   */
+  private static boolean isCountOnly(NeoContext context) {
+    Map<String, String> params = context.getQueryParams();
+    return params != null && "0".equals(params.get("_endRow"));
+  }
+
+  /**
+   * Adds {@code etgoTotalRows} to the response of a Product-window request that has no criteria and
+   * names its product, so the tab can show how many movements the product has. Never throws: without
+   * it the tab simply shows no counter.
+   */
+  private void addTotalRows(NeoContext context, JSONObject body) {
+    try {
+      Map<String, String> params = context.getQueryParams();
+      if (params == null || StringUtils.isNotBlank(params.get("criteria"))) {
+        return;
+      }
+      String productId = params.get("parentId");
+      JSONObject response = body == null ? null : body.optJSONObject("response");
+      if (StringUtils.isBlank(productId) || response == null) {
+        return;
+      }
+      OBContext.setAdminMode(true);
+      try {
+        @SuppressWarnings("unchecked")
+        NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(TOTAL_ROWS_SQL);
+        query.setParameter("productId", productId);
+        query.setParameterList("orgs", readableOrganizations());
+        Object total = query.uniqueResult();
+        if (total instanceof Number) {
+          response.put("etgoTotalRows", ((Number) total).longValue());
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error counting the movements of the product", e);
+    }
+  }
+
+  /** Organizations the session can read: a native query does not apply the DAL read restrictions. */
+  private static List<String> readableOrganizations() {
+    return Arrays.asList(OBContext.getOBContext().getReadableOrganizations());
+  }
+
+  /** Null for a missing or unreadable value: unlike {@code ProductHandlerUtils.toBigDecimal}, never 0. */
+  private static BigDecimal toStock(Object value) {
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof BigDecimal) {
+      return (BigDecimal) value;
+    }
+    try {
+      return new BigDecimal(value.toString());
+    } catch (NumberFormatException e) {
+      return null;
     }
   }
 

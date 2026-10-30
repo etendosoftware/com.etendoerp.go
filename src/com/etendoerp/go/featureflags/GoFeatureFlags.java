@@ -382,6 +382,34 @@ public final class GoFeatureFlags {
   public static final String FLAG_FISCAL_MODEL_390 = "fiscal-model-390";
 
   /**
+   * ETP-5889 — whether the Product window's "Movements" tab (the history of stock movements of a
+   * product) is switched on for an account. Gates behaviour only: the two stored computed columns of
+   * {@code M_Transaction} ({@code EM_Etgo_Warehouse_ID}, {@code EM_Etgo_Doc_Kind}), their triggers, the
+   * AD metadata and the NEO configuration ship unconditionally, like the columns of
+   * {@link #FLAG_CONTACT_CATEGORY_TYPE}.
+   *
+   * <p>Backend-only; never add it to {@code flag-keys.js}. The frontend reads
+   * {@code capabilities.productMovements} off {@code SFWindowAccessMap}'s response and never evaluates the
+   * flag itself: the tab hides, requests nothing and emits no telemetry while it is false. Off, the
+   * {@code ProductTransactionsHandler} also skips the extra work it does for that tab (the resulting
+   * stock of each movement and the exact total), which would otherwise run on every request the side
+   * panel already makes.
+   *
+   * <p><b>Evaluated per account</b>, with the account email of the session user as targeting key (same
+   * resolution as {@link #FLAG_BP_PORTAL_LINK}, in {@code ProductMovementsPolicy}): a targeting rule on the
+   * hosted control plane (Datadog Feature Flags, ConfigCat as the fallback) names the accounts. Positive
+   * polarity: {@code true} = the tab is on; the default ({@code false}, and every failure to resolve the
+   * account) is "hidden", which is the required pre-launch state. Locally
+   * {@code etendo.go.flags.product-movements-tab} / {@code ETGO_FLAG_PRODUCT_MOVEMENTS_TAB}, a plain boolean
+   * for everyone. Must also be created as a boolean setting on the hosted control plane before an account
+   * can be targeted: an undeclared setting resolves to this class's code default.
+   *
+   * <p>Callers: {@code ProductMovementsPolicy} (the only evaluator), used by {@code SFWindowAccessMap}
+   * (capability) and {@code ProductTransactionsHandler} (data).
+   */
+  public static final String FLAG_PRODUCT_MOVEMENTS_TAB = "product-movements-tab";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */
