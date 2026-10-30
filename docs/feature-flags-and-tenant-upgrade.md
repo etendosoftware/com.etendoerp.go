@@ -994,7 +994,7 @@ of the subscription (ETP-5049, additive):
 **Which subscription the page shows (ETP-5051, O-1).** An account can own several environments,
 each paid by its own Stripe subscription and customer. The page and the Customer Portal
 (`POST /sws/go/billing/subscription/portal`) resolve the purchase through the one servlet helper
-`findShownSubscription`, so the portal always acts on the subscription the page shows:
+`findShownSubscription` (or the company the caller names, below), so the portal always acts on the subscription the page shows:
 
 - **Session entered into an environment** (the cookie session's client, written by
   `POST /sws/go/session/environment`): that environment's own billable purchase,
@@ -1008,6 +1008,21 @@ each paid by its own Stripe subscription and customer. The page and the Customer
 - **No environment entered** (account-level session, or the legacy platform-token bearer, which
   carries no environment): the account's newest billable purchase
   (`CheckoutRequestStore#findSubscriptionForAccount`), as before.
+- **A company named by the caller (ETP-6060):** `GET /sws/go/billing/subscription?clientId=<id>`
+  answers that company's own purchase, whatever environment the session is in — the same rule as
+  the portal's `{"clientId": …}` body, through the shared `findRequestedSubscription`. "Mis
+  empresas" uses it to show each owned company's subscription. Ownership stays the store query's
+  (account id and email): a client this account did not buy answers `{"hasSubscription": false}`.
+  A blank value or `0` names no company and keeps the two rules above.
+
+**A scheduled cancellation reads from either field (ETP-6060).** The Customer Portal of recent
+Stripe API versions schedules "cancel at the end of the period" with a `cancel_at` date and leaves
+`cancel_at_period_end` false. Both the live detail (`cancelAtPeriodEnd` of this endpoint) and the
+stored `ETGO_SUBSCRIPTION.CANCEL_AT_PERIOD_END` (from `customer.subscription.*` events, which feeds
+the environment list's `renewalAt`) treat a non-null `cancel_at` as scheduled, whatever the flag
+says; `cancel_at: null` without the flag clears it. The HubSpot sync already read both
+(`StripeSubscriptionEvents`). Before the fix the page kept saying "renews on" after a portal
+cancellation.
 
 Ownership is the query's: both lookups filter on the account id and email, so a client id that is
 not one of the account's own purchases resolves to nothing, whoever owns that client.

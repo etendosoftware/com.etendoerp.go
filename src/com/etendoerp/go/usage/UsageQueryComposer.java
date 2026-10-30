@@ -50,6 +50,8 @@ public final class UsageQueryComposer {
   public static final String PARAM_RECORD_ID = "recordId";
   /** Named parameter for the ids left out of {@link #composePerTenantCountExcluding}. */
   public static final String PARAM_EXCLUDED_IDS = "excludedIds";
+  /** Named parameter for the value a status change leaves, used only by the row-match-as form. */
+  public static final String PARAM_TARGET_VALUE = "targetValue";
 
   private static final String ALIAS_OUTER = "outer_";
   private static final String AND = " and ";
@@ -170,6 +172,83 @@ public final class UsageQueryComposer {
       String restriction) {
     requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
     return rowMatch(entityName, dateProperty, restriction);
+  }
+
+  /**
+   * ETP-6060 — {@link #composeRowMatchInRange} for the row as a status change <em>will</em> leave
+   * it: every reference of the restriction to {@code e.<property>} reads
+   * {@link #PARAM_TARGET_VALUE} instead of the stored value. The NEO quota check of a completion
+   * runs it before the completion, when nothing irreversible has happened yet, to ask "will this
+   * row count once completed". The rewritten restriction is validated and contained like any other
+   * ({@link #appendRestriction}); only references outside string literals are rewritten.
+   *
+   * @param entityName the entity the row belongs to
+   * @param dateProperty the date property that places a row on a day
+   * @param restriction the resource's HQL fragment; it should reference {@code e.<property>}
+   *     ({@link #referencesRootProperty}), otherwise the change does not affect the match
+   * @param property the changed property, as the fragment names it after {@code e.}
+   * @return HQL selecting the row's {@code client.id} when it would match inside the range; bind
+   *     {@link #PARAM_RECORD_ID}, {@link #PARAM_DAY_START}, {@link #PARAM_DAY_END} and, when the
+   *     restriction references the property, {@link #PARAM_TARGET_VALUE}
+   */
+  public static String composeRowMatchInRangeAs(String entityName, String dateProperty,
+      String restriction, String property) {
+    requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
+    requireIdentifier(property, "property");
+    return rowMatch(entityName, dateProperty,
+        replaceRootProperty(restriction, property, ':' + PARAM_TARGET_VALUE));
+  }
+
+  /**
+   * ETP-6060 — whether a restriction reads {@code e.<property>} outside a string literal: whether a
+   * change of that property can change which rows the resource counts.
+   *
+   * @param restriction the HQL fragment; blank references nothing
+   * @param property the property name after {@code e.}
+   * @return true when the fragment references the property on the root alias
+   */
+  public static boolean referencesRootProperty(String restriction, String property) {
+    return StringUtils.isNotBlank(restriction) && StringUtils.isNotBlank(property)
+        && !restriction.equals(replaceRootProperty(restriction, property, "?"));
+  }
+
+  /**
+   * Replaces {@code e.<property>} — the root alias, not {@code x.e.<property>} nor
+   * {@code e.<property>Other} — outside string literals.
+   */
+  private static String replaceRootProperty(String restriction, String property,
+      String replacement) {
+    if (StringUtils.isBlank(restriction)) {
+      return restriction;
+    }
+    String reference = ALIAS_FRAGMENT + '.' + property;
+    StringBuilder out = new StringBuilder(restriction.length());
+    boolean inLiteral = false;
+    int i = 0;
+    while (i < restriction.length()) {
+      char c = restriction.charAt(i);
+      if (c == QUOTE) {
+        inLiteral = !inLiteral;
+      } else if (!inLiteral && restriction.startsWith(reference, i)
+          && !isPathChar(restriction, i - 1)
+          && !isPathChar(restriction, i + reference.length())) {
+        out.append(replacement);
+        i += reference.length();
+        continue;
+      }
+      out.append(c);
+      i++;
+    }
+    return out.toString();
+  }
+
+  /** Whether the character at {@code i} would continue an HQL path: a letter, digit, _ or dot. */
+  private static boolean isPathChar(String text, int i) {
+    if (i < 0 || i >= text.length()) {
+      return false;
+    }
+    char c = text.charAt(i);
+    return Character.isLetterOrDigit(c) || c == '_' || c == '.';
   }
 
   private static String rowMatch(String entityName, String dateProperty, String restriction) {

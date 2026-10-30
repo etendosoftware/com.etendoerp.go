@@ -398,6 +398,143 @@ class QuotaWriteGuardTest {
     }
   }
 
+  /**
+   * ETP-6060 — a resource that counts completed invoices does not match a draft, so the create
+   * check never refuses it; the completion is checked before it runs, on the row as it will be.
+   */
+  @Nested
+  @DisplayName("a status change")
+  class StatusChange {
+
+    private final QuotaDefinition completed = quota("DONE", "block", 2L, null)
+        .hqlRestriction("e.salesTransaction = true and e.documentStatus in ('CO', 'CL')").build();
+    private StatusChangeRowMatcher statusMatcher;
+    private QuotaWriteGuard statusGuard;
+
+    @BeforeEach
+    void setUpStatusGuard() {
+      statusMatcher = mock(StatusChangeRowMatcher.class);
+      when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, completed));
+      statusGuard = new QuotaWriteGuard(new QuotaClientCache(lookup, now::get), matcher,
+          statusMatcher, new QuotaEvaluator(lookup, reader, new MutableClock(NOW)),
+          requestClient::get);
+    }
+
+    private Optional<QuotaEvaluation> complete(String recordId) {
+      return statusGuard.refusalForStatusChange(statusGuard.entryIfChecked("Invoice").orElse(null),
+          "Invoice", recordId, "documentStatus", "CO");
+    }
+
+    private void willCount(String recordId) {
+      when(statusMatcher.tenantIfCountedAs(eq(completed), eq(recordId), any(),
+          eq("documentStatus"), eq("CO"))).thenReturn(CLIENT);
+    }
+
+    @Test
+    void aDraftThatTheCompletionWouldTakeOverTheQuotaIsRefused() {
+      willCount("DRAFT-1");
+      preCreate(completed, 2L);
+
+      Optional<QuotaEvaluation> refusal = complete("DRAFT-1");
+
+      assertTrue(refusal.isPresent());
+      assertEquals(QuotaVerdict.DENY, refusal.get().getVerdict());
+      assertEquals(Long.valueOf(2L), refusal.get().getConsumed());
+      verify(reader).readBeforeCreate(eq(completed), eq(CLIENT), any(), eq(List.of("DRAFT-1")));
+    }
+
+    @Test
+    void aDraftUnderTheQuotaMayBeCompleted() {
+      willCount("DRAFT-1");
+      preCreate(completed, 1L);
+
+      assertTrue(complete("DRAFT-1").isEmpty());
+    }
+
+    /** The row was charged when it started counting; changing it again charges nothing. */
+    @Test
+    void aRowThatAlreadyCountsIsNotChargedAgain() {
+      when(matcher.tenantIfCounted(eq(completed), eq("DONE-1"), any())).thenReturn(CLIENT);
+      preCreate(completed, 5L);
+
+      assertTrue(complete("DONE-1").isEmpty());
+      verifyNoInteractions(statusMatcher, reader);
+    }
+
+    /** A purchase invoice: completed, it still is no sales invoice. */
+    @Test
+    void aRowTheCompletionDoesNotMakeCountedStands() {
+      preCreate(completed, 5L);
+
+      assertTrue(complete("PURCHASE-1").isEmpty());
+      verifyNoInteractions(reader);
+    }
+
+    @Test
+    void aRowOfAnotherClientIsNotMeasured() {
+      when(statusMatcher.tenantIfCountedAs(eq(completed), eq("DRAFT-1"), any(),
+          eq("documentStatus"), eq("CO"))).thenReturn(OTHER_CLIENT);
+
+      assertTrue(complete("DRAFT-1").isEmpty());
+      verifyNoInteractions(reader);
+    }
+
+    /** Counted from creation on: the create check charged it, the completion must not. */
+    @Test
+    void aRestrictionThatDoesNotReadTheStatusIsLeftToTheCreateCheck() {
+      when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, INVOICES));
+      preCreate(INVOICES, 10L);
+
+      assertTrue(complete("DRAFT-1").isEmpty());
+      verifyNoInteractions(matcher, statusMatcher, reader);
+    }
+
+    @Test
+    void aTenantWithNoCurrentPeriodRunsNoMatch() {
+      when(lookup.forTenant(CLIENT)).thenReturn(
+          QuotaTestFixtures.tenantWithPeriod(CLIENT, null, null, false, completed));
+
+      assertTrue(complete("DRAFT-1").isEmpty());
+      verifyNoInteractions(matcher, statusMatcher, reader);
+    }
+
+    @Test
+    void noEntryOrNoRecordMeansNothingToCheck() {
+      assertTrue(statusGuard.refusalForStatusChange(null, "Invoice", "DRAFT-1", "documentStatus",
+          "CO").isEmpty());
+      assertTrue(statusGuard.refusalForStatusChange(statusGuard.entryIfChecked("Invoice").get(),
+          "Invoice", null, "documentStatus", "CO").isEmpty());
+      verifyNoInteractions(matcher, statusMatcher, reader);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void theProductionMatcherBindsTheTargetValue() {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      Query<String> query = mock(Query.class);
+      when(dal.getSession()).thenReturn(session);
+      when(session.createQuery(anyString(), eq(String.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.setMaxResults(1)).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(CLIENT);
+      QuotaPeriod period = QuotaPeriod.current(PERIOD_START, PERIOD_END, false, NOW);
+
+      String tenant;
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+        tenant = StatusChangeRowMatcher.dal().tenantIfCountedAs(completed, "DRAFT-1", period,
+            "documentStatus", "CO");
+      }
+
+      assertEquals(CLIENT, tenant);
+      verify(session).createQuery(UsageQueryComposer.composeRowMatchInRangeAs("Invoice",
+          "invoiceDate", completed.getHqlRestriction(), "documentStatus"), String.class);
+      verify(query).setParameter(UsageQueryComposer.PARAM_TARGET_VALUE, "CO");
+      verify(query).setParameter(UsageQueryComposer.PARAM_RECORD_ID, "DRAFT-1");
+    }
+  }
+
   @Nested
   @DisplayName("the production matcher")
   class DalMatcher {

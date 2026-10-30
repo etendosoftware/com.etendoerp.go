@@ -44,6 +44,8 @@ public final class QuotaDefinition {
   private final String enforcementMode;
   private final Long warningThreshold;
   private final ConsumptionSource source;
+  private final String warningAlert;
+  private final String limitAlert;
 
   private QuotaDefinition(Builder b) {
     this.resourceId = b.resourceId;
@@ -60,6 +62,8 @@ public final class QuotaDefinition {
     this.enforcementMode = QuotaRules.normaliseMode(b.enforcementMode);
     this.warningThreshold = b.warningThreshold;
     this.source = b.source == null ? ConsumptionSource.AGGREGATE : b.source;
+    this.warningAlert = b.warningAlert;
+    this.limitAlert = b.limitAlert;
   }
 
   /**
@@ -74,7 +78,9 @@ public final class QuotaDefinition {
         .includedQty(quota.getIncludedQty())
         .enforcementMode(quota.getEnforcementMode())
         .warningThreshold(quota.getWarningThreshold())
-        .source(ConsumptionSource.fromColumn(quota.getConsumptionSource()));
+        .source(ConsumptionSource.fromColumn(quota.getConsumptionSource()))
+        .warningAlert(quota.getWarningAlert())
+        .limitAlert(quota.getLimitAlert());
     BillingResource resource = quota.getBillingResource();
     if (resource != null) {
       builder.resourceId(resource.getId())
@@ -163,6 +169,25 @@ public final class QuotaDefinition {
     return source;
   }
 
+  /**
+   * ETP-6060 — how the SPA shows the alert of this quota once the warning threshold is reached.
+   *
+   * @return {@code pinned}, {@code dismissible} or {@code hidden}; null keeps the SPA's default
+   */
+  public String getWarningAlert() {
+    return warningAlert;
+  }
+
+  /**
+   * ETP-6060 — how the SPA shows the alert of this quota once the included quantity is reached.
+   * Presentation only: a {@code block} quota refuses new records whatever this says.
+   *
+   * @return {@code pinned}, {@code dismissible} or {@code hidden}; null keeps the SPA's default
+   */
+  public String getLimitAlert() {
+    return limitAlert;
+  }
+
   /** Builds a {@link QuotaDefinition}. */
   public static final class Builder {
     private String resourceId;
@@ -179,6 +204,8 @@ public final class QuotaDefinition {
     private String enforcementMode;
     private Long warningThreshold;
     private ConsumptionSource source;
+    private String warningAlert;
+    private String limitAlert;
 
     private Builder() {
     }
@@ -334,6 +361,28 @@ public final class QuotaDefinition {
      */
     public Builder source(ConsumptionSource value) {
       this.source = value;
+      return this;
+    }
+
+    /**
+     * Sets how the warning-threshold alert is shown.
+     *
+     * @param value {@code pinned}, {@code dismissible}, {@code hidden} or null
+     * @return this builder
+     */
+    public Builder warningAlert(String value) {
+      this.warningAlert = value;
+      return this;
+    }
+
+    /**
+     * Sets how the limit-reached alert is shown.
+     *
+     * @param value {@code pinned}, {@code dismissible}, {@code hidden} or null
+     * @return this builder
+     */
+    public Builder limitAlert(String value) {
+      this.limitAlert = value;
       return this;
     }
 

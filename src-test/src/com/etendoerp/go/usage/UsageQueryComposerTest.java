@@ -624,4 +624,63 @@ class UsageQueryComposerTest {
               "otherwise the same count: " + hql));
     }
   }
+
+  /**
+   * ETP-6060 — the row match of a status change: the restriction reads the value the change will
+   * leave, bound as a parameter, and everything else is the in-range row match.
+   */
+  @Nested
+  class RowMatchAsForm {
+
+    private static final String COMPLETED =
+        "e.salesTransaction = true and e.documentStatus in ('CO', 'CL')";
+
+    @Test
+    void theRootStatusReadsTheBoundTargetValue() {
+      String hql = UsageQueryComposer.composeRowMatchInRangeAs(ENTITY, DATE_PROPERTY, COMPLETED,
+          "documentStatus");
+
+      assertAll(
+          () -> assertTrue(hql.contains("( e.salesTransaction = true and :"
+              + UsageQueryComposer.PARAM_TARGET_VALUE + " in ('CO', 'CL') )"), hql),
+          () -> assertFalse(hql.contains("e.documentStatus"), hql),
+          () -> assertTrue(hql.startsWith(UsageQueryComposer.composeRowMatchInRange(ENTITY,
+              DATE_PROPERTY, null)), "otherwise the in-range row match: " + hql));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "e.order.documentStatus = 'CO'",
+        "e.invoice.documentStatus = 'CO'",
+        "e.documentStatusOld = 'CO'",
+        "e.description = 'e.documentStatus'",
+        "e.salesTransaction = true"
+    })
+    void onlyTheRootPropertyOutsideALiteralIsRewritten(String restriction) {
+      assertFalse(UsageQueryComposer.referencesRootProperty(restriction, "documentStatus"));
+      assertTrue(UsageQueryComposer.composeRowMatchInRangeAs(ENTITY, DATE_PROPERTY, restriction,
+          "documentStatus").contains("( " + restriction + " )"), "left as it is: " + restriction);
+    }
+
+    @Test
+    void readsWhetherARestrictionReferencesTheRootProperty() {
+      assertAll(
+          () -> assertTrue(UsageQueryComposer.referencesRootProperty(COMPLETED, "documentStatus")),
+          () -> assertTrue(UsageQueryComposer.referencesRootProperty(
+              "(e.documentStatus='CO')", "documentStatus")),
+          () -> assertFalse(UsageQueryComposer.referencesRootProperty(null, "documentStatus")),
+          () -> assertFalse(UsageQueryComposer.referencesRootProperty(COMPLETED, null)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { BREAKOUT_FRAGMENT, BALANCED_ESCAPE_FRAGMENT })
+    void rejectsWhatTheValidatorRejects(String malicious) {
+      assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.composeRowMatchInRangeAs(ENTITY, DATE_PROPERTY, malicious,
+              "documentStatus"));
+      assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.composeRowMatchInRangeAs(ENTITY, DATE_PROPERTY, COMPLETED,
+              "documentStatus or 1=1"));
+    }
+  }
 }

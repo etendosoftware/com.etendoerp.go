@@ -1117,7 +1117,18 @@ ways to consume a resource never pass through either:
 
 - **Growth through a state change.** `POSTED_SALES_INVOICES` counts `e.posted = 'Y'`, and an
   invoice is created unposted, so it never matches at create time: a `block` quota on it is never
-  refused, however far over the tenant is. Posting is a process, not a NEO create.
+  refused, however far over the tenant is. Posting is a process, not a NEO create. **Invoice
+  completion is the exception (ETP-6060, 2026-10-30):** the shipped `SALES_INVOICES` counts
+  `e.documentStatus in ('CO', 'CL')`, which a draft never matches either, so completing invoices
+  past the cap went through. `InvoiceCompletionQuotaHook` (a `ProcessInvoiceHook`, so every
+  completion through `ProcessInvoiceUtil`: NEO REST, batch, MCP and the backoffice) now checks
+  in `preProcess`, before `C_Invoice_Post` and before any other hook can send the invoice to a tax
+  authority, whether the invoice *as the completion will leave it* would be counted
+  (`QuotaWriteGuard.refusalForStatusChange`: the restriction's `e.documentStatus` is bound to `CO`,
+  `UsageQueryComposer.composeRowMatchInRangeAs`), and refuses with the gate's 403
+  `QUOTA_EXCEEDED`. Only a restriction that reads `e.documentStatus` is concerned; a row that
+  already counts is not charged again. Posting, and every other document's completion, are still
+  unchecked.
 - **A customization that creates the row itself without calling `NeoQuotaCreateCheck`.** A
   `NeoHandler`/`@NeoExtension` whose `handle()` returns its own response skips the default create
   and the gate with it; its rows are checked only when it calls `NeoQuotaCreateCheck`
@@ -1467,7 +1478,11 @@ same branches.
 **Decision: the Plan step is a view of the plan catalog.** The three open points resolve as:
 
 - **Which cards:** whatever `ETGO_PLAN` lists — one card per plan of `GET /sws/go/plans`, with the
-  catalog's name, description and price. No fixed number of cards.
+  catalog's name and price. No fixed number of cards. Since 2026-10-30 the cards follow the
+  storefront pricing page: a Monthly/Yearly toggle over `billingInterval`, a feature list from the
+  plan's quotas (`quotas`, `kind` `seats` or `perYear`) and from `ETGO_PLAN.INCLUDES_API`, and a
+  badge from `ETGO_PLAN.HIGHLIGHT` (`popular` / `recommended`). The description is no longer shown
+  on the card.
 - **Where the `price_id` lives:** in `ETGO_PLAN.PROVIDER_PRICE_ID`, resolved server-side from the
   `planKey` the card selects (`HostedCheckoutService`). The browser never receives a provider price
   id (§4.8).

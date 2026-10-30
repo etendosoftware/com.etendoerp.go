@@ -38,6 +38,10 @@ import org.codehaus.jettison.json.JSONObject;
  * <p>{@code periodStart} and {@code periodEnd} are the <b>counted window</b> as date-only strings
  * ({@code yyyy-MM-dd}, server-local days): the first counted day and the exclusive end day, the day
  * the period ends on. Consumption is counted over {@code [periodStart, periodEnd)}.
+ *
+ * <p>ETP-6060: {@code warningAlert} and {@code limitAlert} tell the SPA how to show the quota's
+ * alert ({@code pinned}, {@code dismissible}, {@code hidden}); null keeps its default. They change
+ * no verdict and no refusal.
  */
 public final class QuotaItemJson {
 
@@ -53,6 +57,8 @@ public final class QuotaItemJson {
   public static final String VERDICT = "verdict";
   public static final String PERIOD_START = "periodStart";
   public static final String PERIOD_END = "periodEnd";
+  public static final String WARNING_ALERT = "warningAlert";
+  public static final String LIMIT_ALERT = "limitAlert";
 
   private QuotaItemJson() {
   }
@@ -84,6 +90,8 @@ public final class QuotaItemJson {
     // counts in local days, so the UTC instants of the period would name the wrong day.
     item.put(PERIOD_START, period == null ? JSONObject.NULL : day(period.getWindowFrom()));
     item.put(PERIOD_END, period == null ? JSONObject.NULL : day(period.getWindowTo()));
+    item.put(WARNING_ALERT, orNull(quota.getWarningAlert()));
+    item.put(LIMIT_ALERT, orNull(quota.getLimitAlert()));
     return item;
   }
 

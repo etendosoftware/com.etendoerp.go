@@ -78,6 +78,31 @@ public class SubscriptionLifecycleApplierTest {
         event("{\"data\":{\"object\":{\"subscription\":\"sub_1\"}}}")).cancelAtPeriodEnd());
   }
 
+  /**
+   * ETP-6060 — the Customer Portal of recent API versions schedules "cancel at the period end"
+   * with a {@code cancel_at} date and leaves {@code cancel_at_period_end} false.
+   */
+  @Test
+  public void aCancelAtDateSchedulesTheCancellationWhateverTheFlagSays() throws Exception {
+    assertEquals(CancelAtPeriodEnd.SET, applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"cancel_at_period_end\":false,\"cancel_at\":1796083200}}}")).cancelAtPeriodEnd());
+    assertEquals(CancelAtPeriodEnd.SET, applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"cancel_at\":1796083200}}}")).cancelAtPeriodEnd());
+  }
+
+  /** Resuming from the portal clears {@code cancel_at} to null: nothing is scheduled any more. */
+  @Test
+  public void aNullCancelAtClearsTheScheduledCancellation() throws Exception {
+    assertEquals(CancelAtPeriodEnd.CLEARED, applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"cancel_at\":null}}}")).cancelAtPeriodEnd());
+    assertEquals(CancelAtPeriodEnd.CLEARED, applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"cancel_at_period_end\":false,\"cancel_at\":null}}}")).cancelAtPeriodEnd());
+  }
+
   @Test
   public void anIgnoredSubscriptionUpdateCarriesNoCancelFlag() throws Exception {
     SubscriptionEventOutcome outcome = applier.evaluate("customer.subscription.updated",
