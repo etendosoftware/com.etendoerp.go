@@ -226,7 +226,8 @@ What each tier means with what ETP-5051 delivered:
    quota calls it over the period. Such a resource is **reported** at all three report points,
    but a `block` quota on it **refuses nothing** on the NEO write path (§2): making it refusable
    at a point is tier 4. Reference: `schema_forge/docs/neo-headless-extensibility.md` §2.8; the
-   one production strategy is `TenantSeatCounter` (`tenantSeats`, §2.1).
+   production strategies are `TenantSeatCounter` (`tenantSeats`, §2.1) and `AiSpendCounter`
+   (`aiSpend`, §4.7).
 4. **Enforce at an unwired place — development, additive, through the same evaluator.** For
    example at posting (the only way a posted-invoices count grows, §6), at a process, or for
    Classic writes through a DAL observer. The new point must take its verdict from
@@ -246,8 +247,9 @@ reached from a System role: a tenant sees its caps on `/account` but cannot chan
 ### 4.1 The resource exists in the catalog
 
 **Billing Resource** holds what can be counted. **The module ships it empty** — every resource is
-a row an operator adds (tier 2) or a strategy a developer deploys (tier 3). One strategy is
-deployed, `tenantSeats`; its catalog row is still the operator's to add (§4.6).
+a row an operator adds (tier 2) or a strategy a developer deploys (tier 3). Two strategies are
+deployed, `tenantSeats` and `aiSpend`; their catalog rows are still the operator's to add (§4.6,
+§4.7).
 
 | Field | Meaning |
 |---|---|
@@ -424,6 +426,35 @@ year, so a freed seat would never lower it. With `aggregate`, `last` shows the c
 usage-job run. While the usage schedule is on, the job also stores the seat count, but a stock has
 no history: every day it recomputes gets today's value (register §1.1). `last` reads the newest
 day, so the reports are unaffected; the stored past days are not a true history.
+
+### 4.7 The AI spend resource
+
+The money a tenant spent on AI — agent chat turns and document OCR — is counted by the deployed
+strategy `aiSpend` (`AiSpendCounter`): per tenant and day, the sum of `ETGO_USAGE_EVENT.COST_USD`,
+the USD the LiteLLM proxy charged for each call ([`neo-headless.md`](neo-headless.md), usage
+events). Nothing is seeded; to make it available to plans, add a Billing Resource row:
+
+| Field | Value |
+|---|---|
+| Search Key | `AI_SPEND` (any stable key) |
+| Name / Unit Label | `AI spend` / `USD cents` |
+| Counting Mode | `S` |
+| Strategy Qualifier | `aiSpend` |
+| Aggregation | `sum` |
+
+**The unit is the US cent**, because usage and quota quantities are integers: `Included Qty`
+`5000` is 50 USD per subscription year. Each tenant-day is rounded half-up once, so a year's figure
+is within half a cent per active day of the exact sum; a day under half a cent counts 0.
+
+What it does and does not do:
+
+- It is a flow, so `sum` adds the days. `aggregate` reads what the usage job stored; `live` sums
+  `COST_USD` over the period on each report.
+- A quota on it is **reported** (`/account`, environment list, entry) but **refuses nothing**: no
+  AI path asks `QuotaEvaluator` before calling a model. Blocking AI calls at the limit is tier 4.
+- Spend done in an Etendo support session (`"actor":"support"`) is not the tenant's and is left out.
+- Only priced calls count. A turn recorded without `COST_USD` (a provider that reports no cost), or
+  one whose usage POST failed (the BFF logs `[ai-bff:usage] not recorded`), is not in the figure.
 
 ---
 
