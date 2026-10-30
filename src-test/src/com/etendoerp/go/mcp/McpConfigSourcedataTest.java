@@ -31,6 +31,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
@@ -72,6 +73,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpParentSection
  * @covers com.etendoerp.go.mcp.McpEntityConfig
  * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
  * @covers com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler
  * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
@@ -595,21 +597,28 @@ class McpConfigSourcedataTest {
    * ETP-5714: the {@code documentAction} values per status follow core's
    * {@code ActionButtonUtility.docAction} (the real DocAction transitions), not the AD list: an
    * invoice offers CO on a draft and only RE once completed (the screen's Reactivate; no reversal, RC removed
-   * in the QA follow-up), an order CO/VO/PR on a draft and CL/RE
-   * once completed. Advisory data, so its content is asserted here.
+   * in the QA follow-up), an order CO/VO/PR on a draft. Once completed a purchase order offers
+   * CL/RE, while a sales order offers only RE: the app never offers Close on a sales order and its
+   * pre-hook refuses it (ETP-5704). Advisory data, so its content is asserted here.
    */
   @Test
   @DisplayName("order and invoice headers declare documentAction values per status from core's transitions")
   void documentActionValuesByStatus() throws IOException, JSONException {
+    Map<String, Set<String>> completedValues = Map.of(
+        PURCHASE_ORDER_HEADER_ID, Set.of("CL", "RE"),
+        SALES_ORDER_HEADER_ID, Set.of("RE"));
     for (String id : List.of(PURCHASE_ORDER_HEADER_ID, SALES_ORDER_HEADER_ID)) {
       JSONObject values = valuesByStatusOf(id);
       assertEquals(Set.of("CO", "VO", "PR"), setOf(values.getJSONArray("DR")), id);
-      assertEquals(Set.of("CL", "RE"), setOf(values.getJSONArray("CO")), id);
+      assertEquals(completedValues.get(id), setOf(values.getJSONArray("CO")), id);
       // review W2: final statuses are listed explicitly (empty), never left to be guessed
       assertEquals(0, values.getJSONArray("VO").length(), id);
       assertEquals(0, values.getJSONArray("CL").length(), id);
       assertResolvesCleanly(id);
     }
+    // ETP-5704: the sales order's advisory list must never offer Close again.
+    assertFalse(setOf(valuesByStatusOf(SALES_ORDER_HEADER_ID).getJSONArray("CO")).contains("CL"),
+        "a completed sales order is not offered CL");
     for (String id : INVOICE_HEADERS) {
       JSONObject values = valuesByStatusOf(id);
       assertEquals(Set.of("CO"), setOf(values.getJSONArray("DR")), id);

@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -69,6 +70,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  * @covers com.etendoerp.go.schemaforge.InOutInvoiceAvailability
  * @covers com.etendoerp.go.schemaforge.InvoiceDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.ReturnDocumentAvailability
+ * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
  *
  * <p>ETP-5876 adds, per invoice, the import actions that do not suit its kind (see
  * {@code RectificativeImportGate}): a normal invoice rules out the return and origin imports, a
@@ -80,6 +83,10 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 class DocumentAvailabilityTest {
 
   private static final String DOCUMENT_ACTION = "documentAction";
+  /** The availability key of Close, as the MCP publishes it (ETP-5704). */
+  private static final String CLOSE = "documentAction:CL";
+  /** The availability key of Reactivate, as the MCP publishes it. */
+  private static final String REACTIVATE = "documentAction:RE";
 
   private static java.util.function.UnaryOperator<String> subject(String status, String posted) {
     return property -> {
@@ -171,14 +178,53 @@ class DocumentAvailabilityTest {
     }
 
     @Test
-    @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing out")
+    @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing "
+        + "out — except Close, which a sales order rules out even as a draft")
     void unlinkedDraftOrOtherRulesNothingOut() throws Exception {
       try (MockedStatic<OBDal> ignored = linkedDocuments(false)) {
         assertTrue(OrderDocumentAvailability.unavailable(order("CO")).isEmpty());
       }
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-        assertTrue(new SalesOrderHeaderHandler().unavailableActions(order("DR")).isEmpty());
+        // ETP-5704: Close is never offered on a sales order; a purchase order does not opt in.
+        assertEquals(Set.of(CLOSE),
+            new SalesOrderHeaderHandler().unavailableActions(order("DR")).keySet());
+        assertTrue(new PurchaseOrderHeaderHandler().unavailableActions(order("DR")).isEmpty());
         assertTrue(OrderDocumentAvailability.unavailable(mock(Invoice.class)).isEmpty());
+        assertTrue(new SalesOrderHeaderHandler().unavailableActions(mock(Invoice.class)).isEmpty());
+        assertTrue(
+            new SalesQuotationHeaderHandler().unavailableActions(mock(Invoice.class)).isEmpty());
+        obDal.verify(OBDal::getInstance, never());
+      }
+    }
+
+    @Test
+    @DisplayName("a completed sales order rules Close out, and Reactivate too only with linked "
+        + "documents; a purchase order never rules Close out")
+    void completedSalesOrderRulesOutClose() throws Exception {
+      for (boolean linked : new boolean[] { false, true }) {
+        try (MockedStatic<OBDal> ignored = linkedDocuments(linked)) {
+          Map<String, String> sales = new SalesOrderHeaderHandler().unavailableActions(order("CO"));
+          Map<String, String> purchase =
+              new PurchaseOrderHeaderHandler().unavailableActions(order("CO"));
+
+          String label = linked ? "with linked documents" : "with nothing linked";
+          assertTrue(sales.containsKey(CLOSE), label);
+          assertEquals(linked, sales.containsKey(REACTIVATE), label);
+          assertFalse(purchase.containsKey(CLOSE), label);
+          assertEquals(linked, purchase.containsKey(REACTIVATE), label);
+        }
+      }
+    }
+
+    @Test
+    @DisplayName("a quotation rules Reactivate out in every status but voided, read from the record")
+    void quotationRulesOutReactivateUnlessVoided() {
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        for (String status : new String[] { "UE", "DR", "CO" }) {
+          assertEquals(Set.of(REACTIVATE),
+              new SalesQuotationHeaderHandler().unavailableActions(order(status)).keySet(), status);
+        }
+        assertTrue(new SalesQuotationHeaderHandler().unavailableActions(order("VO")).isEmpty());
         obDal.verify(OBDal::getInstance, never());
       }
     }

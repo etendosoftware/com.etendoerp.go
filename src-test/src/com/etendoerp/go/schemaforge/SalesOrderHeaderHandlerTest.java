@@ -79,12 +79,14 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * </ul>
  *
  * <p>{@code handle()} is also covered, including the Reactivate refusal on orders with linked
- * documents, and the create pre-hook's partnerAddress/invoiceAddress default (ETP-5703).
+ * documents, the Close refusal on every sales order, and the create pre-hook's
+ * partnerAddress/invoiceAddress default (ETP-5703).
  *
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.CreateShipmentHandler
  * @covers com.etendoerp.go.schemaforge.CreateDraftInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.OrderReactivationGuard
+ * @covers com.etendoerp.go.schemaforge.DocActionRefusalGuard
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  * @covers com.etendoerp.go.schemaforge.DocActionResolution
@@ -627,7 +629,7 @@ public class SalesOrderHeaderHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
-  // ── Reactivate (DocAction RE) refused on orders with linked documents ──────
+  // ── Reactivate (RE) with linked documents, and Close (CL) always, refused ──
 
   /** Sentinel for the stored-DocAction column of the table below: loading the record throws. */
   private static final String STORED_READ_FAILS = "<stored read fails>";
@@ -654,48 +656,75 @@ public class SalesOrderHeaderHandlerTest {
    * is refused with 500, while a record with nothing stored is not an error. An order id that
    * does not exist answers 404 {@code Record not found} whatever DocAction is sent — the same
    * answer {@code NeoActionRecordGuard} gives an unknown id.
+   *
+   * <p>Close ({@code CL}) is refused on every sales order, linked documents or not, with
+   * {@code ETGO_SalesOrderCloseNotOffered}, decided on the same effective DocAction: the root
+   * value wins over {@code fieldValues}, an empty body runs the stored value, and a root value the
+   * DAL refuses to write ({@code "cl"}, {@code " CL"}) runs the stored one. The last column names
+   * which refusal answered, so a Close is never mistaken for the Reactivate refusal.</p>
    */
   @Test
   public void testHandleReactivateIsGuardedByLinkedDocuments_table() throws Exception {
     final String orderId = "order-re-1";
     final String tabId = "tab-order";
     final String entityName = "Order";
+    final String linkedDocs = OrderReactivationGuard.MSG_LINKED_DOCUMENTS;
+    final String linkedDocsCheckFailed = OrderReactivationGuard.MSG_CHECK_FAILED;
+    final String closeRefused = SalesOrderHeaderHandler.MSG_CLOSE_NOT_OFFERED;
+    final String notFound = NeoActionRecordGuard.MSG_RECORD_NOT_FOUND;
     // Columns: the label, the body sent, the stored DocAction, the property check on the requested
     // value (null when it is accepted), whether linked documents exist (null when the query
-    // throws) and the expected status (null when the request falls through to the router).
+    // throws), the expected status (null when the request falls through to the router) and the
+    // refusal expected (its messageKeys entry, else its error message; null when it falls through).
     Object[][] cases = {
         { "root RE with linked docs is refused",
-            "{\"docAction\":\"RE\"}", "CO", null, Boolean.TRUE, 400 },
+            "{\"docAction\":\"RE\"}", "CO", null, Boolean.TRUE, 400, linkedDocs },
         { "root RE wins over fieldValues CO",
             "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}", "CO", null,
-            Boolean.TRUE, 400 },
+            Boolean.TRUE, 400, linkedDocs },
         { "written root CO wins over fieldValues RE and the stored RE",
             "{\"fieldValues\":{\"documentAction\":\"RE\"},\"docAction\":\"CO\"}", "RE", null,
-            Boolean.TRUE, null },
+            Boolean.TRUE, null, null },
         { "empty body runs the stored RE and is refused",
-            "{}", "RE", null, Boolean.TRUE, 400 },
+            "{}", "RE", null, Boolean.TRUE, 400, linkedDocs },
         { "fieldValues RE without root runs the stored CO",
-            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", null, Boolean.TRUE, null },
+            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", null, Boolean.TRUE, null, null },
         { "root RE without linked docs falls through",
-            "{\"docAction\":\"RE\"}", "CO", null, Boolean.FALSE, null },
+            "{\"docAction\":\"RE\"}", "CO", null, Boolean.FALSE, null, null },
         { "unreadable record fails closed even when docAction is sent",
-            "{\"docAction\":\"RE\"}", STORED_READ_FAILS, null, Boolean.TRUE, 500 },
+            "{\"docAction\":\"RE\"}", STORED_READ_FAILS, null, Boolean.TRUE, 500,
+            linkedDocsCheckFailed },
         { "failed linked-docs lookup fails closed",
-            "{\"docAction\":\"RE\"}", "CO", null, null, 500 },
+            "{\"docAction\":\"RE\"}", "CO", null, null, 500, linkedDocsCheckFailed },
         { "root re outside the list is not written, the stored RE runs and is refused",
-            "{\"docAction\":\"re\"}", "RE", NOT_IN_LIST, Boolean.TRUE, 400 },
+            "{\"docAction\":\"re\"}", "RE", NOT_IN_LIST, Boolean.TRUE, 400, linkedDocs },
         { "root CO on a non-writable property is not written, the stored RE runs and is refused",
-            "{\"docAction\":\"CO\"}", "RE", NOT_WRITABLE, Boolean.TRUE, 400 },
+            "{\"docAction\":\"CO\"}", "RE", NOT_WRITABLE, Boolean.TRUE, 400, linkedDocs },
         { "root RE with no resolvable tab fails closed",
-            "{\"docAction\":\"RE\"}", NO_TAB, null, Boolean.TRUE, 500 },
+            "{\"docAction\":\"RE\"}", NO_TAB, null, Boolean.TRUE, 500, linkedDocsCheckFailed },
         { "root RE on an unknown order id answers 404",
-            "{\"docAction\":\"RE\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404 },
+            "{\"docAction\":\"RE\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404, notFound },
         { "root CO on an unknown order id answers 404, not the router",
-            "{\"docAction\":\"CO\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404 },
+            "{\"docAction\":\"CO\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404, notFound },
         { "root RE on a record whose entity has no DocAction fails closed",
-            "{\"docAction\":\"RE\"}", NO_DOC_ACTION_PROPERTY, null, Boolean.TRUE, 500 },
+            "{\"docAction\":\"RE\"}", NO_DOC_ACTION_PROPERTY, null, Boolean.TRUE, 500,
+            linkedDocsCheckFailed },
         { "empty body on a record with nothing stored falls through",
-            "{}", null, null, Boolean.TRUE, null },
+            "{}", null, null, Boolean.TRUE, null, null },
+        // Close: refused on every sales order, whatever the linked documents.
+        { "root CL with linked docs is refused as Close, not as Reactivate",
+            "{\"docAction\":\"CL\"}", "CO", null, Boolean.TRUE, 400, closeRefused },
+        { "root CL wins over fieldValues CO and is refused without linked docs",
+            "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"CL\"}", "CO", null,
+            Boolean.FALSE, 400, closeRefused },
+        { "fieldValues CL without root runs the stored CO",
+            "{\"fieldValues\":{\"documentAction\":\"CL\"}}", "CO", null, Boolean.FALSE, null, null },
+        { "empty body runs the stored CL and is refused",
+            "{}", "CL", null, Boolean.FALSE, 400, closeRefused },
+        { "root cl outside the list is not written, the stored CL runs and is refused",
+            "{\"docAction\":\"cl\"}", "CL", NOT_IN_LIST, Boolean.FALSE, 400, closeRefused },
+        { "root ' CL' outside the list is not written, the stored CO runs",
+            "{\"docAction\":\" CL\"}", "CO", NOT_IN_LIST, Boolean.FALSE, null, null },
     };
     for (Object[] c : cases) {
       String label = (String) c[0];
@@ -704,6 +733,7 @@ public class SalesOrderHeaderHandlerTest {
       String propertyCheck = (String) c[3];
       Boolean linked = (Boolean) c[4];
       Integer expectedStatus = (Integer) c[5];
+      String expectedRefusal = (String) c[6];
       boolean noTab = NO_TAB.equals(stored);
 
       NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
@@ -758,7 +788,9 @@ public class SalesOrderHeaderHandlerTest {
           MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
           MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
         obDalMock.when(OBDal::getInstance).thenReturn(dal);
-        msgMock.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("refused");
+        // The message text is the key itself, so the response says which refusal answered.
+        msgMock.when(() -> OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
 
         NeoResponse result = handler.handle(ctx);
 
@@ -768,14 +800,21 @@ public class SalesOrderHeaderHandlerTest {
         } else {
           assertNotNull(label, result);
           assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
-          if (expectedStatus == 404) {
-            assertEquals(label, NeoActionRecordGuard.MSG_RECORD_NOT_FOUND,
-                result.getBody().getJSONObject("error").getString("message"));
-          }
+          assertEquals(label, expectedRefusal, refusalOf(result));
           verify(router, never()).handle(any());
         }
       }
     }
+  }
+
+  /**
+   * Which refusal an error response is: its first {@code error.messageKeys} entry when it carries
+   * one ({@link NeoMessageText#error}), otherwise its {@code error.message}.
+   */
+  private static String refusalOf(NeoResponse result) throws JSONException {
+    JSONObject error = result.getBody().getJSONObject("error");
+    JSONArray keys = error.optJSONArray(NeoProcessService.MESSAGE_KEYS);
+    return keys != null && keys.length() > 0 ? keys.getString(0) : error.getString("message");
   }
 
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────
