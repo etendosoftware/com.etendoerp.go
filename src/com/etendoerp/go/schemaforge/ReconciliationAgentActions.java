@@ -179,7 +179,10 @@ final class ReconciliationAgentActions {
             "Lists the account's bank statement lines with their reconciliation state and "
                 + "per-state counts. Start here: every write "
                 + "action needs a statementLineId from this list. Lines of a statement still in "
-                + "draft are not reconcilable and are not listed as pending.",
+                + "draft are not reconcilable and are not listed as pending. The lines come from "
+                + "bank statements imported first (spec bank-statements): an account with no "
+                + "imported statement has nothing to reconcile. The flow is pendingLines -> "
+                + "candidates (for one line) -> reconcileGroup, or autoMatch -> applySuggestions.",
             optional(P_DATE_FROM, NeoActionContract.TYPE_DATE, "Earliest line date (yyyy-MM-dd)."),
             optional(P_DATE_TO, NeoActionContract.TYPE_DATE, "Latest line date (yyyy-MM-dd)."),
             optional("q", S, "Free-text search on the line description.")),

@@ -1679,4 +1679,61 @@ public class McpToolRouterTest {
     JSONObject inner = new JSONObject().put("status", -4).put("errors", errors);
     return new JSONObject().put("response", inner);
   }
+
+  // ── ETP-5684: accounting status never reaches a role without showAccountingFields ──
+
+  private static String contentText(JSONObject result) throws Exception {
+    return result.getJSONArray("content").getJSONObject(0).getString("text");
+  }
+
+  private static JSONObject recordWithAccounting() throws Exception {
+    JSONObject row = new JSONObject().put("id", "INV-1").put("posted", "Y")
+        .put("posted$_identifier", "Posted").put("etblkpAccountingstatus", "Y")
+        .put("documentNo", "FV1000003");
+    return new JSONObject().put("data", new JSONArray().put(row));
+  }
+
+  /** Tests that every accounting property is removed, at any depth, for a role without access. */
+  @Test
+  public void testAccountingPropertiesStrippedWithoutTheCapability() throws Exception {
+    try (MockedStatic<com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy> policy =
+        mockStatic(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy.class,
+            org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      policy.when(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy::currentRoleSeesAccounting)
+          .thenReturn(false);
+      JSONObject row = new JSONObject(contentText(McpToolRouter.wrapAsTextContent(recordWithAccounting())))
+          .getJSONArray("data").getJSONObject(0);
+      assertFalse(row.has("posted"));
+      assertFalse(row.has("posted$_identifier"));
+      assertFalse(row.has("etblkpAccountingstatus"));
+      assertEquals("FV1000003", row.getString("documentNo"));
+    }
+  }
+
+  /** Tests that a role with access keeps the accounting properties. */
+  @Test
+  public void testAccountingPropertiesKeptWithTheCapability() throws Exception {
+    try (MockedStatic<com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy> policy =
+        mockStatic(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy.class,
+            org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      policy.when(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy::currentRoleSeesAccounting)
+          .thenReturn(true);
+      JSONObject row = new JSONObject(contentText(McpToolRouter.wrapAsTextContent(recordWithAccounting())))
+          .getJSONArray("data").getJSONObject(0);
+      assertEquals("Y", row.getString("posted"));
+      assertEquals("Y", row.getString("etblkpAccountingstatus"));
+    }
+  }
+
+  /** Tests that a body with no accounting property never reads the role flag. */
+  @Test
+  public void testNoAccountingPropertyNeverReadsTheRole() throws Exception {
+    try (MockedStatic<com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy> policy =
+        mockStatic(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy.class,
+            org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      McpToolRouter.wrapAsTextContent(new JSONObject().put("documentNo", "FV1"));
+      policy.verify(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy::currentRoleSeesAccounting,
+          org.mockito.Mockito.never());
+    }
+  }
 }

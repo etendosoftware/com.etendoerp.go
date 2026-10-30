@@ -262,8 +262,10 @@ final class DocumentCurrencyRate {
    *       does not send a usable rate, writes the recalculated rate into the body (or {@code null});
    *   </li>
    *   <li>refuses the write with a 422 when the document's currency is not its organization's and
-   *       the rate it would be saved with is empty — the completion text when {@code completing}.
-   *   </li>
+   *       the rate it would be saved with is empty — the completion text when {@code completing};
+   *       otherwise the "no rate for that date" text when no conversion rate range exists, or the
+   *       "the rate cannot be left empty" text ({@link DocumentRateMessages#emptyOnSave}) when the
+   *       range exists and the rate was cleared or stored empty.</li>
    * </ul>
    * A create whose currency, organization or reference date is not in the body yet (derived later
    * by the create cascade) is deferred to {@link #afterWrite}.
@@ -327,10 +329,17 @@ final class DocumentCurrencyRate {
     if (finalRate != null && finalRate.signum() > 0) {
       return null;
     }
-    return completing
-        ? DocumentRateMessages.missingOnComplete(isoCode(orgCurrencyId), isoCode(currencyId))
-        : DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId), date,
-            type.referenceDateLabelKey(), type.referenceDateProperty());
+    if (completing) {
+      return DocumentRateMessages.missingOnComplete(isoCode(orgCurrencyId), isoCode(currencyId));
+    }
+    // A write that changes neither the currency nor the date never looked the rate up: the rate is
+    // empty because the caller cleared it (or it was stored empty), which says nothing about the
+    // range. Only claim the range is missing when it really is (ETP-5840 QA CP-12a).
+    if (!changed && lookupRate(orgCurrencyId, currencyId, date, orgId, clientId) != null) {
+      return DocumentRateMessages.emptyOnSave(isoCode(orgCurrencyId), isoCode(currencyId));
+    }
+    return DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId), date,
+        type.referenceDateLabelKey(), type.referenceDateProperty());
   }
 
   /**

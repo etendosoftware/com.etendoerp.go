@@ -1597,7 +1597,8 @@ class McpWindowDeclaredActionsTest {
     @DisplayName("etendo_action calls a declared action on the HTTP method its contract names")
     void actionUsesTheDeclaredMethod() {
       String body = method("handleAction");
-      Matcher method = Pattern.compile("(\\w+)\\s*=\\s*\\w+\\s*!=\\s*null\\s*\\?\\s*\\w+\\s*\\."
+      // The contract's method may be read in a ternary or assigned inside the declared branch.
+      Matcher method = Pattern.compile("(\\w+)\\s*=\\s*(?:\\w+\\s*!=\\s*null\\s*\\?\\s*)?\\w+\\s*\\."
           + "\\s*getHttpMethod\\s*\\(\\s*\\)").matcher(body);
       assertTrue(method.find(), "handleAction must read the contract's HTTP method");
       assertTrue(Pattern.compile("buildActionHookContext\\s*\\([^;]*\\b" + method.group(1)

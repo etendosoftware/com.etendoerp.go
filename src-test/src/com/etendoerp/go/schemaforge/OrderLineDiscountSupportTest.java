@@ -862,6 +862,65 @@ class OrderLineDiscountSupportTest {
     return Stream.of("PATCH", "PUT");
   }
 
+  /**
+   * ETP-5852: a new line priced by the agent below its list price gets the discount that price
+   * implies (33 → 29.70 is 10 %), with two decimals; a price on the list, a body that already says
+   * its discount (every form write), and a line with no list price are left alone.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("discountOnCreateCases")
+  void deriveDiscountOnCreateFollowsTheAgentPrice(String label, String body, String expected)
+      throws Exception {
+    JSONObject json = new JSONObject(body);
+
+    OrderLineCreateDiscount.derive(mcpCtx("POST", json));
+
+    if (expected == null) {
+      assertEquals(new JSONObject(body).toString(), json.toString(), label);
+    } else {
+      assertEquals(0, new BigDecimal(expected).compareTo(new BigDecimal(json.get("discount").toString())),
+          label + ": " + json);
+    }
+  }
+
+  static Stream<Arguments> discountOnCreateCases() {
+    return Stream.of(
+        Arguments.of("negotiated below list", "{\"listPrice\":33,\"unitPrice\":29.7}", "10"),
+        Arguments.of("non-round discount", "{\"listPrice\":12,\"unitPrice\":10}", "16.67"),
+        Arguments.of("price above list", "{\"listPrice\":10,\"unitPrice\":11}", "-10"),
+        Arguments.of("price on the list", "{\"listPrice\":33,\"unitPrice\":33.004}", null),
+        Arguments.of("form sends its discount", "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":10}", null),
+        Arguments.of("defaulted zero discount", "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":0}", "10"),
+        Arguments.of("no list price", "{\"listPrice\":0,\"unitPrice\":29.7}", null),
+        Arguments.of("no unit price", "{\"listPrice\":33}", null));
+  }
+
+  /** Only a CRUD create is a new line; an update or another endpoint is never touched. */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("priceUpdateMethods")
+  void deriveDiscountOnCreateIgnoresUpdates(String method) throws Exception {
+    JSONObject json = new JSONObject("{\"listPrice\":33,\"unitPrice\":29.7}");
+
+    OrderLineCreateDiscount.derive(mcpCtx(method, json));
+
+    assertTrue(!json.has("discount"));
+  }
+
+  /** A REST create (the app, the public API) keeps the values it sent: MCP only. */
+  @Test
+  void deriveDiscountOnCreateLeavesARestCreateAlone() throws Exception {
+    JSONObject json = new JSONObject("{\"listPrice\":33,\"unitPrice\":29.7}");
+
+    OrderLineCreateDiscount.derive(ctx("POST", NeoEndpointType.CRUD, json));
+
+    assertTrue(!json.has("discount"));
+  }
+
+  private static NeoContext mcpCtx(String method, JSONObject body) {
+    return NeoContext.builder().specName(SPEC).entityName(ENTITY).httpMethod(method)
+        .endpointType(NeoEndpointType.CRUD).mcpOrigin(true).requestBody(body).build();
+  }
+
   // ── ETP-5881: a line sent without a price takes the price list's, on every channel ──
 
   static Stream<Arguments> createWithoutPrice() {

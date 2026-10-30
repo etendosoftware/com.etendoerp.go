@@ -53,7 +53,8 @@ public final class NeoAccessHelper {
    */
   private static final Set<String> UNANCHORED_SPECS_REPORTED = ConcurrentHashMap.newKeySet();
 
-  private static final String DEFAULT_POST_PROCESS_ID = "57496FB9CF9E4E8F847224017941570E";
+  /** The OBUIAPP "Post" process ({@code com.smf.jobs.defaults.Post}) every posting button runs. */
+  static final String DEFAULT_POST_PROCESS_ID = "57496FB9CF9E4E8F847224017941570E";
 
   private NeoAccessHelper() {
   }

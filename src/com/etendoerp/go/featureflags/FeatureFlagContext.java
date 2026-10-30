@@ -81,6 +81,22 @@ public final class FeatureFlagContext {
   }
 
   /**
+   * Builds the context of an <b>environment-wide</b> evaluation: no account, no targeting key, no
+   * attributes. Every rule that targets a user or an email resolves "not matched" against it, so
+   * only operational switches (kill switches, startup and scheduled jobs with no user) may use it.
+   *
+   * <p>A flag that can be rolled out to specific users must NOT be evaluated with this: the SPA
+   * sends the email and shows the feature while the backend never matches the rule. Use
+   * {@link #forAccount(String)} with the resolved account email instead. Prefer this factory over
+   * {@code forAccount(null)}: it states the intent and is greppable.
+   *
+   * @return a context with no targeting information
+   */
+  public static FeatureFlagContext environment() {
+    return forAccount(null);
+  }
+
+  /**
    * Builds a context targeted at an account, carrying the email as the targeting key and as both
    * the {@value #ATTRIBUTE_EMAIL} (ConfigCat) and {@value #ATTRIBUTE_EMAIL_LOWERCASE} (Datadog)
    * attributes — see those constants for why each.

@@ -35,6 +35,7 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -87,6 +88,15 @@ public class AgingReportHandler implements NeoHandler {
   private static final String PARAM_ORG_ID       = "orgId";
   private static final String PARAM_SHOW_DETAILS = "showDetails";
   private static final String PARAM_GL_ID        = "glId";
+  private static final String COL_CURRENT        = "current";
+  private static final String COL_DAYS30         = "days30";
+  private static final String COL_DAYS60         = "days60";
+  private static final String COL_DAYS90         = "days90";
+  private static final String COL_DAYS120        = "days120";
+  private static final String COL_DAYS150PLUS    = "days150plus";
+  private static final String COL_TOTAL          = "total";
+  private static final String COL_CREDITS        = "credits";
+  private static final String COL_NET            = "net";
 
   /**
    * Fallback monetary precision (decimal places) used only when the resolved accounting-schema
@@ -437,6 +447,17 @@ public class AgingReportHandler implements NeoHandler {
       responseData.put("data", rows);
       responseData.put("count", rows.length());
       responseData.put("meta", buildMeta(recOrPay, ctx.currentDate, buckets, showDetails));
+      if (context.isMcpOrigin()) {
+        // ETP-5852 (M-36): an agent had to add the partner rows up itself and guess what each
+        // column meant. MCP only: the SPA computes its own footer.
+        responseData.put("totals", sumColumns(rows));
+        responseData.getJSONObject("meta").put("columns", describeColumns(buckets));
+        // ETP-5852 (M-153): when the documents are listed, each says when it falls due.
+        AgingDueDates.attach(rows);
+        responseData.getJSONObject("meta").getJSONObject("columns").put("docs[].dueDates",
+            "per document, its open installments {dueDate, outstanding} oldest first; "
+                + "outstanding is in the document's own currency (only with showDetails)");
+      }
 
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", responseData);
@@ -646,18 +667,62 @@ public class AgingReportHandler implements NeoHandler {
       if (activeBuckets < 3) daysPlus = daysPlus.add(toBigDecimal(fp.getField("amount3")));
       if (activeBuckets < 2) daysPlus = daysPlus.add(toBigDecimal(fp.getField("amount2")));
 
-      row.put("current",     round(toBigDecimal(fp.getField("amount0")), precision));
-      row.put("days30",      round(toBigDecimal(fp.getField("amount1")), precision));
-      row.put("days60",      round(activeBuckets >= 2 ? toBigDecimal(fp.getField("amount2")) : BigDecimal.ZERO, precision));
-      row.put("days90",      round(activeBuckets >= 3 ? toBigDecimal(fp.getField("amount3")) : BigDecimal.ZERO, precision));
-      row.put("days120",     round(activeBuckets >= 4 ? toBigDecimal(fp.getField("amount4")) : BigDecimal.ZERO, precision));
-      row.put("days150plus", round(daysPlus, precision));
-      row.put("total",       round(toBigDecimal(fp.getField("Total")), precision));
-      row.put("credits",     round(toBigDecimal(fp.getField("credit")), precision));
-      row.put("net",         round(toBigDecimal(fp.getField("net")), precision));
+      row.put(COL_CURRENT,     round(toBigDecimal(fp.getField("amount0")), precision));
+      row.put(COL_DAYS30,      round(toBigDecimal(fp.getField("amount1")), precision));
+      row.put(COL_DAYS60,      round(activeBuckets >= 2 ? toBigDecimal(fp.getField("amount2")) : BigDecimal.ZERO, precision));
+      row.put(COL_DAYS90,      round(activeBuckets >= 3 ? toBigDecimal(fp.getField("amount3")) : BigDecimal.ZERO, precision));
+      row.put(COL_DAYS120,     round(activeBuckets >= 4 ? toBigDecimal(fp.getField("amount4")) : BigDecimal.ZERO, precision));
+      row.put(COL_DAYS150PLUS, round(daysPlus, precision));
+      row.put(COL_TOTAL,       round(toBigDecimal(fp.getField("Total")), precision));
+      row.put(COL_CREDITS,     round(toBigDecimal(fp.getField("credit")), precision));
+      row.put(COL_NET,         round(toBigDecimal(fp.getField(COL_NET)), precision));
       rows.put(row);
     }
     return rows;
+  }
+
+  /** The amount columns of a summary row, in display order. */
+  private static final String[] AMOUNT_COLUMNS =
+      { COL_CURRENT, COL_DAYS30, COL_DAYS60, COL_DAYS90, COL_DAYS120, COL_DAYS150PLUS, COL_TOTAL,
+          COL_CREDITS, COL_NET };
+
+  /** ETP-5852 (M-36): the sum of every amount column over the partner rows. */
+  static JSONObject sumColumns(JSONArray rows) throws JSONException {
+    JSONObject totals = new JSONObject();
+    for (String column : AMOUNT_COLUMNS) {
+      BigDecimal sum = BigDecimal.ZERO;
+      for (int i = 0; i < rows.length(); i++) {
+        sum = sum.add(toBigDecimal(rows.getJSONObject(i).optString(column, "0")));
+      }
+      totals.put(column, sum);
+    }
+    totals.put("partners", rows.length());
+    return totals;
+  }
+
+  /**
+   * ETP-5852 (M-36): what each amount column holds for these bucket limits. Buckets follow the
+   * open amount's due date against currentDate (core's AgingDao); credits are the partner's
+   * payments not yet applied to any document, and net is total minus credits.
+   */
+  private static JSONObject describeColumns(BucketConfig buckets) throws JSONException {
+    String[] limits = { buckets.col1Raw, buckets.col2Raw, buckets.col3Raw, buckets.col4Raw };
+    String[] keys = { COL_DAYS30, COL_DAYS60, COL_DAYS90, COL_DAYS120 };
+    JSONObject columns = new JSONObject();
+    columns.put(COL_CURRENT, "open amount not yet due on currentDate");
+    int from = 1;
+    String last = "0";
+    for (int i = 0; i < buckets.activeBuckets; i++) {
+      columns.put(keys[i], "open amount " + from + "-" + limits[i] + " days overdue");
+      from = Integer.parseInt(limits[i].trim()) + 1;
+      last = limits[i];
+    }
+    columns.put(COL_DAYS150PLUS, "open amount more than " + last + " days overdue (the last "
+        + "bucket, whatever its key says)");
+    columns.put(COL_TOTAL, "all open amounts of the partner (current + every bucket)");
+    columns.put(COL_CREDITS, "the partner's payments not yet applied to any document");
+    columns.put(COL_NET, "total - credits: what is really owed");
+    return columns;
   }
 
   /**
@@ -685,12 +750,12 @@ public class AgingReportHandler implements NeoHandler {
     if (activeBuckets < 3) daysPlus = daysPlus.add(a3);
     if (activeBuckets < 2) daysPlus = daysPlus.add(a2);
 
-    doc.put("current",     round(a0, precision));
-    doc.put("days30",      round(a1, precision));
-    doc.put("days60",      round(activeBuckets >= 2 ? a2 : BigDecimal.ZERO, precision));
-    doc.put("days90",      round(activeBuckets >= 3 ? a3 : BigDecimal.ZERO, precision));
-    doc.put("days120",     round(activeBuckets >= 4 ? a4 : BigDecimal.ZERO, precision));
-    doc.put("days150plus", round(daysPlus, precision));
+    doc.put(COL_CURRENT,     round(a0, precision));
+    doc.put(COL_DAYS30,      round(a1, precision));
+    doc.put(COL_DAYS60,      round(activeBuckets >= 2 ? a2 : BigDecimal.ZERO, precision));
+    doc.put(COL_DAYS90,      round(activeBuckets >= 3 ? a3 : BigDecimal.ZERO, precision));
+    doc.put(COL_DAYS120,     round(activeBuckets >= 4 ? a4 : BigDecimal.ZERO, precision));
+    doc.put(COL_DAYS150PLUS, round(daysPlus, precision));
     return doc;
   }
 

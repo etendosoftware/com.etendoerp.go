@@ -1125,7 +1125,7 @@ public class NeoDefaultsServiceTest {
       assertEquals(200, response.getHttpStatus());
       // Verify cascade was called
       cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-          eq(ctx), eq(adTab), any(JSONObject.class), any(Set.class)));
+          eq(ctx), eq(adTab), any(JSONObject.class), any(Set.class), any(Set.class)));
       // Verify DocTypeResolver reapply was called
       docTypeMock.verify(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
           any(JSONObject.class), eq(adTab), eq(ctx)));

@@ -63,7 +63,14 @@ public final class NeoButtonActionHelper {
   public static NeoResponse listButtonActions(String entityId) throws Exception {
     List<SFField> fields = loadEntityFields(entityId);
     JSONArray actions = new JSONArray();
+    // ETP-5684: posting buttons are not listed to a role without showAccountingFields.
+    boolean hidePosting = fields.stream()
+        .anyMatch(f -> NeoAccountingAccessPolicy.isPostingButton(f.getADColumn()))
+        && !NeoAccountingAccessPolicy.currentRoleSeesAccounting();
     for (SFField field : fields) {
+      if (hidePosting && NeoAccountingAccessPolicy.isPostingButton(field.getADColumn())) {
+        continue;
+      }
       JSONObject actionObj = buildButtonActionEntry(field);
       if (actionObj != null) {
         actions.put(actionObj);
@@ -171,18 +178,54 @@ public final class NeoButtonActionHelper {
     effectiveParams.put("recordId", recordId);
     effectiveParams.put("inpRecordId", recordId);
     addTabParamsCore(entity, recordId, effectiveParams);
-    if (obuiappProcess != null) {
-      if (!NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
-        return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
-            "Access denied to process for current role");
+    NeoResponse denied = processAccessRefusal(adProcess, obuiappProcess);
+    if (denied != null) {
+      return denied;
+    }
+    return obuiappProcess != null
+        ? NeoProcessService.executeObuiappProcess(obuiappProcess, effectiveParams)
+        : NeoProcessService.executeProcess(adProcess, effectiveParams);
+  }
+
+  /**
+   * Whether the current role may run the process behind a button, resolved as
+   * {@link #executeButtonActionCore} resolves it. ETP-5684: a reactivation un-posts (and commits)
+   * before its process runs, so it asks this first — a role that cannot run the process must not
+   * get the un-post either.
+   *
+   * Fails closed: an action that does not resolve to a button process is refused with the
+   * error the action itself would answer, so nothing is un-posted for it.
+   *
+   * @param entity the entity the action belongs to; {@code null} is refused
+   * @param actionName the action (button) name, as the request names it
+   * @return the error the action would answer, or {@code null} when the role may run it
+   */
+  public static NeoResponse refusalForButtonProcess(SFEntity entity, String actionName) {
+    Column column = entity == null ? null : findButtonColumn(entity.getId(), actionName);
+    if (column == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Action not found: " + actionName);
+    }
+    org.openbravo.client.application.Process obuiappProcess = column.getOBUIAPPProcess();
+    Process adProcess = column.getProcess();
+    if (adProcess == null && obuiappProcess == null) {
+      obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(column);
+      if (obuiappProcess == null) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "No process linked to button: " + actionName);
       }
-      return NeoProcessService.executeObuiappProcess(obuiappProcess, effectiveParams);
     }
-    if (!NeoAccessHelper.hasProcessAccess(adProcess.getId())) {
-      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
-          "Access denied to process for current role");
-    }
-    return NeoProcessService.executeProcess(adProcess, effectiveParams);
+    return processAccessRefusal(adProcess, obuiappProcess);
+  }
+
+  private static NeoResponse processAccessRefusal(Process adProcess,
+      org.openbravo.client.application.Process obuiappProcess) {
+    boolean allowed = obuiappProcess != null
+        ? NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())
+        : adProcess == null || NeoAccessHelper.hasProcessAccess(adProcess.getId());
+    return allowed ? null
+        : NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+            "Access denied to process for current role");
   }
 
   private static void addTabParamsCore(SFEntity entity, String recordId,
@@ -214,7 +257,10 @@ public final class NeoButtonActionHelper {
    *         {@code null} when the table declares none
    */
   private static String findKeyColumnName(Table table) {
-    List<Column> columns = table.getADColumnList();
+    // ETP-5684: re-read by id, as a reactivation's un-post commits and closes the session first,
+    // detaching the table this request loaded (its lazy column list would throw).
+    Table current = OBDal.getInstance().get(Table.class, table.getId());
+    List<Column> columns = current != null ? current.getADColumnList() : null;
     if (columns == null) {
       return null;
     }

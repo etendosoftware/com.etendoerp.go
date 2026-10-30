@@ -168,6 +168,7 @@ final class McpParentScope {
     private final String reason;
     private final String problem;
     private final String agentProblem;
+    private final Tab allParentsTab;
 
     private Scope(Kind kind, String parentField, String parentEntity, Set<String> optionalVerbs,
         String reason, String problem) {
@@ -184,6 +185,33 @@ final class McpParentScope {
       this.reason = reason;
       this.problem = problem;
       this.agentProblem = agentProblem;
+      this.allParentsTab = null;
+    }
+
+    private Scope(Scope base, Tab allParentsTab) {
+      this.kind = base.kind;
+      this.parentField = base.parentField;
+      this.parentEntity = base.parentEntity;
+      this.optionalVerbs = base.optionalVerbs;
+      this.reason = base.reason;
+      this.problem = base.problem;
+      this.agentProblem = base.agentProblem;
+      this.allParentsTab = allParentsTab;
+    }
+
+    /** This scope, also listable across every parent on request (ETP-5852). */
+    Scope allowingAllParents(Tab parentTab) {
+      return parentTab == null ? this : new Scope(this, parentTab);
+    }
+
+    /** @return whether {@code etendo_list} may read this child across every parent on request */
+    boolean allowsAllParents() {
+      return allParentsTab != null;
+    }
+
+    /** @return the parent tab whose filter scopes a read across parents, or {@code null} */
+    Tab getAllParentsTab() {
+      return allParentsTab;
     }
 
     Kind getKind() {
@@ -310,6 +338,12 @@ final class McpParentScope {
       if (problem != null) {
         item.put("parentProblem", problem);
       }
+      if (allowsAllParents()) {
+        item.put("allParentsAllowed", true);
+        if (reason != null) {
+          item.put("allParentsReason", reason);
+        }
+      }
       return Optional.of(item);
     }
   }
@@ -344,7 +378,12 @@ final class McpParentScope {
       return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), null, resolved.describeProblems(),
           "its MCP configuration is invalid");
     }
-    return resolveChild(entity, tab, resolved.section(McpParentSection.NAME).orElse(null));
+    JSONObject section = resolved.section(McpParentSection.NAME).orElse(null);
+    Scope scope = resolveChild(entity, tab, section);
+    // ETP-5852: only a child gated by a real parent link can be widened on request.
+    return scope.kind == Kind.RESOLVED && McpParentSection.allowsAllParents(section)
+        ? scope.allowingAllParents(parentTabOf(tab))
+        : scope;
   }
 
   /**

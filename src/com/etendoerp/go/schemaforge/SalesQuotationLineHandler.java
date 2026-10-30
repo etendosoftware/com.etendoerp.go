@@ -19,7 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 /**
  * Customization of sales-quotation/quotationLine (ETP-5528): the behaviour lives in
- * {@link SalesOrderLineCustomization}; this class only binds it to the entity.
+ * {@link OrderLineCustomization}; this class only binds it to the entity.
  *
  * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
  * {@code Java_Qualifier}. The row still carries {@code orderLineHandler}, on purpose: several
@@ -36,5 +36,5 @@ package com.etendoerp.go.schemaforge;
  * other entity; they are two classes only because {@link NeoExtension} is not repeatable.
  */
 @NeoExtension(spec = "sales-quotation", entity = "quotationLine")
-public class SalesQuotationLineHandler extends SalesOrderLineCustomization {
+public class SalesQuotationLineHandler extends OrderLineCustomization {
 }

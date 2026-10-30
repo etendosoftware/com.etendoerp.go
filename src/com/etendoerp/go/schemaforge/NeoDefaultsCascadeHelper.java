@@ -882,7 +882,7 @@ public class NeoDefaultsCascadeHelper {
     if (proposed == null || JSONObject.NULL.equals(proposed)) {
       return;
     }
-    if (kept != null && String.valueOf(kept).equals(String.valueOf(proposed))) {
+    if (kept != null && NeoHandlerUtils.sameTextOrNumber(kept, proposed)) {
       return;
     }
     result.recordSuperseded(fieldName, kept, proposed);

@@ -231,6 +231,13 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         enrichCanCreateReturn(shipmentRec, context.getRecordId());
       } else {
         annotateBatch(dataArr);
+        if (context.isMcpOrigin()) {
+          // ETP-5852: an agent listing shipments needs to know which invoices cover each one
+          // (54 production reports). One query for the page; the SPA list does not use it, so it
+          // is not paid there.
+          InOutInvoiceLinks.putLinkedInvoices(dataArr, InOutInvoiceLinks.linkedInvoicesByInOut(
+              InOutInvoiceLinks.MatchTable.SALES, NeoHandlerUtils.collectIds(dataArr)));
+        }
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

@@ -211,9 +211,16 @@ public class NeoDefaultsService {
           }
         }
 
+        // ETP-5852: the record values the caller already knows (MCP recordContext, REST
+        // /defaults?field=value) are set before the cascade, so the callouts derive their
+        // dependent fields from them exactly as on create or in the UI — a business partner's
+        // payment terms, method, address and price list. Without this the cascade ran with the
+        // partner empty and the defaults came back generic.
+        Set<String> contextFields = NeoDefaultsRecordContext.apply(ctx, fields, dalEntity, defaults);
+
         // Keep cascade enabled for /defaults to preserve the compatibility behavior chosen
         // for this merge: dependent defaults should still be derived during form bootstrap.
-        Tab adTab = applyCascadeAndResolveTab(ctx, sequenceFields, defaults);
+        Tab adTab = applyCascadeAndResolveTab(ctx, sequenceFields, defaults, contextFields);
 
         // ETP-3894: FK preselection is intentionally disabled. Mandatory FKs without an
         // explicit AD_Column default / ETGO_SF_FIELD default / session value / parent value
@@ -612,14 +619,15 @@ public class NeoDefaultsService {
   }
 
   private static @Nullable Tab applyCascadeAndResolveTab(NeoContext ctx, JSONArray sequenceFields,
-      JSONObject defaults) throws JSONException {
+      JSONObject defaults, Set<String> contextFields) throws JSONException {
     Tab adTab = ctx.getAdTab();
     Set<String> seqFieldSet = new HashSet<>();
     for (int i = 0; i < sequenceFields.length(); i++) {
       seqFieldSet.add(sequenceFields.getString(i));
     }
     if (adTab != null) {
-      NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
+      NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet,
+          contextFields);
     }
 
     // Re-apply C_DocTypeTarget_ID from the tab's HQL subtype filter (e.g. sOSubType LIKE 'OB'

@@ -21,6 +21,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -31,6 +33,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.service.json.JsonConstants;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoExtensionChannel;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
@@ -44,6 +47,8 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
@@ -130,12 +135,17 @@ final class McpHookExecutor {
    * @param sfEntity   the entity configuration, whose {@code Java_Qualifier} is resolved
    * @param queryParams the provider's inputs, built by {@link #buildReadProviderParams}; never
    *                   {@code null}
-   * @return the MCP result when the customization served the read, or {@code null} to carry on
+   * @param args       the tool arguments, for the {@code fields} projection (ETP-5852)
+   * @param offset     the caller's first row on {@code etendo_list}, {@code null} on a get
+   * @param limit      the caller's page size on {@code etendo_list}, {@code null} on a get
+   * @return the MCP result when the customization served the read — in the generic read's shape,
+   *         paged and projected ({@link McpProvidedReadShaper}) — or {@code null} to carry on
    *         with the generic path
    * @throws JSONException when the customization's response cannot be converted
    */
   static JSONObject runReadProvider(String specName, String entityName, String recordId,
-      SFEntity sfEntity, Map<String, String> queryParams) throws JSONException {
+      SFEntity sfEntity, Map<String, String> queryParams, JSONObject args, Integer offset,
+      Integer limit) throws JSONException {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
@@ -145,6 +155,9 @@ final class McpHookExecutor {
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
+        // ETP-5852: the read's pre-phase is an MCP call like the others built here; without the
+        // flag a customization could not tell an agent's read from the app's.
+        .mcpOrigin(true)
         .queryParams(queryParams)
         .build();
     NeoExtensionResult result = NeoExtensionDispatcher.dispatch(NeoExtensionRequest.builder()
@@ -156,7 +169,7 @@ final class McpHookExecutor {
         .context(ctx)
         .build());
     NeoResponse response = result.response();
-    return response != null ? neoResponseToMcpResult(response) : null;
+    return response != null ? McpProvidedReadShaper.shape(response, args, offset, limit) : null;
   }
 
   /**
@@ -579,6 +592,21 @@ final class McpHookExecutor {
    */
   static JSONObject runPostHook(NeoExtensionRequest request, JSONObject responseJson)
       throws JSONException {
+    NeoResponse post = runPostHookResponse(request, responseJson);
+    return post == null ? null : neoResponseToMcpResult(post);
+  }
+
+  /**
+   * Same post phase as {@link #runPostHook(NeoExtensionRequest, JSONObject)}, but hands back the
+   * handler's replacement response itself instead of the MCP result built from it. ETP-5852: the
+   * record writes need it to give a replaced success body the same {@code {data:{…}}} shape and
+   * record link as an unreplaced one; a refusal still goes through
+   * {@link #neoResponseToMcpResult(NeoResponse)}.
+   *
+   * @return the handler's replacement (or the after-commit failure), or {@code null} to keep
+   *     {@code responseJson}
+   */
+  static NeoResponse runPostHookResponse(NeoExtensionRequest request, JSONObject responseJson) {
     NeoExtensionResult result;
     try {
       result = NeoExtensionDispatcher.dispatch(
@@ -586,9 +614,9 @@ final class McpHookExecutor {
     } catch (RuntimeException e) {
       // ETP-5782: the write before this post-hook is committed, so its failure must not read as a
       // refusal to correct and re-send — the agent would repeat the write. Same answer as REST.
-      return neoResponseToMcpResult(NeoErrorResponses.afterCommitFailure(e,
+      return NeoErrorResponses.afterCommitFailure(e,
           request.context() != null ? request.context().getHttpMethod() : null,
-          "MCP afterHandle", null));
+          "MCP afterHandle", null);
     }
     if (result.outcome() == NeoExtensionOutcome.NO_CUSTOMIZATION) {
       return null;
@@ -597,10 +625,68 @@ final class McpHookExecutor {
     NeoResponse post = result.response();
     if (post != null) {
       NeoAuditTokenRefresh.refreshInResponse(ctx, post);
-      return neoResponseToMcpResult(post);
+      return post;
     }
     NeoAuditTokenRefresh.refreshInBody(ctx, responseJson);
     return null;
+  }
+
+  /** Whether a post-hook outcome is a refusal (status &ge; 400); {@code null} is not. */
+  static boolean isRefusal(NeoResponse post) {
+    return post != null && post.getHttpStatus() >= 400;
+  }
+
+  /** The body a post-hook replaced the response with, else {@code original}. */
+  static JSONObject bodyOr(NeoResponse post, JSONObject original) {
+    return post == null ? original : post.getBody();
+  }
+
+  /**
+   * ETP-5852: a create or update the entity's pre-hook served by itself (a contact's address, …)
+   * answers like one the generic write served: {@code {data:{…}}} with its {@code url} when the
+   * entity has a page. Before, the handler's core-shaped {@code {response:{status, data:[…]}}}
+   * went out as is. A refusal goes through {@link #neoResponseToMcpResult} unchanged.
+   *
+   * @param recordId the updated record, or {@code null} on a create (read back from the body)
+   */
+  static JSONObject servedRecordResult(NeoResponse served, String specName, String recordId,
+      Tab adTab) throws JSONException {
+    if (isRefusal(served)) {
+      return neoResponseToMcpResult(served);
+    }
+    JSONObject flat = McpToolRouterSupport.flattenCoreResponse(served.getBody());
+    McpRecordUrls.addRecordUrl(flat, specName, recordId, McpToolRouterSupport.isPrimaryTab(adTab));
+    return McpToolRouter.wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));
+  }
+
+  /**
+   * Both record refusals an action answers before anything runs: another tenant's record (ETP-5558),
+   * then an id that is no row of the table for a document action (ETP-5715).
+   */
+  static NeoResponse actionRecordRefusal(SFEntity sfEntity, String recordId, String firedName) {
+    NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
+    return foreignRecord != null ? foreignRecord
+        : NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
+  }
+
+  /**
+   * Fires the action's button process. ETP-5684: when the customization un-posted the record
+   * before a reactivation that then throws, the un-post is committed and stays, so the error is
+   * answered (the router rolls an error answer back) instead of thrown, for the note to reach the
+   * caller.
+   */
+  static NeoResponse executeButtonAction(NeoContext hookCtx, SFEntity sfEntity, String recordId,
+      String firedName, JSONObject actionParams) throws Exception {
+    try {
+      return NeoButtonActionHelper.executeButtonActionCore(sfEntity, recordId, firedName,
+          actionParams);
+    } catch (Exception e) {
+      if (!ReactivationUnpost.ran(hookCtx)) {
+        throw e;
+      }
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          McpActionBatch.parseBody(McpActionBatch.errorBodyOf(e, McpConstants.TOOL_NEO_ACTION)));
+    }
   }
 
   /**

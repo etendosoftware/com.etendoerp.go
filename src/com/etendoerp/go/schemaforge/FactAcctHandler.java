@@ -63,6 +63,8 @@ public class FactAcctHandler implements NeoHandler {
   /** AD_Table_ID for each supported document type (spec name → table ID). */
   private static final Map<String, String> TABLE_ID_BY_SPEC = Map.of(
       "purchase-invoice", "318",
+      // ETP-5852 (M-81): an agent reads a sales invoice's entries as it reads a purchase one's.
+      "sales-invoice", "318",
       "goods-receipt", "319"
   );
 

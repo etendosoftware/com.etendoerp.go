@@ -43,6 +43,7 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
@@ -90,7 +91,8 @@ final class McpDeclaredActions {
         offered.put(e.getKey(), e.getValue());
       }
     }
-    return offered;
+    // ETP-5684: a role without showAccountingFields is not offered post/unpost at all.
+    return NeoAccountingAccessPolicy.withoutPostingActions(offered);
   }
 
   /**
@@ -409,24 +411,6 @@ final class McpDeclaredActions {
       }
     }
     return names;
-  }
-
-  /**
-   * Whether the entity's customization un-posts a posted record before reactivating it
-   * ({@link NeoHandler#unpostBeforeReactivate}); quiet, a customization that throws opts out.
-   *
-   * @param entity the SchemaForge entity
-   * @return {@code true} only when the customization opts in
-   */
-  static boolean unpostsBeforeReactivation(SFEntity entity) {
-    NeoHandler handler = NeoHandlerLookup.forEntityQuietly(entity);
-    try {
-      return handler != null && handler.unpostBeforeReactivate();
-    } catch (RuntimeException e) {
-      log.warn("Could not read unpostBeforeReactivate of {}: {}", handler.getClass().getName(),
-          e.getMessage());
-      return false;
-    }
   }
 
   /** Looked up quietly: a failing customization must not break discovery for the entity. */

@@ -17,12 +17,24 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.List;
+
+import org.openbravo.model.common.businesspartner.BusinessPartner;
+
+import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoExtension;
 
 /**
  * Contacts spec, Vendor/Creditor tab ({@code C_BPartner}): "at least one contact type" guard
- * (ETP-5791). See {@link ContactTypeFlagGuardHandler}.
+ * (ETP-5791), see {@link ContactTypeFlagGuardHandler}; and an MCP list without a parent keeps the
+ * vendors (ETP-5852), see {@link ContactRoleListScope}.
  */
 @NeoExtension(spec = "contacts", entity = "vendorCreditor")
 public class ContactVendorTabHandler extends ContactTypeFlagGuardHandler {
+
+  @Override
+  public List<String> readPredicates(NeoContext context) {
+    return ContactRoleListScope.forList(context,
+        "e." + BusinessPartner.PROPERTY_VENDOR + " = true");
+  }
 }

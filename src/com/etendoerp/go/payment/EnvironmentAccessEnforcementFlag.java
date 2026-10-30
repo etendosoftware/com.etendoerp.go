@@ -52,6 +52,6 @@ public final class EnvironmentAccessEnforcementFlag {
    */
   public static boolean isEnforcementSwitchedOff(String clientId) {
     return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF,
-        FeatureFlagContext.forAccount(null).with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, clientId));
+        FeatureFlagContext.environment().with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, clientId));
   }
 }

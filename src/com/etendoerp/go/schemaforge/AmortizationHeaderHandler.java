@@ -37,6 +37,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
 
 /**
  * NeoHandler for the {@code header} entity of the {@code amortization} spec.
@@ -125,6 +126,14 @@ public class AmortizationHeaderHandler implements NeoHandler {
     NeoResponse confirmRejection = AmortizationConfirmGuard.validateBeforeAction(context);
     if (confirmRejection != null) {
       return confirmRejection;
+    }
+    // ETP-5684: a posted amortization is un-posted on the server, as the last step before it is
+    // reactivated — callers no longer send an unpost first (it needs showAccountingFields).
+    if (AmortizationConfirmGuard.isReactivation(context)) {
+      NeoResponse unpostRefusal = ReactivationUnpost.unpostFirst(context, postingService);
+      if (unpostRefusal != null) {
+        return unpostRefusal;
+      }
     }
     // Rewrite the list "Posted" boolean filter into correct binary String semantics
     // (Posted = 'Y' / Posted <> 'Y') before the default CRUD query builds. See class Javadoc.
@@ -232,6 +241,8 @@ public class AmortizationHeaderHandler implements NeoHandler {
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5684: say what ran when the reactivation un-posted the amortization first.
+    ReactivationUnpost.notePartial(context);
     if (!NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
       return null;
     }

@@ -85,7 +85,7 @@ public class BillingReconciliationProcess extends DalBaseProcess {
       + "was done.";
   /** {@code AD_PROCESS_REQUEST.TIMING_OPTION} of a recurring schedule. */
   static final String TIMING_SCHEDULED = "S";
-  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
+  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.environment();
 
   static final String KIND_SCHEDULE_FLAG_OFF = "schedule-flag-off";
   private static final String ALERT_SCHEDULE_FLAG_OFF = "billing-reconcile-schedule-flag-off";

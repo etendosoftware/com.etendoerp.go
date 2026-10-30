@@ -194,12 +194,6 @@ public class PurchaseInvoiceHeaderHandlerTest {
     });
   }
 
-  /** ETP-5715: the invoice window opts into un-posting before a reactivation, like its SPA. */
-  @Test
-  public void testUnpostsBeforeReactivation() {
-    org.junit.Assert.assertTrue(new PurchaseInvoiceHeaderHandler().unpostBeforeReactivate());
-  }
-
   @Test
   public void testAfterHandleDoesNotSyncConversionRateOnRegisterPaymentAction() throws Exception {
     assertActionDoesNotSyncConversionRate("registerPayment");

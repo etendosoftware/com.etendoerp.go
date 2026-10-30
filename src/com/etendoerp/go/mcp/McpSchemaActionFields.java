@@ -125,4 +125,36 @@ final class McpSchemaActionFields {
     fieldObj.put(McpConstants.KEY_ACTION_VALUES, values);
     fieldObj.put(McpConstants.KEY_ACTION_PARAMETER, McpConstants.PARAM_DOC_ACTION);
   }
+
+  /** Key of the values a {@code list} field can hold (ETP-5852). */
+  static final String KEY_OPTIONS = "options";
+
+  /**
+   * ETP-5852: attach {@code options:[{value, label}]} to a {@code list} field, from the column's AD
+   * reference list with the session-language labels — the same source {@link #addActionValues}
+   * reads for buttons. A list field used to publish only {@code type:"list"}, so an agent read
+   * {@code status:"N"} or {@code documentStatus:"DR"} with no way to know what the code meant;
+   * production agents took the period control's {@code openClose} button value for the period's
+   * state and inverted open and closed. A column without a reference list, or an empty one, gets
+   * no key.
+   *
+   * @param fieldObj the field being described, modified in place
+   * @param col      the AD column
+   * @throws JSONException if the values cannot be written
+   */
+  static void addListOptions(JSONObject fieldObj, Column col) throws JSONException {
+    org.openbravo.model.ad.domain.Reference listRef = col.getReferenceSearchKey();
+    if (listRef == null) {
+      return;
+    }
+    Map<String, String> labels = NeoSelectorService.getListLabels((String) listRef.getId());
+    if (labels == null || labels.isEmpty()) {
+      return;
+    }
+    JSONArray options = new JSONArray();
+    for (String value : new TreeSet<>(labels.keySet())) {
+      options.put(new JSONObject().put("value", value).put("label", labels.get(value)));
+    }
+    fieldObj.put(KEY_OPTIONS, options);
+  }
 }

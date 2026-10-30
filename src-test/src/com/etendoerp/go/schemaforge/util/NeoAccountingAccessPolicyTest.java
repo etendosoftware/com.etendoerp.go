@@ -17,7 +17,9 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -30,6 +32,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.AfterEach;
@@ -40,18 +43,22 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.client.application.Process;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
- * Unit tests for the accounting-entity gate (ETP-5648): the structural criterion (child tab
- * whose table has {@code C_AcctSchema_ID}) and who may see such an entity.
+ * Unit tests for the accounting gate: accounting entities (ETP-5648) — the structural criterion
+ * (child tab whose table has {@code C_AcctSchema_ID}) and who may see such an entity — and the
+ * posting actions (ETP-5684): post/unpost and every button that runs the shared Post process.
  *
  * @covers com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy
  */
@@ -195,5 +202,82 @@ class NeoAccountingAccessPolicyTest {
 
     assertTrue(NeoAccountingAccessPolicy.isEntityNameAllowed(spec, "nope"));
     assertTrue(NeoAccountingAccessPolicy.isEntityNameAllowed(null, "x"));
+  }
+
+  // ETP-5684 — posting actions follow the same capability.
+
+  private static Column button(String processId) {
+    Column column = mock(Column.class);
+    if (processId != null) {
+      Process process = mock(Process.class);
+      when(process.getId()).thenReturn(processId);
+      when(column.getOBUIAPPProcess()).thenReturn(process);
+    }
+    return column;
+  }
+
+  @Test
+  void postAndUnpostArePostingActionsWithoutLookingAtTheEntity() {
+    assertTrue(NeoAccountingAccessPolicy.isPostingAction(null, "post"));
+    assertTrue(NeoAccountingAccessPolicy.isPostingAction(null, "UNPOST"));
+    assertFalse(NeoAccountingAccessPolicy.isPostingAction(null, "reactivate"));
+    assertFalse(NeoAccountingAccessPolicy.isPostingAction(null, " "));
+  }
+
+  @Test
+  void aButtonIsPostingByItsProcessNotItsName() {
+    // EM_Etblkp_Bulkposting: the Post process declared on the column.
+    assertTrue(NeoAccountingAccessPolicy.isPostingButton(
+        button(NeoAccessHelper.DEFAULT_POST_PROCESS_ID)));
+    // Posted: no process on the column, resolved through the shared fallback.
+    Column posted = button(null);
+    Process post = mock(Process.class);
+    when(post.getId()).thenReturn(NeoAccessHelper.DEFAULT_POST_PROCESS_ID);
+    accessMock.when(() -> NeoAccessHelper.resolveFallbackObuiappProcess(posted)).thenReturn(post);
+    assertTrue(NeoAccountingAccessPolicy.isPostingButton(posted));
+
+    assertFalse(NeoAccountingAccessPolicy.isPostingButton(button("OTHER")));
+    assertFalse(NeoAccountingAccessPolicy.isPostingButton(button(null)));
+    assertFalse(NeoAccountingAccessPolicy.isPostingButton(null));
+  }
+
+  @Test
+  void anAdButtonActionIsResolvedOnTheEntity() {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getId()).thenReturn("E1");
+    Column bulk = button(NeoAccessHelper.DEFAULT_POST_PROCESS_ID);
+    try (MockedStatic<NeoButtonActionHelper> buttons = mockStatic(NeoButtonActionHelper.class)) {
+      buttons.when(() -> NeoButtonActionHelper.findButtonColumn("E1", "EM_Etblkp_Bulkposting"))
+          .thenReturn(bulk);
+      assertTrue(NeoAccountingAccessPolicy.isPostingAction(entity, "EM_Etblkp_Bulkposting"));
+      assertFalse(NeoAccountingAccessPolicy.isPostingAction(entity, "DocAction"));
+    }
+  }
+
+  @Test
+  void postingIsRefusedWith403WithoutTheCapability() throws Exception {
+    Role sales = role("R1", false, "N");
+    accessMock.when(NeoAccessHelper::resolveCurrentRole).thenReturn(sales);
+
+    NeoResponse refusal = NeoAccountingAccessPolicy.refusalForPostingAction(null, "unpost");
+
+    assertEquals(403, refusal.getHttpStatus());
+    JSONObject body = refusal.getBody();
+    assertFalse(body.getBoolean("success"));
+    assertEquals(NeoAccountingAccessPolicy.KEY_ACCOUNTING_ACCESS_DENIED,
+        body.getJSONArray("messageKeys").getString(0));
+  }
+
+  @Test
+  void postingRunsWithTheCapability() {
+    Role finance = role("R2", false, "Y");
+    accessMock.when(NeoAccessHelper::resolveCurrentRole).thenReturn(finance);
+    assertNull(NeoAccountingAccessPolicy.refusalForPostingAction(null, "post"));
+  }
+
+  @Test
+  void aNonPostingActionNeverReadsTheRoleFlag() {
+    assertNull(NeoAccountingAccessPolicy.refusalForPostingAction(null, "reactivate"));
+    accessMock.verify(NeoAccessHelper::resolveCurrentRole, never());
   }
 }

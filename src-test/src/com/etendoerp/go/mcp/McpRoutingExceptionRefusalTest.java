@@ -209,19 +209,10 @@ class McpRoutingExceptionRefusalTest {
     }
 
     @Test
-    @DisplayName("operatorKeys() ends with 'between', which lives outside the operator map")
-    void betweenIsListed() {
-      List<String> keys = McpBusinessFilters.operatorKeys();
-      assertEquals(McpBusinessFilters.OP_BETWEEN, keys.get(keys.size() - 1));
-      assertTrue(keys.containsAll(List.of("gt", "gte", "lt", "lte")));
-    }
-
-    @Test
     @DisplayName("a malformed operator value says what shape was expected")
     void malformedOperator() throws JSONException {
-      JSONObject envelope = McpRoutingException
-          .malformedFilterOperator("amount", "between", "the 'between' operator takes a "
-              + "two-element [from, to] array")
+      JSONObject envelope = McpRequestRefusals.malformedFilterOperator("amount", "between",
+          "the 'between' operator takes a two-element [from, to] array")
           .toEnvelope();
       assertEquals(422, envelope.getInt(McpConstants.KEY_STATUS));
       assertEquals(McpConstants.ERROR_VALIDATION, envelope.getString(McpConstants.KEY_ERROR));

@@ -3297,4 +3297,17 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsCascadeHelper instance = constructor.newInstance();
     assertNotNull(instance);
   }
+
+  /**
+   * ETP-5852: a caller's 20 and a callout's "20.00" are the same price — not a superseded default —
+   * while a real difference, or non-numeric text, still is.
+   */
+  @Test
+  public void testSameValueComparesNumbersByValue() {
+    assertTrue(NeoHandlerUtils.sameTextOrNumber(20, "20.00"));
+    assertTrue(NeoHandlerUtils.sameTextOrNumber(new java.math.BigDecimal("5.0"), 5));
+    assertTrue(NeoHandlerUtils.sameTextOrNumber("ABC", "ABC"));
+    assertFalse(NeoHandlerUtils.sameTextOrNumber(20, "18"));
+    assertFalse(NeoHandlerUtils.sameTextOrNumber("ABC", "abc"));
+  }
 }

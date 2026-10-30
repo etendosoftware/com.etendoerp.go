@@ -283,12 +283,34 @@ class SalesLineCustomizationHandlersTest {
   }
 
   /**
-   * {@link PurchaseOrderLineHandler} (ETP-5881) runs the parent's pre-hook and then prices the
-   * created line from the price list; it lets default CRUD continue. The parent's own response
-   * cannot be non-null (see the class note), so only the pricing leg is observable.
+   * Over MCP, {@link PurchaseOrderLineHandler} runs the parent's pre-hook and then every order line
+   * rule (ETP-5881 pricing from the price list, ETP-5852 discount and amounts, as on sales lines);
+   * it lets default CRUD continue. The parent's own response cannot be non-null (see the class
+   * note), so only the rules leg is observable.
    */
   @Test
-  void purchaseOrderLineHandlerPricesACreatedLineAndContinuesCrud() throws Exception {
+  void purchaseOrderLineHandlerAppliesTheLineRulesOverMcp() throws Exception {
+    NeoContext ctx = NeoContext.builder().specName("purchase-order").entityName("lines")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).mcpOrigin(true)
+        .requestBody(new JSONObject("{\"product\":\"P1\"}")).build();
+
+    NeoResponse response;
+    try (MockedStatic<OrderLineDiscountSupport> pricing = mockStatic(
+        OrderLineDiscountSupport.class)) {
+      response = new PurchaseOrderLineHandler().handle(ctx);
+
+      pricing.verify(() -> OrderLineDiscountSupport.applyLineRules(same(ctx)), times(1));
+    }
+
+    assertNull(response, "the pre-hook must let default CRUD continue");
+  }
+
+  /**
+   * On REST (the app's form) a purchase line keeps its own rules only: the price-list pricing of a
+   * created line, never the sales discount and amount rules — the form derives those itself.
+   */
+  @Test
+  void purchaseOrderLineHandlerKeepsItsOwnRulesOnRest() throws Exception {
     NeoContext ctx = createContext("purchase-order", "lines", new JSONObject("{\"product\":\"P1\"}"));
 
     NeoResponse response;
@@ -297,6 +319,7 @@ class SalesLineCustomizationHandlersTest {
       response = new PurchaseOrderLineHandler().handle(ctx);
 
       pricing.verify(() -> OrderLineDiscountSupport.setStandardPriceOnCreate(same(ctx)), times(1));
+      pricing.verify(() -> OrderLineDiscountSupport.applyLineRules(any()), never());
     }
 
     assertNull(response, "the pre-hook must let default CRUD continue");

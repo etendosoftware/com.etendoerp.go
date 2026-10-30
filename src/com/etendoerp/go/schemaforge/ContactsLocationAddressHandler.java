@@ -301,7 +301,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       bpLoc.setActive(Boolean.TRUE);
       bpLoc.setBusinessPartner(bp);
       bpLoc.setLocationAddress(geoLoc);
-      bpLoc.setName(str(body, "name", "."));
+      bpLoc.setName(ContactAddressName.of(ctx, body, geoLoc,
+          ContactsLocationAddressHandler::buildDisplayName));
       bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS, true));
       bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS, true));
       // C_BPartner_Location.IsTaxLocation's own AD default is an unquoted 'N', so a create that

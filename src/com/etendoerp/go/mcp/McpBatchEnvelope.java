@@ -22,6 +22,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 
 /**
@@ -151,6 +152,12 @@ final class McpBatchEnvelope {
       return result;
     }
 
+    JSONObject keyedRefusal = keyedRefusal(detail, status, message);
+    if (keyedRefusal != null) {
+      result.put(McpConstants.KEY_ERROR, keyedRefusal);
+      return result;
+    }
+
     String dalMessage = McpSupportInternals.extractDalMessage(detail);
 
     JSONObject clean = new JSONObject();
@@ -160,6 +167,32 @@ final class McpBatchEnvelope {
     clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     result.put(McpConstants.KEY_ERROR, clean);
     return result;
+  }
+
+  /**
+   * ETP-5945 (in ETP-5852): a refusal NEO identified by its message keys (a date with no valid
+   * period: REST answers it 400 with error.messageKeys) gets the envelope etendo_create answers
+   * for the same refusal — 422, code business_rule, the keys and their recovery hint — instead of
+   * a bare 400 "rejected by server". The op is already named by failedAt.
+   *
+   * @return the envelope, or {@code null} when the sub-response carries no message keys
+   */
+  private static JSONObject keyedRefusal(JSONObject detail, int status, String message)
+      throws JSONException {
+    JSONObject keyed = detail == null ? null : detail.optJSONObject(McpConstants.KEY_ERROR);
+    JSONArray keys = keyed == null ? null : keyed.optJSONArray("messageKeys");
+    if (keys == null || keys.length() == 0 || status >= 500) {
+      return null;
+    }
+    java.util.List<String> keyList = new java.util.ArrayList<>();
+    for (int i = 0; i < keys.length(); i++) {
+      keyList.add(keys.optString(i));
+    }
+    JSONObject envelope = McpToolResponses.classifiedEnvelope(status,
+        keyed.optString("code", NeoErrorClassifier.CODE_BUSINESS_RULE),
+        keyed.optString(McpConstants.KEY_MESSAGE, message), keyList);
+    envelope.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return envelope;
   }
 
   /**

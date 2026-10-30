@@ -100,7 +100,7 @@ final class McpRequestEra {
    * The kill switch is environment level: no targeting key, no attributes (see
    * {@link GoFeatureFlags#FLAG_MCP_MODERN_ERA_DISABLED}). Shared, so nothing is built per request.
    */
-  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
+  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.environment();
 
   /** Methods that select legacy semantics whatever else the request carries. */
   private static final Set<String> LEGACY_HANDSHAKE =

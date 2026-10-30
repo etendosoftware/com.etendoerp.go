@@ -71,6 +71,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * sits inside a {@code catch (Exception)} that swallows failures, so "the body was left alone" is
  * not on its own evidence that the intended guard fired: each abstain test below therefore also
  * asserts that {@link FinancialUtils#getProductPrice} was never reached.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpLinePriceInjector
  */
 class McpLinePriceInjectorTest {
 
@@ -328,17 +330,80 @@ class McpLinePriceInjectorTest {
     assertAbstainedBeforeAnyLoad(body);
   }
 
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> updatePrices() {
+    return java.util.stream.Stream.of(
+        // order line (discount): price 40 keeps the stored 5 % -> net 38
+        org.junit.jupiter.params.provider.Arguments.of("discount", "40", null, "5", "40", "38"),
+        // invoice line (etgoDiscount): price 40 with the stored 10 % -> net 36
+        org.junit.jupiter.params.provider.Arguments.of("etgoDiscount", "40", null, "10", "40", "36"),
+        // a discount sent in the same update wins over the stored one
+        org.junit.jupiter.params.provider.Arguments.of("discount", "40", "25", "5", "40", "30"));
+  }
+
+  /** ETP-5852 (M-103): on update too, a price sent alone is the Precio and the net follows. */
+  @org.junit.jupiter.params.ParameterizedTest(name = "{0} price {1} sent {2} stored {3}")
+  @org.junit.jupiter.params.provider.MethodSource("updatePrices")
+  void anUpdatedPriceIsTheListPrice(String discountKey, String price, String sentDiscount,
+      String storedDiscount, String list, String unit) throws Exception {
+    Entity entity = lineEntity(UNIT_PRICE, LIST_PRICE, discountKey);
+    org.openbravo.base.structure.BaseOBObject stored =
+        mock(org.openbravo.base.structure.BaseOBObject.class);
+    when(stored.get(discountKey)).thenReturn(new BigDecimal(storedDiscount));
+    JSONObject body = body(UNIT_PRICE, new BigDecimal(price));
+    java.util.Set<String> sent = new java.util.HashSet<>(Set.of(UNIT_PRICE));
+    if (sentDiscount != null) {
+      body.put(discountKey, new BigDecimal(sentDiscount));
+      sent.add(discountKey);
+    }
+
+    assertTrue(McpLinePriceInjector.applyAgentPriceOnUpdate(body, entity, sent, stored));
+
+    assertEquals(0, new BigDecimal(list).compareTo(new BigDecimal(body.get(LIST_PRICE).toString())));
+    assertEquals(0, new BigDecimal(unit).compareTo(new BigDecimal(body.get(UNIT_PRICE).toString())));
+  }
+
   @Test
-  @DisplayName("Abstains when the agent supplied unitPrice itself — the agent's price wins")
-  void abstainsWhenTheAgentSuppliedUnitPrice() throws Exception {
-    withResolvedScope();
-    withEverythingNeededForAPrice();
-    JSONObject body = body(UNIT_PRICE, new BigDecimal("0"));
+  void anUpdateThatSendsTheListPriceIsLeftAlone() throws Exception {
+    Entity entity = lineEntity(UNIT_PRICE, LIST_PRICE, "discount");
+    JSONObject body = body(UNIT_PRICE, new BigDecimal("40"));
+    body.put(LIST_PRICE, new BigDecimal("50"));
 
-    McpLinePriceInjector.injectIfMissing(body, commercialLineEntity(), sfEntity(),
-        Set.of(UNIT_PRICE), log);
+    assertFalse(McpLinePriceInjector.applyAgentPriceOnUpdate(body, entity,
+        Set.of(UNIT_PRICE, LIST_PRICE), null));
+    assertEquals("40", body.get(UNIT_PRICE).toString());
+  }
 
-    assertAbstainedBeforeAnyLoad(body);
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> agentPrices() {
+    return java.util.stream.Stream.of(
+        // CO-08: 10 × 50 at 5 % is 475 — the discount applies to the price the agent sent.
+        org.junit.jupiter.params.provider.Arguments.of("50", "5", "50", "47.5"),
+        // CO-09: a price with no discount is the form's Precio — no tariff, no derived discount.
+        org.junit.jupiter.params.provider.Arguments.of("20", null, "20", "20"),
+        org.junit.jupiter.params.provider.Arguments.of("12", "100", "12", "0"),
+        // A discount outside 0..100 is left to the line's own validation; the price stays whole.
+        org.junit.jupiter.params.provider.Arguments.of("20", "150", "20", "20"));
+  }
+
+  /**
+   * ETP-5727 (in ETP-5852): the agent's price is the form's "Precio" (listPrice); the net
+   * unitPrice follows from it and the discount, and the tariff is not consulted.
+   */
+  @org.junit.jupiter.params.ParameterizedTest(name = "price {0} discount {1}")
+  @org.junit.jupiter.params.provider.MethodSource("agentPrices")
+  void theAgentPriceIsTheListPrice(String price, String discount, String list, String unit)
+      throws Exception {
+    JSONObject body = body(UNIT_PRICE, new BigDecimal(price));
+    java.util.Set<String> sent = new java.util.HashSet<>(Set.of(UNIT_PRICE));
+    if (discount != null) {
+      body.put("discount", new BigDecimal(discount));
+      sent.add("discount");
+    }
+
+    McpLinePriceInjector.injectIfMissing(body, commercialLineEntity(), sfEntity(), sent, log);
+
+    assertEquals(0, new BigDecimal(list).compareTo(new BigDecimal(body.get(LIST_PRICE).toString())));
+    assertEquals(0, new BigDecimal(unit).compareTo(new BigDecimal(body.get(UNIT_PRICE).toString())));
+    assertFalse(body.has(PRICE_LIMIT), "the tariff is not consulted");
   }
 
   @Test

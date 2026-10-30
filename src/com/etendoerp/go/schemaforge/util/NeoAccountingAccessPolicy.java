@@ -17,18 +17,30 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
+import org.openbravo.client.application.Process;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -46,6 +58,29 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * {@code AD_Role.EM_ETGO_Show_Acct_Fields = 'Y'}. A {@code null} role is denied (fail closed).</p>
  */
 public final class NeoAccountingAccessPolicy {
+
+  /** Stable identity of the posting refusal; a plain string, as in ETP-5692. */
+  public static final String KEY_ACCOUNTING_ACCESS_DENIED = "ETGO_AccountingAccessDenied";
+
+  static final String MSG_POSTING_DENIED =
+      "Access denied to accounting for current role: posting and unposting need Show Accounting Fields";
+
+  /** The generic posting actions {@code DocumentPostingService} serves for every posted table. */
+  private static final Set<String> POSTING_ACTIONS = Set.of("post", "unpost");
+
+  /**
+   * DAL properties of the accounting columns: {@code Posted}, {@code EM_Etblkp_Accountingstatus}
+   * and the {@code EM_Etblkp_Bulkposting} button. Kept in step with {@link #ACCOUNTING_STATUS_COLUMNS}
+   * and the posting buttons by {@code NeoAccountingAccessPolicyTest}.
+   */
+  private static final Set<String> ACCOUNTING_PROPERTIES =
+      Set.of("posted", "etblkpAccountingstatus", "etblkpBulkposting");
+
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
+
+  /** DB columns (lower case) that store a document's accounting status. */
+  private static final Set<String> ACCOUNTING_STATUS_COLUMNS =
+      Set.of("posted", "em_etblkp_accountingstatus");
 
   /** Structural verdict per {@code AD_Tab_ID}; AD metadata does not change without a restart. */
   private static final Map<String, Boolean> ACCOUNTING_TAB_CACHE = new ConcurrentHashMap<>();
@@ -169,5 +204,135 @@ public final class NeoAccountingAccessPolicy {
       }
     }
     return true;
+  }
+
+  /**
+   * Whether {@code action} on {@code entity} creates or removes ledger entries (ETP-5684): the
+   * {@code post}/{@code unpost} actions {@code DocumentPostingService} serves, or an AD button whose
+   * process is the shared Post process — {@code Posted} through its fallback,
+   * {@code EM_Etblkp_Bulkposting} explicitly. Decided by the process, never by a column name.
+   *
+   * @param entity the entity the action is addressed to; may be {@code null}
+   * @param action the action as typed (field or DB column name for a button)
+   * @return {@code true} for a posting action
+   */
+  public static boolean isPostingAction(SFEntity entity, String action) {
+    if (StringUtils.isBlank(action)) {
+      return false;
+    }
+    if (POSTING_ACTIONS.contains(action.toLowerCase(Locale.ROOT))) {
+      return true;
+    }
+    return entity != null
+        && isPostingButton(NeoButtonActionHelper.findButtonColumn(entity.getId(), action));
+  }
+
+  /**
+   * Whether {@code column} is a button that runs the shared Post process, either declared on the
+   * column or resolved through the {@code Posted} fallback.
+   *
+   * @param column the AD column; may be {@code null}
+   * @return {@code true} for a posting button
+   */
+  public static boolean isPostingButton(Column column) {
+    if (column == null) {
+      return false;
+    }
+    Process process = column.getOBUIAPPProcess();
+    if (process == null) {
+      process = NeoAccessHelper.resolveFallbackObuiappProcess(column);
+    }
+    return process != null && NeoAccessHelper.DEFAULT_POST_PROCESS_ID.equals(process.getId());
+  }
+
+  /**
+   * Whether {@code column} is accounting data a role without {@code showAccountingFields} must not
+   * see through the MCP (ETP-5684): a column that stores the document's accounting status, or a
+   * posting button. The status columns have no shared AD reference ({@code Posted} is a button over
+   * list 234, {@code EM_Etblkp_Accountingstatus} a plain list), hence the explicit set.
+   *
+   * @param column the AD column; may be {@code null}
+   * @return {@code true} for an accounting-status column or a posting button
+   */
+  public static boolean isAccountingColumn(Column column) {
+    return column != null && column.getDBColumnName() != null
+        && (ACCOUNTING_STATUS_COLUMNS.contains(column.getDBColumnName().toLowerCase(Locale.ROOT))
+            || isPostingButton(column));
+  }
+
+  /**
+   * Whether {@code key} is a record property that carries accounting data (ETP-5684): the DAL
+   * property of an accounting column ({@link #isAccountingColumn}), or its {@code $_identifier}.
+   * By key because the MCP filters rendered bodies, and some handlers build {@code posted} by hand
+   * (financial-account) rather than through the DAL serializer.
+   *
+   * @param key the JSON key
+   * @return {@code true} for an accounting property
+   */
+  public static boolean isAccountingProperty(String key) {
+    if (key == null) {
+      return false;
+    }
+    String base = key.endsWith(IDENTIFIER_SUFFIX)
+        ? key.substring(0, key.length() - IDENTIFIER_SUFFIX.length()) : key;
+    return ACCOUNTING_PROPERTIES.contains(base);
+  }
+
+  /**
+   * Whether the current role may see accounting data.
+   *
+   * @return {@link #canSeeAccounting(Role)} for the current role
+   */
+  public static boolean currentRoleSeesAccounting() {
+    return canSeeAccounting(NeoAccessHelper.resolveCurrentRole());
+  }
+
+  /**
+   * {@code actions} without the posting ones when the current role may not post (ETP-5684). The
+   * role flag is read only when a posting action is present.
+   *
+   * @param <V> the value type
+   * @param actions the actions by name
+   * @return {@code actions} itself when nothing is dropped, otherwise a filtered copy
+   */
+  public static <V> Map<String, V> withoutPostingActions(Map<String, V> actions) {
+    if (actions == null || actions.keySet().stream().noneMatch(a -> isPostingAction(null, a))
+        || currentRoleSeesAccounting()) {
+      return actions;
+    }
+    Map<String, V> kept = new LinkedHashMap<>();
+    actions.forEach((name, value) -> {
+      if (!isPostingAction(null, name)) {
+        kept.put(name, value);
+      }
+    });
+    return kept;
+  }
+
+  /**
+   * The refusal for a posting action the current role may not run, or {@code null} (ETP-5684).
+   * Checked on REST and MCP before the entity's customization or the AD button runs, so no
+   * channel can post or unpost without the {@code showAccountingFields} capability. The role flag
+   * is read only for a posting action.
+   *
+   * @param entity the entity the action is addressed to
+   * @param action the action as typed
+   * @return a 403 with {@code messageKeys: [ETGO_AccountingAccessDenied]}, or {@code null}
+   */
+  public static NeoResponse refusalForPostingAction(SFEntity entity, String action) {
+    if (!isPostingAction(entity, action)
+        || canSeeAccounting(NeoAccessHelper.resolveCurrentRole())) {
+      return null;
+    }
+    try {
+      JSONObject body = new JSONObject();
+      body.put("success", false);
+      body.put("message", MSG_POSTING_DENIED);
+      body.put("messageKeys", new JSONArray(List.of(KEY_ACCOUNTING_ACCESS_DENIED)));
+      // The JSONObject overload: the String one nests the text under error.message (ETP-4706).
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN, body);
+    } catch (JSONException e) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN, MSG_POSTING_DENIED);
+    }
   }
 }

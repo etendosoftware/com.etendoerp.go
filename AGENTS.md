@@ -36,3 +36,6 @@ Do not place credentials in `build.gradle`; the file explicitly warns against it
 
 ## Adding a New Etendo GO Webhook
 Default to the NEO pseudo-spec bridge (`NeoGoWebhookBridge`, `NeoServlet`) instead of exposing it only through the Webhooks module's `/webhooks/*` + `SMFWHE_DEFINEDWEBHOOK_ROLE` grant — that table is wiped by `update.database` on every rebuild. See `docs/neo-headless.md` §4.10–4.11 for the pattern and how to wire a new one in.
+
+## Feature Flags: Evaluation Scope
+A flag with backend logic must be evaluated with the right `FeatureFlagContext`. `forAccount(null)` carries no email, so per-user rules in Datadog/ConfigCat never match: the SPA (which sends the email) shows the feature but the backend never runs it. Use `forAccount(<ETGO_ACCOUNT email>)` (see `PortalLinkPolicy#currentAccountEmail`) for any flag that can be rolled out per user, add `ATTRIBUTE_CLIENT_ID` for per-tenant, and use `FeatureFlagContext.environment()` only for operational kill switches and jobs with no user, with a comment saying why. If the request does not say who the flag targets, ask. Details: `docs/feature-flags-and-tenant-upgrade.md` → *Per-account targeting*.

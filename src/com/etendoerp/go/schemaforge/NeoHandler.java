@@ -241,6 +241,23 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares the DAL property names this customization leaves empty on create unless the caller
+   * sends them, although {@code etendo_defaults} answers a value for them (ETP-5852, M-106).
+   *
+   * <p>The app's form prefills such a field and then clears it before saving the new record (the
+   * contact's billing preferences are filled in after it exists). {@code etendo_schema(view:"create")}
+   * would otherwise mark them {@code serverDefaulted} — "the server fills this" — while the record
+   * is saved with them empty. Reader: the MCP layer, which does not call them server-defaulted and
+   * drops them from its {@code etendo_defaults} answer. The customization decides, on its own
+   * channel, what it does with a value the caller sends.</p>
+   *
+   * @return the property names left empty on create; empty by default
+   */
+  default Set<String> createUnsetFields() {
+    return Collections.emptySet();
+  }
+
+  /**
    * Fills create-body defaults that this customization can derive from the body alone, on the
    * channels whose mandatory-field pre-check runs <b>before</b> the pre-hook (ETP-5710).
    *
@@ -371,25 +388,6 @@ public interface NeoHandler {
    */
   default Map<String, String> unavailableActions(BaseOBObject subject) {
     return Collections.emptyMap();
-  }
-
-  /**
-   * Whether reactivating one of this entity's posted records first un-posts it, exactly as the
-   * SPA's Reactivate does for it (ETP-5715).
-   *
-   * <p>Opt-in on purpose: reversing a document's accounting is not something a reactivation does
-   * everywhere. The SPA un-posts first only in the sales and purchase invoice windows
-   * ({@code preUnpost: true}); goods documents, returns and journals never do, so a customization
-   * answers {@code true} only for the windows whose SPA does. The MCP then un-posts through the
-   * entity's declared {@code unpost} action before a {@code documentAction} {@code RE}, in
-   * {@code etendo_action} and {@code etendo_action_batch} alike. MCP only: REST and the SPA ignore
-   * it, because the SPA already sends the un-post itself.</p>
-   *
-   * @return {@code true} when a posted record is un-posted before it is reactivated; {@code false}
-   *         by default
-   */
-  default boolean unpostBeforeReactivate() {
-    return false;
   }
 
   /**
