@@ -18,9 +18,11 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -276,6 +278,11 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
             rec.put(FIELD_INVOICE_STATUS, statusMap.getOrDefault(id, 0));
           }
         }
+        if (context.isMcpOrigin()) {
+          // ETP-5852: as on goods-shipment — the page's invoices in one query, MCP only.
+          InOutInvoiceLinks.putLinkedInvoices(dataArr, InOutInvoiceLinks.linkedInvoicesByInOut(
+              InOutInvoiceLinks.MatchTable.PURCHASE, ids));
+        }
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
@@ -418,29 +425,60 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     }
   }
 
+  /**
+   * One row per active receipt line: what it received and what the returns hold of it. The
+   * returned quantity is aggregated per source line in a sub-select, so the received quantity of
+   * a line with several returns is read once (a plain JOIN would repeat the line once per return
+   * and inflate the denominator, ETP-6054). The returns counted are exactly those of
+   * {@link ReturnableQuantity} (non-voided, drafts included), the same question the picker asks.
+   */
+  static final String RETURN_STATUS_SQL =
+      "SELECT ABS(iol.movementqty), COALESCE(ret.returned_qty, 0) "
+      + "FROM m_inoutline iol "
+      + "LEFT JOIN (SELECT rl.canceled_inoutline_id AS source_line_id, "
+      + "    SUM(ABS(rl.movementqty)) AS returned_qty "
+      + "  FROM " + ReturnableQuantity.COUNTED_RETURN_LINES_FROM + " "
+      + "  WHERE rl.canceled_inoutline_id IS NOT NULL AND "
+      + ReturnableQuantity.COUNTED_RETURN_LINES_FILTER + " "
+      + "  GROUP BY rl.canceled_inoutline_id) ret "
+      + "  ON ret.source_line_id = iol.m_inoutline_id "
+      + "WHERE iol.m_inout_id = ? AND iol.isactive = 'Y'";
+
   private int computeReturnStatus(String receiptId) {
-    String sql =
-        "SELECT CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 "
-        + "ELSE LEAST(100, ROUND("
-        + "  COALESCE(SUM(ABS(ril.movementqty)), 0) / SUM(ABS(iol.movementqty)) * 100"
-        + ")) END "
-        + "FROM m_inoutline iol "
-        + "LEFT JOIN m_inoutline ril ON ril.canceled_inoutline_id = iol.m_inoutline_id "
-        + "  AND ril.isactive = 'Y' "
-        + "  AND EXISTS ("
-        + "    SELECT 1 FROM m_inout rio WHERE rio.m_inout_id = ril.m_inout_id"
-        + "    AND rio.docstatus NOT IN ('VO','DR') AND rio.isactive = 'Y'"
-        + "  ) "
-        + "WHERE iol.m_inout_id = ? AND iol.isactive = 'Y'";
-    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
+    try (PreparedStatement ps =
+        OBDal.getInstance().getConnection().prepareStatement(RETURN_STATUS_SQL)) {
       ps.setString(1, receiptId);
       try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getInt(1) : 0;
+        return returnPercent(rs);
       }
     } catch (Exception e) {
       log.error("DB error computing return status for receipt {}", receiptId, e);
       return 0;
     }
+  }
+
+  /**
+   * Units returned over units received, summed across every line (so it mixes the units of
+   * different products), as an integer percentage capped at 100.
+   *
+   * @param rs rows of {@link #RETURN_STATUS_SQL}: received quantity, returned quantity
+   * @return the percentage, 0 when nothing was received
+   * @throws SQLException when a row cannot be read
+   */
+  static int returnPercent(ResultSet rs) throws SQLException {
+    BigDecimal received = BigDecimal.ZERO;
+    BigDecimal returned = BigDecimal.ZERO;
+    while (rs.next()) {
+      BigDecimal rec = rs.getBigDecimal(1);
+      BigDecimal ret = rs.getBigDecimal(2);
+      received = received.add(rec == null ? BigDecimal.ZERO : rec);
+      returned = returned.add(ret == null ? BigDecimal.ZERO : ret);
+    }
+    if (received.signum() == 0) {
+      return 0;
+    }
+    return returned.multiply(BigDecimal.valueOf(100))
+        .divide(received, 0, RoundingMode.HALF_UP).min(BigDecimal.valueOf(100)).intValue();
   }
 
   @SuppressWarnings("java:S2077")

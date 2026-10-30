@@ -40,6 +40,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import org.openbravo.base.structure.BaseOBObject;
 
@@ -173,15 +174,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         RectificativeImportPolicy.forHeader(this::classifyDocType, true));
   }
 
-  /**
-   * {@inheritDoc} The invoice windows un-post a posted invoice before reactivating it
-   * ({@code preUnpost: true} in the SPA), so the MCP does too (ETP-5715).
-   */
-  @Override
-  public boolean unpostBeforeReactivate() {
-    return true;
-  }
-
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
   @Override
   public Set<String> agentExcludedActions() {
@@ -202,6 +194,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
+    // ETP-5840 (QA CP-12b): an update that changes the invoice date copies it into the accounting
+    // and operation dates, as the UI callout does; before the rate guard, which reads that date.
+    mirrorInvoiceDateOnUpdate(context);
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
     resolveServerCreateFields(context);
     // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
@@ -258,6 +253,10 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (importKindRefusal != null) {
       return importKindRefusal;
     }
+    NeoResponse unpostRefusal = unpostBeforeReactivation(context, postingService);
+    if (unpostRefusal != null) {
+      return unpostRefusal;
+    }
     return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
         registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, importOrderLinesHandler,
         importShipmentLinesHandler, importOriginInvoiceLinesHandler, followUp.actionHandler());
@@ -289,6 +288,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5684: say what ran when the reactivation un-posted the invoice first.
+    ReactivationUnpost.notePartial(context);
     // ETP-5840: a create whose currency or accounting date only the create cascade derived; before
     // the rate-document sync, which must see the resolved rate.
     NeoResponse rateRefusal = currencyRate.afterWrite(context);
@@ -334,7 +335,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       followUp.annotate(dataArr);
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
-        enrichSourceInvoice(rec, context.getRecordId());
         rectificationLinks.enrichOriginInvoice(rec, context.getRecordId());
         rectificationLinks.enrichRectifyingInvoices(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
@@ -369,14 +369,26 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   protected String classifyDocType(DocumentType dt) {
+    return isRectificativeDocType(dt) ? SUBTYPE_RECTIFICATIVA : SUBTYPE_FAC;
+  }
+
+  /**
+   * The AR rectificative rule behind {@link #classifyDocType}, callable without a handler instance
+   * — {@link SalesInvoiceLineHandler} needs it to decide whether a created line links its invoice
+   * to the one it rectifies (ETP-6002).
+   *
+   * @param dt the document type, may be {@code null}
+   * @return {@code true} for the unified rectificative type and the legacy ARC/ARI_RM categories
+   */
+  static boolean isRectificativeDocType(DocumentType dt) {
+    if (dt == null) {
+      return false;
+    }
     if (RectificativeSupport.isRectificative(dt)) {
-      return SUBTYPE_RECTIFICATIVA;
+      return true;
     }
     String category = dt.getDocumentCategory();
-    if ("ARC".equals(category) || "ARI_RM".equals(category)) {
-      return SUBTYPE_RECTIFICATIVA;
-    }
-    return SUBTYPE_FAC;
+    return "ARC".equals(category) || "ARI_RM".equals(category);
   }
 
   /**
@@ -387,53 +399,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Override
   protected String getInvoiceSubtypeKey() {
     return "arInvoiceSubtype";
-  }
-
-  /**
-   * For return invoices, injects:
-   * - {@code sourceReturnReceipt}: the return receipt that originated this invoice
-   * - {@code sourceInvoice}: the original invoice being reversed
-   * Both are traced via C_InvoiceLine → M_InOutLine chains.
-   * Returns nothing for regular invoices (no Canceled_Inoutline_ID on their lines).
-   */
-  @SuppressWarnings("java:S2077")
-  private void enrichSourceInvoice(JSONObject rec, String invoiceId) {
-    String sql =
-        "SELECT DISTINCT " +
-        "  ret.M_InOut_ID AS ret_id, ret.DocumentNo AS ret_doc, ret.DocStatus AS ret_status, " +
-        "  orig_i.C_Invoice_ID AS inv_id, orig_i.DocumentNo AS inv_doc, orig_i.DateInvoiced " +
-        "FROM C_InvoiceLine il " +
-        "JOIN M_InOutLine ret_line ON ret_line.M_InOutLine_ID = il.M_InOutLine_ID " +
-        "JOIN M_InOut ret ON ret.M_InOut_ID = ret_line.M_InOut_ID " +
-        "LEFT JOIN M_InOutLine orig_line ON orig_line.M_InOutLine_ID = ret_line.Canceled_Inoutline_ID " +
-        "LEFT JOIN C_InvoiceLine orig_il ON orig_il.M_InOutLine_ID = orig_line.M_InOutLine_ID " +
-        "LEFT JOIN C_Invoice orig_i ON orig_i.C_Invoice_ID = orig_il.C_Invoice_ID " +
-        "  AND orig_i.DocStatus != 'VO' " +
-        "WHERE il.C_Invoice_ID = ? AND ret_line.Canceled_Inoutline_ID IS NOT NULL " +
-        "ORDER BY orig_i.DateInvoiced DESC LIMIT 1";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, invoiceId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          JSONObject retReceipt = new JSONObject();
-          retReceipt.put("id", rs.getString("ret_id"));
-          retReceipt.put(FIELD_DOCUMENT_NO, rs.getString("ret_doc"));
-          retReceipt.put("documentStatus", rs.getString("ret_status"));
-          rec.put("sourceReturnReceipt", retReceipt);
-
-          String origInvId = rs.getString("inv_id");
-          if (origInvId != null) {
-            JSONObject sourceInvoice = new JSONObject();
-            sourceInvoice.put("id", origInvId);
-            sourceInvoice.put(FIELD_DOCUMENT_NO, rs.getString("inv_doc"));
-            rec.put("sourceInvoice", sourceInvoice);
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not enrich return invoice relations for {}: {}", invoiceId, e.getMessage());
-    }
   }
 
   @Override
@@ -456,8 +421,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    * (M_InOut) linked to one of the invoice's lines.
    *
    * <p>"Linked" is {@link InOutInvoiceLinks#linkedInOutLineIdsSql}: the
-   * {@code C_InvoiceLine.M_InOutLine_ID} column, the {@code M_MatchSI} match table, and the
-   * pre-existing order-line fallback for invoice lines without a direct link. Before ETP-5576
+   * {@code C_InvoiceLine.M_InOutLine_ID} column and the {@code M_MatchSI} match table — never
+   * the order line (ETP-6002 dropped that fallback on the sales side: it made an invoice show
+   * every shipment of its order, including ones another invoice billed). Before ETP-5576
    * the match table was not read, so the second and later partial shipments of an invoice line —
    * which the column cannot hold — never showed up.
    *
@@ -480,7 +446,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         "  AND io.issotrx = 'Y'";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      InOutInvoiceLinks.bindRepeated(ps, 1, invoiceId, InOutInvoiceLinks.LINKED_INOUT_LINES_PARAMS);
+      InOutInvoiceLinks.bindRepeated(ps, 1, invoiceId,
+          InOutInvoiceLinks.linkedInOutLinesParams(InOutInvoiceLinks.MatchTable.SALES));
       JSONArray shipments = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

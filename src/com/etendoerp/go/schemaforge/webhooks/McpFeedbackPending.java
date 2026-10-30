@@ -36,8 +36,8 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * ETP-5952 — the queue the external MCP feedback triage bot ({@code etendo-bots}, {@code
- * bin/bug-triage}) polls: {@code etendo_feedback} reports in {@code ETGO_MCP_USAGE} that the bot
+ * ETP-5952 — the queue the external MCP feedback bug router ({@code etendo-bots}, {@code
+ * bin/bug-router}) polls: {@code etendo_feedback} reports in {@code ETGO_MCP_USAGE} that the bot
  * has not triaged yet, oldest first, from <b>every</b> client.
  *
  * <pre>GET /webhooks/McpFeedbackPending?limit=20</pre>

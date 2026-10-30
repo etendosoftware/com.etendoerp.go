@@ -9,7 +9,7 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All portions are Copyright © 2021-2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
@@ -18,29 +18,38 @@
 package com.etendoerp.go.schemaforge;
 
 /**
- * Customization of purchase-order/lines (ETP-5881): everything {@link OrderLineHandler} does, plus
- * the prices of a created line from the order's (purchase) price list
- * ({@link OrderLineDiscountSupport#setStandardPriceOnCreate}): the unit price when the line was
- * sent without one, and always the standard price, as the form's {@code SL_Order_Product} does.
- * The other sales order rules (discount, amounts) are not applied: purchase lines were on the
- * plain parent on purpose.
+ * Customization of purchase-order/lines (ETP-5881, ETP-6012, ETP-5852). On REST it keeps the
+ * purchase line's own rules: the prices of a created line from the order's (purchase) price list
+ * ({@link OrderLineDiscountSupport#setStandardPriceOnCreate}) and the stored amount inputs a sparse
+ * update needs ({@link OrderLineDiscountSupport#completeAmountInputsOnUpdate}, ETP-6012); the other
+ * sales line rules stay off there on purpose. Over MCP it runs every line rule of
+ * {@link OrderLineCustomization} ({@link OrderLineDiscountSupport#applyLineRules}).
  *
- * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
- * {@code Java_Qualifier}, which stays {@code orderLineHandler} for the readers that look it up
- * directly — the same arrangement, and the same {@code warnOnQualifierDisagreement} ERROR line, as
- * {@link SalesOrderLineHandler}. No {@code @Named}: the parent's name is not inherited.
+ * <p>ETP-5881 created it to price a new purchase line from the order's price list
+ * ({@link OrderLineDiscountSupport#setStandardPriceOnCreate}) and kept the other order line rules
+ * off. ETP-5852 runs all of them for agents, as on sales lines: production agents reported a
+ * {@code discount} on a purchase line that was stored but never turned into a price, and a line
+ * created with an explicit {@code unitPrice} that kept {@code listPrice = 0}, so no discount had a
+ * base. The purchase form already derives price and discount itself before it saves.
+ *
+ * <p><b>Binding.</b> Same as {@link SalesOrderLineHandler}: resolved by {@link NeoExtension} ahead
+ * of the row's {@code Java_Qualifier}, which stays {@code orderLineHandler} for the readers that
+ * look it up directly. No {@code @Named}, for the same reason.
  */
 @NeoExtension(spec = "purchase-order", entity = "lines")
-public class PurchaseOrderLineHandler extends OrderLineHandler {
+public class PurchaseOrderLineHandler extends OrderLineCustomization {
 
-  /** Runs the parent's pre-hook first — a response from it still short-circuits — then prices. */
+  /**
+   * MCP: every line rule, as on sales lines. Any other channel: the purchase line's own pricing of
+   * a created line and the stored amount inputs of a sparse update, exactly as before ETP-5852.
+   */
   @Override
-  public NeoResponse handle(NeoContext context) {
-    NeoResponse response = super.handle(context);
-    if (response != null) {
-      return response;
+  protected void applyRules(NeoContext context) {
+    if (context.isMcpOrigin()) {
+      super.applyRules(context);
+      return;
     }
     OrderLineDiscountSupport.setStandardPriceOnCreate(context);
-    return null;
+    OrderLineDiscountSupport.completeAmountInputsOnUpdate(context);
   }
 }

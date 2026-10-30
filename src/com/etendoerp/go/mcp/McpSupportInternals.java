@@ -445,13 +445,18 @@ final class McpSupportInternals {
   /**
    * Map a batch failure's HTTP status onto a stable machine-detectable code (IMP-15).
    *
-   * <p>Any other status in the 4xx range is treated as something the calling agent can fix by
-   * changing the request; a 5xx status, and likewise the sentinel batch index of {@code -1} used
-   * for an unexpected batch-wide failure, are not agent-fixable.
+   * <p>A 403 is {@code forbidden} (ETP-5852, M-154): the caller's role may not do this, which no
+   * change to the request fixes; it used to read {@code validation_error}. Any other status in the
+   * 4xx range is treated as something the calling agent can fix by changing the request; a 5xx
+   * status, and likewise the sentinel batch index of {@code -1} used for an unexpected batch-wide
+   * failure, are not agent-fixable.
    */
   static String errorCodeForStatus(int status) {
     if (status == McpConstants.STATUS_NOT_FOUND) {
       return McpConstants.ERROR_NOT_FOUND;
+    }
+    if (status == McpConstants.STATUS_FORBIDDEN) {
+      return McpConstants.ERROR_FORBIDDEN;
     }
     if (status == 405) {
       return McpConstants.ERROR_METHOD_NOT_ALLOWED;

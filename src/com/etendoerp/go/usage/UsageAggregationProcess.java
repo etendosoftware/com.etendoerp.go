@@ -187,7 +187,7 @@ public class UsageAggregationProcess extends DalBaseProcess {
   /** @return whether scheduled runs may work; package-visible so tests can decide it */
   boolean scheduleEnabled() {
     return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_USAGE_AGGREGATION_SCHEDULE,
-        FeatureFlagContext.forAccount(null));
+        FeatureFlagContext.environment());
   }
 
   /**

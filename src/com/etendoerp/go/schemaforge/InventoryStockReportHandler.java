@@ -18,6 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -49,6 +52,8 @@ public class InventoryStockReportHandler implements NeoHandler {
   private static final String PARAM_WAREHOUSE_ID = "M_Warehouse_ID";
   private static final String PARAM_CATEGORY_ID = "M_Product_Category_ID";
   private static final String PARAM_INCLUDE_ZERO_STOCK = "includeZeroStock";
+  /** The product id: the SQL parameter prefix and the row key that carries it. */
+  private static final String KEY_PRODUCT_ID = "productId";
 
   /**
    * {@code AD_Window_ID} of the brand-new pseudo-{@code AD_Window} ("Informes de inventario" /
@@ -78,15 +83,23 @@ public class InventoryStockReportHandler implements NeoHandler {
     return Optional.of(List.of(
         NeoReportParam.optional(PARAM_PRODUCT_ID, NeoReportParam.TYPE_STRING,
             "Restrict to these products: one M_Product id, or several separated by commas. "
-                + "Default: every product."),
+                + "Default: every product. When given, the response carries "
+                + "requested.products {withStock, noStock, notFound}: an empty data array then "
+                + "tells apart a product with no stock (noStock) from an id that does not exist, "
+                + "is inactive or is not visible to this organization (notFound)."),
         NeoReportParam.optional(PARAM_WAREHOUSE_ID, NeoReportParam.TYPE_STRING,
             "Restrict to these warehouses: one M_Warehouse id, or several separated by commas. "
-                + "Default: every warehouse in the session's organization tree."),
+                + "Default: every warehouse in the session's organization tree. When given, "
+                + "requested.warehouses {found, notFound} reports which ids were usable."),
         NeoReportParam.optional(PARAM_CATEGORY_ID, NeoReportParam.TYPE_STRING,
             "Restrict to these product categories: one M_Product_Category id, or several "
-                + "separated by commas. Default: every category."),
+                + "separated by commas. Default: every category. When given, "
+                + "requested.categories {found, notFound} reports which ids were usable."),
         NeoReportParam.optional(PARAM_INCLUDE_ZERO_STOCK, NeoReportParam.TYPE_BOOLEAN,
-            "Include products whose on-hand quantity is zero. Default: false.")));
+            "Include product/warehouse pairs whose on-hand quantity is zero but that had stock "
+                + "movements in that warehouse. A product that never moved has no row even "
+                + "then; ask for it by M_Product_ID and read requested.products.noStock. "
+                + "Default: false.")));
   }
 
   @Override
@@ -156,7 +169,10 @@ public class InventoryStockReportHandler implements NeoHandler {
           // A product with no cost yields NULL for both unit_cost and total_valuation, so the
           // report shows a blank instead of a misleading 0.
           + "etgo_product_cost(p.m_product_id) AS unit_cost, "
-          + "COALESCE(SUM(sd.qtyonhand), 0) * etgo_product_cost(p.m_product_id) AS total_valuation "
+          + "COALESCE(SUM(sd.qtyonhand), 0) * etgo_product_cost(p.m_product_id) AS total_valuation, "
+          // ETP-5852 — the product id, so requested.products can say which requested ids
+          // came back with rows; also returned to the caller as productId.
+          + "p.m_product_id AS product_id "
           + "FROM m_product p "
           + "CROSS JOIN m_warehouse wh "
           + "LEFT JOIN c_uom uom ON uom.c_uom_id = p.c_uom_id "
@@ -208,6 +224,11 @@ public class InventoryStockReportHandler implements NeoHandler {
       JSONObject responseData = new JSONObject();
       responseData.put("data", mapRowsToJson(rows));
       responseData.put("count", rows.size());
+      JSONObject requested = classifyRequestedIds(productIds, warehouseIds, categoryIds, rows,
+          clientId, orgTree);
+      if (requested.length() > 0) {
+        responseData.put("requested", requested);
+      }
 
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", responseData);
@@ -229,7 +250,7 @@ public class InventoryStockReportHandler implements NeoHandler {
       List<String> warehouseIds, List<String> categoryIds) {
     if (!productIds.isEmpty()) {
       sql.append("  AND p.m_product_id IN (")
-          .append(buildNamedParams("productId", productIds.size()))
+          .append(buildNamedParams(KEY_PRODUCT_ID, productIds.size()))
           .append(") ");
     }
 
@@ -254,7 +275,7 @@ public class InventoryStockReportHandler implements NeoHandler {
   private static void bindOptionalParameters(NativeQuery<Object[]> query, List<String> productIds,
       List<String> warehouseIds, List<String> categoryIds) {
     for (int i = 0; i < productIds.size(); i++) {
-      query.setParameter("productId" + i, productIds.get(i));
+      query.setParameter(KEY_PRODUCT_ID + i, productIds.get(i));
     }
 
     for (int i = 0; i < warehouseIds.size(); i++) {
@@ -264,6 +285,93 @@ public class InventoryStockReportHandler implements NeoHandler {
     for (int i = 0; i < categoryIds.size(); i++) {
       query.setParameter("categoryId" + i, categoryIds.get(i));
     }
+  }
+
+  /**
+   * ETP-5852 — an empty {@code data} array used to mean four different things (unknown id,
+   * id of another org/tenant, product with no stock, product that never moved), and agents
+   * could not tell them apart. For every filter the caller actually sent, this reports which
+   * ids were usable. The report rows themselves are untouched (ETP-5492's zero-stock rule
+   * stays): a requested product that is valid but produced no row is {@code noStock}.
+   * "Usable" uses the visibility rules of the report query (client, active, org tree or org
+   * '0', and the system-category exclusion), so {@code notFound} means "this id can never
+   * produce a row here".
+   */
+  private static JSONObject classifyRequestedIds(List<String> productIds,
+      List<String> warehouseIds, List<String> categoryIds, List<Object[]> rows, String clientId,
+      Set<String> orgTree) throws JSONException {
+    JSONObject requested = new JSONObject();
+    if (!productIds.isEmpty()) {
+      Set<String> valid = existingIds("SELECT p.m_product_id FROM m_product p "
+          + "LEFT JOIN m_product_category pc ON pc.m_product_category_id = p.m_product_category_id "
+          + "WHERE p.ad_client_id = :clientId AND p.isactive = 'Y' "
+          + "AND (p.ad_org_id = '0' OR p.ad_org_id IN (:orgIds)) "
+          + "AND COALESCE(pc.em_etgo_issystemcategory, 'N') <> 'Y' "
+          + "AND p.m_product_id IN (", productIds, clientId, orgTree);
+      Set<String> withRows = new HashSet<>();
+      for (Object[] row : rows) {
+        withRows.add(String.valueOf(row[8]));
+      }
+      List<String> withStock = new ArrayList<>();
+      List<String> noStock = new ArrayList<>();
+      List<String> notFound = new ArrayList<>();
+      for (String id : new LinkedHashSet<>(productIds)) {
+        if (!valid.contains(id)) {
+          notFound.add(id);
+        } else if (withRows.contains(id)) {
+          withStock.add(id);
+        } else {
+          noStock.add(id);
+        }
+      }
+      requested.put("products", new JSONObject()
+          .put("withStock", new JSONArray(withStock))
+          .put("noStock", new JSONArray(noStock))
+          .put("notFound", new JSONArray(notFound)));
+    }
+    if (!warehouseIds.isEmpty()) {
+      requested.put("warehouses", foundSplit(warehouseIds, existingIds(
+          "SELECT wh.m_warehouse_id FROM m_warehouse wh "
+              + "WHERE wh.ad_client_id = :clientId AND wh.isactive = 'Y' "
+              + "AND (wh.ad_org_id = '0' OR wh.ad_org_id IN (:orgIds)) "
+              + "AND wh.m_warehouse_id IN (", warehouseIds, clientId, orgTree)));
+    }
+    if (!categoryIds.isEmpty()) {
+      requested.put("categories", foundSplit(categoryIds, existingIds(
+          "SELECT pc.m_product_category_id FROM m_product_category pc "
+              + "WHERE pc.ad_client_id IN ('0', :clientId) AND pc.isactive = 'Y' "
+              + "AND (pc.ad_org_id = '0' OR pc.ad_org_id IN (:orgIds)) "
+              + "AND COALESCE(pc.em_etgo_issystemcategory, 'N') <> 'Y' "
+              + "AND pc.m_product_category_id IN (", categoryIds, clientId, orgTree)));
+    }
+    return requested;
+  }
+
+  /** Runs {@code sqlPrefix + <ids> + ")"} and returns the ids it found. */
+  private static Set<String> existingIds(String sqlPrefix, List<String> ids, String clientId,
+      Set<String> orgTree) {
+    NativeQuery<?> query = OBDal.getInstance().getSession()
+        .createNativeQuery(sqlPrefix + buildNamedParams("lookupId", ids.size()) + ")");
+    query.setParameter("clientId", clientId);
+    query.setParameterList("orgIds", orgTree);
+    for (int i = 0; i < ids.size(); i++) {
+      query.setParameter("lookupId" + i, ids.get(i));
+    }
+    Set<String> found = new HashSet<>();
+    for (Object id : query.list()) {
+      found.add(String.valueOf(id));
+    }
+    return found;
+  }
+
+  private static JSONObject foundSplit(List<String> ids, Set<String> valid) throws JSONException {
+    List<String> found = new ArrayList<>();
+    List<String> notFound = new ArrayList<>();
+    for (String id : new LinkedHashSet<>(ids)) {
+      (valid.contains(id) ? found : notFound).add(id);
+    }
+    return new JSONObject().put("found", new JSONArray(found)).put("notFound",
+        new JSONArray(notFound));
   }
 
   /**
@@ -283,6 +391,7 @@ public class InventoryStockReportHandler implements NeoHandler {
       item.put("qtyOnHand", toBigDecimal(row[5]));
       item.put("unitCost", row[6] == null ? JSONObject.NULL : toBigDecimal(row[6]));
       item.put("totalValuation", row[7] == null ? JSONObject.NULL : toBigDecimal(row[7]));
+      item.put(KEY_PRODUCT_ID, row[8]);
       data.put(item);
     }
     return data;

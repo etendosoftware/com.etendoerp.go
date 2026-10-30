@@ -84,6 +84,9 @@ import org.openbravo.service.db.CallStoredProcedure;
  * @covers com.etendoerp.go.schemaforge.ReturnLineQuantityPolicy
  * @covers com.etendoerp.go.schemaforge.CreatePurchaseReturnHandler
  * @covers com.etendoerp.go.schemaforge.ReturnInvoiceSupport
+ * @covers com.etendoerp.go.schemaforge.ReturnableQuantity
+ * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler
  */
 public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
 
@@ -128,6 +131,38 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
     while (OBContext.getOBContext() != null && OBContext.getOBContext().isInAdministratorMode()) {
       OBContext.restorePreviousMode();
     }
+  }
+
+  // ── returned-quantity SQL against the real database (ETP-6054) ────────────
+
+  /** Runs one statement with dummy ids and walks the result, so a typo in the SQL throws. */
+  private static int execute(String sql, String... ids) throws Exception {
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
+      for (int i = 0; i < ids.length; i++) {
+        ps.setString(i + 1, ids[i]);
+      }
+      int rows = 0;
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          rows++;
+        }
+      }
+      return rows;
+    }
+  }
+
+  /**
+   * The three statements that count what is already returned (the goods receipt's returnStatus,
+   * the returns-holding lookup of the 201 and the availableReceiptLines picker) are plain SQL, so
+   * only the database can tell a typo from a query. Dummy ids: nothing matches, and a well-formed
+   * statement answers no rows (the percentage reads 0).
+   */
+  @Test
+  public void returnedQuantitySqlExecutesAgainstTheRealDatabase() throws Exception {
+    assertEquals(0, execute(GoodsReceiptHeaderHandler.RETURN_STATUS_SQL, "NO-SUCH-RECEIPT"));
+    assertEquals(0, execute(ReturnableQuantity.RETURNS_HOLDING_SQL, "NO-SUCH-LINE", "NO-SUCH-RETURN"));
+    assertEquals(0, execute(ReturnToVendorShipmentHeaderHandler.AVAILABLE_LINES_SQL,
+        "NO-SUCH-RECEIPT", "NO-SUCH-PARTNER"));
   }
 
   // ── ReturnInvoiceSupport HQL against the real model ───────────────────────

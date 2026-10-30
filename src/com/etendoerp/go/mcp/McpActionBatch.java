@@ -156,9 +156,8 @@ final class McpActionBatch {
         + "document where it does not apply answers what etendo_action would answer. A malformed "
         + "call (empty ids, more than " + MAX_DOCUMENTS + ", repeated ids, unknown entity or "
         + "action, parameters the action's contract rejects) is refused before anything runs. "
-        + "Like the SPA's bulk Reactivate, reactivating (docAction 'RE') a POSTED document whose "
-        + "entity declares an unpost action un-posts it first, then reactivates it; that "
-        + "document's result lists steps:['unpost','documentAction']. If the reactivation then "
+        + "Reactivating a POSTED invoice or amortization un-posts it first, on the server; that "
+        + "document's result lists steps:['unpost','reactivate']. If the reactivation then "
         + "fails the un-post stays done (the result says so under 'partial'). "
         + "This tool never creates documents: creations go through etendo_batch (creates only, "
         + "atomic) or etendo_create. Example — complete three draft purchase orders: "
@@ -196,8 +195,7 @@ final class McpActionBatch {
     }
     // read before the loop: the entity is detached after the first commitAndClose
     String entityName = entity.getName();
-    Call call = new Call(runner, specName, entityName, action, parameters,
-        McpActionBatchUnpost.forCall(entity, action, parameters));
+    Call call = new Call(runner, specName, entityName, action, parameters);
     JSONArray results = new JSONArray();
     int succeeded = 0;
     for (String id : ids) {
@@ -281,32 +279,27 @@ final class McpActionBatch {
     private final String entityName;
     private final String action;
     private final JSONObject parameters;
-    /** The un-post-before-reactivate step, or {@code null} when this call never has one. */
-    private final McpActionBatchUnpost unpost;
 
     Call(ActionRunner runner, String specName, String entityName, String action,
-        JSONObject parameters, McpActionBatchUnpost unpost) {
+        JSONObject parameters) {
       this.runner = runner;
       this.specName = specName;
       this.entityName = entityName;
       this.action = action;
       this.parameters = parameters;
-      this.unpost = unpost;
     }
   }
 
   /**
    * Runs one document and turns whatever happens into its result. A reactivation of a posted
-   * document runs the un-post step first, each step in its own transaction.
+   * document is un-posted first by the entity's customization, on the server (ETP-5684).
    *
-   * @return {@code {id, ok:true, status, result}} or {@code {id, ok:false, error}}, plus
-   *         {@code steps} when the un-post step ran
+   * @return {@code {id, ok:true, status, result}} or {@code {id, ok:false, error}}
    */
   private static JSONObject runDocument(Call call, String id) {
-    JSONArray steps = new JSONArray();
     JSONObject outcome;
     try {
-      outcome = runSteps(call, id, steps);
+      outcome = step(call, id, call.action, call.parameters);
     } catch (Exception e) {
       log.warn("etendo_action_batch document {} failed: {}", id, e.toString());
       rollbackQuietly();
@@ -314,21 +307,7 @@ final class McpActionBatch {
     } finally {
       ensureAdminMode();
     }
-    return withSteps(outcome, steps);
-  }
-
-  /**
-   * The un-post step when it applies, then the action itself. A failed un-post is the document's
-   * result and the action is never fired. A failed action after a successful un-post cannot undo
-   * the un-post: it was committed on its own, exactly as the SPA leaves it.
-   */
-  private static JSONObject runSteps(Call call, String id, JSONArray steps) throws Exception {
-    JSONObject refused = call.unpost == null ? null
-        : call.unpost.unpostFirst(call.specName, id, call.action, call.runner, steps);
-    if (refused != null) {
-      return outcomeOf(id, refused);
-    }
-    return step(call, id, call.action, call.parameters);
+    return outcome;
   }
 
   /** Fires one action of one document through the single-document path and ends its transaction. */
@@ -338,25 +317,6 @@ final class McpActionBatch {
         documentArgs(call.entityName, action, parameters, id));
     JSONObject outcome = outcomeOf(id, content);
     finishTransaction(outcome.optBoolean(KEY_OK));
-    return outcome;
-  }
-
-  /**
-   * @return the outcome with the steps that ran, when an extra step ran; and the note that the
-   *         committed un-post stays when the action after it failed
-   */
-  private static JSONObject withSteps(JSONObject outcome, JSONArray steps) {
-    if (steps.length() == 0) {
-      return outcome;
-    }
-    try {
-      outcome.put(McpActionBatchUnpost.KEY_STEPS, steps);
-      if (steps.length() > 1 && !outcome.optBoolean(KEY_OK)) {
-        outcome.put(McpActionBatchUnpost.KEY_PARTIAL, McpActionBatchUnpost.PARTIAL_NOTE);
-      }
-    } catch (JSONException e) {
-      throw new McpToolException("Error building a document result", e);
-    }
     return outcome;
   }
 
