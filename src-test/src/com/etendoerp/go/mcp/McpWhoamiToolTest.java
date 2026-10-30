@@ -44,16 +44,19 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
+import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
 import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
@@ -63,6 +66,7 @@ import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
  * connection, with what the role and token can do, read from the context the call runs under.
  *
  * @covers com.etendoerp.go.mcp.McpWhoamiTool
+ * @covers com.etendoerp.go.mcp.McpWhoamiToolDefinition
  */
 class McpWhoamiToolTest {
 
@@ -259,6 +263,54 @@ class McpWhoamiToolTest {
   @DisplayName("a session without a role has no permissions to list")
   void noRoleHasNoPermissions() throws Exception {
     assertEquals(JSONObject.NULL, McpWhoamiTool.permissions(null));
+  }
+
+  @Test
+  @DisplayName("a call lists permissions only when asked, naming every catalog spec of a window")
+  void handleListsPermissionsOnlyWhenAsked() throws Exception {
+    OBCriteria<SFSpec> criteria = mockCriteria(List.of(
+        spec("sales-order", "143"), spec("sales-order-simple", "143")));
+    when(dal.createCriteria(SFSpec.class)).thenReturn(criteria);
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<RoleAccessMatrix> matrix = mockStatic(RoleAccessMatrix.class);
+        MockedStatic<ReportAccessCatalog> reports = mockStatic(ReportAccessCatalog.class)) {
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+      stubMatrices(matrix);
+
+      JSONObject plain = resultBody(McpWhoamiTool.handle(new JSONObject(), Set.of("etendo:read")));
+      JSONObject withPermissions = resultBody(McpWhoamiTool.handle(
+          new JSONObject().put(McpWhoamiTool.PARAM_INCLUDE_PERMISSIONS, true),
+          Set.of("etendo:read")));
+
+      assertFalse(plain.has(McpWhoamiTool.KEY_PERMISSIONS));
+      assertEquals("ROLE1", withPermissions.getJSONObject(McpWhoamiTool.KEY_ROLE).getString("id"));
+      JSONObject salesOrder = withPermissions.getJSONObject(McpWhoamiTool.KEY_PERMISSIONS)
+          .getJSONObject(McpWhoamiTool.KEY_WINDOWS).getJSONArray("categories").getJSONObject(0)
+          .getJSONArray("windows").getJSONObject(0);
+      assertEquals("[\"sales-order\",\"sales-order-simple\"]",
+          salesOrder.getJSONArray("specs").toString());
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<SFSpec> mockCriteria(List<SFSpec> specs) {
+    OBCriteria<SFSpec> criteria = mock(OBCriteria.class);
+    when(criteria.list()).thenReturn(specs);
+    return criteria;
+  }
+
+  private static SFSpec spec(String name, String windowId) {
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn(windowId);
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getName()).thenReturn(name);
+    when(spec.getADWindow()).thenReturn(window);
+    return spec;
+  }
+
+  private static JSONObject resultBody(JSONObject result) throws Exception {
+    return new JSONObject(result.getJSONArray("content").getJSONObject(0).getString("text"));
   }
 
   private static final Map<String, List<String>> SPECS_BY_WINDOW =
