@@ -419,7 +419,7 @@ public class ToolRegistry {
   McpToolDefinition buildWhoamiTool() {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpWhoamiTool.PARAM_INCLUDE_PERMISSIONS, booleanProp(
-        "Optional, default false. true also lists the Etendo GO windows and reports your role "
+        "Optional, default false. true also lists the application windows and reports your role "
             + "can reach, grouped by menu category, each with its access (full or read-only) and "
             + "the spec names to use with the other tools (specs for a window, spec for a "
             + "report; an empty specs means the window is not in this catalog). Anything not "
