@@ -76,13 +76,21 @@ final class ReturnableQuantity {
   private static final String HTTP_PUT = "PUT";
 
   /**
+   * The return lines that count as "already returned": the line ({@code rl}) joined to its header
+   * ({@code rh}). Shared with every query that totals returns per source line, so they cannot
+   * drift from {@link #alreadyReturned}.
+   */
+  static final String COUNTED_RETURN_LINES_FROM =
+      "M_InOutLine rl JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID";
+  /** Which of those count: every non-voided header, drafts included (the pickers' own filter). */
+  static final String COUNTED_RETURN_LINES_FILTER = "rh.DocStatus NOT IN ('VO')";
+  /**
    * Sum of the quantities of the non-voided return lines pointing at one source line. The
    * {@code DocStatus} filter is the one of the window's {@code availableX} lists, verbatim.
    */
   private static final String ALREADY_RETURNED_SQL =
-      "SELECT COALESCE(SUM(ABS(rl.MovementQty)), 0) FROM M_InOutLine rl "
-          + "JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID "
-          + "WHERE rl.Canceled_Inoutline_ID = ? AND rh.DocStatus NOT IN ('VO')";
+      "SELECT COALESCE(SUM(ABS(rl.MovementQty)), 0) FROM " + COUNTED_RETURN_LINES_FROM + " "
+          + "WHERE rl.Canceled_Inoutline_ID = ? AND " + COUNTED_RETURN_LINES_FILTER;
   /**
    * Row lock on one source line ({@code FOR NO KEY UPDATE}: a foreign-key insert that points at
    * the line, an invoice line or a match row, takes {@code FOR KEY SHARE} on it and must not wait
@@ -93,6 +101,12 @@ final class ReturnableQuantity {
   private static final String LOCK_SOURCE_LINE_SQL =
       "SELECT M_InOutLine_ID FROM M_InOutLine WHERE M_InOutLine_ID = ? FOR NO KEY UPDATE";
   private static final String EXCLUDING_LINE_SQL = " AND rl.M_InOutLine_ID <> ?";
+  /** The returns that hold units of one source line, one row per return, same counting rule. */
+  static final String RETURNS_HOLDING_SQL =
+      "SELECT rh.M_InOut_ID, rh.DocumentNo, rh.DocStatus, SUM(ABS(rl.MovementQty)) FROM "
+          + COUNTED_RETURN_LINES_FROM + " WHERE rl.Canceled_Inoutline_ID = ? AND "
+          + COUNTED_RETURN_LINES_FILTER + " AND rh.M_InOut_ID <> ? "
+          + "GROUP BY rh.M_InOut_ID, rh.DocumentNo, rh.DocStatus ORDER BY rh.DocumentNo";
 
   private ReturnableQuantity() {
   }
@@ -168,6 +182,52 @@ final class ReturnableQuantity {
         return total == null ? BigDecimal.ZERO : total;
       }
     }
+  }
+
+  /** A return that holds units of a source line: its id, number, status and those units. */
+  static final class HoldingReturn {
+    final String id;
+    final String documentNo;
+    final String documentStatus;
+    final BigDecimal quantity;
+
+    HoldingReturn(String id, String documentNo, String documentStatus, BigDecimal quantity) {
+      this.id = id;
+      this.documentNo = documentNo;
+      this.documentStatus = documentStatus;
+      this.quantity = quantity == null ? BigDecimal.ZERO : quantity;
+    }
+  }
+
+  /**
+   * The returns that already hold units of {@code sourceLineId}, with the same counting rule as
+   * {@link #alreadyReturned} (non-voided, drafts included), leaving out the return document
+   * {@code excludedReturnId} (the one just created).
+   *
+   * @param sourceLineId     the source receipt / shipment line
+   * @param excludedReturnId the return document left out, or {@code null} to list all of them
+   * @return one entry per holding return, ordered by document number
+   * @throws SQLException when the query fails
+   */
+  static List<HoldingReturn> returnsHolding(String sourceLineId, String excludedReturnId)
+      throws SQLException {
+    List<HoldingReturn> result = new ArrayList<>();
+    Connection conn = OBDal.getInstance().getConnection();
+    // A failed statement aborts a PostgreSQL transaction; JdbcSavepoints rolls back to its savepoint
+    // (so a caller that swallows the failure keeps a usable transaction) and releases it on success.
+    JdbcSavepoints.run(conn, () -> {
+      try (PreparedStatement ps = conn.prepareStatement(RETURNS_HOLDING_SQL)) {
+        ps.setString(1, sourceLineId);
+        ps.setString(2, excludedReturnId == null ? "" : excludedReturnId);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            result.add(new HoldingReturn(rs.getString(1), rs.getString(2), rs.getString(3),
+                rs.getBigDecimal(4)));
+          }
+        }
+      }
+    });
+    return result;
   }
 
   /** What is left of {@code source} to return: its movement quantity minus {@link #alreadyReturned}. */
