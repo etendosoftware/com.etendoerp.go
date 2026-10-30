@@ -68420,7 +68420,7 @@
 <!--AB07F7E39FF94324AFCA810C07A17D58-->  <JAVA_QUALIFIER><![CDATA[documentAction]]></JAVA_QUALIFIER>
 <!--AB07F7E39FF94324AFCA810C07A17D58-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--AB07F7E39FF94324AFCA810C07A17D58-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
-<!--AB07F7E39FF94324AFCA810C07A17D58-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales quotation. Fire it with etendo_action, sending the chosen value as parameters.docAction. A quotation Under evaluation (documentStatus=UE) is accepted with the Convertquotation action, which converts it into a sales order, or rejected with rejectQuotation (docAction RJ is routed to the same flow and needs its reason); it is never sent back to Draft. RE (Reactivate) is accepted only on a voided quotation (documentStatus=VO), as in the app; in any other status, UE included, it is refused with 400. Read documentStatus with etendo_get before acting.]]></AGENT_PROMPT>
+<!--AB07F7E39FF94324AFCA810C07A17D58-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales quotation. Fire it with etendo_action, sending the chosen value as parameters.docAction. A quotation Under evaluation (documentStatus=UE) is accepted with the Convertquotation action, which creates a draft sales order, or rejected with rejectQuotation (docAction RJ is routed to the same flow and needs its reason); it is never sent back to Draft. RE (Reactivate) is accepted only on a voided quotation (documentStatus=VO), as in the app; in any other status, UE included, it is refused with 400. Read documentStatus with etendo_get before acting.]]></AGENT_PROMPT>
 <!--AB07F7E39FF94324AFCA810C07A17D58-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--AB07F7E39FF94324AFCA810C07A17D58--></ETGO_SF_FIELD>
 
