@@ -10478,7 +10478,7 @@ hand links to the user and reach nobody else, so they stay closed-world.
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
 |---|---|---|---|
-| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, every `generate_*` report | true | false | true |
+| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, `etendo_whoami`, every `generate_*` report | true | false | true |
 | `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback`, `etendo_request_document_extraction_upload` | false | false | false |
 | `etendo_delete`, `etendo_delete_attachment` | false | true | true |
 | `etendo_update`, `etendo_batch`, `etendo_job_cancel`, `etendo_action`, `etendo_action_batch`, `etendo_request_attachment_upload` (`main:true` replaces the previous main file), `etendo_send_document_email` (two calls are two emails), `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
@@ -12752,3 +12752,73 @@ Tests: `ImportInOutLinesIntoInvoiceHandlerTest` (returns), `ImportOriginInvoiceL
 `RectificativeImportGateTest`, `DocumentAvailabilityTest` (the advice), `SalesInvoiceHeaderHandlerTest` /
 `PurchaseInvoiceHeaderHandlerTest` (contracts and routing), and the real-model HQL parse in
 `ImportOrderLinesIntoInvoiceHandlerIntegrationTest`.
+
+#### 4.12.43 Who the connection is: `etendo_whoami` (etendo-ai#53, gap G17)
+
+Each MCP connection runs as its own user, role, client and organization, and what an agent can read or change
+depends on the role. Without a way to ask, an agent that saw a spec answer `forbidden` on a second connection
+read it as "permissions changed mid-session" and created and deleted a test purchase order to learn who it was
+(etendo-ai#50). `etendo_whoami` answers that in one call.
+
+- **One optional argument**, `includePermissions` (boolean, default `false`); no side effects. Any other argument
+  except `_indentResponse` is refused (`unknown_argument`).
+- **Read tier** (`etendo:read`), listed first among the built-ins for every role with read; annotated read-only
+  and idempotent. It addresses no spec, so the spec access gate does not apply.
+- **Source**: the `OBContext` the servlet entered for the call (the same one every other tool runs under) and
+  the token's scopes. Nothing is cached.
+
+```json
+{
+  "user": {"id": "…", "name": "Compras", "username": "compras@acme.test"},
+  "role": {"id": "…", "name": "Purchasing", "isAdmin": false},
+  "client": {"id": "…", "name": "ACME"},
+  "organization": {"id": "…", "name": "ACME Spain"},
+  "warehouse": {"id": "…", "name": "Main warehouse"},
+  "capabilities": {"showAccountingFields": false, "scopes": ["etendo:read", "etendo:write"]},
+  "currentDate": "2026-10-30",
+  "timeZone": "Europe/Madrid",
+  "currency": {"id": "…", "isoCode": "EUR", "standardPrecision": 2},
+  "language": "es_ES",
+  "hint": "This is the identity every other tool runs under on this connection. …"
+}
+```
+
+- `role.isAdmin`: the System role or a client-admin role — the same bypass the access checks apply
+  (`NeoAccessHelper.isAdminOrClientAdmin`).
+- `capabilities.showAccountingFields`: `NeoAccountingAccessPolicy.canSeeAccounting`, the single source of truth
+  behind accounting tabs and the `post`/`unpost` refusal.
+- `capabilities.scopes`: the token's scopes under their current `etendo:` names (legacy `neo:` mapped), sorted.
+- `currentDate` / `timeZone`: today in the server's zone, the zone business dates are interpreted in.
+- `currency`: the organization's functional currency by `OBCurrencyUtils.getOrgCurrency` (organization, legal
+  entity, client). `null` when none resolves — unlike `GET /sws/neo/session` there is no `USD` placeholder, which an
+  agent would take for the real currency.
+- `language`: the user's Etendo language.
+- `warehouse`: the session's default warehouse (`OBContext.getWarehouse`), `null` when there is none.
+
+**`includePermissions:true`** adds `permissions`: the rows of the "Configuración > Roles" matrix this role can
+reach. Rows, categories and order come from `RoleAccessMatrix.buildMatrix` / `buildReportsMatrix` (the same builder
+`SFRolesOverview` and `SFSystemRoleTemplates` use), reduced to this one role:
+
+- **Only reachable rows.** A `none` row is left out, and so is a category left empty: absent means no access. The
+  roles page lists `none` rows because it compares several roles; an agent only needs its own.
+- **Spec names, not `AD_Window_ID`s.** A window row carries `specs`: the active window specs of that window
+  published in the MCP catalog (`ShowInMCP`), sorted — what `etendo_list` and the other tools take as `spec`. It is
+  empty for a reachable row no catalog spec serves (the windowless GO pages, e.g. "Fiscal Models"). A report row
+  carries `spec`: the report ids of `ReportAccessCatalog` are their spec names (`generate_<snake>`).
+- `access` is `full` or `read-only`. An admin or client-admin role gets every row as `full` — the bypass
+  `NeoAccessHelper.hasWindowAccess` and `SFMyReportAccess` apply — not the tiers its own grant rows would give.
+
+```json
+"permissions": {
+  "windows": {"categories": [{"name": "Procurement Management",
+    "windows": [{"name": "Purchase Order", "specs": ["purchase-order"], "access": "full"}]}]},
+  "reports": {"categories": [{"name": "Finance",
+    "reports": [{"spec": "aging-payable", "name": "Aging Report (Payables)", "access": "full"}]}]}
+}
+```
+
+Size, measured on a local database (2026-10-30, compact JSON as the MCP answers): 1,296 bytes for the Purchasing
+template role (14 of 44 rows reachable); ~4.2 KB for an admin role, which reaches every row.
+
+Usage telemetry records the call with verb `whoami`. Tests: `McpWhoamiToolTest`, `McpToolAnnotationsTest`,
+`McpToolTitlesTest`, `ToolRegistryGenerateToolsTest`.

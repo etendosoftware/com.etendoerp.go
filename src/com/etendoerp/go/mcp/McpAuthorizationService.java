@@ -86,6 +86,8 @@ final class McpAuthorizationService {
       // B3: read-tier on purpose. Reporting friction writes no business data, and gating it behind
       // etendo:write would silence exactly the read-only sessions most likely to get lost.
       case McpConstants.TOOL_NEO_FEEDBACK:
+      // etendo-ai#53: knowing who you are is the read every session needs before any other.
+      case McpConstants.TOOL_NEO_WHOAMI:
       // ETP-5677: reading a job's progress writes nothing; only its owner can see it anyway.
       case McpConstants.TOOL_NEO_JOB_STATUS:
         return SCOPE_READ;

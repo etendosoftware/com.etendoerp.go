@@ -94,6 +94,8 @@ public class ToolRegistry {
 
     // Always add etendo_discover if user can read
     if (permissions.canRead) {
+      // etendo-ai#53: first, because it is the call an agent should make first.
+      tools.add(McpWhoamiToolDefinition.definition());
       tools.add(buildDiscoverTool());
       tools.add(buildDocsTool());
       // etendo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
@@ -340,7 +342,8 @@ public class ToolRegistry {
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
     // Static tools (e.g. docs) are not tied to any spec
     if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)
-        || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)) {
+        || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)
+        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)) {
       return null;
     }
     // IMP-53: etendo_discover's optional 'spec' narrows the catalog, it does not address a spec.
@@ -759,6 +762,8 @@ public class ToolRegistry {
         definition = McpOcrToolDefinitions.requestUpload(List.of()); break;
       case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
         definition = McpOcrToolDefinitions.extract(List.of()); break;
+      // etendo-ai#53: only includePermissions; anything else is refused.
+      case McpConstants.TOOL_NEO_WHOAMI: definition = McpWhoamiToolDefinition.definition(); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
