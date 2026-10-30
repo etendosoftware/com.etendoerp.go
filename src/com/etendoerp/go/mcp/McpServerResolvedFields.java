@@ -135,6 +135,22 @@ final class McpServerResolvedFields {
   }
 
   /**
+   * The fields the entity's customization leaves empty on create unless the caller sends them
+   * ({@link NeoHandler#createUnsetFields()}, ETP-5852): never server-defaulted on create, and not
+   * a default to offer.
+   *
+   * @param sfEntity the Schema Forge entity; {@code null} answers an empty set
+   * @return the names, never {@code null}
+   */
+  static Set<String> unsetOnCreate(SFEntity sfEntity) {
+    if (sfEntity == null) {
+      return Collections.emptySet();
+    }
+    return declaredByCustomization(sfEntity, NeoExtensionSurface.CREATE,
+        NeoHandler::createUnsetFields, "create-unset");
+  }
+
+  /**
    * The create-body directives the entity's customization declares
    * ({@link NeoHandler#createDirectives()}, ETP-5676): request options its pre-hook reads and
    * strips, so the write verbs must not report them unknown and {@code etendo_schema} publishes them.

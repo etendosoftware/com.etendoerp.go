@@ -40,6 +40,8 @@ final class McpConstants {
   /** Requested output format of a {@code generate_*} report tool (ETP-4793 / IMP-19). */
   static final String PARAM_FORMAT = "format";
   static final String PARAM_PARENT_ID = "parentId";
+  /** ETP-5852: etendo_list across every parent, asked for on purpose. */
+  static final String PARAM_ALL_PARENTS = "allParents";
   /** The record id a tool acts on or, for {@code etendo_schema(view:"actions")}, judges. */
   static final String PARAM_ID = "id";
   static final String PARAM_ASSET_ID = "assetId";

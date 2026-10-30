@@ -99,14 +99,7 @@ public class NeoCertificateHelper {
       if (orgId == null || orgId.isBlank()) {
         return NeoResponse.error(400, "Required parameter: orgId");
       }
-      var session = OBDal.getInstance().getSession();
-      @SuppressWarnings("unchecked")
-      var q = session.createNativeQuery(
-          "SELECT expiration_date FROM etsg_certificate" +
-          " WHERE ad_org_id = :orgId AND isactive = 'Y'" +
-          " ORDER BY expiration_date DESC LIMIT 1");
-      q.setParameter(PARAM_ORG_ID, orgId);
-      Object row = q.uniqueResult();
+      Object row = activeCertificateExpiry(orgId);
       JSONObject resp = new JSONObject();
       if (row != null) {
         resp.put("exists", true);
@@ -120,6 +113,24 @@ public class NeoCertificateHelper {
       log.error("Certificate GET failed", e);
       return NeoResponse.error(500, "Internal error retrieving certificate status");
     }
+  }
+
+  /**
+   * The expiry date of the organization's active signing certificate, the latest one when there
+   * are several; {@code null} when it has none. Shared by {@code GET /sws/neo/certificate} and the
+   * agents' read of the same status (ETP-5852).
+   *
+   * @param orgId the organization
+   * @return the expiry date, or {@code null}
+   */
+  public static java.util.Date activeCertificateExpiry(String orgId) {
+    Object row = OBDal.getInstance().getSession().createNativeQuery(
+            "SELECT expiration_date FROM etsg_certificate"
+                + " WHERE ad_org_id = :orgId AND isactive = 'Y'"
+                + " ORDER BY expiration_date DESC LIMIT 1")
+        .setParameter(PARAM_ORG_ID, orgId)
+        .uniqueResult();
+    return row instanceof java.util.Date ? (java.util.Date) row : null;
   }
 
   /**
