@@ -1,5 +1,6 @@
 package com.etendoerp.go.schemaforge;
 
+import java.sql.SQLException;
 import java.util.function.Supplier;
 
 import javax.servlet.http.HttpServletResponse;
@@ -50,11 +51,14 @@ final class DocActionRefusalGuard {
   @FunctionalInterface
   interface RecordCheck {
     /**
+     * Decides whether the refused value must be refused on this record. It may throw — a
+     * {@link SQLException} or any unchecked exception — and the guard then fails closed.
+     *
      * @param recordId the record the button runs on
      * @return {@code true} to refuse the request
-     * @throws Exception when the condition cannot be read
+     * @throws SQLException when the condition cannot be read from the database
      */
-    boolean refuses(String recordId) throws Exception;
+    boolean refuses(String recordId) throws SQLException;
   }
 
   private DocActionRefusalGuard() {
