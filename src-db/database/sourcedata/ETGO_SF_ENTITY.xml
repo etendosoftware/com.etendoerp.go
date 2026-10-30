@@ -5207,6 +5207,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <JAVA_QUALIFIER><![CDATA[year-close]]></JAVA_QUALIFIER>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <SEQNO><![CDATA[20]]></SEQNO>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <AGENT_PROMPT><![CDATA[To know whether a date falls in an open period, do not walk the calendar: call etendo_list on spec 'open-close-period-control', entity 'periodControl', with filters {startingDate:{lte:<date>}, endingDate:{gte:<date>}}; its status says whether the period is open (O).]]></AGENT_PROMPT>
+<!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents list the fiscal years to check a date or a year-close, and the calendar entity is excluded, so there is no parent id to pass; allParents keeps them to years of fiscal calendars."}}]]></MCP_CONFIG>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67--></ETGO_SF_ENTITY>
 
 <!--E891228C65744C9CBBABE36F715D0E4E--><ETGO_SF_ENTITY>

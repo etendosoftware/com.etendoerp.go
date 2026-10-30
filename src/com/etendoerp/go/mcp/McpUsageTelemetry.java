@@ -456,6 +456,8 @@ final class McpUsageTelemetry {
         return "discover";
       case "etendo_vector_search":
         return "search";
+      case McpConstants.TOOL_NEO_WHOAMI:
+        return "whoami";
       case "docs":
         return "docs";
       default:

@@ -4513,7 +4513,7 @@ Other MCP-only refusals declared in §4.12.6:
 | `etendo_defaults` input that depends on the record's current values (ETP-5680, ETP-5852) | `GET .../defaults?productType=S` | optional `recordContext` object; its scalar entries (≤ 32, ≤ 256 characters each) become `NeoContext#getQueryParams()` of the DEFAULTS hooks, with `parentId`/`assetId`/`view`/`spec`/`entity` never overridden. They reach the entity's DEFAULTS customization exactly as `?key=value` does on REST `/defaults` — there is no allowlist, and some handlers read generic keys (e.g. `action`, `accountId`, `statementId`), so a caller should send only current field values of the record. Since ETP-5852 the generic resolver applies every entry that names an included field of the entity before the callout cascade (`NeoDefaultsRecordContext#apply`, protected from the cascade), so `{businessPartner}` on a document header returns that partner's payment terms, method and price list; other keys are ignored there. The entities that need a value first declare it in `MCP_CONFIG.defaults.context`, listed in the `etendo_defaults` `recordContext` description. `ProductDefaultsHandler` reads `productType` and returns the defaults of that type: `productType` is set to the requested one (no stale `productType$_identifier`), `taxCategory` becomes the type's named category when the tenant has it, and `typeTaxCategory` repeats it for the UI (absent when the category does not exist, then `taxCategory` is unchanged) — so copying `taxCategory` from these defaults into `etendo_create` stays consistent with the type |
 | get, update, delete or action by id on a record outside the entity's tab filter (ETP-5852) — a purchase invoice id on `sales-invoice/header`, a sales order id on `purchase-order/header` | **served** — core's read by id (`DefaultJsonDataService` with `id`) and the write paths ignore the tab's HQL where clause | **404 `not_found`**, nothing read or changed; when the caller's role can see the record, `detail` and `foundIn` name the `spec/entity` pairs over the same table whose filter admits it (`McpSpecScope`). A filter with `@…@` placeholders is not judged |
 | response shape of `etendo_create` / `etendo_update` / `etendo_action` (ETP-5945, ETP-5852) | n/a (REST keeps core's `{response:{data:[…]}}`) | `etendo_create` and `etendo_update` answer one record as `{data:{…}}`, like `etendo_get`; `etendo_update` also carries the record `url`. Every `etendo_action` result carries `success` (boolean) and `message` (first of `message`/`processMessage`/`detail`/`title`, Etendo message keys translated) next to its own keys (`McpActionEnvelope`). `etendo_batch` (sync result and every `etendo_job_status` row) adds the same `url` to each committed op on a primary entity (`McpRecordUrls#addBatchUrls`), and answers a keyed refusal (`error.messageKeys`, e.g. `PeriodNotValid`) as `etendo_create` does: 422, `code`, `messageKeys` and the key's hint, instead of REST's 400 (`McpBatchEnvelope`). `PeriodNotValid` gets the open-the-period hint on every tool |
-| list of a child entity across every parent (ETP-5852, M-13 / M-46) | n/a (the SPA reads lines inside their document) | `etendo_list(allParents:true)`, on purpose and only where `MCP_CONFIG.parent.allParents` (with `reason`) allows it — today `sales-order/lines`, `purchase-order/lines`, `goods-movements/movementLine`, `sales-invoice/paymentPlan`, `purchase-invoice/paymentPlan`. The rows are scoped to the parent tab's own filter (`e.<parentField>.id in (select p.id from <Parent> p where …)`, `McpAllParents`), so sales lines never include purchase or quotation lines; the answer carries `allParents:true` and `allParentsNote`. Without the argument the parent stays required (`parent_required`, whose hint then names `allParents`); with `parentId` too, or on another entity, 422. `etendo_schema`/`etendo_discover` publish `allParentsAllowed` and `allParentsReason` |
+| list of a child entity across every parent (ETP-5852, M-13 / M-46) | n/a (the SPA reads lines inside their document) | `etendo_list(allParents:true)`, on purpose and only where `MCP_CONFIG.parent.allParents` (with `reason`) allows it — today `sales-order/lines`, `purchase-order/lines`, `goods-movements/movementLine`, `sales-invoice/paymentPlan`, `purchase-invoice/paymentPlan`, `fiscal-calendar/year` (ETP-6036: its parent `calendar` is excluded from the spec, so there is no parent id to pass and the years are only reachable this way). The rows are scoped to the parent tab's own filter (`e.<parentField>.id in (select p.id from <Parent> p where …)`, `McpAllParents`), so sales lines never include purchase or quotation lines; the answer carries `allParents:true` and `allParentsNote` (which says "parent record" when the parent entity is not in the spec). Without the argument the parent stays required (`parent_required`, whose hint then names `allParents`); with `parentId` too, or on another entity, 422. `etendo_schema`/`etendo_discover` publish `allParentsAllowed` and `allParentsReason`. The scope keeps the parent tab's id and re-reads the tab in each request (ETP-6036): the cached `Tab` belongs to an earlier request's session, and reading its table lazily answered 500 (`LazyInitializationException`) on every `allParents` read after the first |
 | `etendo_selectors` on a field whose rule reads the payment direction (`@Isreceipt@`, e.g. `documentType` of `payment-in`/`payment-out`) (ETP-5852, M-57) | the form sends the direction | the direction is taken from `recordContext.receipt` (or `IsReceipt`) and otherwise from the window's sales flag (payments in = receipt), and passed under the rule's exact spelling `Isreceipt` too — ComboTableData looks a rule parameter up by exact name, so the selector used to answer empty |
 | aging report totals and column meaning (ETP-5852, M-36) | partner rows and `meta` only | also `response.totals` (each amount column summed over the partners, plus `partners`) and `meta.columns` (each column for the bucket limits of the call: buckets by due date against `currentDate`, `credits` = payments not yet applied, `net` = total − credits). MCP report runs carry `mcpOrigin` since this change; no other report handler branches on it |
 | `etendo_widget` period and range (ETP-5852, M-38 / M-42 / M-24) | `GET /sws/neo/dashboard/{entity}?range=` unchanged: an unknown range falls back to the rolling 12 months | an unknown `params.range` is refused **422** with the accepted values (`WidgetPeriod.RANGES`); every answer carries `response.period` — the effective `range` (the widget's default when none was sent: `kpis` ytd, `revenue-trend` lastYear) with `from`/`to` computed by the same expression the query uses, or the widget's default `window`, and `asOf` (widgets are computed per call). The tool describes each figure's basis (net without VAT vs total/outstanding with VAT, period flow vs point in time) |
@@ -5714,9 +5714,18 @@ this endpoint — some are recorded by the backend itself through `UsageEventRec
 
 | Event type | Recorded by | When | Columns |
 |------------|-------------|------|---------|
-| `ai.agent.message` | AI BFF, through this endpoint (defined; no caller yet) | One completed AI agent chat turn | `properties`: model, token counts |
+| `ai.agent.message` | AI BFF (`tools/ai-bff/src/usage.js`), through this endpoint | One AI agent chat or page-help turn, also when it failed or was aborted (`outcome = error`) | `target` = `agent-chat`/`page-help`, `sessionKey` = the conversation's external id; `COST_USD` from the body's `costUsd` (when the provider priced it); `properties`: `model`, `inputTokens`, `outputTokens`, `cachedInputTokens`, `steps`, `toolCalls`, `finishReason` |
 | `ai.support.message` | Backend (defined; no caller yet) | One completed support chat (ValerIA) turn | `properties`: model, token counts |
+| `ai.tool.execute` | Backend (`CopilotToolUsageRecorder`, a `CopilotToolUsageHook` of `com.etendoerp.copilot`) | One `/sws/copilot/executeTool` call whose tool reported model usage — today the document OCR (`SimpleOcrTool`). Never on a non-2xx answer. | client/org/user/role from `OBContext`; `target` = tool name, `action = execute`, `outcome = ok`, `durationMs` = Copilot's answer time; `COST_USD` (when the LiteLLM proxy priced it); `properties`: `model`, `inputTokens`, `outputTokens` |
 | `session.login` | Backend (`SessionLoginUsage`) | One successful entry into an environment, after the credential is issued: `GET /sws/go/login?userId=` (`action = login`) and `POST /sws/go/session/environment` (`action = cookie-login`, the path the SPA uses). Never on a 4xx/5xx. | client/org/user/role of the environment entered — set explicitly, not from `OBContext`, which is the system context on both paths; `target = environment`, `outcome = ok`, `durationMs` = login handling; `properties.authMethod` = `password`/`sso` on the cookie path only |
+
+`COST_USD` (`NUMERIC`, nullable) is the money the LiteLLM proxy (`llm.etendo.software`) charged
+for the call, in USD, as it reports it (`usage.cost` when streaming, header
+`x-litellm-response-cost` otherwise). It is a column and not a property so the billing engine can
+sum it: the `aiSpend` strategy (`AiSpendCounter`, [`plan-quotas.md`](plan-quotas.md) §4.7) turns
+it into a Billing Resource. The ingest body carries it as the top-level number `costUsd`; anything
+but a finite, non-negative number is stored as null, because a negative cost would lower a
+tenant's spend. Null means "not priced", never "free".
 
 Recording is the last statement of the success path, after the response is written, and never
 throws; the INSERT happens on the recorder's writer thread, so a slow or locked
@@ -10478,7 +10487,7 @@ hand links to the user and reach nobody else, so they stay closed-world.
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
 |---|---|---|---|
-| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, every `generate_*` report | true | false | true |
+| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, `etendo_whoami`, every `generate_*` report | true | false | true |
 | `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback`, `etendo_request_document_extraction_upload` | false | false | false |
 | `etendo_delete`, `etendo_delete_attachment` | false | true | true |
 | `etendo_update`, `etendo_batch`, `etendo_job_cancel`, `etendo_action`, `etendo_action_batch`, `etendo_request_attachment_upload` (`main:true` replaces the previous main file), `etendo_send_document_email` (two calls are two emails), `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
@@ -12752,3 +12761,73 @@ Tests: `ImportInOutLinesIntoInvoiceHandlerTest` (returns), `ImportOriginInvoiceL
 `RectificativeImportGateTest`, `DocumentAvailabilityTest` (the advice), `SalesInvoiceHeaderHandlerTest` /
 `PurchaseInvoiceHeaderHandlerTest` (contracts and routing), and the real-model HQL parse in
 `ImportOrderLinesIntoInvoiceHandlerIntegrationTest`.
+
+#### 4.12.43 Who the connection is: `etendo_whoami` (etendo-ai#53, gap G17)
+
+Each MCP connection runs as its own user, role, client and organization, and what an agent can read or change
+depends on the role. Without a way to ask, an agent that saw a spec answer `forbidden` on a second connection
+read it as "permissions changed mid-session" and created and deleted a test purchase order to learn who it was
+(etendo-ai#50). `etendo_whoami` answers that in one call.
+
+- **One optional argument**, `includePermissions` (boolean, default `false`); no side effects. Any other argument
+  except `_indentResponse` is refused (`unknown_argument`).
+- **Read tier** (`etendo:read`), listed first among the built-ins for every role with read; annotated read-only
+  and idempotent. It addresses no spec, so the spec access gate does not apply.
+- **Source**: the `OBContext` the servlet entered for the call (the same one every other tool runs under) and
+  the token's scopes. Nothing is cached.
+
+```json
+{
+  "user": {"id": "…", "name": "Compras", "username": "compras@acme.test"},
+  "role": {"id": "…", "name": "Purchasing", "isAdmin": false},
+  "client": {"id": "…", "name": "ACME"},
+  "organization": {"id": "…", "name": "ACME Spain"},
+  "warehouse": {"id": "…", "name": "Main warehouse"},
+  "capabilities": {"showAccountingFields": false, "scopes": ["etendo:read", "etendo:write"]},
+  "currentDate": "2026-10-30",
+  "timeZone": "Europe/Madrid",
+  "currency": {"id": "…", "isoCode": "EUR", "standardPrecision": 2},
+  "language": "es_ES",
+  "hint": "This is the identity every other tool runs under on this connection. …"
+}
+```
+
+- `role.isAdmin`: the System role or a client-admin role — the same bypass the access checks apply
+  (`NeoAccessHelper.isAdminOrClientAdmin`).
+- `capabilities.showAccountingFields`: `NeoAccountingAccessPolicy.canSeeAccounting`, the single source of truth
+  behind accounting tabs and the `post`/`unpost` refusal.
+- `capabilities.scopes`: the token's scopes under their current `etendo:` names (legacy `neo:` mapped), sorted.
+- `currentDate` / `timeZone`: today in the server's zone, the zone business dates are interpreted in.
+- `currency`: the organization's functional currency by `OBCurrencyUtils.getOrgCurrency` (organization, legal
+  entity, client). `null` when none resolves — unlike `GET /sws/neo/session` there is no `USD` placeholder, which an
+  agent would take for the real currency.
+- `language`: the user's Etendo language.
+- `warehouse`: the session's default warehouse (`OBContext.getWarehouse`), `null` when there is none.
+
+**`includePermissions:true`** adds `permissions`: the rows of the "Configuración > Roles" matrix this role can
+reach. Rows, categories and order come from `RoleAccessMatrix.buildMatrix` / `buildReportsMatrix` (the same builder
+`SFRolesOverview` and `SFSystemRoleTemplates` use), reduced to this one role:
+
+- **Only reachable rows.** A `none` row is left out, and so is a category left empty: absent means no access. The
+  roles page lists `none` rows because it compares several roles; an agent only needs its own.
+- **Spec names, not `AD_Window_ID`s.** A window row carries `specs`: the active window specs of that window
+  published in the MCP catalog (`ShowInMCP`), sorted — what `etendo_list` and the other tools take as `spec`. It is
+  empty for a reachable row no catalog spec serves (the windowless GO pages, e.g. "Fiscal Models"). A report row
+  carries `spec`: the report ids of `ReportAccessCatalog` are their spec names (`generate_<snake>`).
+- `access` is `full` or `read-only`. An admin or client-admin role gets every row as `full` — the bypass
+  `NeoAccessHelper.hasWindowAccess` and `SFMyReportAccess` apply — not the tiers its own grant rows would give.
+
+```json
+"permissions": {
+  "windows": {"categories": [{"name": "Procurement Management",
+    "windows": [{"name": "Purchase Order", "specs": ["purchase-order"], "access": "full"}]}]},
+  "reports": {"categories": [{"name": "Finance",
+    "reports": [{"spec": "aging-payable", "name": "Aging Report (Payables)", "access": "full"}]}]}
+}
+```
+
+Size, measured on a local database (2026-10-30, compact JSON as the MCP answers): 1,296 bytes for the Purchasing
+template role (14 of 44 rows reachable); ~4.2 KB for an admin role, which reaches every row.
+
+Usage telemetry records the call with verb `whoami`. Tests: `McpWhoamiToolTest`, `McpToolAnnotationsTest`,
+`McpToolTitlesTest`, `ToolRegistryGenerateToolsTest`.
