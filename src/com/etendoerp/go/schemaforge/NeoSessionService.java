@@ -84,7 +84,8 @@ import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
  *
  * <p>{@code brandingUpdated} is the latest {@code updated} among the rows a printed document
  * takes the issuer identity from: the organization, its {@code AD_OrgInfo}, that info's
- * address and the resolved logo image. The web client compares it with a cached PDF's own
+ * address, the resolved logo image and the organization's saved printable design
+ * ({@code ETGO_DOC_TEMPLATE_CONFIG}). The web client compares it with a cached PDF's own
  * write time, so a logo or company-data change invalidates the cached renderings the way a
  * record edit does (see {@code attachmentFreshness.js} in schema_forge). {@code null} when
  * none of those rows carries a timestamp.
@@ -305,7 +306,22 @@ public class NeoSessionService {
       latest = later(latest, location != null ? location.getUpdated() : null);
     }
     Organization org = OBDal.getReadOnlyInstance().get(Organization.class, orgId);
-    return later(latest, org != null ? org.getUpdated() : null);
+    latest = later(latest, org != null ? org.getUpdated() : null);
+    return later(latest, designUpdated(orgId));
+  }
+
+  /**
+   * ETP-5988: the printable design chosen for the organization (Settings → Printable documents)
+   * changes what every document prints, so it invalidates cached PDFs like a logo change does. A
+   * failure to read it never breaks the session: the cache then keeps its other invalidation causes.
+   */
+  private static Date designUpdated(String orgId) {
+    try {
+      return new DocTemplateConfigStore().latestUpdated(orgId);
+    } catch (RuntimeException e) {
+      log.warn("brandingUpdated: the printable design's timestamp could not be read: {}", e.toString());
+      return null;
+    }
   }
 
   private static Date later(Date a, Date b) {

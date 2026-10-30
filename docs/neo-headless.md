@@ -2405,6 +2405,12 @@ The `403` is the same whether or not the organization exists. The client always 
 caller's context, never from the request. There is **no fallback to a parent organization**: an
 organization with no row gets the defaults. Not exposed over MCP.
 
+**Cached PDFs.** A saved design changes what every document prints, so the session's
+`brandingUpdated` (`GET /sws/neo/session`, also read by `NeoDocumentPdf`) is the latest `updated`
+among the organization's `ETGO_DOC_TEMPLATE_CONFIG` rows (active or not) as well as the logo and
+company-data rows: a PDF cached before the design changed reads as stale, as after a logo change.
+Reading that timestamp never fails the session (`NeoSessionService.designUpdated`).
+
 > **Why the checks are explicit.** `NeoServlet` runs every request in `OBContext.setAdminMode()`, and
 > in admin mode the DAL applies neither the readable/writable organization filters nor the entity
 > access check. Every query of `DocTemplateConfigStore` therefore names the client and the

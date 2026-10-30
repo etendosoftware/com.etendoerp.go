@@ -36,6 +36,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
@@ -83,6 +85,49 @@ class NeoSessionBrandingUpdatedTest {
       dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       return NeoSessionService.resolveBrandingUpdated(ORG_ID, logo);
     }
+  }
+
+  /** The organization's saved printable design is one more row the newest-wins rule reads (ETP-5988). */
+  private static Date resolveWithDesign(Date orgUpdated, Date designUpdated, boolean designReadFails) {
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(OrganizationInformation.class, ORG_ID)).thenReturn(null);
+    Organization org = mock(Organization.class);
+    when(org.getUpdated()).thenReturn(orgUpdated);
+    when(dal.get(Organization.class, ORG_ID)).thenReturn(org);
+    if (designReadFails) {
+      when(dal.createCriteria(DocTemplateConfigStore.ENTITY_NAME)).thenThrow(new IllegalStateException("no table"));
+    } else {
+      @SuppressWarnings("unchecked")
+      OBCriteria<BaseOBObject> criteria = mock(OBCriteria.class);
+      BaseOBObject row = mock(BaseOBObject.class);
+      when(row.get("updated")).thenReturn(designUpdated);
+      when(criteria.uniqueResult()).thenReturn(designUpdated == null ? null : row);
+      when(dal.createCriteria(DocTemplateConfigStore.ENTITY_NAME)).thenReturn(criteria);
+    }
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      return NeoSessionService.resolveBrandingUpdated(ORG_ID, null);
+    }
+  }
+
+  @Test
+  void aNewerSavedDesignInvalidatesCachedPdfs() {
+    assertEquals(NEW, resolveWithDesign(OLD, NEW, false));
+  }
+
+  @Test
+  void anOlderSavedDesignDoesNotMoveTheTimestamp() {
+    assertEquals(NEW, resolveWithDesign(NEW, OLD, false));
+  }
+
+  @Test
+  void anOrganizationWithoutADesignKeepsItsOtherRows() {
+    assertEquals(OLD, resolveWithDesign(OLD, null, false));
+  }
+
+  @Test
+  void aDesignThatCannotBeReadNeverBreaksTheSession() {
+    assertEquals(OLD, resolveWithDesign(OLD, null, true));
   }
 
   static Stream<Arguments> newestRowWins() {

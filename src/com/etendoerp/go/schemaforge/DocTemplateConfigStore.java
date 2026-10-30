@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 import org.hibernate.criterion.Order;
@@ -44,6 +45,7 @@ class DocTemplateConfigStore {
 
   private static final String P_CLIENT = "client.id";
   private static final String P_ORG = "organization.id";
+  private static final String P_UPDATED = "updated";
   private static final String P_DOC_TYPE = "templateDocumentType";
   private static final String P_VARIANT = "templateVariant";
   private static final String P_LOGO = "templateLogo";
@@ -72,6 +74,22 @@ class DocTemplateConfigStore {
       configs.add(toConfig(row));
     }
     return configs;
+  }
+
+  /**
+   * The latest change of any of the organization's saved designs, active or not (switching a design
+   * off changes what prints too), or null when it never saved one. Read-only: the session reports
+   * it as part of {@code brandingUpdated}, so a cached PDF written before a design change is
+   * stale. The organization alone selects the rows — it belongs to exactly one client.
+   */
+  Date latestUpdated(String orgId) {
+    OBCriteria<BaseOBObject> criteria = OBDal.getReadOnlyInstance().createCriteria(ENTITY_NAME);
+    criteria.setFilterOnActive(false);
+    criteria.add(Restrictions.eq(P_ORG, orgId));
+    criteria.addOrder(Order.desc(P_UPDATED));
+    criteria.setMaxResults(1);
+    BaseOBObject row = (BaseOBObject) criteria.uniqueResult();
+    return row == null ? null : (Date) row.get(P_UPDATED);
   }
 
   /**
