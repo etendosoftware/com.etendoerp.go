@@ -11222,6 +11222,8 @@ the window's pickers (`availableReceiptLines` / `availableShipmentLines` and the
 (`VO`) frees its quantity. A reversal that should give the units back is out of scope of this rule; if it is ever
 wanted it has to change the pickers and this cap together.
 
+**One rule, four readers (ETP-6054).** The rule lives in `ReturnableQuantity.COUNTED_RETURN_LINES_FROM` / `COUNTED_RETURN_LINES_FILTER` and is read by the cap (`alreadyReturned`), the goods receipt's `returnStatus` (`GoodsReceiptHeaderHandler.RETURN_STATUS_SQL`), the picker `availableReceiptLines` (`ReturnToVendorShipmentHeaderHandler.AVAILABLE_LINES_SQL`) and the 201 of the create-from-document actions. That 201 (`ReturnFromDocumentSupport.describe`, shared by `createPurchaseReturn` and the sales `createReturn`, so both directions gain the keys) now adds per line `alreadyReturnedQuantity` (what OTHER returns hold of the source line, the one just created excluded) and `returns: [{id, documentNo, documentStatus}]`; every existing key is kept. The lookup is informational: it runs under a savepoint and a failure is logged at warn and leaves the two keys out of that line, so it can never fail or roll back the creation of the return. `availableReceiptLines` adds `receivedQuantity` (the receipt line's quantity) next to `movementQuantity` (still returnable); `availableShipmentLines` is unchanged. Not a channel divergence: REST, batch and MCP reach the same code.
+
 **`reason`.** It is stored as `M_InOut.Description`. Over the AD length of that column (255 today, read from the
 model at runtime, `ReturnFromDocumentSupport.descriptionMaxLength`) the action answers **422 `returnReasonTooLong`**
 before creating anything, instead of cutting the end of what the user wrote.
@@ -11237,7 +11239,7 @@ copies through `CloneRecordHook` / `DalUtil.copy`, none of them through the line
 CRUD pre-hook of the two return line customizations (`ReturnableQuantity.refuseDirectCreate`, called explicitly, no
 entity name in shared code). `PUT` / `PATCH` of `movementQuantity` of an existing line stay allowed and capped.
 `refuseQuantityEdit` still answers `null` (no cap) for a **legacy** line without a source link (`canceledInoutLine`
-is `discarded` in both windows): loose lines can no longer be created, but ones that already exist have nothing to be
+is `discarded` on the customer return and, since ETP-6054, API-only `readOnly` with `grid: false, form: false` on the return to vendor, so MCP reads it and the screen is unchanged): loose lines can no longer be created, but ones that already exist have nothing to be
 capped against. Every line linked to a receipt/shipment arrives by import or by create-from-the-document, both capped.
 `etendo_batch` has no ACTION surface and no update, so the actions and the quantity edit are not reachable through it;
 its `create` on a return line is refused like REST's.
@@ -11653,7 +11655,7 @@ the document is in a final state. The header handlers inject keys that no spec f
 
 | Entity | Keys | Meaning |
 |---|---|---|
-| goods receipt | `invoiceStatus`, `returnStatus`, `linkedInvoices`, `linkedReturns`, `linkedOrders`, `resolvedPriceListId`, `resolvedPriceList$_identifier` | `invoiceStatus` / `returnStatus`: percentage (0 to 100, rounded, capped) of the receipt already invoiced / returned; the linked lists are `[{id, documentNo, documentStatus, ...}]` |
+| goods receipt | `invoiceStatus`, `returnStatus`, `linkedInvoices`, `linkedReturns`, `linkedOrders`, `resolvedPriceListId`, `resolvedPriceList$_identifier` | `invoiceStatus` / `returnStatus`: percentage (0 to 100, rounded, capped) of the receipt already invoiced / returned. `returnStatus` (ETP-6054) is units returned over units received summed across every line (it mixes the units of different products), counting returns with the rule of `ReturnableQuantity` (non-voided, drafts included): the received quantity of each line is read once and the returned quantity is aggregated per source line in a sub-select (the former join repeated the line once per return and inflated the denominator); the linked lists are `[{id, documentNo, documentStatus, ...}]` |
 | goods shipment | `invoiceStatus`, `linkedOrders`, `linkedInvoices`, `returnReceipts`, `canCreateReturn`, `issuerOrg`, `resolvedPriceListId`, `resolvedPriceList$_identifier` | as above, sales side |
 | return to vendor, customer return | `sourceReceipts` / `sourceShipments`, `sourceReceiptDocNo` / `sourceShipmentDocNo`, `returnInvoices`, `hasReturnInvoice`, `linesCount`, `invoiceStatus`, `issuerOrg` | |
 | purchase and sales order | `hasLinkedDocuments`, `needsPrimaryDoc`, `needsInvoiceDoc` | `hasLinkedDocuments`: an active invoice or goods document points at the order |
