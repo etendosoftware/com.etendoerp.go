@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_TRANSACTION_WAREHOUSE">
+    <function name="ETGO_TRANSACTION_WAREHOUSE" type="VARCHAR" volatility="STABLE">
+      <parameter name="p_m_transaction_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_result VARCHAR(32);
+BEGIN
+  -- ETP-5889. Feeds M_Transaction.EM_Etgo_Warehouse_ID (Computation_Mode = 'S', Refresh_Mode = 'S').
+  --
+  -- M_Transaction has no warehouse of its own: the warehouse is the one of the storage bin
+  -- (M_Locator) the stock moved in or out of. Storing it makes the Product "Movements" tab able to
+  -- sort and filter by warehouse in the backend query; a value injected by a NeoHandler
+  -- afterHandle() could not be filtered or sorted.
+  --
+  -- TOTAL FUNCTION. Refresh_Mode = 'S' runs inside the transaction that posts the stock movement,
+  -- so an exception here would roll back the posting of the document. Every edge case resolves
+  -- to a value, never to an error: a null or unknown transaction id, and a transaction whose
+  -- locator no longer resolves, answer null.
+  -- Value: M_Locator.M_Warehouse_ID of the transaction's locator.
+
+  IF p_m_transaction_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT l.m_warehouse_id INTO v_result
+  FROM   m_transaction t
+         JOIN m_locator l ON l.m_locator_id = t.m_locator_id
+  WHERE  t.m_transaction_id = p_m_transaction_id;
+
+  RETURN v_result;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN NULL;
+END ETGO_TRANSACTION_WAREHOUSE
+]]></body>
+    </function>
+  </database>
