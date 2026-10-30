@@ -328,12 +328,14 @@ final class McpConstants {
   /** HTTP-style status for a validation failure on a write (IMP-5). */
   static final int STATUS_UNPROCESSABLE = 422;
   /**
-   * Machine-detectable error code for a write the current data refuses — a duplicate business key
-   * (ETP-4793 / IMP-17). Distinct from {@link #ERROR_VALIDATION}: the request is well-formed, so
-   * re-sending corrected values is not necessarily the remedy; the agent may need a different record.
+   * Machine-detectable error code for an operation the current data refuses: a duplicate business
+   * key (ETP-4793 / IMP-17), or a record whose current state refuses the operation — e.g. emailing a
+   * document that is not in a sendable status (ETP-6013). Distinct from {@link #ERROR_VALIDATION}:
+   * the request is well-formed, so re-sending corrected values is not necessarily the remedy; the
+   * agent may need a different record, or the record must change state first.
    */
   static final String ERROR_CONFLICT = "conflict";
-  /** HTTP-style status for a duplicate-key conflict (ETP-4793 / IMP-17). */
+  /** HTTP-style status for a {@link #ERROR_CONFLICT} answer (ETP-4793 / IMP-17, ETP-6013). */
   static final int STATUS_CONFLICT = 409;
   /**
    * Machine-detectable error code for a write refused because the record changed underneath the

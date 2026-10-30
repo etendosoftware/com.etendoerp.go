@@ -75,7 +75,7 @@ public final class NeoDocumentPdf {
    * receipts and shipments, journals...) and the Order_Document Status list the order windows use
    * ({@code FF80818130217A350130218D802B0011}). Both carry {@code DR} as their draft value.
    */
-  static final Set<String> DOCUMENT_STATUS_REFERENCES =
+  public static final Set<String> DOCUMENT_STATUS_REFERENCES =
       Set.of("131", "FF80818130217A350130218D802B0011");
 
   /** What the stored file is worth as the document's PDF. */

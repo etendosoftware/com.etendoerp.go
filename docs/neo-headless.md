@@ -4430,6 +4430,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | document actions over several documents (ETP-5715) | one document per call (`etendo_action`), one transaction, the call's own answer | `etendo_batch` is **create-only and atomic**; it has no ACTION surface | **`etendo_action_batch` is neither: per-document, NOT atomic, capped at 50 ids**, one result per document. Each document runs the `etendo_action` path in its own transaction (commit on success, rollback and a clean session on failure) and the batch carries on after a failure. REST has no equivalent call: the SPA's list toolbar posts one request per record. **Aligned with the SPA (bulk bar, row kebab, form kebab) and the same in single `etendo_action`:** reactivating a *posted* invoice or amortization un-posts it first, on the server (ETP-5684; goods documents, returns and journals do not), §4.12.36. **Not aligned, on purpose:** concurrency, the client-side `rowFilter` omission, and the SPA clone dialog stopping at the first failure. Declared in §4.12.36 |
 | attachments of a document — **read authorization and parent ownership** (ETP-5715) | `GET /sws/neo/attachments/{table}/{record}` and `/file/{id}` check **nothing** about the parent: no client/organization ownership, no window-access tier for a read, no existence check on a download (ADR-0003 is still "Proposed", ETP-4570). Writes check only the window-access tier of *a* window that shows the table (`NeoAttachmentAuthorizer`, ETP-5205) | **enforced, on every operation** (`etendo_request_attachment_upload`, `etendo_list_attachments`, `etendo_delete_attachment`; §4.12.37): the role must have access to the **spec** (read tier to list, write tier to upload and delete), the record must exist and belong to a client AND organization the session reads (`TenantOwnership`), a missing and a foreign record answer the same `404`, and an attachment id must belong to **that** record (a bare id of another document is the same `404` as an unknown one) | the MCP does not inherit a gap the platform is about to close. Until ETP-4570 lands in REST, a REST caller can still list/download/delete the attachments of another tenant's record by id; the MCP cannot. **Do not "fix" this by relaxing the MCP side** |
 | attachments on windows the SPA gives no Attachments tab (ETP-5715) | REST serves attachments of any table | **refused `405`** on the spec whose root entity carries `MCP_CONFIG.attachments.enabled:false` (the nine windows with `attachments:false` in `decisions.json`); parity with the SPA is enforced, REST is not changed | the MCP must not offer what the application hides; see §4.12.37 |
+| attachments of a type declared read-only for the MCP (ETP-6013) | REST serves and accepts attachments of any table (writes gated by the window-access tier only) | on the spec whose root entity carries `MCP_CONFIG.attachments.readOnly:true` (today `tax`), list and download work and **every write is refused `405`** with the declared, translated `messageKey` ("Los impuestos no se pueden modificar.") before any record lookup; REST is not changed | a product decision for the agent surface, not an SPA parity rule; see §4.12.37 |
  | attachment writes — organization (ETP-5715) | upload/delete do not check that the record's organization is writable by the role | **required** (`getWritableOrganizations`); a readable-only organization is the same `404` | as the row above |
 | attachment upload (ETP-5715) | multipart `POST` with the caller's bearer token | a **single-use link** (`PUT /sws/neo/attachment/upload/{token}`, no bearer: the token is the credential) bound to session, role, document, file name and the main flag; the upload runs **as the session that asked for the link** and the document is authorized again at upload time | the bytes must not pass through the conversation; the validation and the storage are the SAME code (`NeoAttachmentStore`) |
 | the PDF of a document (ETP-5715) | REST has no "PDF" operation: the SPA renders it in the browser (jsreport) when the document's preview is opened and stores it as the record's main attachment | `etendo_get_document_pdf` **never renders**: it returns the PDF the application already stored (link + metadata) or a `409` saying there is none (§4.12.38) | the PDF is produced by the front end from the template and the data the browser fetches; a server-side render would be a second renderer to keep identical (five consumption points, `docs/document-printables.md`). Declared so nobody "fixes" the 409 by adding a render |
@@ -12111,6 +12112,27 @@ MCP — and nothing derives one from the other yet: a window that sets `attachme
 implemented, it needs `schema_forge_core`):* have the pusher (`sf-push-neo`) write the section from `window.attachments` so there is a single
 source. The flags are sourcedata (`ETGO_SF_ENTITY.xml`) and reach an instance through `update.database`; no separate SQL is shipped.
 
+**Read-only attachments (ETP-6013).** The same section has a second mode, for a document type whose attachments the MCP may
+list but never change: `{"attachments":{"readOnly":true,"reason":"...","messageKey":"<AD_MESSAGE value>"}}`. Reads
+(`etendo_list_attachments`, the download links) work as on any document; every write — `etendo_request_attachment_upload`
+(link request, staged document, **and** the PUT of an already issued link, which re-authorizes through the same
+`NeoAttachmentTarget`), `etendo_delete_attachment`, and anything else that authorizes as a write on the target (including
+`etendo_send_document_email`, since the application's send stores the PDF as an attachment first) — is refused with
+**`405 method_not_allowed`**, decided from the declaration alone **before** any role or record lookup, so it is a clear
+answer and never the 404 of a record the tenant cannot write. The `detail` is the declared `messageKey` resolved in the
+request language by `NeoMessageText` (`AD_MESSAGE` + the versioned `neo_hints_<lang>.properties` catalog), or
+`ETGO_AttachmentsReadOnly` ("The attachments of this document type cannot be modified." / "Los adjuntos de este tipo de
+documento no se pueden modificar.") when none is declared; the `hint` says the attachments can still be listed. Validation
+(`NeoAttachmentsConfig.validate`): a mode is required (`enabled` boolean, or `readOnly:true`), `readOnly:true` with
+`enabled:false` is a contradiction, `reason` is mandatory, and `messageKey` must be key-shaped (`[A-Za-z][A-Za-z0-9_]*`), never
+prose. Reading stays fail-closed: a `readOnly` that is not the boolean `true`, or contradicted by `enabled:false`, closes
+everything. **Declared on:** `tax` (root entity `tax`, product decision: a tax cannot be modified through the MCP, its
+attachments included) with `messageKey: "ETGO_TaxNotModifiable"` → "Los impuestos no se pueden modificar." / "Taxes cannot be
+modified.". Before this, an upload on a tax answered `404 Record not found` because the tax row is not writable by the
+tenant (`TenantOwnership.isWritableByCurrentTenant`), while the list worked. `readOnly` has no SPA counterpart (the
+application's tab is unchanged); `McpConfigSourcedataTest.attachmentLessWindowsAreDeclared` lists the specs that declare it
+next to the `enabled:false` ones. REST attachments are unchanged (§4.12.9 row).
+
 **Upload flow.** `etendo_request_attachment_upload` answers `{uploadUrl, expiresAt, maxBytes: 10485760, allowedExtensions, spec, entity,
 id, name, main, curlExample, hint}`. Whoever holds the file does `curl -X PUT --upload-file ./factura.pdf "<uploadUrl>"`; no
 `Authorization` header (the 192-bit token is the credential, exactly as for the image link and the email download links, and
@@ -12348,6 +12370,30 @@ small classes (`McpDocumentEmailTool`, `McpDocumentEmailRequest`, `McpDocumentEm
   must exist and belong to a client and readable organization (the same `404 not_found` for missing and foreign, `403 forbidden` for a role without write,
   `405` for a window with no Attachments tab), then the contract's own `authorize` inside the send path. A document the contract cannot resolve
   (e.g. a sales order id passed as `purchase-order`) is the same `404`.
+- **The status gate (ETP-6013).** Right after the document's authorization and **before the PDF is looked at** — for the
+  preview and for the send — the document's `DocStatus` is checked against the rule its send contract declares
+  (`DefaultDocumentSendEmailContract#isSendableStatus`, per contract, no spec named in shared code): **only `CO`** for
+  `sales-invoice`, `sales-order`, `purchase-order`, `goods-shipment`, `return-to-vendor`, `return-material-receipt` and
+  `return-to-vendor-shipment` (the default), **any status but `DR`** for `sales-quotation` (`SalesQuotationSendEmailContract`
+  overrides it) — exactly where the SPA offers "Enviar" (`isCompleted` / `documentStatus === 'CO'` in the windows'
+  `*SecondaryActions.jsx`, preview and row action; `status !== 'DR'` in `QuotationSecondaryActions.jsx`). A refused document
+  answers **`409 conflict`**, `sent:false`, nothing sent, and the refusal **wins over `no_pdf`/`pdf_stale`**: a document
+  completed, printed and then reactivated keeps its old PDF, so the PDF alone would have let it through. The `detail` is the
+  contract's `AD_MESSAGE` in the request language (`NeoMessageText`, `neo_hints_<lang>.properties`), `{0}` the document number
+  and `{1}` the status name from the document status lists (`AD_Ref_List_Trl`): `ETGO_EmailOnlyCompleted` — "1000123 está en
+  Borrador: el envío por correo solo aplica a documentos Completados." / "1000123 is Draft: sending by email only applies to
+  Completed documents."; `ETGO_EmailNotForDraft` (quotation) — "… está en Borrador: el envío por correo no aplica a documentos
+  en Borrador." / "… is Draft: sending by email does not apply to Draft documents.". **The same rule is enforced on the
+  backend contract path**, so it holds for every channel: `DefaultDocumentSendEmailContract#authorize` refuses a send by
+  status with `409` (`VALIDATION_FAILED` in the service's answer, message in the command's `language`) after the write tier
+  and the document lookup, for the SPA's `POST /sws/neo/email-contracts/{window}-send` exactly as for the MCP. The status comes
+  from the document resolvers (`EmailDocumentRecord#getDocumentStatus`, filled by every `Dal*EmailDocumentResolver`); a
+  resolver that reports none applies no rule. No UI change: the SPA never offers the send in a refused status, so it never
+  receives the 409 — no divergence to declare in §4.12.9. **Language of the refusal:** the MCP answers in the **request
+  language** (the session's GO locale, `NeoLanguage.currentCode()`), because the sentence is for the user talking to the
+  agent; the MCP's `language` argument is the language of the email copy, not of the answer. The REST contract
+  (`authorize`) answers in the command's `language` field, which the SPA fills with its UI locale (falling back to the
+  request language when the command carries none).
 - **The PDF gate wording.** The 409 status and codes are `etendo_get_document_pdf`'s; the hint is the email tool's own ("open the document's preview in the application so its PDF is stored (or refreshed), then ask to send again"), because that tool's "or send it by email" is circular here. The closing sentence (a window whose preview stores nothing, a return receipt, needs its first send done from the application) is generic and true for every window: no declared property tells the backend which windows those are, and a spec literal is not allowed in shared code.
 - **The no-PDF hint depends on the document's state** (both PDF tools; `NeoDocumentPdf.Result#getDocumentStatus` / `isDraft`, read only for a MISSING PDF, after the document's authorization, in admin mode with the previous mode restored). The status is read **structurally**: the entity's status property is the one whose AD column uses a *document status* list as its reference value (`AD_Reference` `131` All_Document Status — invoices, receipts, shipments — and `FF80818130217A350130218D802B0011` Order_Document Status — the order windows; the order windows use their own list, so `131` alone would have left them without the draft advice). The column and the DAL property may be called anything. Draft is `DR`, the `AD_Ref_List` value of both lists. No column, more than one, an inactive one, no value or any failure leaves the status unknown and the hint generic. A draft gets only "This document is a draft and a draft never stores a PDF: complete it first, then open its preview in the application and ask again."; a document with another status gets the preview advice without the draft remark; unknown keeps the generic text.
 - **Explicit `null` arguments.** An explicit `null` for `subject`, `message` or `language` is `422`, like `preview` (omit the argument instead); `to`/`cc` `null` is still read as omitted.

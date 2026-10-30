@@ -67,21 +67,49 @@ public final class NeoAttachmentTarget {
   public static final class Refused extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final int status;
+    private final boolean readOnly;
 
     /**
      * Builds a refusal.
      *
-     * @param status  the HTTP-style status: 403 role, 404 missing or foreign, 422 not attachable
+     * @param status  the HTTP-style status: 403 role, 404 missing or foreign, 405 not offered by the
+     *                document type, 422 not attachable
      * @param message what the caller is told
      */
     public Refused(int status, String message) {
+      this(status, message, false);
+    }
+
+    /**
+     * The 405 of a document type whose attachments are read-only (ETP-6013).
+     *
+     * @param message what the caller is told: the declared, translated message
+     * @return the refusal, {@link #isReadOnly()} set
+     */
+    public static Refused readOnly(String message) {
+      return new Refused(405, message, true);
+    }
+
+    private Refused(int status, String message, boolean readOnly) {
       super(message);
       this.status = status;
+      this.readOnly = readOnly;
     }
 
     /** Returns the status. */
     public int getStatus() {
       return status;
+    }
+
+    /**
+     * Whether this is the 405 of a document type whose attachments are read-only (ETP-6013): the
+     * attachments can still be listed, only this change is refused. {@code false} for every other
+     * refusal, including the 405 of a type with no attachments at all.
+     *
+     * @return {@code true} for a read-only refusal
+     */
+    public boolean isReadOnly() {
+      return readOnly;
     }
   }
 
@@ -110,9 +138,10 @@ public final class NeoAttachmentTarget {
    * @param recordId the parent record's id
    * @param write    {@code true} for upload and delete, {@code false} for list and download
    * @return the authorized target
-   * @throws Refused 405 when the document type is declared attachment-less in {@code MCP_CONFIG}
-   *         (checked first, before any lookup), 403 when the role lacks the access tier, 404 when the record is missing or not
-   *         the tenant's, 422 when the entity has no attachable record
+   * @throws Refused 405 when the document type is declared attachment-less in {@code MCP_CONFIG},
+   *         or declared read-only and {@code write} is set (checked first, before any lookup), 403
+   *         when the role lacks the access tier, 404 when the record is missing or not the
+   *         tenant's, 422 when the entity has no attachable record
    */
   public static NeoAttachmentTarget resolve(SFSpec spec, SFEntity entity, String recordId,
       boolean write) {
@@ -122,7 +151,7 @@ public final class NeoAttachmentTarget {
       if (tab == null || tab.getTable() == null || StringUtils.isBlank(recordId)) {
         throw new Refused(422, MSG_NO_ATTACHABLE_RECORD);
       }
-      requireAttachable(entity, tab);
+      requireAttachable(entity, tab, write);
       requireRoleAccess(spec, tab.getTable().getId(), write);
       requireVisibleRecord(tab.getTable().getId(), recordId, write);
       return new NeoAttachmentTarget(spec, entity, tab, recordId);
@@ -131,16 +160,20 @@ public final class NeoAttachmentTarget {
     }
   }
 
-  /** The document itself, not a line, and not a type the application gives no Attachments tab. */
-  private static void requireAttachable(SFEntity entity, Tab tab) {
+  /**
+   * The document itself, not a line, and not a type the application gives no Attachments tab — nor,
+   * for a change, a type whose attachments are declared read-only (ETP-6013).
+   */
+  private static void requireAttachable(SFEntity entity, Tab tab, boolean write) {
     if (tab.getTabLevel() != null && tab.getTabLevel() > 0) {
       throw new Refused(422, "Attachments belong to the document itself, not to its lines. "
           + "Use the document's own entity.");
     }
-    String unavailable = NeoAttachmentsConfig.refusalFor(entity);
-    if (unavailable != null) {
+    NeoAttachmentsConfig.Refusal refusal = NeoAttachmentsConfig.refusalFor(entity, write);
+    if (refusal != null) {
       // Declared in MCP_CONFIG, not a secret: a clear refusal, before any role or record lookup.
-      throw new Refused(405, unavailable);
+      throw refusal.isReadOnly() ? Refused.readOnly(refusal.getMessage())
+          : new Refused(405, refusal.getMessage());
     }
   }
 
@@ -150,8 +183,9 @@ public final class NeoAttachmentTarget {
    *
    * @param spec   the active spec
    * @param entity the spec's root entity
-   * @throws Refused 405 when the document type has no Attachments tab, 403 when the role lacks the
-   *         write tier, 422 when the entity has no attachable table or is a line
+   * @throws Refused 405 when the document type has no Attachments tab or its attachments are
+   *         read-only, 403 when the role lacks the write tier, 422 when the entity has no
+   *         attachable table or is a line
    */
   public static void requireWriteAccess(SFSpec spec, SFEntity entity) {
     OBContext.setAdminMode(true);
@@ -160,7 +194,7 @@ public final class NeoAttachmentTarget {
       if (tab == null || tab.getTable() == null) {
         throw new Refused(422, MSG_NO_ATTACHABLE_RECORD);
       }
-      requireAttachable(entity, tab);
+      requireAttachable(entity, tab, true);
       requireRoleAccess(spec, tab.getTable().getId(), true);
     } finally {
       OBContext.restorePreviousMode();

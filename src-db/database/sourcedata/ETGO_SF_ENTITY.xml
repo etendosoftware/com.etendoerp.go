@@ -1739,6 +1739,7 @@
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <JAVA_QUALIFIER><![CDATA[taxSifOverrideHandler]]></JAVA_QUALIFIER>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <AGENT_PROMPT><![CDATA[The catalogue of every tax rate of the tenant, including inactive and future ones and the variants with surcharge or for specific business partner tax categories. To know which tax applies to an order or invoice line, do not pick from here: omit tax on the line and the server resolves it, or call etendo_selectors for 'tax' on that line entity with recordContext {product, businessPartner, date}.]]></AGENT_PROMPT>
+<!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <MCP_CONFIG><![CDATA[{"attachments":{"readOnly":true,"reason":"Product decision: a tax is reference data and cannot be modified through the MCP, attachments included; listing stays available","messageKey":"ETGO_TaxNotModifiable"}}]]></MCP_CONFIG>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4--></ETGO_SF_ENTITY>
 
 <!--4BBCDE8093FF45F0B7A7CF07538A8CC0--><ETGO_SF_ENTITY>
