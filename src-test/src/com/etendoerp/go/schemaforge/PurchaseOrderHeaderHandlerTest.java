@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -753,5 +754,53 @@ public class PurchaseOrderHeaderHandlerTest {
       assertEquals("loc-1", body.getString("partnerAddress"));
       assertEquals("loc-1", body.getString("invoiceAddress"));
     }
+  }
+
+  // ── ETP-5726: a currency change is saved like the window does ─────────────
+
+  /**
+   * An MCP {@code PUT} that moves a stored DRAFT order (EUR, price list in EUR) to another
+   * currency is not refused: the handler lets it through to the default save, adds nothing to the
+   * body (no price list, no converted amount) and never reads a price list. This is exactly the
+   * case the removed currency-vs-price-list guard refused with a 422.
+   */
+  @Test
+  public void mcpCurrencyChangeIsNotRefusedAndLeavesPriceListAndAmountsAlone() throws Exception {
+    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
+    PurchaseOrderHeaderHandler handler = handlerWithMockClone(mockClone);
+    OBDal dal = mock(OBDal.class);
+    org.openbravo.model.common.currency.Currency eur =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(eur.getId()).thenReturn("EUR_ID");
+    when(eur.getISOCode()).thenReturn("EUR");
+    org.openbravo.model.pricing.pricelist.PriceList eurList =
+        mock(org.openbravo.model.pricing.pricelist.PriceList.class);
+    when(eurList.getName()).thenReturn("Tarifa EUR");
+    when(eurList.getCurrency()).thenReturn(eur);
+    org.openbravo.model.common.order.Order draft =
+        mock(org.openbravo.model.common.order.Order.class);
+    when(draft.getDocumentStatus()).thenReturn("DR");
+    when(draft.getCurrency()).thenReturn(eur);
+    when(draft.getPriceList()).thenReturn(eurList);
+    when(dal.get(org.openbravo.model.common.order.Order.class, "ORD1")).thenReturn(draft);
+    JSONObject body = new JSONObject().put("currency", "USD_ID");
+    NeoContext ctx = NeoContext.builder().specName("purchase-order").entityName("header")
+        .httpMethod("PUT").endpointType(NeoEndpointType.CRUD).recordId("ORD1")
+        .requestBody(body).mcpOrigin(true).build();
+    when(mockClone.handle(ctx)).thenReturn(null);
+
+    try (MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      assertNull(handler.handle(ctx));
+    }
+
+    assertEquals(1, body.length());
+    assertEquals("USD_ID", body.getString("currency"));
+    verify(dal, never()).createCriteria(org.openbravo.model.pricing.pricelist.PriceList.class);
+    verify(dal, never()).get(org.mockito.ArgumentMatchers.eq(
+        org.openbravo.model.pricing.pricelist.PriceList.class), anyString());
+    verify(draft, never()).setPriceList(any());
+    verify(draft, never()).setCurrency(any());
   }
 }

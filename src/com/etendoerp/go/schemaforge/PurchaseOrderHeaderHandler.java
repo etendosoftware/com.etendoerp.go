@@ -137,18 +137,11 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
-    // A create that names a vendor but no address (REST and the public API; the SPA always sends
-    // one) gets the vendor's address, as on sales orders (ETP-5703) and as SE_Order_BPartner does
-    // for both sides.
-    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
-        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
-        Location.PROPERTY_INVOICETOADDRESS);
+    // ETP-5881 / ETP-5852: a create that names a vendor but no address (REST, the public API and
+    // MCP; the SPA always sends one) gets the vendor's only address and its bill-to, as on sales
+    // orders (ETP-5703). MCP also runs it before its mandatory check (resolveServerCreateFields).
+    PartnerLocationDefaults.fillOrderLocations(context);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
-    // ETP-5726: MCP only — a draft order's currency may not leave its price list in another one.
-    NeoResponse currencyRefusal = OrderCurrencyPriceListGuard.refuseCurrencyOutsidePriceList(context);
-    if (currencyRefusal != null) {
-      return currencyRefusal;
-    }
     // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
     // with side effects runs.
     NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);

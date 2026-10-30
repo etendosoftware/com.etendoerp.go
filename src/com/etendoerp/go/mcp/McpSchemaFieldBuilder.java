@@ -31,12 +31,10 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Field;
-import org.openbravo.model.ad.ui.FieldTrl;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 
@@ -45,6 +43,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * Schema/field-metadata building for MCP discovery (etendo_schema and related tools).
@@ -68,9 +67,11 @@ final class McpSchemaFieldBuilder {
    */
   private static final Map<String, String> VIRTUAL_FIELD_PROMPTS = Map.of(
       "C_COUNTRY_ID",
-      "The country of the address. Also the argument the region selector needs: call etendo_selectors "
-          + "for 'region' with recordContext {\"country\": \"<this id>\"}, since province names "
-          + "exist only relative to a country.",
+      "The country of the address, as an ID ONLY (e.g. '106' for Spain) — resolve it with "
+          + "etendo_selectors for 'country'; a country NAME sent here is refused, not resolved. "
+          + "Also the argument the region selector needs: call etendo_selectors for "
+          + "'region' with recordContext {\"country\": \"<this id>\"}, since province names exist "
+          + "only relative to a country.",
       "C_REGION_ID",
       "The province, as an ID ONLY — resolve it with etendo_selectors, passing the country in "
           + "recordContext. A province NAME sent here is refused, not resolved; send it in "
@@ -409,6 +410,13 @@ final class McpSchemaFieldBuilder {
    * functional label the Etendo UI shows instead of the raw {@code AD_Column} name
    * (e.g. "SII Description" rather than "EM_Aeatsii_Descripcion_Sii"). (IMP-1, ref §7.1)
    *
+   * <p><b>Label precedence</b> (ETP-5840): (1) the {@link McpFieldLabels} catalog entry
+   * {@code <TableName>.<ColumnName>} for {@code langCode}; (2) the {@code AD_FIELD_TRL} name;
+   * (3) {@code AD_FIELD.name}. The catalog exists because this module's {@code AD_FIELD_TRL} rows
+   * are never exported. The description follows the same order: the catalog's
+   * {@code <TableName>.<ColumnName>.description}, then {@code AD_FIELD_TRL}, then
+   * {@code AD_FIELD.description}.</p>
+   *
    * <p>A column may back more than one field in the tab; the first active field wins (the tab's
    * field list is sequence-ordered). Never throws — on any failure the base-language label is used,
    * and columns with no field fall back to the {@code AD_Column} name kept by the array builder.</p>
@@ -418,61 +426,18 @@ final class McpSchemaFieldBuilder {
     if (adTab == null) {
       return byColumn;
     }
-    Map<String, Field> fieldByColumnName = new HashMap<>();
     List<String> fieldIds = new ArrayList<>();
-    for (Field field : adTab.getADFieldList()) {
-      if (!Boolean.TRUE.equals(field.isActive()) || field.getColumn() == null) {
-        continue;
-      }
-      String colName = field.getColumn().getDBColumnName().toUpperCase();
-      if (fieldByColumnName.putIfAbsent(colName, field) == null) {
-        fieldIds.add((String) field.getId());
-      }
-    }
-    Map<String, String[]> trlById = loadFieldTranslations(fieldIds, langCode);
+    Map<String, Field> fieldByColumnName =
+        McpFieldLabels.indexActiveFieldsByColumn(adTab, fieldIds);
+    Map<String, String[]> trlById = McpFieldLabels.loadFieldTranslations(fieldIds, langCode);
+    String tableName = adTab.getTable() != null ? adTab.getTable().getDBTableName() : null;
     for (Map.Entry<String, Field> entry : fieldByColumnName.entrySet()) {
       Field field = entry.getValue();
       String[] trl = trlById.get((String) field.getId());
-      String label = trl != null && StringUtils.isNotBlank(trl[0]) ? trl[0] : field.getName();
-      String description = trl != null && StringUtils.isNotBlank(trl[1])
-          ? trl[1] : field.getDescription();
-      byColumn.put(entry.getKey(), new String[] { label, description });
+      byColumn.put(entry.getKey(),
+          McpFieldLabels.resolveFieldLabel(field, trl, tableName, langCode));
     }
     return byColumn;
-  }
-
-  /**
-   * Resolves the {@code {name, description}} translation of the given AD_Field ids into
-   * {@code langCode} from {@code ADFieldTrl}. Runs in admin mode ({@code ADFieldTrl} is not
-   * readable under a restricted NEO role) and never throws — an empty map means callers use the
-   * base-language field text. Mirrors the {@code *_Trl} lookup convention in {@code NeoTrl}.
-   */
-  private static Map<String, String[]> loadFieldTranslations(List<String> fieldIds,
-      String langCode) {
-    Map<String, String[]> byId = new HashMap<>();
-    if (fieldIds.isEmpty() || StringUtils.isBlank(langCode)) {
-      return byId;
-    }
-    boolean adminMode = false;
-    try {
-      OBContext.setAdminMode(true);
-      adminMode = true;
-      OBCriteria<FieldTrl> crit = OBDal.getInstance().createCriteria(FieldTrl.class);
-      crit.add(Restrictions.in(FieldTrl.PROPERTY_FIELD + ".id", fieldIds));
-      crit.add(Restrictions.eq(FieldTrl.PROPERTY_LANGUAGE + ".language", langCode));
-      for (FieldTrl trl : crit.list()) {
-        byId.put((String) trl.getField().getId(),
-            new String[] { trl.getName(), trl.getDescription() });
-      }
-    } catch (Exception e) {
-      // Translation table not readable / language missing → fall back to base-language labels.
-      return new HashMap<>();
-    } finally {
-      if (adminMode) {
-        OBContext.restorePreviousMode();
-      }
-    }
-    return byId;
   }
 
   /**
@@ -562,8 +527,24 @@ final class McpSchemaFieldBuilder {
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
       throws JSONException {
     JSONArray fieldsArray = new JSONArray();
+    // ETP-5684: without showAccountingFields the accounting status and the posting buttons are
+    // absent, not listed as invokable:false (IMP-21) — the role is not told accounting exists,
+    // as ETP-5648 does for accounting entities. The role flag is read once, and only if needed.
+    Boolean hideAccounting = null;
+    // ETP-5806 — resolved at most once for the whole walk (and only if a structured column is
+    // actually met), never once per column: the documented invariant is that the account is
+    // resolved once per request and never re-checked.
+    StructuredAddressGate structuredAddressGate = new StructuredAddressGate();
     for (Column col : adTab.getTable().getADColumnList()) {
-      if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata)) {
+      if (NeoAccountingAccessPolicy.isAccountingColumn(col)) {
+        if (hideAccounting == null) {
+          hideAccounting = !NeoAccountingAccessPolicy.currentRoleSeesAccounting();
+        }
+        if (hideAccounting) {
+          continue;
+        }
+      }
+      if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata, structuredAddressGate)) {
         JSONObject fieldObj = buildSchemaField(col, adTab, dalEntity,
             fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
             fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs);
@@ -656,13 +637,42 @@ final class McpSchemaFieldBuilder {
   private static final java.util.Set<String> STRUCTURED_ADDRESS_COLUMNS = java.util.Set.of(
       "EM_OBSEPA_STRTNM", "EM_OBSEPA_BLDGNB", "EM_OBSEPA_BLDGNM");
 
+  /**
+   * ETP-5806 — the {@code structured-address-for-sepa} answer for the account making this request,
+   * resolved lazily and then remembered for the rest of the schema walk.
+   *
+   * <p>Two properties at once. <b>Once per walk</b>: the account resolution is a DB lookup
+   * ({@code GoAccountResolver.currentAccountEmail} — up to 2 queries), and a table carrying
+   * all 3 structured columns used to pay for it 3 times, contradicting the "resolved once per
+   * request, never re-resolved per check" invariant the flag's own javadoc and
+   * {@code docs/feature-flags-and-tenant-upgrade.md} assert. <b>Only if needed</b>: it is still
+   * never resolved at all on a table with none of the 3 columns, which is almost every table —
+   * which is why this is lazy rather than computed up front.
+   */
+  static final class StructuredAddressGate {
+
+    private Boolean enabled;
+
+    boolean isEnabled() {
+      if (enabled == null) {
+        enabled = com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled(
+            com.etendoerp.go.common.GoAccountResolver.currentAccountEmail());
+      }
+      return enabled;
+    }
+  }
+
   private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns,
-      FieldMetadata fieldMetadata) {
+      FieldMetadata fieldMetadata, StructuredAddressGate structuredAddressGate) {
     if (!col.isActive() || systemColumns.contains(col.getDBColumnName().toUpperCase())) {
       return false;
     }
+    // ETP-5806 — per-account (staged rollout), same account the capability signal resolves for.
+    // The gate sits AFTER the column-name test on purpose: && short-circuits, so a schema walk
+    // only consults it on the at most 3 columns this set can match, and never at all on a table
+    // that has none of them. The gate itself then resolves the account only once for the walk.
     if (STRUCTURED_ADDRESS_COLUMNS.contains(col.getDBColumnName().toUpperCase())
-        && !com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled()) {
+        && !structuredAddressGate.isEnabled()) {
       return false;
     }
     return McpSchemaActionFields.isButtonColumn(col) || fieldMetadata.exposes(col);
@@ -714,6 +724,9 @@ final class McpSchemaFieldBuilder {
         businessCriticalByColumnId.get((String) col.getId()));
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
+    if ("list".equals(type)) {
+      McpSchemaActionFields.addListOptions(fieldObj, col);
+    }
     addWritableVia(fieldObj, dalEntity, dbColName);
     if (isButton) {
       addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));

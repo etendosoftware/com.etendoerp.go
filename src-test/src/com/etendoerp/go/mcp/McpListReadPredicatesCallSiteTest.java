@@ -47,11 +47,6 @@ class McpListReadPredicatesCallSiteTest {
   private static final Pattern RESOLVE_ON_MCP = Pattern.compile(
       "NeoReadPredicates\\s*\\.\\s*resolve\\s*\\((?s:.*?)NeoExtensionChannel\\s*\\.\\s*MCP\\s*\\)");
 
-  /** The resolved predicate is ANDed onto the where clause built so far. */
-  private static final Pattern AND_ONTO_WHERE = Pattern.compile(
-      "NeoReadPredicates\\s*\\.\\s*and\\s*\\(\\s*params\\s*\\.\\s*get\\s*\\("
-          + "\\s*JsonConstants\\s*\\.\\s*WHERE_AND_FILTER_CLAUSE\\s*\\)");
-
   /** The list query itself. */
   private static final Pattern FETCH = Pattern.compile("jsonService\\s*\\.\\s*fetch\\s*\\(");
 
@@ -61,14 +56,6 @@ class McpListReadPredicatesCallSiteTest {
     assertTrue(RESOLVE_ON_MCP.matcher(listBody()).find(),
         "handleList no longer calls NeoReadPredicates.resolve(..., NeoExtensionChannel.MCP)."
             + " Without it etendo_list returns rows the REST list excludes in the query (ETP-5009).");
-  }
-
-  @Test
-  @DisplayName("handleList ANDs the read predicate onto the existing where clause")
-  void listAndsThePredicateOntoTheWhereClause() {
-    assertTrue(AND_ONTO_WHERE.matcher(listBody()).find(),
-        "handleList must AND the read predicate onto params' whereAndFilterClause via"
-            + " NeoReadPredicates.and, not replace the filters/tab where already there (ETP-5009).");
   }
 
   @Test

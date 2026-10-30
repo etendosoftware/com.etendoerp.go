@@ -316,20 +316,70 @@ public final class GoFeatureFlags {
    * onboarding session bootstrap, and never imports a flag key of its own. See
    * {@code docs/neo-headless.md} §8c and the ETP-5806 plan for the full architecture.
    *
-   * <p><b>Environment level for now</b> (plain boolean, no per-account targeting) — the TTL is a
-   * hard global deadline, not a staged per-tenant rollout; revisit if that changes.
+   * <p><b>Per-account targeting, staged rollout (ETP-5806 follow-up).</b> <b>Every</b> call site
+   * evaluates it against {@link FeatureFlagContext#forAccount(String)} with a real
+   * {@code ETGO_ACCOUNT} email, never {@code null}, mirroring {@link #FLAG_BP_PORTAL_LINK}'s
+   * pattern. This lets a Datadog targeting rule (e.g. "email is one of [...]") stage the rollout —
+   * localization team first, then the rest of Etendo, then everyone — instead of switching on for
+   * every tenant at once. With no targeting rule configured the answer is still the plain
+   * per-environment boolean default, so the TTL remains a hard global deadline regardless of how
+   * the rollout is staged.
    * Locally {@code etendo.go.flags.structured-address-for-sepa} / {@code ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA}.
    * Must also be created as a boolean setting in the ConfigCat dashboard before it can be toggled
    * in any environment with an SDK key configured — an undeclared ConfigCat setting resolves to
    * this class's code default ({@code false}) regardless of local configuration.
    *
-   * <p>Callers: {@code SFWindowAccessMap} (capability), {@code ContactsLocationAddressHandler},
-   * {@code WarehouseLocationHandler}, {@code BpLocationHandler} (NEO read/write gating),
-   * {@code AddressVirtualSelectorPolicy}/{@code McpSchemaFieldBuilder} (MCP schema gating),
-   * {@code StructuredAddressComposer} and {@code EtendoGoJwtServlet} (mandatory-field
-   * validation).
+   * <p><b>Where each call site gets the email.</b> Two shapes, because the account is knowable in
+   * two different ways and resolving it implicitly would be wrong for the second:
+   * <ul>
+   *   <li><b>Authenticated request</b> — {@code GoAccountResolver#currentAccountEmail()} at
+   *       the call site: {@code SFWindowAccessMap} (capability),
+   *       {@code ContactsLocationAddressHandler}/{@code WarehouseLocationHandler}/
+   *       {@code BpLocationHandler} (NEO read/write gating),
+   *       {@code AddressVirtualSelectorPolicy}/{@code McpSchemaFieldBuilder} (MCP schema gating).
+   *       Resolved once per request and threaded through the handler's own helpers, never
+   *       re-resolved per check. Where the call site later switches to admin mode, the email is
+   *       resolved <em>before</em> that switch (the {@code SFWindowAccessMap} ordering trap).</li>
+   *   <li><b>Onboarding</b> — the account is already in hand and provisioning runs under an admin
+   *       execution context with no caller identity to recover, so it is passed down explicitly:
+   *       {@code EtendoGoJwtServlet#buildSessionCapabilities} and the two
+   *       {@code validateStructuredAddress*} checks take it as a parameter, and it rides
+   *       {@code OrgInfoInput} to
+   *       {@code OnboardingOrgInfoService#createLocation}, which persists the fields.</li>
+   * </ul>
+   * {@code StructuredAddressComposer#isEnabled(String)} is the one evaluator they all share and
+   * it has <b>no account-less overload</b>, by design: validation, persistence and MCP-schema
+   * exposure therefore resolve for the same account the capability signal did, so a targeted
+   * account can never see the fields in the UI and have the backend silently drop what it fills
+   * in (the gap this follow-up closed).
    */
   public static final String FLAG_STRUCTURED_ADDRESS_FOR_SEPA = "structured-address-for-sepa";
+
+  /**
+   * ETP-5716 — whether Modelo 390 (the annual VAT summary) is available in the Fiscal Models
+   * catalog. Positive polarity: {@code true} = available; the default ({@code false}, and every
+   * failure of this class) hides it. TTL 2027-01-01.
+   *
+   * <p><b>Backend-only, read through one gate.</b> Only {@code FiscalModel390Flag} evaluates it,
+   * and only {@code NeoFiscalModelsCatalogService} calls that gate: off, the catalog answer drops
+   * model {@code 390} and lists it under {@code _unavailable}, and a catalog save can neither
+   * switch it on nor erase the value stored before the flag was turned off. Every SPA surface
+   * (catalog drawer, declarations list, new declaration, the Organization window's Modelo 390
+   * section) reacts to that answer; nothing in the browser reads this key, so never add it to
+   * the web client's {@code flag-keys.js}.
+   *
+   * <p><b>A visual gate, not authorization.</b> The {@code /fiscal390/*} and
+   * legal-representative endpoints keep answering whatever the flag says; they stay protected
+   * by the role's window access.
+   *
+   * <p><b>Targeted per user and per tenant</b> on the hosted arms: the context carries the
+   * authenticated account email (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; with no resolvable account, {@code clientId} only. A Datadog rule matches the
+   * lowercase {@code email} attribute against a lowercase value. The local arm is a plain
+   * per-environment boolean: {@code etendo.go.flags.fiscal-model-390} /
+   * {@code ETGO_FLAG_FISCAL_MODEL_390}.
+   */
+  public static final String FLAG_FISCAL_MODEL_390 = "fiscal-model-390";
 
   /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset

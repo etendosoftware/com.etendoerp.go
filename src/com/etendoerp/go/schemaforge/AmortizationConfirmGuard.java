@@ -108,6 +108,29 @@ final class AmortizationConfirmGuard {
   }
 
   /**
+   * Whether the request reactivates the amortization: the {@code Processed} button on a row that is
+   * already processed (the same confirm-vs-reactivate rule {@link #validateLinesBeforeConfirm}
+   * applies). ETP-5684: the handler un-posts such a row first.
+   *
+   * @param context the request
+   * @return {@code true} for a reactivation
+   */
+  static boolean isReactivation(NeoContext context) {
+    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
+        || !isProcessedButton(context.getFieldName())
+        || StringUtils.isBlank(context.getRecordId())) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Amortization amortization = OBDal.getInstance().get(Amortization.class, context.getRecordId());
+      return amortization != null && !VALUE_NOT_PROCESSED.equals(amortization.getProcessed());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Rejects any CRUD PATCH/PUT that touches {@code processed} directly — see class javadoc for
    * why this is an outright block rather than a validated pass-through.
    */

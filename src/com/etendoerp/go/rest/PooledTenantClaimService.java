@@ -29,8 +29,6 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.enterprise.OrganizationInformation;
-import org.openbravo.model.common.geography.Location;
 
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.pool.TenantPoolConfig;
@@ -102,10 +100,14 @@ public class PooledTenantClaimService {
 
   TenantPoolStore store = new TenantPoolStore();
 
-  /** The request data a claim needs. */
+  /**
+   * The request data a claim needs.
+   *
+   * <p>No address: ETP-5806 follow-up made {@code OnboardingOrgInfoService} the single writer of
+   * the signup's address for both paths — see {@link #personalize}.
+   */
   public record ClaimRequest(String accountEmail, String clientName, String fullName,
-      String currencyIso, String countryCode, String language, String address,
-      String adminPassword) {
+      String currencyIso, String countryCode, String language, String adminPassword) {
   }
 
   /**
@@ -217,6 +219,15 @@ public class PooledTenantClaimService {
    * {@code SocialName} {@code applySocialName} sets (ETP-4749), and the admin user fields
    * {@code InitialSetupUtility#insertUser}, {@code applyClientAdminDisplayName} and
    * {@code applyClientAdminEmail} (ETP-5019) set.
+   *
+   * <p><b>Not the address</b> (ETP-5806 follow-up). It used to be written here, from the legacy
+   * free-text {@code address} alone, because {@code OnboardingOrgInfoService} refused to touch a
+   * location that already existed — and a pooled tenant always has one. That made this the only
+   * writer on the pooled path and it knew nothing about the structured SEPA fields or the city, so
+   * a signup that filled them lost the whole address. {@code ensureOrgInfoLocation} now completes
+   * a blank location instead, which the servlet's {@code finishPooledTenant} always reaches
+   * through {@code wireOrgInfo}, so both paths persist the address through the same code and this
+   * second writer is gone.
    */
   void personalize(String clientId, ClaimRequest request) {
     long personalizeStartedAt = System.nanoTime();
@@ -256,7 +267,6 @@ public class PooledTenantClaimService {
     admin.setActive(true);
     OBDal.getInstance().save(admin);
 
-    applySignupAddress(org, request.address());
     long beforeFlushElapsed = elapsedMillis(personalizeStartedAt);
     long flushStartedAt = System.nanoTime();
     OBDal.getInstance().flush();
@@ -287,25 +297,6 @@ public class PooledTenantClaimService {
           .executeUpdate();
     }
     return rewritten;
-  }
-
-  /**
-   * The pooled tenant's fiscal location was created with no street line (the pool has no address
-   * to give it), and {@code OnboardingOrgInfoService} never touches a location that already
-   * exists — so the signup's address is written here. The warehouse copy follows from the
-   * servlet's {@code wireWarehouseAddress}, which always re-copies the fiscal location.
-   */
-  void applySignupAddress(Organization org, String address) {
-    if (StringUtils.isBlank(address)) {
-      return;
-    }
-    OrganizationInformation orgInfo =
-        OBDal.getInstance().get(OrganizationInformation.class, org.getId());
-    Location location = orgInfo != null ? orgInfo.getLocationAddress() : null;
-    if (location != null && StringUtils.isBlank(location.getAddressLine1())) {
-      location.setAddressLine1(address.trim());
-      OBDal.getInstance().save(location);
-    }
   }
 
   /**

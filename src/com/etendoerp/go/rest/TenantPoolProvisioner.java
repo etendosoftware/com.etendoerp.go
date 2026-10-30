@@ -29,6 +29,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.currency.Currency;
 
 import com.etendoerp.go.onboarding.LoggingOnboardingProgressSink;
+import com.etendoerp.go.onboarding.OrgInfoInput;
 import com.etendoerp.go.onboarding.pool.TenantPoolConfig;
 import com.etendoerp.go.onboarding.pool.TenantPoolFiller;
 
@@ -89,8 +90,7 @@ public class TenantPoolProvisioner implements TenantPoolFiller.Provisioner {
         return failed(clientId, "Organization not found after creation");
       }
       if (!chain.ensureOnboardingDataset(sink, clientId, orgId, admin.adminUserId,
-          admin.adminRoleId, new OnboardingProvisioningChain.OrgInfoInput(
-              TenantPoolConfig.SUPPORTED_COUNTRY, "", "", "", "", "", ""))) {
+          admin.adminRoleId, OrgInfoInput.countryOnly(TenantPoolConfig.SUPPORTED_COUNTRY))) {
         return failed(clientId, sink.getLastError());
       }
       deactivateAdmin(admin.adminUserId);

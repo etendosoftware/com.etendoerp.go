@@ -122,12 +122,23 @@ final class ListReferenceSelectorExecutor {
         org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id", referenceId));
     criteria.add(Restrictions.eq(org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, true));
     if (valRuleSql != null) {
-      criteria.add(Restrictions.sqlRestriction(valRuleSql));
+      criteria.add(Restrictions.sqlRestriction(qualifyListTable(valRuleSql)));
     }
     if (StringUtils.isNotBlank(search)) {
       criteria.add(Restrictions.ilike(
           org.openbravo.model.ad.domain.List.PROPERTY_NAME, "%" + search + "%"));
     }
     return criteria;
+  }
+
+  /**
+   * ETP-5852 (M-173): a list validation rule names its table, as in {@code AD_Ref_List.Value IN
+   * ('ARABA', 'BIZKAIA', 'GIPUZKOA')} (the TicketBAI territories), but the criteria query aliases
+   * {@code ad_ref_list} as {@code this_}, so PostgreSQL refused the qualified name and the selector
+   * answered 500. The table name is rewritten to Hibernate's {@code {alias}}, case-insensitively and
+   * only as a qualifier; an unqualified rule is unchanged.
+   */
+  static String qualifyListTable(String valRuleSql) {
+    return valRuleSql.replaceAll("(?i)(?<![\\w.])AD_Ref_List\\.", "{alias}.");
   }
 }

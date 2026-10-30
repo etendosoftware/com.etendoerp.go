@@ -276,6 +276,11 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
             rec.put(FIELD_INVOICE_STATUS, statusMap.getOrDefault(id, 0));
           }
         }
+        if (context.isMcpOrigin()) {
+          // ETP-5852: as on goods-shipment — the page's invoices in one query, MCP only.
+          InOutInvoiceLinks.putLinkedInvoices(dataArr, InOutInvoiceLinks.linkedInvoicesByInOut(
+              InOutInvoiceLinks.MatchTable.PURCHASE, ids));
+        }
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

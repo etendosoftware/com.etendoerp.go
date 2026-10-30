@@ -667,10 +667,12 @@ class ContactsLocationAddressParentAndRegionTest {
   /** Invokes the private static writer, unwrapping reflection's exception wrapper. */
   private void applyGeoLocFields(JSONObject body, Location geoLoc) throws Exception {
     Method method = ContactsLocationAddressHandler.class
-        .getDeclaredMethod("applyGeoLocFields", JSONObject.class, Location.class);
+        .getDeclaredMethod("applyGeoLocFields", JSONObject.class, Location.class, boolean.class);
     method.setAccessible(true);
     try {
-      method.invoke(null, body, geoLoc);
+      // ETP-5806 — see ContactsLocationAddressHandlerTest#invokeApplyGeoLocFields: the per-account
+      // flag is threaded in by the caller; these region cases do not depend on it.
+      method.invoke(null, body, geoLoc, true);
     } catch (InvocationTargetException e) {
       Throwable cause = e.getCause();
       if (cause instanceof RuntimeException) {
