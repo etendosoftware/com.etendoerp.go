@@ -22,6 +22,7 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.LocalDate;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -34,6 +35,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
@@ -857,6 +859,82 @@ public abstract class AbstractInvoiceHeaderHandler {
   // NeoHandlerUtils — shared with AbstractOrderHeaderHandler, GoodsReceiptHeaderHandler and
   // GoodsShipmentHeaderHandler — see NeoHandlerUtils#mirrorAccountingDateOnCreate. Call sites
   // here invoke it with ("invoiceDate", "accountingDate").
+
+  static final String FIELD_INVOICE_DATE = "invoiceDate";
+  static final String FIELD_ACCOUNTING_DATE = "accountingDate";
+  /**
+   * The operation date of {@code com.etendoerp.sif.general} ({@code EM_Etsg_Date_Operation}); only
+   * mirrored when the {@code Invoice} entity declares it (the module is installed).
+   */
+  static final String FIELD_OPERATION_DATE = "etsgDateOperation";
+
+  /**
+   * ETP-5840 (QA CP-12b): the update counterpart of
+   * {@link NeoHandlerUtils#mirrorAccountingDateOnCreate}, so an API update (REST single, batch, MCP
+   * {@code etendo_update}) that changes the invoice date gets what the UI gets.
+   *
+   * <p>In the UI, changing the invoice date fires the classic callout registered on
+   * {@code C_Invoice.DateInvoiced} — {@code SifInvoiceOperationDateCallout}, which extends
+   * {@code SE_Invoice_AccountingDate} — and it overwrites the accounting date ({@code inpdateacct})
+   * and the operation date ({@code inpemEtsgDateOperation}) with the new invoice date; the user may
+   * then retype either before saving. An API update runs no interactive callout, so this replays
+   * that rule: on a CRUD {@code PUT}/{@code PATCH} whose {@code invoiceDate} differs from the stored
+   * one, it copies that date into {@code accountingDate} and {@code etsgDateOperation} — each only
+   * when the body does not send its own non-blank value (the "user retyped it" case). An update
+   * that does not change the invoice date mirrors nothing, so an independently edited accounting
+   * date is never clobbered (ETP-5273).
+   *
+   * <p>Must run before the exchange-rate pre-hook ({@link DocumentRateGuards#guardInvoiceHeader}),
+   * whose recalculation reads the accounting date from the body. Total: never throws.
+   *
+   * @param context the current request
+   */
+  protected void mirrorInvoiceDateOnUpdate(NeoContext context) {
+    try {
+      if (context == null || !NeoEndpointType.CRUD.equals(context.getEndpointType())
+          || !("PUT".equals(context.getHttpMethod()) || "PATCH".equals(context.getHttpMethod()))
+          || StringUtils.isBlank(context.getRecordId()) || context.getRequestBody() == null) {
+        return;
+      }
+      JSONObject body = context.getRequestBody();
+      LocalDate newDate = DocumentCurrencyRate.parseDate(body.opt(FIELD_INVOICE_DATE));
+      if (newDate == null) {
+        return;
+      }
+      Invoice stored = OBDal.getInstance().get(Invoice.class, context.getRecordId());
+      if (stored == null
+          || newDate.equals(DocumentCurrencyRate.parseDate(stored.getInvoiceDate()))) {
+        return;
+      }
+      mirrorDateIfNotSent(body, FIELD_ACCOUNTING_DATE);
+      if (invoiceDeclares(FIELD_OPERATION_DATE)) {
+        mirrorDateIfNotSent(body, FIELD_OPERATION_DATE);
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-5840] Could not mirror the invoice date of {}: {}",
+          context != null ? context.getRecordId() : null, e.getMessage());
+    }
+  }
+
+  /** Copies {@code invoiceDate} into {@code target} unless the body sends a non-blank one. */
+  private static void mirrorDateIfNotSent(JSONObject body, String target) {
+    Object sent = body.opt(target);
+    boolean explicit = sent != null && !JSONObject.NULL.equals(sent)
+        && StringUtils.isNotBlank(String.valueOf(sent));
+    if (!explicit) {
+      NeoHandlerUtils.mirrorFieldValue(body, FIELD_INVOICE_DATE, target);
+    }
+  }
+
+  /** Whether the {@code Invoice} entity declares {@code property} (an optional module's column). */
+  static boolean invoiceDeclares(String property) {
+    try {
+      return ModelProvider.getInstance().getEntity(Invoice.ENTITY_NAME)
+          .hasProperty(property);
+    } catch (Exception e) {
+      return false;
+    }
+  }
 
   /**
    * Shared {@code afterCallout} body: blocks callout-driven currency updates (ETP-4029); returns

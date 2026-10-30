@@ -206,6 +206,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
+    // ETP-5840 (QA CP-12b): an update that changes the invoice date copies it into the accounting
+    // and operation dates, as the UI callout does; before the rate guard, which reads that date.
+    mirrorInvoiceDateOnUpdate(context);
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
     resolveServerCreateFields(context);
     // ETP-5840: exchange rate — recalculation on the accounting date, save and completion

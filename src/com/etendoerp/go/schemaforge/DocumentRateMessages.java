@@ -49,6 +49,11 @@ final class DocumentRateMessages {
   /** Save refused: foreign currency and no rate. {@code %0} org ISO, {@code %1} document ISO,
    * {@code %2} reference date, {@code %3} reference date name. */
   static final String MSG_MISSING_ON_SAVE = "ETGO_ExchangeRateMissingOnSave";
+  /**
+   * Save refused: foreign currency, the rate left empty (cleared, zero or never set) although a
+   * conversion rate range exists for the reference date. {@code %0} org ISO, {@code %1} doc ISO.
+   */
+  static final String MSG_EMPTY_ON_SAVE = "ETGO_ExchangeRateEmptyOnSave";
   /** Completion refused: foreign currency and no rate. {@code %0} org ISO, {@code %1} doc ISO. */
   static final String MSG_MISSING_ON_COMPLETE = "ETGO_ExchangeRateMissingOnComplete";
   /** Name of the reference date of an invoice ({@code DateAcct}). */
@@ -61,6 +66,7 @@ final class DocumentRateMessages {
   static final int SC_UNPROCESSABLE = 422;
   static final String CODE_MISSING_ON_SAVE = "exchange_rate_missing";
   static final String CODE_MISSING_ON_COMPLETE = "exchange_rate_missing_on_complete";
+  static final String CODE_EMPTY_ON_SAVE = "exchange_rate_empty";
 
   private static final String PARAM_ORG_CURRENCY = "orgCurrency";
   private static final String PARAM_DOC_CURRENCY = "documentCurrency";
@@ -97,6 +103,11 @@ final class DocumentRateMessages {
         text(referenceDateLabelKey, language));
   }
 
+  /** The empty-rate save-refusal text, in the request language. */
+  static String emptyOnSaveText(String orgIso, String docIso) {
+    return text(MSG_EMPTY_ON_SAVE, NeoLanguage.currentCode(), orgIso, docIso);
+  }
+
   /** The completion-refusal text, in the request language. */
   static String missingOnCompleteText(String orgIso, String docIso) {
     return text(MSG_MISSING_ON_COMPLETE, NeoLanguage.currentCode(), orgIso, docIso);
@@ -126,10 +137,26 @@ final class DocumentRateMessages {
   }
 
   /**
+   * 422 refusing a save that leaves the rate of a foreign-currency document empty while a conversion
+   * rate range exists for its reference date — so the text must not claim the range is missing
+   * (ETP-5840 QA CP-12a). {@code messageParams}: {@code orgCurrency}, {@code documentCurrency}.
+   */
+  static NeoResponse emptyOnSave(String orgIso, String docIso) {
+    return refusal(CODE_EMPTY_ON_SAVE, emptyOnSaveText(orgIso, docIso),
+        currencyParams(orgIso, docIso), MSG_EMPTY_ON_SAVE);
+  }
+
+  /**
    * 422 refusing to complete a foreign-currency document without a rate. {@code messageParams}:
    * {@code orgCurrency}, {@code documentCurrency} (ISO codes).
    */
   static NeoResponse missingOnComplete(String orgIso, String docIso) {
+    return refusal(CODE_MISSING_ON_COMPLETE, missingOnCompleteText(orgIso, docIso),
+        currencyParams(orgIso, docIso), MSG_MISSING_ON_COMPLETE);
+  }
+
+  /** {@code {orgCurrency, documentCurrency}}. Total: never throws. */
+  private static JSONObject currencyParams(String orgIso, String docIso) {
     JSONObject params = new JSONObject();
     try {
       params.put(PARAM_ORG_CURRENCY, orgIso);
@@ -137,8 +164,7 @@ final class DocumentRateMessages {
     } catch (Exception e) {
       log.debug("[ETP-5840] Could not build the refusal params: {}", e.getMessage());
     }
-    return refusal(CODE_MISSING_ON_COMPLETE, missingOnCompleteText(orgIso, docIso), params,
-        MSG_MISSING_ON_COMPLETE);
+    return params;
   }
 
   private static NeoResponse refusal(String code, String message, JSONObject params,

@@ -31,12 +31,10 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Field;
-import org.openbravo.model.ad.ui.FieldTrl;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 
@@ -412,6 +410,13 @@ final class McpSchemaFieldBuilder {
    * functional label the Etendo UI shows instead of the raw {@code AD_Column} name
    * (e.g. "SII Description" rather than "EM_Aeatsii_Descripcion_Sii"). (IMP-1, ref §7.1)
    *
+   * <p><b>Label precedence</b> (ETP-5840): (1) the {@link McpFieldLabels} catalog entry
+   * {@code <TableName>.<ColumnName>} for {@code langCode}; (2) the {@code AD_FIELD_TRL} name;
+   * (3) {@code AD_FIELD.name}. The catalog exists because this module's {@code AD_FIELD_TRL} rows
+   * are never exported. The description follows the same order: the catalog's
+   * {@code <TableName>.<ColumnName>.description}, then {@code AD_FIELD_TRL}, then
+   * {@code AD_FIELD.description}.</p>
+   *
    * <p>A column may back more than one field in the tab; the first active field wins (the tab's
    * field list is sequence-ordered). Never throws — on any failure the base-language label is used,
    * and columns with no field fall back to the {@code AD_Column} name kept by the array builder.</p>
@@ -421,61 +426,18 @@ final class McpSchemaFieldBuilder {
     if (adTab == null) {
       return byColumn;
     }
-    Map<String, Field> fieldByColumnName = new HashMap<>();
     List<String> fieldIds = new ArrayList<>();
-    for (Field field : adTab.getADFieldList()) {
-      if (!Boolean.TRUE.equals(field.isActive()) || field.getColumn() == null) {
-        continue;
-      }
-      String colName = field.getColumn().getDBColumnName().toUpperCase();
-      if (fieldByColumnName.putIfAbsent(colName, field) == null) {
-        fieldIds.add((String) field.getId());
-      }
-    }
-    Map<String, String[]> trlById = loadFieldTranslations(fieldIds, langCode);
+    Map<String, Field> fieldByColumnName =
+        McpFieldLabels.indexActiveFieldsByColumn(adTab, fieldIds);
+    Map<String, String[]> trlById = McpFieldLabels.loadFieldTranslations(fieldIds, langCode);
+    String tableName = adTab.getTable() != null ? adTab.getTable().getDBTableName() : null;
     for (Map.Entry<String, Field> entry : fieldByColumnName.entrySet()) {
       Field field = entry.getValue();
       String[] trl = trlById.get((String) field.getId());
-      String label = trl != null && StringUtils.isNotBlank(trl[0]) ? trl[0] : field.getName();
-      String description = trl != null && StringUtils.isNotBlank(trl[1])
-          ? trl[1] : field.getDescription();
-      byColumn.put(entry.getKey(), new String[] { label, description });
+      byColumn.put(entry.getKey(),
+          McpFieldLabels.resolveFieldLabel(field, trl, tableName, langCode));
     }
     return byColumn;
-  }
-
-  /**
-   * Resolves the {@code {name, description}} translation of the given AD_Field ids into
-   * {@code langCode} from {@code ADFieldTrl}. Runs in admin mode ({@code ADFieldTrl} is not
-   * readable under a restricted NEO role) and never throws — an empty map means callers use the
-   * base-language field text. Mirrors the {@code *_Trl} lookup convention in {@code NeoTrl}.
-   */
-  private static Map<String, String[]> loadFieldTranslations(List<String> fieldIds,
-      String langCode) {
-    Map<String, String[]> byId = new HashMap<>();
-    if (fieldIds.isEmpty() || StringUtils.isBlank(langCode)) {
-      return byId;
-    }
-    boolean adminMode = false;
-    try {
-      OBContext.setAdminMode(true);
-      adminMode = true;
-      OBCriteria<FieldTrl> crit = OBDal.getInstance().createCriteria(FieldTrl.class);
-      crit.add(Restrictions.in(FieldTrl.PROPERTY_FIELD + ".id", fieldIds));
-      crit.add(Restrictions.eq(FieldTrl.PROPERTY_LANGUAGE + ".language", langCode));
-      for (FieldTrl trl : crit.list()) {
-        byId.put((String) trl.getField().getId(),
-            new String[] { trl.getName(), trl.getDescription() });
-      }
-    } catch (Exception e) {
-      // Translation table not readable / language missing → fall back to base-language labels.
-      return new HashMap<>();
-    } finally {
-      if (adminMode) {
-        OBContext.restorePreviousMode();
-      }
-    }
-    return byId;
   }
 
   /**

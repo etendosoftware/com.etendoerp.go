@@ -541,7 +541,9 @@ final class NeoHandlerUtils {
    *       extending {@code SE_Invoice_AccountingDate}) executed server-side by
    *       {@link NeoCalloutService}. Nothing gates that cascade: it is one-way by construction,
    *       because the callout registered on {@code DateAcct} is {@code SE_Invoice_TaxDate}, which
-   *       writes {@code Taxdate} and never {@code DateInvoiced} (CP-2).</li>
+   *       writes {@code Taxdate} and never {@code DateInvoiced} (CP-2). An API update runs no
+   *       interactive callout, so the invoice customizations replay that same rule themselves
+   *       ({@code AbstractInvoiceHeaderHandler#mirrorInvoiceDateOnUpdate}, ETP-5840).</li>
    * </ul>
    *
    * <p>ETP-5273 applies ONLY to sales and purchase invoices, so only
