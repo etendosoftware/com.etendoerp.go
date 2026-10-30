@@ -19295,7 +19295,7 @@
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <JAVA_QUALIFIER><![CDATA[documentAction]]></JAVA_QUALIFIER>
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
-<!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales order. Fire it with etendo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO books the order — it validates the lines, reserves stock and makes the order shippable and invoiceable; VO voids it. From documentStatus=CO (Booked): RE reactivates it back to DR, but only while the order has no linked documents (no shipment or invoice generated from it) — the UI hides Reactivate in that case and the process will reject it. CL closes the pending quantities. Preconditions for CO: at least one line, a business partner with payment terms and a price list, and an open period for the accounting date. Read documentStatus with etendo_get before acting — CO on an order that is already CO is an error. Booking recalculates the total-discount line automatically; never create that line by hand. The remaining values offered in actionValues (AP, PO, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
+<!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales order. Fire it with etendo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO books the order — it validates the lines, reserves stock and makes the order shippable and invoiceable; VO voids it. From documentStatus=CO (Booked): RE reactivates it back to DR, but only while the order has no linked documents (no shipment or invoice generated from it) — the UI hides Reactivate in that case and the process will reject it. CL (Close) is not offered by the app and is refused with 400 on every sales order, linked documents or not: never send it. Preconditions for CO: at least one line, a business partner with payment terms and a price list, and an open period for the accounting date. Read documentStatus with etendo_get before acting — CO on an order that is already CO is an error. Booking recalculates the total-discount line automatically; never create that line by hand. The remaining values offered in actionValues (AP, PO, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97--></ETGO_SF_FIELD>
 
@@ -25462,11 +25462,11 @@
 <!--3E47E06BBDCC431398E64372DC2378CE-->  <ETGO_SF_ENTITY_ID><![CDATA[4201284FF88A4D9CB84DCDA86ABEFE7C]]></ETGO_SF_ENTITY_ID>
 <!--3E47E06BBDCC431398E64372DC2378CE-->  <AD_COLUMN_ID><![CDATA[B7E494705B883B25E040007F0100742F]]></AD_COLUMN_ID>
 <!--3E47E06BBDCC431398E64372DC2378CE-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
-<!--3E47E06BBDCC431398E64372DC2378CE-->  <ISINCLUDED><![CDATA[N]]></ISINCLUDED>
-<!--3E47E06BBDCC431398E64372DC2378CE-->  <ISREADONLY><![CDATA[N]]></ISREADONLY>
+<!--3E47E06BBDCC431398E64372DC2378CE-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--3E47E06BBDCC431398E64372DC2378CE-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
 <!--3E47E06BBDCC431398E64372DC2378CE-->  <JAVA_QUALIFIER><![CDATA[canceledInoutLine]]></JAVA_QUALIFIER>
 <!--3E47E06BBDCC431398E64372DC2378CE-->  <SEQNO><![CDATA[160]]></SEQNO>
-<!--3E47E06BBDCC431398E64372DC2378CE-->  <VISIBILITY><![CDATA[discarded]]></VISIBILITY>
+<!--3E47E06BBDCC431398E64372DC2378CE-->  <VISIBILITY><![CDATA[readOnly]]></VISIBILITY>
 <!--3E47E06BBDCC431398E64372DC2378CE-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--3E47E06BBDCC431398E64372DC2378CE--></ETGO_SF_FIELD>
 
@@ -68436,6 +68436,7 @@
 <!--AB07F7E39FF94324AFCA810C07A17D58-->  <JAVA_QUALIFIER><![CDATA[documentAction]]></JAVA_QUALIFIER>
 <!--AB07F7E39FF94324AFCA810C07A17D58-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--AB07F7E39FF94324AFCA810C07A17D58-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
+<!--AB07F7E39FF94324AFCA810C07A17D58-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales quotation. Fire it with etendo_action, sending the chosen value as parameters.docAction. A quotation Under evaluation (documentStatus=UE) is accepted with the Convertquotation action, which creates a draft sales order, or rejected with rejectQuotation (docAction RJ is routed to the same flow and needs its reason); it is never sent back to Draft. RE (Reactivate) is accepted only on a voided quotation (documentStatus=VO), as in the app; in any other status, UE included, it is refused with 400. Read documentStatus with etendo_get before acting.]]></AGENT_PROMPT>
 <!--AB07F7E39FF94324AFCA810C07A17D58-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--AB07F7E39FF94324AFCA810C07A17D58--></ETGO_SF_FIELD>
 

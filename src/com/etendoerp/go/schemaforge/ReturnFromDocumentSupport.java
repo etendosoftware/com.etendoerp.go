@@ -219,7 +219,14 @@ final class ReturnFromDocumentSupport {
 
   /**
    * The {@code data} of the 201 an action answers: the new return and each line with the source
-   * line it returns.
+   * line it returns. Per line it also says what OTHER returns already hold of that source line
+   * ({@code alreadyReturnedQuantity}, same rule as {@link ReturnableQuantity#alreadyReturned}) and
+   * which returns those are ({@code returns}: id, documentNo, documentStatus).
+   *
+   * @param returnDoc the return just created
+   * @param created   its lines with the source line each returns
+   * @return the {@code data} of the 201
+   * @throws JSONException when the answer cannot be built
    */
   static JSONObject describe(ShipmentInOut returnDoc, List<CreatedLine> created)
       throws JSONException {
@@ -237,10 +244,40 @@ final class ReturnFromDocumentSupport {
       line.put("originalQuantity",
           c.source.getMovementQuantity() == null ? null : c.source.getMovementQuantity().abs());
       line.put("sourceLineId", c.source.getId());
+      putHoldingReturns(line, c.source.getId(), returnDoc.getId());
       lines.put(line);
     }
     data.put(PARAM_LINES, lines);
     return data;
+  }
+
+  /**
+   * Adds what other returns already hold of one source line, and which returns they are. The data
+   * is informational and read after the return was written, so a failing lookup is logged and the
+   * two keys are left out: creating a return never fails (or rolls back) because of it.
+   */
+  private static void putHoldingReturns(JSONObject line, String sourceLineId, String returnDocId)
+      throws JSONException {
+    List<ReturnableQuantity.HoldingReturn> holding;
+    try {
+      holding = ReturnableQuantity.returnsHolding(sourceLineId, returnDocId);
+    } catch (SQLException | RuntimeException e) {
+      log.warn("Could not read the returns holding source line {}: {}", sourceLineId,
+          e.getMessage());
+      return;
+    }
+    BigDecimal total = BigDecimal.ZERO;
+    JSONArray returns = new JSONArray();
+    for (ReturnableQuantity.HoldingReturn h : holding) {
+      total = total.add(h.quantity);
+      JSONObject r = new JSONObject();
+      r.put("id", h.id);
+      r.put("documentNo", h.documentNo);
+      r.put("documentStatus", h.documentStatus);
+      returns.put(r);
+    }
+    line.put("alreadyReturnedQuantity", total);
+    line.put("returns", returns);
   }
 
   /**
@@ -258,8 +295,10 @@ final class ReturnFromDocumentSupport {
         "Creates a " + returnNoun + " in DRAFT from this completed " + sourceNoun + ", each line "
             + "linked to the " + sourceNoun + " line it returns, and answers 201 with {id, "
             + "documentNo, documentStatus, lines:[{id, product, productName, returnedQuantity, "
-            + "originalQuantity, sourceLineId}]}. The return is left in draft, never completed "
-            + "here: " + nextStep
+            + "originalQuantity, sourceLineId, alreadyReturnedQuantity, returns:[{id, documentNo, "
+            + "documentStatus}]}]}, where alreadyReturnedQuantity is what OTHER returns (drafts "
+            + "included, voided excluded) already hold of that source line and returns lists "
+            + "them. The return is left in draft, never completed here: " + nextStep
             + " Precondition: the " + sourceNoun + " is completed (status CO). Lines: omit lines to "
             + "return everything still returnable of every line (a line with nothing left is "
             + "skipped; when nothing is left on any line it answers 422 nothingLeftToReturn). "
