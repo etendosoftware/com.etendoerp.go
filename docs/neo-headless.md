@@ -4632,6 +4632,9 @@ Customizations that compared with a DB column literal were made tolerant of both
 (`Convertquotation` / `convertquotation`). `AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction`
 (the quotation's `DocAction` path) also serves an MCP call that arrives under `documentAction` when
 it is not a completion (a completion is recalculated once by `applyTotalDiscountBeforeComplete`).
+For the quotation this was not enough: the button's DAL property is `createOrder`, not
+`convertquotation`, so the customization receives `createOrder` and every MCP conversion missed
+the handler until ETP-5704, which matches `createOrder` too (see §4.12.21).
 
 ##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
 
@@ -10237,6 +10240,16 @@ the button's process-access check.
 - **UI unchanged:** the modal's own RE call only fires when the fetched order is `CO`, so against
   a Draft order it is a no-op. The UI still ends with a Draft order, and nothing is reactivated
   twice.
+- **Names it is reached under (ETP-5704).** The button is column `Convertquotation`, DAL property
+  `createOrder` (the name `etendo_schema` lists). The SPA posts `action/Convertquotation`, and the
+  REST path hands the customization that URL segment. MCP (`etendo_action` and
+  `etendo_action_batch`) hands it the button's **property name**, whichever spelling the agent
+  typed (`McpDeclaredActions.customizationNameOf`, ETP-5710). Until ETP-5704 the handler matched
+  only `Convertquotation` and `convertquotation`, so every MCP conversion missed it and ran core's
+  classic process instead: the order stayed `CO` and the response was core's message, not
+  `{salesOrderId, documentStatus}`. `SalesQuotationHeaderHandler.isConvertQuotationAction` now
+  also matches `createOrder`, so all channels run this flow, with its missing-rate (ETP-5840) and
+  quota (ETP-5051) checks.
 
 #### 4.12.22 Rejecting a quotation and creating its lines over MCP behave as in the UI (ETP-5535)
 
