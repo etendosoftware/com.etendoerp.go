@@ -741,18 +741,23 @@ class CalloutRequestBuilder {
       return;
     }
     for (Property property : entity.getProperties()) {
-      Entity target = property.isId() ? entity : property.getTargetEntity();
-      if (target == null || property.isOneToMany() || property.getColumnName() == null) {
-        continue;
-      }
-      String inpName = NeoCalloutService.toInpName(property.getColumnName());
-      String value = paramValue(params, inpName);
-      if (value == null || value.isEmpty() || isOwnedOrMissing(target, value)) {
-        continue;
-      }
-      log.warn("[NEO-CALLOUT] Dropped {}: it names a row of another client", inpName);
-      params.put(inpName, new String[] { "" });
+      blankIfForeign(entity, property, params);
     }
+  }
+
+  private static void blankIfForeign(Entity entity, Property property,
+      Map<String, String[]> params) {
+    Entity target = property.isId() ? entity : property.getTargetEntity();
+    if (target == null || property.isOneToMany() || property.getColumnName() == null) {
+      return;
+    }
+    String inpName = NeoCalloutService.toInpName(property.getColumnName());
+    String value = paramValue(params, inpName);
+    if (value == null || value.isEmpty() || isOwnedOrMissing(target, value)) {
+      return;
+    }
+    log.warn("[NEO-CALLOUT] Dropped {}: it names a row of another client", inpName);
+    params.put(inpName, new String[] { "" });
   }
 
   private static boolean isOwnedOrMissing(Entity target, String id) {
