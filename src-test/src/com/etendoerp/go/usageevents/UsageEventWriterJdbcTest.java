@@ -19,6 +19,7 @@ package com.etendoerp.go.usageevents;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,6 +36,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -94,6 +96,7 @@ class UsageEventWriterJdbcTest {
   private static final int P_OCCURRED_AT = 16;
   private static final int P_APP_VERSION = 17;
   private static final int P_PROPERTIES = 18;
+  private static final int P_COST = 19;
 
   private MockedStatic<SequenceIdData> sequence;
 
@@ -115,19 +118,19 @@ class UsageEventWriterJdbcTest {
         .sessionKey("conv-1").target("sales-order").action("complete")
         .outcome(UsageEvent.OUTCOME_OK).errorCode("E42").durationMs(1234L)
         .occurredAt(Instant.parse("2026-09-23T10:00:00Z")).appVersion("3.1.0")
-        .property("inputTokens", 1200);
+        .property("inputTokens", 1200).costUsd(new BigDecimal("0.00004725"));
   }
 
   private static UsageEvent withOccurredAt(UsageEvent e, Instant at) {
     return new UsageEvent(e.clientId(), e.orgId(), e.userId(), e.roleId(), e.eventType(),
         e.source(), e.sessionKey(), e.target(), e.action(), e.outcome(), e.errorCode(),
-        e.durationMs(), at, e.appVersion(), e.properties());
+        e.durationMs(), at, e.appVersion(), e.properties(), e.costUsd());
   }
 
   private static UsageEvent withProperties(UsageEvent e, String properties) {
     return new UsageEvent(e.clientId(), e.orgId(), e.userId(), e.roleId(), e.eventType(),
         e.source(), e.sessionKey(), e.target(), e.action(), e.outcome(), e.errorCode(),
-        e.durationMs(), e.occurredAt(), e.appVersion(), properties);
+        e.durationMs(), e.occurredAt(), e.appVersion(), properties, e.costUsd());
   }
 
   @Nested
@@ -138,7 +141,7 @@ class UsageEventWriterJdbcTest {
 
     @Test
     void theSqlHasOnePlaceholderPerBoundParameter() {
-      assertEquals(P_PROPERTIES, StringUtils.countMatches(UsageEventWriter.INSERT_SQL, '?'));
+      assertEquals(P_COST, StringUtils.countMatches(UsageEventWriter.INSERT_SQL, '?'));
     }
 
     @Test
@@ -164,6 +167,7 @@ class UsageEventWriterJdbcTest {
       verify(ps).setTimestamp(P_OCCURRED_AT, Timestamp.from(event.occurredAt()));
       verify(ps).setString(P_APP_VERSION, "3.1.0");
       verify(ps).setString(P_PROPERTIES, "{\"inputTokens\":1200}");
+      verify(ps).setBigDecimal(P_COST, new BigDecimal("0.00004725"));
       verify(ps, never()).setNull(anyInt(), anyInt());
     }
 
@@ -205,7 +209,7 @@ class UsageEventWriterJdbcTest {
     void blankOptionalValuesBecomeNull() throws SQLException {
       UsageEvent event = fullEvent()
           .roleId("  ").sessionKey("").target(" ").action(null).outcome("\t").errorCode(null)
-          .appVersion("   ").durationMs(null)
+          .appVersion("   ").durationMs(null).costUsd(null)
           .build();
       UsageEventWriter.bind(ps, withProperties(event, "  "));
 
@@ -218,6 +222,7 @@ class UsageEventWriterJdbcTest {
       verify(ps).setNull(P_APP_VERSION, Types.VARCHAR);
       verify(ps).setNull(P_DURATION, Types.NUMERIC);
       verify(ps).setNull(P_PROPERTIES, Types.VARCHAR);
+      verify(ps).setNull(P_COST, Types.NUMERIC);
     }
 
     @Test
@@ -296,6 +301,23 @@ class UsageEventWriterJdbcTest {
     void nullPropertiesBindNull() throws SQLException {
       UsageEventWriter.bind(ps, withProperties(fullEvent().build(), null));
       verify(ps).setNull(P_PROPERTIES, Types.VARCHAR);
+    }
+
+    @Test
+    void aNegativeCostIsNeverStoredAndZeroIsKept() throws SQLException {
+      // The builder already drops it; a record built directly must not lower a tenant's spend either.
+      UsageEvent built = fullEvent().costUsd(new BigDecimal("-5")).build();
+      assertNull(built.costUsd());
+      UsageEvent direct = new UsageEvent(built.clientId(), built.orgId(), built.userId(),
+          built.roleId(), built.eventType(), built.source(), built.sessionKey(), built.target(),
+          built.action(), built.outcome(), built.errorCode(), built.durationMs(),
+          built.occurredAt(), built.appVersion(), built.properties(), new BigDecimal("-5"));
+      UsageEventWriter.bind(ps, direct);
+      verify(ps).setNull(P_COST, Types.NUMERIC);
+
+      PreparedStatement zero = mock(PreparedStatement.class);
+      UsageEventWriter.bind(zero, fullEvent().costUsd(BigDecimal.ZERO).build());
+      verify(zero).setBigDecimal(P_COST, BigDecimal.ZERO);
     }
   }
 

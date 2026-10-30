@@ -5711,9 +5711,18 @@ this endpoint — some are recorded by the backend itself through `UsageEventRec
 
 | Event type | Recorded by | When | Columns |
 |------------|-------------|------|---------|
-| `ai.agent.message` | AI BFF, through this endpoint (defined; no caller yet) | One completed AI agent chat turn | `properties`: model, token counts |
+| `ai.agent.message` | AI BFF (`tools/ai-bff/src/usage.js`), through this endpoint | One AI agent chat or page-help turn, also when it failed or was aborted (`outcome = error`) | `target` = `agent-chat`/`page-help`, `sessionKey` = the conversation's external id; `COST_USD` from the body's `costUsd` (when the provider priced it); `properties`: `model`, `inputTokens`, `outputTokens`, `cachedInputTokens`, `steps`, `toolCalls`, `finishReason` |
 | `ai.support.message` | Backend (defined; no caller yet) | One completed support chat (ValerIA) turn | `properties`: model, token counts |
+| `ai.tool.execute` | Backend (`CopilotToolUsageRecorder`, a `CopilotToolUsageHook` of `com.etendoerp.copilot`) | One `/sws/copilot/executeTool` call whose tool reported model usage — today the document OCR (`SimpleOcrTool`). Never on a non-2xx answer. | client/org/user/role from `OBContext`; `target` = tool name, `action = execute`, `outcome = ok`, `durationMs` = Copilot's answer time; `COST_USD` (when the LiteLLM proxy priced it); `properties`: `model`, `inputTokens`, `outputTokens` |
 | `session.login` | Backend (`SessionLoginUsage`) | One successful entry into an environment, after the credential is issued: `GET /sws/go/login?userId=` (`action = login`) and `POST /sws/go/session/environment` (`action = cookie-login`, the path the SPA uses). Never on a 4xx/5xx. | client/org/user/role of the environment entered — set explicitly, not from `OBContext`, which is the system context on both paths; `target = environment`, `outcome = ok`, `durationMs` = login handling; `properties.authMethod` = `password`/`sso` on the cookie path only |
+
+`COST_USD` (`NUMERIC`, nullable) is the money the LiteLLM proxy (`llm.etendo.software`) charged
+for the call, in USD, as it reports it (`usage.cost` when streaming, header
+`x-litellm-response-cost` otherwise). It is a column and not a property so the billing engine can
+sum it: the `aiSpend` strategy (`AiSpendCounter`, [`plan-quotas.md`](plan-quotas.md) §4.7) turns
+it into a Billing Resource. The ingest body carries it as the top-level number `costUsd`; anything
+but a finite, non-negative number is stored as null, because a negative cost would lower a
+tenant's spend. Null means "not priced", never "free".
 
 Recording is the last statement of the success path, after the response is written, and never
 throws; the INSERT happens on the recorder's writer thread, so a slow or locked

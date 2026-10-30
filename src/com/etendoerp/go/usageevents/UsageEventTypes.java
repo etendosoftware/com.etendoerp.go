@@ -54,6 +54,12 @@ public final class UsageEventTypes {
   public static final String AI_SUPPORT_MESSAGE = "ai.support.message";
 
   /**
+   * One Copilot tool call that used a model (the document OCR), recorded by the backend with the
+   * token usage and cost ({@link CopilotToolUsageRecorder}). {@code target} is the tool name.
+   */
+  public static final String AI_TOOL_EXECUTE = "ai.tool.execute";
+
+  /**
    * One successful entry into an environment, recorded by the backend once the environment's
    * credential is issued ({@link SessionLoginUsage}). {@code action} tells the two paths apart.
    */
@@ -63,6 +69,7 @@ public final class UsageEventTypes {
   private static final Set<String> KNOWN = Set.of(
       AI_AGENT_MESSAGE,
       AI_SUPPORT_MESSAGE,
+      AI_TOOL_EXECUTE,
       SESSION_LOGIN);
 
   private UsageEventTypes() {
