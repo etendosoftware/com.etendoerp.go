@@ -39,6 +39,7 @@ public class PlanCatalogService {
 
   private static final String PARAM_SEARCH_KEY = "searchKey";
   private static final String PARAM_PLAN_ID = "planId";
+  private static final String PARAM_PRICE_ID = "priceId";
 
   /**
    * Reads the configured legacy fallback price id ({@code etendo.go.checkout.price.id} /
@@ -84,6 +85,38 @@ public class PlanCatalogService {
           "as plan where plan." + Plan.PROPERTY_SEARCHKEY + " = :" + PARAM_SEARCH_KEY
               + " and plan." + Plan.PROPERTY_ACTIVE + " = true");
       query.setNamedParameter(PARAM_SEARCH_KEY, StringUtils.trimToEmpty(planKey));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return Optional.ofNullable(query.uniqueResult());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5053 — the active plan sold at a Stripe price: how an applied plan change, seen as a new
+   * item price in {@code customer.subscription.updated}, is mapped back to the catalog.
+   *
+   * <p>A price that maps to no plan answers empty, and the caller parks the event for review
+   * rather than guessing: a price is operator configuration, and an unknown one means the catalog
+   * and Stripe disagree. Two active plans on one price would be the same misconfiguration; the
+   * first by search key answers, deterministically, and the caller's log names the price.
+   *
+   * @param providerPriceId {@code price_...}; blank finds nothing
+   * @return the active plan carrying that provider price, or empty
+   */
+  public Optional<Plan> findByProviderPrice(String providerPriceId) {
+    if (StringUtils.isBlank(providerPriceId)) {
+      return Optional.empty();
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBQuery<Plan> query = OBDal.getInstance().createQuery(Plan.class,
+          "as plan where plan." + Plan.PROPERTY_PROVIDERPRICEID + " = :" + PARAM_PRICE_ID
+              + " and plan." + Plan.PROPERTY_ACTIVE + " = true"
+              + " order by plan." + Plan.PROPERTY_SEARCHKEY);
+      query.setNamedParameter(PARAM_PRICE_ID, StringUtils.trim(providerPriceId));
       query.setFilterOnReadableClients(false);
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);

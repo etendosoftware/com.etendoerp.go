@@ -481,6 +481,134 @@ public class SubscriptionService {
   }
 
   /**
+   * ETP-5053 — rolls a tenant's open row over to another plan: closes it now and opens its
+   * successor in the same transaction, so the tenant keeps a price history and at most one row is
+   * ever open ({@code etgo_sub_open_envclient_uq}).
+   *
+   * <p><b>What the successor inherits.</b> Everything that describes the same provider
+   * subscription — tenant, account, Stripe customer and subscription ids, status, billing period,
+   * grace anchor, event watermark, cancel-at-period-end flag — plus the <b>quota-year anchor</b>
+   * the caller decided ({@code QUOTA_YEAR_START}): the predecessor's for an upgrade or a
+   * downgrade, so usage already counted this year carries over against the new limit; the new
+   * provider period start for a billing-interval change, where the provider restarted the cycle.
+   * The successor starts a fresh price snapshot from the price the item is now on, and clears
+   * {@code PENDING_PLAN_ID} / {@code PENDING_EFFECTIVE_DATE}: whatever was pending has either
+   * just applied or was superseded by this change.
+   *
+   * <p><b>Order of writes.</b> The predecessor is closed by a targeted statement before the
+   * successor is saved, for the reason {@link #closeInDatabase} gives: Hibernate flushes inserts
+   * before updates, and the partial unique index would reject the new open row while the old one
+   * still reads as open. {@code END_DATE} is "now" — past tense, never the future (§5.13).
+   *
+   * <p>Written as system, like {@link #openSubscription}: the rows are client-{@code 0} rows about
+   * a tenant. Not committed; the caller (the lifecycle webhook, or the reconciliation) commits it
+   * with the event that caused it.
+   *
+   * @param open the tenant's open row, never null
+   * @param target the plan the provider subscription is now on, never null
+   * @param chargedPriceId the Stripe price the item is on, may be null (then the plan's)
+   * @param quotaYearStart the anchor of the successor's quota year, may be null (then its start)
+   * @return the open successor row
+   */
+  public Subscription rollToPlan(Subscription open, Plan target, String chargedPriceId,
+      Date quotaYearStart) {
+    if (open == null || target == null) {
+      throw new IllegalArgumentException("A plan change needs the open row and the target plan");
+    }
+    return SystemContext.call("rolling a subscription over to another plan",
+        () -> rollAsSystem(open, target, chargedPriceId, quotaYearStart));
+  }
+
+  private Subscription rollAsSystem(Subscription open, Plan target, String chargedPriceId,
+      Date quotaYearStart) {
+    closeInDatabase(open);
+    Subscription successor = OBProvider.getInstance().get(Subscription.class);
+    successor.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    successor.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    successor.setEnvironmentClient(open.getEnvironmentClient());
+    successor.setEtendoGoAccount(open.getEtendoGoAccount());
+    successor.setPlan(target);
+    successor.setSubscriptionStatus(open.getSubscriptionStatus());
+    Date now = new Date();
+    successor.setStartDate(now);
+    successor.setEndDate(null);
+    successor.setQuotaYearStart(quotaYearStart != null && quotaYearStart.after(now) ? now
+        : quotaYearStart);
+    successor.setCurrentPeriodStart(open.getCurrentPeriodStart());
+    successor.setCurrentPeriodEnd(open.getCurrentPeriodEnd());
+    successor.setGraceAnchor(open.getGraceAnchor());
+    successor.setLastEventAt(open.getLastEventAt());
+    successor.setCancelAtPeriodEnd(open.isCancelAtPeriodEnd());
+    successor.setStripeCustomer(open.getStripeCustomer());
+    successor.setStripeSubscription(open.getStripeSubscription());
+    successor.setPendingPlan(null);
+    successor.setPendingEffectiveDate(null);
+    String planPriceId = StringUtils.trimToNull(target.getProviderPriceID());
+    String charged = StringUtils.defaultIfBlank(StringUtils.trimToNull(chargedPriceId),
+        planPriceId);
+    successor.setProviderPriceID(charged);
+    if (StringUtils.equals(charged, planPriceId)) {
+      successor.setSnapshotAmount(target.getDisplayPrice());
+      successor.setSnapshotCurrency(StringUtils.trimToNull(target.getCurrencyCode()));
+    }
+    saveOrEvict(successor);
+    log.info("Rolled subscription {} of tenant {} over to plan '{}' as {} (quota year anchored on"
+        + " {})", open.getId(), open.getEnvironmentClient() == null ? null
+            : open.getEnvironmentClient().getId(), target.getSearchKey(), successor.getId(),
+        successor.getQuotaYearStart());
+    return successor;
+  }
+
+  /**
+   * ETP-5053 — records a scheduled downgrade on the open row: the plan it moves to and when
+   * ({@code PENDING_PLAN_ID}, {@code PENDING_EFFECTIVE_DATE}). The provider holds the schedule;
+   * these columns exist so the Classic window, the account page and the reconciliation see the
+   * pending change without calling Stripe. A future intention lives here and only here — never
+   * on {@code END_DATE} (§5.13).
+   *
+   * <p>Written as system (the row is a client-{@code 0} row) and not committed: the caller
+   * commits it with the provider call that scheduled the change.
+   *
+   * @param open the tenant's open row, never null
+   * @param target the plan the subscription moves to at {@code effectiveAt}, never null
+   * @param effectiveAt the end of the current billing period, never null
+   */
+  public void writePendingChange(Subscription open, Plan target, Date effectiveAt) {
+    if (open == null || target == null || effectiveAt == null) {
+      throw new IllegalArgumentException(
+          "A pending plan change needs the open row, the target plan and its effective date");
+    }
+    SystemContext.run("recording a pending plan change", () -> {
+      open.setPendingPlan(target);
+      open.setPendingEffectiveDate(new Date(effectiveAt.getTime()));
+      saveOrEvict(open);
+      log.info("Subscription {} will move to plan '{}' on {}", open.getId(),
+          target.getSearchKey(), effectiveAt);
+    });
+  }
+
+  /**
+   * ETP-5053 — clears a pending change: the schedule was released (an upgrade superseded the
+   * downgrade) or the downgrade applied and the row rolled over. A row with nothing pending is
+   * left untouched.
+   *
+   * @param open the tenant's open row, never null
+   * @return true when something was cleared
+   */
+  public boolean clearPendingChange(Subscription open) {
+    if (open == null || (open.getPendingPlan() == null && open.getPendingEffectiveDate() == null)) {
+      return false;
+    }
+    SystemContext.run("clearing a pending plan change", () -> {
+      open.setPendingPlan(null);
+      open.setPendingEffectiveDate(null);
+      saveOrEvict(open);
+      log.info("Pending plan change of subscription {} cleared", open.getId());
+    });
+    return true;
+  }
+
+  /**
    * ETP-5047 — fills the billing period of the tenant's open row from the payment provider, when
    * the row names a Stripe subscription and has no period yet.
    *

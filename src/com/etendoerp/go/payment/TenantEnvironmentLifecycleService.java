@@ -83,6 +83,11 @@ public class TenantEnvironmentLifecycleService {
 
   private final TenantPlanService tenantPlanService;
   private final SubscriptionService subscriptionService;
+  /**
+   * ETP-5053 — rolls a row over when a lifecycle event shows its item on another plan's price.
+   * Package-visible so a test replaces it.
+   */
+  SubscriptionPlanRollover planRollover;
 
   /** Creates a lifecycle service backed by the default plan resolver. */
   public TenantEnvironmentLifecycleService() {
@@ -97,6 +102,8 @@ public class TenantEnvironmentLifecycleService {
       SubscriptionService subscriptionService) {
     this.tenantPlanService = tenantPlanService;
     this.subscriptionService = subscriptionService;
+    this.planRollover = new SubscriptionPlanRollover(subscriptionService,
+        new PlanCatalogService());
   }
 
   /**
@@ -552,7 +559,10 @@ public class TenantEnvironmentLifecycleService {
       Instant eventAt) {
     try {
       if (target.subscription() != null) {
-        subscriptionService.applyLifecycleOutcome(target.subscription(), outcome, eventAt);
+        // ETP-5053 — an item price that moved to another plan is an applied plan change: the row
+        // is rolled over first, and the transition lands on the successor.
+        Subscription row = planRollover.rollIfPriceChanged(target.subscription(), outcome);
+        subscriptionService.applyLifecycleOutcome(row, outcome, eventAt);
         return true;
       }
       Client client = OBDal.getInstance().get(Client.class, target.clientId());

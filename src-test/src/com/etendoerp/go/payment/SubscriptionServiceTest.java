@@ -873,7 +873,8 @@ class SubscriptionServiceTest {
     void aTerminatingOutcomeClosesTheRowAtTheProviderEndInstant() {
       Subscription row = subscriptionOf(CLIENT_ID);
       when(row.getStartDate()).thenReturn(java.util.Date.from(anchor.minusSeconds(86_400L * 30)));
-      java.time.Instant ended = java.time.Instant.parse("2026-11-15T09:00:00Z");
+      // A past instant: END_DATE is refused when it lies ahead of the clock (ETP-5053).
+      java.time.Instant ended = java.time.Instant.now().minusSeconds(3600L);
 
       service.applyLifecycleOutcome(row, SubscriptionEventOutcome
           .apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null).closing(ended), eventAt);
@@ -887,12 +888,12 @@ class SubscriptionServiceTest {
       // ETGO_SUB_DATES_CHK: END_DATE >= START_DATE. A provider instant earlier than the row's own
       // start (the row was opened after Stripe ended it) must not reject the whole event.
       Subscription row = subscriptionOf(CLIENT_ID);
-      java.util.Date start = java.util.Date.from(eventAt);
+      java.util.Date start = new java.util.Date();
       when(row.getStartDate()).thenReturn(start);
 
       service.applyLifecycleOutcome(row, SubscriptionEventOutcome
           .apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
-          .closing(eventAt.minusSeconds(3600L)), eventAt);
+          .closing(start.toInstant().minusSeconds(3600L)), eventAt);
 
       verify(row).setEndDate(start);
     }
@@ -963,6 +964,137 @@ class SubscriptionServiceTest {
   }
 
   /** ETP-5047 — a re-subscription after a cancellation whose close never arrived. */
+  @Nested
+  class RollToPlan {
+
+    private static final String OPEN_ROW_ID = "7A1F2B3C4D5E4F60A1B2C3D4E5F60718";
+
+    private Plan target;
+    private Subscription open;
+    private Subscription created;
+    private Session session;
+    @SuppressWarnings("rawtypes")
+    private org.hibernate.query.Query closeStatement;
+
+    @BeforeEach
+    void givenAnOpenRowAndATargetPlan() {
+      target = mock(Plan.class);
+      when(target.getSearchKey()).thenReturn("pro-monthly");
+      when(target.getProviderPriceID()).thenReturn("price_pro");
+      when(target.getDisplayPrice()).thenReturn(new java.math.BigDecimal("99"));
+      when(target.getCurrencyCode()).thenReturn("EUR");
+      open = subscriptionOf(CLIENT_ID);
+      when(open.getId()).thenReturn(OPEN_ROW_ID);
+      when(open.getSubscriptionStatus()).thenReturn(SubscriptionService.STATUS_ACTIVE);
+      when(open.getStartDate()).thenReturn(new java.util.Date(System.currentTimeMillis()
+          - 30L * 86_400_000L));
+      when(open.getStripeCustomer()).thenReturn(CUSTOMER_ID);
+      when(open.getStripeSubscription()).thenReturn(STRIPE_SUBSCRIPTION_ID);
+      when(open.getCurrentPeriodStart()).thenReturn(new java.util.Date(1_000L));
+      when(open.getCurrentPeriodEnd()).thenReturn(new java.util.Date(2_000L));
+      when(open.getLastEventAt()).thenReturn(new java.util.Date(1_500L));
+      when(open.isCancelAtPeriodEnd()).thenReturn(true);
+      created = mock(Subscription.class);
+      when(created.getId()).thenReturn("SUCCESSOR");
+      when(obProvider.get(Subscription.class)).thenReturn(created);
+      when(obDal.get(eq(Client.class), any())).thenReturn(mock(Client.class));
+      when(obDal.get(eq(Organization.class), any())).thenReturn(mock(Organization.class));
+      session = mock(Session.class);
+      closeStatement = mock(org.hibernate.query.Query.class, org.mockito.Mockito.RETURNS_SELF);
+      when(closeStatement.executeUpdate()).thenReturn(1);
+      when(session.createQuery(anyString())).thenReturn(closeStatement);
+      when(obDal.getSession()).thenReturn(session);
+      OBContext context = mock(OBContext.class);
+      when(context.getUser()).thenReturn(mock(org.openbravo.model.ad.access.User.class));
+      obContextMock.when(OBContext::getOBContext).thenReturn(context);
+    }
+
+    @Test
+    void closesTheOpenRowInTheDatabaseBeforeInsertingTheSuccessor() {
+      java.util.Date anchor = new java.util.Date(System.currentTimeMillis() - 200L * 86_400_000L);
+
+      Subscription result = service.rollToPlan(open, target, "price_pro", anchor);
+
+      assertSame(created, result);
+      org.mockito.InOrder order =
+          org.mockito.Mockito.inOrder(closeStatement, session, obProvider, obDal);
+      order.verify(closeStatement).executeUpdate();
+      order.verify(session).refresh(open);
+      order.verify(obProvider).get(Subscription.class);
+      order.verify(obDal).save(created);
+      verify(closeStatement).setParameter("id", OPEN_ROW_ID);
+      // END_DATE is "now", past tense: never a future value (register §5.13).
+      ArgumentCaptor<java.util.Date> end = ArgumentCaptor.forClass(java.util.Date.class);
+      verify(closeStatement).setParameter(eq("endDate"), end.capture());
+      assertTrue(!end.getValue().after(new java.util.Date()), "closed now: " + end.getValue());
+    }
+
+    @Test
+    void theSuccessorInheritsTheProviderSubscriptionAndTheGivenQuotaYearAnchor() {
+      java.util.Date anchor = new java.util.Date(System.currentTimeMillis() - 200L * 86_400_000L);
+
+      service.rollToPlan(open, target, "price_pro", anchor);
+
+      verify(created).setPlan(target);
+      verify(created).setEnvironmentClient(open.getEnvironmentClient());
+      verify(created).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
+      verify(created).setStripeCustomer(CUSTOMER_ID);
+      verify(created).setStripeSubscription(STRIPE_SUBSCRIPTION_ID);
+      verify(created).setCurrentPeriodStart(new java.util.Date(1_000L));
+      verify(created).setCurrentPeriodEnd(new java.util.Date(2_000L));
+      verify(created).setLastEventAt(new java.util.Date(1_500L));
+      verify(created).setCancelAtPeriodEnd(true);
+      verify(created).setEndDate(null);
+      verify(created).setQuotaYearStart(anchor);
+      // Whatever was pending has applied or been superseded by this change.
+      verify(created).setPendingPlan(null);
+      verify(created).setPendingEffectiveDate(null);
+      ArgumentCaptor<java.util.Date> start = ArgumentCaptor.forClass(java.util.Date.class);
+      verify(created).setStartDate(start.capture());
+      assertTrue(!start.getValue().after(new java.util.Date()));
+    }
+
+    @Test
+    void theSuccessorSnapshotsTheTargetPriceWhenTheItemIsOnIt() {
+      service.rollToPlan(open, target, "price_pro", null);
+
+      verify(created).setProviderPriceID("price_pro");
+      verify(created).setSnapshotAmount(new java.math.BigDecimal("99"));
+      verify(created).setSnapshotCurrency("EUR");
+      // No anchor given: the successor's own start is its anchor (null column, START_DATE rule).
+      verify(created).setQuotaYearStart(null);
+    }
+
+    @Test
+    void aChargedPriceOtherThanThePlansKeepsNoAmountSnapshot() {
+      service.rollToPlan(open, target, "price_legacy", null);
+
+      verify(created).setProviderPriceID("price_legacy");
+      verify(created, never()).setSnapshotAmount(any());
+      verify(created, never()).setSnapshotCurrency(any());
+    }
+
+    @Test
+    void aFutureAnchorIsClampedToTheSuccessorsStart() {
+      java.util.Date future = new java.util.Date(System.currentTimeMillis() + 86_400_000L);
+
+      service.rollToPlan(open, target, "price_pro", future);
+
+      ArgumentCaptor<java.util.Date> anchor = ArgumentCaptor.forClass(java.util.Date.class);
+      verify(created).setQuotaYearStart(anchor.capture());
+      assertTrue(!anchor.getValue().after(new java.util.Date()), "clamped: " + anchor.getValue());
+    }
+
+    @Test
+    void refusesWithoutARowOrATarget() {
+      assertThrows(IllegalArgumentException.class, () -> service.rollToPlan(null, target, null,
+          null));
+      assertThrows(IllegalArgumentException.class, () -> service.rollToPlan(open, null, null,
+          null));
+      verify(obDal, never()).save(any());
+    }
+  }
+
   @Nested
   class OpenSubscriptionOverACanceledRow {
 

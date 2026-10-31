@@ -284,6 +284,40 @@ class PlanCatalogServiceTest {
     assertFalse(PlanCatalogService.namesLegacyPlan(planKey));
   }
 
+  // ===================== findByProviderPrice (ETP-5053) =====================
+
+  @Test
+  void findsTheActivePlanSoldAtAProviderPrice() {
+    Plan pro = mock(Plan.class);
+    when(planQuery.uniqueResult()).thenReturn(pro);
+
+    assertSame(pro, service.findByProviderPrice(" price_pro ").orElseThrow());
+
+    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+    verify(obDal).createQuery(eq(Plan.class), hql.capture());
+    assertTrue(hql.getValue().contains("plan.providerPriceID = :priceId"), hql.getValue());
+    assertTrue(hql.getValue().contains("plan.active = true"), hql.getValue());
+    verify(planQuery).setNamedParameter("priceId", "price_pro");
+    verify(planQuery).setFilterOnReadableClients(false);
+    verify(planQuery).setFilterOnReadableOrganization(false);
+    verify(planQuery).setMaxResult(1);
+  }
+
+  @Test
+  void aPriceNoPlanCarriesAnswersEmptyAndIsNeverGuessed() {
+    when(planQuery.uniqueResult()).thenReturn(null);
+
+    assertFalse(service.findByProviderPrice("price_unknown").isPresent());
+  }
+
+  @ParameterizedTest
+  @NullSource
+  @ValueSource(strings = { "", "   " })
+  void aBlankPriceFindsNothingWithoutQuerying(String priceId) {
+    assertFalse(service.findByProviderPrice(priceId).isPresent());
+    verify(obDal, never()).createQuery(eq(Plan.class), anyString());
+  }
+
   // ===================== listActiveQuotas (ETP-5049) =====================
 
   @Test

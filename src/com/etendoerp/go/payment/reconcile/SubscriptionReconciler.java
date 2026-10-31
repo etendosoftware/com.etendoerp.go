@@ -604,25 +604,9 @@ final class SubscriptionReconciler {
     return lifecycle.targetForSubscription(candidate.subscriptionId);
   }
 
-  /**
-   * The re-read subscription as a {@code customer.subscription.updated} event created at
-   * {@code providerAt}, so the applier's stale check orders it against the stored watermark
-   * exactly as it orders a webhook event. No {@code created} when the provider gave no instant.
-   */
+  /** The re-read subscription as a {@code customer.subscription.updated} event; see the applier. */
   private static JSONObject syntheticEvent(JSONObject subscription, Instant providerAt) {
-    try {
-      JSONObject data = new JSONObject();
-      data.put("object", subscription);
-      JSONObject event = new JSONObject();
-      event.put("type", SUBSCRIPTION_UPDATED);
-      if (providerAt != null) {
-        event.put("created", providerAt.getEpochSecond());
-      }
-      event.put("data", data);
-      return event;
-    } catch (JSONException e) {
-      throw new IllegalStateException("Could not build the reconciliation event", e);
-    }
+    return SubscriptionLifecycleApplier.syntheticSubscriptionUpdated(subscription, providerAt);
   }
 
   private static boolean hasOurMetadata(JSONObject subscription) {
