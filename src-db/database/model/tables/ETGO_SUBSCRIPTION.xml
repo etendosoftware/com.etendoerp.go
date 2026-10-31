@@ -109,6 +109,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="CHANGE_PLAN" primaryKey="false" required="false" type="CHAR" size="1" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="ETGO_ACCOUNT" name="ETGO_SUB_ACCOUNT_FK">
         <reference local="ETGO_ACCOUNT_ID" foreign="ETGO_ACCOUNT_ID"/>
       </foreign-key>
