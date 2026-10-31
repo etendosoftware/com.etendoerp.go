@@ -912,6 +912,34 @@ class SubscriptionServiceTest {
     }
 
     @Test
+    void aFutureClosingInstantIsRefusedAndNothingIsWritten() {
+      // ETP-5053 — END_DATE is past tense (register §5.13, option 1): a future value would close
+      // the row at once and read the tenant as canceled inside a paid period.
+      Subscription row = subscriptionOf(CLIENT_ID);
+      java.time.Instant future = java.time.Instant.now().plus(java.time.Duration.ofDays(1));
+
+      assertThrows(IllegalArgumentException.class, () -> service.applyLifecycleOutcome(row,
+          SubscriptionEventOutcome.apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
+              .closing(future), eventAt));
+
+      verify(row, never()).setEndDate(any());
+      verify(obDal, never()).save(any());
+    }
+
+    @Test
+    void aClosingInstantWithinTheClockSkewToleranceStillCloses() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+      java.time.Instant slightlyAhead = java.time.Instant.now()
+          .plus(SubscriptionService.END_DATE_SKEW_TOLERANCE).minusSeconds(30L);
+
+      service.applyLifecycleOutcome(row, SubscriptionEventOutcome
+          .apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null).closing(slightlyAhead),
+          eventAt);
+
+      verify(row).setEndDate(java.util.Date.from(slightlyAhead));
+    }
+
+    @Test
     void anAlreadyClosedRowIsNotClosedAgain() {
       Subscription row = subscriptionOf(CLIENT_ID);
       when(row.getEndDate()).thenReturn(java.util.Date.from(eventAt));

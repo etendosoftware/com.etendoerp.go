@@ -5,6 +5,7 @@
  */
 package com.etendoerp.go.payment;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -72,6 +73,12 @@ public class SubscriptionService {
   public static final String STATUS_PAST_DUE = "past_due";
   /** The subscription was terminated; the tenant is no longer entitled to the paid plan. */
   public static final String STATUS_CANCELED = "canceled";
+
+  /**
+   * ETP-5053 — how far ahead of this server's clock a closing instant may be and still count as
+   * "now" (provider clock skew); see {@link #requireNotFuture}.
+   */
+  static final Duration END_DATE_SKEW_TOLERANCE = Duration.ofMinutes(5);
 
   private static final String PARAM_CLIENT_ID = "environmentClientId";
   private static final String PARAM_CLIENT_IDS = "environmentClientIds";
@@ -807,9 +814,34 @@ public class SubscriptionService {
   }
 
   private static Date closingDateOf(Subscription subscription, Instant endedAt) {
-    Date end = endedAt == null ? new Date() : Date.from(endedAt);
+    Date now = new Date();
+    Date end = endedAt == null ? now : Date.from(endedAt);
+    requireNotFuture(subscription, end, now);
     Date start = subscription.getStartDate();
     return start != null && end.before(start) ? start : end;
+  }
+
+  /**
+   * ETP-5053 — {@code END_DATE} records what happened, never what will happen
+   * ({@code open-and-notable-topics.md} §5.13, option 1): every writer sets it to the moment the
+   * row stopped being the tenant's current row, and a future intention lives only in
+   * {@code PENDING_PLAN_ID} / {@code PENDING_EFFECTIVE_DATE}.
+   *
+   * <p>Why a guard and not a convention: "open" is {@code END_DATE IS NULL}, so a future-dated end
+   * would close the row <em>immediately</em> — the tenant would read as canceled, and free, inside
+   * a period it paid for — and nothing in the schema rejects that shape. A provider instant a few
+   * seconds ahead of this server's clock is still "now"; {@link #END_DATE_SKEW_TOLERANCE} is the
+   * allowance. Anything beyond it is a programming error or a misread payload, and the write is
+   * refused rather than silently clamped so it is seen.
+   *
+   * @throws IllegalArgumentException when {@code end} is later than {@code now} plus the tolerance
+   */
+  static void requireNotFuture(Subscription subscription, Date end, Date now) {
+    if (end.getTime() > now.getTime() + END_DATE_SKEW_TOLERANCE.toMillis()) {
+      throw new IllegalArgumentException("END_DATE records what happened, never what will happen:"
+          + " refused the future closing instant " + end.toInstant() + " for subscription "
+          + (subscription == null ? null : subscription.getId()));
+    }
   }
 
   /**
