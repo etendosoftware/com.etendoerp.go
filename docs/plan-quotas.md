@@ -11,6 +11,7 @@ before promising a customer that something can be capped.
 | The HTTP contract: the 403 `QUOTA_EXCEEDED` and 500 `QUOTA_CHECK_FAILED` bodies, the gate's transaction handling, the cache, locks, failure modes | [`neo-headless.md`](neo-headless.md) §4.16 |
 | The `quotas` and `accessEnforced` fields of `GET /sws/go/environments`, `planQuotas` of `GET /sws/go/billing/subscription` | [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md) §2 and §3 (*Exposure in `/environments`*) |
 | The `usage-aggregation-schedule` flag | [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md) §1 |
+| How a plan change (upgrade now, downgrade at period end) moves the row and keeps the quota year | [`plan-changes.md`](plan-changes.md) |
 | The decisions behind each rule, and the accepted limits as register topics | [`open-and-notable-topics.md`](open-and-notable-topics.md) §1.1 (seats), §4.19, §5.1–§5.9, §5.15, §5.18 |
 | How usage is counted and stored (catalog, counting modes, settling window, run log) | `schema_forge/docs/usage-measurement.md` |
 | What the SPA shows (banner, `/account`, translated refusals) | `schema_forge/docs/generated-custom-windows/app-shell-functional-flows.md` §3.2a-bis … §3.2a-quater |
@@ -29,7 +30,7 @@ ETGO_BILLING_RESOURCE  (System catalog: what is countable and how)
 ETGO_PLAN_QUOTA        (Plans window → Quotas tab: one row per plan and resource)
    │  INCLUDED_QTY, ENFORCEMENT_MODE off|warn|block, WARNING_THRESHOLD %, CONSUMPTION_SOURCE
    ▼
-ETGO_SUBSCRIPTION      (the tenant's open row: its plan, START_DATE, CURRENT_PERIOD_START / _END)
+ETGO_SUBSCRIPTION      (the tenant's open row: its plan, QUOTA_YEAR_START / START_DATE, CURRENT_PERIOD_START / _END)
    ▼
 QuotaEvaluator  ── consumption over the subscription year ──►  QuotaRules.verdict → ALLOW | WARN | DENY
    │                 aggregate: ETGO_USAGE_DAILY (written by the usage job)
@@ -42,17 +43,30 @@ report points (entry, environment list, /account)        NEO write path (block, 
 - **No active quota row means unlimited**, never zero, and costs no consumption query (§5.1 of the
   register). Deleting or deactivating a row is how a cap is removed.
 - **The window is the subscription year, whatever the billing interval** (register §5.5, §5.8):
-  the year that starts on each anniversary of `ETGO_SUBSCRIPTION.START_DATE`
+  the year that starts on each anniversary of the subscription's **quota-year anchor**
   (`QuotaPeriod.yearContaining`, each anniversary computed from the anchor itself, so a 29 February
   start falls on 28 February in non-leap years without drifting), never the calendar year or month, counted in whole server-local
   days: `[startOfDay(anniversary), startOfDay(next anniversary))`. `Included Qty` is therefore
   always a **yearly** quantity: a monthly-paid plan counts over the whole year and can reach its
-  limit in its first month. A row with no `START_DATE` (or one dated after now) falls back to the
+  limit in its first month. A row with no anchor (or one dated after now) falls back to the
   billing period, `[startOfDay(CURRENT_PERIOD_START), startOfDay(CURRENT_PERIOD_END))`.
-- **The year follows the subscription row.** `START_DATE` is set when the row is opened
-  (`SubscriptionService.openSubscription`), so a new row — a re-subscription after a cancel, or a
-  plan change that opens a successor row (register §5.13) — starts a new quota year; renewals of
-  the same row do not.
+- **The year follows the quota-year anchor, not the row** (ETP-5053). The anchor is
+  `ETGO_SUBSCRIPTION.QUOTA_YEAR_START` when the row carries one, else its `START_DATE`
+  (`TenantQuotas.quotaYearAnchorOf`). `START_DATE` is the moment the row was opened, and a plan
+  change opens a successor row (register §5.13), so anchoring on it alone would restart the year —
+  and wipe an exhausted yearly quota — on every upgrade or downgrade. Instead the successor
+  **inherits its predecessor's anchor**: your yearly quota renews when your billing anniversary
+  comes around, whatever plan you are on. Only two things start a new quota year: a **billing-
+  interval change** (monthly → annual; Stripe restarts the cycle on the change date and the anchor
+  becomes the new `current_period_start`), and a **new subscription after a cancellation** (a fresh
+  row with no anchor, counting from its own start). A renewal of the same row never does. Rows
+  written before ETP-5053 have no `QUOTA_YEAR_START` and keep counting from their start: no data
+  fix. Making this behaviour configurable (restart on upgrade vs keep) is a follow-up.
+- **A downgrade into an exceeded quota is allowed** (ETP-5053): usage carries over, so a tenant
+  already above the lower plan's `Included Qty` is DENY on that resource from the moment the
+  downgrade applies until the next anniversary (or the next upgrade): new NEO creates of it are
+  refused (`block` mode, §2), existing data stays readable. The account page shows the numbers
+  against the target plan before the customer confirms.
 - **A subscription with no current period** (a bound missing, inverted, the row closed, or now
   outside the period) is ALLOW with no consumption query, plus one `[QUOTA]` WARN per tenant per
   hour while the row is open (§5.9). This still holds with the yearly window: the year is only
