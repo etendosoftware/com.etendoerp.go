@@ -126,6 +126,47 @@ decision 11, `billing-reconciliation.md` §3, the flag section of
 `feature-flags-and-tenant-upgrade.md`). The menu entry, the process and Process Request scheduling
 are unaffected either way.
 
+### 🔴 1.10 A `block` quota on invoice lines can stop a legally required credit invoice (ETP-5051)
+
+**Ticket:** related ETP-5051 (the quota check), ETP-5876 (the rectificative and return line
+imports); no ticket. **Status:** open, product decision pending.
+
+**To raise with / decides:** Martin Taal
+
+Since ETP-5051 the NEO actions that create invoice lines run the plan quota check
+(`plan-quotas.md` §2), and three of them create the lines of a **credit** invoice:
+
+- `importOriginInvoiceLines` (`ImportOriginInvoiceLinesHandler`) copies a source invoice's lines,
+  negated, into a draft rectificative invoice ("factura rectificativa"). Checked since `3029c01cb`.
+- `importReturnLines` (`ImportInOutLinesIntoInvoiceHandler`) adds the lines of a completed return,
+  negative, to a draft rectificative invoice.
+- `createReturnInvoice` creates the return invoice; it was checked before either import.
+
+The two imports call `AbstractLineImportHandler.requireQuotaAllowed`, which runs
+`NeoQuotaCreateCheck` on the created `InvoiceLine` rows. A tenant whose plan has a `block` quota on
+an `InvoiceLine` resource and has reached the cap is answered 403 `QUOTA_EXCEEDED`, and the whole
+import is rolled back. **The tenant cannot issue a correcting or credit invoice through NEO.** In
+Spain (and elsewhere) issuing a rectificative to correct or cancel an issued invoice is a legal
+obligation, not an optional document, so a commercial cap ends up blocking a compliance duty.
+
+- **Only `block` mode refuses.** A `warn` quota reports and never refuses; `off` is never
+  evaluated on a create.
+- **There is no built-in exemption.** The check does not tell a credit line from any other line.
+- **The only way out today is operator configuration:** a restriction on the quota's Billing
+  Resource that credit lines do not match, so they are neither counted nor refused. For example
+  `e.invoicedQuantity > 0`: the lines both imports create are negative. Every other negative line
+  stops counting too, one on an ordinary invoice included. How restrictions are written and
+  matched: `plan-quotas.md` §2 (*Only restrictions that hold at create time*), §4.1 and §4.5.
+
+**Options:**
+
+- **(a) Keep blocking**, and document the restriction workaround for operators in
+  `plan-quotas.md`. No code; it relies on each operator setting the restriction before a tenant
+  reaches the cap.
+- **(b) Exempt rectificative and return credit lines from `block` quotas in code.**
+- **(c) Seed a default restriction on `InvoiceLine` quotas.** The module ships the Billing Resource
+  catalog empty (`plan-quotas.md` §4.1), so today there is no row to seed it on.
+
 ---
 
 ## 2. Deployment — constraints that are not visible in the code
@@ -1125,9 +1166,11 @@ ways to consume a resource never pass through either:
   document), whose `Refused` `NeoExtensionDispatcher` maps to the gate's 403 `QUOTA_EXCEEDED` with
   the action rolled back. The NEO actions that create documents do — invoice, shipment and receipt
   generation, returns and return invoices, follow-up documents, clone, quotation conversion and the
-  line imports, return line imports included (`plan-quotas.md` §2 lists them). Still unchecked: the
-  discount lines `TotalDiscountService` adds while a document is saved (deliberately), and any new
-  customization that creates rows and forgets the call — nothing detects the omission.
+  line imports, rectificative line imports (`importOriginInvoiceLines`, `importReturnLines`) and
+  return line imports included (`plan-quotas.md` §2 lists them; on credit invoices see §1.10).
+  Still unchecked: the discount lines `TotalDiscountService` adds while a document is saved
+  (deliberately), and any new customization that creates rows and forgets the call — nothing
+  detects the omission.
 - **Rows created by processes** or the Classic UI. The check sits on the NEO write path only; there
   is no DAL observer, by decision. The SPA's CSV/XLSX import is not among them: it writes through
   `/sws/neo/batch` and is refused, only with a generic row message (§5.18, ETP-5911).
@@ -1211,12 +1254,22 @@ On 2026-10-23: §5.14, §5.5. On 2026-10-24 (ETP-5051): §5.1, §5.6, §5.8, §5
 on 2026-10-23: §1.9, now §5.16; §1.4, now §5.17. Moved in from §4 on 2026-10-24: §4.20, now
 §5.18; §4.21, now §5.19.*
 
-### 🔴 5.13 `END_DATE` records what happened, never what will happen — and any value closes the row
+### ✅ 5.13 `END_DATE` records what happened, never what will happen — and any value closes the row
 
 **Ticket:** owner ETP-5053 (the `END_DATE` guard or meaning change). Closing the row on cancel was
 settled in ETP-5047 (§3.7).
 
-**To raise with:** Sebastián Barrozo — not discussed on 2026-09-28.
+**Status:** decided and implemented 2026-10-31 (ETP-5053): **option 1**. `END_DATE` keeps its
+past-tense meaning. Every writer goes through `SubscriptionService.closingDateOf`, which refuses a
+closing instant more than five minutes ahead of the server clock (`END_DATE_SKEW_TOLERANCE`,
+provider clock skew) with an `IllegalArgumentException` instead of closing the row early; the
+plan-change rollover (`SubscriptionService.rollToPlan`) closes the predecessor at *now* with the
+same targeted statement a re-subscription uses and inserts the successor in the same transaction.
+A scheduled downgrade lives only in `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE`, written by
+`PlanChangeService`; the row rolls over when Stripe's schedule phase emits
+`customer.subscription.updated` with the new item price (`SubscriptionPlanRollover`). Pinned by
+`SubscriptionServiceTest` (*a future closing instant is refused*). Option 2 (a date-aware "open")
+stays unneeded: nothing schedules a future-dated row.
 
 **What it means today.** `END_DATE` is past tense: the moment this row stopped being the tenant's
 current row. Its writers: a cancellation (ETP-5047 — Stripe's `ended_at`, else `canceled_at`, else
@@ -1633,7 +1686,11 @@ A periodless row has the answer of §5.9.
 
 **Changed on 2026-10-28 (ETP-5051): the window is now the subscription year.** Plan limits are
 yearly whatever the billing interval: a quota counts over the year that starts on each anniversary
-of `ETGO_SUBSCRIPTION.START_DATE` (`QuotaPeriod.yearContaining`, each anniversary computed from
+of the subscription's quota-year anchor — `ETGO_SUBSCRIPTION.QUOTA_YEAR_START` when set, else
+`START_DATE` (`TenantQuotas.quotaYearAnchorOf`, ETP-5053, 2026-10-31: a successor row opened by a
+plan change inherits its predecessor's anchor, so an upgrade or a downgrade never restarts the
+year; only a billing-interval change or a new subscription after a cancellation does, see
+`plan-changes.md`) — (`QuotaPeriod.yearContaining`, each anniversary computed from
 the anchor, so a 29 February start clamps to 28 February in non-leap years without drifting),
 day-aligned the same way. Still
 never the calendar month or year. The billing period keeps two roles: a billing period in effect is
@@ -1719,8 +1776,9 @@ subscription year whatever the billing interval (§5.5), so `INCLUDED_QTY` is a 
 monthly-paid plan too, and such a plan can reach it in one month. `TenantQuotas.getPlanInterval()`
 — the `period` of every `QuotaItem` — answers `year` whenever the row has a `START_DATE`, and the
 plan's billing interval only for a row without one; `periodStart` / `periodEnd` are the subscription
-year's days. **Still owed:** the **Quotas** tab help and the **Included Qty** help (`AD_TAB`,
-`AD_ELEMENT`, `AD_FIELD` sourcedata) still say "per billing period of the plan"; no ticket.
+year's days. **Done 2026-10-31 (ETP-5053):** the **Quotas** tab help and the **Included Qty** help (`AD_TAB`,
+`AD_ELEMENT`, `AD_FIELD` sourcedata) now say the quota is consumed over the subscription year,
+anchored on the Quota Year Start, whatever the billing interval.
 
 ### ✅ 5.9 A subscription with no current period needs a defined answer
 

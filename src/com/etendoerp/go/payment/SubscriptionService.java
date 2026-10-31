@@ -5,6 +5,7 @@
  */
 package com.etendoerp.go.payment;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -72,6 +73,12 @@ public class SubscriptionService {
   public static final String STATUS_PAST_DUE = "past_due";
   /** The subscription was terminated; the tenant is no longer entitled to the paid plan. */
   public static final String STATUS_CANCELED = "canceled";
+
+  /**
+   * ETP-5053 — how far ahead of this server's clock a closing instant may be and still count as
+   * "now" (provider clock skew); see {@link #requireNotFuture}.
+   */
+  static final Duration END_DATE_SKEW_TOLERANCE = Duration.ofMinutes(5);
 
   private static final String PARAM_CLIENT_ID = "environmentClientId";
   private static final String PARAM_CLIENT_IDS = "environmentClientIds";
@@ -474,6 +481,134 @@ public class SubscriptionService {
   }
 
   /**
+   * ETP-5053 — rolls a tenant's open row over to another plan: closes it now and opens its
+   * successor in the same transaction, so the tenant keeps a price history and at most one row is
+   * ever open ({@code etgo_sub_open_envclient_uq}).
+   *
+   * <p><b>What the successor inherits.</b> Everything that describes the same provider
+   * subscription — tenant, account, Stripe customer and subscription ids, status, billing period,
+   * grace anchor, event watermark, cancel-at-period-end flag — plus the <b>quota-year anchor</b>
+   * the caller decided ({@code QUOTA_YEAR_START}): the predecessor's for an upgrade or a
+   * downgrade, so usage already counted this year carries over against the new limit; the new
+   * provider period start for a billing-interval change, where the provider restarted the cycle.
+   * The successor starts a fresh price snapshot from the price the item is now on, and clears
+   * {@code PENDING_PLAN_ID} / {@code PENDING_EFFECTIVE_DATE}: whatever was pending has either
+   * just applied or was superseded by this change.
+   *
+   * <p><b>Order of writes.</b> The predecessor is closed by a targeted statement before the
+   * successor is saved, for the reason {@link #closeInDatabase} gives: Hibernate flushes inserts
+   * before updates, and the partial unique index would reject the new open row while the old one
+   * still reads as open. {@code END_DATE} is "now" — past tense, never the future (§5.13).
+   *
+   * <p>Written as system, like {@link #openSubscription}: the rows are client-{@code 0} rows about
+   * a tenant. Not committed; the caller (the lifecycle webhook, or the reconciliation) commits it
+   * with the event that caused it.
+   *
+   * @param open the tenant's open row, never null
+   * @param target the plan the provider subscription is now on, never null
+   * @param chargedPriceId the Stripe price the item is on, may be null (then the plan's)
+   * @param quotaYearStart the anchor of the successor's quota year, may be null (then its start)
+   * @return the open successor row
+   */
+  public Subscription rollToPlan(Subscription open, Plan target, String chargedPriceId,
+      Date quotaYearStart) {
+    if (open == null || target == null) {
+      throw new IllegalArgumentException("A plan change needs the open row and the target plan");
+    }
+    return SystemContext.call("rolling a subscription over to another plan",
+        () -> rollAsSystem(open, target, chargedPriceId, quotaYearStart));
+  }
+
+  private Subscription rollAsSystem(Subscription open, Plan target, String chargedPriceId,
+      Date quotaYearStart) {
+    closeInDatabase(open);
+    Subscription successor = OBProvider.getInstance().get(Subscription.class);
+    successor.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    successor.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    successor.setEnvironmentClient(open.getEnvironmentClient());
+    successor.setEtendoGoAccount(open.getEtendoGoAccount());
+    successor.setPlan(target);
+    successor.setSubscriptionStatus(open.getSubscriptionStatus());
+    Date now = new Date();
+    successor.setStartDate(now);
+    successor.setEndDate(null);
+    successor.setQuotaYearStart(quotaYearStart != null && quotaYearStart.after(now) ? now
+        : quotaYearStart);
+    successor.setCurrentPeriodStart(open.getCurrentPeriodStart());
+    successor.setCurrentPeriodEnd(open.getCurrentPeriodEnd());
+    successor.setGraceAnchor(open.getGraceAnchor());
+    successor.setLastEventAt(open.getLastEventAt());
+    successor.setCancelAtPeriodEnd(open.isCancelAtPeriodEnd());
+    successor.setStripeCustomer(open.getStripeCustomer());
+    successor.setStripeSubscription(open.getStripeSubscription());
+    successor.setPendingPlan(null);
+    successor.setPendingEffectiveDate(null);
+    String planPriceId = StringUtils.trimToNull(target.getProviderPriceID());
+    String charged = StringUtils.defaultIfBlank(StringUtils.trimToNull(chargedPriceId),
+        planPriceId);
+    successor.setProviderPriceID(charged);
+    if (StringUtils.equals(charged, planPriceId)) {
+      successor.setSnapshotAmount(target.getDisplayPrice());
+      successor.setSnapshotCurrency(StringUtils.trimToNull(target.getCurrencyCode()));
+    }
+    saveOrEvict(successor);
+    log.info("Rolled subscription {} of tenant {} over to plan '{}' as {} (quota year anchored on"
+        + " {})", open.getId(), open.getEnvironmentClient() == null ? null
+            : open.getEnvironmentClient().getId(), target.getSearchKey(), successor.getId(),
+        successor.getQuotaYearStart());
+    return successor;
+  }
+
+  /**
+   * ETP-5053 — records a scheduled downgrade on the open row: the plan it moves to and when
+   * ({@code PENDING_PLAN_ID}, {@code PENDING_EFFECTIVE_DATE}). The provider holds the schedule;
+   * these columns exist so the Classic window, the account page and the reconciliation see the
+   * pending change without calling Stripe. A future intention lives here and only here — never
+   * on {@code END_DATE} (§5.13).
+   *
+   * <p>Written as system (the row is a client-{@code 0} row) and not committed: the caller
+   * commits it with the provider call that scheduled the change.
+   *
+   * @param open the tenant's open row, never null
+   * @param target the plan the subscription moves to at {@code effectiveAt}, never null
+   * @param effectiveAt the end of the current billing period, never null
+   */
+  public void writePendingChange(Subscription open, Plan target, Date effectiveAt) {
+    if (open == null || target == null || effectiveAt == null) {
+      throw new IllegalArgumentException(
+          "A pending plan change needs the open row, the target plan and its effective date");
+    }
+    SystemContext.run("recording a pending plan change", () -> {
+      open.setPendingPlan(target);
+      open.setPendingEffectiveDate(new Date(effectiveAt.getTime()));
+      saveOrEvict(open);
+      log.info("Subscription {} will move to plan '{}' on {}", open.getId(),
+          target.getSearchKey(), effectiveAt);
+    });
+  }
+
+  /**
+   * ETP-5053 — clears a pending change: the schedule was released (an upgrade superseded the
+   * downgrade) or the downgrade applied and the row rolled over. A row with nothing pending is
+   * left untouched.
+   *
+   * @param open the tenant's open row, never null
+   * @return true when something was cleared
+   */
+  public boolean clearPendingChange(Subscription open) {
+    if (open == null || (open.getPendingPlan() == null && open.getPendingEffectiveDate() == null)) {
+      return false;
+    }
+    SystemContext.run("clearing a pending plan change", () -> {
+      open.setPendingPlan(null);
+      open.setPendingEffectiveDate(null);
+      saveOrEvict(open);
+      log.info("Pending plan change of subscription {} cleared", open.getId());
+    });
+    return true;
+  }
+
+  /**
    * ETP-5047 — fills the billing period of the tenant's open row from the payment provider, when
    * the row names a Stripe subscription and has no period yet.
    *
@@ -601,16 +736,12 @@ public class SubscriptionService {
     try {
       OBDal.getInstance().save(subscription);
     } catch (RuntimeException e) {
-      evictQuietly(subscription);
+      try {
+        OBDal.getInstance().getSession().evict(subscription);
+      } catch (RuntimeException evictFailure) {
+        log.error("Could not evict the refused subscription row from the session", evictFailure);
+      }
       throw e;
-    }
-  }
-
-  private static void evictQuietly(Subscription subscription) {
-    try {
-      OBDal.getInstance().getSession().evict(subscription);
-    } catch (RuntimeException e) {
-      log.error("Could not evict the refused subscription row from the session", e);
     }
   }
 
@@ -692,7 +823,8 @@ public class SubscriptionService {
       writeCancelAtPeriodEnd(subscription, outcome.cancelAtPeriodEnd());
       writeEventWatermark(subscription, eventAt);
       if (outcome.closesSubscription() && subscription.getEndDate() == null) {
-        close(subscription, outcome.endedAt());
+        // END_DATE is the provider's end instant, never before START_DATE, "now" when none.
+        subscription.setEndDate(closingDateOf(subscription, outcome.endedAt()));
       }
       OBDal.getInstance().save(subscription);
       log.info("Subscription {} moved to '{}'{} by a lifecycle event", subscription.getId(),
@@ -798,18 +930,35 @@ public class SubscriptionService {
         : subscription.getLastEventAt().toInstant();
   }
 
-  /**
-   * Closes a row: {@code END_DATE} is the provider's end instant, never before the row's own
-   * {@code START_DATE} ({@code ETGO_SUB_DATES_CHK}), and "now" when the provider gave none.
-   */
-  private static void close(Subscription subscription, Instant endedAt) {
-    subscription.setEndDate(closingDateOf(subscription, endedAt));
-  }
-
   private static Date closingDateOf(Subscription subscription, Instant endedAt) {
-    Date end = endedAt == null ? new Date() : Date.from(endedAt);
+    Date now = new Date();
+    Date end = endedAt == null ? now : Date.from(endedAt);
+    requireNotFuture(subscription, end, now);
     Date start = subscription.getStartDate();
     return start != null && end.before(start) ? start : end;
+  }
+
+  /**
+   * ETP-5053 — {@code END_DATE} records what happened, never what will happen
+   * ({@code open-and-notable-topics.md} §5.13, option 1): every writer sets it to the moment the
+   * row stopped being the tenant's current row, and a future intention lives only in
+   * {@code PENDING_PLAN_ID} / {@code PENDING_EFFECTIVE_DATE}.
+   *
+   * <p>Why a guard and not a convention: "open" is {@code END_DATE IS NULL}, so a future-dated end
+   * would close the row <em>immediately</em> — the tenant would read as canceled, and free, inside
+   * a period it paid for — and nothing in the schema rejects that shape. A provider instant a few
+   * seconds ahead of this server's clock is still "now"; {@link #END_DATE_SKEW_TOLERANCE} is the
+   * allowance. Anything beyond it is a programming error or a misread payload, and the write is
+   * refused rather than silently clamped so it is seen.
+   *
+   * @throws IllegalArgumentException when {@code end} is later than {@code now} plus the tolerance
+   */
+  static void requireNotFuture(Subscription subscription, Date end, Date now) {
+    if (end.getTime() > now.getTime() + END_DATE_SKEW_TOLERANCE.toMillis()) {
+      throw new IllegalArgumentException("END_DATE records what happened, never what will happen:"
+          + " refused the future closing instant " + end.toInstant() + " for subscription "
+          + (subscription == null ? null : subscription.getId()));
+    }
   }
 
   /**

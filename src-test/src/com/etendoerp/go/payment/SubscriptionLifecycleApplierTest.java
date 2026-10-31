@@ -79,6 +79,26 @@ public class SubscriptionLifecycleApplierTest {
   }
 
   @Test
+  public void aSubscriptionUpdateCarriesTheItemPriceExpandedOrBare() throws Exception {
+    // ETP-5053 — the item price is how an applied plan change shows up; the price may arrive
+    // expanded (an object) or as its bare id.
+    SubscriptionEventOutcome expanded = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"items\":{\"data\":[{\"price\":{\"id\":\"price_pro\"}}]}}}}"));
+    SubscriptionEventOutcome bare = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\","
+            + "\"items\":{\"data\":[{\"price\":\"price_core\"}]}}}}"));
+    SubscriptionEventOutcome none = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"active\"}}}"));
+    assertEquals("price_pro", expanded.providerPriceId());
+    assertEquals("price_core", bare.providerPriceId());
+    assertNull(none.providerPriceId());
+    // A paid invoice names no item price: nothing to compare, nothing rolled over.
+    assertNull(applier.evaluate("invoice.paid",
+        event("{\"data\":{\"object\":{\"subscription\":\"sub_1\"}}}")).providerPriceId());
+  }
+
+  @Test
   public void anIgnoredSubscriptionUpdateCarriesNoCancelFlag() throws Exception {
     SubscriptionEventOutcome outcome = applier.evaluate("customer.subscription.updated",
         event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"incomplete\","

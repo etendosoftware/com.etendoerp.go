@@ -174,6 +174,41 @@ class QuotaDefinitionTest {
   }
 
   @Test
+  void theQuotaYearIsAnchoredOnTheQuotaYearStartWhenTheRowCarriesOne() {
+    // ETP-5053 — a successor row opened by a plan change inherits its predecessor's anchor, so
+    // the year (and the usage counted in it) does not restart with the row.
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getCurrentPeriodStart()).thenReturn(PERIOD_START);
+    when(subscription.getCurrentPeriodEnd()).thenReturn(PERIOD_END);
+    when(subscription.getStartDate()).thenReturn(NOW);
+    java.util.Date inherited = java.util.Date.from(NOW.toInstant().minusSeconds(200L * 86_400L));
+    when(subscription.getQuotaYearStart()).thenReturn(inherited);
+
+    assertEquals(inherited, TenantQuotas.quotaYearAnchorOf(subscription));
+    TenantQuotas tenant = TenantQuotas.of(CLIENT, subscription, null);
+    assertEquals(TenantQuotas.QUOTA_WINDOW, tenant.getPlanInterval());
+    assertEquals(QuotaPeriod.yearContaining(inherited, NOW), tenant.currentPeriod(NOW));
+  }
+
+  @Test
+  void aRowWithoutAQuotaYearStartIsAnchoredOnItsStartDate() {
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getStartDate()).thenReturn(PERIOD_START);
+
+    assertEquals(PERIOD_START, TenantQuotas.quotaYearAnchorOf(subscription));
+  }
+
+  @Test
+  void aQuotaYearStartAfterTheStartDateIsClampedToTheStartDate() {
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getStartDate()).thenReturn(PERIOD_START);
+    when(subscription.getQuotaYearStart()).thenReturn(java.util.Date.from(
+        PERIOD_START.toInstant().plusSeconds(60L)));
+
+    assertEquals(PERIOD_START, TenantQuotas.quotaYearAnchorOf(subscription));
+  }
+
+  @Test
   void anEndDateMakesTheRowClosedWithNoCurrentPeriod() {
     Subscription subscription = mock(Subscription.class);
     when(subscription.getCurrentPeriodStart()).thenReturn(PERIOD_START);
