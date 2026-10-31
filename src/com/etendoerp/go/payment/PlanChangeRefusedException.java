@@ -30,6 +30,8 @@ public class PlanChangeRefusedException extends RuntimeException {
   private final String code;
 
   /**
+   * A refusal with its stable code and the reason, for logs and the operator.
+   *
    * @param code one of this class's codes
    * @param message what was refused and why, for logs and the operator
    */

@@ -48,6 +48,8 @@ public class SubscriptionPlanRollover {
   private final PlanCatalogService planCatalogService;
 
   /**
+   * Wires the rollover over the services it rolls with.
+   *
    * @param subscriptionService rolls the row over
    * @param planCatalogService resolves the target plan by its provider price
    */
