@@ -60,11 +60,10 @@ class PlanChangeServiceTest {
   private final PlanChangeCatalog planChangeCatalog = mock(PlanChangeCatalog.class);
   private final TenantEnvironmentLifecycleService lifecycle =
       mock(TenantEnvironmentLifecycleService.class);
-  private final SubscriptionLifecycleApplier applier = new SubscriptionLifecycleApplier();
   private final StripeApiClient stripe = mock(StripeApiClient.class);
   private boolean configured = true;
   private final PlanChangeService service = new PlanChangeService(subscriptionService,
-      planCatalogService, planChangeCatalog, lifecycle, applier, stripe, () -> configured,
+      planCatalogService, planChangeCatalog, lifecycle, stripe, () -> configured,
       Clock.fixed(NOW, ZoneOffset.UTC));
 
   private Plan core;

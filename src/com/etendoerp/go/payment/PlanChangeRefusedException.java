@@ -29,6 +29,10 @@ public class PlanChangeRefusedException extends RuntimeException {
 
   private final String code;
 
+  /**
+   * @param code one of this class's codes
+   * @param message what was refused and why, for logs and the operator
+   */
   public PlanChangeRefusedException(String code, String message) {
     super(message);
     this.code = code;

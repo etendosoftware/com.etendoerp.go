@@ -736,16 +736,12 @@ public class SubscriptionService {
     try {
       OBDal.getInstance().save(subscription);
     } catch (RuntimeException e) {
-      evictQuietly(subscription);
+      try {
+        OBDal.getInstance().getSession().evict(subscription);
+      } catch (RuntimeException evictFailure) {
+        log.error("Could not evict the refused subscription row from the session", evictFailure);
+      }
       throw e;
-    }
-  }
-
-  private static void evictQuietly(Subscription subscription) {
-    try {
-      OBDal.getInstance().getSession().evict(subscription);
-    } catch (RuntimeException e) {
-      log.error("Could not evict the refused subscription row from the session", e);
     }
   }
 
@@ -827,7 +823,8 @@ public class SubscriptionService {
       writeCancelAtPeriodEnd(subscription, outcome.cancelAtPeriodEnd());
       writeEventWatermark(subscription, eventAt);
       if (outcome.closesSubscription() && subscription.getEndDate() == null) {
-        close(subscription, outcome.endedAt());
+        // END_DATE is the provider's end instant, never before START_DATE, "now" when none.
+        subscription.setEndDate(closingDateOf(subscription, outcome.endedAt()));
       }
       OBDal.getInstance().save(subscription);
       log.info("Subscription {} moved to '{}'{} by a lifecycle event", subscription.getId(),
@@ -931,14 +928,6 @@ public class SubscriptionService {
   public static Instant lastEventAtOf(Subscription subscription) {
     return subscription == null || subscription.getLastEventAt() == null ? null
         : subscription.getLastEventAt().toInstant();
-  }
-
-  /**
-   * Closes a row: {@code END_DATE} is the provider's end instant, never before the row's own
-   * {@code START_DATE} ({@code ETGO_SUB_DATES_CHK}), and "now" when the provider gave none.
-   */
-  private static void close(Subscription subscription, Instant endedAt) {
-    subscription.setEndDate(closingDateOf(subscription, endedAt));
   }
 
   private static Date closingDateOf(Subscription subscription, Instant endedAt) {

@@ -98,16 +98,6 @@ class SubscriptionPlanChangeActionHandlerTest {
         + (planId == null ? "null" : "\"" + planId + "\"") + "}}";
   }
 
-  private static String messageOf(JSONObject response) {
-    JSONObject actions = response.optJSONObject("responseActions") == null ? null
-        : response.optJSONObject("responseActions");
-    if (actions == null) {
-      // The builder answers an array of actions.
-      return response.toString();
-    }
-    return actions.toString();
-  }
-
   @Test
   void appliesAnUpgradeAndSaysSo() throws Exception {
     when(service.requestChange(row, "pro")).thenReturn(new PlanChangeResultFixture()
