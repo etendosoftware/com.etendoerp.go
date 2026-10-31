@@ -92,6 +92,11 @@ import com.etendoerp.go.payment.StripeEventTypes;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
+import com.etendoerp.go.payment.PlanChangeRefusedException;
+import com.etendoerp.go.payment.PlanChangeResult;
+import com.etendoerp.go.payment.PlanChangeService;
+import com.etendoerp.go.payment.PlanChangeTiming;
+import com.etendoerp.go.payment.StripeTransportException;
 import com.etendoerp.go.payment.PlanNotAvailableException;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
@@ -106,6 +111,7 @@ import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.PlanChange;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -192,6 +198,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/billing/offers — Server-owned billing offer projection
  *   POST /sws/go/billing/purchases — Start a new owner-authorized purchase
  *   GET  /sws/go/billing/purchases/{id} — Read one account-scoped purchase projection
+ *   GET  /sws/go/billing/subscription/plan-changes — ETP-5053: the plan changes the shown
+ *        subscription may ask for, each with the tenant's usage against the target plan's quotas
+ *   POST /sws/go/billing/subscription/plan-change — ETP-5053: upgrade now or schedule a downgrade
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
  * Auth model: session token in Authorization header ("Bearer <token>").
@@ -497,6 +506,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   SubscriptionModelSwitch subscriptionModelSwitch = new SubscriptionModelSwitch();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   PlanCatalogService planCatalogService = new PlanCatalogService();
+  /** ETP-5053 — plan upgrades and downgrades; package-visible for tests. */
+  PlanChangeService planChangeService = new PlanChangeService();
   /** ETP-5051 — the one quota evaluator; package-visible for tests. */
   QuotaEvaluator quotaEvaluator = QuotaEvaluator.forReports();
   /**
@@ -623,6 +634,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingOverview(request, response);
     } else if (isPath(path, "/billing/subscription")) {
       handleBillingSubscription(request, response);
+    } else if (isPath(path, "/billing/subscription/plan-changes")) {
+      handleBillingPlanChanges(request, response);
     } else if (path != null && path.startsWith("/billing/purchases/")) {
       handleBillingPurchase(request, response);
     } else {
@@ -818,6 +831,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/billing/subscription/portal")) {
       handleBillingPortal(request, response);
+    } else if (isPath(path, "/billing/subscription/plan-change")) {
+      handleBillingPlanChange(request, response);
     } else if (isPath(path, "/billing/reactivation")) {
       handleSubscriptionReactivation(request, response);
     } else if (isPath(path, "/demo-data-transfer/retry")) {
@@ -1778,6 +1793,176 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("planName",
         plan == null ? JSONObject.NULL : StringUtils.defaultString(plan.getName()));
     result.put("planQuotas", quotas);
+    // ETP-5053 — the anniversary the quota year is counted from, and the downgrade pending at the
+    // provider, so the page can say "your plan changes to X on <date>" without calling Stripe.
+    Date quotaYear = subscription == null ? null : TenantQuotas.quotaYearAnchorOf(subscription);
+    result.put("quotaYearStart", quotaYear == null ? JSONObject.NULL
+        : quotaYear.toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString());
+    result.put("pendingChange", pendingChangeJson(subscription));
+  }
+
+  /**
+   * ETP-5053 — the downgrade scheduled on a row ({@code PENDING_PLAN_ID} /
+   * {@code PENDING_EFFECTIVE_DATE}), or JSON null when nothing is pending or the row is closed.
+   */
+  private static Object pendingChangeJson(Subscription subscription) throws JSONException {
+    if (subscription == null || subscription.getEndDate() != null
+        || subscription.getPendingPlan() == null
+        || subscription.getPendingEffectiveDate() == null) {
+      return JSONObject.NULL;
+    }
+    JSONObject pending = planJson(subscription.getPendingPlan());
+    pending.put("effectiveAt", subscription.getPendingEffectiveDate().toInstant().toString());
+    pending.put("timing", PlanChangeTiming.PERIOD_END.value());
+    return pending;
+  }
+
+  /** ETP-5053 — a catalog plan as the account page names it. */
+  private static JSONObject planJson(Plan plan) throws JSONException {
+    JSONObject json = new JSONObject();
+    json.put(FIELD_PLAN_KEY, plan.getSearchKey());
+    json.put("planName", StringUtils.defaultString(plan.getName()));
+    json.put("billingInterval", StringUtils.defaultString(plan.getBillingInterval()));
+    json.put("displayPrice", plan.getDisplayPrice() == null ? JSONObject.NULL
+        : plan.getDisplayPrice().toPlainString());
+    json.put(FIELD_CURRENCY, StringUtils.defaultString(plan.getCurrencyCode()));
+    return json;
+  }
+
+  /**
+   * GET /sws/go/billing/subscription/plan-changes — ETP-5053.
+   *
+   * <p>The plan changes the shown subscription may ask for (the same subscription
+   * {@code GET /billing/subscription} describes, or the environment named by {@code ?clientId=}
+   * for a "Mis empresas" row — ownership is the query's, as for the portal). Each offered target
+   * carries its timing ({@code immediate} / {@code period_end}), whether it changes the billing
+   * interval (then the quota year restarts), and the tenant's <em>current</em> usage measured
+   * against the target plan's quotas, so a downgrade into an exceeded quota shows its numbers
+   * before the customer confirms. No active Allowed plan changes row for a target means it is
+   * simply not listed.
+   */
+  private void handleBillingPlanChanges(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithPlatformContext(request, response, "billing-plan-changes", authenticated -> {
+      String requestedClientId = StringUtils.trimToNull(request.getParameter(FIELD_CLIENT_ID));
+      CheckoutRequest purchase = findPortalSubscription(authenticated,
+          ZERO_ID.equals(requestedClientId) ? null : requestedClientId);
+      JSONObject result = new JSONObject();
+      if (purchase == null || purchase.getCreatedClient() == null) {
+        result.put("hasSubscription", false);
+        result.put("changes", new JSONArray());
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+        return;
+      }
+      String clientId = purchase.getCreatedClient().getId();
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      try {
+        Subscription subscription = subscriptionService.findOpen(clientId).orElse(null);
+        Plan current = subscription == null ? null : subscription.getPlan();
+        result.put("hasSubscription", subscription != null);
+        result.put(FIELD_CLIENT_ID, clientId);
+        result.put("currentPlan", current == null ? JSONObject.NULL : planJson(current));
+        result.put("subscriptionStatus", subscription == null ? JSONObject.NULL
+            : StringUtils.defaultString(SubscriptionService.effectiveStatusOf(subscription)));
+        result.put("pendingChange", pendingChangeJson(subscription));
+        JSONArray changes = new JSONArray();
+        for (PlanChange change : planChangeService.allowedChanges(subscription)) {
+          Plan target = change.getTargetPlan();
+          JSONObject item = planJson(target);
+          item.put("timing", change.getTiming());
+          item.put("intervalChange", current != null && !StringUtils.equalsIgnoreCase(
+              StringUtils.trimToEmpty(current.getBillingInterval()),
+              StringUtils.trimToEmpty(target.getBillingInterval())));
+          // Today's usage against the target plan's limits: the same evaluator and window as
+          // the page's own quotas, only the included quantities are the target's.
+          TenantQuotas against = TenantQuotas.of(clientId, subscription,
+              planCatalogService.listActiveQuotas(target));
+          item.put("quotas", QuotaItemJson.ofAll(evaluateQuotas(against)));
+          changes.put(item);
+        }
+        result.put("changes", changes);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    });
+  }
+
+  /**
+   * POST /sws/go/billing/subscription/plan-change — ETP-5053.
+   * Body: {@code { "planKey": "<VALUE of the target plan>", "clientId": "<optional>" }}.
+   *
+   * <p>Applies an upgrade now (the item is updated at the provider, prorated, and the row rolled
+   * over before answering) or schedules a downgrade for the end of the current billing period
+   * (recorded on the row as pending). Refusals carry the service's code: 404
+   * {@code NO_SUBSCRIPTION} / {@code PLAN_NOT_FOUND}, 409 {@code PLAN_CHANGE_NOT_ALLOWED} /
+   * {@code SUBSCRIPTION_NOT_CURRENT}, 503 {@code CHECKOUT_NOT_CONFIGURED}, 502
+   * {@code BILLING_PROVIDER_ERROR}. Repeating a request is idempotent: the same downgrade is
+   * reported {@code alreadyPending}, and an upgrade carries an idempotency key at the provider.
+   */
+  private void handleBillingPlanChange(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithPlatformContext(request, response, "billing-plan-change", authenticated -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) {
+        return;
+      }
+      String planKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
+      if (planKey == null) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+            "planKey is required", "Choose the plan to change to");
+        return;
+      }
+      String requestedClientId = StringUtils.trimToNull(body.optString(FIELD_CLIENT_ID, ""));
+      CheckoutRequest purchase = findPortalSubscription(authenticated,
+          ZERO_ID.equals(requestedClientId) ? null : requestedClientId);
+      if (purchase == null || purchase.getCreatedClient() == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND,
+            PlanChangeRefusedException.NO_SUBSCRIPTION, "No subscription for this account",
+            "No subscription for this account");
+        return;
+      }
+      String clientId = purchase.getCreatedClient().getId();
+      try {
+        // The service runs its own client-0 writes as system; the request's DAL filter commits.
+        PlanChangeResult changed = planChangeService.requestChange(clientId, planKey);
+        JSONObject result = planJson(changed.targetPlan());
+        result.put("timing", changed.timing().value());
+        result.put("effectiveAt", changed.effectiveAt().toString());
+        result.put("alreadyPending", changed.alreadyPending());
+        result.put(FIELD_CLIENT_ID, clientId);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (PlanChangeRefusedException e) {
+        EtendoGoDalHelper.rollbackDalChanges("billing-plan-change", e, log);
+        log.warn("Plan change refused for tenant {}: {} ({})", clientId, e.getMessage(),
+            e.code());
+        writeError(response, planChangeStatusOf(e.code()), e.code(), e.getMessage(),
+            e.getMessage());
+      } catch (StripeTransportException e) {
+        EtendoGoDalHelper.rollbackDalChanges("billing-plan-change", e, log);
+        log.error("The payment provider did not answer the plan change of tenant {}", clientId,
+            e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
+            "Unable to change the plan", "Unable to change the plan");
+      }
+    });
+  }
+
+  /** ETP-5053 — the HTTP status of each plan change refusal code. */
+  static int planChangeStatusOf(String code) {
+    switch (StringUtils.defaultString(code)) {
+      case PlanChangeRefusedException.NO_SUBSCRIPTION:
+      case PlanChangeRefusedException.PLAN_NOT_FOUND:
+        return HttpServletResponse.SC_NOT_FOUND;
+      case PlanChangeRefusedException.PLAN_CHANGE_NOT_ALLOWED:
+      case PlanChangeRefusedException.SUBSCRIPTION_NOT_CURRENT:
+        return HttpServletResponse.SC_CONFLICT;
+      case PlanChangeRefusedException.NOT_CONFIGURED:
+        return HttpServletResponse.SC_SERVICE_UNAVAILABLE;
+      default:
+        return HttpServletResponse.SC_BAD_GATEWAY;
+    }
   }
 
   /**
