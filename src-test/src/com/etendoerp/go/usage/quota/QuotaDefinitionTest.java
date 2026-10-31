@@ -181,7 +181,7 @@ class QuotaDefinitionTest {
     when(subscription.getCurrentPeriodStart()).thenReturn(PERIOD_START);
     when(subscription.getCurrentPeriodEnd()).thenReturn(PERIOD_END);
     when(subscription.getStartDate()).thenReturn(NOW);
-    java.util.Date inherited = new java.util.Date(NOW.getTime() - 200L * 86_400_000L);
+    java.util.Date inherited = java.util.Date.from(NOW.toInstant().minusSeconds(200L * 86_400L));
     when(subscription.getQuotaYearStart()).thenReturn(inherited);
 
     assertEquals(inherited, TenantQuotas.quotaYearAnchorOf(subscription));
@@ -202,8 +202,8 @@ class QuotaDefinitionTest {
   void aQuotaYearStartAfterTheStartDateIsClampedToTheStartDate() {
     Subscription subscription = mock(Subscription.class);
     when(subscription.getStartDate()).thenReturn(PERIOD_START);
-    when(subscription.getQuotaYearStart()).thenReturn(new java.util.Date(PERIOD_START.getTime()
-        + 60_000L));
+    when(subscription.getQuotaYearStart()).thenReturn(java.util.Date.from(
+        PERIOD_START.toInstant().plusSeconds(60L)));
 
     assertEquals(PERIOD_START, TenantQuotas.quotaYearAnchorOf(subscription));
   }

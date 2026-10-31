@@ -47,6 +47,10 @@ public class SubscriptionPlanRollover {
   private final SubscriptionService subscriptionService;
   private final PlanCatalogService planCatalogService;
 
+  /**
+   * @param subscriptionService rolls the row over
+   * @param planCatalogService resolves the target plan by its provider price
+   */
   public SubscriptionPlanRollover(SubscriptionService subscriptionService,
       PlanCatalogService planCatalogService) {
     this.subscriptionService = subscriptionService;

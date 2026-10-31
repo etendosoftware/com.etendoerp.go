@@ -13,7 +13,6 @@ import java.time.Instant;
 import java.util.Date;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.function.BooleanSupplier;
 
 import org.apache.commons.lang3.StringUtils;
@@ -69,6 +68,7 @@ public class PlanChangeService {
   static final String PRORATION_NONE = "none";
   private static final String SUBSCRIPTIONS = "/v1/subscriptions/";
   private static final String SCHEDULES = "/v1/subscription_schedules";
+  private static final String FIELD_SCHEDULE = "schedule";
 
   private final SubscriptionService subscriptionService;
   private final PlanCatalogService planCatalogService;
@@ -82,20 +82,22 @@ public class PlanChangeService {
   /** Production wiring. */
   public PlanChangeService() {
     this(new SubscriptionService(), new PlanCatalogService(), new PlanChangeCatalog(),
-        new TenantEnvironmentLifecycleService(), new SubscriptionLifecycleApplier(),
-        new HttpUrlConnectionStripeApiClient(), CheckoutConfiguration::isConfigured,
-        Clock.systemUTC());
+        new TenantEnvironmentLifecycleService(), new HttpUrlConnectionStripeApiClient(),
+        CheckoutConfiguration::isConfigured, Clock.systemUTC());
   }
 
+  /**
+   * Explicit wiring, for tests. The lifecycle applier is pure (no database, no clock), so it is
+   * never a seam and is created here.
+   */
   PlanChangeService(SubscriptionService subscriptionService, PlanCatalogService planCatalogService,
       PlanChangeCatalog planChangeCatalog, TenantEnvironmentLifecycleService lifecycleService,
-      SubscriptionLifecycleApplier applier, StripeApiClient stripe,
-      BooleanSupplier providerConfigured, Clock clock) {
+      StripeApiClient stripe, BooleanSupplier providerConfigured, Clock clock) {
     this.subscriptionService = subscriptionService;
     this.planCatalogService = planCatalogService;
     this.planChangeCatalog = planChangeCatalog;
     this.lifecycleService = lifecycleService;
-    this.applier = applier;
+    this.applier = new SubscriptionLifecycleApplier();
     this.stripe = stripe;
     this.providerConfigured = providerConfigured;
     this.clock = clock;
@@ -138,6 +140,11 @@ public class PlanChangeService {
    * Requests a plan change on a known open row (the Classic operator action resolves the row
    * itself).
    *
+   * @param open the tenant's open row, may be null (then refused as {@code NO_SUBSCRIPTION})
+   * @param targetPlanKey the {@code VALUE} of the plan asked for
+   * @return what happened: applied now, or scheduled for the period end
+   * @throws PlanChangeRefusedException with one of its codes when the change is refused
+   * @throws StripeTransportException when the provider did not answer
    * @see #requestChange(String, String)
    */
   public PlanChangeResult requestChange(Subscription open, String targetPlanKey)
@@ -329,12 +336,13 @@ public class PlanChangeService {
 
   /** The schedule a subscription is under: {@code schedule} as an id or an expanded object. */
   static String scheduleIdOf(JSONObject subscription) {
-    if (subscription == null || !subscription.has("schedule") || subscription.isNull("schedule")) {
+    if (subscription == null || !subscription.has(FIELD_SCHEDULE)
+        || subscription.isNull(FIELD_SCHEDULE)) {
       return null;
     }
-    JSONObject expanded = subscription.optJSONObject("schedule");
+    JSONObject expanded = subscription.optJSONObject(FIELD_SCHEDULE);
     return StringUtils.trimToNull(expanded != null ? expanded.optString("id", "")
-        : subscription.optString("schedule", ""));
+        : subscription.optString(FIELD_SCHEDULE, ""));
   }
 
   static String firstItemIdOf(JSONObject subscription) {
@@ -376,10 +384,5 @@ public class PlanChangeService {
 
   private static String clientIdOf(Subscription open) {
     return open.getEnvironmentClient() == null ? null : open.getEnvironmentClient().getId();
-  }
-
-  /** @return the optional target plan of a pending change, for callers rendering it */
-  public static Optional<Plan> pendingPlanOf(Subscription open) {
-    return open == null ? Optional.empty() : Optional.ofNullable(open.getPendingPlan());
   }
 }

@@ -40,6 +40,7 @@ public class PlanCatalogService {
   private static final String PARAM_SEARCH_KEY = "searchKey";
   private static final String PARAM_PLAN_ID = "planId";
   private static final String PARAM_PRICE_ID = "priceId";
+  private static final String PLAN_WHERE = "as plan where plan.";
 
   /**
    * Reads the configured legacy fallback price id ({@code etendo.go.checkout.price.id} /
@@ -82,7 +83,7 @@ public class PlanCatalogService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Plan> query = OBDal.getInstance().createQuery(Plan.class,
-          "as plan where plan." + Plan.PROPERTY_SEARCHKEY + " = :" + PARAM_SEARCH_KEY
+          PLAN_WHERE + Plan.PROPERTY_SEARCHKEY + " = :" + PARAM_SEARCH_KEY
               + " and plan." + Plan.PROPERTY_ACTIVE + " = true");
       query.setNamedParameter(PARAM_SEARCH_KEY, StringUtils.trimToEmpty(planKey));
       query.setFilterOnReadableClients(false);
@@ -113,7 +114,7 @@ public class PlanCatalogService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Plan> query = OBDal.getInstance().createQuery(Plan.class,
-          "as plan where plan." + Plan.PROPERTY_PROVIDERPRICEID + " = :" + PARAM_PRICE_ID
+          PLAN_WHERE + Plan.PROPERTY_PROVIDERPRICEID + " = :" + PARAM_PRICE_ID
               + " and plan." + Plan.PROPERTY_ACTIVE + " = true"
               + " order by plan." + Plan.PROPERTY_SEARCHKEY);
       query.setNamedParameter(PARAM_PRICE_ID, StringUtils.trim(providerPriceId));
@@ -145,7 +146,7 @@ public class PlanCatalogService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Plan> query = OBDal.getInstance().createQuery(Plan.class,
-          "as plan where plan." + Plan.PROPERTY_ACTIVE + " = true"
+          PLAN_WHERE + Plan.PROPERTY_ACTIVE + " = true"
               + " order by plan." + Plan.PROPERTY_DISPLAYPRICE
               + ", plan." + Plan.PROPERTY_NAME);
       query.setFilterOnReadableClients(false);
