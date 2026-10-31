@@ -5,6 +5,7 @@ import java.time.Instant;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
@@ -99,7 +100,8 @@ public class SubscriptionLifecycleApplier {
         return fromSubscriptionStatus(object, current)
             .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
                 subscriptionPeriodBoundary(object, CURRENT_PERIOD_END))
-            .withCancelAtPeriodEnd(cancelAtPeriodEndOf(object));
+            .withCancelAtPeriodEnd(cancelAtPeriodEndOf(object))
+            .withProviderPrice(itemPriceIdOf(object));
       default:
         return SubscriptionEventOutcome.ignore("unhandled event type");
     }
@@ -272,6 +274,27 @@ public class SubscriptionLifecycleApplier {
    * Reads a subscription period boundary from the top level or, from API 2025-03-31, from the
    * first subscription item.
    */
+  /**
+   * ETP-5053 — the Stripe price of the subscription's first item, {@code items.data[0].price}:
+   * an object with an {@code id} when expanded, else the bare id string. The item is what a plan
+   * change updates, so this is where an applied upgrade, or a downgrade phase reached at the
+   * period boundary, shows up in {@code customer.subscription.updated}.
+   *
+   * @param subscription a Stripe subscription object
+   * @return the price id, or null when the object carries no item or no price
+   */
+  public static String itemPriceIdOf(JSONObject subscription) {
+    JSONObject items = subscription == null ? null : subscription.optJSONObject("items");
+    JSONArray data = items == null ? null : items.optJSONArray("data");
+    JSONObject first = data == null ? null : data.optJSONObject(0);
+    if (first == null || !first.has("price") || first.isNull("price")) {
+      return null;
+    }
+    JSONObject price = first.optJSONObject("price");
+    String id = price != null ? StripeJson.text(price, "id") : StripeJson.text(first, "price");
+    return StringUtils.trimToNull(id);
+  }
+
   static Instant subscriptionPeriodBoundary(JSONObject subscription, String field) {
     Instant topLevel = epochSeconds(subscription, field);
     if (topLevel != null) {
@@ -378,6 +401,34 @@ public class SubscriptionLifecycleApplier {
     }
     return SubscriptionEventOutcome.apply(
         EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, paidPeriodEnd);
+  }
+
+  /**
+   * ETP-5048 / ETP-5053 — a Stripe subscription object, as read back or returned by the
+   * provider, wrapped as a {@code customer.subscription.updated} event created at {@code at}, so
+   * the stale check orders it against the stored watermark exactly as it orders a webhook event.
+   * Shared by the billing reconciliation and the plan-change service, which applies the
+   * provider's answer to an upgrade the moment it has it. No {@code created} when no instant is
+   * known.
+   *
+   * @param subscription the Stripe subscription object
+   * @param at the provider instant the object's state is asserted at, may be null
+   * @return the event envelope
+   */
+  public static JSONObject syntheticSubscriptionUpdated(JSONObject subscription, Instant at) {
+    try {
+      JSONObject data = new JSONObject();
+      data.put("object", subscription);
+      JSONObject event = new JSONObject();
+      event.put("type", SUBSCRIPTION_UPDATED);
+      if (at != null) {
+        event.put("created", at.getEpochSecond());
+      }
+      event.put("data", data);
+      return event;
+    } catch (JSONException e) {
+      throw new IllegalStateException("Could not build the subscription event", e);
+    }
   }
 
   private static JSONObject eventObject(JSONObject event) {

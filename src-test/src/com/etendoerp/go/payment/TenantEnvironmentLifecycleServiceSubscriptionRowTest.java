@@ -75,7 +75,8 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   private static final Instant EVENT_AT = Instant.parse("2026-11-01T12:30:00Z");
   private static final Instant PERIOD_START = Instant.parse("2026-11-01T00:00:00Z");
   private static final Instant PERIOD_END = Instant.parse("2026-12-01T00:00:00Z");
-  private static final Instant ENDED_AT = Instant.parse("2026-11-15T09:00:00Z");
+  /** In the past: a closing instant ahead of the clock is refused (ETP-5053, register §5.13). */
+  private static final Instant ENDED_AT = Instant.now().minusSeconds(3600L);
 
   /**
    * Loads the Openbravo properties once, before any test mocks {@code OBProvider} statically.
