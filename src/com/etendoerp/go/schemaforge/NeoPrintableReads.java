@@ -21,6 +21,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
+import javax.inject.Named;
+
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -31,6 +33,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * The NEO reads a printable's data builder makes, served by the very pipeline a REST GET goes
@@ -116,12 +119,32 @@ final class NeoPrintableReads {
           .obContext(OBContext.getOBContext())
           .endpointType(NeoEndpointType.CRUD)
           .build();
-      NeoResponse response = NeoServletSupport.handleWithHooks(entity.getJavaQualifier(), context,
-          new NeoCrudHandler(null), NeoExtensionChannel.REST_SINGLE);
+      // The entity's customization, resolved the way a REST GET resolves it (the @NeoExtension
+      // first, then the legacy binding, through REST's resolver) without reading Java_Qualifier here.
+      NeoHandler customization = NeoHandlerLookup.forEntity(entity,
+          NeoServletSupport::lookupHandler);
+      NeoResponse response = NeoServletSupport.handleWithHooks(dispatchKeyOf(customization),
+          context, new NeoCrudHandler(null), NeoExtensionChannel.REST_SINGLE);
       return response == null || response.getHttpStatus() >= 400 ? null : response.getBody();
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The key the hook pipeline dispatches a resolved customization under: the {@code @Named} value a
+   * legacy (qualifier-bound) handler carries — the very name REST's resolver matched it by — and
+   * {@code null} for an {@code @NeoExtension} class, which {@code NeoExtensionDispatcher} resolves
+   * from the {@code (spec, entity)} annotation index before any qualifier. With no customization,
+   * {@code null}: the generic read runs, as on REST.
+   *
+   * @param customization what {@link NeoHandlerLookup#forEntity} resolved, or {@code null}
+   * @return the dispatch key, or {@code null}
+   */
+  static String dispatchKeyOf(NeoHandler customization) {
+    Named named = customization == null ? null
+        : customization.getClass().getAnnotation(Named.class);
+    return named == null ? null : named.value();
   }
 
   /** {@code d?.response?.data?.[0] ?? d?.response?.data ?? d}, for an object body. */
