@@ -62,6 +62,8 @@ public class SalesInvoicePrintableData implements NeoPrintableDataBuilder {
   private static final Logger log = LogManager.getLogger(SalesInvoicePrintableData.class);
 
   static final String DOCUMENT = "sales-invoice";
+  /** The line's per-product discount percentage ({@code buildInvoiceData} reads the same key). */
+  static final String DISCOUNT_FIELD = "etgoDiscount";
 
   @Override
   public String document() {
@@ -69,15 +71,19 @@ public class SalesInvoicePrintableData implements NeoPrintableDataBuilder {
   }
 
   @Override
-  public JSONObject build(String recordId) throws Exception {
-    JSONObject header = NeoPrintableReads.record(DOCUMENT, "header", recordId);
+  public JSONObject build(String recordId) throws PrintableDataException {
+    JSONObject header = NeoPrintableReads.readRecord(DOCUMENT, "header", recordId);
     if (header == null) {
-      throw new IllegalStateException("The invoice could not be read");
+      throw new PrintableDataException("The invoice could not be read");
     }
     JSONArray linesRaw = NeoPrintableReads.children(DOCUMENT, "lines", recordId);
     NeoResponse sessionResponse = NeoSessionService.resolveSession();
     JSONObject session = sessionResponse.getHttpStatus() < 400 ? sessionResponse.getBody() : null;
-    return build(header, linesRaw, session);
+    try {
+      return build(header, linesRaw, session);
+    } catch (Exception e) {
+      throw new PrintableDataException("The invoice data could not be built", e);
+    }
   }
 
   /**
@@ -102,7 +108,7 @@ public class SalesInvoicePrintableData implements NeoPrintableDataBuilder {
       line.put("productName", truthy(value(l, "product$_identifier"), value(l, "description"), "—"));
       line.put("quantity", coalesce(value(l, "invoicedQuantity"), value(l, "qtyInvoiced"), 0));
       line.put("unitPrice", coalesce(value(l, "unitPrice"), value(l, "priceActual"), 0));
-      Object discount = value(l, "etgoDiscount");
+      Object discount = value(l, DISCOUNT_FIELD);
       line.put("discount", isTruthy(discount) ? json(number(discount)) : JSONObject.NULL);
       line.put("taxName", truthy(value(l, "tax$_identifier"), value(l, "taxRate"), ""));
       line.put("lineTotal", coalesce(value(l, "lineNetAmount"), value(l, "lineAmount"), 0));
@@ -123,7 +129,7 @@ public class SalesInvoicePrintableData implements NeoPrintableDataBuilder {
 
     boolean hasLineDiscount = false;
     for (JSONObject l : sorted) {
-      hasLineDiscount |= number(coalesce(value(l, "etgoDiscount"), 0)) > 0;
+      hasLineDiscount |= number(coalesce(value(l, DISCOUNT_FIELD), 0)) > 0;
     }
 
     data.put("documentNo", truthy(value(header, "documentNo"), ""));
@@ -167,7 +173,7 @@ public class SalesInvoicePrintableData implements NeoPrintableDataBuilder {
       return qty * number(listPrice);
     }
     double lineNet = number(coalesce(value(l, "lineNetAmount"), value(l, "lineAmount"), 0));
-    double disc = number(coalesce(value(l, "etgoDiscount"), 0));
+    double disc = number(coalesce(value(l, DISCOUNT_FIELD), 0));
     return disc > 0 ? lineNet / (1 - disc / 100) : lineNet;
   }
 

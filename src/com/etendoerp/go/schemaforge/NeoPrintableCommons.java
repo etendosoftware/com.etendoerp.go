@@ -128,7 +128,7 @@ public final class NeoPrintableCommons {
       return ((Number) v).doubleValue();
     }
     if (v instanceof Boolean) {
-      return ((Boolean) v) ? 1 : 0;
+      return Boolean.TRUE.equals(v) ? 1 : 0;
     }
     String s = String.valueOf(v).trim();
     if (s.isEmpty()) {
@@ -230,7 +230,7 @@ public final class NeoPrintableCommons {
     String companyLogoDataUrl = isTruthy(logoId) ? imageDataUrl(text(logoId)) : null;
     Object partnerAddress = value(header, "partnerAddress");
     JSONObject partnerLocation = isTruthy(partnerAddress)
-        ? NeoPrintableReads.record("contacts", "locationAddress", text(partnerAddress)) : null;
+        ? NeoPrintableReads.readRecord("contacts", "locationAddress", text(partnerAddress)) : null;
 
     JSONObject org = session == null ? null : session.optJSONObject("organization");
     List<String> addressLines = buildLocationAddressLines(partnerLocation,

@@ -49,6 +49,8 @@ import org.codehaus.jettison.json.JSONObject;
 public class QuotationPrintableData implements NeoPrintableDataBuilder {
 
   static final String DOCUMENT = "sales-quotation";
+  /** The line's per-product discount percentage ({@code buildQuotationData} reads the same key). */
+  static final String DISCOUNT_FIELD = "discount";
 
   @Override
   public String document() {
@@ -61,15 +63,19 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
   }
 
   @Override
-  public JSONObject build(String recordId) throws Exception {
-    JSONObject header = NeoPrintableReads.record(DOCUMENT, "quotation", recordId);
+  public JSONObject build(String recordId) throws PrintableDataException {
+    JSONObject header = NeoPrintableReads.readRecord(DOCUMENT, "quotation", recordId);
     if (header == null) {
-      throw new IllegalStateException("The quotation could not be read");
+      throw new PrintableDataException("The quotation could not be read");
     }
     JSONArray linesRaw = NeoPrintableReads.children(DOCUMENT, "quotationLine", recordId);
     NeoResponse sessionResponse = NeoSessionService.resolveSession();
     JSONObject session = sessionResponse.getHttpStatus() < 400 ? sessionResponse.getBody() : null;
-    return build(header, linesRaw, session);
+    try {
+      return build(header, linesRaw, session);
+    } catch (Exception e) {
+      throw new PrintableDataException("The quotation data could not be built", e);
+    }
   }
 
   /**
@@ -92,7 +98,7 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
       line.put("productName", truthy(value(l, "product$_identifier"), value(l, "description"), "—"));
       line.put("quantity", coalesce(value(l, "orderedQuantity"), 0));
       line.put("unitPrice", coalesce(value(l, "unitPrice"), 0));
-      Object discount = value(l, "discount");
+      Object discount = value(l, DISCOUNT_FIELD);
       line.put("discount", isTruthy(discount) ? json(number(discount)) : JSONObject.NULL);
       line.put("taxName", truthy(value(l, "tax$_identifier"), ""));
       line.put("lineTotal", coalesce(value(l, "lineNetAmount"), 0));
@@ -147,7 +153,7 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
       return qty * number(listPrice);
     }
     double lineNet = number(coalesce(value(l, "lineNetAmount"), 0));
-    double disc = number(coalesce(value(l, "discount"), 0));
+    double disc = number(coalesce(value(l, DISCOUNT_FIELD), 0));
     return disc > 0 ? lineNet / (1 - disc / 100) : lineNet;
   }
 }

@@ -55,12 +55,22 @@ public class ShipmentPrintableData extends MovementPrintableData {
   void putDocumentFields(JSONObject header, JSONObject data) throws JSONException {
     Object status = value(header, "documentStatus");
     data.put("documentStatusLabel", truthy(value(header, "documentStatus$_identifier"), status, ""));
-    data.put("documentStatusClass", "CO".equals(status) ? "status-co"
-        : "DR".equals(status) ? "status-dr" : "status-default");
+    data.put("documentStatusClass", statusClass(status));
     // header['salesOrder$_identifier']?.split(' ')[0] || null
     Object salesOrder = value(header, "salesOrder$_identifier");
     String salesOrderRef = salesOrder == null ? null : String.valueOf(salesOrder).split(" ", -1)[0];
     data.put("salesOrderRef", orNull(salesOrderRef));
+  }
+
+  /** {@code ({CO: 'status-co', DR: 'status-dr'})[status] || 'status-default'}. */
+  static String statusClass(Object status) {
+    if ("CO".equals(status)) {
+      return "status-co";
+    }
+    if ("DR".equals(status)) {
+      return "status-dr";
+    }
+    return "status-default";
   }
 
   @Override

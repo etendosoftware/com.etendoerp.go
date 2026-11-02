@@ -282,6 +282,39 @@ class PrintableDataTest {
     assertJsonEquals(new JSONObject(expected), movement(new ReturnReceiptPrintableData()), "$");
   }
 
+  @Test
+  @DisplayName("build(recordId): the builders read through NEO and fail with a dedicated exception")
+  void buildersReadAndFailWithADedicatedException() throws Exception {
+    try (org.mockito.MockedStatic<NeoPrintableReads> reads =
+            org.mockito.Mockito.mockStatic(NeoPrintableReads.class);
+        org.mockito.MockedStatic<NeoSessionService> session =
+            org.mockito.Mockito.mockStatic(NeoSessionService.class)) {
+      session.when(NeoSessionService::resolveSession)
+          .thenReturn(NeoResponse.ok(new JSONObject(SESSION)));
+      reads.when(() -> NeoPrintableReads.children(org.mockito.ArgumentMatchers.anyString(),
+          org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString()))
+          .thenReturn(new JSONArray(LINES));
+      reads.when(() -> NeoPrintableReads.children(org.mockito.ArgumentMatchers.anyString(),
+          org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(),
+          org.mockito.ArgumentMatchers.anyMap())).thenReturn(new JSONArray(MOVEMENT_LINES));
+
+      NeoPrintableDataBuilder[] builders = {new SalesInvoicePrintableData(),
+          new SalesOrderPrintableData(), new QuotationPrintableData(), new ShipmentPrintableData()};
+      for (NeoPrintableDataBuilder builder : builders) {
+        // no record: a dedicated exception, never a generic one
+        org.junit.jupiter.api.Assertions.assertThrows(
+            NeoPrintableDataBuilder.PrintableDataException.class, () -> builder.build("R1"),
+            builder.document());
+      }
+      reads.when(() -> NeoPrintableReads.readRecord("sales-invoice", "header", "R1"))
+          .thenReturn(new JSONObject(HEADER));
+      assertEquals("INV-001", new SalesInvoicePrintableData().build("R1").getString("documentNo"));
+      reads.when(() -> NeoPrintableReads.readRecord("goods-shipment", "goodsShipment", "R1"))
+          .thenReturn(new JSONObject(MOVEMENT_HEADER));
+      assertEquals("MV-1", new ShipmentPrintableData().build("R1").getString("documentNo"));
+    }
+  }
+
   /** Recursive equality with numbers compared by value, JSON null as null. */
   private static void assertJsonEquals(Object expected, Object actual, String path)
       throws Exception {

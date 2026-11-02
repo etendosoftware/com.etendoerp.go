@@ -21,7 +21,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.function.BiFunction;
+import java.util.function.BinaryOperator;
 import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
@@ -103,7 +103,7 @@ public final class NeoPrintableRenderer {
   private final NeoPrintableTemplates templates;
   private final NeoJsreportClient jsreport;
   private final Supplier<Iterable<NeoPrintableDataBuilder>> builders;
-  private final BiFunction<String, String, String> mainFileName;
+  private final BinaryOperator<String> mainFileName;
 
   /** The production renderer. */
   public NeoPrintableRenderer() {
@@ -118,7 +118,7 @@ public final class NeoPrintableRenderer {
    */
   NeoPrintableRenderer(NeoPrintableTemplates templates, NeoJsreportClient jsreport,
       Supplier<Iterable<NeoPrintableDataBuilder>> builders,
-      BiFunction<String, String, String> mainFileName) {
+      BinaryOperator<String> mainFileName) {
     this.templates = templates;
     this.jsreport = jsreport;
     this.builders = builders;

@@ -30,7 +30,7 @@ import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -84,17 +84,25 @@ public class NeoPrintableTemplates {
   static final int MANIFEST_VERSION = 1;
   static final Duration TTL = Duration.ofMinutes(1);
   static final Duration FETCH_TIMEOUT = Duration.ofSeconds(10);
+
+  // Manifest keys (printableSources.js#buildPrintableManifest)
+  static final String KEY_TEMPLATE = "template";
+  static final String KEY_LABELS = "labels";
+  static final String KEY_HELPERS = "helpers";
+  static final String KEY_BUILT_AT = "builtAt";
+  static final String KEY_RATE_DECIMALS = "rateDecimals";
+  private static final String PRINTABLE_PREFIX = "Printable '";
   /** The locale used when neither the requested one nor its language is published. */
   static final String FALLBACK_LOCALE = "en_US";
 
   private static final NeoPrintableTemplates INSTANCE = new NeoPrintableTemplates(
       NeoPrintableTemplates::fetchOverHttp, Clock.systemUTC());
 
-  private final Function<String, String> fetcher;
+  private final UnaryOperator<String> fetcher;
   private final Clock clock;
   private final Map<String, Cached> cache = new ConcurrentHashMap<>();
 
-  NeoPrintableTemplates(Function<String, String> fetcher, Clock clock) {
+  NeoPrintableTemplates(UnaryOperator<String> fetcher, Clock clock) {
     this.fetcher = fetcher;
     this.clock = clock;
   }
@@ -152,7 +160,7 @@ public class NeoPrintableTemplates {
     try {
       raw = fetcher.apply(PublicUrlResolver.appendPath(base, document + ".json"));
     } catch (RuntimeException e) {
-      throw new ManifestException("Printable '" + document + "' could not be fetched: "
+      throw new ManifestException(PRINTABLE_PREFIX + document + "' could not be fetched: "
           + e.getMessage(), e);
     }
     Template template = Template.parse(document, raw);
@@ -242,22 +250,22 @@ public class NeoPrintableTemplates {
         // A static host answering its SPA fallback (index.html, 200) for a missing file lands here.
         manifest = new JSONObject(StringUtils.defaultString(raw));
       } catch (JSONException e) {
-        throw new ManifestException("Printable '" + document + "' is not JSON (not deployed?)", e);
+        throw new ManifestException(PRINTABLE_PREFIX + document + "' is not JSON (not deployed?)", e);
       }
       if (manifest.optInt("manifestVersion", -1) != MANIFEST_VERSION) {
-        throw new ManifestException("Printable '" + document + "' has manifest version "
+        throw new ManifestException(PRINTABLE_PREFIX + document + "' has manifest version "
             + manifest.opt("manifestVersion") + ", expected " + MANIFEST_VERSION);
       }
       if (!document.equals(manifest.optString("document", null))) {
-        throw new ManifestException("Printable '" + document + "' names another document");
+        throw new ManifestException(PRINTABLE_PREFIX + document + "' names another document");
       }
-      JSONObject template = manifest.optJSONObject("template");
-      JSONObject labels = manifest.optJSONObject("labels");
+      JSONObject template = manifest.optJSONObject(KEY_TEMPLATE);
+      JSONObject labels = manifest.optJSONObject(KEY_LABELS);
       if (template == null || StringUtils.isBlank(template.optString("content", null))
-          || StringUtils.isBlank(manifest.optString("helpers", null))
+          || StringUtils.isBlank(manifest.optString(KEY_HELPERS, null))
           || manifest.optJSONObject("helperPlaceholders") == null || labels == null
           || labels.length() == 0) {
-        throw new ManifestException("Printable '" + document + "' is incomplete");
+        throw new ManifestException(PRINTABLE_PREFIX + document + "' is incomplete");
       }
       return new Template(document, manifest);
     }
@@ -274,8 +282,8 @@ public class NeoPrintableTemplates {
 
     /** @return the build instant the manifest was published at, or {@code null} */
     public Long getBuiltAt() {
-      return manifest.has("builtAt") && !manifest.isNull("builtAt")
-          ? manifest.optLong("builtAt") : null;
+      return manifest.has(KEY_BUILT_AT) && !manifest.isNull(KEY_BUILT_AT)
+          ? manifest.optLong(KEY_BUILT_AT) : null;
     }
 
     /**
@@ -284,9 +292,10 @@ public class NeoPrintableTemplates {
      *
      * @param locale an Etendo language code ({@code es_ES}) or a BCP-47 tag ({@code es-ES})
      * @return a copy of the labels object
+     * @throws JSONException when the manifest's labels cannot be read
      */
     public JSONObject labelsFor(String locale) throws JSONException {
-      JSONObject labels = manifest.getJSONObject("labels");
+      JSONObject labels = manifest.getJSONObject(KEY_LABELS);
       String code = StringUtils.replace(StringUtils.defaultString(locale), "-", "_");
       JSONObject exact = labels.optJSONObject(code);
       if (exact != null) {
@@ -304,9 +313,13 @@ public class NeoPrintableTemplates {
           sameLanguage = labels.getJSONObject(key);
         }
       }
-      JSONObject chosen = sameLanguage != null ? sameLanguage
-          : labels.optJSONObject(FALLBACK_LOCALE) != null ? labels.getJSONObject(FALLBACK_LOCALE)
-          : labels.getJSONObject(any);
+      JSONObject chosen = sameLanguage;
+      if (chosen == null) {
+        chosen = labels.optJSONObject(FALLBACK_LOCALE);
+      }
+      if (chosen == null) {
+        chosen = labels.getJSONObject(any);
+      }
       return new JSONObject(chosen.toString());
     }
 
@@ -318,13 +331,14 @@ public class NeoPrintableTemplates {
      * @param rateDecimals the exchange-rate precision ({@code rateDecimals} of the data; negative
      *                     falls back to 4, as the browser does)
      * @return the helpers string jsreport receives
+     * @throws JSONException when the manifest's helpers or placeholders cannot be read
      */
     public String fillHelpers(NeoCurrencyFormatConfig separators, int rateDecimals)
         throws JSONException {
       JSONObject placeholders = manifest.getJSONObject("helperPlaceholders");
       String thousands = StringUtils.defaultIfEmpty(separators.getThousandsSeparator(), ".");
       String decimal = StringUtils.defaultIfEmpty(separators.getDecimalSeparator(), ",");
-      String helpers = manifest.getString("helpers");
+      String helpers = manifest.getString(KEY_HELPERS);
       // The separators sit in the source as JSON string literals: swap the quoted token for the
       // quoted value, which is what JSON.stringify produces in the browser.
       helpers = StringUtils.replace(helpers,
@@ -333,7 +347,7 @@ public class NeoPrintableTemplates {
       helpers = StringUtils.replace(helpers,
           JSONObject.quote(placeholders.getString("decimalSeparator")),
           JSONObject.quote(decimal));
-      return StringUtils.replace(helpers, placeholders.getString("rateDecimals"),
+      return StringUtils.replace(helpers, placeholders.getString(KEY_RATE_DECIMALS),
           String.valueOf(rateDecimals >= 0 ? rateDecimals : 4));
     }
 
@@ -344,11 +358,12 @@ public class NeoPrintableTemplates {
      * @param data   the document data (the browser data builder's shape), without labels
      * @param locale the language the PDF is printed in
      * @return the request body for {@link NeoJsreportClient#render}
+     * @throws JSONException when the manifest or the data cannot be read
      */
     public JSONObject payload(JSONObject data, String locale) throws JSONException {
-      JSONObject template = new JSONObject(manifest.getJSONObject("template").toString());
-      int rateDecimals = data.has("rateDecimals") ? data.optInt("rateDecimals", 4) : 4;
-      template.put("helpers", fillHelpers(NeoCurrencyFormatConfig.fromRuntime(), rateDecimals));
+      JSONObject template = new JSONObject(manifest.getJSONObject(KEY_TEMPLATE).toString());
+      int rateDecimals = data.has(KEY_RATE_DECIMALS) ? data.optInt(KEY_RATE_DECIMALS, 4) : 4;
+      template.put(KEY_HELPERS, fillHelpers(NeoCurrencyFormatConfig.fromRuntime(), rateDecimals));
       JSONObject body = new JSONObject();
       body.put("css", manifest.optString("css", ""));
       Iterator<?> keys = data.keys();
@@ -356,9 +371,9 @@ public class NeoPrintableTemplates {
         String key = (String) keys.next();
         body.put(key, data.get(key));
       }
-      body.put("labels", labelsFor(locale));
+      body.put(KEY_LABELS, labelsFor(locale));
       JSONObject payload = new JSONObject();
-      payload.put("template", template);
+      payload.put(KEY_TEMPLATE, template);
       payload.put("data", body);
       return payload;
     }

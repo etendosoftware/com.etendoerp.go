@@ -65,7 +65,7 @@ final class NeoPrintableReads {
    * @return the record, or {@code null} when the read failed or found nothing (the browser throws on
    *         a non-2xx answer; the callers treat {@code null} as that failure)
    */
-  static JSONObject record(String specName, String entityName, String recordId) {
+  static JSONObject readRecord(String specName, String entityName, String recordId) {
     JSONObject body = get(specName, entityName, recordId, Collections.emptyMap());
     return body == null ? null : unwrapOne(body);
   }

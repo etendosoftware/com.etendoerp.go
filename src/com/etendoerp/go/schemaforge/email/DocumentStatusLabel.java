@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge.email;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.Collections;
 import java.util.List;
 import java.util.TreeSet;
 
@@ -56,14 +55,21 @@ public final class DocumentStatusLabel {
   private static final String ALL_DOCUMENT_STATUS = "131";
 
   /** The document status lists, in a fixed order, each bound to its own {@code IN} placeholder. */
-  private static final List<String> REFERENCES =
+  static final List<String> REFERENCES =
       List.copyOf(new TreeSet<>(NeoDocumentPdf.DOCUMENT_STATUS_REFERENCES));
 
-  private static final String SQL = "SELECT COALESCE(t.name, l.name) FROM ad_ref_list l"
+  /**
+   * How many {@code IN} placeholders {@link #SQL} has: one per document status list. The SQL is a
+   * compile-time constant (no list built into it); {@code DocumentStatusLabelTest} pins that it
+   * equals the size of {@link NeoDocumentPdf#DOCUMENT_STATUS_REFERENCES}, so adding a list there
+   * fails the build until a placeholder is added here.
+   */
+  static final int REFERENCE_PLACEHOLDERS = 2;
+
+  static final String SQL = "SELECT COALESCE(t.name, l.name) FROM ad_ref_list l"
       + " LEFT JOIN ad_ref_list_trl t ON t.ad_ref_list_id = l.ad_ref_list_id"
       + " AND t.ad_language = ? AND t.isactive = 'Y'"
-      + " WHERE l.ad_reference_id IN ("
-      + String.join(", ", Collections.nCopies(REFERENCES.size(), "?")) + ")"
+      + " WHERE l.ad_reference_id IN (?, ?)"
       + " AND l.value = ?"
       + " ORDER BY CASE WHEN l.ad_reference_id = ? THEN 0 ELSE 1 END LIMIT 1";
 
@@ -89,8 +95,8 @@ public final class DocumentStatusLabel {
       try (PreparedStatement ps = conn.prepareStatement(SQL)) {
         int index = 1;
         ps.setString(index++, StringUtils.defaultString(language));
-        for (String reference : REFERENCES) {
-          ps.setString(index++, reference);
+        for (int i = 0; i < REFERENCE_PLACEHOLDERS; i++) {
+          ps.setString(index++, i < REFERENCES.size() ? REFERENCES.get(i) : null);
         }
         ps.setString(index++, status);
         ps.setString(index, ALL_DOCUMENT_STATUS);

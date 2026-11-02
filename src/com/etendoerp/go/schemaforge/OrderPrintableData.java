@@ -57,16 +57,20 @@ public abstract class OrderPrintableData implements NeoPrintableDataBuilder {
   static final String DISCOUNT_FIELD = "discount";
 
   @Override
-  public JSONObject build(String recordId) throws Exception {
+  public JSONObject build(String recordId) throws PrintableDataException {
     String spec = document();
-    JSONObject header = NeoPrintableReads.record(spec, "header", recordId);
+    JSONObject header = NeoPrintableReads.readRecord(spec, "header", recordId);
     if (header == null) {
-      throw new IllegalStateException("The order could not be read");
+      throw new PrintableDataException("The order could not be read");
     }
     JSONArray linesRaw = NeoPrintableReads.children(spec, "lines", recordId);
     NeoResponse sessionResponse = NeoSessionService.resolveSession();
     JSONObject session = sessionResponse.getHttpStatus() < 400 ? sessionResponse.getBody() : null;
-    return build(header, linesRaw, session);
+    try {
+      return build(header, linesRaw, session);
+    } catch (Exception e) {
+      throw new PrintableDataException("The order data could not be built", e);
+    }
   }
 
   /**
@@ -89,10 +93,10 @@ public abstract class OrderPrintableData implements NeoPrintableDataBuilder {
       line.put("lineNo", truthy(value(l, "lineNo"), idx + 1));
       line.put("productCode", NeoPrintableCommons.resolveProductCode(l));
       line.put("productName", truthy(value(l, "product$_identifier"), value(l, "description"), "—"));
-      line.put("quantity", coalesce(value(l, "orderedQuantity"), value(l, "qtyOrdered"), 0));
-      line.put("unitPrice", coalesce(value(l, "listPrice"), value(l, "unitPrice"),
+      line.put("quantity", coalesce(value(l, QTY_FIELD), value(l, "qtyOrdered"), 0));
+      line.put("unitPrice", coalesce(value(l, PRICE_FIELD), value(l, "unitPrice"),
           value(l, "priceActual"), 0));
-      Object discount = value(l, "discount");
+      Object discount = value(l, DISCOUNT_FIELD);
       line.put("discount", isTruthy(discount) ? json(number(discount)) : JSONObject.NULL);
       line.put("taxName", truthy(value(l, "tax$_identifier"), value(l, "taxRate"), ""));
       line.put("lineTotal", coalesce(value(l, "lineGrossAmount"), value(l, "grossAmount"),

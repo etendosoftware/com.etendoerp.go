@@ -30,14 +30,12 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
 import com.etendoerp.go.common.ConfigPropertyReader;
-import com.etendoerp.go.schemaforge.NeoMessageText;
 import com.etendoerp.go.schemaforge.email.render.EmailContent;
 import com.etendoerp.go.schemaforge.email.render.EmailDates;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
-import com.etendoerp.go.schemaforge.util.NeoLanguage;
 
 /**
  * Base contract for document-send transactional emails resolved from trusted server records.
@@ -295,15 +293,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   }
 
   private Optional<String> statusRefusal(EmailDocumentRecord document, String requestedLanguage) {
-    String status = document.getDocumentStatus();
-    if (status == null || isSendableStatus(status)) {
-      return Optional.empty();
-    }
-    String language = StringUtils.isNotBlank(requestedLanguage) ? requestedLanguage
-        : currentLanguage();
-    return Optional.of(NeoMessageText.text(unsendableStatusMessageKey(), language,
-        StringUtils.defaultString(document.getDocumentNumber()),
-        DocumentStatusLabel.of(status, language)));
+    return DocumentSendStatusGate.refusal(document, requestedLanguage, this::isSendableStatus,
+        unsendableStatusMessageKey());
   }
 
   /**
@@ -330,16 +321,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
    */
   protected String unsendableStatusMessageKey() {
     return MSG_ONLY_COMPLETED;
-  }
-
-  /** The request language, or {@code null} without a usable context. */
-  private static String currentLanguage() {
-    try {
-      return NeoLanguage.currentCode();
-    } catch (RuntimeException e) {
-      log.debug("No request language for the email status refusal: {}", e.getMessage());
-      return null;
-    }
   }
 
   /**

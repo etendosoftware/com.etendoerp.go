@@ -55,6 +55,22 @@ public class DocumentSendAuthorizeTierTest {
   private static final String SPEC_NAME = "sales-order";
   private static final String RECORD_ID = "doc-1";
 
+  /**
+   * java:S2077 — the status-name SQL is a compile-time constant with one bound {@code IN} placeholder
+   * per document status list; adding a list to {@code DOCUMENT_STATUS_REFERENCES} must fail here
+   * until the SQL gets its placeholder.
+   */
+  @Test
+  public void statusLabelSqlHasOnePlaceholderPerStatusList() {
+    String in = DocumentStatusLabel.SQL
+        .replaceAll("(?s).*ad_reference_id IN \\(([^)]*)\\).*", "$1");
+    int placeholders = in.split(",").length;
+    assertEquals(DocumentStatusLabel.REFERENCE_PLACEHOLDERS, placeholders);
+    assertEquals(com.etendoerp.go.schemaforge.NeoDocumentPdf.DOCUMENT_STATUS_REFERENCES.size(),
+        DocumentStatusLabel.REFERENCE_PLACEHOLDERS);
+    assertEquals(DocumentStatusLabel.REFERENCE_PLACEHOLDERS, DocumentStatusLabel.REFERENCES.size());
+  }
+
   @Test
   public void fullAccessRoleIsAllowed() throws Exception {
     try (MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class)) {

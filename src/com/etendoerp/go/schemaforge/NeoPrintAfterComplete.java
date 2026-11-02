@@ -107,6 +107,8 @@ public final class NeoPrintAfterComplete {
 
   private static final Logger log = LogManager.getLogger(NeoPrintAfterComplete.class);
 
+  private static final String MSG_NOT_QUEUED = "[print] could not queue the server-side render: {}";
+
   static final int THREADS = 2;
   static final int QUEUE_CAPACITY = 200;
   static final int LOCK_WAIT_SECONDS = 30;
@@ -164,7 +166,7 @@ public final class NeoPrintAfterComplete {
           try {
             submit(job);
           } catch (RuntimeException e) {
-            log.warn("[print] could not queue the server-side render: {}",
+            log.warn(MSG_NOT_QUEUED,
                 e.getClass().getSimpleName());
           }
         }
@@ -186,6 +188,23 @@ public final class NeoPrintAfterComplete {
     };
   }
 
+  /** Who renders, and in which language: the caller's context, captured on the request thread. */
+  static final class Caller {
+    final String userId;
+    final String roleId;
+    final String clientId;
+    final String orgId;
+    final String language;
+
+    Caller(String userId, String roleId, String clientId, String orgId, String language) {
+      this.userId = userId;
+      this.roleId = roleId;
+      this.clientId = clientId;
+      this.orgId = orgId;
+      this.language = language;
+    }
+  }
+
   /** What the worker needs, captured on the request thread: ids and strings only. */
   static final class Job {
     final String specName;
@@ -198,17 +217,16 @@ public final class NeoPrintAfterComplete {
     final String orgId;
     final String language;
 
-    Job(String specName, String entityId, String tableName, String recordId, String userId,
-        String roleId, String clientId, String orgId, String language) {
+    Job(String specName, String entityId, String tableName, String recordId, Caller caller) {
       this.specName = specName;
       this.entityId = entityId;
       this.tableName = tableName;
       this.recordId = recordId;
-      this.userId = userId;
-      this.roleId = roleId;
-      this.clientId = clientId;
-      this.orgId = orgId;
-      this.language = language;
+      this.userId = caller.userId;
+      this.roleId = caller.roleId;
+      this.clientId = caller.clientId;
+      this.orgId = caller.orgId;
+      this.language = caller.language;
     }
 
     /** The key a render of this document is serialized on. */
@@ -242,7 +260,7 @@ public final class NeoPrintAfterComplete {
         submit(job);
       }
     } catch (RuntimeException e) {
-      log.warn("[print] could not queue the server-side render: {}", e.getClass().getSimpleName());
+      log.warn(MSG_NOT_QUEUED, e.getClass().getSimpleName());
     }
   }
 
@@ -263,7 +281,7 @@ public final class NeoPrintAfterComplete {
     try {
       job = jobFor(entity, recordId, language);
     } catch (RuntimeException e) {
-      log.warn("[print] could not queue the server-side render: {}", e.getClass().getSimpleName());
+      log.warn(MSG_NOT_QUEUED, e.getClass().getSimpleName());
       return null;
     }
     return job == null ? null : await(submit(job), recordId);
@@ -307,7 +325,7 @@ public final class NeoPrintAfterComplete {
         submit(job);
       }
     } catch (RuntimeException e) {
-      log.warn("[print] could not queue the server-side render: {}", e.getClass().getSimpleName());
+      log.warn(MSG_NOT_QUEUED, e.getClass().getSimpleName());
     }
   }
 
@@ -331,11 +349,18 @@ public final class NeoPrintAfterComplete {
         || context.getRole() == null) {
       return null;
     }
-    return new Job(spec.getName(), entity.getId(), table.getDBTableName(), recordId,
-        context.getUser().getId(), context.getRole().getId(), context.getCurrentClient().getId(),
-        context.getCurrentOrganization().getId(),
-        StringUtils.isNotBlank(language) ? language
-            : context.getLanguage() == null ? null : context.getLanguage().getLanguage());
+    Caller caller = new Caller(context.getUser().getId(), context.getRole().getId(),
+        context.getCurrentClient().getId(), context.getCurrentOrganization().getId(),
+        languageOf(language, context));
+    return new Job(spec.getName(), entity.getId(), table.getDBTableName(), recordId, caller);
+  }
+
+  /** The language passed, else the context's (null when it has none). */
+  private static String languageOf(String language, OBContext context) {
+    if (StringUtils.isNotBlank(language)) {
+      return language;
+    }
+    return context.getLanguage() == null ? null : context.getLanguage().getLanguage();
   }
 
   /** {@link #isDocActionButton} for a printable entity only (the cheap declaration check first). */
@@ -497,7 +522,7 @@ public final class NeoPrintAfterComplete {
     }
     String tableName = table.getDBTableName();
     String keyColumn = dalEntity.getIdProperties().get(0).getColumnName();
-    if (!tableName.matches("[A-Za-z0-9_]+") || !keyColumn.matches("[A-Za-z0-9_]+")) {
+    if (!tableName.matches("\\w+") || !keyColumn.matches("\\w+")) {
       return;
     }
     org.hibernate.Session session = OBDal.getInstance().getSession();

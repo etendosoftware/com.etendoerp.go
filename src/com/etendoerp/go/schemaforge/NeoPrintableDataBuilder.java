@@ -54,9 +54,30 @@ public interface NeoPrintableDataBuilder {
    *
    * @param recordId the document's id, already authorized for the current user
    * @return the data
-   * @throws Exception when the document cannot be read; the render is then skipped
+   * @throws PrintableDataException when the document cannot be read or its data cannot be built;
+   *         the render is then skipped
    */
-  JSONObject build(String recordId) throws Exception;
+  JSONObject build(String recordId) throws PrintableDataException;
+
+  /** A document whose printable data cannot be built; the render is skipped, nothing stored. */
+  class PrintableDataException extends Exception {
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * @param message what could not be built (never record data)
+     */
+    public PrintableDataException(String message) {
+      super(message);
+    }
+
+    /**
+     * @param message what could not be built (never record data)
+     * @param cause   the failure
+     */
+    public PrintableDataException(String message, Throwable cause) {
+      super(message, cause);
+    }
+  }
 
   /**
    * Whether a document in this status gets a stored PDF. The default is the completed status: the

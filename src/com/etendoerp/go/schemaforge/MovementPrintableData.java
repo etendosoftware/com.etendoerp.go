@@ -65,20 +65,24 @@ public abstract class MovementPrintableData implements NeoPrintableDataBuilder {
   abstract void putQuantities(JSONObject line, JSONObject out) throws JSONException;
 
   @Override
-  public JSONObject build(String recordId) throws Exception {
-    JSONObject header = NeoPrintableReads.record(document(), headerEntity(), recordId);
+  public JSONObject build(String recordId) throws PrintableDataException {
+    JSONObject header = NeoPrintableReads.readRecord(document(), headerEntity(), recordId);
     if (header == null) {
-      throw new IllegalStateException("The document could not be read");
+      throw new PrintableDataException("The document could not be read");
     }
     JSONArray linesRaw = NeoPrintableReads.children(document(), lineEntity(), recordId, LINE_PAGE);
     NeoResponse sessionResponse = NeoSessionService.resolveSession();
     JSONObject session = sessionResponse.getHttpStatus() < 400 ? sessionResponse.getBody() : null;
     Object partnerAddress = value(header, "partnerAddress");
     JSONObject partnerLocation = isTruthy(partnerAddress)
-        ? NeoPrintableReads.record("contacts", "locationAddress", text(partnerAddress)) : null;
+        ? NeoPrintableReads.readRecord("contacts", "locationAddress", text(partnerAddress)) : null;
     Object logoId = value(session, "yourCompanyDocumentImageId");
     String logo = isTruthy(logoId) ? NeoPrintableCommons.imageDataUrl(text(logoId)) : null;
-    return build(header, linesRaw, partnerLocation, logo);
+    try {
+      return build(header, linesRaw, partnerLocation, logo);
+    } catch (JSONException e) {
+      throw new PrintableDataException("The document data could not be built", e);
+    }
   }
 
   /**

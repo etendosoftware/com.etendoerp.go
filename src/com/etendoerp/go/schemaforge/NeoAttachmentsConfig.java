@@ -96,7 +96,7 @@ public final class NeoAttachmentsConfig {
   static final String MSG_READ_ONLY_DEFAULT = "ETGO_AttachmentsReadOnly";
 
   /** An {@code AD_MESSAGE} value: an identifier, never a sentence. */
-  private static final Pattern MESSAGE_KEY_SHAPE = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
+  private static final Pattern MESSAGE_KEY_SHAPE = Pattern.compile("[A-Za-z]\\w*");
 
   /** The one sentence an agent gets: no configuration detail, no internal file names. */
   static final String MSG_UNAVAILABLE =

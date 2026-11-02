@@ -275,6 +275,14 @@ public final class NeoDocumentPdf {
   /** An isolated render of one document, waited for: its outcome, or {@code null} past the wait. */
   @FunctionalInterface
   interface IsolatedRender {
+    /**
+     * Renders one document and waits for it.
+     *
+     * @param entity   the document's root entity
+     * @param recordId the document's id
+     * @param language the language to print in
+     * @return the outcome, or {@code null} when it did not finish within the wait
+     */
     NeoPrintableRenderer.Outcome render(SFEntity entity, String recordId, String language);
   }
 

@@ -284,9 +284,14 @@ public class McpServlet extends HttpServlet {
       McpUsageTelemetry.clearCurrentClient();
       McpUsageTelemetry.clearCurrentTenant();
       NeoWriteChannel.restore(previousChannel);
-      if (printRenders != null) {
-        printRenders.close();
-      }
+      closeQuietly(printRenders);
+    }
+  }
+
+  /** Ends this call's deferral of server-side PDF renders (ETP-6013); null when it never opened. */
+  private static void closeQuietly(NeoPrintAfterComplete.Deferral printRenders) {
+    if (printRenders != null) {
+      printRenders.close();
     }
   }
 

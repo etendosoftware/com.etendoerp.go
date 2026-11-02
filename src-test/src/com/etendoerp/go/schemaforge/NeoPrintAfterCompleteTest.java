@@ -170,7 +170,8 @@ class NeoPrintAfterCompleteTest {
     CompletableFuture<NeoPrintableRenderer.Outcome> running = new CompletableFuture<>();
     NeoPrintAfterComplete.IN_FLIGHT.put("C_Invoice/" + RECORD, running);
     NeoPrintAfterComplete.Job job = new NeoPrintAfterComplete.Job("sales-invoice", "ENTITY1",
-        "C_Invoice", RECORD, "USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES");
+        "C_Invoice", RECORD,
+        new NeoPrintAfterComplete.Caller("USER1", "ROLE1", "CLIENT1", "ORG1", "es_ES"));
 
     assertSame(running, NeoPrintAfterComplete.submit(job));
   }
