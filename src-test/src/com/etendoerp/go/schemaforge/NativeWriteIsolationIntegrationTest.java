@@ -62,6 +62,7 @@ public class NativeWriteIsolationIntegrationTest extends WeldBaseTest {
   private static final String PARAM_ORG_ID = "orgId";
 
   private String foreignAttachmentId;
+  private String ownAttachmentId;
   private boolean requestAdminMode;
 
   @Before
@@ -72,7 +73,10 @@ public class NativeWriteIsolationIntegrationTest extends WeldBaseTest {
     try {
       String foreignOrderId = firstIdOfClient(Order.class, QA_TEST_CLIENT_ID);
       assumeNotNull("the sample data has no order of the QA Testing client", foreignOrderId);
-      foreignAttachmentId = createForeignMainAttachment(foreignOrderId);
+      foreignAttachmentId = createMainAttachment(QA_TEST_CLIENT_ID, QA_TEST_ORG_ID, foreignOrderId);
+      String ownOrderId = firstIdOfClient(Order.class, TEST_CLIENT_ID);
+      assumeNotNull("the sample data has no order of the F&B client", ownOrderId);
+      ownAttachmentId = createMainAttachment(TEST_CLIENT_ID, TEST_ORG_ID, ownOrderId);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -101,6 +105,15 @@ public class NativeWriteIsolationIntegrationTest extends WeldBaseTest {
 
     assertEquals(404, response.getHttpStatus());
     assertTrue("the foreign attachment must still be its record's main", isMain(foreignAttachmentId));
+  }
+
+  /** Positive pair: the same call on the caller's own attachment does change it. */
+  @Test
+  public void testUnmarkingTheCallersOwnMainAttachmentChangesIt() {
+    NeoResponse response = NeoAttachmentsHelper.handleMarkMain(ownAttachmentId, false);
+
+    assertEquals(200, response.getHttpStatus());
+    assertFalse("the caller's own attachment must no longer be main", isMain(ownAttachmentId));
   }
 
   @Test
@@ -153,12 +166,12 @@ public class NativeWriteIsolationIntegrationTest extends WeldBaseTest {
     return request;
   }
 
-  private static String createForeignMainAttachment(String foreignOrderId) {
+  private static String createMainAttachment(String clientId, String orgId, String orderId) {
     Attachment attachment = OBProvider.getInstance().get(Attachment.class);
-    attachment.setClient(OBDal.getInstance().get(Client.class, QA_TEST_CLIENT_ID));
-    attachment.setOrganization(OBDal.getInstance().get(Organization.class, QA_TEST_ORG_ID));
+    attachment.setClient(OBDal.getInstance().get(Client.class, clientId));
+    attachment.setOrganization(OBDal.getInstance().get(Organization.class, orgId));
     attachment.setTable(OBDal.getInstance().get(Table.class, ORDER_TABLE_ID));
-    attachment.setRecord(foreignOrderId);
+    attachment.setRecord(orderId);
     attachment.setName(MARKER + ".pdf");
     attachment.setSequenceNumber(10L);
     attachment.setETGOIsPreviewMain(true);
