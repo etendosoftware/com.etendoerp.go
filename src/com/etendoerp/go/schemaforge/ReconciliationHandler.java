@@ -42,7 +42,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
-import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -87,9 +86,14 @@ import org.openbravo.model.project.Project;
 
 /**
  * NeoHandler that powers the manual bank-reconciliation split panel introduced by
- * the Bank Reconciliation module (T6). It is registered against the {@code header}
- * entity of the {@code bank-reconciliation} W spec via
- * {@code ETGO_SF_ENTITY.Java_Qualifier = "bankReconciliation"}.
+ * the Bank Reconciliation module (T6). It serves the {@code bank-reconciliation} entity of the
+ * {@code bank-reconciliation} report spec ({@code SPEC_TYPE=R}).
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5581, following the ETP-5588 recipe): the
+ * {@code ETGO_SF_ENTITY} row carries no {@code Java_Qualifier} and the class no {@code @Named}.
+ * Every surface (the SPA's {@code /sws/neo/bank-reconciliation} routes, {@code etendo_action} /
+ * {@code etendo_schema} over MCP and the action contracts in discover) reaches it through the
+ * annotation. See {@code neo-headless.md} §5.3.a.
  *
  * <p>It exposes three custom action routes and falls through to the generic CRUD
  * service for any other request (so the W spec's list/get of FIN_Reconciliation
@@ -135,7 +139,7 @@ import org.openbravo.model.project.Project;
  * <p>Signed amounts: a bank-statement line amount is {@code cramount - dramount};
  * a finacc transaction amount is {@code depositamt - paymentamt}.
  */
-@Named("bankReconciliation")
+@NeoExtension(spec = "bank-reconciliation", entity = "bank-reconciliation")
 public class ReconciliationHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReconciliationHandler.class);

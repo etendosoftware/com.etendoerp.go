@@ -2884,7 +2884,8 @@ and for `etendo_action` alike — both enter the same `ReconciliationHandlerSupp
 ##### 4.12.1.2 Bank statement agent actions (ETP-5447, ETP-5469)
 
 The second spec on this mechanism is **`bank-statements`** (`BankStatementsHandler`,
-`@Named("bank-statements")`), the report spec (`SPEC_TYPE=R`) behind the SPA's
+`@NeoExtension(spec = "bank-statements", entity = "bank-statements")` since ETP-5581, see §5.3.a),
+the report spec (`SPEC_TYPE=R`) behind the SPA's
 `/sws/neo/bank-statements?action=…` routes. Its one included entity is also named
 `bank-statements`, so that is the `entity` `etendo_action` / `etendo_schema` take (the value
 `NeoActionContract.SpecActions#getEntityName()` resolves, and `actionEntity` in `etendo_discover`).
@@ -6211,6 +6212,31 @@ classes no `@Named`.
 behaviour stays in that class and each entity is bound by a concrete (empty) subclass — the same
 shape `SalesOrderLineHandler`/`SalesQuotationLineHandler` use (§4.12.20). Nothing binds the base
 class itself.
+
+**Migrated (ETP-5581).** Two more pairs, the two report specs (`SPEC_TYPE=R`) of the bank
+reconciliation, bind by annotation **only**: their `ETGO_SF_ENTITY` rows carry no
+`JAVA_QUALIFIER` (there is no `decisions.json` for either spec) and the classes no `@Named`.
+`EXTENSION_CEILING` went from 88 to 86.
+
+| `(spec, entity)` | class | former qualifier |
+|---|---|---|
+| `bank-reconciliation` / `bank-reconciliation` | `ReconciliationHandler` | `bankReconciliation` |
+| `bank-statements` / `bank-statements` | `BankStatementsHandler` | `bank-statements` |
+
+Both override only `handle` and `actionContracts`, and every reader of those resolves annotation
+first: the SPA's routes go through `NeoRequestRouter.handleReportSpecRequest` →
+`NeoExtensionDispatcher` (the context's `entityName` is the spec name, which is why the annotated
+entity equals the spec), `etendo_action` / `etendo_schema` through the dispatcher and
+`McpDeclaredActions` (`NeoHandlerLookup.forEntityQuietly`), and the discover catalog through
+`NeoActionContract.resolve`. The audit of the generic services found no branch on either pair; the
+`bank-reconciliation` mentions in `ToolRegistry`, `McpToolRouter` and `McpReportActionsSchema` are
+comments naming an example of a structural rule (a report spec whose handler declares actions).
+
+**One visible change:** the `reportHandler` attribute that MCP publishes for a report spec
+(`McpResourceProvider`, from `NeoReportCallability.reportHandlerName`) is the entity's qualifier
+while it has one and the simple class name otherwise. For these two specs it changed from
+`bankReconciliation` / `bank-statements` to `ReconciliationHandler` / `BankStatementsHandler`.
+Nothing in the SPA or the artifacts reads it.
 
 Still pending from the same audit: the `accountingDate` re-injection in
 `NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living

@@ -49,8 +49,6 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 
-import javax.inject.Named;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -82,8 +80,15 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>Import C43:      {@code POST /sws/neo/bank-statements?action=import}
  *       body: {@code { FIN_Financial_Account_ID, fileName, contentBase64 }}
  * </ul>
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5581, following the ETP-5588 recipe): the
+ * {@code ETGO_SF_ENTITY} row of the {@code bank-statements} report spec carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface (the SPA's
+ * {@code /sws/neo/bank-statements} routes, {@code etendo_action} / {@code etendo_schema} over MCP
+ * and the action contracts in discover) reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("bank-statements")
+@NeoExtension(spec = "bank-statements", entity = "bank-statements")
 public class BankStatementsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BankStatementsHandler.class);
