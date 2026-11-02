@@ -85,6 +85,8 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
  * for product, priceLimit, priceListVersion), afterHandle() guards (null context,
  * non-SELECTOR, wrong fieldName), and afterHandle enrichment of selector items
  * with salesPriceList flag.
+ *
+ * @covers com.etendoerp.go.schemaforge.ProductPriceHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

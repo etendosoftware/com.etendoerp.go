@@ -53,6 +53,8 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  *
  * <p>Tests that require DB access (orderLineQty / productCode enrichment via SQL)
  * are not included here — those are covered by integration tests.
+ *
+ * @covers com.etendoerp.go.schemaforge.GoodsShipmentLineHandler
  */
 public class GoodsShipmentLineHandlerTest {
 

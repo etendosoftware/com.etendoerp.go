@@ -65,6 +65,8 @@ import org.openbravo.model.common.enterprise.Organization;
  *   - buildCertDetails (private, via reflection)
  *   - extractCertDetails (private, via reflection)
  *   - validateNifOrGetPendingResponse (private, via reflection)
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCertificateHelper
  */
 public class NeoCertificateHelperTest {
 

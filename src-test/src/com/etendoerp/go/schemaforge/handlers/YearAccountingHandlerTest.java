@@ -64,6 +64,8 @@ import com.etendoerp.go.schemaforge.TenantOwnership;
  * SelectorAuxResolverTest}), so the real HQL never executes against the dev DB — this handler is
  * read-only with no persistence side effects, unlike Tasks 7/8's legacy-servlet concerns, but the
  * same principle of not depending on a live DB connection for a unit test still applies.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.YearAccountingHandler
  */
 public class YearAccountingHandlerTest {
 

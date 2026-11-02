@@ -58,6 +58,12 @@ import com.etendoerp.go.schemaforge.handlers.YearAccountingHandler;
  *
  * <p>Where the caller's answer is compared with the one for an id that exists nowhere, equality is
  * the point: another tenant's id must not be told apart from a missing one.
+ *
+ * @covers com.etendoerp.go.schemaforge.CalloutRequestBuilder
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsService
+ * @covers com.etendoerp.go.schemaforge.ProductPriceHandler
+ * @covers com.etendoerp.go.schemaforge.ProductStockWarehouseHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.YearAccountingHandler
  */
 public class TenantReadIsolationIntegrationTest extends WeldBaseTest {
 

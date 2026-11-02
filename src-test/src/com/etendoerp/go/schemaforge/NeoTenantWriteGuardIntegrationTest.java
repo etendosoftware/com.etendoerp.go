@@ -52,6 +52,8 @@ import org.openbravo.model.common.uom.UOM;
  * skipped them.
  *
  * <p>Nothing here persists: every test rolls back in {@link #rollBack()}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoTenantWriteGuard
  */
 public class NeoTenantWriteGuardIntegrationTest extends WeldBaseTest {
 

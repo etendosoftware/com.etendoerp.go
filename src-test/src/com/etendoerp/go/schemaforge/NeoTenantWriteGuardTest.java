@@ -50,6 +50,8 @@ import org.openbravo.model.ad.system.Client;
 /**
  * ETP-5819: inside a guarded request no row of another client — System included — can be written,
  * and outside one nothing changes. No DB: the model, the context and the session are mocked.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoTenantWriteGuard
  */
 class NeoTenantWriteGuardTest {
 

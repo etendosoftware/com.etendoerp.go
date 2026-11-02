@@ -53,6 +53,9 @@ import org.openbravo.model.common.order.Order;
  * <p>The caller is the standard test user of the F&amp;B client; the "other tenant" is the QA
  * Testing client of the same sample data. Its attachment is a fixture created here; everything
  * rolls back in {@link #rollBack()}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
+ * @covers com.etendoerp.go.schemaforge.NeoCertificateHelper
  */
 public class NativeWriteIsolationIntegrationTest extends WeldBaseTest {
 
