@@ -70,6 +70,5 @@ class McpConstantsTest {
   void labelConstants() throws Exception {
     assertNotNull(getConstant("LABEL_SPEC_NAME"));
     assertNotNull(getConstant("LABEL_ENTITY_NAME"));
-    assertNotNull(getConstant("LABEL_ENTITY_NAME_WITH_EXAMPLE"));
   }
 }

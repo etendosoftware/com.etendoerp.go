@@ -329,6 +329,32 @@ public class ToolRegistry {
   // ── Tool name resolution ──────────────────────────────────────────────
 
   /**
+   * Whether a tool addresses one entity of a spec through a top-level {@code entity} argument, which
+   * the router fills with the spec's primary entity when omitted (ETP-5848). {@code etendo_batch}
+   * is not one: each operation names its own entity.
+   *
+   * @param toolName the MCP tool name
+   * @return true for the single-entity CRUD, metadata and action tools
+   */
+  static boolean takesEntity(String toolName) {
+    switch (toolName) {
+      case McpConstants.TOOL_NEO_LIST:
+      case McpConstants.TOOL_NEO_GET:
+      case McpConstants.TOOL_NEO_CREATE:
+      case McpConstants.TOOL_NEO_UPDATE:
+      case McpConstants.TOOL_NEO_DELETE:
+      case McpConstants.TOOL_NEO_SELECTORS:
+      case McpConstants.TOOL_NEO_DEFAULTS:
+      case McpConstants.TOOL_NEO_SCHEMA:
+      case "etendo_action":
+      case McpConstants.TOOL_NEO_ACTION_BATCH:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /**
    * Resolve the spec name associated with a tool name.
    * <p>
    * For CRUD tools (etendo_list, etc.), the spec comes from the "spec" argument.
@@ -781,8 +807,7 @@ public class ToolRegistry {
   private McpToolDefinition buildListTool(List<String> specNames, String namedFilterSummary) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
-    props.put(McpConstants.PARAM_ENTITY,
-      stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put("filters", objectProp(
         "Filter criteria. Five shapes, combinable: (1) exact match {\"column\": value}; "
             + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
@@ -831,7 +856,7 @@ public class ToolRegistry {
             + "pagination, sorting, and field projection (`fields` / view:\"summary\"). "
             + "`totalRows` is the number of records matching the filters, whatever page you ask for. "
             + LIST_CODES_NOTE,
-          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
+          buildObjectSchema(props, List.of("spec")));
   }
 
   /**
@@ -865,7 +890,7 @@ public class ToolRegistry {
             + "in `data` ({\"data\": {…}}), not a list. Supports field projection "
             + "(`fields` / view:\"summary\"). " + LIST_CODES_NOTE + " "
             + McpConstants.RECORD_URL_NOTE,
-          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
+          buildObjectSchema(props, List.of("spec", "id")));
   }
 
   private McpToolDefinition buildCreateTool(List<String> specNames) {
@@ -917,7 +942,7 @@ public class ToolRegistry {
             + unknownFieldsNote
             + McpConstants.RECORD_URL_NOTE,
         buildObjectSchema(props,
-          List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
+          List.of("spec", McpConstants.PARAM_FIELDS)));
   }
 
   private McpToolDefinition buildUpdateTool(List<String> specNames) {
@@ -954,7 +979,7 @@ public class ToolRegistry {
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
             + unknownFieldsNote,
         buildObjectSchema(props,
-          List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS,
+          List.of("spec", "id", McpConstants.PARAM_FIELDS,
             McpConstants.PARAM_UPDATED)));
   }
 
@@ -967,7 +992,7 @@ public class ToolRegistry {
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_DELETE,
         "Delete a record from an Etendo API spec.",
-          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
+          buildObjectSchema(props, List.of("spec", "id")));
   }
 
   private McpToolDefinition buildSelectorsTool(List<String> specNames) {
@@ -1001,13 +1026,13 @@ public class ToolRegistry {
             + "Returns {items:[{id,label}], totalCount, hasMore}, capped at 50 items with no "
             + "paging: when hasMore is true, narrow with query.",
         buildObjectSchema(props,
-          List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN)));
+          List.of("spec", McpConstants.PARAM_COLUMN)));
   }
 
   private McpToolDefinition buildDefaultsTool(List<String> specNames, String requiredContextSummary) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
-    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
         "Parent record ID — REQUIRED for a child/line entity (e.g. the order ID when getting "
             + "line defaults, or the inventory header ID when getting inventory-line defaults). "
@@ -1076,7 +1101,7 @@ public class ToolRegistry {
             + "fields you actually confirm. "
             + "Date values come back ISO-8601 ('YYYY-MM-DD', or 'YYYY-MM-DDTHH:MM:SS' for "
             + "datetime fields) and can be passed straight back to etendo_create unchanged.",
-        buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
+        buildObjectSchema(props, List.of("spec")));
   }
 
   // ── Batch tool (cross-spec, sequential — not atomic, see IMP-23) ──────
@@ -1229,8 +1254,7 @@ public class ToolRegistry {
   private McpToolDefinition buildSchemaTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
-    props.put(McpConstants.PARAM_ENTITY,
-      stringProp("Entity name within the spec (e.g. 'header', 'lines'; use the exact names etendo_discover lists)"));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     // IMP-44: REQUIRED, and "full" is now a value you ask for rather than what you get for not
     // choosing. The full dump is 39.5 kB on sales-order/header against 5.4 kB for "create", and
     // the caller used to be told about the cheaper projection by a hint at the bottom of the
@@ -1286,7 +1310,7 @@ public class ToolRegistry {
             + "buttons/processes instead, and view:\"full\" when you are reading or filtering "
             + "and genuinely need every column.",
         buildObjectSchema(props,
-            List.of("spec", "entity", McpActionsView.PARAM_VIEW)));
+            List.of("spec", McpActionsView.PARAM_VIEW)));
   }
 
   // ── Action tool ────────────────────────────────────────────────────────
@@ -1327,7 +1351,7 @@ public class ToolRegistry {
             + "Schema for 'parameters' and an 'idDescription' saying what 'id' is; they return "
             + "the handler's own JSON.",
         buildObjectSchema(props,
-            List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
+            List.of("spec", "id", "action")));
   }
 
   // ── Process tool ───────────────────────────────────────────────────────
