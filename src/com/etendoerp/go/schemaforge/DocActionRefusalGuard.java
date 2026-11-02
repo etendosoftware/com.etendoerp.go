@@ -4,6 +4,7 @@ import java.sql.SQLException;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -102,7 +103,7 @@ final class DocActionRefusalGuard {
    * @return the error response, or {@code null} when the request may continue
    */
   static NeoResponse refuseUnlessAllowed(NeoContext context, AllowedValues allowed,
-      Function<String, String> refusalKeyOf) {
+      UnaryOperator<String> refusalKeyOf) {
     return refuseUnlessAllowed(context, allowed,
         value -> NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, refusalKeyOf.apply(value),
             value != null ? value : "-"),

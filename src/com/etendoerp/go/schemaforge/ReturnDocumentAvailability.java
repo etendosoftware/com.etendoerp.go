@@ -70,23 +70,14 @@ final class ReturnDocumentAvailability {
 
   /**
    * The actions that do not apply to this return: {@code createReturnInvoice} when it already has
-   * a non-voided factura rectificativa (the {@code hasReturnInvoice} rule).
-   *
-   * @param subject the record the agent asked about
-   * @return {@code action → reason}; empty for anything that is not a completed return, when it
-   *         has no rectificativa yet, or when the lookup fails
-   */
-  static Map<String, String> unavailable(BaseOBObject subject) {
-    return unavailable(subject, true);
-  }
-
-  /**
-   * {@link #unavailable(BaseOBObject)}, with the caller saying whether its contract accepts
-   * {@code allowDuplicate} (ETP-6026): when it does not, the reason offers no way past the 409.
+   * a non-voided factura rectificativa (the {@code hasReturnInvoice} rule). The reason offers
+   * {@code allowDuplicate:true} as a way past the 409 only when the caller's contract accepts it
+   * (ETP-6026).
    *
    * @param subject the record the agent asked about
    * @param acceptsAllowDuplicate whether {@code allowDuplicate:true} lets a second one through
-   * @return {@code action → reason}
+   * @return {@code action → reason}; empty for anything that is not a completed return, when it
+   *         has no rectificativa yet, or when the lookup fails
    */
   static Map<String, String> unavailable(BaseOBObject subject, boolean acceptsAllowDuplicate) {
     if (!(subject instanceof ShipmentInOut)) {

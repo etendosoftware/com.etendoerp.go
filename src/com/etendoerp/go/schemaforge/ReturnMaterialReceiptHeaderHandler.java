@@ -459,8 +459,9 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
         // ETP-5381 / ETP-5712: which invoices are rectified, the rectificativas the return already
         // had, the zero-amount refusal, then create, link and confirm — in that order, see the
         // shared body.
-        return ReturnInvoiceSupport.createReturnInvoice(receipt, receiptId, lines, docType, true,
-            acceptsAllowDuplicate(), context, createDraftInvoiceHandler);
+        return ReturnInvoiceSupport.createReturnInvoice(receipt, receiptId, lines, docType,
+            new ReturnInvoiceSupport.ReturnInvoiceKind(true, acceptsAllowDuplicate()), context,
+            createDraftInvoiceHandler);
 
       } finally {
         OBContext.restorePreviousMode();

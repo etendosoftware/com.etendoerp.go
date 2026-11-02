@@ -658,12 +658,12 @@ class DocumentAvailabilityTest {
       try (MockedStatic<ReturnShipmentUtils> utils = mockStatic(ReturnShipmentUtils.class)) {
         utils.when(() -> ReturnShipmentUtils.fetchPreviousReturnInvoices("R1"))
             .thenReturn(rectificativas());
-        assertTrue(ReturnDocumentAvailability.unavailable(inout("CO")).isEmpty());
-        assertTrue(ReturnDocumentAvailability.unavailable(inout("DR")).isEmpty());
-        assertTrue(ReturnDocumentAvailability.unavailable(mock(Order.class)).isEmpty());
+        assertTrue(ReturnDocumentAvailability.unavailable(inout("CO"), true).isEmpty());
+        assertTrue(ReturnDocumentAvailability.unavailable(inout("DR"), true).isEmpty());
+        assertTrue(ReturnDocumentAvailability.unavailable(mock(Order.class), true).isEmpty());
         utils.when(() -> ReturnShipmentUtils.fetchPreviousReturnInvoices("R1"))
             .thenThrow(new OBException("could not verify"));
-        assertTrue(ReturnDocumentAvailability.unavailable(inout("CO")).isEmpty());
+        assertTrue(ReturnDocumentAvailability.unavailable(inout("CO"), true).isEmpty());
       }
     }
 

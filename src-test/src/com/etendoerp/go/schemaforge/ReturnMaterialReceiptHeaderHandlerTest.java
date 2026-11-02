@@ -525,7 +525,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       utils.when(() -> ReturnShipmentUtils.findReturnDocTypeForOrg(any(), eq("org-1"),
           eq("ARI"), anyBoolean(), anyBoolean(), anyBoolean())).thenReturn(docType);
       support.when(() -> ReturnInvoiceSupport.createReturnInvoice(any(), anyString(), any(),
-          any(), anyBoolean(), anyBoolean(), any(), any()))
+          any(), any(ReturnInvoiceSupport.ReturnInvoiceKind.class), any(), any()))
           .thenThrow(QuotaRefusalTestSupport.refusal());
 
       NeoResponse result = handler.handle(NeoContext.builder()
