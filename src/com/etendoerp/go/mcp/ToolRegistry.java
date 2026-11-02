@@ -431,7 +431,8 @@ public class ToolRegistry {
         McpConstants.TOOL_NEO_DISCOVER,
         "List all available Etendo API specs the current user can access. "
             + "Returns spec names, types, entities, and available HTTP methods. "
-            + "Use this first to discover what specs and entities are available. "
+            + "Call it when you do not know which spec holds what the task needs, or which "
+            + "entities a spec has; when you already know the spec, go straight to it. "
             + "Pass spec to get only that spec's entities, parent links and actions. "
             + "The answer is always complete, never paged: count is the number of specs returned. "
             + "If your client shows it cut, call it again with spec for the one you need.",
