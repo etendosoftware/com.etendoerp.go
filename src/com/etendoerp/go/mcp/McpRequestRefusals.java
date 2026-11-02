@@ -48,6 +48,26 @@ final class McpRequestRefusals {
   }
 
   /**
+   * {@code contains} on a field that references another record (ETP-5848). The bare "works only on
+   * text fields" left the agent to work out how to find, say, the invoices of a customer named X;
+   * this names the step: find the referenced record with the field's own selector, then filter by
+   * its id.
+   *
+   * @param key  the filter key, a reference field
+   * @param text the text the caller looked for
+   * @return the exception to throw
+   */
+  static McpRoutingException containsOnReference(String key, Object text) {
+    String query = text instanceof String ? (String) text : "<text>";
+    return McpRoutingException.unprocessable(
+        "Filter '" + key + "' operator 'contains' cannot match a referenced record by its name: '"
+            + key + "' holds the id of another record.",
+        key, List.of(), "Find the record first with etendo_selectors(spec: <this spec>, field: '"
+            + key + "', query: '" + query + "'), then filter by its id: {\"" + key
+            + "\": \"<id>\"}.");
+  }
+
+  /**
    * A filter value that is not of the field's type (ETP-5914): a word on a number, a date that is
    * not {@code YYYY-MM-DD}, a boolean other than {@code true}/{@code false}. It used to reach the
    * query and fail it with a 500, or be cleaned into a filter that matched everything.

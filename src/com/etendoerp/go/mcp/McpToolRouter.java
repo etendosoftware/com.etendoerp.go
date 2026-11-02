@@ -234,7 +234,9 @@ public class McpToolRouter {
     // handlers use admin mode for DAL metadata and therefore cannot safely host this check.
     // Dispatching before setAdminMode preserves AD_Window/entity organization isolation.
     if (McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
-      return McpVectorSearchTool.handle(arguments);
+      // ETP-5848: its text fallback lists through route(), so role, spec access and scopes apply.
+      return McpVectorSearchTool.handle(arguments,
+          listArgs -> route("etendo_list", listArgs, scopes));
     }
     try {
       OBContext.setAdminMode();

@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.List;
+import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -39,8 +40,16 @@ final class McpVectorSearchTool {
   private McpVectorSearchTool() {
   }
 
-  /** Route semantic search through the same authenticated DB Extended contract as REST. */
-  static JSONObject handle(JSONObject arguments) {
+  /**
+   * Route semantic search through the same authenticated DB Extended contract as REST; when it
+   * cannot run or finds nothing, search the same targets by text (ETP-5848,
+   * {@link McpVectorTextFallback}).
+   *
+   * @param arguments the tool arguments
+   * @param listTool  runs {@code etendo_list} through the router, under the caller's role and scopes
+   * @return the MCP result
+   */
+  static JSONObject handle(JSONObject arguments, Function<JSONObject, JSONObject> listTool) {
     String query = arguments == null ? null : arguments.optString(McpConstants.PARAM_QUERY, null);
     String targets = McpArgumentUtils.joinStringArray(
         arguments == null ? null : arguments.optJSONArray("targets"));
@@ -56,14 +65,36 @@ final class McpVectorSearchTool {
       // search nothing": leave targets null so the endpoint decides, as it did before IMP-41.
       targets = allowed.map(keys -> String.join(",", keys)).orElse(null);
     }
-    NeoResponse response = new NeoVectorSearchEndpoint().handle(query, null, targets,
-        McpArgumentUtils.optionalString(arguments, "topK"),
-        McpArgumentUtils.optionalString(arguments, "minScore"),
-        McpArgumentUtils.optionalString(arguments, "maxScore"), null);
+    String topK = McpArgumentUtils.optionalString(arguments, "topK");
+    String minScore = McpArgumentUtils.optionalString(arguments, "minScore");
+    String maxScore = McpArgumentUtils.optionalString(arguments, "maxScore");
+    NeoResponse response = new NeoVectorSearchEndpoint().handle(query, null, targets, topK,
+        minScore, maxScore, null);
+    String reason = StringUtils.isBlank(query) || targets == null ? null
+        : McpVectorTextFallback.reasonFor(response);
+    if (reason != null) {
+      try {
+        return McpToolRouter.wrapAsTextContent(McpVectorTextFallback.search(
+            List.of(targets.split(",")), query.trim(), number(topK, DEFAULT_TOP_K).intValue(),
+            number(minScore, DEFAULT_MIN_SCORE).doubleValue(),
+            number(maxScore, 1d).doubleValue(), reason,
+            NeoVectorSearchEndpoint::targetTextProperties, listTool));
+      } catch (JSONException e) {
+        throw new McpToolException(ERROR_BUILDING_CONTENT, e);
+      }
+    }
     // ETP-5306: the JSONObject overloads, so the body is sanitised before it is rendered.
     JSONObject body = response.getBody();
     return response.getHttpStatus() >= 400 ? McpToolRouter.wrapAsErrorContent(body)
         : McpToolRouter.wrapAsTextContent(body);
+  }
+
+  /** The endpoint's own defaults; a value it accepted is a valid number here too. */
+  private static final int DEFAULT_TOP_K = 10;
+  private static final double DEFAULT_MIN_SCORE = 0.60d;
+
+  private static Number number(String raw, Number fallback) {
+    return StringUtils.isBlank(raw) ? fallback : Double.valueOf(raw.trim());
   }
 
   /**

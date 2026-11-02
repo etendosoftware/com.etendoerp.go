@@ -734,7 +734,9 @@ public class ToolRegistry {
         "Search indexed business records by semantic similarity using DB Extended. "
             + "Only 'query' is required: with no 'targets' it searches every index the current role "
             + "can read. Targets are authorized against their physical source entity for the "
-            + "current role. Scores are ranking signals, not confidence probabilities.",
+            + "current role. Scores are ranking signals, not confidence probabilities. When "
+            + "semantic search is unavailable or finds nothing, the same targets are searched by "
+            + "text on their indexed fields and the answer says mode:\"lexical\".",
         buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY)));
   }
 
