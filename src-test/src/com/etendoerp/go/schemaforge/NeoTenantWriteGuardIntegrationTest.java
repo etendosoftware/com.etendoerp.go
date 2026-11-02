@@ -22,6 +22,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.junit.Assume.assumeNotNull;
 
+import java.util.Collections;
 import java.util.List;
 
 import org.hibernate.criterion.Restrictions;
@@ -41,6 +42,9 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Greeting;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.uom.UOM;
+
+import com.etendoerp.go.roles.SystemRoleTemplates;
+import com.etendoerp.go.roles.UserRoleCompositionService;
 
 /**
  * Two-tenant coverage of {@link NeoTenantWriteGuard} against a real database (ETP-5819).
@@ -144,6 +148,20 @@ public class NeoTenantWriteGuardIntegrationTest extends WeldBaseTest {
 
     assertEquals(MARKER,
         OBDal.getInstance().get(BusinessPartner.class, ownPartnerId).getDescription());
+  }
+
+  /**
+   * Regression: composing a tenant user's role from a System template copies the template's
+   * process accesses with the template's client {@code 0}, on purpose. The guard admits exactly
+   * that write ({@link NeoTenantWriteGuard#allowingSystemRows}); before, the invitation failed.
+   */
+  @Test
+  public void testComposingARoleFromASystemTemplatePasses() throws Exception {
+    NeoTenantWriteGuard.call(() -> new UserRoleCompositionService().assignTemplateRoles(
+        TEST_USER_ID, Collections.singletonList(SystemRoleTemplates.SALES_ROLE_ID)));
+
+    assertTrue(new UserRoleCompositionService().getAppliedTemplateRoleIds(TEST_USER_ID)
+        .contains(SystemRoleTemplates.SALES_ROLE_ID));
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

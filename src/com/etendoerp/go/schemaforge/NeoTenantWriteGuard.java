@@ -54,7 +54,9 @@ import org.openbravo.model.ad.system.Client;
  * request, a row whose client is not the context's current client cannot be inserted, updated or
  * deleted. That includes client {@code 0} (System) rows, which a tenant request must never change.
  * For an update the previous client is checked too, so a row cannot be pulled into the tenant by
- * rewriting its client. Organization scoping within the tenant stays with NEO's guards.
+ * rewriting its client. Organization scoping within the tenant stays with NEO's guards. The one
+ * exception is explicit: code that knowingly writes System rows for the tenant runs that write in
+ * {@link #allowingSystemRows}, which admits client {@code 0} — never another tenant.
  *
  * <p><b>Why a thread flag and a flush.</b> The observer is active only between {@link #call}'s entry
  * and exit, on that thread, so background processes, imports and every non-NEO servlet are
@@ -66,6 +68,10 @@ public class NeoTenantWriteGuard extends EntityPersistenceEventObserver {
   private static final Logger log = LogManager.getLogger(NeoTenantWriteGuard.class);
 
   private static final ThreadLocal<Boolean> ACTIVE = new ThreadLocal<>();
+
+  private static final ThreadLocal<Boolean> SYSTEM_ROWS_ALLOWED = new ThreadLocal<>();
+
+  private static final String SYSTEM_CLIENT_ID = "0";
 
   /** The client property every {@link ClientEnabled} entity shares. */
   private static final String CLIENT_PROPERTY = "client";
@@ -100,6 +106,28 @@ public class NeoTenantWriteGuard extends EntityPersistenceEventObserver {
       return result;
     } finally {
       ACTIVE.remove();
+    }
+  }
+
+  /**
+   * Runs {@code body} letting the guard admit rows of client {@code 0} (System); rows of another
+   * tenant are still refused. Only for a write the caller already exempts, on purpose, from core's
+   * own client check with {@code setAdminMode(false)} — role template accesses copied onto a
+   * tenant's role keep the template's System client, for instance.
+   *
+   * @param body the write, typically a flush, that may touch System rows
+   */
+  public static void allowingSystemRows(Runnable body) {
+    Boolean previous = SYSTEM_ROWS_ALLOWED.get();
+    SYSTEM_ROWS_ALLOWED.set(Boolean.TRUE);
+    try {
+      body.run();
+    } finally {
+      if (previous == null) {
+        SYSTEM_ROWS_ALLOWED.remove();
+      } else {
+        SYSTEM_ROWS_ALLOWED.set(previous);
+      }
     }
   }
 
@@ -178,6 +206,11 @@ public class NeoTenantWriteGuard extends EntityPersistenceEventObserver {
 
   /** Fails closed: a known row client with no current client to match is foreign. */
   private static boolean isForeign(String rowClientId, String currentClientId) {
-    return rowClientId != null && !rowClientId.equals(currentClientId);
+    if (rowClientId == null || rowClientId.equals(currentClientId)) {
+      return false;
+    }
+    boolean admittedSystemRow = SYSTEM_CLIENT_ID.equals(rowClientId)
+        && Boolean.TRUE.equals(SYSTEM_ROWS_ALLOWED.get());
+    return !admittedSystemRow;
   }
 }

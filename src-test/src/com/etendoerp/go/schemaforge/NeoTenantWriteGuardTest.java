@@ -193,6 +193,32 @@ class NeoTenantWriteGuardTest {
     assertRefused(() -> guard.onUpdate(updateEvent(row(OTHER_TENANT), TENANT)));
   }
 
+  // ------------------------------------------------------------ allowingSystemRows
+
+  @Test
+  void systemRowsPassInsideTheExplicitScope() {
+    assertDoesNotThrow(() -> guarded(() -> NeoTenantWriteGuard.allowingSystemRows(() -> {
+      guard.onSave(newEvent(row(SYSTEM)));
+      guard.onUpdate(updateEvent(row(SYSTEM), SYSTEM));
+      guard.onDelete(deleteEvent(row(SYSTEM)));
+    })));
+    verify(session, never()).setDoRollback(true);
+  }
+
+  @Test
+  void anotherTenantIsStillRefusedInsideTheExplicitScope() {
+    assertRefused(() -> NeoTenantWriteGuard.allowingSystemRows(
+        () -> guard.onSave(newEvent(row(OTHER_TENANT)))));
+  }
+
+  @Test
+  void theExplicitScopeEndsWithItsBody() {
+    assertRefused(() -> {
+      NeoTenantWriteGuard.allowingSystemRows(() -> { });
+      guard.onSave(newEvent(row(SYSTEM)));
+    });
+  }
+
   @Test
   void deletingAnotherTenantsRowIsRefused() {
     assertRefused(() -> guard.onDelete(deleteEvent(row(OTHER_TENANT))));
