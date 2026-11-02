@@ -47,6 +47,9 @@ import org.mockito.Mockito;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
+import org.junit.After;
+import org.junit.Before;
+import org.openbravo.model.common.enterprise.Organization;
 
 /**
  * Unit tests for {@link NeoCertificateHelper}.
@@ -64,6 +67,21 @@ import org.openbravo.model.common.enterprise.OrganizationInformation;
  *   - validateNifOrGetPendingResponse (private, via reflection)
  */
 public class NeoCertificateHelperTest {
+
+  /** ETP-5819: the handler only serves the caller's own organizations; every id here is one. */
+  private MockedStatic<TenantOwnership> ownership;
+
+  @Before
+  public void ownEveryRecord() {
+    ownership = Mockito.mockStatic(TenantOwnership.class);
+    ownership.when(() -> TenantOwnership.loadOwned(Mockito.eq(Organization.class),
+        Mockito.anyString())).thenReturn(Mockito.mock(Organization.class));
+  }
+
+  @After
+  public void closeOwnership() {
+    ownership.close();
+  }
 
   // Real-world RPJ subject from an FNMT test certificate
   private static final String RPJ_DN =
