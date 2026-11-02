@@ -995,10 +995,28 @@ public class NeoProcessService {
           && (!params.has(columnName) || params.isNull(columnName)) && StringUtils.isBlank(param.getDefaultValue())) {
         return NeoResponse.error(400,
             "Missing mandatory parameter: " + columnName
-                + " (" + param.getName() + ")");
+                + " (" + param.getName() + ")" + acceptedValues(param));
       }
     }
     return null;
+  }
+
+  /**
+   * ETP-5848: the values a list parameter accepts, as {@code "; one of: CO (Complete), VO (Void)"},
+   * so the caller that missed it can send one instead of guessing; empty for a non-list parameter.
+   */
+  private static String acceptedValues(ProcessParameter param) {
+    if (param.getReferenceSearchKey() == null) {
+      return "";
+    }
+    Map<String, String> labels =
+        NeoSelectorService.getListLabels((String) param.getReferenceSearchKey().getId());
+    if (labels == null || labels.isEmpty()) {
+      return "";
+    }
+    return new java.util.TreeMap<>(labels).entrySet().stream()
+        .map(e -> e.getKey() + " (" + e.getValue() + ")")
+        .collect(java.util.stream.Collectors.joining(", ", "; one of: ", ""));
   }
 
   // ---- Result translation ----

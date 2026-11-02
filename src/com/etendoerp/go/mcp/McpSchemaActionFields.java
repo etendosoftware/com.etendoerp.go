@@ -17,13 +17,18 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.Comparator;
 import java.util.Map;
 import java.util.TreeSet;
+
+import org.apache.commons.lang3.StringUtils;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.ProcessParameter;
 
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 
@@ -156,5 +161,61 @@ final class McpSchemaActionFields {
       options.put(new JSONObject().put("value", value).put("label", labels.get(value)));
     }
     fieldObj.put(KEY_OPTIONS, options);
+  }
+
+  /** Key of the parameters a Classic process button reads (ETP-5848). */
+  static final String KEY_PROCESS_PARAMETERS = "processParameters";
+
+  /**
+   * ETP-5848: attach {@code processParameters:[{name, label, type, required, default?, options?}]}
+   * to a button whose Classic process reads parameters of its own ({@code AD_Process_Para}). The
+   * button listed only its process name, so an agent pressing Internal Consumption's
+   * {@code processNow} learnt of its mandatory {@code action} (CO / VO) from a 400 and guessed the
+   * value. {@code name} is the key {@code etendo_action} takes in {@code parameters};
+   * {@code required} is what {@code NeoProcessService} enforces: mandatory with no default. A
+   * process with no active parameter gets no key.
+   *
+   * @param fieldObj the button being described, modified in place
+   * @param process  the Classic process behind it
+   * @throws JSONException if the parameters cannot be written
+   */
+  static void addProcessParameters(JSONObject fieldObj, Process process) throws JSONException {
+    JSONArray out = new JSONArray();
+    process.getADProcessParameterList().stream()
+        .filter(p -> Boolean.TRUE.equals(p.isActive()) && p.getDBColumnName() != null)
+        .sorted(Comparator.comparing(ProcessParameter::getSequenceNumber,
+            Comparator.nullsLast(Comparator.naturalOrder())))
+        .forEach(p -> out.put(describe(p)));
+    if (out.length() > 0) {
+      fieldObj.put(KEY_PROCESS_PARAMETERS, out);
+    }
+  }
+
+  private static JSONObject describe(ProcessParameter param) {
+    try {
+      String refId = param.getReference() != null ? (String) param.getReference().getId() : null;
+      boolean hasDefault = StringUtils.isNotBlank(param.getDefaultValue());
+      JSONObject entry = new JSONObject()
+          .put("name", param.getDBColumnName())
+          .put(McpConstants.KEY_LABEL, StringUtils.defaultString(param.getName()))
+          .put("type", McpSchemaFieldBuilder.mapColumnType(refId))
+          .put("required", Boolean.TRUE.equals(param.isMandatory()) && !hasDefault);
+      if (hasDefault) {
+        entry.put("default", param.getDefaultValue());
+      }
+      Map<String, String> labels = param.getReferenceSearchKey() != null
+          ? NeoSelectorService.getListLabels((String) param.getReferenceSearchKey().getId())
+          : null;
+      if (labels != null && !labels.isEmpty()) {
+        JSONArray options = new JSONArray();
+        for (String value : new TreeSet<>(labels.keySet())) {
+          options.put(new JSONObject().put("value", value).put("label", labels.get(value)));
+        }
+        entry.put(KEY_OPTIONS, options);
+      }
+      return entry;
+    } catch (JSONException e) {
+      throw new IllegalStateException(e);
+    }
   }
 }

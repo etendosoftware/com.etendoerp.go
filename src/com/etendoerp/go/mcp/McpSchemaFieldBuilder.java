@@ -785,6 +785,7 @@ final class McpSchemaFieldBuilder {
       processName = classicProcess.getName();
       fieldObj.put("processName", processName != null ? processName : "");
       fieldObj.put("processId", classicProcess.getId());
+      McpSchemaActionFields.addProcessParameters(fieldObj, classicProcess);
     }
     applyActionLabelFallback(fieldObj, col, processName);
     McpSchemaActionFields.addInvokability(fieldObj, visibility, processName != null, hiddenInTab);
