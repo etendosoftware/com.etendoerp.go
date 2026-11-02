@@ -2987,13 +2987,49 @@ PSD2 transaction id, the PSD2 discard flag and button and the bounce-pair link
 A body line without `id` is a new line, as before — the SPA's statement editor does not send it
 yet, so until it does an edit still loses them.
 
-**Known divergences, not channel ones.** REST and MCP run the same wrappers, so there is none
-between channels. Two counters outside this API still count discarded lines as pending: the
-statement aggregates and status (`BankStatementAggregates`, `deriveStatementStatus` — a statement
-with a discarded line stays `PARTIAL`) and the account's *Por conciliar* stored computed column
-(`ETGO_ACCOUNT_PENDING_COUNT` → `EM_ETGO_Pending_Count`, served as `eTGOPendingCount` by the
-`financial-account` CRUD and as `pendingCount` by `financial-accounts-page`). Whether a discarded
-line counts as resolved there is an open product decision, so they are unchanged.
+**Discarded lines count as resolved in every Etendo counter.** Product decision: in Etendo a
+line is only ever discarded as part of a bounce pair, so a discarded line is **resolved** —
+never pending, and never reported as matched to a transaction. The counters outside this API
+agree with the pending panel:
+
+- **Statement aggregates and status** (`BankStatementAggregates`,
+  `BankStatementsSupport.deriveStatementStatus(processed, lineCount, matchedCount,
+  discardedCount)`). A new stored column `FIN_BankStatement.EM_ETGO_Discarded_Count` counts the
+  active lines that are discarded and not matched; `EM_ETGO_Matched_Count` keeps counting only
+  lines matched to a transaction (the two are disjoint). The status treats `matched +
+  discarded` as resolved: none → `PENDING`, some → `PARTIAL`, all → `RECONCILED`, so a
+  statement whose lines are all matched or discarded is `RECONCILED`. Still pending is
+  `lineCount − matchedCount − discardedCount`. `EM_ETGO_Total_In` / `_Out` remain the
+  statement's totals and include discarded lines. `bank-statements?action=list` returns
+  `discardedCount` next to `matchedCount`. The discard flag is read by column name
+  (`StatementLineDiscard`), not through the APRM hook, because `BankStatementLineAggregateHandler`
+  must see the in-flight value of the line being saved; that observer recomputes on every line
+  update, so a discard or restore — by Classic's PSD2 button, or by `discardPair` /
+  `restorePair`, which update two lines — refreshes each affected statement.
+  `BankStatementHeaderStatusHandler` derives the status from the same three stored counts.
+- **The account's *Por conciliar*** stored computed column (`ETGO_ACCOUNT_PENDING_COUNT` →
+  `EM_ETGO_Pending_Count`, served as `eTGOPendingCount` by the `financial-account` CRUD and as
+  `pendingCount` by `financial-accounts-page`) counts only lines with
+  `em_psd2_is_discarded = 'N'`, and its `FIN_BankStatementLine` dependency watches
+  `EM_PSD2_Is_Discarded`, so the counter refreshes when a line is discarded or restored. The
+  function has no catch-all: missing data already yields 0 (`COUNT` + `COALESCE`, so an unknown
+  account counts 0), and any other error fails loudly instead of showing "0 por conciliar".
+  **Known open item — the module dependency is not declared.** Reading a PSD2 column from a
+  computed column makes the computed-column policy (CLAUDE.md) ask for
+  `com.etendoerp.psd2.bank.integration` in `com.etendoerp.go`'s `AD_MODULE_DEPENDENCY`; it is
+  today only a Gradle dependency (`build.gradle`, `[2.0.0,)`). Nothing in the build requires the
+  record: `export.database`, `update.database` and the `ad_scd_*` trigger generation do not check
+  module dependencies, and `ETGO_SF_FIELD.xml` already references PSD2 columns without it. What
+  it would guard is an AD-level install of this module without PSD2, where the watched-column row
+  would point at a missing `AD_COLUMN` and the function would fail at run time.
+
+Classic APRM is unchanged: these are Etendo-only columns. **Deploying this change on a database
+that already holds discarded lines** needs one refresh of each: `SELECT
+ad_scd_rebuild('870AD3030E334C3CB5BED17CB44C2A1B')` for the pending counter (changing an existing
+column's function leaves its stored values alone), and the *Backfill Bank Statement Aggregates*
+process (`BackfillBankStatementAggregatesProcess`) for the statement counts and status.
+
+REST and MCP run the same wrappers, so there is no divergence between channels.
 
 ##### 4.12.1.2 Bank statement agent actions (ETP-5447, ETP-5469)
 

@@ -268,24 +268,44 @@ public final class BankStatementsSupport {
 
   /**
    * Three-state status derived from how many of the statement's lines are
-   * already matched to a financial-account transaction:
-   * {@code matched == 0} → PENDING; {@code 0 < matched < total} → PARTIAL;
-   * {@code matched == total > 0} → RECONCILED; empty statement → PENDING.
+   * already matched to a financial-account transaction, with no discarded line.
+   * Same as {@link #deriveStatementStatus(int, int, int)} with {@code discardedCount = 0}.
    *
    * @param lineCount    total number of lines in the statement
    * @param matchedCount number of those lines already matched to a transaction
    * @return one of {@code "PENDING"}, {@code "PARTIAL"} or {@code "RECONCILED"}
    */
   public static String deriveStatementStatus(int lineCount, int matchedCount) {
-    if (lineCount == 0 || matchedCount == 0) return STATUS_PENDING;
-    if (matchedCount >= lineCount) return STATUS_RECONCILED;
+    return deriveStatementStatus(lineCount, matchedCount, 0);
+  }
+
+  /**
+   * Three-state status derived from how many of the statement's lines are
+   * <em>resolved</em>: matched to a financial-account transaction, or discarded
+   * (ETP-5581 — in Etendo a line is only ever discarded as part of a PSD2 bounce
+   * pair). A discarded line is resolved without being matched, so it counts toward
+   * the status but never toward {@code matchedCount}. With
+   * {@code resolved = matched + discarded}: {@code resolved == 0} → PENDING;
+   * {@code 0 < resolved < total} → PARTIAL; {@code resolved >= total > 0} →
+   * RECONCILED; empty statement → PENDING. A statement whose lines are all matched
+   * or discarded is therefore RECONCILED.
+   *
+   * @param lineCount      total number of lines in the statement
+   * @param matchedCount   number of those lines already matched to a transaction
+   * @param discardedCount number of those lines discarded and not matched (negative reads as 0)
+   * @return one of {@code "PENDING"}, {@code "PARTIAL"} or {@code "RECONCILED"}
+   */
+  public static String deriveStatementStatus(int lineCount, int matchedCount, int discardedCount) {
+    int resolved = matchedCount + Math.max(discardedCount, 0);
+    if (lineCount == 0 || resolved <= 0) return STATUS_PENDING;
+    if (resolved >= lineCount) return STATUS_RECONCILED;
     return STATUS_PARTIAL;
   }
 
   /**
-   * Status that also accounts for whether the statement has been processed.
-   * An unprocessed statement is a draft regardless of its matching state;
-   * once processed, the matching-based status applies.
+   * Status that also accounts for whether the statement has been processed, with
+   * no discarded line. Same as {@link #deriveStatementStatus(boolean, int, int, int)}
+   * with {@code discardedCount = 0}.
    *
    * @param processed    whether the statement's Processed flag is set
    * @param lineCount    total number of lines in the statement
@@ -294,8 +314,26 @@ public final class BankStatementsSupport {
    *         {@code "PENDING"}, {@code "PARTIAL"} or {@code "RECONCILED"}
    */
   public static String deriveStatementStatus(boolean processed, int lineCount, int matchedCount) {
+    return deriveStatementStatus(processed, lineCount, matchedCount, 0);
+  }
+
+  /**
+   * Status that also accounts for whether the statement has been processed.
+   * An unprocessed statement is a draft regardless of its lines; once processed,
+   * the resolution-based status of {@link #deriveStatementStatus(int, int, int)}
+   * applies, where a discarded line counts as resolved (ETP-5581).
+   *
+   * @param processed      whether the statement's Processed flag is set
+   * @param lineCount      total number of lines in the statement
+   * @param matchedCount   number of those lines already matched to a transaction
+   * @param discardedCount number of those lines discarded and not matched
+   * @return {@code "DRAFT"} when not processed, otherwise one of
+   *         {@code "PENDING"}, {@code "PARTIAL"} or {@code "RECONCILED"}
+   */
+  public static String deriveStatementStatus(boolean processed, int lineCount, int matchedCount,
+      int discardedCount) {
     if (!processed) return "DRAFT";
-    return deriveStatementStatus(lineCount, matchedCount);
+    return deriveStatementStatus(lineCount, matchedCount, discardedCount);
   }
 
   /**

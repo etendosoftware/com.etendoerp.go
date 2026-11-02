@@ -300,6 +300,7 @@ public class BankStatementsHandler implements NeoHandler {
           + "       bs.created,"
           + "       bs.em_etgo_line_count,"
           + "       bs.em_etgo_matched_count,"
+          + "       bs.em_etgo_discarded_count,"
           + "       bs.em_etgo_total_in,"
           + "       bs.em_etgo_total_out,"
           + "       bs.em_etgo_status,"
@@ -1312,6 +1313,9 @@ public class BankStatementsHandler implements NeoHandler {
         while (rs.next()) {
           int lineCount = rs.getInt("em_etgo_line_count");
           int matchedCount = rs.getInt("em_etgo_matched_count");
+          // ETP-5581: discarded lines are resolved without being matched; NULL (a row not yet
+          // recomputed since the column was added) reads as 0.
+          int discardedCount = rs.getInt("em_etgo_discarded_count");
           BigDecimal totalIn = nullSafeBigDecimal(rs.getBigDecimal("em_etgo_total_in"));
           BigDecimal totalOut = nullSafeBigDecimal(rs.getBigDecimal("em_etgo_total_out"));
           String periodFrom = formatDate(rs.getTimestamp("period_from"));
@@ -1333,6 +1337,7 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put(FIELD_LINE_COUNT, lineCount);
           row.put("matchedCount", matchedCount);
+          row.put("discardedCount", discardedCount);
           // totalAmount is kept for the existing conditional filter; it is just the
           // sum of the two persisted columns, derived here so we store one less column.
           row.put("totalAmount", totalIn.add(totalOut));
@@ -1344,7 +1349,7 @@ public class BankStatementsHandler implements NeoHandler {
           // predate the column and have not been backfilled yet.
           String status = StringUtils.trimToEmpty(rs.getString("em_etgo_status"));
           if (StringUtils.isBlank(status)) {
-            status = deriveStatementStatus(processed, lineCount, matchedCount);
+            status = deriveStatementStatus(processed, lineCount, matchedCount, discardedCount);
           }
           row.put("status", status);
           arr.put(row);
