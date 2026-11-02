@@ -718,6 +718,7 @@ final class McpSchemaFieldBuilder {
     if (McpConstants.TYPE_IMAGE.equals(type)) {
       McpImageFieldSupport.decorateImageField(fieldObj);
     }
+    addMaxLength(fieldObj, col, type);
     addDefaultExpression(fieldObj, col, dalEntity);
     addVisibility(fieldObj, visibility, !isButton && col.isMandatory());
     boolean isBusinessCritical = Boolean.TRUE.equals(
@@ -739,6 +740,21 @@ final class McpSchemaFieldBuilder {
   private static void addAgentPrompt(JSONObject fieldObj, String agentPrompt) throws JSONException {
     if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
       fieldObj.put("agentPrompt", agentPrompt.trim());
+    }
+  }
+
+  /** Key of the most characters a text field takes (ETP-5848). */
+  static final String KEY_MAX_LENGTH = "maxLength";
+
+  /**
+   * ETP-5848: the column's length on a text field, so an agent does not learn it from a
+   * "Value too long … maximum allowed 40" refusal after the create. Text only: on any other type
+   * the AD length is the storage of an id, a number or a date, not something the caller types.
+   */
+  static void addMaxLength(JSONObject fieldObj, Column col, String type) throws JSONException {
+    Long length = col.getLength();
+    if (McpConstants.TYPE_STRING.equals(type) && length != null && length > 0) {
+      fieldObj.put(KEY_MAX_LENGTH, length.longValue());
     }
   }
 
