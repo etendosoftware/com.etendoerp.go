@@ -133,7 +133,13 @@ final class McpDocumentEmailTool {
       if (notSendable.isPresent()) {
         return statusRefusal(notSendable.get());
       }
-      NeoDocumentPdf.Result pdf = NeoDocumentPdf.resolve(target, entity);
+      // ETP-6013: a PDF the server renders for this email is in the email's language.
+      String pdfLanguage = StringUtils.defaultIfBlank(request.getLanguage(),
+          McpDocumentEmailRequest.DEFAULT_LANGUAGE);
+      NeoDocumentPdf.Result pdf;
+      try (NeoDocumentPdf.RenderLanguage scope = NeoDocumentPdf.renderLanguage(pdfLanguage)) {
+        pdf = NeoDocumentPdf.resolve(target, entity);
+      }
       return proceed(contract.get(), request, specName, pdf);
     } catch (NeoAttachmentTarget.Refused e) {
       return refusal(e);
@@ -239,8 +245,9 @@ final class McpDocumentEmailTool {
     if (pdf.getStatus() == NeoDocumentPdf.Status.MISSING) {
       problem.put(McpConstants.KEY_HINT, missingHint(pdf));
     } else if (pdf.getStatus() == NeoDocumentPdf.Status.STALE) {
-      problem.put(McpConstants.KEY_HINT, "Open the document's preview in the application so its "
-          + "PDF is refreshed, then ask to send again. " + PREVIEW_STORES_NOTHING);
+      problem.put(McpConstants.KEY_HINT, McpDocumentPdfTool.JUST_COMPLETED_HINT
+          + "Otherwise open the document's preview in the application so its PDF is refreshed, "
+          + "then ask to send again. " + PREVIEW_STORES_NOTHING);
     }
     return problem;
   }
@@ -251,8 +258,8 @@ final class McpDocumentEmailTool {
     if (pdf.isDraft()) {
       return DRAFT_SEND_HINT;
     }
-    String advice = "Open the document's preview in the application so its PDF is stored, then "
-        + "ask to send again";
+    String advice = McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise open the document's preview "
+        + "in the application so its PDF is stored, then ask to send again";
     return (documentStatus == null ? advice + " (a draft never stores a PDF: complete it first). "
         : advice + ". ") + PREVIEW_STORES_NOTHING;
   }

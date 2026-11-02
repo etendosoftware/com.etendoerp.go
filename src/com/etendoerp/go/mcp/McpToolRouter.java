@@ -77,6 +77,7 @@ import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
+import com.etendoerp.go.schemaforge.NeoPrintAfterComplete;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
@@ -2039,6 +2040,31 @@ public class McpToolRouter {
    * document over MCP would skip handler logic the UI executes (ETP-4285).
    */
   JSONObject handleAction(String specName, JSONObject args) throws Exception {
+    JSONObject result = runAction(specName, args);
+    // ETP-6013: a successful DocAction on a printable document queues its server-side PDF, rendered
+    // after the call commits (by the request, or by etendo_action_batch for each document, which
+    // runs through here). Returns at once and never throws.
+    if (!result.optBoolean("isError", false)) {
+      queueServerPdf(specName, args);
+    }
+    return result;
+  }
+
+  /** ETP-6013: see {@link NeoPrintAfterComplete}. A failure here never reaches the action's answer. */
+  private static void queueServerPdf(String specName, JSONObject args) {
+    try {
+      SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+      SFEntity entity = McpToolRouterSupport.findIncludedEntity(spec.getId(),
+          args.getString(McpConstants.PARAM_ENTITY));
+      // The MCP's PDF language: the email tool's default, so a later email and this PDF match.
+      NeoPrintAfterComplete.afterAction(entity, args.getString("id"), args.getString("action"),
+          true, McpDocumentEmailRequest.DEFAULT_LANGUAGE);
+    } catch (Exception e) {
+      log.debug("[print] server-side PDF not queued: {}", e.getClass().getSimpleName());
+    }
+  }
+
+  private JSONObject runAction(String specName, JSONObject args) throws Exception {
     McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", "action");
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);

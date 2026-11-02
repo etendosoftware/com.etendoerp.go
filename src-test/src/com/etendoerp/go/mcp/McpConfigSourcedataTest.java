@@ -275,8 +275,24 @@ class McpConfigSourcedataTest {
   private static final Set<String> SUPPLIER_PDF_ENTITIES = new TreeSet<>(List.of(
       "goods-receipt/goodsReceipt", "purchase-invoice/header"));
 
+  /**
+   * ETP-6013 — the document entities whose printable the server renders: they declare
+   * {@code pdf.source:"rendered"} with {@code print.document} naming the manifest the frontend build
+   * publishes and the {@code NeoPrintableDataBuilder} that fills it. Each key maps to the entity that
+   * declares it.
+   */
+  private static final java.util.Map<String, String> PRINTED_PDF_ENTITIES = new java.util.TreeMap<>(
+      java.util.Map.of("sales-invoice/header", "sales-invoice",
+          "sales-order/header", "sales-order",
+          "purchase-order/header", "purchase-order",
+          "sales-quotation/quotation", "sales-quotation",
+          "goods-shipment/goodsShipment", "goods-shipment",
+          "return-to-vendor-shipment/returnToVendorShipment", "return-to-vendor-shipment",
+          "return-material-receipt/returnMaterialReceipt", "return-material-receipt"));
+
   @Test
-  @DisplayName("exactly the upload-layout document entities declare pdf.source:supplier, validly")
+  @DisplayName("exactly the upload-layout document entities declare pdf.source:supplier, validly; "
+      + "the server-printed ones declare pdf.print")
   void supplierPdfEntitiesAreDeclared() throws Exception {
     Path dir = sourcedataDir();
     String specXml = new String(Files.readAllBytes(dir.resolve("ETGO_SF_SPEC.xml")),
@@ -293,6 +309,7 @@ class McpConfigSourcedataTest {
     Matcher rows = Pattern.compile("<!--[0-9A-F]{32}--><ETGO_SF_ENTITY>(.*?)</ETGO_SF_ENTITY>",
         Pattern.DOTALL).matcher(entityXml);
     Set<String> declared = new TreeSet<>();
+    java.util.Map<String, String> printed = new java.util.TreeMap<>();
     McpConfigSections.resetForTests();
     while (rows.find()) {
       Matcher config = ROW.matcher(rows.group(1));
@@ -305,14 +322,21 @@ class McpConfigSourcedataTest {
       }
       JSONObject section = body.getJSONObject("pdf");
       assertEquals(List.of(), com.etendoerp.go.schemaforge.NeoPdfSourceConfig.validate(section));
-      assertEquals("supplier", section.getString("source"), "only the exception is declared in data");
       Matcher spec = Pattern.compile("<ETGO_SF_SPEC_ID><!\\[CDATA\\[([0-9A-F]{32})]]>")
           .matcher(rows.group(1));
       Matcher name = Pattern.compile("<NAME><!\\[CDATA\\[(.*?)]]></NAME>").matcher(rows.group(1));
       assertTrue(spec.find() && name.find());
-      declared.add(specNames.get(spec.group(1)) + "/" + name.group(1));
+      String entity = specNames.get(spec.group(1)) + "/" + name.group(1);
+      if ("supplier".equals(section.getString("source"))) {
+        declared.add(entity);
+      } else {
+        // A rendered section in data exists only to name the server-side printable (ETP-6013).
+        assertEquals("rendered", section.getString("source"), entity);
+        printed.put(entity, section.getJSONObject("print").getString("document"));
+      }
     }
     assertEquals(SUPPLIER_PDF_ENTITIES, declared);
+    assertEquals(PRINTED_PDF_ENTITIES, printed);
   }
 
   private static final String SALES_INVOICE_HEADER = "7240CAF07810439B85DE61E70BE8DC0B";

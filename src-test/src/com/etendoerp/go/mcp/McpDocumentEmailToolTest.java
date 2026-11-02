@@ -648,7 +648,8 @@ class McpDocumentEmailToolTest {
       assertNotSent(result, 409, "no_pdf");
       String hint = result.getString("hint");
       assertFalse(hint.contains("send the document by email"), hint);
-      assertTrue(hint.contains("Open the document's preview in the application"), hint);
+      assertTrue(hint.contains("open the document's preview in the application"), hint);
+      assertTrue(hint.contains("ask again in a few seconds"), hint);
       assertTrue(hint.contains("ask to send again"), hint);
       assertTrue(hint.contains("first send must be done from the application"), hint);
       assertFalse(result.getBoolean("sent"));
@@ -668,8 +669,9 @@ class McpDocumentEmailToolTest {
       pdfMock.when(() -> NeoDocumentPdf.resolve(target, header))
           .thenReturn(NeoDocumentPdf.Result.notStoredInStatus("CO"));
       String completed = McpDocumentEmailTool.run(argsTo(BASE)).getString("hint");
-      assertTrue(completed.startsWith("Open the document's preview in the application so its "
-          + "PDF is stored, then ask to send again."), completed);
+      assertTrue(completed.startsWith(McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise open "
+          + "the document's preview in the application so its PDF is stored, then ask to send "
+          + "again."), completed);
       assertFalse(completed.contains("draft"), completed);
       assertTrue(completed.contains("first send must be done from the application"), completed);
 
@@ -735,6 +737,8 @@ class McpDocumentEmailToolTest {
 
       JSONObject command = sentCommand();
       assertEquals("es_ES", command.getString("language"));
+      // ETP-6013: without a language the PDF the server renders is es_ES, like the email
+      pdfMock.verify(() -> NeoDocumentPdf.renderLanguage("es_ES"));
       assertEquals("Pedido de Compra #1000008 — Proveedor Mayorista",
           command.getJSONObject("messageEdits").getString("subject"));
     }
@@ -748,6 +752,8 @@ class McpDocumentEmailToolTest {
 
       JSONObject command = sentCommand();
       assertEquals("en_US", command.getString("language"));
+      // ETP-6013: a PDF the server renders for this email is in the email's language
+      pdfMock.verify(() -> NeoDocumentPdf.renderLanguage("en_US"));
       JSONObject edits = command.getJSONObject("messageEdits");
       assertEquals("Purchase Order #1000008 — Proveedor Mayorista", edits.getString("subject"));
       assertEquals("Hello **Proveedor Mayorista**,\n\nPlease find your Purchase Order "
@@ -984,7 +990,9 @@ class McpDocumentEmailToolTest {
       String description = McpDocumentEmailToolDefinition.DESCRIPTION;
       assertTrue(description.contains("sends a REAL email"), description);
       assertTrue(description.contains("preview"), description);
-      assertTrue(description.contains("never generates"), description);
+      // ETP-6013: the server generates a missing or stale PDF first where it can.
+      assertFalse(description.contains("never generates"), description);
+      assertTrue(description.contains("ask again in a few seconds"), description);
       assertTrue(description.contains("DUPLICATE") || description.contains("identical"),
           description);
     }

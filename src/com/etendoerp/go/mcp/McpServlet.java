@@ -47,6 +47,7 @@ import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
+import com.etendoerp.go.schemaforge.NeoPrintAfterComplete;
 import com.etendoerp.go.schemaforge.NeoWriteChannel;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
@@ -216,7 +217,10 @@ public class McpServlet extends HttpServlet {
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     // ETP-5791: label the writes this call makes as MCP (telemetry only). Restored in the finally.
     String previousChannel = NeoWriteChannel.enter(NeoWriteChannel.MCP);
+    NeoPrintAfterComplete.Deferral printRenders = null;
     try {
+      // ETP-6013: server-side PDF renders queued by this call wait until its work is done.
+      printRenders = NeoPrintAfterComplete.deferUntilEnd();
       method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
       callParams = rpcMessage.optJSONObject("params");
@@ -251,9 +255,14 @@ public class McpServlet extends HttpServlet {
       String rendered = rpcResponse.toString();
       response.setStatus(HttpServletResponse.SC_OK);
       response.getWriter().write(rendered);
+      // The call's writes are all flushed: a queued render now waits (FOR SHARE) for its final
+      // commit, not for a commit made in the middle of the call.
+      printRenders.release();
 
-      // AFTER the business transaction has been committed and closed by McpSessionManager, and
-      // after the caller already has its answer: nothing below can affect either.
+      // AFTER the caller already has its answer, and after McpSessionManager flushed the call's
+      // writes. The business transaction is NOT committed yet: DalRequestFilter commits it once
+      // doPost returns (the released print renders wait for exactly that commit). Nothing below
+      // writes to it, so nothing below can affect the answer or the transaction.
       recordToolCall(identity, new McpCallObservation(McpUsageTelemetry.currentSessionKey(), body,
           rendered, startedAtNanos), toolName, callParams, result, null);
 
@@ -275,6 +284,9 @@ public class McpServlet extends HttpServlet {
       McpUsageTelemetry.clearCurrentClient();
       McpUsageTelemetry.clearCurrentTenant();
       NeoWriteChannel.restore(previousChannel);
+      if (printRenders != null) {
+        printRenders.close();
+      }
     }
   }
 
@@ -474,8 +486,9 @@ public class McpServlet extends HttpServlet {
    * Hand one {@code tools/call} to {@link McpUsageLogger}, which writes it on its own thread, on its
    * own connection, in its own transaction.
    * <p>
-   * Called only once the response has been written, so the user's answer is already out and the
-   * business transaction is already committed and closed. The whole body is wrapped in a
+   * Called only once the response has been written, so the user's answer is already out; the
+   * business transaction is flushed but committed later, by {@code DalRequestFilter}, after
+   * {@code doPost} returns — the logger's own connection keeps it out of that transaction. The whole body is wrapped in a
    * {@code catch (Throwable)} for the same reason the logger is: a defect in telemetry must not turn
    * a successful tool call into a failed HTTP request.
    *
