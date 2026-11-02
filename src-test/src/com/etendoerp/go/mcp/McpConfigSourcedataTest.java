@@ -652,11 +652,11 @@ class McpConfigSourcedataTest {
    * invoice offers CO on a draft and only RE once completed (the screen's Reactivate; no reversal, RC removed
    * in the QA follow-up), an order CO/VO/PR on a draft. Once completed a purchase order offers
    * CL/RE, while a sales order offers only RE: the app never offers Close on a sales order and its
-   * pre-hook refuses it (ETP-5704). ETP-6026: a draft or in-progress sales order is not offered VO
-   * either (the app offers Delete and Confirm there and the pre-hook refuses it); the purchase
-   * order keeps VO. A quotation is offered CO on a draft and RJ Under evaluation, never RE, VO or
-   * CL; the final statuses (VO, CA, CJ, CL and ETGO_CI, the one CreateDraftInvoiceHandler sets)
-   * offer nothing. Advisory data, so its content is asserted here.
+   * pre-hook refuses it (ETP-5704). ETP-6026: the sales order is an allow-list — CO on a draft or
+   * in-progress order, RE on a booked one, nothing else (no VO, no PR); the purchase order keeps
+   * VO and PR. A quotation is offered CO on a draft and RJ Under evaluation, nothing else; the
+   * other statuses (IP, VO, CA, CJ, CL and ETGO_CI, the one CreateDraftInvoiceHandler sets) offer
+   * nothing. Advisory data, so its content is asserted here.
    */
   @Test
   @DisplayName("order and invoice headers declare documentAction values per status from core's transitions")
@@ -666,7 +666,7 @@ class McpConfigSourcedataTest {
         SALES_ORDER_HEADER_ID, Set.of("RE"));
     Map<String, Set<String>> draftValues = Map.of(
         PURCHASE_ORDER_HEADER_ID, Set.of("CO", "VO", "PR"),
-        SALES_ORDER_HEADER_ID, Set.of("CO", "PR"));
+        SALES_ORDER_HEADER_ID, Set.of("CO"));
     Map<String, Set<String>> inProgressValues = Map.of(
         PURCHASE_ORDER_HEADER_ID, Set.of("CO", "VO"),
         SALES_ORDER_HEADER_ID, Set.of("CO"));
@@ -686,7 +686,7 @@ class McpConfigSourcedataTest {
     JSONObject quotation = valuesByStatusOf(SALES_QUOTATION_HEADER_ID);
     assertEquals(Set.of("CO"), setOf(quotation.getJSONArray("DR")));
     assertEquals(Set.of("RJ"), setOf(quotation.getJSONArray("UE")));
-    for (String status : List.of("VO", "CA", "CJ", "CL", "ETGO_CI")) {
+    for (String status : List.of("IP", "VO", "CA", "CJ", "CL", "ETGO_CI")) {
       assertEquals(0, quotation.getJSONArray(status).length(), status);
     }
     assertResolvesCleanly(SALES_QUOTATION_HEADER_ID);

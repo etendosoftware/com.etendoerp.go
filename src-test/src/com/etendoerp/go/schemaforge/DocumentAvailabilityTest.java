@@ -89,6 +89,21 @@ class DocumentAvailabilityTest {
   private static final String REACTIVATE = "documentAction:RE";
   /** The availability key of Void, as the MCP publishes it (ETP-6026). */
   private static final String VOID = "documentAction:VO";
+  /** The C_Order.DocAction values an agent could send, as the AD list holds them (ETP-6026). */
+  private static final List<String> DOC_ACTION_LIST =
+      List.of("CO", "RE", "VO", "CL", "PR", "AP", "RJ", "PO", "RA", "RC", "XL");
+
+  /** The availability keys of every listed value but {@code allowed} (ETP-6026 allow-list). */
+  private static Set<String> keysExcept(String... allowed) {
+    Set<String> keep = Set.of(allowed);
+    Set<String> keys = new java.util.LinkedHashSet<>();
+    for (String value : DOC_ACTION_LIST) {
+      if (!keep.contains(value)) {
+        keys.add(DOCUMENT_ACTION + ":" + value);
+      }
+    }
+    return keys;
+  }
 
   private static java.util.function.UnaryOperator<String> subject(String status, String posted) {
     return property -> {
@@ -181,17 +196,17 @@ class DocumentAvailabilityTest {
 
     @Test
     @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing "
-        + "out — except Close, which a sales order rules out even as a draft, and Void, which it "
-        + "rules out on a draft or in-progress order")
+        + "out — except, on a sales order, every documentAction value but CO on a draft or "
+        + "in-progress order")
     void unlinkedDraftOrOtherRulesNothingOut() throws Exception {
       try (MockedStatic<OBDal> ignored = linkedDocuments(false)) {
         assertTrue(OrderDocumentAvailability.unavailable(order("CO")).isEmpty());
       }
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-        // ETP-5704: Close is never offered on a sales order; a purchase order does not opt in.
-        // ETP-6026: nor is Void on a draft or in-progress sales order.
+        // ETP-5704 / ETP-6026: the sales order is an allow-list — a draft or in-progress order
+        // takes CO and nothing else; a purchase order does not opt in.
         for (String status : new String[] { "DR", "IP" }) {
-          assertEquals(Set.of(CLOSE, VOID),
+          assertEquals(keysExcept("CO"),
               new SalesOrderHeaderHandler().unavailableActions(order(status)).keySet(), status);
           assertTrue(new PurchaseOrderHeaderHandler().unavailableActions(order(status)).isEmpty(),
               status);
@@ -216,8 +231,15 @@ class DocumentAvailabilityTest {
 
           String label = linked ? "with linked documents" : "with nothing linked";
           assertTrue(sales.containsKey(CLOSE), label);
-          // ETP-6026: the app offers only Reactivate on a booked sales order, never Void
-          assertTrue(sales.containsKey(VOID), label);
+          // ETP-6026: the app offers only Reactivate on a booked sales order (CO there is a
+          // no-op the pre-hook lets through, so it is not reported either)
+          Set<String> expected = keysExcept("CO", "RE");
+          if (linked) {
+            expected.add(REACTIVATE);
+          }
+          assertEquals(expected, sales.keySet().stream()
+              .filter(k -> k.startsWith(DOCUMENT_ACTION + ":"))
+              .collect(java.util.stream.Collectors.toSet()), label);
           assertFalse(purchase.containsKey(VOID), label);
           assertEquals(linked, sales.containsKey(REACTIVATE), label);
           assertFalse(purchase.containsKey(CLOSE), label);
@@ -227,14 +249,17 @@ class DocumentAvailabilityTest {
     }
 
     @Test
-    @DisplayName("a quotation rules Reactivate, Void and Close out in every status, voided included")
+    @DisplayName("a quotation rules out every documentAction value but CO on a draft and RJ "
+        + "under evaluation; Reactivate, Void and Close in every status, voided included")
     void quotationRulesOutReactivateVoidAndClose() {
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-        // ETP-6026: the app offers none of the three on a quotation, and core refuses any action
-        // on a voided one, so Reactivate is no longer available once voided either.
-        for (String status : new String[] { "UE", "DR", "CO", "VO" }) {
-          assertEquals(Set.of(REACTIVATE, VOID, CLOSE),
-              new SalesQuotationHeaderHandler().unavailableActions(order(status)).keySet(), status);
+        // ETP-6026: an allow-list. Core refuses any action on a voided quotation, so nothing is
+        // available once voided, Reactivate included.
+        SalesQuotationHeaderHandler handler = new SalesQuotationHeaderHandler();
+        assertEquals(keysExcept("CO"), handler.unavailableActions(order("DR")).keySet());
+        assertEquals(keysExcept("RJ"), handler.unavailableActions(order("UE")).keySet());
+        for (String status : new String[] { "IP", "CO", "VO", "CA", "CJ" }) {
+          assertEquals(keysExcept(), handler.unavailableActions(order(status)).keySet(), status);
         }
         obDal.verify(OBDal::getInstance, never());
       }

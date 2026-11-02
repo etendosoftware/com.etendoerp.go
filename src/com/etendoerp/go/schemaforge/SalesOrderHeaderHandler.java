@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import javax.inject.Inject;
@@ -63,11 +64,20 @@ import java.util.Set;
  * as Reactivate ({@link DocActionRefusalGuard}); advertised by {@link #unavailableActions}.
  * Purchase orders do not opt in.
  *
- * <p>ETP-6026: Void ({@code DocAction} = {@code VO}) is refused on a sales order that is a draft
- * ({@code DR}), in progress ({@code IP}) or booked ({@code CO}) — the window offers Delete and
- * Confirm on a draft and only Reactivate once booked, never Void. Over MCP a draft order used to
- * be voided with total 0. Decided on the stored {@code documentStatus}, with the same guard and
- * rules as Close; advertised by {@link #unavailableActions}. Purchase orders do not opt in.
+ * <p>ETP-6026: the {@code DocAction} button is an ALLOW-list of what the window offers, decided on
+ * the stored {@code documentStatus} ({@link #ALLOWED_BY_STATUS}): Confirm ({@code CO}) on a draft
+ * ({@code DR}) or an in-progress ({@code IP}) order — the form shows Confirmar on both, since an
+ * {@code IP} order is not processed — and Reactivate ({@code RE}) on a booked one ({@code CO}).
+ * {@code CO} on a booked order is also let through: the list's bulk bar sends it to every
+ * selected row in a mixed draft + booked selection, and {@code DocActionIdempotency} answers that
+ * row "already applied" without running anything. {@code RE} on a draft is left to the rule that
+ * answered it before ({@link #LEFT_TO_EXISTING_RULES}), so the bulk bar's Reactivar over drafts
+ * still gets 422 {@code ETGO_ReactivateOnlyCompleted}; on any other non-booked status it is
+ * refused like the rest. Every other effective value —
+ * Void, Close, Prepare ({@code PR}, which used to take a draft to {@code IP} over MCP),
+ * {@code AP}, {@code --}, nothing at all — is refused with 400
+ * ({@code DocActionRefusalGuard#refuseUnlessAllowed}; Close and Void keep their own messages).
+ * Advertised by {@link #unavailableActions}. Purchase orders do not opt in.
  *
  * <p><b>Binding (ETP-6026).</b> Bound by {@link NeoExtension} on every channel. The row's
  * {@code Java_Qualifier} ({@code salesOrderHeaderHandler}) and the class's {@code @Named} were
@@ -115,17 +125,40 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   /** Void, which the window never offers on a sales order (ETP-6026). */
   static final String DOC_ACTION_VOID = "VO";
 
-  /** The statuses Void is refused in: draft, in progress and booked (ETP-6026). */
-  static final Set<String> VOID_REFUSED_STATUSES = Set.of("DR", "IP", "CO");
-
-  /** The 400 a Void on a draft, in-progress or booked sales order answers with (ETP-6026). */
+  /** The 400 a Void on a sales order answers with (ETP-6026). */
   static final String MSG_VOID_NOT_OFFERED = "ETGO_SalesOrderVoidNotOffered";
 
   /** Why {@code documentAction:VO} is unavailable on a sales order (ETP-6026). */
   static final String REASON_VOID_NOT_OFFERED = "The app does not offer Void on a sales order, so "
-      + "documentAction VO is refused on a draft (DR), in-progress (IP) or booked (CO) order. "
-      + "Delete a draft with etendo_delete instead; reactivate a booked order (RE, only while it "
-      + "has no linked documents), edit it and complete it again.";
+      + "documentAction VO is refused on every sales order. Delete a draft with etendo_delete "
+      + "instead; reactivate a booked order (RE, only while it has no linked documents), edit it "
+      + "and complete it again.";
+
+  /** The 400 for any other value the window does not offer in the order's status (ETP-6026). */
+  static final String MSG_ACTION_NOT_OFFERED = "ETGO_SalesOrderActionNotOffered";
+
+  /**
+   * The {@code DocAction} values the window sends, per stored {@code documentStatus} (ETP-6026).
+   * A status that is not a key accepts nothing.
+   */
+  static final Map<String, Set<String>> ALLOWED_BY_STATUS = Map.of(
+      "DR", Set.of("CO"),
+      "IP", Set.of("CO"),
+      "CO", Set.of("CO", "RE"));
+
+  /**
+   * Values the allow-list lets through, per status, to the rule that answered them before
+   * (ETP-6026): Reactivate on a draft, which {@code DocActionReactivationRule} — after this
+   * pre-hook, and only on {@code DR} — refuses with 422 {@code ETGO_ReactivateOnlyCompleted}, so
+   * the bulk bar's Reactivar over a selection holding drafts reports those rows exactly as before.
+   * Nowhere else: on {@code VO}/{@code CL} core only answered a technical {@code @AlreadyPosted@},
+   * so the allow-list's 400 applies there. Not advertised.
+   */
+  static final Map<String, Set<String>> LEFT_TO_EXISTING_RULES = Map.of("DR", Set.of("RE"));
+
+  /** The values of the {@code C_Order.DocAction} list an agent could send, for the advice. */
+  static final List<String> DOC_ACTION_VALUES =
+      List.of("CO", "RE", "VO", "CL", "PR", "AP", "RJ", "PO", "RA", "RC", "XL");
 
   @Override
   protected DocumentCurrencyRate currencyRate() {
@@ -165,43 +198,77 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
    * {@inheritDoc} Reactivate is ruled out for an order that has linked documents, and each
    * creation action when nothing is left to do or a draft already covers it (ETP-5714). Close is
    * ruled out on every sales order, whatever its status: the app never offers it and the pre-hook
-   * refuses it (ETP-5704). Void is ruled out on a draft, in-progress or booked order, read from
-   * the record's {@code documentStatus} (ETP-6026).
+   * refuses it (ETP-5704). ETP-6026: every {@code documentAction} value the pre-hook does not
+   * allow in the record's {@code documentStatus} ({@link #ALLOWED_BY_STATUS}) is ruled out, with
+   * Close's and Void's own reasons and a generic one for the rest.
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
     Map<String, String> unavailable =
         new LinkedHashMap<>(OrderDocumentAvailability.unavailable(subject, AVAILABILITY_FLOW));
     if (subject instanceof Order) {
-      unavailable.put(NeoActionAvailability.valueKey(
-          OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, DOC_ACTION_CLOSE),
-          REASON_CLOSE_NOT_OFFERED);
-      if (VOID_REFUSED_STATUSES.contains(((Order) subject).getDocumentStatus())) {
-        unavailable.put(NeoActionAvailability.valueKey(
-            OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, DOC_ACTION_VOID),
-            REASON_VOID_NOT_OFFERED);
+      Set<String> allowed = allowedIn(((Order) subject).getDocumentStatus());
+      for (String value : DOC_ACTION_VALUES) {
+        if (!allowed.contains(value)) {
+          unavailable.putIfAbsent(NeoActionAvailability.valueKey(
+              OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, value), reasonNotOffered(value));
+        }
       }
     }
     return unavailable;
   }
 
+  /** The values the window sends in {@code status}; empty for any other status (ETP-6026). */
+  static Set<String> allowedIn(String status) {
+    return status == null ? Set.of() : ALLOWED_BY_STATUS.getOrDefault(status, Set.of());
+  }
+
+  /** Why {@code value} is unavailable: Close's and Void's own reason, else the generic one. */
+  static String reasonNotOffered(String value) {
+    if (DOC_ACTION_CLOSE.equals(value)) {
+      return REASON_CLOSE_NOT_OFFERED;
+    }
+    if (DOC_ACTION_VOID.equals(value)) {
+      return REASON_VOID_NOT_OFFERED;
+    }
+    return "The app does not offer documentAction " + value + " on a sales order in this "
+        + "status: it confirms (CO) a draft or in-progress order and reactivates (RE) a booked "
+        + "one, nothing else.";
+  }
+
+  /** The refusal key for a value the pre-hook does not allow (ETP-6026). */
+  static String refusalKeyOf(String value) {
+    if (DOC_ACTION_CLOSE.equals(value)) {
+      return MSG_CLOSE_NOT_OFFERED;
+    }
+    if (DOC_ACTION_VOID.equals(value)) {
+      return MSG_VOID_NOT_OFFERED;
+    }
+    return MSG_ACTION_NOT_OFFERED;
+  }
+
   /**
-   * Whether the sales order's stored {@code documentStatus} is draft, in progress or booked — the
-   * condition under which Void is refused (ETP-6026). Read under admin mode, as the DocAction
-   * resolution reads the record.
+   * The {@code DocAction} values the pre-hook lets through, from the stored {@code documentStatus}
+   * (ETP-6026): the window's allow-list plus {@link #LEFT_TO_EXISTING_RULES}. Read under admin
+   * mode, as the DocAction resolution reads the record.
    *
    * @param orderId the order the button runs on
-   * @return {@code true} when the order is {@code DR}, {@code IP} or {@code CO}
+   * @return the accepted values
    * @throws IllegalStateException when the order cannot be loaded — the guard then fails closed
    */
-  static boolean isVoidRefusedStatus(String orderId) {
+  static Set<String> allowedDocActions(String orderId) {
     OBContext.setAdminMode(true);
     try {
       Order order = OBDal.getInstance().get(Order.class, orderId);
       if (order == null) {
         throw new IllegalStateException("Sales order " + orderId + " cannot be loaded");
       }
-      return VOID_REFUSED_STATUSES.contains(order.getDocumentStatus());
+      String status = order.getDocumentStatus();
+      Set<String> allowed = new java.util.HashSet<>(allowedIn(status));
+      if (status != null) {
+        allowed.addAll(LEFT_TO_EXISTING_RULES.getOrDefault(status, Set.of()));
+      }
+      return allowed;
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -220,15 +287,11 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
     if (reactivationRefusal != null) {
       return reactivationRefusal;
     }
-    NeoResponse closeRefusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_CLOSE,
-        DocActionRefusalGuard.ALWAYS, MSG_CLOSE_NOT_OFFERED);
-    if (closeRefusal != null) {
-      return closeRefusal;
-    }
-    NeoResponse voidRefusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_VOID,
-        SalesOrderHeaderHandler::isVoidRefusedStatus, MSG_VOID_NOT_OFFERED);
-    if (voidRefusal != null) {
-      return voidRefusal;
+    // ETP-6026: only the DocAction values the window offers in the order's status run.
+    NeoResponse notOffered = DocActionRefusalGuard.refuseUnlessAllowed(context,
+        SalesOrderHeaderHandler::allowedDocActions, SalesOrderHeaderHandler::refusalKeyOf);
+    if (notOffered != null) {
+      return notOffered;
     }
     // ETP-5703: the partner's only ship-to (and its bill-to) on a create without an address.
     PartnerLocationDefaults.fillOrderLocations(context);

@@ -246,7 +246,8 @@ public class SalesQuotationHeaderHandlerTest {
   /** Status sentinel: the DocAction resolves, but the quotation cannot be loaded for its status. */
   private static final String STATUS_UNREADABLE = "<status unreadable>";
   /** The DocAction list the stubbed property accepts, exact case, as the AD list does. */
-  private static final Set<String> DOC_ACTION_LIST = Set.of("CO", "RE", "RJ", "CL", "VO", "--");
+  private static final Set<String> DOC_ACTION_LIST =
+      Set.of("CO", "RE", "RJ", "CL", "VO", "PR", "AP", "--");
 
   /** A POST of the DocAction button (named {@code fieldName}) on the quotation, through {@code tab}. */
   private static NeoContext docActionCtx(String fieldName, String body, Tab tab) throws Exception {
@@ -306,25 +307,27 @@ public class SalesQuotationHeaderHandlerTest {
   }
 
   /**
-   * Reactivate guard through {@code handle()}: {@code RE} is refused with 400
-   * {@code ETGO_QuotationReactivateNotOffered} in every status, voided included (ETP-6026: the app
-   * never offers it, and core refuses any action on a voided quotation), decided on the DocAction
-   * that will actually run (root {@code docAction} when the DAL accepts it, else the stored value —
-   * never {@code fieldValues}). The status is not read. An unknown id answers 404 whatever the
-   * action; an action that cannot be resolved fails closed with 500
+   * DocAction allow-list through {@code handle()} (ETP-6026): only {@code CO} on a draft runs,
+   * decided on the DocAction that will actually run (root {@code docAction} when the DAL accepts
+   * it, else the stored value — never {@code fieldValues}) and the stored {@code documentStatus}.
+   * {@code RE} answers {@code ETGO_QuotationReactivateNotOffered} in every status, voided included
+   * (the app never offers it, and core refuses any action on a voided quotation); any other value
+   * the window does not offer answers {@code ETGO_QuotationActionNotOffered}. An unknown id answers
+   * 404 whatever the action; an action or status that cannot be read fails closed with 500
    * {@code ETGO_DocActionCheckFailed}. A refusal reaches neither the total-discount sync nor the
    * router. {@code RJ} keeps going to the reject flow, also from {@code fieldValues} on a quotation
    * whose stored action is RE. ETP-6026: {@code VO} and {@code CL} are refused on every quotation
    * ({@code ETGO_QuotationVoidNotOffered} / {@code ETGO_QuotationCloseNotOffered}).
    */
   @Test
-  public void testHandle_reactivateVoidAndCloseAreRefused_table() throws Exception {
+  public void testHandle_docActionAllowList_table() throws Exception {
     final String reject = "<reject flow>";
     final String routed = "<router>";
     final String notOffered = SalesQuotationHeaderHandler.MSG_REACTIVATE_NOT_OFFERED;
     final String checkFailed = DocActionRefusalGuard.MSG_CHECK_FAILED;
     final String voidRefused = SalesQuotationHeaderHandler.MSG_VOID_NOT_OFFERED;
     final String closeRefused = SalesQuotationHeaderHandler.MSG_CLOSE_NOT_OFFERED;
+    final String actionRefused = SalesQuotationHeaderHandler.MSG_ACTION_NOT_OFFERED;
     // Columns: the label, the button name, the body, the stored DocAction, the stored status, the
     // expected status (null when it is not refused) and the expected outcome: the refusal's
     // messageKeys entry (else its error message), or the flow that answered.
@@ -338,8 +341,8 @@ public class SalesQuotationHeaderHandlerTest {
         { "root RE wins over fieldValues CO",
             "DocAction", "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}",
             "CO", "UE", 400, notOffered },
-        { "fieldValues RE without root runs the stored CO",
-            "DocAction", "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", "UE", null,
+        { "fieldValues RE without root runs the stored CO of a draft",
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", "DR", null,
             routed },
         { "root re outside the list is not written, the stored RE runs and is refused",
             "DocAction", "{\"docAction\":\"re\"}", "RE", "UE", 400, notOffered },
@@ -350,8 +353,8 @@ public class SalesQuotationHeaderHandlerTest {
             NeoActionRecordGuard.MSG_RECORD_NOT_FOUND },
         { "an action that cannot be resolved fails closed",
             "DocAction", "{\"docAction\":\"RE\"}", NO_TAB, "UE", 500, checkFailed },
-        { "the status is not read: RE is refused even when it could not be loaded",
-            "DocAction", "{\"docAction\":\"RE\"}", "RE", STATUS_UNREADABLE, 400, notOffered },
+        { "a status that cannot be read fails closed",
+            "DocAction", "{\"docAction\":\"RE\"}", "RE", STATUS_UNREADABLE, 500, checkFailed },
         { "fieldValues RJ with a stored RE still goes to the reject flow",
             "DocAction", "{\"fieldValues\":{\"documentAction\":\"RJ\"}}", "RE", "UE", null,
             reject },
@@ -364,6 +367,19 @@ public class SalesQuotationHeaderHandlerTest {
             "DocAction", "{\"docAction\":\"CL\"}", "CO", "UE", 400, closeRefused },
         { "empty body runs the stored CL and is refused",
             "DocAction", "{}", "CL", "UE", 400, closeRefused },
+        // ETP-6026 allow-list: only CO on a draft runs; everything else is refused.
+        { "SendToEvaluationModal's empty body runs the stored CO of a draft",
+            "DocAction", "{\"fieldValues\":{}}", "CO", "DR", null, routed },
+        { "root PR on a draft is refused (it used to take the quotation to IP)",
+            "DocAction", "{\"docAction\":\"PR\"}", "CO", "DR", 400, actionRefused },
+        { "root AP on an in-progress quotation is refused",
+            "DocAction", "{\"docAction\":\"AP\"}", "AP", "IP", 400, actionRefused },
+        { "root CO on an in-progress quotation is refused",
+            "DocAction", "{\"docAction\":\"CO\"}", "AP", "IP", 400, actionRefused },
+        { "root CO on a quotation under evaluation is refused",
+            "DocAction", "{\"docAction\":\"CO\"}", "CO", "UE", 400, actionRefused },
+        { "empty body running the stored -- is refused",
+            "DocAction", "{}", "--", "UE", 400, actionRefused },
         { "root VO by field name on a voided quotation is still refused",
             "documentAction", "{\"docAction\":\"VO\"}", "RE", "VO", 400, voidRefused },
     };

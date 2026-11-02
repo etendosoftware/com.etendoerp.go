@@ -19,7 +19,9 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Inject;
 
@@ -27,6 +29,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
@@ -81,9 +84,17 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * MCP a quotation Under evaluation went back to Draft (RE), a draft was voided and one Under
  * evaluation closed. ETP-5704 still let RE through on a voided quotation, but core's
  * {@code C_Order_Post} refuses any action on a {@code VO}/{@code CL} document
- * ({@code @AlreadyPosted@}), so that path only ended in a technical error. Same resolution and
- * fail-closed rules as the sales order's refusals ({@link DocActionRefusalGuard}), see
- * {@code refuseDocActionNotOffered}; advertised by {@link #unavailableActions}. It does not touch
+ * ({@code @AlreadyPosted@}), so that path only ended in a technical error.
+ *
+ * <p>ETP-6026: the {@code DocAction} button is an ALLOW-list of what the window offers: Confirm
+ * ({@code CO}) on a draft only ({@link #ALLOWED_BY_STATUS}) — what {@code SendToEvaluationModal},
+ * the row Confirmar and the bulk bar (drafts only) send. {@code RJ} never reaches it: it is routed
+ * to the reject flow first. Every other effective value — Prepare ({@code PR}, which took a draft
+ * to {@code IP} over MCP), {@code AP}, {@code CO} outside a draft, {@code --}, nothing at all — is
+ * refused with 400 ({@code DocActionRefusalGuard#refuseUnlessAllowed}; RE, VO and CL keep their own
+ * messages). An {@code IP} quotation accepts nothing: its Confirmar opens no modal. Same resolution
+ * and fail-closed rules as the sales order ({@link DocActionRefusalGuard}); advertised by
+ * {@link #unavailableActions}. It does not touch
  * {@code Convertquotation} (another button; the new order is reactivated through
  * {@link OrderDocActionSupport}, not through this pre-hook) or the DR→UE {@code DocAction} of
  * {@code SendToEvaluationModal} (it runs CO).
@@ -124,6 +135,22 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   static final String REASON_CLOSE_NOT_OFFERED = "The app does not offer Close on a quotation, "
       + "so documentAction CL is refused on every quotation. A quotation Under evaluation (UE) is "
       + "accepted with Convertquotation or rejected with rejectQuotation.";
+  /** The 400 for any other value the window does not offer in the quotation's status (ETP-6026). */
+  static final String MSG_ACTION_NOT_OFFERED = "ETGO_QuotationActionNotOffered";
+  /**
+   * The {@code DocAction} values the pre-hook lets run, per stored {@code documentStatus}
+   * (ETP-6026). A status that is not a key accepts nothing.
+   */
+  static final Map<String, Set<String>> ALLOWED_BY_STATUS = Map.of("DR", Set.of("CO"));
+  /**
+   * The values advertised per status: the allow-list plus {@code RJ} Under evaluation, which the
+   * pre-hook routes to the reject flow before the allow-list (ETP-6026).
+   */
+  static final Map<String, Set<String>> ADVERTISED_BY_STATUS =
+      Map.of("DR", Set.of("CO"), "UE", Set.of(DOC_ACTION_REJECT));
+  /** The values of the {@code C_Order.DocAction} list an agent could send, for the advice. */
+  static final List<String> DOC_ACTION_VALUES =
+      List.of("CO", "RE", "VO", "CL", "PR", "AP", "RJ", "PO", "RA", "RC", "XL");
   /** The button's column name, what the SPA posts. */
   private static final String ACTION_CONVERT_COLUMN = "Convertquotation";
   /** A lower-case spelling of the column name, matched since ETP-5710; kept for any caller using it. */
@@ -256,42 +283,91 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   }
 
   /**
-   * The refusal of a {@code DocAction} value the quotation window does not offer, or {@code null}:
-   * Reactivate, Void and Close on every quotation (ETP-5704, ETP-6026) — the window offers none of
-   * them in any status. Each is decided on the value that will actually run, with
+   * The refusal of a {@code DocAction} value the quotation window does not offer in the
+   * quotation's status, or {@code null} (ETP-5704, ETP-6026): an allow-list
+   * ({@link #ALLOWED_BY_STATUS}) decided on the value that will actually run, with
    * {@link DocActionRefusalGuard}'s fail-closed rules.
    *
    * @param context the request reaching the pre-hook
    * @return the error response, or {@code null} when the request may continue
    */
   private static NeoResponse refuseDocActionNotOffered(NeoContext context) {
-    NeoResponse refusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_REACTIVATE,
-        DocActionRefusalGuard.ALWAYS, MSG_REACTIVATE_NOT_OFFERED);
-    if (refusal == null) {
-      refusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_VOID,
-          DocActionRefusalGuard.ALWAYS, MSG_VOID_NOT_OFFERED);
+    return DocActionRefusalGuard.refuseUnlessAllowed(context,
+        SalesQuotationHeaderHandler::allowedDocActions, SalesQuotationHeaderHandler::refusalKeyOf);
+  }
+
+  /** The refusal key for a value the pre-hook does not allow (ETP-6026). */
+  static String refusalKeyOf(String value) {
+    if (DOC_ACTION_REACTIVATE.equals(value)) {
+      return MSG_REACTIVATE_NOT_OFFERED;
     }
-    if (refusal == null) {
-      refusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_CLOSE,
-          DocActionRefusalGuard.ALWAYS, MSG_CLOSE_NOT_OFFERED);
+    if (DOC_ACTION_VOID.equals(value)) {
+      return MSG_VOID_NOT_OFFERED;
     }
-    return refusal;
+    if (DOC_ACTION_CLOSE.equals(value)) {
+      return MSG_CLOSE_NOT_OFFERED;
+    }
+    return MSG_ACTION_NOT_OFFERED;
   }
 
   /**
-   * {@inheritDoc} Reactivate, Void and Close are ruled out on every quotation, whatever its
-   * status: the window never offers them and the pre-hook refuses them (ETP-5704, ETP-6026).
+   * The {@code DocAction} values the quotation accepts, from its stored {@code documentStatus}
+   * (ETP-6026). Read under admin mode, as the DocAction resolution reads the record.
+   *
+   * @param quotationId the quotation the button runs on
+   * @return the accepted values
+   * @throws IllegalStateException when the quotation cannot be loaded — the guard then fails closed
+   */
+  static Set<String> allowedDocActions(String quotationId) {
+    OBContext.setAdminMode(true);
+    try {
+      Order quotation = OBDal.getInstance().get(Order.class, quotationId);
+      if (quotation == null) {
+        throw new IllegalStateException("Quotation " + quotationId + " cannot be loaded");
+      }
+      String status = quotation.getDocumentStatus();
+      return status == null ? Set.of() : ALLOWED_BY_STATUS.getOrDefault(status, Set.of());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * {@inheritDoc} Every {@code documentAction} value the window does not offer in the record's
+   * status ({@link #ADVERTISED_BY_STATUS}) is ruled out, with Reactivate's, Void's and Close's own
+   * reasons and a generic one for the rest (ETP-5704, ETP-6026).
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
     if (!(subject instanceof Order)) {
       return Collections.emptyMap();
     }
+    String status = ((Order) subject).getDocumentStatus();
+    Set<String> advertised =
+        status == null ? Set.of() : ADVERTISED_BY_STATUS.getOrDefault(status, Set.of());
     Map<String, String> unavailable = new LinkedHashMap<>();
-    unavailable.put(documentActionKey(DOC_ACTION_REACTIVATE), REASON_REACTIVATE_NOT_OFFERED);
-    unavailable.put(documentActionKey(DOC_ACTION_VOID), REASON_VOID_NOT_OFFERED);
-    unavailable.put(documentActionKey(DOC_ACTION_CLOSE), REASON_CLOSE_NOT_OFFERED);
+    for (String value : DOC_ACTION_VALUES) {
+      if (!advertised.contains(value)) {
+        unavailable.put(documentActionKey(value), reasonNotOffered(value));
+      }
+    }
     return unavailable;
+  }
+
+  /** Why {@code value} is unavailable: RE's, VO's and CL's own reason, else the generic one. */
+  static String reasonNotOffered(String value) {
+    if (DOC_ACTION_REACTIVATE.equals(value)) {
+      return REASON_REACTIVATE_NOT_OFFERED;
+    }
+    if (DOC_ACTION_VOID.equals(value)) {
+      return REASON_VOID_NOT_OFFERED;
+    }
+    if (DOC_ACTION_CLOSE.equals(value)) {
+      return REASON_CLOSE_NOT_OFFERED;
+    }
+    return "The app does not offer documentAction " + value + " on a quotation in this status: "
+        + "it sends a draft to evaluation (CO) and rejects one Under evaluation (RJ, or "
+        + "rejectQuotation); acceptance is the Convertquotation action.";
   }
 
   /** The availability key of one {@code documentAction} value, e.g. {@code documentAction:VO}. */
