@@ -38,6 +38,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
@@ -89,6 +90,11 @@ import org.openbravo.base.structure.BaseOBObject;
 public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(PurchaseInvoiceHeaderHandler.class);
+
+  /** Header field of the vendor's contact ({@code C_Invoice.AD_User_ID}). */
+  static final String FIELD_USER_CONTACT = "userContact";
+  /** Header field and {@code /defaults} record-context key of the vendor. */
+  static final String FIELD_BUSINESS_PARTNER = "businessPartner";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -317,6 +323,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-6036: a contact default that is not one of the vendor's contacts is not a default.
+    dropForeignContactDefault(context);
     // ETP-5684: say what ran when the reactivation un-posted the invoice first.
     ReactivationUnpost.notePartial(context);
     // ETP-5840: a create whose currency or accounting date only the create cascade derived; before
@@ -377,6 +385,46 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       log.error("Error enriching purchase invoice", e);
       return null;
     }
+  }
+
+  /**
+   * ETP-6036 — removes {@code userContact} from a {@code /defaults} answer unless it is a contact
+   * of the business partner the caller sent as record context.
+   *
+   * <p>{@code C_Invoice.AD_User_ID} has no AD default, so the generic defaults resolution
+   * preselected the first row of the user combo — {@code Admin}, whoever was logged in — and an
+   * agent copying it into {@code etendo_create} would name Admin as the vendor's contact
+   * (pre-ticket etendo-ai#50). Fixed here, in this window's customization, and not in the shared
+   * combo fallback, which other windows rely on (price lists, payment methods, SII keys). With a
+   * business partner sent, a contact of that partner (what its callout sets) is kept.</p>
+   *
+   * @param context the current request; anything but a {@code DEFAULTS} answer is left untouched
+   */
+  static void dropForeignContactDefault(NeoContext context) {
+    if (context == null || !NeoEndpointType.DEFAULTS.equals(context.getEndpointType())
+        || context.getPreviousResult() == null || context.getPreviousResult().getBody() == null) {
+      return;
+    }
+    JSONObject defaults = context.getPreviousResult().getBody().optJSONObject("defaults");
+    String contactId = defaults == null ? null
+        : StringUtils.trimToNull(defaults.optString(FIELD_USER_CONTACT, null));
+    if (contactId == null) {
+      return;
+    }
+    Map<String, String> params = context.getQueryParams();
+    String partnerId = params == null ? null
+        : StringUtils.trimToNull(params.get(FIELD_BUSINESS_PARTNER));
+    if (partnerId != null && isContactOf(contactId, partnerId)) {
+      return;
+    }
+    defaults.remove(FIELD_USER_CONTACT);
+    defaults.remove(FIELD_USER_CONTACT + "$_identifier");
+  }
+
+  private static boolean isContactOf(String userId, String partnerId) {
+    User user = OBDal.getInstance().get(User.class, userId);
+    return user != null && user.getBusinessPartner() != null
+        && partnerId.equals(user.getBusinessPartner().getId());
   }
 
   @Override

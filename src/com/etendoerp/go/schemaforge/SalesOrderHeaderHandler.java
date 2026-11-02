@@ -26,6 +26,7 @@ import javax.inject.Named;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import org.openbravo.base.structure.BaseOBObject;
 import java.util.Set;
@@ -54,6 +55,12 @@ import java.util.Set;
  * invoices is refused before the button runs — see {@link OrderReactivationGuard}. Same rule as
  * the {@code hasLinkedDocuments} flag the SPA hides the action with; REST and MCP both reach this
  * pre-hook.
+ *
+ * <p>ETP-5704 (QA CP-20): Close ({@code DocAction} = {@code CL}) is refused on every sales order,
+ * linked documents or not — the Sales Order window never offers it, and core's Close zeroes the
+ * pending quantities and leaves a draft shipment dangling. Same resolution and fail-closed rules
+ * as Reactivate ({@link DocActionRefusalGuard}); advertised by {@link #unavailableActions}.
+ * Purchase orders do not opt in.
  */
 @Named("salesOrderHeaderHandler")
 public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
@@ -82,6 +89,17 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
       DocumentRateMessages.LABEL_ORDER_DATE);
 
   private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
+
+  /** Close, the {@code documentAction} value the Sales Order window never offers (ETP-5704). */
+  static final String DOC_ACTION_CLOSE = "CL";
+
+  /** The 400 a Close on a sales order answers with (ETP-5704). */
+  static final String MSG_CLOSE_NOT_OFFERED = "ETGO_SalesOrderCloseNotOffered";
+
+  /** Why {@code documentAction:CL} is unavailable on every sales order (ETP-5704). */
+  static final String REASON_CLOSE_NOT_OFFERED = "The app does not offer Close on a sales order, "
+      + "so documentAction CL is refused on every sales order. To change a booked order, "
+      + "reactivate it (RE, only while it has no linked documents), edit it and complete it again.";
 
   @Override
   protected DocumentCurrencyRate currencyRate() {
@@ -119,11 +137,20 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   /**
    * {@inheritDoc} Reactivate is ruled out for an order that has linked documents, and each
-   * creation action when nothing is left to do or a draft already covers it (ETP-5714).
+   * creation action when nothing is left to do or a draft already covers it (ETP-5714). Close is
+   * ruled out on every sales order, whatever its status: the app never offers it and the pre-hook
+   * refuses it (ETP-5704).
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
-    return OrderDocumentAvailability.unavailable(subject, AVAILABILITY_FLOW);
+    Map<String, String> unavailable =
+        new LinkedHashMap<>(OrderDocumentAvailability.unavailable(subject, AVAILABILITY_FLOW));
+    if (subject instanceof Order) {
+      unavailable.put(NeoActionAvailability.valueKey(
+          OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, DOC_ACTION_CLOSE),
+          REASON_CLOSE_NOT_OFFERED);
+    }
+    return unavailable;
   }
 
   @Override
@@ -138,6 +165,11 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
     NeoResponse reactivationRefusal = OrderReactivationGuard.refuseIfLinkedDocuments(context);
     if (reactivationRefusal != null) {
       return reactivationRefusal;
+    }
+    NeoResponse closeRefusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_CLOSE,
+        DocActionRefusalGuard.ALWAYS, MSG_CLOSE_NOT_OFFERED);
+    if (closeRefusal != null) {
+      return closeRefusal;
     }
     // ETP-5703: the partner's only ship-to (and its bill-to) on a create without an address.
     PartnerLocationDefaults.fillOrderLocations(context);

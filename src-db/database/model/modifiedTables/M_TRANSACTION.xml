@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE M_TRANSACTION">
+    <table name="M_TRANSACTION" primaryKey="M_TRANSACTION_KEY">
+      <column name="EM_ETGO_WAREHOUSE_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_DOC_KIND" primaryKey="false" required="false" type="VARCHAR" size="40" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="M_WAREHOUSE" name="EM_ETGO_TRX_WAREHOUSE_FK" onDelete="setnull">
+        <reference local="EM_ETGO_WAREHOUSE_ID" foreign="M_WAREHOUSE_ID"/>
+      </foreign-key>
+      <index name="EM_ETGO_TRX_DOC_KIND_IDX" unique="false">
+        <index-column name="EM_ETGO_DOC_KIND"/>
+      </index>
+      <index name="EM_ETGO_TRX_WAREHOUSE_IDX" unique="false">
+        <index-column name="EM_ETGO_WAREHOUSE_ID"/>
+      </index>
+    </table>
+  </database>

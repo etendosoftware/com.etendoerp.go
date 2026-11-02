@@ -124,6 +124,31 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
         FIELD_SOURCE_RECEIPT_DOC_NO);
   }
 
+  /**
+   * The returnable lines of one receipt: the quantity still returnable (column 5) and the
+   * quantity the receipt line received (column 6, ETP-6054). Returns are counted by the rule of
+   * {@link ReturnableQuantity}, so this list, the 201 of createPurchaseReturn and the goods
+   * receipt's returnStatus cannot disagree about what is already returned.
+   */
+  static final String AVAILABLE_LINES_SQL =
+      "SELECT l.M_InOutLine_ID, l.M_Product_ID, p.Name AS product_name, l.C_UOM_ID, "
+          + "  l.MovementQty - COALESCE(ret.ret_qty, 0) AS available_qty, "
+          + "  l.MovementQty AS received_qty "
+          + "FROM M_InOutLine l "
+          + "JOIN M_InOut h ON h.M_InOut_ID = l.M_InOut_ID "
+          + "JOIN M_Product p ON p.M_Product_ID = l.M_Product_ID "
+          + "LEFT JOIN ( "
+          + "  SELECT rl.Canceled_Inoutline_ID, SUM(ABS(rl.MovementQty)) AS ret_qty "
+          + "  FROM " + ReturnableQuantity.COUNTED_RETURN_LINES_FROM + " "
+          + "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND "
+          + ReturnableQuantity.COUNTED_RETURN_LINES_FILTER + " "
+          + "  GROUP BY rl.Canceled_Inoutline_ID "
+          + ") ret ON ret.Canceled_Inoutline_ID = l.M_InOutLine_ID "
+          + "WHERE l.M_InOut_ID = ? "
+          + "AND h.C_BPartner_ID = ? "
+          + "AND l.MovementQty > COALESCE(ret.ret_qty, 0) "
+          + "ORDER BY l.Line";
+
   private static Map<String, NeoActionContract> buildActionContracts() {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(ACTION_AVAILABLE_RECEIPTS, NeoActionContract.read(ACTION_AVAILABLE_RECEIPTS,
@@ -134,8 +159,9 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
         .withIdDescription(ID_NOT_USED));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of a goods receipt that can still be returned: {data:[{id, product, uOM, "
-            + "movementQuantity}]}, where movementQuantity is the quantity still returnable (what "
-            + "other non-voided returns, drafts included, already hold is subtracted). Step 2."
+            + "movementQuantity, receivedQuantity}]}, where movementQuantity is the quantity still "
+            + "returnable (what other non-voided returns, drafts included, already hold is "
+            + "subtracted) and receivedQuantity is what the receipt line received. Step 2."
             + FLOW,
         NeoActionContract.Param.required("receiptId", NeoActionContract.TYPE_STRING,
             "Id of a receipt returned by availableReceipts."),
@@ -356,23 +382,7 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "businessPartner param is required");
     }
     try {
-      String sql =
-          "SELECT l.M_InOutLine_ID, l.M_Product_ID, p.Name AS product_name, l.C_UOM_ID, " +
-          "  l.MovementQty - COALESCE(ret.ret_qty, 0) AS available_qty " +
-          "FROM M_InOutLine l " +
-          "JOIN M_InOut h ON h.M_InOut_ID = l.M_InOut_ID " +
-          "JOIN M_Product p ON p.M_Product_ID = l.M_Product_ID " +
-          "LEFT JOIN ( " +
-          "  SELECT rl.Canceled_Inoutline_ID, SUM(ABS(rl.MovementQty)) AS ret_qty " +
-          "  FROM M_InOutLine rl " +
-          "  JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID " +
-          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus NOT IN ('VO')" +
-          "  GROUP BY rl.Canceled_Inoutline_ID " +
-          ") ret ON ret.Canceled_Inoutline_ID = l.M_InOutLine_ID " +
-          "WHERE l.M_InOut_ID = ? " +
-          "AND h.C_BPartner_ID = ? " +
-          "AND l.MovementQty > COALESCE(ret.ret_qty, 0) " +
-          "ORDER BY l.Line";
+      String sql = AVAILABLE_LINES_SQL;
 
       JSONArray data = new JSONArray();
       Connection conn = OBDal.getInstance().getConnection();
@@ -381,7 +391,9 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
         ps.setString(2, bpId);
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
-            data.put(ReturnShipmentUtils.buildAvailableLineRow(rs));
+            JSONObject row = ReturnShipmentUtils.buildAvailableLineRow(rs);
+            row.put("receivedQuantity", rs.getBigDecimal(6));
+            data.put(row);
           }
         }
       }

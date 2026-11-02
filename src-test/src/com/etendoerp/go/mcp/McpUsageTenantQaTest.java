@@ -406,4 +406,10 @@ public class McpUsageTenantQaTest {
     assertEquals("document_extraction",
         McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
   }
+
+  /** ETP-6061 — etendo_whoami is counted as its own verb, not under the process default. */
+  @Test
+  public void whoamiHasItsOwnTelemetryVerb() {
+    assertEquals("whoami", McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_WHOAMI));
+  }
 }
