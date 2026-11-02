@@ -36,6 +36,7 @@ import com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract;
 import com.etendoerp.go.schemaforge.email.EmailContractRegistry;
 import com.etendoerp.go.schemaforge.email.EmailMessageEdits;
 import com.etendoerp.go.schemaforge.email.EmailSendDefaults;
+import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 
 /**
  * {@code etendo_send_document_email} (ETP-5715): the application's "Enviar", for one document.
@@ -189,7 +190,7 @@ final class McpDocumentEmailTool {
       log.error("etendo_send_document_email failed: {}", e.getClass().getName());
       JSONObject failure = error(McpConstants.STATUS_SERVER_ERROR, McpConstants.ERROR_SERVER,
           "The email could not be confirmed as sent.",
-          "Check the document's email history in the application before trying again, so the "
+          "Check the document's send history (preview:true lists it) before trying again, so the "
               + "same email is not sent twice.");
       failure.put(KEY_SENT, false);
       return failure;
@@ -218,6 +219,7 @@ final class McpDocumentEmailTool {
         .put("maxSubjectLength", EmailMessageEdits.MAX_SUBJECT_LENGTH)
         .put("maxMessageLength", EmailMessageEdits.MAX_MESSAGE_LENGTH));
     JSONObject problem = pdfProblem(pdf);
+    body.put(KEY_HISTORY, history(request.getId(), specName));
     body.put(KEY_PDF, pdfSummary(pdf, problem));
     body.put("readyToSend", problem == null);
     body.put(McpConstants.KEY_HINT, problem == null
@@ -226,6 +228,35 @@ final class McpDocumentEmailTool {
         : "Nothing was sent, and a send would be refused until the PDF is available: "
             + problem.optString(McpConstants.KEY_HINT));
     return body;
+  }
+
+  /** Key of the document's past sends in the preview (ETP-5848). */
+  static final String KEY_HISTORY = "history";
+  /** Most past sends the preview lists, newest first. */
+  static final int MAX_HISTORY = 10;
+
+  /**
+   * The document's past sends, newest first: when, how it ended, to whom and with what subject.
+   * Before this the history was readable only in the application, so an agent could neither check
+   * that a send it did went out nor avoid sending the same email twice. Compact on purpose: the
+   * body, the link and the sender stay in the application. A history that cannot be read is an
+   * empty list rather than a failed preview.
+   */
+  static JSONArray history(String recordId, String specName) {
+    JSONArray compact = new JSONArray();
+    try {
+      JSONArray rows = SFDocumentEmailHistory.read(recordId, specName);
+      for (int i = 0; i < rows.length() && i < MAX_HISTORY; i++) {
+        JSONObject row = rows.getJSONObject(i);
+        compact.put(new JSONObject().put("sentAt", row.opt("sentAt"))
+            .put("status", row.opt("status"))
+            .put(McpDocumentEmailRequest.PARAM_TO, row.opt("recipientsTo"))
+            .put(KEY_SUBJECT, row.opt(KEY_SUBJECT)));
+      }
+    } catch (Exception e) {
+      log.debug("Could not read the send history of a document: {}", e.getClass().getName());
+    }
+    return compact;
   }
 
   /**
