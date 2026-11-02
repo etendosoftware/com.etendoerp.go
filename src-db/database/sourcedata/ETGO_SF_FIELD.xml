@@ -54247,6 +54247,7 @@
 <!--87491A3979AF40F6BAAE78C83B94C54A-->  <SEQNO><![CDATA[280]]></SEQNO>
 <!--87491A3979AF40F6BAAE78C83B94C54A-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
 <!--87491A3979AF40F6BAAE78C83B94C54A-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--87491A3979AF40F6BAAE78C83B94C54A-->  <MCP_CONFIG><![CDATA[{"fields":{"readOnly":true,"reason":"Roles are set with the user action assignRoles (ETP-5848). Writing Default_Ad_Role_ID directly made UserRoleAssignmentHandler resync AD_User_Roles to that role, so an agent could give a user any role it can pick, the client admin included, around the window promote/demote buttons and the template composition. Read-only for agents; the window keeps its own path."}}]]></MCP_CONFIG>
 <!--87491A3979AF40F6BAAE78C83B94C54A--></ETGO_SF_FIELD>
 
 <!--874DAE6B8A8746ACB4DE0317086CA0CC--><ETGO_SF_FIELD>
