@@ -38,6 +38,7 @@ final class InvoiceInboxMessages {
   static final String UNSUPPORTED_TYPE = "ETGO_InvoiceInboxUnsupportedType";
   static final String EMPTY_FILE = "ETGO_InvoiceInboxEmptyFile";
   static final String STORE_FAILED = "ETGO_InvoiceInboxStoreFailed";
+  private static final String FILE_NAME_PARAM = "fileName";
   static final String ORG_NOT_ALLOWED = "ETGO_InvoiceInboxOrgNotAllowed";
 
   private static final Map<String, String> DEFAULTS = Map.of(
@@ -91,14 +92,14 @@ final class InvoiceInboxMessages {
   }
 
   static String unsupportedType(String fileName) {
-    return text(UNSUPPORTED_TYPE, "fileName", fileName);
+    return text(UNSUPPORTED_TYPE, FILE_NAME_PARAM, fileName);
   }
 
   static String emptyFile(String fileName) {
-    return text(EMPTY_FILE, "fileName", fileName);
+    return text(EMPTY_FILE, FILE_NAME_PARAM, fileName);
   }
 
   static String storeFailed(String fileName) {
-    return text(STORE_FAILED, "fileName", fileName);
+    return text(STORE_FAILED, FILE_NAME_PARAM, fileName);
   }
 }
