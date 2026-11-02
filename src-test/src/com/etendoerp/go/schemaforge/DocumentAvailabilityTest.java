@@ -227,17 +227,15 @@ class DocumentAvailabilityTest {
     }
 
     @Test
-    @DisplayName("a quotation rules Reactivate out in every status but voided, and Void and Close "
-        + "in every status, read from the record")
-    void quotationRulesOutReactivateUnlessVoided() {
+    @DisplayName("a quotation rules Reactivate, Void and Close out in every status, voided included")
+    void quotationRulesOutReactivateVoidAndClose() {
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-        for (String status : new String[] { "UE", "DR", "CO" }) {
+        // ETP-6026: the app offers none of the three on a quotation, and core refuses any action
+        // on a voided one, so Reactivate is no longer available once voided either.
+        for (String status : new String[] { "UE", "DR", "CO", "VO" }) {
           assertEquals(Set.of(REACTIVATE, VOID, CLOSE),
               new SalesQuotationHeaderHandler().unavailableActions(order(status)).keySet(), status);
         }
-        // ETP-6026: Void and Close stay ruled out once voided; only Reactivate becomes available.
-        assertEquals(Set.of(VOID, CLOSE),
-            new SalesQuotationHeaderHandler().unavailableActions(order("VO")).keySet());
         obDal.verify(OBDal::getInstance, never());
       }
     }

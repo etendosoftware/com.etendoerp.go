@@ -654,9 +654,9 @@ class McpConfigSourcedataTest {
    * CL/RE, while a sales order offers only RE: the app never offers Close on a sales order and its
    * pre-hook refuses it (ETP-5704). ETP-6026: a draft or in-progress sales order is not offered VO
    * either (the app offers Delete and Confirm there and the pre-hook refuses it); the purchase
-   * order keeps VO. A quotation is offered CO on a draft, RJ Under evaluation and RE once voided,
-   * never VO or CL; the final statuses (CA, CJ, CL and ETGO_CI, the one CreateDraftInvoiceHandler
-   * sets) offer nothing. Advisory data, so its content is asserted here.
+   * order keeps VO. A quotation is offered CO on a draft and RJ Under evaluation, never RE, VO or
+   * CL; the final statuses (VO, CA, CJ, CL and ETGO_CI, the one CreateDraftInvoiceHandler sets)
+   * offer nothing. Advisory data, so its content is asserted here.
    */
   @Test
   @DisplayName("order and invoice headers declare documentAction values per status from core's transitions")
@@ -686,8 +686,7 @@ class McpConfigSourcedataTest {
     JSONObject quotation = valuesByStatusOf(SALES_QUOTATION_HEADER_ID);
     assertEquals(Set.of("CO"), setOf(quotation.getJSONArray("DR")));
     assertEquals(Set.of("RJ"), setOf(quotation.getJSONArray("UE")));
-    assertEquals(Set.of("RE"), setOf(quotation.getJSONArray("VO")));
-    for (String status : List.of("CA", "CJ", "CL", "ETGO_CI")) {
+    for (String status : List.of("VO", "CA", "CJ", "CL", "ETGO_CI")) {
       assertEquals(0, quotation.getJSONArray(status).length(), status);
     }
     assertResolvesCleanly(SALES_QUOTATION_HEADER_ID);
