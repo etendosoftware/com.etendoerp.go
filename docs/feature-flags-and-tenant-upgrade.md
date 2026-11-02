@@ -184,6 +184,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `usage-aggregation-schedule` | `etendo.go.flags.usage-aggregation-schedule` | `ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | `structured-address-for-sepa` | `etendo.go.flags.structured-address-for-sepa` | `ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA` | absent ⇒ **`false`** (legacy single-line address; TTL 2026-11-15 — SEPA 2025 rulebooks ban unstructured addresses in SEPA remittance files from that date, per [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24)) |
 | `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
+| `invoice-inbox` | `etendo.go.flags.invoice-inbox` | `ETGO_FLAG_INVOICE_INBOX` | absent ⇒ **`false`** (inbox upload refused; per account on a hosted arm only; TTL 2027-01-31, provisional) — see its section below |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -751,6 +752,54 @@ handling); delete `FiscalModel390Flag.java` and its test, and `FLAG_FISCAL_MODEL
 The `etendo_schema_forge` side (the `catalogAvailability.js` toggle points, the model-id guardrail
 allow-list line, the registry `flag` object) is listed in the registry entry's `ttlNote`.
 `GoAccountResolver.currentAccountEmail()` stays: `bp-portal-link` and `contact-category-type` use it too.
+
+### `invoice-inbox` (ETP-6047) — backend-only, per account, off by default
+
+Gates the **behaviour** of the incoming-invoice inbox (epic ETP-6046), never its schema. Positive
+polarity: `true` = the inbox is enabled. Default and every failure = `false`.
+
+**What it gates.** The inbox upload endpoint (story ETP-6047) must refuse the request when the flag
+is off, **before** any OCR work is enqueued. The `ETGO_INCOMING_DOCUMENT` table and the
+`Invoice Inbox` window ship unconditionally: the flag gates behaviour, not schema. Not implemented
+by the flag change itself; the endpoint calls the gate.
+
+**The one gate.** `InvoiceInboxFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
+`GoFeatureFlags.FLAG_INVOICE_INBOX`. Never read the key anywhere else. It has no window or entity
+identity in it.
+
+- `InvoiceInboxFlag.isEnabled()` evaluates for the request user's account
+  (`GoAccountResolver.currentAccountEmail()`) and the current tenant (`clientId`).
+- `InvoiceInboxFlag.isEnabled(accountEmail, clientId)` is the explicit overload for callers that do
+  not run as the account owner.
+
+**Evaluate at request entry, never in the OCR worker.** The asynchronous OCR worker has no
+`OBContext` user, so `currentAccountEmail()` returns `null` there and a targeted user would look
+"off" (the ETP-5791 #1454 to #1476 lesson). The upload endpoint evaluates the flag once, at request
+entry, and then enqueues; the worker must **not** re-evaluate it. If any off-request code genuinely
+needs the answer, capture the account email and `clientId` at request entry and pass them to
+`isEnabled(accountEmail, clientId)`.
+
+**Targeting.** Per account on the hosted arms: the context carries the account email (targeting
+key, `Email` and lowercase `email`) and `clientId`. Write Datadog rules on the lowercase `email`
+attribute only, against lowercase values (never on the identifier, a percentage or a tenant
+attribute: the web client and the backend use different targeting keys). With no resolvable account
+the context carries `clientId` only, so an email rule does not match and the default stays off. The
+web client has no key for this flag yet; story ETP-6049 adds it when the inbox gets a UI.
+
+**Turning it on locally:** `etendo.go.flags.invoice-inbox=true` in `Openbravo.properties` (or
+`-Detendo.go.flags.invoice-inbox=true`, or `ETGO_FLAG_INVOICE_INBOX=true` in Tomcat's environment),
+with no Datadog/ConfigCat arm selected, then restart Tomcat.
+
+**Rollout prerequisite:** before targeting anyone on a shared environment, create the
+`invoice-inbox` **boolean** setting in Datadog Experimental/Production with default `false`, then
+add rules on the lowercase `email` attribute. The local property is inert while a hosted arm is
+selected, and an undefined key resolves to `false`, so a missing setting looks exactly like "off".
+
+**Retirement (TTL 2027-01-31, provisional until confirmed with product):** the inbox then ships to
+everyone. Unwrap the toggle point(s) that call `InvoiceInboxFlag` (the upload endpoint), delete
+`InvoiceInboxFlag.java` and its test, delete `FLAG_INVOICE_INBOX` from `GoFeatureFlags`, remove this
+section and the configuration-table row, and delete the hosted setting. Keep the registry feature
+entry in `etendo_schema_forge`.
 
 ### `usage-aggregation-schedule` (ETP-5051) — backend-only, strictly off by default
 
