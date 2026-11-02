@@ -329,32 +329,6 @@ public class ToolRegistry {
   // ── Tool name resolution ──────────────────────────────────────────────
 
   /**
-   * Whether a tool addresses one entity of a spec through a top-level {@code entity} argument, which
-   * the router fills with the spec's primary entity when omitted (ETP-5848). {@code etendo_batch}
-   * is not one: each operation names its own entity.
-   *
-   * @param toolName the MCP tool name
-   * @return true for the single-entity CRUD, metadata and action tools
-   */
-  static boolean takesEntity(String toolName) {
-    switch (toolName) {
-      case McpConstants.TOOL_NEO_LIST:
-      case McpConstants.TOOL_NEO_GET:
-      case McpConstants.TOOL_NEO_CREATE:
-      case McpConstants.TOOL_NEO_UPDATE:
-      case McpConstants.TOOL_NEO_DELETE:
-      case McpConstants.TOOL_NEO_SELECTORS:
-      case McpConstants.TOOL_NEO_DEFAULTS:
-      case McpConstants.TOOL_NEO_SCHEMA:
-      case "etendo_action":
-      case McpConstants.TOOL_NEO_ACTION_BATCH:
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  /**
    * Resolve the spec name associated with a tool name.
    * <p>
    * For CRUD tools (etendo_list, etc.), the spec comes from the "spec" argument.

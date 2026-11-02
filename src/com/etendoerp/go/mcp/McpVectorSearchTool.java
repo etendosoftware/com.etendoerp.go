@@ -74,10 +74,11 @@ final class McpVectorSearchTool {
         : McpVectorTextFallback.reasonFor(response);
     if (reason != null) {
       try {
+        McpVectorTextFallback.Limits limits = new McpVectorTextFallback.Limits(
+            number(topK, DEFAULT_TOP_K).intValue(), number(minScore, DEFAULT_MIN_SCORE).doubleValue(),
+            number(maxScore, 1d).doubleValue());
         return McpToolRouter.wrapAsTextContent(McpVectorTextFallback.search(
-            List.of(targets.split(",")), query.trim(), number(topK, DEFAULT_TOP_K).intValue(),
-            number(minScore, DEFAULT_MIN_SCORE).doubleValue(),
-            number(maxScore, 1d).doubleValue(), reason,
+            List.of(targets.split(",")), query.trim(), limits, reason,
             NeoVectorSearchEndpoint::targetTextProperties, listTool));
       } catch (JSONException e) {
         throw new McpToolException(ERROR_BUILDING_CONTENT, e);

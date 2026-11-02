@@ -73,6 +73,10 @@ class McpVectorTextFallbackTest {
     return target -> byTarget.getOrDefault(target, List.of());
   }
 
+  private static McpVectorTextFallback.Limits limits(int topK, double minScore) {
+    return new McpVectorTextFallback.Limits(topK, minScore, 1d);
+  }
+
   private static List<String> ids(JSONObject response) throws Exception {
     List<String> ids = new ArrayList<>();
     JSONArray matches = response.getJSONArray("matches");
@@ -104,7 +108,7 @@ class McpVectorTextFallbackTest {
   @DisplayName("each content field of each target is listed with contains on the query")
   void listsEveryContentFieldOfEveryTarget() throws Exception {
     FakeList list = new FakeList();
-    McpVectorTextFallback.search(List.of("contacts", "product"), "  Agua ", 10, 0d, 1d,
+    McpVectorTextFallback.search(List.of("contacts", "product"), "  Agua ", limits(10, 0d),
         McpVectorTextFallback.REASON_EMBEDDING_UNAVAILABLE,
         fields(Map.of("contacts", List.of("name", "searchKey"), "product", List.of("name"))),
         list);
@@ -129,7 +133,7 @@ class McpVectorTextFallbackTest {
         .answer("product", "searchKey", "P-CONTAINS", "Bidón de agua")
         .answer("product", "searchKey", "P-PREFIX", "AGUA-500");
 
-    JSONObject response = McpVectorTextFallback.search(List.of("product"), "Agua", 10, 0d, 1d,
+    JSONObject response = McpVectorTextFallback.search(List.of("product"), "Agua", limits(10, 0d),
         McpVectorTextFallback.REASON_EMBEDDING_UNAVAILABLE,
         fields(Map.of("product", List.of("name", "searchKey"))), list);
 
@@ -155,15 +159,15 @@ class McpVectorTextFallbackTest {
         .answer("product", "name", "P-EXACT", "Agua");
     list.refused.add("product");
 
-    JSONObject inRange = McpVectorTextFallback.search(List.of("contacts", "product"), "agua", 10,
-        0.8d, 1d, McpVectorTextFallback.REASON_NO_SEMANTIC_MATCHES,
+    JSONObject inRange = McpVectorTextFallback.search(List.of("contacts", "product"), "agua",
+        limits(10, 0.8d), McpVectorTextFallback.REASON_NO_SEMANTIC_MATCHES,
         fields(Map.of("contacts", List.of("name"), "product", List.of("name"))), list);
     assertEquals(List.of("C-EXACT"), ids(inRange),
         "a contains-match is below 0.8, and the refused product target adds nothing");
     assertEquals(McpVectorTextFallback.REASON_NO_SEMANTIC_MATCHES,
         inRange.getString("fallbackReason"));
 
-    JSONObject top1 = McpVectorTextFallback.search(List.of("contacts"), "agua", 1, 0d, 1d,
+    JSONObject top1 = McpVectorTextFallback.search(List.of("contacts"), "agua", limits(1, 0d),
         McpVectorTextFallback.REASON_NO_SEMANTIC_MATCHES,
         fields(Map.of("contacts", List.of("name"))), list);
     assertEquals(List.of("C-EXACT"), ids(top1));

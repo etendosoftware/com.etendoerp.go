@@ -198,28 +198,6 @@ public class McpToolRouter {
     return routeCall(toolName, arguments, scopes);
   }
 
-  /**
-   * Fill an omitted {@code entity} with the spec's primary entity (ETP-5848), for every tool that
-   * takes one. Runs before the handlers validate their arguments, so a call without it reads and
-   * writes the spec's main record instead of failing on a missing argument. An entity the caller
-   * did send is never touched.
-   */
-  private static void defaultEntityToPrimary(String toolName, String specName, JSONObject arguments) {
-    if (arguments == null || specName == null || !ToolRegistry.takesEntity(toolName)
-        || (arguments.has(McpConstants.PARAM_ENTITY) && !arguments.isNull(McpConstants.PARAM_ENTITY))) {
-      return;
-    }
-    String primary = McpEntityNames.primaryName(specName);
-    if (primary == null) {
-      return;
-    }
-    try {
-      arguments.put(McpConstants.PARAM_ENTITY, primary);
-    } catch (JSONException e) {
-      // Leave it absent: the handler reports the missing argument as before.
-    }
-  }
-
   private JSONObject routeCall(String toolName, JSONObject arguments,
       java.util.Set<String> scopes) {
     String renamedTo = McpRoutingException.renamedToolName(toolName);
@@ -249,7 +227,7 @@ public class McpToolRouter {
         // Resolve spec name from tool name or arguments
         String specName = ToolRegistry.resolveSpecName(toolName, arguments);
         authorizeSpecAccess(specName, resolveAccessMethod(toolName));
-        defaultEntityToPrimary(toolName, specName, arguments);
+        McpEntityNames.defaultToPrimary(toolName, specName, arguments);
 
         switch (toolName) {
           case "etendo_discover":

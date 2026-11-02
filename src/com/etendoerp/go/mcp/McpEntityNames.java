@@ -18,6 +18,8 @@
 package com.etendoerp.go.mcp;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -91,5 +93,53 @@ final class McpEntityNames {
     }
     return McpToolRouterSupport.resolvePrimaryEntityName(
         McpToolRouterSupport.listVisibleEntities(spec.getId()));
+  }
+
+  /**
+   * Whether a tool addresses one entity of a spec through a top-level {@code entity} argument, which
+   * {@link #defaultToPrimary} fills when omitted (ETP-5848). {@code etendo_batch} is not one: each
+   * operation names its own entity.
+   *
+   * @param toolName the MCP tool name
+   * @return true for the single-entity CRUD, metadata and action tools
+   */
+  static boolean takesEntity(String toolName) {
+    switch (toolName) {
+      case McpConstants.TOOL_NEO_LIST:
+      case McpConstants.TOOL_NEO_GET:
+      case McpConstants.TOOL_NEO_CREATE:
+      case McpConstants.TOOL_NEO_UPDATE:
+      case McpConstants.TOOL_NEO_DELETE:
+      case McpConstants.TOOL_NEO_SELECTORS:
+      case McpConstants.TOOL_NEO_DEFAULTS:
+      case McpConstants.TOOL_NEO_SCHEMA:
+      case McpConstants.TOOL_NEO_ACTION:
+      case McpConstants.TOOL_NEO_ACTION_BATCH:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Fill an omitted {@code entity} with the spec's primary entity (ETP-5848), for every tool that
+   * takes one. Runs before the handlers validate their arguments, so a call without it reads and
+   * writes the spec's main record instead of failing on a missing argument. An entity the caller
+   * did send is never touched.
+   */
+  static void defaultToPrimary(String toolName, String specName, JSONObject arguments) {
+    if (arguments == null || specName == null || !takesEntity(toolName)
+        || (arguments.has(McpConstants.PARAM_ENTITY) && !arguments.isNull(McpConstants.PARAM_ENTITY))) {
+      return;
+    }
+    String primary = primaryName(specName);
+    if (primary == null) {
+      return;
+    }
+    try {
+      arguments.put(McpConstants.PARAM_ENTITY, primary);
+    } catch (JSONException e) {
+      // Leave it absent: the handler reports the missing argument as before.
+    }
   }
 }

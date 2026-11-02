@@ -30,6 +30,9 @@ import org.codehaus.jettison.json.JSONObject;
  */
 final class McpRequestRefusals {
 
+  /** Start of every refusal that names a filter key. */
+  private static final String FILTER = "Filter '";
+
   private McpRequestRefusals() {
   }
 
@@ -43,7 +46,7 @@ final class McpRequestRefusals {
    */
   static McpRoutingException malformedFilterOperator(String key, String operator, String expected) {
     return McpRoutingException.unprocessable(
-        "Filter '" + key + "' operator '" + operator + "' has a malformed value: " + expected,
+        FILTER + key + "' operator '" + operator + "' has a malformed value: " + expected,
         key, List.of(), "Correct the operator's value and retry.");
   }
 
@@ -60,7 +63,7 @@ final class McpRequestRefusals {
   static McpRoutingException containsOnReference(String key, Object text) {
     String query = text instanceof String ? (String) text : "<text>";
     return McpRoutingException.unprocessable(
-        "Filter '" + key + "' operator 'contains' cannot match a referenced record by its name: '"
+        FILTER + key + "' operator 'contains' cannot match a referenced record by its name: '"
             + key + "' holds the id of another record.",
         key, List.of(), "Find the record first with etendo_selectors(spec: <this spec>, field: '"
             + key + "', query: '" + query + "'), then filter by its id: {\"" + key
@@ -86,7 +89,7 @@ final class McpRequestRefusals {
       // a String key and a JSON value cannot fail; the refusal still carries field and detail
     }
     return McpRoutingException.unprocessable(
-        "Filter '" + key + "' expects a " + expectedType + " value"
+        FILTER + key + "' expects a " + expectedType + " value"
             + ("date".equals(expectedType) ? " (YYYY-MM-DD)" : "") + ", got '" + received + "'.",
         key, List.of(), "Correct the value and retry; nothing was read.")
         .withExtras(extras);

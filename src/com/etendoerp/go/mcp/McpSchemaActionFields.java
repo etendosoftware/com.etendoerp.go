@@ -112,23 +112,33 @@ final class McpSchemaActionFields {
    * @throws JSONException if the values cannot be written
    */
   static void addActionValues(JSONObject fieldObj, Column col) throws JSONException {
-    org.openbravo.model.ad.domain.Reference listRef = col.getReferenceSearchKey();
-    if (listRef == null) {
+    JSONArray values = listOptions(col.getReferenceSearchKey());
+    if (values == null) {
       return;
-    }
-    Map<String, String> labels = NeoSelectorService.getListLabels((String) listRef.getId());
-    if (labels == null || labels.isEmpty()) {
-      return;
-    }
-    JSONArray values = new JSONArray();
-    for (String value : new TreeSet<>(labels.keySet())) {
-      JSONObject entry = new JSONObject();
-      entry.put("value", value);
-      entry.put("label", labels.get(value));
-      values.put(entry);
     }
     fieldObj.put(McpConstants.KEY_ACTION_VALUES, values);
     fieldObj.put(McpConstants.KEY_ACTION_PARAMETER, McpConstants.PARAM_DOC_ACTION);
+  }
+
+  /**
+   * The values of an AD list reference as {@code [{value, label}]}, sorted by value, with the
+   * session-language labels; {@code null} for no reference or an empty list. One builder for the
+   * three places that publish a list: button values, list-field options and process parameters.
+   */
+  private static JSONArray listOptions(org.openbravo.model.ad.domain.Reference listRef)
+      throws JSONException {
+    if (listRef == null) {
+      return null;
+    }
+    Map<String, String> labels = NeoSelectorService.getListLabels((String) listRef.getId());
+    if (labels == null || labels.isEmpty()) {
+      return null;
+    }
+    JSONArray options = new JSONArray();
+    for (String value : new TreeSet<>(labels.keySet())) {
+      options.put(new JSONObject().put("value", value).put(McpConstants.KEY_LABEL, labels.get(value)));
+    }
+    return options;
   }
 
   /** Key of the values a {@code list} field can hold (ETP-5852). */
@@ -148,19 +158,10 @@ final class McpSchemaActionFields {
    * @throws JSONException if the values cannot be written
    */
   static void addListOptions(JSONObject fieldObj, Column col) throws JSONException {
-    org.openbravo.model.ad.domain.Reference listRef = col.getReferenceSearchKey();
-    if (listRef == null) {
-      return;
+    JSONArray options = listOptions(col.getReferenceSearchKey());
+    if (options != null) {
+      fieldObj.put(KEY_OPTIONS, options);
     }
-    Map<String, String> labels = NeoSelectorService.getListLabels((String) listRef.getId());
-    if (labels == null || labels.isEmpty()) {
-      return;
-    }
-    JSONArray options = new JSONArray();
-    for (String value : new TreeSet<>(labels.keySet())) {
-      options.put(new JSONObject().put("value", value).put("label", labels.get(value)));
-    }
-    fieldObj.put(KEY_OPTIONS, options);
   }
 
   /** Key of the parameters a Classic process button reads (ETP-5848). */
@@ -203,14 +204,8 @@ final class McpSchemaActionFields {
       if (hasDefault) {
         entry.put("default", param.getDefaultValue());
       }
-      Map<String, String> labels = param.getReferenceSearchKey() != null
-          ? NeoSelectorService.getListLabels((String) param.getReferenceSearchKey().getId())
-          : null;
-      if (labels != null && !labels.isEmpty()) {
-        JSONArray options = new JSONArray();
-        for (String value : new TreeSet<>(labels.keySet())) {
-          options.put(new JSONObject().put("value", value).put("label", labels.get(value)));
-        }
+      JSONArray options = listOptions(param.getReferenceSearchKey());
+      if (options != null) {
         entry.put(KEY_OPTIONS, options);
       }
       return entry;

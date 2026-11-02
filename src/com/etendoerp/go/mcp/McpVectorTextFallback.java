@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -78,57 +79,75 @@ final class McpVectorTextFallback {
     return matches == null || matches.length() == 0 ? REASON_NO_SEMANTIC_MATCHES : null;
   }
 
+  /** How many matches to return and the score range to keep, as the caller asked. */
+  static final class Limits {
+    final int topK;
+    final double minScore;
+    final double maxScore;
+
+    Limits(int topK, double minScore, double maxScore) {
+      this.topK = topK;
+      this.minScore = minScore;
+      this.maxScore = maxScore;
+    }
+  }
+
   /**
    * Search the targets by text.
    *
    * @param targets    the target keys, each the name of a spec
    * @param query      the caller's query
-   * @param topK       the most matches to return
-   * @param minScore   the lowest score kept
-   * @param maxScore   the highest score kept
+   * @param limits     topK and the score range
    * @param reason     why the fallback runs
    * @param textFields the content fields of a target
    * @param listTool   runs {@code etendo_list} with the given arguments, as the router does
    * @return the response body, shaped like the semantic one plus {@code mode:"lexical"}
    * @throws JSONException if the JSON cannot be built
    */
-  static JSONObject search(List<String> targets, String query, int topK, double minScore,
-      double maxScore, String reason, Function<String, List<String>> textFields,
-      Function<JSONObject, JSONObject> listTool) throws JSONException {
+  static JSONObject search(List<String> targets, String query, Limits limits, String reason,
+      Function<String, List<String>> textFields, Function<JSONObject, JSONObject> listTool)
+      throws JSONException {
     String text = query.trim();
-    String wanted = normalize(text);
     Map<String, JSONObject> found = new LinkedHashMap<>();
     for (String target : targets) {
       List<String> fields = textFields.apply(target);
       for (String field : fields) {
-        for (JSONObject row : rows(listTool.apply(listArgs(target, field, fields, text, topK)))) {
-          double score = scoreOf(row.optString(field, ""), wanted);
-          String key = target + "/" + row.optString("id");
-          JSONObject previous = found.get(key);
-          if (previous == null || previous.getDouble(KEY_SCORE) < score) {
-            found.put(key, new JSONObject().put(KEY_TARGET, target).put("id", row.optString("id"))
-                .put(KEY_SCORE, score).put("matchType", "lexical").put("fields", row));
-          }
-        }
+        keepBest(found, target, field, normalize(text),
+            rows(listTool.apply(listArgs(target, field, fields, text, limits.topK))));
       }
-    }
-    List<JSONObject> ranked = new ArrayList<>();
-    for (JSONObject match : found.values()) {
-      double score = match.getDouble(KEY_SCORE);
-      if (score >= minScore && score <= maxScore) {
-        ranked.add(match);
-      }
-    }
-    ranked.sort(Comparator.comparingDouble((JSONObject m) -> -m.optDouble(KEY_SCORE)));
-    JSONArray matches = new JSONArray();
-    for (JSONObject match : ranked.subList(0, Math.min(topK, ranked.size()))) {
-      matches.put(match);
     }
     return new JSONObject().put("targets", new JSONArray(targets)).put("mode", "lexical")
         .put("fallbackReason", reason)
         .put("hint", "Semantic search was unavailable or found nothing, so these are text matches "
             + "on the indexed fields. Read a match with etendo_get(spec: <its target>, id).")
-        .put(KEY_MATCHES, matches);
+        .put(KEY_MATCHES, ranked(found.values(), limits));
+  }
+
+  /** Adds each row of one field's list, keeping a record found on several fields at its best score. */
+  private static void keepBest(Map<String, JSONObject> found, String target, String field,
+      String wanted, List<JSONObject> rows) throws JSONException {
+    for (JSONObject row : rows) {
+      double score = scoreOf(row.optString(field, ""), wanted);
+      String key = target + "/" + row.optString("id");
+      JSONObject previous = found.get(key);
+      if (previous == null || previous.getDouble(KEY_SCORE) < score) {
+        found.put(key, new JSONObject().put(KEY_TARGET, target).put("id", row.optString("id"))
+            .put(KEY_SCORE, score).put("matchType", "lexical").put("fields", row));
+      }
+    }
+  }
+
+  /** The matches inside the score range, best first, at most topK. */
+  private static JSONArray ranked(Collection<JSONObject> found, Limits limits) {
+    List<JSONObject> kept = new ArrayList<>();
+    for (JSONObject match : found) {
+      double score = match.optDouble(KEY_SCORE);
+      if (score >= limits.minScore && score <= limits.maxScore) {
+        kept.add(match);
+      }
+    }
+    kept.sort(Comparator.comparingDouble((JSONObject m) -> -m.optDouble(KEY_SCORE)));
+    return new JSONArray(kept.subList(0, Math.min(limits.topK, kept.size())));
   }
 
   private static JSONObject listArgs(String target, String field, List<String> fields,

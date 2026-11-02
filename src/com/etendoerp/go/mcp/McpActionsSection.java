@@ -328,23 +328,26 @@ final class McpActionsSection {
     Map<String, Set<String>> narrowed = parseValues(body);
     for (Iterator<?> it = byButton.keys(); it.hasNext();) {
       String button = String.valueOf(it.next());
-      JSONObject reasons = byButton.optJSONObject(button);
-      Set<String> allowed = narrowed.get(button);
-      if (reasons == null || reasons.length() == 0) {
-        problems.add(KEY_VALUE_REASONS + "." + button + " must be a non-empty object {value: reason}");
-        continue;
-      }
-      if (allowed == null) {
-        problems.add(KEY_VALUE_REASONS + "." + button + " names no button of " + KEY_VALUES);
-        continue;
-      }
+      validateButtonReasons(button, byButton.optJSONObject(button), narrowed.get(button), problems);
+    }
+  }
+
+  /** One button's {@code valueReasons}: a non-empty object, of a narrowed button, for refused values. */
+  private static void validateButtonReasons(String button, JSONObject reasons, Set<String> allowed,
+      List<String> problems) {
+    String where = KEY_VALUE_REASONS + "." + button;
+    if (reasons == null || reasons.length() == 0) {
+      problems.add(where + " must be a non-empty object {value: reason}");
+    } else if (allowed == null) {
+      problems.add(where + " names no button of " + KEY_VALUES);
+    } else {
       for (Iterator<?> vit = reasons.keys(); vit.hasNext();) {
         String value = String.valueOf(vit.next());
         if (allowed.contains(value)) {
-          problems.add(KEY_VALUE_REASONS + "." + button + "." + value + " is a value " + KEY_VALUES
+          problems.add(where + "." + value + " is a value " + KEY_VALUES
               + " offers, so it is never refused");
         } else if (StringUtils.isBlank(reasons.optString(value, null))) {
-          problems.add(KEY_VALUE_REASONS + "." + button + "." + value + " must be a non-blank reason");
+          problems.add(where + "." + value + " must be a non-blank reason");
         }
       }
     }

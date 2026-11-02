@@ -98,9 +98,9 @@ class McpEntityNamesPrimaryTest {
   @Test
   @DisplayName("only tools with a top-level entity argument get it filled")
   void onlySingleEntityToolsTakeIt() {
-    assertTrue(ToolRegistry.takesEntity(McpConstants.TOOL_NEO_LIST));
-    assertTrue(ToolRegistry.takesEntity("etendo_action"));
-    assertFalse(ToolRegistry.takesEntity("etendo_batch"), "each batch operation names its own");
-    assertFalse(ToolRegistry.takesEntity(McpConstants.TOOL_NEO_DISCOVER));
+    assertTrue(McpEntityNames.takesEntity(McpConstants.TOOL_NEO_LIST));
+    assertTrue(McpEntityNames.takesEntity("etendo_action"));
+    assertFalse(McpEntityNames.takesEntity("etendo_batch"), "each batch operation names its own");
+    assertFalse(McpEntityNames.takesEntity(McpConstants.TOOL_NEO_DISCOVER));
   }
 }

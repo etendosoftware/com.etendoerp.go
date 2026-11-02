@@ -106,6 +106,21 @@ final class UserRolesAssignAction {
           "templateRoleIds is required: the whole set of template roles the user must end with "
               + "(an empty list removes them all).");
     }
+    String callerUserId = OBContext.getOBContext() != null
+        && OBContext.getOBContext().getUser() != null
+        ? OBContext.getOBContext().getUser().getId() : null;
+    String userId = context.getRecordId();
+    try {
+      UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
+          .assignTemplateRoles(userId, distinctIds(raw), caller, callerUserId);
+      return NeoResponse.ok(answer(result));
+    } catch (Exception e) {
+      return failure(e, userId);
+    }
+  }
+
+  /** The requested ids, trimmed, blanks dropped, each once, in request order. */
+  private static List<String> distinctIds(JSONArray raw) {
     List<String> roleIds = new ArrayList<>();
     for (int i = 0; i < raw.length(); i++) {
       String id = StringUtils.trimToNull(raw.optString(i, null));
@@ -113,30 +128,25 @@ final class UserRolesAssignAction {
         roleIds.add(id);
       }
     }
-    String callerUserId = OBContext.getOBContext() != null
-        && OBContext.getOBContext().getUser() != null
-        ? OBContext.getOBContext().getUser().getId() : null;
-    String userId = context.getRecordId();
-    try {
-      UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
-          .assignTemplateRoles(userId, roleIds, caller, callerUserId);
-      return NeoResponse.ok(answer(result));
-    } catch (Exception e) {
-      if (RoleWriteConflicts.isConcurrencyFailure(e)) {
-        OBDal.getInstance().rollbackAndClose();
-        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-            "Another change to this user's roles is in progress. Read them with the action "
-                + "'roles' and try again.");
-      }
-      if (e instanceof OBException) {
-        // A domain refusal: not a template, the owner or an administrator, another client's
-        // user. Its message says which.
-        return NeoResponse.error(SC_UNPROCESSABLE, e.getMessage());
-      }
-      log.error("assignRoles failed for user {}: {}", userId, e.getClass().getName());
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Could not assign the user's roles.");
+    return roleIds;
+  }
+
+  /** A lost race is a 409 to retry, a domain refusal a 422 with its message, anything else a 500. */
+  private static NeoResponse failure(Exception e, String userId) {
+    if (RoleWriteConflicts.isConcurrencyFailure(e)) {
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Another change to this user's roles is in progress. Read them with the action "
+              + "'roles' and try again.");
     }
+    if (e instanceof OBException) {
+      // A domain refusal: not a template, the owner or an administrator, another client's user.
+      // Its message says which.
+      return NeoResponse.error(SC_UNPROCESSABLE, e.getMessage());
+    }
+    log.error("assignRoles failed for user {}: {}", userId, e.getClass().getName());
+    return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        "Could not assign the user's roles.");
   }
 
   /** Template roles are system-level records, so their names are read in admin mode. */
