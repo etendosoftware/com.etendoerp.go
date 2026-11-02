@@ -323,6 +323,13 @@ class NeoCrudHandler {
    * {@link NeoWritePreflight} before dispatching to a customization.
    */
   NeoResponse handleDefault(NeoContext context) {
+    // ETP-6062: the preflight waived the target-row guard because the customization declared this
+    // update consumed elsewhere; reaching the default write means it did not, so refuse as the
+    // guard would have.
+    NeoResponse undelivered = NeoActionRecordGuard.refusalForUndeliveredDelegation(context);
+    if (undelivered != null) {
+      return undelivered;
+    }
     try {
       Tab adTab = context.getAdTab();
       if (adTab == null) {
