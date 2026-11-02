@@ -641,7 +641,13 @@ class DocumentAvailabilityTest {
           assertTrue(unavailable.get("createReturnInvoice").contains("R-1, R-2"));
           assertTrue(unavailable.get("createReturnInvoice")
               .contains("refused with 409 returnInvoiceAlreadyExists and creates nothing"));
-          assertTrue(unavailable.get("createReturnInvoice").contains("allowDuplicate:true"));
+          // ETP-6026: only the return to vendor still offers the way past it; the customer
+          // return keeps one per return, as on the screen.
+          boolean purchase = handler instanceof ReturnToVendorShipmentHeaderHandler;
+          assertEquals(purchase,
+              unavailable.get("createReturnInvoice").contains("allowDuplicate:true"));
+          assertEquals(!purchase,
+              unavailable.get("createReturnInvoice").contains("one per return, as on the screen"));
         }
       }
     }

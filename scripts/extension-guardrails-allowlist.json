@@ -77,7 +77,6 @@
     "RegisterPaymentHandler",
     "RegisterPaymentOutHandler",
     "RejectQuotationHandler",
-    "ReturnMaterialReceiptHeaderHandler",
     "ReturnMaterialReceiptLineHandler",
     "ReturnToVendorShipmentHeaderHandler",
     "ReturnToVendorShipmentLineHandler",

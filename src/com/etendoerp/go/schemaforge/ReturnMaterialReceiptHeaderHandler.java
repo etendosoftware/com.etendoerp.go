@@ -28,7 +28,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
@@ -57,8 +56,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * <p>Extends {@link AbstractReturnDocumentHeaderHandler}, which owns the {@code postingService}
  * injection point and the {@code handle()} wiring shared with {@link ReturnToVendorShipmentHeaderHandler}.
+ *
+ * <p><b>Binding (ETP-6026).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code returnMaterialReceiptHeaderHandler}) and the class's
+ * {@code @Named} were removed in the same change (neo-extension-migration).
  */
-@Named("returnMaterialReceiptHeaderHandler")
+@NeoExtension(spec = "return-material-receipt", entity = "returnMaterialReceipt")
 public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptHeaderHandler.class);
@@ -169,12 +172,12 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
             + "completed return receipt, links it to the invoices it rectifies and confirms it: "
             + "the invoice is left COMPLETED. Confirming the return does NOT do this; it is this "
             + "separate call. Refused with 400 when the receipt is not completed. A second call "
-            + "is refused with 409 returnInvoiceAlreadyExists, creating nothing, "
+            + "is always refused with 409 returnInvoiceAlreadyExists, creating nothing, "
             + "when the return already has a non-voided factura rectificativa (one per return, "
             + "as on the screen; see hasReturnInvoice in rectifiableInvoices or returnInvoices on "
-            + "the return header), unless allowDuplicate:true is passed; the refusal lists the "
-            + "existing ones in previousReturnInvoices, and with allowDuplicate:true the answer "
-            + "lists the ones the return had before this call. Refused with 422 "
+            + "the return header); the refusal lists the existing ones in "
+            + "previousReturnInvoices. To create another, void the existing one first. "
+            + "Refused with 422 "
             + "returnInvoiceWithoutAmount, creating nothing, when a product has no price to refund. Returns {id, documentNo, "
             + "documentStatus, documentType, isSalesTransaction, grandTotalAmount, totalLines, "
             + "linkedReturnId, returnDocumentNo, rectifiedInvoices:[{id, documentNo}], "
@@ -182,17 +185,23 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
             + "negative, it refunds. Step 6." + FLOW,
         NeoActionContract.Param.array("originInvoices", NeoActionContract.TYPE_STRING, false,
             "Ids of the invoices it rectifies, from rectifiableInvoices. Default: the invoice "
-                + "auto-detected from the returned shipment lines; refused when none is found."),
-        NeoActionContract.Param.optional(ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE,
-            NeoActionContract.TYPE_BOOLEAN,
-            "Only the JSON boolean true creates a second factura rectificativa for a return "
-                + "that already has one; anything else (absent, false, a string, a number) keeps "
-                + "the one-per-return refusal. Use it only when a second one is really intended."))
+                + "auto-detected from the returned shipment lines; refused when none is found."))
         .withIdDescription("The id of the completed return receipt.")
         .availableWhen(DocumentAvailability.WHEN_COMPLETED));
     contracts.putAll(GoodsPostingContracts.CONTRACTS);
     contracts.put(ReturnCompletionContract.CONTRACT.getName(), ReturnCompletionContract.CONTRACT);
     return Collections.unmodifiableMap(contracts);
+  }
+
+  /**
+   * {@inheritDoc} The customer return does not (ETP-6026): one non-voided factura rectificativa
+   * per return, on every channel, exactly as the screen (which never sends the flag). The flag is
+   * not declared in the contract, so MCP refuses it as an unknown parameter; on REST it is not
+   * read.
+   */
+  @Override
+  protected boolean acceptsAllowDuplicate() {
+    return false;
   }
 
   @Override
@@ -451,7 +460,7 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
         // had, the zero-amount refusal, then create, link and confirm — in that order, see the
         // shared body.
         return ReturnInvoiceSupport.createReturnInvoice(receipt, receiptId, lines, docType, true,
-            context, createDraftInvoiceHandler);
+            acceptsAllowDuplicate(), context, createDraftInvoiceHandler);
 
       } finally {
         OBContext.restorePreviousMode();

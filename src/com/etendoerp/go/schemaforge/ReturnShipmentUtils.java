@@ -91,6 +91,13 @@ final class ReturnShipmentUtils {
   static final String HINT_RETURN_INVOICE_ALREADY_EXISTS = "Pass allowDuplicate:true only if a "
       + "second rectificative invoice for this return is really intended (for example one per "
       + "origin invoice). Nothing was created.";
+  /**
+   * {@code error.hint} of that 409 for a return whose customization does not accept
+   * {@code allowDuplicate} (ETP-6026): there is no way past it, as on the screen.
+   */
+  static final String HINT_RETURN_INVOICE_ONE_PER_RETURN = "A return has at most one non-voided "
+      + "rectificative invoice, as on the screen: use the existing one (previousReturnInvoices), "
+      + "or void it first to create another. Nothing was created.";
   /** The 422 message of an {@code allowDuplicate} that is not a JSON boolean. */
   static final String MSG_ALLOW_DUPLICATE_NOT_BOOLEAN =
       "'allowDuplicate' must be the JSON boolean true or false. Nothing was created.";

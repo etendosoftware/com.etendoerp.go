@@ -206,12 +206,29 @@ final class ReturnInvoiceSupport {
   static NeoResponse createReturnInvoice(ShipmentInOut returnDoc, String returnId,
       List<ShipmentInOutLine> lines, DocumentType docType, boolean isSales, NeoContext context,
       CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
+    return createReturnInvoice(returnDoc, returnId, lines, docType, isSales, true, context,
+        createDraftInvoiceHandler);
+  }
+
+  /**
+   * {@link #createReturnInvoice(ShipmentInOut, String, List, DocumentType, boolean, NeoContext,
+   * CreateDraftInvoiceHandler)}, with the caller saying whether its contract accepts
+   * {@code allowDuplicate} (ETP-6026). When it does not, a second rectificativa is always refused
+   * and the key, if sent anyway, is not read.
+   *
+   * @param acceptsAllowDuplicate whether {@code allowDuplicate:true} lets a second rectificativa
+   *     through; {@code false} keeps the one-per-return rule unconditionally
+   */
+  static NeoResponse createReturnInvoice(ShipmentInOut returnDoc, String returnId,
+      List<ShipmentInOutLine> lines, DocumentType docType, boolean isSales,
+      boolean acceptsAllowDuplicate, NeoContext context,
+      CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
     JSONObject body = context.getRequestBody();
     OBContext obContext = context.getObContext();
     // ETP-5712: one rectificativa per return, like the screen (it hides the button once the
     // return has one). The check reads only, so it runs before anything else.
     JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices(returnId);
-    NeoResponse duplicate = refuseIfAlreadyInvoiced(body, previous);
+    NeoResponse duplicate = refuseIfAlreadyInvoiced(body, previous, acceptsAllowDuplicate);
     if (duplicate != null) {
       return duplicate;
     }
@@ -255,10 +272,28 @@ final class ReturnInvoiceSupport {
    * @return the 409 or 422, or {@code null} when the creation may go on
    */
   static NeoResponse refuseIfAlreadyInvoiced(JSONObject body, JSONArray previous) {
-    return DuplicateCreationRefusal.refuseUnlessAllowed(body, previous,
-        ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS,
+    return refuseIfAlreadyInvoiced(body, previous, true);
+  }
+
+  /**
+   * {@link #refuseIfAlreadyInvoiced(JSONObject, JSONArray)}, with the caller saying whether
+   * {@code allowDuplicate} is honoured (ETP-6026). When it is not, the body is not read at all: a
+   * return with a non-voided rectificativa is refused with the same 409 and message, and a hint
+   * that offers no way past it.
+   *
+   * @param body the request body; {@code null} reads as empty
+   * @param previous the non-voided rectificativas the return already has
+   * @param acceptsAllowDuplicate whether {@code allowDuplicate:true} lets a second one through
+   * @return the 409 or 422, or {@code null} when the creation may go on
+   */
+  static NeoResponse refuseIfAlreadyInvoiced(JSONObject body, JSONArray previous,
+      boolean acceptsAllowDuplicate) {
+    return DuplicateCreationRefusal.refuseUnlessAllowed(acceptsAllowDuplicate ? body : null,
+        previous, ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS,
         ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS,
-        ReturnShipmentUtils.HINT_RETURN_INVOICE_ALREADY_EXISTS, "previousReturnInvoices");
+        acceptsAllowDuplicate ? ReturnShipmentUtils.HINT_RETURN_INVOICE_ALREADY_EXISTS
+            : ReturnShipmentUtils.HINT_RETURN_INVOICE_ONE_PER_RETURN,
+        "previousReturnInvoices");
   }
 
   /**

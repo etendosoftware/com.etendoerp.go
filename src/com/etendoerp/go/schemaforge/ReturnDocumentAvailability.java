@@ -37,7 +37,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  * <p>Shared by {@link ReturnToVendorShipmentHeaderHandler} and
  * {@link ReturnMaterialReceiptHeaderHandler}, which call it explicitly. Advisory only: it warns
  * before the call; the refusal itself (409 {@code returnInvoiceAlreadyExists}, unless
- * {@code allowDuplicate:true}) lives in {@link ReturnInvoiceSupport#refuseIfAlreadyInvoiced}.</p>
+ * {@code allowDuplicate:true} where the header accepts it — the customer return does not since
+ * ETP-6026) lives in {@link ReturnInvoiceSupport#refuseIfAlreadyInvoiced}.</p>
  */
 final class ReturnDocumentAvailability {
 
@@ -76,6 +77,18 @@ final class ReturnDocumentAvailability {
    *         has no rectificativa yet, or when the lookup fails
    */
   static Map<String, String> unavailable(BaseOBObject subject) {
+    return unavailable(subject, true);
+  }
+
+  /**
+   * {@link #unavailable(BaseOBObject)}, with the caller saying whether its contract accepts
+   * {@code allowDuplicate} (ETP-6026): when it does not, the reason offers no way past the 409.
+   *
+   * @param subject the record the agent asked about
+   * @param acceptsAllowDuplicate whether {@code allowDuplicate:true} lets a second one through
+   * @return {@code action → reason}
+   */
+  static Map<String, String> unavailable(BaseOBObject subject, boolean acceptsAllowDuplicate) {
     if (!(subject instanceof ShipmentInOut)) {
       return Collections.emptyMap();
     }
@@ -92,11 +105,12 @@ final class ReturnDocumentAvailability {
       for (int i = 0; i < previous.length(); i++) {
         docNos.append(i == 0 ? "" : ", ").append(previous.optJSONObject(i).optString("documentNo"));
       }
-      return Map.of(ACTION_CREATE_RETURN_INVOICE, "This return already has a factura "
-          + "rectificativa (" + docNos + "); calling it again is refused with 409 "
-          + ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS
-          + " and creates nothing, unless "
-          + ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE + ":true is passed.");
+      String refusal = "This return already has a factura rectificativa (" + docNos
+          + "); calling it again is refused with 409 "
+          + ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS + " and creates nothing";
+      return Map.of(ACTION_CREATE_RETURN_INVOICE, acceptsAllowDuplicate
+          ? refusal + ", unless " + ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE + ":true is passed."
+          : refusal + ": one per return, as on the screen.");
     } catch (OBException e) {
       log.debug("Could not read the rectificativas of return {}: {}", inout.getId(), e.getMessage());
       return Collections.emptyMap();
