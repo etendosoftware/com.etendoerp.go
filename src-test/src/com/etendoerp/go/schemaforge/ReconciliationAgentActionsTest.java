@@ -66,7 +66,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * surface of {@code bank-reconciliation} — and the regression guarantees around it:
  *
  * <ul>
- *   <li>CA1/CA7: the nine declared contracts (names, order, mutating flag, required lists);</li>
+ *   <li>CA1/CA7: the eleven declared contracts (names, order, mutating flag, required lists);</li>
  *   <li>CA2–CA6: every action re-enters the SAME {@code ReconciliationHandlerSupport.handle*}
  *       wrapper the SPA route uses, with {@code id} mapped to {@code financialAccountId} (writes)
  *       or {@code accountId} (reads) and the parameters passed through untouched;</li>
@@ -267,11 +267,12 @@ class ReconciliationAgentActionsTest {
   class Contracts {
 
     @Test
-    @DisplayName("nine actions, reads first then writes, in presentation order")
+    @DisplayName("eleven actions, reads first then writes, the bounce-pair pair last")
     void nineActionsInOrder() {
       assertEquals(List.of("pendingLines", "candidates", "autoMatch", "reconcileGroup",
           "reconcileDifference", "undoReconciliation", "removeOperation", "reactivateSelected",
-          "applySuggestions"), new ArrayList<>(ReconciliationAgentActions.CONTRACTS.keySet()));
+          "applySuggestions", "discardPair", "restorePair"),
+          new ArrayList<>(ReconciliationAgentActions.CONTRACTS.keySet()));
     }
 
     @Test
@@ -295,6 +296,10 @@ class ReconciliationAgentActionsTest {
       expected.put("removeOperation", List.of("statementLineId", "transactionIds"));
       expected.put("reactivateSelected", List.of("statementLineId", "transactionIds"));
       expected.put("applySuggestions", List.of("groups"));
+      expected.put("discardPair", List.of("statementLineId", "counterpartLineId"));
+      expected.put("restorePair", List.of("lineId"));
+      assertEquals(expected.keySet(), ReconciliationAgentActions.CONTRACTS.keySet(),
+          "every declared action has an expected required list");
       for (Map.Entry<String, NeoActionContract> e : ReconciliationAgentActions.CONTRACTS
           .entrySet()) {
         JSONObject schema = e.getValue().toJson().getJSONObject("parameters");

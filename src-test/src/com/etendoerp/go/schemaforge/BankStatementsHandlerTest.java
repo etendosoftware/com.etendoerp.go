@@ -53,6 +53,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -67,6 +68,9 @@ import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -93,6 +97,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * fully offline.
  *
  * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
+ * @covers com.etendoerp.go.schemaforge.BankStatementLineSet
  */
 // Silent runner: clearMocks() (below) wipes the inline mock maker registry after
 // each test to keep the shared test-worker heap flat; the strict runner would
@@ -1821,6 +1826,212 @@ public class BankStatementsHandlerTest {
       JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
           .getJSONObject("statement");
       assertEquals(1, data.getInt("lineCount"));
+    }
+  }
+
+  // ── ?action=update keeps the bank identity of a rebuilt line (ETP-5581) ──
+
+  /** Column name (upper case) → property name of the simulated FIN_BankStatementLine model. */
+  private static final Map<String, String> BANK_IDENTITY_COLUMNS = new HashMap<>();
+
+  static {
+    for (String column : new String[] { StatementLineDiscard.COL_IS_DISCARDED,
+        StatementLineDiscard.COL_DISCARD_LINE, StatementLineDiscard.COL_TRANSACTION_IDENTIFIER,
+        BankBouncePairService.COL_PAIR_LINE, BankBouncePairService.COL_DISCARDED_AT,
+        BankBouncePairService.COL_SIGNAL, BankBouncePairService.COL_CONFIDENCE }) {
+      BANK_IDENTITY_COLUMNS.put(column.toUpperCase(Locale.ROOT), bankProp(column));
+    }
+  }
+
+  private static String bankProp(String column) {
+    return "p_" + column.toLowerCase(Locale.ROOT);
+  }
+
+  /** Mocks the DAL model so every PSD2 / bounce column of the line is mapped. */
+  private static MockedStatic<ModelProvider> mockBankIdentityModel() {
+    ModelProvider model = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    when(model.getEntity(FIN_BankStatementLine.ENTITY_NAME)).thenReturn(entity);
+    when(entity.getPropertyByColumnName(anyString(), eq(false))).thenAnswer(inv -> {
+      String name = BANK_IDENTITY_COLUMNS.get(
+          ((String) inv.getArgument(0)).toUpperCase(Locale.ROOT));
+      if (name == null) {
+        return null;
+      }
+      Property property = mock(Property.class);
+      when(property.getName()).thenReturn(name);
+      return property;
+    });
+    MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+    modelMock.when(ModelProvider::getInstance).thenReturn(model);
+    return modelMock;
+  }
+
+  /** A line mock whose columns live in {@code values}, keyed by property name. */
+  private static FIN_BankStatementLine valuedLine(String id, Map<String, Object> values) {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn(id);
+    when(line.get(anyString())).thenAnswer(inv -> values.get(inv.getArgument(0)));
+    doAnswer(inv -> values.put(inv.getArgument(0), inv.getArgument(1)))
+        .when(line).set(anyString(), any());
+    return line;
+  }
+
+  /** The values of an unmatched PSD2 line that a discardPair left discarded and linked. */
+  private static Map<String, Object> discardedPairValues(String transactionId,
+      FIN_BankStatementLine counterpart) {
+    Map<String, Object> values = new HashMap<>();
+    values.put(bankProp(StatementLineDiscard.COL_TRANSACTION_IDENTIFIER), transactionId);
+    values.put(bankProp(StatementLineDiscard.COL_IS_DISCARDED), true);
+    values.put(bankProp(StatementLineDiscard.COL_DISCARD_LINE), "Y");
+    values.put(bankProp(BankBouncePairService.COL_PAIR_LINE), counterpart);
+    values.put(bankProp(BankBouncePairService.COL_SIGNAL), "counterparty");
+    values.put(bankProp(BankBouncePairService.COL_CONFIDENCE), "review");
+    return values;
+  }
+
+  /** A body line of ?action=update carrying the {@code "id"} of the line it replaces. */
+  private static JSONObject rebuiltLine(String oldId, Object in, Object out) throws Exception {
+    JSONObject l = createLine("2026-06-02T00:00:00Z", "X", "ACME", in, out);
+    if (oldId != null) {
+      l.put("id", oldId);
+    }
+    return l;
+  }
+
+  /**
+   * A discarded bounce pair whose two lines are both in the edited statement: each rebuilt line
+   * gets back its PSD2 transaction id, discard flag and button, and the pair is linked between the
+   * two NEW lines. A body line with no {@code "id"} is a new line and gets none of it.
+   */
+  @Test
+  public void handleUpdateRebuildsAPairInsideTheStatementWithItsBankIdentity() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = idBody("st-1");
+    body.put("name", "Editado");
+    body.put("transactionDate", "2026-06-04T00:00:00Z");
+    body.put("importDate", "2026-06-04T00:00:00Z");
+    JSONArray lines = new JSONArray();
+    lines.put(rebuiltLine("OLD-OUT", 0, 50));
+    lines.put(rebuiltLine("OLD-IN", 50, 0));
+    lines.put(rebuiltLine(null, 10, 0));
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_BankStatement draft = draftStatement("st-1");
+    Map<String, Object> oldOutValues = new HashMap<>();
+    Map<String, Object> oldInValues = new HashMap<>();
+    FIN_BankStatementLine oldOut = valuedLine("OLD-OUT", oldOutValues);
+    FIN_BankStatementLine oldIn = valuedLine("OLD-IN", oldInValues);
+    oldOutValues.putAll(discardedPairValues("TX-OUT", oldIn));
+    oldInValues.putAll(discardedPairValues("TX-IN", oldOut));
+    Map<String, Object> newOutValues = new HashMap<>();
+    Map<String, Object> newInValues = new HashMap<>();
+    Map<String, Object> newPlainValues = new HashMap<>();
+    FIN_BankStatementLine newOut = valuedLine("NEW-OUT", newOutValues);
+    FIN_BankStatementLine newIn = valuedLine("NEW-IN", newInValues);
+    FIN_BankStatementLine newPlain = valuedLine("NEW-PLAIN", newPlainValues);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> matched = mock(OBCriteria.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> unmatched = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+         MockedStatic<ModelProvider> modelMock = mockBankIdentityModel()) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      // countMatched asks first (no matched line); every later read sees the two unmatched lines.
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(matched, unmatched);
+      when(matched.add(any())).thenReturn(matched);
+      when(matched.list()).thenReturn(Collections.emptyList());
+      when(unmatched.add(any())).thenReturn(unmatched);
+      when(unmatched.list()).thenReturn(Arrays.asList(oldOut, oldIn));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(newOut, newIn, newPlain);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "update"));
+
+      assertEquals(200, r.getHttpStatus());
+      verify(dal).remove(oldOut);
+      verify(dal).remove(oldIn);
+      assertEquals("TX-OUT",
+          newOutValues.get(bankProp(StatementLineDiscard.COL_TRANSACTION_IDENTIFIER)));
+      assertEquals("TX-IN",
+          newInValues.get(bankProp(StatementLineDiscard.COL_TRANSACTION_IDENTIFIER)));
+      for (Map<String, Object> values : Arrays.asList(newOutValues, newInValues)) {
+        assertEquals(Boolean.TRUE, values.get(bankProp(StatementLineDiscard.COL_IS_DISCARDED)));
+        assertEquals("Y", values.get(bankProp(StatementLineDiscard.COL_DISCARD_LINE)));
+        assertEquals("counterparty", values.get(bankProp(BankBouncePairService.COL_SIGNAL)));
+      }
+      assertSame(newIn, newOutValues.get(bankProp(BankBouncePairService.COL_PAIR_LINE)));
+      assertSame(newOut, newInValues.get(bankProp(BankBouncePairService.COL_PAIR_LINE)));
+      assertTrue("a body line without an id is a new line: " + newPlainValues,
+          newPlainValues.isEmpty());
+      verify(dal, never()).get(eq(FIN_BankStatementLine.class), anyString());
+      assertEquals(3, r.getBody().getJSONObject("response").getJSONObject("data")
+          .getJSONObject("statement").getInt("lineCount"));
+    }
+  }
+
+  /**
+   * A discarded pair whose counterpart lives in ANOTHER statement: the edited line is rebuilt with
+   * its identity and linked again, in both directions, with the counterpart that was kept.
+   */
+  @Test
+  public void handleUpdateRelinksAPairAcrossTwoStatementsInBothDirections() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = idBody("st-1");
+    body.put("name", "Editado");
+    body.put("transactionDate", "2026-06-04T00:00:00Z");
+    body.put("importDate", "2026-06-04T00:00:00Z");
+    JSONArray lines = new JSONArray();
+    lines.put(rebuiltLine("OLD-OUT", 0, 50));
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_BankStatement draft = draftStatement("st-1");
+    // The counterpart, in another statement, lost its link when the old line was deleted.
+    Map<String, Object> keptValues = new HashMap<>();
+    FIN_BankStatementLine keptIn = valuedLine("KEPT-IN", keptValues);
+    FIN_BankStatementLine oldOut = valuedLine("OLD-OUT", discardedPairValues("TX-OUT", keptIn));
+    Map<String, Object> newOutValues = new HashMap<>();
+    FIN_BankStatementLine newOut = valuedLine("NEW-OUT", newOutValues);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> matched = mock(OBCriteria.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> unmatched = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+         MockedStatic<ModelProvider> modelMock = mockBankIdentityModel()) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.get(FIN_BankStatementLine.class, "KEPT-IN")).thenReturn(keptIn);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(matched, unmatched);
+      when(matched.add(any())).thenReturn(matched);
+      when(matched.list()).thenReturn(Collections.emptyList());
+      when(unmatched.add(any())).thenReturn(unmatched);
+      when(unmatched.list()).thenReturn(Collections.singletonList(oldOut));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(newOut);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "update"));
+
+      assertEquals(200, r.getHttpStatus());
+      verify(dal).remove(oldOut);
+      assertEquals("TX-OUT",
+          newOutValues.get(bankProp(StatementLineDiscard.COL_TRANSACTION_IDENTIFIER)));
+      assertEquals(Boolean.TRUE, newOutValues.get(bankProp(StatementLineDiscard.COL_IS_DISCARDED)));
+      assertSame(keptIn, newOutValues.get(bankProp(BankBouncePairService.COL_PAIR_LINE)));
+      assertSame(newOut, keptValues.get(bankProp(BankBouncePairService.COL_PAIR_LINE)));
+      verify(dal).save(keptIn);
     }
   }
 

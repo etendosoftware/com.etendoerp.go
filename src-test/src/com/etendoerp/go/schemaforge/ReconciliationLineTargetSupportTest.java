@@ -45,10 +45,12 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -66,6 +68,11 @@ import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
  * <p>The handler is a plain mock — every DAL seam the support class needs goes through it. {@link
  * OBDal} and {@link ModelProvider} (the match-group id is an extension column read through the
  * model, see {@code ReactivationSupport.readMatchGroupId}) are mocked statically for every test.
+ *
+ * <p>ETP-5581: a stuck line a {@code BankStatementLineFilterHook} excludes (PSD2's discarded
+ * lines) is refused with the 409 {@code LINE_DISCARDED} before the heal, the only write here.
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationLineTargetSupport
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -385,6 +392,79 @@ class ReconciliationLineTargetSupportTest {
     assertEquals(DRAFT_HOLDS_MESSAGE, errorMessage(target.error()));
     assertNoWrite();
     assertEquals(2, held.size());
+  }
+
+  // ── ETP-5581: a discarded stuck line is never healed ─────────────────────────
+
+  private static final String DISCARDED_TEXT = "The statement line is discarded";
+
+  /**
+   * A stuck line (a movement with no reconciliation) that a {@code BankStatementLineFilterHook}
+   * excludes is refused with the 409 {@code LINE_DISCARDED} and NOT freed: the heal is a write, and
+   * the line could not be reconciled afterwards anyway.
+   */
+  @Test
+  void testResolveForMatchRefusesADiscardedStuckLineWithoutHealingIt() throws Exception {
+    when(trx.getReconciliation()).thenReturn(null);
+
+    ReconciliationLineTargetSupport.Target target;
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class)) {
+      filter.when(() -> StatementLineFilter.isExcluded(line, Usage.MATCH_STATEMENT_GRID))
+          .thenReturn(true);
+      messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
+          .thenReturn(DISCARDED_TEXT);
+
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+    }
+
+    assertNotNull(target.error());
+    assertEquals(409, target.error().getHttpStatus());
+    JSONObject body = target.error().getBody();
+    assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, body.getString("code"));
+    assertEquals(DISCARDED_TEXT, errorMessage(target.error()));
+    assertNoWrite();
+    verify(handler, never()).loadMatchGroupLines(any(), any());
+  }
+
+  /**
+   * Guard order: a stuck line on a draft statement keeps the draft-statement answer even when it is
+   * also discarded — the discard check is never even asked.
+   */
+  @Test
+  void testResolveForMatchAnswersTheDraftStatementBeforeTheDiscard() throws Exception {
+    when(trx.getReconciliation()).thenReturn(null);
+    when(statement.isProcessed()).thenReturn(Boolean.FALSE);
+
+    ReconciliationLineTargetSupport.Target target;
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class)) {
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+      filter.verifyNoInteractions();
+    }
+
+    assertEquals(ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT, errorMessage(target.error()));
+    assertNoWrite();
+  }
+
+  /**
+   * A pending line (no movement) is returned unchanged without asking the hooks: there is nothing
+   * to heal, and its caller runs the discard guard itself, next to its draft check.
+   */
+  @Test
+  void testResolveForMatchLeavesTheDiscardGuardOfAPendingLineToItsCaller() throws Exception {
+    when(line.getFinancialAccountTransaction()).thenReturn(null);
+
+    ReconciliationLineTargetSupport.Target target;
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class)) {
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+      filter.verifyNoInteractions();
+    }
+
+    assertNull(target.error());
+    assertSame(line, target.line());
   }
 
   @Test

@@ -53,12 +53,14 @@ import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -76,10 +78,19 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
  *       {@code pendingAmount}, {@code remainderLineId});</li>
  *   <li>B3 — {@code candidates} for the reconciled head of a partial group lists its remainder and
  *       says so.</li>
+ *   <li>ETP-5581 — a line a {@code BankStatementLineFilterHook} excludes (PSD2's discarded lines)
+ *       is refused with the 409 {@code LINE_DISCARDED} by {@code reconcileGroup} and by
+ *       {@code applySuggestions}' {@code prepareGroup}, before any write (rolled back on the
+ *       route).</li>
  * </ul>
  *
  * <p>{@link #routedHandler} is a plain mock for the dispatch-envelope tests; {@link #handler} is a
  * spy on a real handler whose DAL seams are stubbed, for the business-method tests.
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
+ * @covers com.etendoerp.go.schemaforge.ReconciliationHandlerSupport
+ * @covers com.etendoerp.go.schemaforge.ReconciliationFlowSupport
+ * @covers com.etendoerp.go.schemaforge.StatementLineFilter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -503,6 +514,123 @@ class ReconciliationRefusedWriteTest {
     verifyNoInteractions(dal);
     verify(handler, never()).addNewDraftReconciliation(any());
     verify(handler, never()).normalizeReactivatedMatchGroup(any());
+  }
+
+  // ── ETP-5581: a discarded line is refused (409 LINE_DISCARDED) before any write ─
+
+  private static final String DISCARDED_TEXT = "The statement line is discarded";
+
+  /**
+   * Marks {@code row} as excluded by a {@code BankStatementLineFilterHook} for {@code usage} only;
+   * any other line or usage falls through to the real method, which finds no hook. The refusal's
+   * text comes from a mocked dictionary.
+   */
+  private static void discarded(MockedStatic<StatementLineFilter> filter,
+      MockedStatic<OBMessageUtils> messages, FIN_BankStatementLine row, Usage usage) {
+    filter.when(() -> StatementLineFilter.isExcluded(row, usage)).thenReturn(true);
+    messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
+        .thenReturn(DISCARDED_TEXT);
+  }
+
+  private static void assertLineDiscarded(JSONObject body) throws Exception {
+    assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, body.getString("code"));
+    JSONObject error = body.getJSONObject(KEY_ERROR);
+    assertEquals(409, error.getInt("status"));
+    assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, error.getString("code"));
+    assertEquals(DISCARDED_TEXT, error.getString(KEY_MESSAGE));
+    assertEquals(StatementLineDiscard.MSG_LINE_DISCARDED,
+        error.getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
+  }
+
+  @Test
+  void testReconcileGroupRefusesADiscardedLineBeforeAnyWrite() throws Exception {
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(operation).when(handler).loadTransaction(OP_ID);
+
+    NeoResponse response;
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class);
+        MockedStatic<ReconciliationPaymentService> payments =
+            Mockito.mockStatic(ReconciliationPaymentService.class);
+        MockedStatic<ReconciliationWriteoffSupport> writeoff =
+            Mockito.mockStatic(ReconciliationWriteoffSupport.class)) {
+      discarded(filter, messages, line, Usage.MATCH_STATEMENT_GRID);
+
+      response = handler.reconcileGroup(reconcileBody(true, OP_ID));
+
+      payments.verifyNoInteractions();
+      writeoff.verifyNoInteractions();
+    }
+
+    assertEquals(409, response.getHttpStatus());
+    assertLineDiscarded(response.getBody());
+    // Refused even before the client-supplied operations are looked up.
+    verify(handler, never()).loadTransaction(any());
+    verify(handler, never()).addNewDraftReconciliation(any());
+    verify(handler, never()).matchInto(any(), anyList(), any());
+    verify(handler, never()).processReconciliation(any());
+    verify(line, never()).setFinancialAccountTransaction(any());
+    verifyNoInteractions(dal);
+  }
+
+  @Test
+  void testReconcileGroupThroughTheRouteRollsBackTheDiscardedRefusal() throws Exception {
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    when(context.getRequestBody()).thenReturn(reconcileBody(false, OP_ID));
+
+    NeoResponse response;
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class)) {
+      discarded(filter, messages, line, Usage.MATCH_STATEMENT_GRID);
+      response = ReconciliationHandlerSupport.handleReconcileGroup(handler, context);
+    }
+
+    assertEquals(409, response.getHttpStatus());
+    verify(handler).doRollbackAndClose();
+  }
+
+  /**
+   * {@code applySuggestions}: a group on a discarded line is refused with the 409, stamped with its
+   * {@code statementLineId}, BEFORE its rule transaction is created; the other groups of the batch
+   * are prepared as usual.
+   */
+  @Test
+  void testApplySuggestionsRefusesADiscardedLineBeforeCreatingItsRuleTransaction()
+      throws Exception {
+    when(operation.getDepositAmount()).thenReturn(new BigDecimal(HUNDRED));
+    doReturn(operation).when(handler).loadTransaction(OP_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(remainder).when(handler).loadLine(REM_ID);
+    JSONObject ruleGroup = new JSONObject().put(KEY_STATEMENT_LINE_ID, REM_ID)
+        .put(KEY_OPERATION_IDS, new JSONArray())
+        .put("createPayment", new JSONObject().put("glItemId", "gl-1").put("ruleId", "rule-1"));
+    List<ReconciliationHandler.PreparedGroup> prepared = new ArrayList<>();
+    JSONArray results = new JSONArray();
+
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class);
+        MockedStatic<AutoMatchSupport> autoMatch = Mockito.mockStatic(AutoMatchSupport.class)) {
+      discarded(filter, messages, remainder, Usage.AUTO_MATCH_CANDIDATES);
+
+      ReconciliationFlowSupport.prepareAllGroups(handler, account,
+          new JSONArray().put(ruleGroup).put(group(LINE_ID, OP_ID)), prepared, results);
+
+      autoMatch.verifyNoInteractions();
+    }
+
+    assertEquals(1, prepared.size());
+    assertSame(line, prepared.get(0).line);
+    assertEquals(1, results.length());
+    JSONObject failure = results.getJSONObject(0);
+    assertLineDiscarded(failure);
+    assertEquals(REM_ID, failure.getString(KEY_STATEMENT_LINE_ID));
+    verifyNoWriteSeam();
+    verify(remainder, never()).setFinancialAccountTransaction(any());
   }
 
   private static JSONObject group(String lineId, String opId) throws Exception {

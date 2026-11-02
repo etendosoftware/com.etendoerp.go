@@ -95,7 +95,10 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *
  * <p>The heart of the suite is the "no write before a rejected request" invariant: a returned
  * {@code NeoResponse.error(...)} COMMITS, so every failing scenario asserts BOTH the status and
- * {@code never()} on {@code createTransactionForRule} / {@code reconcileGroup}.
+ * {@code never()} on {@code createTransactionForRule} / {@code reconcileGroup}. Since ETP-5581
+ * that includes a line a {@code BankStatementLineFilterHook} excludes (409 {@code LINE_DISCARDED}).
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationDifferenceSupport
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationDifferenceSupportTest {
@@ -753,6 +756,37 @@ public class ReconciliationDifferenceSupportTest {
     assertEquals(REM_ID, response.getBody().getString("remainderLineId"));
     verify(handler, never()).createTransactionForRule(any(), any(), any());
     verify(handler, never()).reconcileGroup(any());
+  }
+
+  /**
+   * ETP-5581: a remainder that a {@code BankStatementLineFilterHook} excludes (PSD2's discarded
+   * lines) is refused with the 409 {@code LINE_DISCARDED}, in the read-only preflight — no
+   * adjustment movement is created and nothing is reconciled. The fixture is the happy path's
+   * with only the discard added, so without the guard this request would answer 201.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testDiscardedLineReturns409LineDiscardedAndWritesNothing() throws Exception {
+    stubPartialGroup("12.00", null, "0.50", null);
+    FIN_BankStatementLine remainder = handler.loadLine(REM_ID);
+
+    NeoResponse response;
+    try (MockedStatic<StatementLineFilter> filter =
+        mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      filter.when(() -> StatementLineFilter.isExcluded(remainder,
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage
+              .MATCH_STATEMENT_GRID)).thenReturn(true);
+      msgMock.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
+          .thenReturn("Discarded line");
+      response = runAction(body(ACC_ID, REM_ID));
+    }
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, response.getBody().getString("code"));
+    assertEquals("Discarded line", errorMessage(response));
+    assertNoWrite();
   }
 
   /**
