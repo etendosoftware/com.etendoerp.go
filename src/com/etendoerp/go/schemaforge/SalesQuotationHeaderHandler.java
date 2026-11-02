@@ -84,6 +84,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * order is reactivated through {@link OrderDocActionSupport}, not through this pre-hook) or the
  * DR→UE {@code DocAction} of {@code SendToEvaluationModal} (it runs CO, not RE).
  *
+ * <p>ETP-6026: Void ({@code VO}) and Close ({@code CL}) are refused on every quotation, whatever
+ * its status — the window offers neither (its generated process list is empty; a draft offers
+ * Delete and Confirm, one Under evaluation Confirm and Reject). Over MCP a draft quotation used to
+ * be voided and one Under evaluation closed. Same guard and rules as Reactivate, see
+ * {@code refuseDocActionNotOffered}; advertised by {@link #unavailableActions}.
+ *
  * <p><b>Binding (ETP-6002).</b> Bound by {@link NeoExtension} on every channel. The row's
  * {@code Java_Qualifier} ({@code salesQuotationHeaderHandler}) and the class's {@code @Named} were
  * removed in the same change (neo-extension-migration).
@@ -106,6 +112,22 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
       + "only once it is voided (documentStatus VO), so documentAction RE is refused in any other "
       + "status. A quotation Under evaluation (UE) is accepted with Convertquotation or rejected "
       + "with rejectQuotation; it is not sent back to Draft.";
+  /** Void, a {@code documentAction} value the quotation window never offers (ETP-6026). */
+  static final String DOC_ACTION_VOID = "VO";
+  /** Close, a {@code documentAction} value the quotation window never offers (ETP-6026). */
+  static final String DOC_ACTION_CLOSE = "CL";
+  /** The 400 a Void on a quotation answers with (ETP-6026). */
+  static final String MSG_VOID_NOT_OFFERED = "ETGO_QuotationVoidNotOffered";
+  /** The 400 a Close on a quotation answers with (ETP-6026). */
+  static final String MSG_CLOSE_NOT_OFFERED = "ETGO_QuotationCloseNotOffered";
+  /** Why {@code documentAction:VO} is unavailable on every quotation (ETP-6026). */
+  static final String REASON_VOID_NOT_OFFERED = "The app does not offer Void on a quotation, so "
+      + "documentAction VO is refused on every quotation. A draft quotation (DR) is deleted with "
+      + "etendo_delete; one Under evaluation (UE) is rejected with rejectQuotation.";
+  /** Why {@code documentAction:CL} is unavailable on every quotation (ETP-6026). */
+  static final String REASON_CLOSE_NOT_OFFERED = "The app does not offer Close on a quotation, "
+      + "so documentAction CL is refused on every quotation. A quotation Under evaluation (UE) is "
+      + "accepted with Convertquotation or rejected with rejectQuotation.";
   /** The button's column name, what the SPA posts. */
   private static final String ACTION_CONVERT_COLUMN = "Convertquotation";
   /** A lower-case spelling of the column name, matched since ETP-5710; kept for any caller using it. */
@@ -204,10 +226,9 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     if (isRejectDocAction(context)) {
       return rejectQuotationHandler.reject(context);
     }
-    NeoResponse reactivationRefusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_REACTIVATE,
-        SalesQuotationHeaderHandler::isNotVoided, MSG_REACTIVATE_NOT_VOIDED);
-    if (reactivationRefusal != null) {
-      return reactivationRefusal;
+    NeoResponse docActionRefusal = refuseDocActionNotOffered(context);
+    if (docActionRefusal != null) {
+      return docActionRefusal;
     }
     // ETP-5840: exchange rate — recalculation, save and confirmation validation — before the
     // total-discount sync and the actions run.
@@ -239,17 +260,52 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   }
 
   /**
+   * The refusal of a {@code DocAction} value the quotation window does not offer, or {@code null}:
+   * Reactivate unless the quotation is voided (ETP-5704), and Void and Close on every quotation
+   * (ETP-6026) — the window offers neither in any status. Each is decided on the value that will
+   * actually run, with {@link DocActionRefusalGuard}'s fail-closed rules.
+   *
+   * @param context the request reaching the pre-hook
+   * @return the error response, or {@code null} when the request may continue
+   */
+  private static NeoResponse refuseDocActionNotOffered(NeoContext context) {
+    NeoResponse refusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_REACTIVATE,
+        SalesQuotationHeaderHandler::isNotVoided, MSG_REACTIVATE_NOT_VOIDED);
+    if (refusal == null) {
+      refusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_VOID,
+          DocActionRefusalGuard.ALWAYS, MSG_VOID_NOT_OFFERED);
+    }
+    if (refusal == null) {
+      refusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_CLOSE,
+          DocActionRefusalGuard.ALWAYS, MSG_CLOSE_NOT_OFFERED);
+    }
+    return refusal;
+  }
+
+  /**
    * {@inheritDoc} Reactivate is ruled out on a quotation that is not voided — the window offers it
-   * only in {@code VO}, and the pre-hook refuses it otherwise (ETP-5704).
+   * only in {@code VO}, and the pre-hook refuses it otherwise (ETP-5704). Void and Close are ruled
+   * out on every quotation, whatever its status: the window never offers them and the pre-hook
+   * refuses them (ETP-6026).
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
-    if (!(subject instanceof Order)
-        || DOC_STATUS_VOIDED.equals(((Order) subject).getDocumentStatus())) {
+    if (!(subject instanceof Order)) {
       return Collections.emptyMap();
     }
-    return Map.of(NeoActionAvailability.valueKey(OrderDocumentAvailability.ACTION_DOCUMENT_ACTION,
-        DOC_ACTION_REACTIVATE), REASON_REACTIVATE_NOT_VOIDED);
+    Map<String, String> unavailable = new LinkedHashMap<>();
+    if (!DOC_STATUS_VOIDED.equals(((Order) subject).getDocumentStatus())) {
+      unavailable.put(documentActionKey(DOC_ACTION_REACTIVATE), REASON_REACTIVATE_NOT_VOIDED);
+    }
+    unavailable.put(documentActionKey(DOC_ACTION_VOID), REASON_VOID_NOT_OFFERED);
+    unavailable.put(documentActionKey(DOC_ACTION_CLOSE), REASON_CLOSE_NOT_OFFERED);
+    return unavailable;
+  }
+
+  /** The availability key of one {@code documentAction} value, e.g. {@code documentAction:VO}. */
+  private static String documentActionKey(String docAction) {
+    return NeoActionAvailability.valueKey(OrderDocumentAvailability.ACTION_DOCUMENT_ACTION,
+        docAction);
   }
 
   /**

@@ -21,8 +21,9 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
@@ -61,8 +62,18 @@ import java.util.Set;
  * pending quantities and leaves a draft shipment dangling. Same resolution and fail-closed rules
  * as Reactivate ({@link DocActionRefusalGuard}); advertised by {@link #unavailableActions}.
  * Purchase orders do not opt in.
+ *
+ * <p>ETP-6026: Void ({@code DocAction} = {@code VO}) is refused on a sales order that is a draft
+ * ({@code DR}), in progress ({@code IP}) or booked ({@code CO}) — the window offers Delete and
+ * Confirm on a draft and only Reactivate once booked, never Void. Over MCP a draft order used to
+ * be voided with total 0. Decided on the stored {@code documentStatus}, with the same guard and
+ * rules as Close; advertised by {@link #unavailableActions}. Purchase orders do not opt in.
+ *
+ * <p><b>Binding (ETP-6026).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code salesOrderHeaderHandler}) and the class's {@code @Named} were
+ * removed in the same change (neo-extension-migration).
  */
-@Named("salesOrderHeaderHandler")
+@NeoExtension(spec = "sales-order", entity = "header")
 public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Inject
@@ -100,6 +111,21 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   static final String REASON_CLOSE_NOT_OFFERED = "The app does not offer Close on a sales order, "
       + "so documentAction CL is refused on every sales order. To change a booked order, "
       + "reactivate it (RE, only while it has no linked documents), edit it and complete it again.";
+
+  /** Void, which the window never offers on a sales order (ETP-6026). */
+  static final String DOC_ACTION_VOID = "VO";
+
+  /** The statuses Void is refused in: draft, in progress and booked (ETP-6026). */
+  static final Set<String> VOID_REFUSED_STATUSES = Set.of("DR", "IP", "CO");
+
+  /** The 400 a Void on a draft, in-progress or booked sales order answers with (ETP-6026). */
+  static final String MSG_VOID_NOT_OFFERED = "ETGO_SalesOrderVoidNotOffered";
+
+  /** Why {@code documentAction:VO} is unavailable on a sales order (ETP-6026). */
+  static final String REASON_VOID_NOT_OFFERED = "The app does not offer Void on a sales order, so "
+      + "documentAction VO is refused on a draft (DR), in-progress (IP) or booked (CO) order. "
+      + "Delete a draft with etendo_delete instead; reactivate a booked order (RE, only while it "
+      + "has no linked documents), edit it and complete it again.";
 
   @Override
   protected DocumentCurrencyRate currencyRate() {
@@ -139,7 +165,8 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
    * {@inheritDoc} Reactivate is ruled out for an order that has linked documents, and each
    * creation action when nothing is left to do or a draft already covers it (ETP-5714). Close is
    * ruled out on every sales order, whatever its status: the app never offers it and the pre-hook
-   * refuses it (ETP-5704).
+   * refuses it (ETP-5704). Void is ruled out on a draft, in-progress or booked order, read from
+   * the record's {@code documentStatus} (ETP-6026).
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
@@ -149,8 +176,35 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
       unavailable.put(NeoActionAvailability.valueKey(
           OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, DOC_ACTION_CLOSE),
           REASON_CLOSE_NOT_OFFERED);
+      if (VOID_REFUSED_STATUSES.contains(((Order) subject).getDocumentStatus())) {
+        unavailable.put(NeoActionAvailability.valueKey(
+            OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, DOC_ACTION_VOID),
+            REASON_VOID_NOT_OFFERED);
+      }
     }
     return unavailable;
+  }
+
+  /**
+   * Whether the sales order's stored {@code documentStatus} is draft, in progress or booked — the
+   * condition under which Void is refused (ETP-6026). Read under admin mode, as the DocAction
+   * resolution reads the record.
+   *
+   * @param orderId the order the button runs on
+   * @return {@code true} when the order is {@code DR}, {@code IP} or {@code CO}
+   * @throws IllegalStateException when the order cannot be loaded — the guard then fails closed
+   */
+  static boolean isVoidRefusedStatus(String orderId) {
+    OBContext.setAdminMode(true);
+    try {
+      Order order = OBDal.getInstance().get(Order.class, orderId);
+      if (order == null) {
+        throw new IllegalStateException("Sales order " + orderId + " cannot be loaded");
+      }
+      return VOID_REFUSED_STATUSES.contains(order.getDocumentStatus());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   @Override
@@ -170,6 +224,11 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
         DocActionRefusalGuard.ALWAYS, MSG_CLOSE_NOT_OFFERED);
     if (closeRefusal != null) {
       return closeRefusal;
+    }
+    NeoResponse voidRefusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_VOID,
+        SalesOrderHeaderHandler::isVoidRefusedStatus, MSG_VOID_NOT_OFFERED);
+    if (voidRefusal != null) {
+      return voidRefusal;
     }
     // ETP-5703: the partner's only ship-to (and its bill-to) on a create without an address.
     PartnerLocationDefaults.fillOrderLocations(context);

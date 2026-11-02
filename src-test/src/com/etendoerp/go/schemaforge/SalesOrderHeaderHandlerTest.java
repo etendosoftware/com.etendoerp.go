@@ -817,6 +817,93 @@ public class SalesOrderHeaderHandlerTest {
     return keys != null && keys.length() > 0 ? keys.getString(0) : error.getString("message");
   }
 
+  /**
+   * ETP-6026: Void ({@code VO}) is refused with 400 {@code ETGO_SalesOrderVoidNotOffered} on a
+   * sales order whose stored {@code documentStatus} is {@code DR}, {@code IP} or {@code CO} — the
+   * window offers Delete and Confirm on a draft and only Reactivate once booked — decided on the
+   * effective DocAction like Close (whose table above already covers root-vs-fieldValues
+   * resolution). Another status falls through to the router, and a status that cannot be read
+   * fails closed with 500.
+   */
+  @Test
+  public void testHandleVoidIsRefusedOnDraftInProgressOrBooked_table() throws Exception {
+    final String orderId = "order-vo-1";
+    final String tabId = "tab-order";
+    final String voidRefused = SalesOrderHeaderHandler.MSG_VOID_NOT_OFFERED;
+    final String checkFailed = DocActionRefusalGuard.MSG_CHECK_FAILED;
+    // Columns: label, body, stored DocAction, stored documentStatus (null: the order cannot be
+    // loaded for its status), expected status (null: falls through) and expected refusal key.
+    Object[][] cases = {
+        { "root VO on a draft is refused", "{\"docAction\":\"VO\"}", "CO", "DR", 400,
+            voidRefused },
+        { "root VO on an in-progress order is refused", "{\"docAction\":\"VO\"}", "CO", "IP", 400,
+            voidRefused },
+        { "empty body runs the stored VO of a draft and is refused", "{}", "VO", "DR", 400,
+            voidRefused },
+        { "root VO on a booked order is refused", "{\"docAction\":\"VO\"}", "CO", "CO", 400,
+            voidRefused },
+        { "root VO on a closed order is not this guard's refusal", "{\"docAction\":\"VO\"}",
+            "--", "CL", null, null },
+        { "a status that cannot be read fails closed", "{\"docAction\":\"VO\"}", "CO", null, 500,
+            checkFailed },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      String status = (String) c[3];
+      Integer expectedStatus = (Integer) c[4];
+
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      SalesOrderHeaderHandler handler = handlerWithMockClone(router);
+      Tab tab = mock(Tab.class);
+      Table table = mock(Table.class);
+      Property property = mock(Property.class);
+      Entity entity = mock(Entity.class);
+      BaseOBObject stored = mock(BaseOBObject.class);
+      when(tab.getId()).thenReturn(tabId);
+      when(tab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("Order");
+      when(entity.hasProperty("documentAction")).thenReturn(true);
+      when(entity.getProperty("documentAction")).thenReturn(property);
+      when(stored.getEntity()).thenReturn(entity);
+      when(stored.get("documentAction")).thenReturn(c[2]);
+      OBDal dal = mock(OBDal.class);
+      when(dal.get(Tab.class, tabId)).thenReturn(tab);
+      when(dal.get("Order", orderId)).thenReturn(stored);
+      if (status != null) {
+        org.openbravo.model.common.order.Order order =
+            mock(org.openbravo.model.common.order.Order.class);
+        when(order.getDocumentStatus()).thenReturn(status);
+        when(dal.get(org.openbravo.model.common.order.Order.class, orderId)).thenReturn(order);
+      }
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-order").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("DocAction").recordId(orderId).adTab(tab)
+          .requestBody(new JSONObject((String) c[1]))
+          .build();
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        msgMock.when(() -> OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        NeoResponse result = handler.handle(ctx);
+
+        if (expectedStatus == null) {
+          assertNull(label, result);
+          verify(router).handle(ctx);
+        } else {
+          assertNotNull(label, result);
+          assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
+          assertEquals(label, c[5], refusalOf(result));
+          verify(router, never()).handle(any());
+        }
+      }
+    }
+  }
+
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────
 
   /**

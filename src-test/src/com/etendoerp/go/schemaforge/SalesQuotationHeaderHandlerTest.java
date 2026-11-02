@@ -312,7 +312,8 @@ public class SalesQuotationHeaderHandlerTest {
    * whatever the action; an action or status that cannot be read fails closed with 500
    * {@code ETGO_DocActionCheckFailed}. A refusal reaches neither the total-discount sync nor the
    * router. {@code RJ} keeps going to the reject flow, also from {@code fieldValues} on a quotation
-   * whose stored action is RE.
+   * whose stored action is RE. ETP-6026: {@code VO} and {@code CL} are refused on every quotation
+   * ({@code ETGO_QuotationVoidNotOffered} / {@code ETGO_QuotationCloseNotOffered}).
    */
   @Test
   public void testHandle_reactivateIsRefusedUnlessVoided_table() throws Exception {
@@ -320,6 +321,8 @@ public class SalesQuotationHeaderHandlerTest {
     final String routed = "<router>";
     final String notVoided = SalesQuotationHeaderHandler.MSG_REACTIVATE_NOT_VOIDED;
     final String checkFailed = DocActionRefusalGuard.MSG_CHECK_FAILED;
+    final String voidRefused = SalesQuotationHeaderHandler.MSG_VOID_NOT_OFFERED;
+    final String closeRefused = SalesQuotationHeaderHandler.MSG_CLOSE_NOT_OFFERED;
     // Columns: the label, the button name, the body, the stored DocAction, the stored status, the
     // expected status (null when it is not refused) and the expected outcome: the refusal's
     // messageKeys entry (else its error message), or the flow that answered.
@@ -350,6 +353,17 @@ public class SalesQuotationHeaderHandlerTest {
         { "fieldValues RJ with a stored RE still goes to the reject flow",
             "DocAction", "{\"fieldValues\":{\"documentAction\":\"RJ\"}}", "RE", "UE", null,
             reject },
+        // ETP-6026: Void and Close are refused on every quotation, whatever its status.
+        { "root VO on a draft quotation is refused",
+            "DocAction", "{\"docAction\":\"VO\"}", "CO", "DR", 400, voidRefused },
+        { "root VO on a quotation under evaluation is refused",
+            "DocAction", "{\"docAction\":\"VO\"}", "CO", "UE", 400, voidRefused },
+        { "root CL on a quotation under evaluation is refused",
+            "DocAction", "{\"docAction\":\"CL\"}", "CO", "UE", 400, closeRefused },
+        { "empty body runs the stored CL and is refused",
+            "DocAction", "{}", "CL", "UE", 400, closeRefused },
+        { "root VO by field name on a voided quotation is still refused",
+            "documentAction", "{\"docAction\":\"VO\"}", "RE", "VO", 400, voidRefused },
     };
     for (Object[] c : cases) {
       String label = (String) c[0];

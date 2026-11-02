@@ -627,8 +627,13 @@ class McpConfigSourcedataTest {
         "Create_POLines"), setOf(purchase.getJSONArray(McpActionsSection.KEY_HIDDEN)));
     assertEquals(Set.of("Cancelandreplace", "Confirmcancelandreplace", "Create_POLines",
         "RM_Pickfromreceipt"), setOf(sales.getJSONArray(McpActionsSection.KEY_HIDDEN)));
+    // ETP-6026: the quotation window offers no orphan-line or payment button either, so the four
+    // AD buttons the live test reached (and that failed with technical errors) are hidden too,
+    // keyed by the DB column name the actions view publishes as `column`
     assertEquals(Set.of("Create_POLines", "RM_Pickfromreceipt", "Cancelandreplace",
-        "Confirmcancelandreplace"), setOf(quotation.getJSONArray(McpActionsSection.KEY_HIDDEN)));
+        "Confirmcancelandreplace", "RM_AddOrphanLine", "EM_APRM_AddPayment",
+        "EM_Etpr_Remove_Payment", "EM_Psd2_Generate_Bank_Payment"),
+        setOf(quotation.getJSONArray(McpActionsSection.KEY_HIDDEN)));
     for (JSONObject actions : List.of(purchase, sales, quotation)) {
       for (String hidden : setOf(actions.getJSONArray(McpActionsSection.KEY_HIDDEN))) {
         assertFalse(actions.getJSONObject(McpActionsSection.KEY_REASONS).optString(hidden, "")
@@ -647,7 +652,11 @@ class McpConfigSourcedataTest {
    * invoice offers CO on a draft and only RE once completed (the screen's Reactivate; no reversal, RC removed
    * in the QA follow-up), an order CO/VO/PR on a draft. Once completed a purchase order offers
    * CL/RE, while a sales order offers only RE: the app never offers Close on a sales order and its
-   * pre-hook refuses it (ETP-5704). Advisory data, so its content is asserted here.
+   * pre-hook refuses it (ETP-5704). ETP-6026: a draft or in-progress sales order is not offered VO
+   * either (the app offers Delete and Confirm there and the pre-hook refuses it); the purchase
+   * order keeps VO. A quotation is offered CO on a draft, RJ Under evaluation and RE once voided,
+   * never VO or CL; the final statuses (CA, CJ, CL and ETGO_CI, the one CreateDraftInvoiceHandler
+   * sets) offer nothing. Advisory data, so its content is asserted here.
    */
   @Test
   @DisplayName("order and invoice headers declare documentAction values per status from core's transitions")
@@ -655,9 +664,16 @@ class McpConfigSourcedataTest {
     Map<String, Set<String>> completedValues = Map.of(
         PURCHASE_ORDER_HEADER_ID, Set.of("CL", "RE"),
         SALES_ORDER_HEADER_ID, Set.of("RE"));
+    Map<String, Set<String>> draftValues = Map.of(
+        PURCHASE_ORDER_HEADER_ID, Set.of("CO", "VO", "PR"),
+        SALES_ORDER_HEADER_ID, Set.of("CO", "PR"));
+    Map<String, Set<String>> inProgressValues = Map.of(
+        PURCHASE_ORDER_HEADER_ID, Set.of("CO", "VO"),
+        SALES_ORDER_HEADER_ID, Set.of("CO"));
     for (String id : List.of(PURCHASE_ORDER_HEADER_ID, SALES_ORDER_HEADER_ID)) {
       JSONObject values = valuesByStatusOf(id);
-      assertEquals(Set.of("CO", "VO", "PR"), setOf(values.getJSONArray("DR")), id);
+      assertEquals(draftValues.get(id), setOf(values.getJSONArray("DR")), id);
+      assertEquals(inProgressValues.get(id), setOf(values.getJSONArray("IP")), id);
       assertEquals(completedValues.get(id), setOf(values.getJSONArray("CO")), id);
       // review W2: final statuses are listed explicitly (empty), never left to be guessed
       assertEquals(0, values.getJSONArray("VO").length(), id);
@@ -667,6 +683,14 @@ class McpConfigSourcedataTest {
     // ETP-5704: the sales order's advisory list must never offer Close again.
     assertFalse(setOf(valuesByStatusOf(SALES_ORDER_HEADER_ID).getJSONArray("CO")).contains("CL"),
         "a completed sales order is not offered CL");
+    JSONObject quotation = valuesByStatusOf(SALES_QUOTATION_HEADER_ID);
+    assertEquals(Set.of("CO"), setOf(quotation.getJSONArray("DR")));
+    assertEquals(Set.of("RJ"), setOf(quotation.getJSONArray("UE")));
+    assertEquals(Set.of("RE"), setOf(quotation.getJSONArray("VO")));
+    for (String status : List.of("CA", "CJ", "CL", "ETGO_CI")) {
+      assertEquals(0, quotation.getJSONArray(status).length(), status);
+    }
+    assertResolvesCleanly(SALES_QUOTATION_HEADER_ID);
     for (String id : INVOICE_HEADERS) {
       JSONObject values = valuesByStatusOf(id);
       assertEquals(Set.of("CO"), setOf(values.getJSONArray("DR")), id);

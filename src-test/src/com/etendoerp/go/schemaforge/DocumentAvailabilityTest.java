@@ -87,6 +87,8 @@ class DocumentAvailabilityTest {
   private static final String CLOSE = "documentAction:CL";
   /** The availability key of Reactivate, as the MCP publishes it. */
   private static final String REACTIVATE = "documentAction:RE";
+  /** The availability key of Void, as the MCP publishes it (ETP-6026). */
+  private static final String VOID = "documentAction:VO";
 
   private static java.util.function.UnaryOperator<String> subject(String status, String posted) {
     return property -> {
@@ -179,16 +181,21 @@ class DocumentAvailabilityTest {
 
     @Test
     @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing "
-        + "out — except Close, which a sales order rules out even as a draft")
+        + "out — except Close, which a sales order rules out even as a draft, and Void, which it "
+        + "rules out on a draft or in-progress order")
     void unlinkedDraftOrOtherRulesNothingOut() throws Exception {
       try (MockedStatic<OBDal> ignored = linkedDocuments(false)) {
         assertTrue(OrderDocumentAvailability.unavailable(order("CO")).isEmpty());
       }
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
         // ETP-5704: Close is never offered on a sales order; a purchase order does not opt in.
-        assertEquals(Set.of(CLOSE),
-            new SalesOrderHeaderHandler().unavailableActions(order("DR")).keySet());
-        assertTrue(new PurchaseOrderHeaderHandler().unavailableActions(order("DR")).isEmpty());
+        // ETP-6026: nor is Void on a draft or in-progress sales order.
+        for (String status : new String[] { "DR", "IP" }) {
+          assertEquals(Set.of(CLOSE, VOID),
+              new SalesOrderHeaderHandler().unavailableActions(order(status)).keySet(), status);
+          assertTrue(new PurchaseOrderHeaderHandler().unavailableActions(order(status)).isEmpty(),
+              status);
+        }
         assertTrue(OrderDocumentAvailability.unavailable(mock(Invoice.class)).isEmpty());
         assertTrue(new SalesOrderHeaderHandler().unavailableActions(mock(Invoice.class)).isEmpty());
         assertTrue(
@@ -198,8 +205,8 @@ class DocumentAvailabilityTest {
     }
 
     @Test
-    @DisplayName("a completed sales order rules Close out, and Reactivate too only with linked "
-        + "documents; a purchase order never rules Close out")
+    @DisplayName("a completed sales order rules Close and Void out, and Reactivate too only with "
+        + "linked documents; a purchase order never rules Close or Void out")
     void completedSalesOrderRulesOutClose() throws Exception {
       for (boolean linked : new boolean[] { false, true }) {
         try (MockedStatic<OBDal> ignored = linkedDocuments(linked)) {
@@ -209,6 +216,9 @@ class DocumentAvailabilityTest {
 
           String label = linked ? "with linked documents" : "with nothing linked";
           assertTrue(sales.containsKey(CLOSE), label);
+          // ETP-6026: the app offers only Reactivate on a booked sales order, never Void
+          assertTrue(sales.containsKey(VOID), label);
+          assertFalse(purchase.containsKey(VOID), label);
           assertEquals(linked, sales.containsKey(REACTIVATE), label);
           assertFalse(purchase.containsKey(CLOSE), label);
           assertEquals(linked, purchase.containsKey(REACTIVATE), label);
@@ -217,14 +227,17 @@ class DocumentAvailabilityTest {
     }
 
     @Test
-    @DisplayName("a quotation rules Reactivate out in every status but voided, read from the record")
+    @DisplayName("a quotation rules Reactivate out in every status but voided, and Void and Close "
+        + "in every status, read from the record")
     void quotationRulesOutReactivateUnlessVoided() {
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
         for (String status : new String[] { "UE", "DR", "CO" }) {
-          assertEquals(Set.of(REACTIVATE),
+          assertEquals(Set.of(REACTIVATE, VOID, CLOSE),
               new SalesQuotationHeaderHandler().unavailableActions(order(status)).keySet(), status);
         }
-        assertTrue(new SalesQuotationHeaderHandler().unavailableActions(order("VO")).isEmpty());
+        // ETP-6026: Void and Close stay ruled out once voided; only Reactivate becomes available.
+        assertEquals(Set.of(VOID, CLOSE),
+            new SalesQuotationHeaderHandler().unavailableActions(order("VO")).keySet());
         obDal.verify(OBDal::getInstance, never());
       }
     }

@@ -81,7 +81,6 @@
     "ReturnMaterialReceiptLineHandler",
     "ReturnToVendorShipmentHeaderHandler",
     "ReturnToVendorShipmentLineHandler",
-    "SalesOrderHeaderHandler",
     "SiiConfigDeactivateHandler",
     "SiiSendHandler",
     "TaxAccountingHandler",
