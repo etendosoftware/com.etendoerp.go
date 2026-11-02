@@ -227,6 +227,7 @@ class NeoUsageEventEndpoint {
         .sessionKey(string(json, "sessionKey"))
         .appVersion(string(json, "appVersion"))
         .properties(properties(json.opt("properties")))
+        .costUsd(UsageEvent.costOf(json.opt("costUsd")))
         .build();
   }
 

@@ -271,6 +271,9 @@ public class McpToolRouter {
           // B3: addresses no spec and touches no business data — it only reports on the API itself.
           case McpConstants.TOOL_NEO_FEEDBACK:
             return McpFeedbackTool.handle(arguments);
+          // etendo-ai#53: the identity this call already runs under; reads only the context.
+          case McpConstants.TOOL_NEO_WHOAMI:
+            return McpWhoamiTool.handle(arguments, scopes);
           case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.requestUpload(arguments));
           case McpConstants.TOOL_NEO_UPLOAD_IMAGE:

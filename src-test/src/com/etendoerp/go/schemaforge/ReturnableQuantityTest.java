@@ -20,6 +20,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -485,6 +486,124 @@ public class ReturnableQuantityTest {
           ReturnedQuantityTestSupport.sourceLine("src-1", "Agua", "10"));
       withDescriptionLength(10, () -> assertNull(ReturnFromDocumentSupport.plan(source,
           new JSONObject().put("reason", "1234567890")).refusal));
+    }
+  }
+
+  // ── what other returns hold of a source line (ETP-6054) ───────────────────
+
+  private static ReturnFromDocumentSupport.CreatedLine created(String sourceId, String qty) {
+    ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+    when(line.getId()).thenReturn("new-" + sourceId);
+    return new ReturnFromDocumentSupport.CreatedLine(line,
+        ReturnedQuantityTestSupport.sourceLine(sourceId, "Cerveza", "100"), bd(qty));
+  }
+
+  /**
+   * The 201 says, per line, what OTHER returns already hold of the source line (a completed one
+   * and a draft both count) and lists them; the return just created is excluded by its id.
+   */
+  @Test
+  public void describe_reportsWhatOtherReturnsHoldAndWhichReturnsTheyAre() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      List<String> excluded = new ArrayList<>();
+      ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L, (src, excl) -> bd("0"),
+          (src, excl) -> {
+            excluded.add(excl);
+            return "L1".equals(src)
+                ? List.of(new String[] {"ret-1", "1000001", "CO", "20"},
+                    new String[] {"ret-2", "1000002", "DR", "20"})
+                : List.of();
+          });
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(returnDoc.getId()).thenReturn("ret-3");
+      when(returnDoc.getDocumentNo()).thenReturn("1000003");
+      when(returnDoc.getDocumentStatus()).thenReturn("DR");
+
+      org.codehaus.jettison.json.JSONArray lines = ReturnFromDocumentSupport
+          .describe(returnDoc, List.of(created("L1", "5"), created("L2", "5")))
+          .getJSONArray("lines");
+
+      JSONObject first = lines.getJSONObject(0);
+      assertEquals(40, first.getDouble("alreadyReturnedQuantity"), 0.0001);
+      assertEquals(2, first.getJSONArray("returns").length());
+      assertEquals("1000002", first.getJSONArray("returns").getJSONObject(1).getString("documentNo"));
+      assertEquals("DR", first.getJSONArray("returns").getJSONObject(1).getString("documentStatus"));
+      assertEquals("ret-1", first.getJSONArray("returns").getJSONObject(0).getString("id"));
+      assertEquals(5, first.getDouble("returnedQuantity"), 0.0001);
+      assertEquals(0, lines.getJSONObject(1).getDouble("alreadyReturnedQuantity"), 0.0001);
+      assertEquals(0, lines.getJSONObject(1).getJSONArray("returns").length());
+      assertEquals(List.of("ret-3", "ret-3"), excluded);
+    }
+  }
+
+  /** The holding-returns query counts with the same filter as {@code alreadyReturned}. */
+  @Test
+  public void returnsHolding_usesTheSameCountingRuleAsAlreadyReturned() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L,
+          (src, excl) -> bd("0"), (src, excl) -> List.of());
+
+      assertTrue(ReturnableQuantity.returnsHolding("L1", "ret-3").isEmpty());
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      assertTrue(sql.getValue(), sql.getValue().contains(ReturnableQuantity.COUNTED_RETURN_LINES_FILTER));
+      assertTrue(sql.getValue(), sql.getValue().contains(ReturnableQuantity.COUNTED_RETURN_LINES_FROM));
+      assertTrue(sql.getValue(), sql.getValue().contains("rh.M_InOut_ID <> ?"));
+    }
+  }
+
+  /**
+   * The holding-returns lookup is informational: when it fails the 201 data is still built, the
+   * two keys are left out of the line, and the transaction is rolled back to its savepoint (never
+   * released), so creating a return never fails because of it.
+   */
+  @Test
+  public void describe_aFailingHoldingLookupStillAnswersWithoutTheTwoKeys() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.Savepoint savepoint = mock(java.sql.Savepoint.class);
+      when(conn.setSavepoint()).thenReturn(savepoint);
+      when(conn.prepareStatement(anyString())).thenThrow(new SQLException("boom"));
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(returnDoc.getId()).thenReturn("ret-3");
+      when(returnDoc.getDocumentNo()).thenReturn("1000003");
+      when(returnDoc.getDocumentStatus()).thenReturn("DR");
+
+      JSONObject line = ReturnFromDocumentSupport.describe(returnDoc, List.of(created("L1", "5")))
+          .getJSONArray("lines").getJSONObject(0);
+
+      assertEquals("L1", line.getString("sourceLineId"));
+      assertEquals(5, line.getDouble("returnedQuantity"), 0.0001);
+      assertTrue(!line.has("alreadyReturnedQuantity"));
+      assertTrue(!line.has("returns"));
+      verify(conn).rollback(savepoint);
+      verify(conn, never()).releaseSavepoint(any(java.sql.Savepoint.class));
+    }
+  }
+
+  /** On success the savepoint is released, so a create does not leave one open per line. */
+  @Test
+  public void returnsHolding_releasesItsSavepointOnSuccess() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L,
+          (src, excl) -> bd("0"), (src, excl) -> List.of());
+      java.sql.Savepoint savepoint = mock(java.sql.Savepoint.class);
+      when(conn.setSavepoint()).thenReturn(savepoint);
+
+      ReturnableQuantity.returnsHolding("L1", "ret-3");
+
+      verify(conn).releaseSavepoint(savepoint);
+      verify(conn, never()).rollback(any(java.sql.Savepoint.class));
     }
   }
 }

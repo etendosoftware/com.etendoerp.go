@@ -34,6 +34,12 @@ public class SubscriptionLifecycleApplier {
   static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
   /** The provider's scheduled-cancellation flag on a subscription object (display-only). */
   static final String CANCEL_AT_PERIOD_END = "cancel_at_period_end";
+  /**
+   * ETP-6060 — the provider's scheduled cancellation date. The Customer Portal of recent API
+   * versions schedules "cancel at the end of the period" with this date and leaves
+   * {@code cancel_at_period_end} false, so either one means a cancellation is scheduled.
+   */
+  static final String CANCEL_AT = "cancel_at";
   static final String SUBSCRIPTION_DELETED = "customer.subscription.deleted";
   /** The prefix of every {@code customer.subscription.*} event type. */
   public static final String SUBSCRIPTION_EVENT_PREFIX = "customer.subscription.";
@@ -284,17 +290,28 @@ public class SubscriptionLifecycleApplier {
   }
 
   /**
-   * ETP-5051 (O-1b) — the subscription object's {@code cancel_at_period_end}, or null when the
-   * object does not carry it. Display-only (it feeds {@code renewalAt} on the environment list);
-   * {@link #fromSubscriptionStatus} never reads it, so it cannot change the status mapping.
+   * ETP-5051 (O-1b) — whether the subscription object schedules a cancellation, or
+   * {@link CancelAtPeriodEnd#NOT_REPORTED} when it carries neither field. Display-only (it feeds
+   * {@code renewalAt} on the environment list); {@link #fromSubscriptionStatus} never reads it, so
+   * it cannot change the status mapping.
+   *
+   * <p>ETP-6060 — a {@code cancel_at} date schedules it too, whatever {@code cancel_at_period_end}
+   * says: that is how the Customer Portal of recent API versions cancels at the period end. A
+   * {@code cancel_at} reported as JSON null with no flag means nothing is scheduled.
    *
    * @param subscription a Stripe subscription object
-   * @return the flag; {@link CancelAtPeriodEnd#NOT_REPORTED} when absent, null or not a boolean
+   * @return the state; {@link CancelAtPeriodEnd#NOT_REPORTED} when neither field is usable
    */
   static CancelAtPeriodEnd cancelAtPeriodEndOf(JSONObject subscription) {
-    if (subscription == null || !subscription.has(CANCEL_AT_PERIOD_END)
-        || subscription.isNull(CANCEL_AT_PERIOD_END)) {
+    if (subscription == null) {
       return CancelAtPeriodEnd.NOT_REPORTED;
+    }
+    if (subscription.has(CANCEL_AT) && epochSeconds(subscription, CANCEL_AT) != null) {
+      return CancelAtPeriodEnd.SET;
+    }
+    if (!subscription.has(CANCEL_AT_PERIOD_END) || subscription.isNull(CANCEL_AT_PERIOD_END)) {
+      return subscription.has(CANCEL_AT) ? CancelAtPeriodEnd.CLEARED
+          : CancelAtPeriodEnd.NOT_REPORTED;
     }
     Object value = subscription.opt(CANCEL_AT_PERIOD_END);
     if (value instanceof Boolean) {

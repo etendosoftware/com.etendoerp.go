@@ -62,13 +62,55 @@ final class ReturnedQuantityTestSupport {
    */
   static Connection stubReturnedQuantities(OBDal dal, long maxLineNo,
       BiFunction<String, String, BigDecimal> returned) throws Exception {
+    return stubReturnedQuantities(dal, maxLineNo, returned, (src, excl) -> List.of());
+  }
+
+  /**
+   * The same fixture, also answering the "which returns hold this source line" query of
+   * {@link ReturnableQuantity#returnsHolding} (ETP-6054).
+   *
+   * @param holding receives the source line id and the excluded return document id and returns one
+   *                {@code {id, documentNo, documentStatus, quantity}} row per holding return
+   */
+  static Connection stubReturnedQuantities(OBDal dal, long maxLineNo,
+      BiFunction<String, String, BigDecimal> returned,
+      BiFunction<String, String, List<String[]>> holding) throws Exception {
     Connection conn = mock(Connection.class);
     when(dal.getConnection()).thenReturn(conn);
     when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
       String sql = inv.getArgument(0);
+      if (isHoldingReturnsQuery(sql)) {
+        return holdingStatement(holding);
+      }
       return isReturnedQuantityQuery(sql) ? returnedStatement(returned) : lineNoStatement(maxLineNo);
     });
     return conn;
+  }
+
+  static boolean isHoldingReturnsQuery(String sql) {
+    return sql.contains("GROUP BY rh.M_InOut_ID");
+  }
+
+  private static PreparedStatement holdingStatement(
+      BiFunction<String, String, List<String[]>> holding) throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    String[] params = new String[2];
+    doAnswer(inv -> {
+      params[(int) inv.getArgument(0) - 1] = inv.getArgument(1);
+      return null;
+    }).when(ps).setString(anyInt(), anyString());
+    when(ps.executeQuery()).thenAnswer(inv -> {
+      List<String[]> rows = holding.apply(params[0], params[1]);
+      ResultSet rs = mock(ResultSet.class);
+      int[] i = {-1};
+      when(rs.next()).thenAnswer(x -> ++i[0] < rows.size());
+      when(rs.getString(1)).thenAnswer(x -> rows.get(i[0])[0]);
+      when(rs.getString(2)).thenAnswer(x -> rows.get(i[0])[1]);
+      when(rs.getString(3)).thenAnswer(x -> rows.get(i[0])[2]);
+      when(rs.getBigDecimal(4)).thenAnswer(x -> new BigDecimal(rows.get(i[0])[3]));
+      return rs;
+    });
+    return ps;
   }
 
   /** The same fixture for tests that do not care about the line number. */
@@ -78,7 +120,8 @@ final class ReturnedQuantityTestSupport {
   }
 
   static boolean isReturnedQuantityQuery(String sql) {
-    return sql.contains("SUM(ABS(rl.MovementQty))") && sql.contains("rl.Canceled_Inoutline_ID = ?");
+    return sql.contains("SUM(ABS(rl.MovementQty))") && sql.contains("rl.Canceled_Inoutline_ID = ?")
+        && !isHoldingReturnsQuery(sql);
   }
 
   private static PreparedStatement lineNoStatement(long maxLineNo) throws Exception {

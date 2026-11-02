@@ -33,6 +33,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.client.kernel.KernelUtils;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
@@ -168,7 +169,12 @@ final class McpParentScope {
     private final String reason;
     private final String problem;
     private final String agentProblem;
-    private final Tab allParentsTab;
+    /**
+     * The id, not the {@link Tab}: the parent tab comes from {@code parentTabOf}'s cache, loaded
+     * in an earlier request's session, so its lazy {@code table} could not be read in a later one
+     * (ETP-6036: {@code LazyInitializationException} on the second {@code allParents} read).
+     */
+    private final String allParentsTabId;
 
     private Scope(Kind kind, String parentField, String parentEntity, Set<String> optionalVerbs,
         String reason, String problem) {
@@ -185,10 +191,10 @@ final class McpParentScope {
       this.reason = reason;
       this.problem = problem;
       this.agentProblem = agentProblem;
-      this.allParentsTab = null;
+      this.allParentsTabId = null;
     }
 
-    private Scope(Scope base, Tab allParentsTab) {
+    private Scope(Scope base, String allParentsTabId) {
       this.kind = base.kind;
       this.parentField = base.parentField;
       this.parentEntity = base.parentEntity;
@@ -196,22 +202,25 @@ final class McpParentScope {
       this.reason = base.reason;
       this.problem = base.problem;
       this.agentProblem = base.agentProblem;
-      this.allParentsTab = allParentsTab;
+      this.allParentsTabId = allParentsTabId;
     }
 
     /** This scope, also listable across every parent on request (ETP-5852). */
     Scope allowingAllParents(Tab parentTab) {
-      return parentTab == null ? this : new Scope(this, parentTab);
+      return parentTab == null ? this : new Scope(this, parentTab.getId());
     }
 
     /** @return whether {@code etendo_list} may read this child across every parent on request */
     boolean allowsAllParents() {
-      return allParentsTab != null;
+      return allParentsTabId != null;
     }
 
-    /** @return the parent tab whose filter scopes a read across parents, or {@code null} */
+    /**
+     * @return the parent tab whose filter scopes a read across parents, loaded in the current
+     *         session, or {@code null}
+     */
     Tab getAllParentsTab() {
-      return allParentsTab;
+      return allParentsTabId == null ? null : OBDal.getInstance().get(Tab.class, allParentsTabId);
     }
 
     Kind getKind() {

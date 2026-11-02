@@ -2017,4 +2017,78 @@ public class PurchaseInvoiceHeaderHandlerTest {
       return call.call();
     }
   }
+
+  // ── ETP-6036: userContact default must be a contact of the vendor ─────────────────────────────
+
+  private static JSONObject defaultsBody(String contactId) throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("userContact", contactId);
+    defaults.put("userContact$_identifier", "Admin");
+    defaults.put("documentStatus", "DR");
+    return new JSONObject().put("defaults", defaults);
+  }
+
+  private static NeoContext defaultsContext(JSONObject body, String partnerId) {
+    Map<String, String> params = new HashMap<>();
+    if (partnerId != null) {
+      params.put("businessPartner", partnerId);
+    }
+    return NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+        .queryParams(params).previousResult(new NeoResponse(200, body)).build();
+  }
+
+  private static org.openbravo.model.ad.access.User contactOf(String partnerId) {
+    org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+    org.openbravo.model.common.businesspartner.BusinessPartner partner =
+        mock(org.openbravo.model.common.businesspartner.BusinessPartner.class);
+    when(partner.getId()).thenReturn(partnerId);
+    when(user.getBusinessPartner()).thenReturn(partner);
+    return user;
+  }
+
+  /** Without a vendor, the first user of the combo (Admin) is nobody's choice: no default. */
+  @Test
+  public void defaultsDropTheContactWhenNoVendorIsSent() throws Exception {
+    JSONObject body = defaultsBody("100");
+
+    PurchaseInvoiceHeaderHandler.dropForeignContactDefault(defaultsContext(body, null));
+
+    JSONObject defaults = body.getJSONObject("defaults");
+    assertFalse(defaults.has("userContact"));
+    assertFalse(defaults.has("userContact$_identifier"));
+    assertEquals("DR", defaults.getString("documentStatus"));
+  }
+
+  /** With a vendor, its own contact (what the callout sets) stays; another user does not. */
+  @Test
+  public void defaultsKeepOnlyAContactOfTheSentVendor() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    org.openbravo.model.ad.access.User vendorContact = contactOf("BP-1");
+    org.openbravo.model.ad.access.User otherUser = contactOf("BP-2");
+    when(dal.get(org.openbravo.model.ad.access.User.class, "U-VENDOR")).thenReturn(vendorContact);
+    when(dal.get(org.openbravo.model.ad.access.User.class, "U-OTHER")).thenReturn(otherUser);
+    JSONObject kept = defaultsBody("U-VENDOR");
+    JSONObject dropped = defaultsBody("U-OTHER");
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      PurchaseInvoiceHeaderHandler.dropForeignContactDefault(defaultsContext(kept, "BP-1"));
+      PurchaseInvoiceHeaderHandler.dropForeignContactDefault(defaultsContext(dropped, "BP-1"));
+    }
+
+    assertEquals("U-VENDOR", kept.getJSONObject("defaults").getString("userContact"));
+    assertFalse(dropped.getJSONObject("defaults").has("userContact"));
+  }
+
+  /** Only a defaults answer is touched: a read of a saved invoice keeps whatever contact it has. */
+  @Test
+  public void contactIsLeftAloneOutsideDefaults() throws Exception {
+    JSONObject body = defaultsBody("100");
+    NeoContext crud = NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .previousResult(new NeoResponse(200, body)).build();
+
+    PurchaseInvoiceHeaderHandler.dropForeignContactDefault(crud);
+
+    assertEquals("100", body.getJSONObject("defaults").getString("userContact"));
+  }
 }

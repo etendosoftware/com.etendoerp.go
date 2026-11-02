@@ -18,6 +18,7 @@
 package com.etendoerp.go.usage.quota;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -25,6 +26,8 @@ import java.util.function.Supplier;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
+
+import com.etendoerp.go.usage.UsageQueryComposer;
 
 /**
  * ETP-5051 — the quota check of the NEO write path, structural and driven by catalog data only:
@@ -52,6 +55,11 @@ import org.openbravo.dal.core.OBContext;
  * list and on the account page. The configuration route to a refusable cap is a restriction that
  * holds at create time, for example {@code e.salesTransaction = true} ("sales invoices created",
  * with the {@code live} source), which this guard does match.
+ *
+ * <p><b>ETP-6060 — the status change.</b> {@link #refusalForStatusChange} closes that gap for a
+ * caller that knows the change before it runs (the invoice completion hook): it asks the same
+ * question of the row as the change will leave it, before anything irreversible, so completing the
+ * invoice that would go over a {@code block} quota is refused.
  */
 public class QuotaWriteGuard {
 
@@ -59,6 +67,7 @@ public class QuotaWriteGuard {
 
   private final QuotaClientCache cache;
   private final CreatedRowMatcher matcher;
+  private final StatusChangeRowMatcher statusMatcher;
   private final QuotaEvaluator evaluator;
   private final Supplier<String> currentClient;
 
@@ -72,8 +81,24 @@ public class QuotaWriteGuard {
    */
   public QuotaWriteGuard(QuotaClientCache cache, CreatedRowMatcher matcher,
       QuotaEvaluator evaluator, Supplier<String> currentClient) {
+    this(cache, matcher, StatusChangeRowMatcher.dal(), evaluator, currentClient);
+  }
+
+  /**
+   * A guard over explicit seams, the status-change matcher included.
+   *
+   * @param cache each client's block quotas, by counted entity
+   * @param matcher tests a row against a resource's restriction and the period
+   * @param statusMatcher tests a row as a status change will leave it
+   * @param evaluator decides
+   * @param currentClient the client of the running request, or null when there is none
+   */
+  public QuotaWriteGuard(QuotaClientCache cache, CreatedRowMatcher matcher,
+      StatusChangeRowMatcher statusMatcher, QuotaEvaluator evaluator,
+      Supplier<String> currentClient) {
     this.cache = cache;
     this.matcher = matcher;
+    this.statusMatcher = statusMatcher;
     this.evaluator = evaluator;
     this.currentClient = currentClient;
   }
@@ -149,6 +174,58 @@ public class QuotaWriteGuard {
       }
     }
     return Optional.empty();
+  }
+
+  /**
+   * ETP-6060 — checks a row <b>before</b> a change of one of its properties (a document's status),
+   * against the entry read for it. Only the quotas whose restriction reads that property are
+   * concerned: a change that cannot alter the match was charged when the row was created. A quota
+   * is skipped when the row already counts (it was charged then) or will not count after the
+   * change; otherwise the row is charged on top of the consumption without it, exactly as a
+   * created row is.
+   *
+   * @param entry the request's client's entry, from {@link #entryIfChecked}
+   * @param entityName the DAL entity name of the row
+   * @param recordId the id of the row, flushed in the current transaction
+   * @param property the changed property, as the restrictions name it after {@code e.}
+   * @param targetValue the value the change will leave in it
+   * @return the DENY evaluation, or empty when the change may run
+   */
+  public Optional<QuotaEvaluation> refusalForStatusChange(QuotaClientCache.Entry entry,
+      String entityName, String recordId, String property, String targetValue) {
+    if (entry == null || recordId == null) {
+      return Optional.empty();
+    }
+    List<QuotaDefinition> quotas = entry.blockQuotasFor(entityName);
+    TenantQuotas tenant = entry.getTenant();
+    QuotaPeriod period = quotas.isEmpty() ? null : evaluator.writeCheckPeriod(tenant);
+    if (period == null) {
+      return Optional.empty();
+    }
+    for (QuotaDefinition quota : quotas) {
+      if (becomesCounted(tenant, quota, period, recordId, property, targetValue)) {
+        long before = evaluator.consumptionBeforeCreate(tenant, quota, period,
+            Collections.singletonList(recordId));
+        Optional<QuotaEvaluation> refusal =
+            evaluator.refusalForCreate(tenant, quota, period, before);
+        if (refusal.isPresent()) {
+          return refusal;
+        }
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** Whether the change makes the quota's resource start counting the row, for our client. */
+  private boolean becomesCounted(TenantQuotas tenant, QuotaDefinition quota, QuotaPeriod period,
+      String recordId, String property, String targetValue) {
+    if (!UsageQueryComposer.referencesRootProperty(quota.getHqlRestriction(), property)
+        || matcher.tenantIfCounted(quota, recordId, period) != null) {
+      return false;
+    }
+    String rowClient = statusMatcher.tenantIfCountedAs(quota, recordId, period, property,
+        targetValue);
+    return rowClient != null && rowClient.equals(tenant.getClientId());
   }
 
   /**

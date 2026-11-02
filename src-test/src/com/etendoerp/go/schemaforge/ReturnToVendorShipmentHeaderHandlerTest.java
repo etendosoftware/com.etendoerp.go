@@ -59,6 +59,7 @@ import org.hibernate.Session;
 import org.hibernate.query.Query;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
@@ -342,6 +343,42 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       JSONArray data = result.getBody().getJSONObject("response").getJSONArray("data");
       assertEquals(1, data.length());
       assertEquals("Widget B", data.getJSONObject(0).getString("product$_identifier"));
+    }
+  }
+
+  /**
+   * ETP-6054: each returnable line also says what its receipt line received, next to what is
+   * still returnable, and the SQL counts returns with the shared rule (drafts included).
+   */
+  @Test
+  public void testHandleAvailableReceiptLinesAnswersTheReceivedQuantity() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getBigDecimal(5)).thenReturn(new BigDecimal("60"));
+      when(rs.getBigDecimal(6)).thenReturn(new BigDecimal("100"));
+
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("availableReceiptLines")
+          .requestBody(new JSONObject().put("receiptId", "rcpt-1").put("businessPartner", "bp-1"))
+          .build();
+      JSONObject row = handler.handle(ctx).getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      assertEquals(60, row.getDouble("movementQuantity"), 0.0001);
+      assertEquals(100, row.getDouble("receivedQuantity"), 0.0001);
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      Mockito.verify(conn).prepareStatement(sql.capture());
+      assertTrue(sql.getValue(),
+          sql.getValue().contains(ReturnableQuantity.COUNTED_RETURN_LINES_FILTER));
     }
   }
 

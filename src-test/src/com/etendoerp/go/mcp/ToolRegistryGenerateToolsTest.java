@@ -231,15 +231,16 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
-      // Read access always yields etendo_discover + docs + etendo_widget + etendo_vector_search +
-      // etendo_feedback when no specs exist. These are built-in read tools
-      // (ETP-4284 / ETP-5123 / ETP-5306).
+      // Read access always yields etendo_whoami + etendo_discover + docs + etendo_widget +
+      // etendo_vector_search + etendo_feedback when no specs exist. These are built-in read tools
+      // (ETP-4284 / ETP-5123 / ETP-5306 / etendo-ai#53).
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WHOAMI), names.toString());
       assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
       assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
-      assertEquals(5, tools.size(), names.toString());
+      assertEquals(6, tools.size(), names.toString());
     }
 
     @Test
@@ -406,18 +407,19 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
       List<String> names = toolNames(tools);
 
-      // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (etendo_discover + docs + etendo_widget + etendo_vector_search +
+      // No CRUD tools since there are no accessible window specs; only the read-scope baseline
+      // tools (etendo_whoami + etendo_discover + docs + etendo_widget + etendo_vector_search +
       // etendo_feedback) are present.
       assertFalse(names.contains("etendo_list"));
       assertFalse(names.contains("etendo_get"));
       assertFalse(names.contains("etendo_create"));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WHOAMI), names.toString());
       assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
       assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
-      assertEquals(5, tools.size(), names.toString());
+      assertEquals(6, tools.size(), names.toString());
     }
 
     @Test
@@ -442,18 +444,19 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
       List<String> names = toolNames(tools);
 
-      // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (etendo_discover + docs + etendo_widget + etendo_vector_search +
+      // No CRUD tools since there are no accessible window specs; only the read-scope baseline
+      // tools (etendo_whoami + etendo_discover + docs + etendo_widget + etendo_vector_search +
       // etendo_feedback) are present.
       assertFalse(names.contains("etendo_list"));
       assertFalse(names.contains("etendo_get"));
       assertFalse(names.contains("etendo_create"));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WHOAMI), names.toString());
       assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
       assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
-      assertEquals(5, tools.size(), names.toString());
+      assertEquals(6, tools.size(), names.toString());
     }
 
     @Test
@@ -571,12 +574,14 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No window specs => no CRUD/window tools. What remains is the read-scope baseline
-      // (etendo_discover + docs + etendo_widget + etendo_vector_search + etendo_feedback) plus the three
-      // write-scope image-upload tools (ETP-5184), which are built-in and not gated on any spec.
+      // (etendo_whoami + etendo_discover + docs + etendo_widget + etendo_vector_search +
+      // etendo_feedback) plus the three write-scope image-upload tools (ETP-5184), which are
+      // built-in and not gated on any spec.
       assertFalse(names.contains("etendo_list"));
       assertFalse(names.contains("etendo_create"));
       assertFalse(names.contains("etendo_update"));
       assertFalse(names.contains("etendo_delete"));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WHOAMI), names.toString());
       assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
@@ -585,7 +590,7 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD));
       assertTrue(names.contains(McpConstants.TOOL_NEO_UPLOAD_IMAGE));
       assertTrue(names.contains(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD));
-      assertEquals(8, tools.size(), names.toString());
+      assertEquals(9, tools.size(), names.toString());
     }
   }
 
@@ -1022,9 +1027,10 @@ class ToolRegistryGenerateToolsTest {
             String.valueOf(second.get(i).getInputSchema()), first.get(i).getName());
       }
       List<String> names = toolNames(first);
-      assertEquals(List.of("etendo_discover", "docs", McpConstants.TOOL_NEO_WIDGET,
-          McpConstants.TOOL_NEO_VECTOR_SEARCH, McpConstants.TOOL_NEO_FEEDBACK),
-          names.subList(0, 5), "built-ins first, in a fixed order: " + names);
+      assertEquals(List.of(McpConstants.TOOL_NEO_WHOAMI, "etendo_discover", "docs",
+          McpConstants.TOOL_NEO_WIDGET, McpConstants.TOOL_NEO_VECTOR_SEARCH,
+          McpConstants.TOOL_NEO_FEEDBACK),
+          names.subList(0, 6), "built-ins first, in a fixed order: " + names);
       assertTrue(names.indexOf("complete_order") < names.indexOf("etendo_list"),
           "process tools before the CRUD tools: " + names);
       Map<String, Object> listSchema = first.get(names.indexOf("etendo_list")).getInputSchema();

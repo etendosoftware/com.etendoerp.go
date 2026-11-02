@@ -184,6 +184,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `usage-aggregation-schedule` | `etendo.go.flags.usage-aggregation-schedule` | `ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | `structured-address-for-sepa` | `etendo.go.flags.structured-address-for-sepa` | `ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA` | absent ⇒ **`false`** (legacy single-line address; TTL 2026-11-15 — SEPA 2025 rulebooks ban unstructured addresses in SEPA remittance files from that date, per [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24)) |
 | `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
+| `product-movements-tab` | `etendo.go.flags.product-movements-tab` | `ETGO_FLAG_PRODUCT_MOVEMENTS_TAB` | absent ⇒ **`false`** (no Movements tab on the Product window; placeholder TTL 2027-01-31) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -209,6 +210,17 @@ Datadog targeting rule (e.g. "email is one of [...]") roll the feature out to th
 first, then the rest of Etendo, then everyone, instead of flipping it for every tenant at once; with
 no targeting rule configured it is still the plain per-environment boolean default, so the TTL stays
 a hard global deadline.
+
+`product-movements-tab` (ETP-5889) decides whether an account gets the read-only Movements tab of the
+Product window. One evaluator only, the backend: `ProductMovementsPolicy` evaluates the flag with the
+`ETGO_ACCOUNT` email as targeting key and the tenant as `clientId` attribute, `SFWindowAccessMap`
+publishes the answer as `capabilities.productMovements`, and the tab reads that capability. The
+browser never evaluates the flag, so a rule on email, tenant or percentage cannot make the two ends
+disagree; a change reaches a user when the access map is next loaded. `ProductTransactionsHandler`
+asks the same policy before adding `etgoStockAfter` and `etgoTotalRows`. A request with no account is
+evaluated account-less and gets the default (off). Only behaviour is gated: the stored computed
+columns of `M_Transaction`, their triggers and the `ETGO_SF_*` configuration ship unconditionally, so
+run `update.database` and check `ad_scd_check` = 0 before targeting any account. The flag is not access control: with it off the `/transactions` rows (and the new `etgoWarehouse`, `etgoDocKind` and `etgoDocHeaderId` fields) stay readable under the role's entity and organization access; it only withholds `etgoStockAfter` and `etgoTotalRows` and hides the tab.
 
 The email reaches each call site in one of two ways, and the split is the point — resolving it
 implicitly inside the shared evaluator would be wrong for the second group:
@@ -994,7 +1006,7 @@ of the subscription (ETP-5049, additive):
 **Which subscription the page shows (ETP-5051, O-1).** An account can own several environments,
 each paid by its own Stripe subscription and customer. The page and the Customer Portal
 (`POST /sws/go/billing/subscription/portal`) resolve the purchase through the one servlet helper
-`findShownSubscription`, so the portal always acts on the subscription the page shows:
+`findShownSubscription` (or the company the caller names, below), so the portal always acts on the subscription the page shows:
 
 - **Session entered into an environment** (the cookie session's client, written by
   `POST /sws/go/session/environment`): that environment's own billable purchase,
@@ -1008,6 +1020,21 @@ each paid by its own Stripe subscription and customer. The page and the Customer
 - **No environment entered** (account-level session, or the legacy platform-token bearer, which
   carries no environment): the account's newest billable purchase
   (`CheckoutRequestStore#findSubscriptionForAccount`), as before.
+- **A company named by the caller (ETP-6060):** `GET /sws/go/billing/subscription?clientId=<id>`
+  answers that company's own purchase, whatever environment the session is in — the same rule as
+  the portal's `{"clientId": …}` body, through the shared `findRequestedSubscription`. "Mis
+  empresas" uses it to show each owned company's subscription. Ownership stays the store query's
+  (account id and email): a client this account did not buy answers `{"hasSubscription": false}`.
+  A blank value or `0` names no company and keeps the two rules above.
+
+**A scheduled cancellation reads from either field (ETP-6060).** The Customer Portal of recent
+Stripe API versions schedules "cancel at the end of the period" with a `cancel_at` date and leaves
+`cancel_at_period_end` false. Both the live detail (`cancelAtPeriodEnd` of this endpoint) and the
+stored `ETGO_SUBSCRIPTION.CANCEL_AT_PERIOD_END` (from `customer.subscription.*` events, which feeds
+the environment list's `renewalAt`) treat a non-null `cancel_at` as scheduled, whatever the flag
+says; `cancel_at: null` without the flag clears it. The HubSpot sync already read both
+(`StripeSubscriptionEvents`). Before the fix the page kept saying "renews on" after a portal
+cancellation.
 
 Ownership is the query's: both lookups filter on the account id and email, so a client id that is
 not one of the account's own purchases resolves to nothing, whoever owns that client.

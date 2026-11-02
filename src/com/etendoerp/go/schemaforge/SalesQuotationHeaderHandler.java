@@ -26,11 +26,14 @@ import javax.inject.Inject;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -41,7 +44,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * Dispatches custom ACTION requests:
  * <ul>
- *   <li>{@code Convertquotation} → calls {@link ConvertQuotationIntoOrder#convertQuotationIntoSalesOrder}
+ *   <li>{@code Convertquotation} (also reached as {@code createOrder}, the button's property name,
+ *       on every MCP call — see {@link #isConvertQuotationAction}) → calls {@link ConvertQuotationIntoOrder#convertQuotationIntoSalesOrder}
  *       with {@code recalculatePrices=false} so that unit prices agreed in the quotation are
  *       preserved in the new sales order (default Etendo behaviour would re-fetch prices from
  *       the active price list, overwriting the quoted amounts), then reactivates the order so it
@@ -71,6 +75,15 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <p>Currency / price-list / exchange-rate behaviors are inherited from
  * {@link AbstractOrderHeaderHandler#afterCallout}.
  *
+ * <p>ETP-5704 (QA CP-17): Reactivate ({@code DocAction} = {@code RE}) is refused unless the
+ * quotation's stored {@code documentStatus} is {@code VO} — the only status the window offers
+ * Reactivate in ({@code processOverrides.Reactivate}, {@code @documentStatus@='VO'}). Without it a
+ * quotation Under evaluation ({@code UE}) went back to Draft over MCP. Same resolution and
+ * fail-closed rules as the sales order's refusals ({@link DocActionRefusalGuard}); advertised by
+ * {@link #unavailableActions}. It does not touch {@code Convertquotation} (another button; the new
+ * order is reactivated through {@link OrderDocActionSupport}, not through this pre-hook) or the
+ * DR→UE {@code DocAction} of {@code SendToEvaluationModal} (it runs CO, not RE).
+ *
  * <p><b>Binding (ETP-6002).</b> Bound by {@link NeoExtension} on every channel. The row's
  * {@code Java_Qualifier} ({@code salesQuotationHeaderHandler}) and the class's {@code @Named} were
  * removed in the same change (neo-extension-migration).
@@ -82,10 +95,28 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String DOC_STATUS_COMPLETED = "CO";
   private static final String DOC_ACTION_REJECT = "RJ";
+  /** Reactivate, the {@code documentAction} value only a voided quotation accepts (ETP-5704). */
+  static final String DOC_ACTION_REACTIVATE = "RE";
+  /** The only quotation status the window offers Reactivate in (ETP-5704). */
+  static final String DOC_STATUS_VOIDED = "VO";
+  /** The 400 a Reactivate on a quotation that is not voided answers with (ETP-5704). */
+  static final String MSG_REACTIVATE_NOT_VOIDED = "ETGO_QuotationReactivateNotVoided";
+  /** Why {@code documentAction:RE} is unavailable on a quotation that is not voided (ETP-5704). */
+  static final String REASON_REACTIVATE_NOT_VOIDED = "The app offers Reactivate on a quotation "
+      + "only once it is voided (documentStatus VO), so documentAction RE is refused in any other "
+      + "status. A quotation Under evaluation (UE) is accepted with Convertquotation or rejected "
+      + "with rejectQuotation; it is not sent back to Draft.";
   /** The button's column name, what the SPA posts. */
   private static final String ACTION_CONVERT_COLUMN = "Convertquotation";
-  /** The button's field name, what an MCP {@code etendo_action} call reaches the handler under (ETP-5710). */
+  /** A lower-case spelling of the column name, matched since ETP-5710; kept for any caller using it. */
   private static final String ACTION_CONVERT_FIELD = "convertquotation";
+  /**
+   * The button's DAL property name, {@code createOrder} (column {@code Convertquotation}): what
+   * every MCP {@code etendo_action} call reaches the handler under, whichever name the agent typed
+   * — {@code McpDeclaredActions.customizationNameOf} resolves the button to its property name
+   * (ETP-5704; ETP-5710 had assumed {@code convertquotation}, so MCP never got here).
+   */
+  private static final String ACTION_CONVERT_PROPERTY = Order.PROPERTY_CREATEORDER;
 
   /** The named actions published to agents, in presentation order (ETP-5535). */
   private static final Map<String, NeoActionContract> ACTION_CONTRACTS = buildActionContracts();
@@ -173,6 +204,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     if (isRejectDocAction(context)) {
       return rejectQuotationHandler.reject(context);
     }
+    NeoResponse reactivationRefusal = DocActionRefusalGuard.refuse(context, DOC_ACTION_REACTIVATE,
+        SalesQuotationHeaderHandler::isNotVoided, MSG_REACTIVATE_NOT_VOIDED);
+    if (reactivationRefusal != null) {
+      return reactivationRefusal;
+    }
     // ETP-5840: exchange rate — recalculation, save and confirmation validation — before the
     // total-discount sync and the actions run.
     NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);
@@ -200,6 +236,42 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
         rejectQuotationHandler,
         createRejectReasonHandler,
         createDraftInvoiceHandler);
+  }
+
+  /**
+   * {@inheritDoc} Reactivate is ruled out on a quotation that is not voided — the window offers it
+   * only in {@code VO}, and the pre-hook refuses it otherwise (ETP-5704).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    if (!(subject instanceof Order)
+        || DOC_STATUS_VOIDED.equals(((Order) subject).getDocumentStatus())) {
+      return Collections.emptyMap();
+    }
+    return Map.of(NeoActionAvailability.valueKey(OrderDocumentAvailability.ACTION_DOCUMENT_ACTION,
+        DOC_ACTION_REACTIVATE), REASON_REACTIVATE_NOT_VOIDED);
+  }
+
+  /**
+   * Whether the quotation's stored {@code documentStatus} is anything but {@code VO} — the
+   * condition under which Reactivate is refused (ETP-5704). Read under admin mode, as the
+   * DocAction resolution reads the record.
+   *
+   * @param quotationId the quotation the button runs on
+   * @return {@code true} when the quotation is not voided
+   * @throws IllegalStateException when the quotation cannot be loaded — the guard then fails closed
+   */
+  static boolean isNotVoided(String quotationId) {
+    OBContext.setAdminMode(true);
+    try {
+      Order quotation = OBDal.getInstance().get(Order.class, quotationId);
+      if (quotation == null) {
+        throw new IllegalStateException("Quotation " + quotationId + " cannot be loaded");
+      }
+      return !DOC_STATUS_VOIDED.equals(quotation.getDocumentStatus());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
@@ -247,8 +319,15 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     return DocActionRequestSupport.requests(context, DOC_ACTION_REJECT);
   }
 
-  private static boolean isConvertQuotationAction(String action) {
-    return ACTION_CONVERT_COLUMN.equals(action) || ACTION_CONVERT_FIELD.equals(action);
+  /**
+   * Whether the ACTION names the {@code Convertquotation} button under any of the names a channel
+   * reaches this handler with: the column name (the SPA's REST post), the DAL property name
+   * {@code createOrder} (every MCP call, single or batch, and a REST post using it — ETP-5704), or
+   * the lower-case column spelling (ETP-5710).
+   */
+  static boolean isConvertQuotationAction(String action) {
+    return ACTION_CONVERT_COLUMN.equals(action) || ACTION_CONVERT_PROPERTY.equals(action)
+        || ACTION_CONVERT_FIELD.equals(action);
   }
 
   /**
@@ -270,6 +349,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * UI request reaches ({@link OrderDocActionSupport}), so both channels share one flow. The UI's own
    * call is guarded by {@code documentStatus === 'CO'}, so against an order that is already Draft
    * it simply does not fire — no double reactivation.
+   *
+   * <p><b>ETP-5704 — MCP did not actually reach this.</b> MCP hands the customization the button's
+   * property name ({@code createOrder}), which was not matched, so an MCP conversion ran core's
+   * classic process: order left Completed and its prices recalculated from the price list. Matching
+   * {@code createOrder} too brings every MCP call (single and batch) here.
    *
    * <p>Best-effort only for failures the procedure REPORTS (an {@code AD_PInstance} result other
    * than 1, or no access to {@code C_Order_Post}): the conversion is kept, the order stays
