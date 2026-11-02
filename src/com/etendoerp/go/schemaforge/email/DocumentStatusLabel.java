@@ -34,7 +34,8 @@ import com.etendoerp.go.schemaforge.NeoDocumentPdf;
 
 /**
  * The name of a {@code DocStatus} code in a language, for the sentence that refuses a document email
- * by status (ETP-6013): "1000123 está en Borrador: ...".
+ * by status, and for the refusal of Reactivate on a draft (ETP-6013): "1000123 está en Borrador:
+ * ...".
  *
  * <p>Read from the document status lists ({@link NeoDocumentPdf#DOCUMENT_STATUS_REFERENCES}: the
  * {@code 131} All_Document Status list of invoices and goods movements, and the Order_Document Status
@@ -47,7 +48,7 @@ import com.etendoerp.go.schemaforge.NeoDocumentPdf;
  * <p>Total: never throws. Without a database, a translation or a list value, the answer degrades to
  * the base name and then to the code itself, so the refusal is always readable.</p>
  */
-final class DocumentStatusLabel {
+public final class DocumentStatusLabel {
 
   private static final Logger log = LogManager.getLogger(DocumentStatusLabel.class);
 
@@ -76,7 +77,7 @@ final class DocumentStatusLabel {
    * @param language the AD language code, such as {@code es_ES}; blank reads the base name
    * @return the translated name, the base name, or the code when neither can be read
    */
-  static String of(String status, String language) {
+  public static String of(String status, String language) {
     if (StringUtils.isBlank(status)) {
       return StringUtils.defaultString(status);
     }

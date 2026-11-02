@@ -57,6 +57,7 @@ import org.openbravo.model.ad.ui.Tab;
  * called {@code lifecycle} on purpose.
  *
  * @covers com.etendoerp.go.schemaforge.DocActionIdempotency
+ * @covers com.etendoerp.go.schemaforge.DocActionReactivationRule
  */
 class DocActionIdempotencyTest {
 
@@ -296,5 +297,122 @@ class DocActionIdempotencyTest {
     assertEquals(badRequest,
         DocActionIdempotency.orAlreadyApplied(badRequest, TAB_ID, RECORD_ID, "CO"));
     org.mockito.Mockito.verify(dal, never()).refresh(any());
+  }
+
+  // ---- ETP-6013: Reactivate on a draft (DocActionReactivationRule, same status lookup) ----
+
+  /**
+   * ETP-6013 repro — {@code RE} on a draft is refused {@code 422 business_rule} with the translated
+   * explanation, before the procedure; every other case goes to the procedure as before. The status
+   * column is found through the AD exactly as above (property {@code lifecycle}, never a name).
+   * No database: the status name falls back to its code, the sentence to the catalog.
+   */
+  @org.junit.jupiter.api.Nested
+  class ReactivationOfADraft {
+
+    private MockedStatic<org.openbravo.dal.core.OBContext> contextStatic;
+    private MockedStatic<com.etendoerp.go.schemaforge.util.NeoLanguage> languageStatic;
+
+    @BeforeEach
+    void noContext() {
+      // setAdminMode/restorePreviousMode of the message and label reads are no-ops here.
+      contextStatic = mockStatic(org.openbravo.dal.core.OBContext.class);
+      languageStatic = mockStatic(com.etendoerp.go.schemaforge.util.NeoLanguage.class);
+    }
+
+    @AfterEach
+    void close() {
+      languageStatic.close();
+      contextStatic.close();
+    }
+
+    /**
+     * The status column (its list holds DR and CO, as the lookup filters) stores {@code status};
+     * the table also has a DocumentNo column.
+     */
+    private void draftLike(String status, String documentNo) {
+      Column column = listColumn("DocStatus", "ref-status");
+      when(table.getADColumnList()).thenReturn(List.of(column));
+      bindProperty(column, "lifecycle", status);
+      listValues("ref-status", "DR", "CO");
+      Entity entity = document.getEntity();
+      Property number = mock(Property.class);
+      when(number.getName()).thenReturn("documentNo");
+      when(entity.getPropertyByColumnName("DocumentNo", false)).thenReturn(number);
+      when(document.get("documentNo")).thenReturn(documentNo);
+    }
+
+    @ParameterizedTest(name = "RE on a draft, {0}")
+    @CsvSource(delimiter = '|', value = {
+        "es_ES | PC1000015 est\u00e1 en DR: Reactivar solo aplica a documentos Completados.",
+        "en_US | PC1000015 is DR: Reactivate only applies to Completed documents.",
+    })
+    void reactivateOnADraftIsRefusedWithTheTranslatedExplanation(String language,
+        String expected) throws Exception {
+      languageStatic.when(com.etendoerp.go.schemaforge.util.NeoLanguage::currentCode)
+          .thenReturn(language);
+      draftLike("DR", "PC1000015");
+
+      NeoResponse response = DocActionReactivationRule.refusal(TAB_ID, RECORD_ID, "RE");
+
+      assertNotNull(response);
+      assertEquals(422, response.getHttpStatus());
+      assertEquals(expected, response.getBody().getString("message"));
+      assertEquals("error", response.getBody().getString("status"));
+      assertEquals("business_rule", response.getBody().getJSONObject("error").getString("code"));
+      assertEquals("ETGO_ReactivateOnlyCompleted",
+          response.getBody().getJSONArray("messageKeys").getString(0));
+    }
+
+    /**
+     * Left to the procedure: a completed document (the one status RE applies to), the statuses this
+     * rule does not judge (a voided quotation is reactivated by design), and any other action.
+     */
+    @ParameterizedTest(name = "{1} on a document in {0} goes to the procedure")
+    @CsvSource({ "CO, RE", "VO, RE", "CL, RE", "IP, RE", "DR, CO", "DR, re", "DR, ' RE'" })
+    void everythingElseGoesToTheProcedure(String status, String action) {
+      draftLike(status, "PC1000015");
+
+      assertNull(DocActionReactivationRule.refusal(TAB_ID, RECORD_ID, action));
+    }
+
+    @Test
+    void anotherActionNeverReadsTheRecord() {
+      assertNull(DocActionReactivationRule.refusal(TAB_ID, RECORD_ID, "CO"));
+      resolutionStatic.verify(() -> DocActionResolution.loadDocActionRecord(anyString(),
+          anyString()), never());
+    }
+
+    /** Undecidable is not refused: no status column, a missing record or a failing lookup. */
+    @Test
+    void anUndecidableRecordGoesToTheProcedure() {
+      when(table.getADColumnList()).thenReturn(List.of());
+      assertNull(DocActionReactivationRule.refusal(TAB_ID, RECORD_ID, "RE"));
+
+      resolutionStatic.when(() -> DocActionResolution.loadDocActionRecord(TAB_ID, "ghost"))
+          .thenReturn(null);
+      assertNull(DocActionReactivationRule.refusal(TAB_ID, "ghost", "RE"));
+
+      resolutionStatic.when(() -> DocActionResolution.loadDocActionRecord(TAB_ID, RECORD_ID))
+          .thenThrow(new IllegalStateException("boom"));
+      assertNull(DocActionReactivationRule.refusal(TAB_ID, RECORD_ID, "RE"));
+    }
+
+    /** A table without a DocumentNo column names the document by its identifier. */
+    @Test
+    void withoutADocumentNumberTheIdentifierIsUsed() throws Exception {
+      languageStatic.when(com.etendoerp.go.schemaforge.util.NeoLanguage::currentCode)
+          .thenReturn("en_US");
+      Column column = listColumn("DocStatus", "ref-status");
+      when(table.getADColumnList()).thenReturn(List.of(column));
+      bindProperty(column, "lifecycle", "DR");
+      listValues("ref-status", "DR", "CO");
+      when(document.getIdentifier()).thenReturn("Journal 7");
+
+      NeoResponse response = DocActionReactivationRule.refusal(TAB_ID, RECORD_ID, "RE");
+
+      assertEquals("Journal 7 is DR: Reactivate only applies to Completed documents.",
+          response.getBody().getString("message"));
+    }
   }
 }

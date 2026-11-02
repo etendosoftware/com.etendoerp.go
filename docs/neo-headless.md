@@ -1366,9 +1366,29 @@ classification.)
   column of the record's table whose reference list holds both the draft status (`DR`) and the target
   status (the action's own list never holds `DR`); two candidates count as ambiguous.
   `DocActionIdempotency`.
-- Both changes live in `NeoProcessService.executeDbProcedure`, which MCP (`etendo_action`) also
-  reaches, so both channels behave the same; MCP reads `status >= 400` and the flat body, so the
-  422 needs no change there.
+- **Reactivate on a draft is refused before the procedure (ETP-6013).** `RE` on a record whose
+  document status is `DR` answers the same `422 business_rule` envelope as a procedure refusal,
+  with `messageKeys:["ETGO_ReactivateOnlyCompleted"]` and the sentence in the request language
+  (`NeoMessageText`; `{0}` the record's `DocumentNo`, or its identifier when the table has none;
+  `{1}` the status name from the document status lists, `DocumentStatusLabel`):
+  "PC1000015 está en Borrador: Reactivar solo aplica a documentos Completados." /
+  "PC1000015 is Draft: Reactivate only applies to Completed documents.". Before it, the core
+  procedure answered `ActionNotSupported` ("Esta acción no se puede sostener"), which explains
+  nothing. Nothing is written on the record and the procedure is not called. The status column is
+  found with the same structural lookup as above (list holding `DR` and `CO`); undecidable (no or
+  several columns, a missing record, a failing lookup) runs the procedure as before.
+  **Only the draft status is decided**, not "anything but `CO`": a voided sales quotation is
+  reactivated by design (ETP-5704, its pre-hook refuses every other status with its own message,
+  and that pre-hook runs first), so "not completed" is not a structural rule. Closed/voided orders
+  and invoices still get the procedure's own refusal. Decided on the request's root `docAction`
+  (exact `RE`, the value written on the record). `DocActionReactivationRule`.
+  The GO app never offers Reactivate on a draft (row action and form gated on `CO`); the only UI
+  path that can send it is the bulk "Procesar" over a mixed draft+completed selection with
+  "Reactivar" chosen, where a draft row already failed and now fails with this sentence instead.
+- All three live in `NeoProcessService.executeDbProcedure`, which MCP (`etendo_action`, and each
+  document of `etendo_action_batch`, where it is that document's `ok:false` result while the
+  others carry on) also reaches, so every channel behaves the same; MCP reads `status >= 400` and
+  the flat body, so the 422 needs no change there. No divergence to declare in §4.12.9.
 
 ### 4.4 Selectors (FK Dropdowns)
 
