@@ -1558,4 +1558,49 @@ public class NeoBuiltInEndpointHandlerTest {
       serviceMock.verifyNoInteractions();
     }
   }
+
+  /**
+   * ETP-6047 — {@code POST /invoice-inbox/upload} delegates to the upload endpoint and writes the
+   * answer it returns; the branch itself decides nothing.
+   */
+  @Test
+  public void handleInvoiceInboxUploadPostDelegatesToTheEndpointAndWritesItsResponse()
+      throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse answer = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<InvoiceInboxUploadEndpoint> endpoint =
+        mockStatic(InvoiceInboxUploadEndpoint.class)) {
+      endpoint.when(() -> InvoiceInboxUploadEndpoint.handle(request)).thenReturn(answer);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "upload", null),
+          "POST", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, answer);
+      endpoint.verify(() -> InvoiceInboxUploadEndpoint.handle(request));
+    }
+  }
+
+  /**
+   * ETP-6047 — the branch is exact: another verb on the upload path, or another entity of the
+   * invoice-inbox spec, is not the upload endpoint's and falls through to the regular router.
+   */
+  @Test
+  public void handleInvoiceInboxOtherVerbOrEntityDoesNotTakeTheUploadBranch() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<InvoiceInboxUploadEndpoint> endpoint =
+        mockStatic(InvoiceInboxUploadEndpoint.class)) {
+      assertFalse(handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "upload", null),
+          "GET", request, response));
+      assertFalse(handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "header", null),
+          "POST", request, response));
+
+      endpoint.verifyNoInteractions();
+      verify(servlet, never()).writeResponse(any(), any());
+    }
+  }
 }

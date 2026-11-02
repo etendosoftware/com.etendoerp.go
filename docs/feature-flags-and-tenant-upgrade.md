@@ -758,10 +758,14 @@ allow-list line, the registry `flag` object) is listed in the registry entry's `
 Gates the **behaviour** of the incoming-invoice inbox (epic ETP-6046), never its schema. Positive
 polarity: `true` = the inbox is enabled. Default and every failure = `false`.
 
-**What it gates.** The inbox upload endpoint (story ETP-6047) must refuse the request when the flag
-is off, **before** any OCR work is enqueued. The `ETGO_INCOMING_DOCUMENT` table and the
-`Invoice Inbox` window ship unconditionally: the flag gates behaviour, not schema. Not implemented
-by the flag change itself; the endpoint calls the gate.
+**What it gates.** The inbox upload endpoint `POST /sws/neo/invoice-inbox/upload` (ETP-6047,
+`neo-headless.md` section 4.6b) refuses the request with `403 feature_disabled` when the flag is
+off, **before** the multipart is read and before any row or OCR work is created. The
+`ETGO_INCOMING_DOCUMENT` table and the `Invoice Inbox` window ship unconditionally: the flag gates
+behaviour, not schema.
+
+**The toggle point.** `InvoiceInboxUploadEndpoint` is the one class that calls
+`InvoiceInboxFlag.isEnabled()`, at request entry.
 
 **The one gate.** `InvoiceInboxFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
 `GoFeatureFlags.FLAG_INVOICE_INBOX`. Never read the key anywhere else. It has no window or entity
@@ -796,7 +800,7 @@ add rules on the lowercase `email` attribute. The local property is inert while 
 selected, and an undefined key resolves to `false`, so a missing setting looks exactly like "off".
 
 **Retirement (TTL 2027-01-31, provisional until confirmed with product):** the inbox then ships to
-everyone. Unwrap the toggle point(s) that call `InvoiceInboxFlag` (the upload endpoint), delete
+everyone. Unwrap the toggle point (the flag check at the top of `InvoiceInboxUploadEndpoint.handle`), delete
 `InvoiceInboxFlag.java` and its test, delete `FLAG_INVOICE_INBOX` from `GoFeatureFlags`, remove this
 section and the configuration-table row, and delete the hosted setting. Keep the registry feature
 entry in `etendo_schema_forge`.

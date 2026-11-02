@@ -118,6 +118,14 @@ class NeoBuiltInEndpointHandler {
       handleAttachmentsEndpoint(method, request, response);
       return true;
     }
+    // ETP-6047: the invoice inbox bulk upload. The branch only delegates; the flag, the access
+    // check and the entity work live in InvoiceInboxUploadEndpoint. Any other verb or path of this
+    // spec falls through to the regular spec router.
+    if ("invoice-inbox".equals(pathInfo.specName) && "upload".equals(pathInfo.entityName)
+        && METHOD_POST.equals(method)) {
+      servlet.writeResponse(response, InvoiceInboxUploadEndpoint.handle(request));
+      return true;
+    }
     AbstractFiscalHandler fiscalHandler = fiscalHandlerFor(pathInfo.specName);
     if (fiscalHandler != null) {
       fiscalHandler.handle(pathInfo.entityName, method, request, response);
