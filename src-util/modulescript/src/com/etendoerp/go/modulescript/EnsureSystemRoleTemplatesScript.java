@@ -100,6 +100,9 @@ import org.openbravo.modulescript.ModuleScript;
  * Inventory Stock Report; Smart Scan counts once despite being granted to all four roles).
  * ETP-5830 then removed Smart Scan from all four again: Sales 12, Purchasing 13, Finance 33,
  * Inventory 14, 41 distinct windows.
+ * ETP-6047 then added the Invoice Inbox window ({@code 81AC659E93504927B459E0CAE80CE923}, FULL) to
+ * Purchasing and Finance: Sales 12, Purchasing 14, Finance 34, Inventory 14, 42 distinct windows
+ * (74 grants).
  * "Asientos manuales" resolves to the
  * <b>Simple G/L Journal</b> window ({@code B917E8A7B0864ACEA9D941E3B7494E53}), not the classic
  * {@code G/L Journal} (window {@code 132}, which literally carries the ES label "Asientos
@@ -269,6 +272,12 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
    */
   private static final String INVENTORY_STOCK_REPORT_WINDOW_ID = "6346B88619F948F9A42224BDB0B239FA";
 
+  /**
+   * {@code AD_Window_ID} of the Invoice Inbox window (ETP-6047) — granted FULL to Compras and
+   * Financiero. Inlined copy of {@code TemplateRoleWindowAccess#INVOICE_INBOX_WINDOW_ID}.
+   */
+  private static final String INVOICE_INBOX_WINDOW_ID = "81AC659E93504927B459E0CAE80CE923";
+
   /** English names for the role INSERT, keyed by the literal ids above. */
   private static final Map<String, String> ROLE_NAMES_BY_ID = namesByRoleId();
 
@@ -338,8 +347,9 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Purchasing ("Compras") column of the ETP-4878 matrix — 13 grants: 11 from the original
-   * matrix, plus {@code 107} (Receipt-Invoice Link, added after the original matrix by
+   * Purchasing ("Compras") column of the ETP-4878 matrix — 14 grants: 11 from the original
+   * matrix, plus {@code 81AC659E93504927B459E0CAE80CE923} (Invoice Inbox, ETP-6047, shared with
+   * Financiero), plus {@code 107} (Receipt-Invoice Link, added after the original matrix by
    * ETP-5075 — granted FULL so its accounting posting action, a {@code POST} on the action
    * sub-endpoint, clears {@code NeoAccessHelper#hasWindowAccess}'s {@code IsReadWrite='Y'}
    * requirement for write methods; the data itself stays read-only via {@code ETGO_SF_ENTITY}, a
@@ -363,11 +373,12 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("146"),                                          // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
         readOnly("192"),                                       // Categoría de contacto — Business Partner Category
-        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID),              // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(INVOICE_INBOX_WINDOW_ID));                      // Bandeja de facturas — Invoice Inbox (ETP-6047)
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 33 grants: 25 from the original ticket
+   * Finance ("Financiero") column of the ETP-4878 matrix — 34 grants: 25 from the original ticket
    * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
    * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
    * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
@@ -378,7 +389,8 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
    * ({@code D647D118F5014D00AF47A636B2CD0DD3}, Financiero-only; the Smart Scan grant that pass also
    * added was removed again by ETP-5830), and 1 more grant from a still-later ETP-5116 pass: "Informes de inventario" / Inventory Stock
    * Report ({@code 6346B88619F948F9A42224BDB0B239FA}, shared with Compras/Almacén, NOT Ventas —
-   * see class javadoc).
+   * see class javadoc), and 1 more grant from ETP-6047: "Invoice Inbox" ({@code
+   * 81AC659E93504927B459E0CAE80CE923}, FULL, shared with Compras).
    * Inlined copy of {@code TemplateRoleWindowAccess#financeGrants()}.
    */
   private static List<WindowGrant> financeGrants() {
@@ -415,7 +427,8 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
         full("27A453FA86974745977672F1A8DCCEFF"),              // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
         full("D647D118F5014D00AF47A636B2CD0DD3"),              // Informes financieros — Financial Reports (ETP-5116, Financiero-only)
-        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID),              // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(INVOICE_INBOX_WINDOW_ID));                      // Bandeja de facturas — Invoice Inbox (ETP-6047)
   }
 
   /**
