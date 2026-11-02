@@ -261,9 +261,12 @@ public class McpToolRouter {
             return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
             // ETP-5945 (in ETP-5852): every action result also carries success + message.
-            return McpActionEnvelope.normalize(handleAction(specName, arguments));
+            // ETP-6013: a successful DocAction also queues the document's server-side PDF.
+            return McpActionEnvelope.normalize(
+                McpPrintTrigger.queueingServerPdf(this::handleAction).run(specName, arguments));
           case McpConstants.TOOL_NEO_ACTION_BATCH:
-            return McpActionBatch.handle(specName, arguments, this::handleAction);
+            return McpActionBatch.handle(specName, arguments,
+                McpPrintTrigger.queueingServerPdf(this::handleAction));
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
             return handleGenerateAmortizationPlan(arguments);
           case McpConstants.TOOL_NEO_WIDGET:

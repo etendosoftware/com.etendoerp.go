@@ -79,7 +79,8 @@ final class DalReturnMaterialReceiptEmailDocumentResolver implements EmailDocume
         receipt.getClient().getId(),
         // No total: a return receipt carries no amount, same as a shipment.
         Collections.singletonList(
-            EmailDocumentDetail.date("document.detail.movementDate", receipt.getMovementDate()))));
+            EmailDocumentDetail.date("document.detail.movementDate", receipt.getMovementDate())))
+        .withDocumentStatus(receipt.getDocumentStatus()));
   }
 
   private static boolean isReturnDocument(ShipmentInOut receipt) {

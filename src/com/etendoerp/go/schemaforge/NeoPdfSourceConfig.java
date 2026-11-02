@@ -41,6 +41,12 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *       in the browser when the document's preview is opened and stores it as the record's main
  *       attachment. {@code etendo_get_document_pdf} returns that file under the SPA's own freshness
  *       rule (older than the record or the company branding: stale).</li>
+ *   <li>{@code print} (ETP-6013, optional, only with {@code rendered}): {@code {"document": "<key>"}}
+ *       names the printable the backend renders by itself when the document has no current PDF —
+ *       the key of the manifest the frontend build publishes ({@code printables/<key>.json}, see
+ *       {@link NeoPrintableTemplates}) and of the {@link NeoPrintableDataBuilder} that fills it.
+ *       Without it the entity keeps the browser-only behaviour: the PDF exists only once someone
+ *       opens the preview or sends the document.</li>
  *   <li>{@code supplier}: the document has no printable. Its "PDF" is the file the user uploaded as
  *       the main attachment (a purchase invoice's supplier document, a goods receipt's delivery
  *       note). It is returned as is and is never stale, because no edit of ours can outdate a
@@ -71,8 +77,12 @@ public final class NeoPdfSourceConfig {
   public static final String SOURCE_SUPPLIER = "supplier";
   /** Value: the PDF is the one the application rendered and stored (the default). */
   public static final String SOURCE_RENDERED = "rendered";
+  /** Key (ETP-6013): the printable the backend renders, {@code {"document": "<key>"}}. */
+  public static final String KEY_PRINT = "print";
+  /** Key inside {@value #KEY_PRINT}: the published printable's key. */
+  public static final String KEY_PRINT_DOCUMENT = "document";
   /** Every key the section body may carry. */
-  public static final Set<String> ALLOWED_KEYS = Set.of(KEY_SOURCE, KEY_REASON);
+  public static final Set<String> ALLOWED_KEYS = Set.of(KEY_SOURCE, KEY_REASON, KEY_PRINT);
 
   private static final Logger log = LogManager.getLogger(NeoPdfSourceConfig.class);
 
@@ -103,6 +113,26 @@ public final class NeoPdfSourceConfig {
     if (StringUtils.isBlank(body.optString(KEY_REASON, null))) {
       problems.add(KEY_REASON + " is required, so every declaration is auditable");
     }
+    if (body.has(KEY_PRINT)) {
+      problems.addAll(validatePrint(body.opt(KEY_PRINT), source));
+    }
+    return problems;
+  }
+
+  /** {@code print} must be {@code {"document": "<non-blank>"}} and only names a rendered PDF. */
+  private static List<String> validatePrint(Object print, Object source) {
+    List<String> problems = new ArrayList<>();
+    if (!(print instanceof JSONObject)
+        || StringUtils.isBlank(((JSONObject) print).optString(KEY_PRINT_DOCUMENT, null))) {
+      problems.add(KEY_PRINT + " must be an object with a non-blank \"" + KEY_PRINT_DOCUMENT
+          + "\" string");
+    } else if (((JSONObject) print).length() != 1) {
+      problems.add(KEY_PRINT + " carries only \"" + KEY_PRINT_DOCUMENT + "\"");
+    }
+    if (SOURCE_SUPPLIER.equals(source)) {
+      problems.add(KEY_PRINT + " cannot be declared with source \"" + SOURCE_SUPPLIER
+          + "\": a supplier document is never rendered");
+    }
     return problems;
   }
 
@@ -129,6 +159,36 @@ public final class NeoPdfSourceConfig {
       log.warn("PDF source of entity '{}' read as rendered: its MCP_CONFIG cannot be read ({})",
           entity.getName(), e.getClass().getSimpleName());
       return Source.RENDERED;
+    }
+  }
+
+  /**
+   * The printable the backend renders for this entity's document (ETP-6013), or {@code null} when
+   * the entity declares none — or its PDF is the supplier's, which is never rendered.
+   *
+   * @param entity the document's root entity
+   * @return the published printable's key (e.g. the manifest {@code printables/<key>.json}), or null
+   */
+  public static String printDocumentOf(SFEntity entity) {
+    if (entity == null) {
+      return null;
+    }
+    try {
+      JSONObject section = sectionOf(entity.getMCPConfig());
+      if (section == null) {
+        SFSpec spec = entity.getETGOSFSpec();
+        section = spec == null ? null : sectionOf(spec.getMCPConfig());
+      }
+      if (section == null || SOURCE_SUPPLIER.equals(section.opt(KEY_SOURCE))) {
+        return null;
+      }
+      JSONObject print = section.optJSONObject(KEY_PRINT);
+      return print == null ? null : StringUtils.trimToNull(print.optString(KEY_PRINT_DOCUMENT, null));
+    } catch (JSONException | RuntimeException e) {
+      // Not printable beats a wrong render: the entity keeps the browser-only behaviour.
+      log.warn("Printable of entity '{}' not read: its MCP_CONFIG cannot be read ({})",
+          entity.getName(), e.getClass().getSimpleName());
+      return null;
     }
   }
 

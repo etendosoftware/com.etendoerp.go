@@ -71,6 +71,7 @@ final class DalShipmentEmailDocumentResolver implements EmailDocumentRecordResol
         Arrays.asList(
             EmailDocumentDetail.date("document.detail.movementDate", shipment.getMovementDate()),
             EmailDocumentDetail.date("document.detail.shipDate", shipment.getShipDate()),
-            EmailDocumentDetail.date("document.detail.orderDate", shipment.getOrderDate()))));
+            EmailDocumentDetail.date("document.detail.orderDate", shipment.getOrderDate())))
+        .withDocumentStatus(shipment.getDocumentStatus()));
   }
 }

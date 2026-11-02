@@ -20,8 +20,9 @@ package com.etendoerp.go.mcp;
 import com.etendoerp.go.schemaforge.NeoAttachmentsConfig;
 
 /**
- * Registers the {@code attachments} section of {@code MCP_CONFIG} (ETP-5715) so an entity that
- * declares it is published and a misspelt key inside it is an error. The semantics and the reading
+ * Registers the {@code attachments} section of {@code MCP_CONFIG} (ETP-5715; {@code readOnly} and
+ * {@code messageKey}, ETP-6013) so an entity that declares it is published and a misspelt key inside
+ * it is an error. The semantics and the reading
  * live in {@link NeoAttachmentsConfig}, which the schemaforge layer can reach without depending on
  * this package.
  */

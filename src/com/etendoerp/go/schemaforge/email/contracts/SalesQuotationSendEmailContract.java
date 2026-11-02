@@ -38,4 +38,17 @@ public final class SalesQuotationSendEmailContract extends DefaultDocumentSendEm
     super(NAME, "Sales Quotation", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
 
+  /**
+   * A quotation is sent in any status but draft (ETP-6013), as its window offers "Enviar":
+   * {@code showSend={Boolean(status) && status !== 'DR'}} in {@code QuotationSecondaryActions}.
+   */
+  @Override
+  protected boolean isSendableStatus(String documentStatus) {
+    return !STATUS_DRAFT.equals(documentStatus);
+  }
+
+  @Override
+  protected String unsendableStatusMessageKey() {
+    return MSG_NOT_FOR_DRAFT;
+  }
 }

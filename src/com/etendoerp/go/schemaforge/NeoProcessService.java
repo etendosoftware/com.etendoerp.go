@@ -861,6 +861,12 @@ public class NeoProcessService {
       String tabId = params.optString(INP_TAB_ID, null);
       boolean docActionOnRecord = docAction != null && tabId != null;
       if (docActionOnRecord) {
+        // ETP-6013 — Reactivate on a draft is refused with an explanation, not the procedure's
+        // ActionNotSupported. Before anything is written on the record.
+        NeoResponse notReactivatable = DocActionReactivationRule.refusal(tabId, recordId, docAction);
+        if (notReactivatable != null) {
+          return notReactivatable;
+        }
         // ETP-5783 — a document already in the status this action leads to has nothing to run.
         NeoResponse alreadyApplied = DocActionIdempotency.alreadyApplied(tabId, recordId, docAction);
         if (alreadyApplied != null) {

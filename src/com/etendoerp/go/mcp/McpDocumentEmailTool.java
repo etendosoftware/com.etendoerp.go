@@ -57,6 +57,14 @@ import com.etendoerp.go.schemaforge.email.EmailSendDefaults;
  * is missing or older than the document ({@link NeoDocumentPdf}), with the answer
  * {@code etendo_get_document_pdf} gives.</p>
  *
+ * <p><b>The status gate (ETP-6013).</b> Before the PDF gate, the document's status is checked
+ * against the rule its send contract declares
+ * ({@link DefaultDocumentSendEmailContract#statusRefusal}: completed only, or any status but draft
+ * for a quotation — what the application's "Enviar" offers). A reactivated document keeps the PDF of
+ * when it was completed, so the PDF alone would let it through. The refusal is a 409
+ * {@code conflict} that wins over {@code no_pdf}, for the preview too; the contract's
+ * {@code authorize} applies the same rule on the send itself, for every channel.</p>
+ *
  * <p>{@code preview: true} runs the same checks and returns what would be sent, sending nothing.</p>
  */
 final class McpDocumentEmailTool {
@@ -68,6 +76,10 @@ final class McpDocumentEmailTool {
       + "ask to send again.";
   private static final String PREVIEW_STORES_NOTHING = "For a window whose preview stores nothing "
       + "(a return receipt) the first send must be done from the application.";
+  /** The advice of a send refused by status (ETP-6013); the detail already names the rule. */
+  static final String STATUS_HINT = "Nothing was sent. The application offers 'Send by email' "
+      + "only in the statuses the detail names, whatever PDF the document already has: bring the "
+      + "document to that status first (for most documents, complete it), then ask again.";
   private static final String KEY_SENT = "sent";
   private static final String KEY_PDF = "pdf";
   private static final String KEY_READY = "ready";
@@ -115,7 +127,19 @@ final class McpDocumentEmailTool {
       SFEntity entity = McpAttachmentTools.rootEntityOf(spec, args);
       NeoAttachmentTarget target = NeoAttachmentTarget.resolve(spec, entity, request.getId(),
           true);
-      NeoDocumentPdf.Result pdf = NeoDocumentPdf.resolve(target, entity);
+      // ETP-6013: the status decides before the PDF does, for the preview too: a reactivated
+      // document still has the PDF of when it was completed, and that must not make it sendable.
+      Optional<String> notSendable = contract.get().statusRefusal(request.getId(), null);
+      if (notSendable.isPresent()) {
+        return statusRefusal(notSendable.get());
+      }
+      // ETP-6013: a PDF the server renders for this email is in the email's language.
+      String pdfLanguage = StringUtils.defaultIfBlank(request.getLanguage(),
+          McpDocumentEmailRequest.DEFAULT_LANGUAGE);
+      NeoDocumentPdf.Result pdf;
+      try (NeoDocumentPdf.RenderLanguage scope = NeoDocumentPdf.renderLanguage(pdfLanguage)) {
+        pdf = NeoDocumentPdf.resolve(target, entity);
+      }
       return proceed(contract.get(), request, specName, pdf);
     } catch (NeoAttachmentTarget.Refused e) {
       return refusal(e);
@@ -221,8 +245,9 @@ final class McpDocumentEmailTool {
     if (pdf.getStatus() == NeoDocumentPdf.Status.MISSING) {
       problem.put(McpConstants.KEY_HINT, missingHint(pdf));
     } else if (pdf.getStatus() == NeoDocumentPdf.Status.STALE) {
-      problem.put(McpConstants.KEY_HINT, "Open the document's preview in the application so its "
-          + "PDF is refreshed, then ask to send again. " + PREVIEW_STORES_NOTHING);
+      problem.put(McpConstants.KEY_HINT, McpDocumentPdfTool.JUST_COMPLETED_HINT
+          + "Otherwise open the document's preview in the application so its PDF is refreshed, "
+          + "then ask to send again. " + PREVIEW_STORES_NOTHING);
     }
     return problem;
   }
@@ -233,8 +258,8 @@ final class McpDocumentEmailTool {
     if (pdf.isDraft()) {
       return DRAFT_SEND_HINT;
     }
-    String advice = "Open the document's preview in the application so its PDF is stored, then "
-        + "ask to send again";
+    String advice = McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise open the document's preview "
+        + "in the application so its PDF is stored, then ask to send again";
     return (documentStatus == null ? advice + " (a draft never stores a PDF: complete it first). "
         : advice + ". ") + PREVIEW_STORES_NOTHING;
   }
@@ -286,6 +311,17 @@ final class McpDocumentEmailTool {
     return specs;
   }
 
+  /**
+   * A send refused by the document's status (ETP-6013): the contract's translated sentence, with the
+   * status of the backend refusal ({@link DefaultDocumentSendEmailContract#STATUS_NOT_SENDABLE}).
+   */
+  private static JSONObject statusRefusal(String detail) throws JSONException {
+    JSONObject body = error(DefaultDocumentSendEmailContract.STATUS_NOT_SENDABLE,
+        McpConstants.ERROR_CONFLICT, detail, STATUS_HINT);
+    body.put(KEY_SENT, false);
+    return body;
+  }
+
   /** A target refusal as the error envelope, worded for SENDING a document. */
   private static JSONObject refusal(NeoAttachmentTarget.Refused refused) throws JSONException {
     int status = refused.getStatus();
@@ -296,7 +332,11 @@ final class McpDocumentEmailTool {
       hint = "This role cannot send this document: sending needs write access to its window.";
     } else if (status == McpConstants.STATUS_METHOD_NOT_ALLOWED) {
       code = McpConstants.ERROR_METHOD_NOT_ALLOWED;
-      hint = "The application gives this document type no PDF to send.";
+      // ETP-6013: a send authorizes as an attachment write (the application stores the PDF first).
+      hint = refused.isReadOnly()
+          ? "The attachments of this document type are read-only through this API, so it cannot "
+              + "be sent from here."
+          : "The application gives this document type no PDF to send.";
     } else if (status == McpConstants.STATUS_NOT_FOUND) {
       code = McpConstants.ERROR_NOT_FOUND;
       hint = "Check the id with etendo_list: it must be a record of this spec that you can see.";

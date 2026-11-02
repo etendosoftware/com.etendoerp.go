@@ -1402,9 +1402,29 @@ classification.)
   column of the record's table whose reference list holds both the draft status (`DR`) and the target
   status (the action's own list never holds `DR`); two candidates count as ambiguous.
   `DocActionIdempotency`.
-- Both changes live in `NeoProcessService.executeDbProcedure`, which MCP (`etendo_action`) also
-  reaches, so both channels behave the same; MCP reads `status >= 400` and the flat body, so the
-  422 needs no change there.
+- **Reactivate on a draft is refused before the procedure (ETP-6013).** `RE` on a record whose
+  document status is `DR` answers the same `422 business_rule` envelope as a procedure refusal,
+  with `messageKeys:["ETGO_ReactivateOnlyCompleted"]` and the sentence in the request language
+  (`NeoMessageText`; `{0}` the record's `DocumentNo`, or its identifier when the table has none;
+  `{1}` the status name from the document status lists, `DocumentStatusLabel`):
+  "PC1000015 está en Borrador: Reactivar solo aplica a documentos Completados." /
+  "PC1000015 is Draft: Reactivate only applies to Completed documents.". Before it, the core
+  procedure answered `ActionNotSupported` ("Esta acción no se puede sostener"), which explains
+  nothing. Nothing is written on the record and the procedure is not called. The status column is
+  found with the same structural lookup as above (list holding `DR` and `CO`); undecidable (no or
+  several columns, a missing record, a failing lookup) runs the procedure as before.
+  **Only the draft status is decided**, not "anything but `CO`": a voided sales quotation is
+  reactivated by design (ETP-5704, its pre-hook refuses every other status with its own message,
+  and that pre-hook runs first), so "not completed" is not a structural rule. Closed/voided orders
+  and invoices still get the procedure's own refusal. Decided on the request's root `docAction`
+  (exact `RE`, the value written on the record). `DocActionReactivationRule`.
+  The GO app never offers Reactivate on a draft (row action and form gated on `CO`); the only UI
+  path that can send it is the bulk "Procesar" over a mixed draft+completed selection with
+  "Reactivar" chosen, where a draft row already failed and now fails with this sentence instead.
+- All three live in `NeoProcessService.executeDbProcedure`, which MCP (`etendo_action`, and each
+  document of `etendo_action_batch`, where it is that document's `ok:false` result while the
+  others carry on) also reaches, so every channel behaves the same; MCP reads `status >= 400` and
+  the flat body, so the 422 needs no change there. No divergence to declare in §4.12.9.
 
 ### 4.4 Selectors (FK Dropdowns)
 
@@ -4466,14 +4486,15 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | document actions over several documents (ETP-5715) | one document per call (`etendo_action`), one transaction, the call's own answer | `etendo_batch` is **create-only and atomic**; it has no ACTION surface | **`etendo_action_batch` is neither: per-document, NOT atomic, capped at 50 ids**, one result per document. Each document runs the `etendo_action` path in its own transaction (commit on success, rollback and a clean session on failure) and the batch carries on after a failure. REST has no equivalent call: the SPA's list toolbar posts one request per record. **Aligned with the SPA (bulk bar, row kebab, form kebab) and the same in single `etendo_action`:** reactivating a *posted* invoice or amortization un-posts it first, on the server (ETP-5684; goods documents, returns and journals do not), §4.12.36. **Not aligned, on purpose:** concurrency, the client-side `rowFilter` omission, and the SPA clone dialog stopping at the first failure. Declared in §4.12.36 |
 | attachments of a document — **read authorization and parent ownership** (ETP-5715) | `GET /sws/neo/attachments/{table}/{record}` and `/file/{id}` check **nothing** about the parent: no client/organization ownership, no window-access tier for a read, no existence check on a download (ADR-0003 is still "Proposed", ETP-4570). Writes check only the window-access tier of *a* window that shows the table (`NeoAttachmentAuthorizer`, ETP-5205) | **enforced, on every operation** (`etendo_request_attachment_upload`, `etendo_list_attachments`, `etendo_delete_attachment`; §4.12.37): the role must have access to the **spec** (read tier to list, write tier to upload and delete), the record must exist and belong to a client AND organization the session reads (`TenantOwnership`), a missing and a foreign record answer the same `404`, and an attachment id must belong to **that** record (a bare id of another document is the same `404` as an unknown one) | the MCP does not inherit a gap the platform is about to close. Until ETP-4570 lands in REST, a REST caller can still list/download/delete the attachments of another tenant's record by id; the MCP cannot. **Do not "fix" this by relaxing the MCP side** |
 | attachments on windows the SPA gives no Attachments tab (ETP-5715) | REST serves attachments of any table | **refused `405`** on the spec whose root entity carries `MCP_CONFIG.attachments.enabled:false` (the nine windows with `attachments:false` in `decisions.json`); parity with the SPA is enforced, REST is not changed | the MCP must not offer what the application hides; see §4.12.37 |
+| attachments of a type declared read-only for the MCP (ETP-6013) | REST serves and accepts attachments of any table (writes gated by the window-access tier only) | on the spec whose root entity carries `MCP_CONFIG.attachments.readOnly:true` (today `tax`), list and download work and **every write is refused `405`** with the declared, translated `messageKey` ("Los impuestos no se pueden modificar.") before any record lookup; REST is not changed | a product decision for the agent surface, not an SPA parity rule; see §4.12.37 |
  | attachment writes — organization (ETP-5715) | upload/delete do not check that the record's organization is writable by the role | **required** (`getWritableOrganizations`); a readable-only organization is the same `404` | as the row above |
 | attachment upload (ETP-5715) | multipart `POST` with the caller's bearer token | a **single-use link** (`PUT /sws/neo/attachment/upload/{token}`, no bearer: the token is the credential) bound to session, role, document, file name and the main flag; the upload runs **as the session that asked for the link** and the document is authorized again at upload time | the bytes must not pass through the conversation; the validation and the storage are the SAME code (`NeoAttachmentStore`) |
-| the PDF of a document (ETP-5715) | REST has no "PDF" operation: the SPA renders it in the browser (jsreport) when the document's preview is opened and stores it as the record's main attachment | `etendo_get_document_pdf` **never renders**: it returns the PDF the application already stored (link + metadata) or a `409` saying there is none (§4.12.38) | the PDF is produced by the front end from the template and the data the browser fetches; a server-side render would be a second renderer to keep identical (five consumption points, `docs/document-printables.md`). Declared so nobody "fixes" the 409 by adding a render |
+| the PDF of a document (ETP-5715, **reversed by ETP-6013**) | REST has no "PDF" operation: the SPA renders it in the browser (jsreport) when the document's preview is opened and stores it as the record's main attachment — unchanged by ETP-6013 | `etendo_get_document_pdf` returns the stored PDF (link + metadata). For an entity that declares `MCP_CONFIG.pdf.print` the **server renders it too, for the MCP only**: after an MCP Complete, and on an MCP request when the stored one is missing or stale (§4.12.38.1). Only when that is not possible (no declaration, read-only tier, a person's own main file, no jsreport, a failed render) does it answer the `409` | ETP-5715 declared "never renders" to avoid a second renderer to keep identical. ETP-6013 renders on the server **without** a second template: the frontend build publishes the exact template, helpers and labels the browser sends to jsreport (`printables/<document>.json`), and only the data builder is ported to Java, with a parity fixture shared by a Vitest and a JUnit test |
 | staleness of the stored PDF (ETP-5715) | the SPA serves a cached PDF only if it is not older than the record (`updated`) or the company branding (`brandingUpdated`) or the bundle that rendered it (`attachmentFreshness.js`); otherwise it **re-renders and re-uploads** | the MCP applies the first two (whole-second, strict, fail-open, the same inputs) to the main attachment of a `rendered` entity — **whatever the file is named**, as `fetchCachedBlob` does — and answers `409 pdf_stale` instead of regenerating; it **cannot** apply the bundle rule (the build epoch lives in the browser), so a PDF rendered by an older template is served as long as the data did not change | a stale PDF must not be handed out as current, and the MCP cannot regenerate; it asks for the preview to be opened again |
 | the uploaded document of a purchase invoice or goods receipt as its "PDF" (ETP-5715) | those windows pass no `recordUpdated`: their main attachment is the counterparty's own file, never judged stale | declared per entity: `MCP_CONFIG.pdf.source:"supplier"` returns the main file as is, never stale, and answers `409 no_pdf` "This document has no supplier document attached." when there is none (§4.12.38) | the main-attachment flag marks both kinds of file; the SPA tells them apart by window (a frontend decision), so the backend must be told. **Rule: a window whose preview shows an uploaded document instead of a rendered one MUST declare `pdf.source:"supplier"`**; `McpConfigSourcedataTest.supplierPdfEntitiesAreDeclared` is the drift guard |
 | a legacy customer file as the PDF of a return material receipt (ETP-5715) | since ETP-5124 the preview renders fresh and never reads the stored file, so a customer file marked main by the retired ETP-4408 upload is invisible there | the window is `rendered`: its main file is returned as "the PDF" when newer than the record, `pdf_stale` when older | the main-attachment flag cannot tell a legacy upload from an emailed copy; declared so it is not mistaken for a bug. The fix is a data check that no such files remain (D18), not code |
 | attachment download (ETP-5715) | `GET /sws/neo/attachments/file/{id}` with a bearer token, no parent check | a signed link (`/sws/neo/document-download/{token}`, the email link's token plus an attachment-id claim), valid **10 minutes**, bound to the record, the client and the attachment | the agent never receives bytes; the email links (7 days, main attachment only) are unchanged |
-| sending a document by email (ETP-5715) | `POST /sws/neo/email-contracts/{window}-send` from the send modal, which first renders the document in the browser and stores that PDF as the record's main attachment, then posts the command | `etendo_send_document_email` posts **the same command** to the **same `TransactionalEmailService`** (same contract checks, throttles, idempotency, suppression, audit rows) but **cannot render**: it refuses with `409 no_pdf` / `pdf_stale` (the `etendo_get_document_pdf` answers) before sending when the record has no current stored PDF (§4.12.39) | the email's "Descargar documento" link serves the record's main attachment when clicked; the server does NOT check it exists (the application guarantees it by caching first), so a send without a PDF would deliver a link that answers 404. The MCP has no render, so the gate is the only safe equivalent |
+| sending a document by email (ETP-5715) | `POST /sws/neo/email-contracts/{window}-send` from the send modal, which first renders the document in the browser and stores that PDF as the record's main attachment, then posts the command | `etendo_send_document_email` posts **the same command** to the **same `TransactionalEmailService`** (same contract checks, throttles, idempotency, suppression, audit rows) and resolves the PDF through the same `NeoDocumentPdf.resolve`: for a declared printable a missing or stale PDF is **rendered on the server first** (ETP-6013, MCP only, §4.12.38.1); otherwise it refuses with `409 no_pdf` / `pdf_stale` (the `etendo_get_document_pdf` answers) before sending (§4.12.39) | the email's "Descargar documento" link serves the record's main attachment when clicked; the server does NOT check it exists (the application guarantees it by caching first), so a send without a PDF would deliver a link that answers 404. Where the server cannot render (§4.12.38.1), the gate is the only safe equivalent |
 | a `DUPLICATE` email (ETP-5715) | the modal shows the duplicate as a **success** toast ("<document> ya fue enviado") and closes | reported as an **error envelope**, `409 email_duplicate`, `sent:false`, "Not sent: an identical email was already sent at <time>" (`previousSentAt`, new additive field of the `DUPLICATE` answer) | nothing is delivered on a duplicate; an agent that read it as success would tell the user a mail is on its way. Every non-`SENT` status (`DUPLICATE`, `THROTTLED`, `SUPPRESSED`, `NO_RECIPIENT`, `PROVIDER_FAILED`, `VALIDATION_FAILED`, `UNAUTHORIZED`) is `sent:false` with the server's status in `emailStatus` |
 | email subject, recipients and message from an agent (ETP-5715) | an operator types them; the server repairs a subject's CR/LF silently and validates an address with a permissive regex | **refused, never repaired**: CR/LF/control characters in an address or the subject, a malformed address (`a..b`, leading/trailing dot, `-` labels, more than 254 characters), more than the contract's recipient cap (10) between `to` and `cc`, a subject over 200 or a message over 5000 characters; no rejected value is echoed back | an agent's text is not an operator's keystrokes; the refusal happens before anything reaches the send path, which re-validates as before (§4.12.39) |
 | the detected supplier number and date of a scanned invoice (ETP-5715) | the review modal has a toggle for each, but the batch builder falls back to the OCR value when the toggle is off (`buildHeaderBody`: `extras.documentNo ?? safe.document_no`), so a user who declines the number or the date still gets them | **respected**: `etendo_extract_invoice_document` offers them as `apply_documentNo` / `apply_invoiceDate` decisions (default `true`, asked of the user) and the `batchTemplate` carries them only as **optional** entries, to be sent only if the user accepted. The SPA's behaviour is deliberately NOT changed | a user's explicit "do not apply" is a decision, not a hint (§4.12.40) |
@@ -12171,6 +12192,27 @@ MCP — and nothing derives one from the other yet: a window that sets `attachme
 implemented, it needs `schema_forge_core`):* have the pusher (`sf-push-neo`) write the section from `window.attachments` so there is a single
 source. The flags are sourcedata (`ETGO_SF_ENTITY.xml`) and reach an instance through `update.database`; no separate SQL is shipped.
 
+**Read-only attachments (ETP-6013).** The same section has a second mode, for a document type whose attachments the MCP may
+list but never change: `{"attachments":{"readOnly":true,"reason":"...","messageKey":"<AD_MESSAGE value>"}}`. Reads
+(`etendo_list_attachments`, the download links) work as on any document; every write — `etendo_request_attachment_upload`
+(link request, staged document, **and** the PUT of an already issued link, which re-authorizes through the same
+`NeoAttachmentTarget`), `etendo_delete_attachment`, and anything else that authorizes as a write on the target (including
+`etendo_send_document_email`, since the application's send stores the PDF as an attachment first) — is refused with
+**`405 method_not_allowed`**, decided from the declaration alone **before** any role or record lookup, so it is a clear
+answer and never the 404 of a record the tenant cannot write. The `detail` is the declared `messageKey` resolved in the
+request language by `NeoMessageText` (`AD_MESSAGE` + the versioned `neo_hints_<lang>.properties` catalog), or
+`ETGO_AttachmentsReadOnly` ("The attachments of this document type cannot be modified." / "Los adjuntos de este tipo de
+documento no se pueden modificar.") when none is declared; the `hint` says the attachments can still be listed. Validation
+(`NeoAttachmentsConfig.validate`): a mode is required (`enabled` boolean, or `readOnly:true`), `readOnly:true` with
+`enabled:false` is a contradiction, `reason` is mandatory, and `messageKey` must be key-shaped (`[A-Za-z][A-Za-z0-9_]*`), never
+prose. Reading stays fail-closed: a `readOnly` that is not the boolean `true`, or contradicted by `enabled:false`, closes
+everything. **Declared on:** `tax` (root entity `tax`, product decision: a tax cannot be modified through the MCP, its
+attachments included) with `messageKey: "ETGO_TaxNotModifiable"` → "Los impuestos no se pueden modificar." / "Taxes cannot be
+modified.". Before this, an upload on a tax answered `404 Record not found` because the tax row is not writable by the
+tenant (`TenantOwnership.isWritableByCurrentTenant`), while the list worked. `readOnly` has no SPA counterpart (the
+application's tab is unchanged); `McpConfigSourcedataTest.attachmentLessWindowsAreDeclared` lists the specs that declare it
+next to the `enabled:false` ones. REST attachments are unchanged (§4.12.9 row).
+
 **Upload flow.** `etendo_request_attachment_upload` answers `{uploadUrl, expiresAt, maxBytes: 10485760, allowedExtensions, spec, entity,
 id, name, main, curlExample, hint}`. Whoever holds the file does `curl -X PUT --upload-file ./factura.pdf "<uploadUrl>"`; no
 `Authorization` header (the 192-bit token is the credential, exactly as for the image link and the email download links, and
@@ -12255,8 +12297,9 @@ request itself; a document of another client → `404 Record not found`, identic
 
 #### 4.12.38 The PDF of a document: `etendo_get_document_pdf` (ETP-5715)
 
-One read-only MCP tool, piece B1 of ETP-5715 stage 2: "give me the PDF of invoice X". It **returns the PDF the application already
-stored; it never renders one.** Reuses piece A (§4.12.37): the document is authorized by `NeoAttachmentTarget` and the file is handed out as
+One read-only MCP tool, piece B1 of ETP-5715 stage 2: "give me the PDF of invoice X". It **returns the PDF the application stored** — and,
+since ETP-6013, for an entity that declares a printable it renders a missing or stale one on the server first (§4.12.38.1; this reverses
+ETP-5715's "never renders"). Reuses piece A (§4.12.37): the document is authorized by `NeoAttachmentTarget` and the file is handed out as
 the same signed, 10-minute attachment link (`att` claim). Emailing a document (B2) and OCR are separate.
 
 **What the SPA does (measured, `tools/app-shell`).** The PDF of a document is rendered **in the browser** (jsreport; `documentPdf.js`,
@@ -12318,9 +12361,9 @@ others.
 | document missing, or of another client/organization | `404 not_found` | `Record not found` (identical for both; never mentions a PDF) |
 | role cannot read the window | `403 forbidden` | access denied |
 | window with no Attachments tab (payments, fiscal monitors) | `405 method_not_allowed` | `Attachments are not available for this document type, as in the application.` |
-| `rendered` entity with no main attachment | `409 no_pdf` | `This document has no PDF yet.` + hint: open the document's preview in the application, or send the document by email (a return receipt's preview stores nothing, only sending it does), and ask again; a draft never stores a PDF: complete it first |
+| `rendered` entity with no main attachment (and no server render possible) | `409 no_pdf` | `This document has no PDF yet.` + hint: if the document was just completed its PDF is being generated, ask again in a few seconds; otherwise open the document's preview in the application, or send the document by email (a return receipt's preview stores nothing, only sending it does), and ask again; a draft never stores a PDF: complete it first |
 | `supplier` entity with no main attachment | `409 no_pdf` | `This document has no supplier document attached.` + hint: attach it as main with `etendo_request_attachment_upload` (`main:true`) |
-| `rendered` main file older than the document or the branding | `409 pdf_stale` | `The stored PDF of this document is out of date…` + hint: ask the user to open the document's preview (or send it by email, where the preview stores nothing) so the application regenerates it |
+| `rendered` main file older than the document or the branding (and no server render possible) | `409 pdf_stale` | `The stored PDF of this document is out of date…` + hint: if the document was just completed, ask again in a few seconds; otherwise ask the user to open the document's preview (or send it by email, where the preview stores nothing) so the application regenerates it |
 | unexpected failure on one document | `500 server_error` | `The PDF of this document could not be looked up.`; in `ids[]` it is that entry only, the others still answer (the exception class is logged, never its message) |
 | lookup failed | `500 server_error` | the helper's message |
 | spec header entity missing / a line entity | `422` | as the attachment tools |
@@ -12341,13 +12384,128 @@ unchanged data is served. A document that was changed by raw SQL does not move `
 
 *Purchases — the supplier's PDF of a purchase invoice:* `etendo_get_document_pdf({spec:"purchase-invoice", id:<invoice id>})` →
 `file:{name:"segundo-documento.pdf", …}` and a link; with no main attachment → `409 no_pdf` and the hint to attach it.
-*Sales — the PDF of a completed sales invoice whose preview was opened:* `etendo_get_document_pdf({spec:"sales-invoice", id})` →
-`file:{name:"<id>.pdf"}` and a link. Never opened → `409 no_pdf`; edited after it was opened → `409 pdf_stale`.
+*Sales — the PDF of a completed sales invoice:* `etendo_get_document_pdf({spec:"sales-invoice", id})` →
+`file:{name:"<id>.pdf"}` (rendered by the preview) or `file:{name:"sales-invoice-<number>.pdf"}` (rendered by the server after Complete or on this
+request) and a link. `409 no_pdf` / `pdf_stale` only when the server cannot render (§4.12.38.1). A document completed in the GO app gets its
+server PDF on this first request.
 *Several:* `etendo_get_document_pdf({spec:"sales-invoice", ids:[a, b, c]})` → one `results` entry each.
 
 **Tests:** `NeoDocumentPdfTest` (the decision and its inputs), `NeoPdfSourceConfigTest` (the section), `McpDocumentPdfToolTest` (answers, errors, bulk, definition), `McpEntityConfigTest` and `McpConfigSourcedataTest` (registration, validation, the declared set), plus the wiring in
 `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`,
 `McpUsageTenantQaTest`, `McpAttachmentToolsTest`.
+
+##### 4.12.38.1 Server-side render of a document's printable — MCP only (ETP-6013)
+
+**Why.** Before ETP-6013 a document's PDF existed only once someone opened its preview (or sent it) in the browser, so
+`etendo_get_document_pdf` and `etendo_send_document_email` answered `409 no_pdf` for every document completed by an agent and never opened.
+The server now renders the **same** printable itself — **for the MCP only**. The GO app is unchanged: a Complete or a preview made in
+the app keeps producing the PDF in the browser exactly as before. Jasper is not an option (ETP-4255) and the Node report server only
+accepts the SPA session cookie, so it is jsreport — what the browser uses.
+
+**One template source.** The backend holds no template. The frontend build publishes, next to the SPA bundle, one manifest per document,
+`<app>/printables/<document>.json` (`tools/app-shell/vite-plugins/printables-publish.js`, from `printableSources.js`, the module the browser
+renders from): Handlebars template, CSS, the `helpers` string, chrome-pdf options and the labels resolved per locale. `NeoPrintableTemplates`
+fetches it (cached 1 minute per document, redirects not followed), fills the three render-time placeholders of the commercial helpers
+(instance thousands/decimal separators from `NeoCurrencyFormatConfig`, exchange-rate precision) exactly as the browser bakes them, and builds
+the browser's jsreport payload (`{template:{content, engine, recipe, helpers, chrome}, data:{css, ...data, labels}}`). `NeoJsreportClient`
+posts it to `<app>/jsreport/api/report` (5 s connect, 30 s render, no redirects; the answer must start with `%PDF-`; on a non-2xx answer only
+the status is kept — jsreport's error body echoes the template and the data).
+
+**Known limit — the manifest cache.** For up to that minute after a frontend deploy a server render may still use the previous manifest. The
+file is written after the new bundle's build instant, so the SPA's bundle-identity check (D16/D17) reads it as fresh and keeps serving the
+previous design until the record or the branding changes again. The short cache keeps the window small; it does not close it.
+
+**The data is a Java port** of each browser builder (`NeoPrintableDataBuilder`), fed by the very NEO reads the browser makes
+(`NeoPrintableReads`: the REST GET pipeline, READ customizations included, in admin mode as `NeoServlet.service` runs), with JavaScript's
+`||` / `??` / `Number()` semantics kept (`NeoPrintableCommons`). Dual-implementation drift is guarded by one fixture per builder shared by
+`printableSources.vitest.js` (runs the real browser builder) and `PrintableDataTest` (runs the port): same input, same expected data.
+The Verifactu QR is encoded with zxing from the stored URL **verbatim** (D1; the browser trims it, the stored value has no blanks), level M,
+laid out like node `qrcode` `{width:400, margin:1}` so it prints at the browser's size; unlike the browser, a QR that fails to generate fails
+the render, so a stored PDF never lacks it.
+
+**Declared per entity, no document names in shared code.** `MCP_CONFIG.pdf` gains `print`:
+
+```json
+{"pdf":{"source":"rendered","print":{"document":"sales-invoice"},"reason":"..."}}
+```
+
+`print.document` is the manifest key and the `NeoPrintableDataBuilder#document()` of the builder that fills it (only with `source:"rendered"`;
+`McpConfigSourcedataTest` lists the declaring entities). No declaration → today's browser-only behaviour. The builder decides the statuses that
+get a stored PDF (`storesFor`, default: completed `CO`; a quotation: any non-draft, as its preview does; a draft never).
+
+**Two triggers, MCP only, one renderer (`NeoPrintableRenderer`).**
+
+1. **Eager, after an MCP Complete** (`NeoPrintAfterComplete`). Called from `McpToolRouter.handleAction` only — `etendo_action`, and
+   `etendo_action_batch`, which runs every document through it. **Not** from the REST action the GO app posts its Complete to. Any successful
+   call of the `DocAction` button on a declaring entity queues a job (ids, the caller's user, role, client and organization, and the
+   MCP's PDF language — see *Language* below); a bounded pool (2 daemon threads,
+   queue 200; overflow is logged and left to the fallback) runs it on its own thread and session and commits its own store. The job is **held
+   until the MCP call has done all its work** (`McpServlet` releases it after writing the answer, `NeoPrintAfterComplete.deferUntilEnd`): a
+   completion may commit mid-call (`ProcessInvoiceUtil`) while the call keeps changing the invoice, and a render started at that first commit
+   stored a PDF already stale (seen live: the invoice's `updated` 4 s after the file). A call that fails drops its held jobs. (The wait covers the final commit only when the call wrote the header row after a mid-call
+   commit; if only child rows change afterwards, the stored PDF can be stale — then the staleness check and the on-request fallback
+   re-render it.) The worker first
+   takes `SELECT … FOR SHARE` on the document's row with a 30 s `lock_timeout`, so it starts **after** the completing transaction commits,
+   whoever commits (the request, the batch's own `commitAndClose`, a `ProcessInvoiceUtil` that committed mid-request); it then reads the
+   committed status, so a Complete or a re-Complete after Reactivate renders and a Reactivate, a Void or a rolled-back action does not.
+2. **Fallback, on MCP request** (`NeoDocumentPdf.resolve`, whose only callers are `McpDocumentPdfTool` and `McpDocumentEmailTool`). When the
+   stored PDF is `MISSING` or `STALE` for a declared printable whose status the builder stores, it hands the render to the same pool and
+   waits for it (at most 40 s): the render runs **isolated** — its own thread, session and commit, never the MCP request's transaction, so a
+   failed store or read cannot roll back or break what the request already did — and the request then reads the committed file. At most 3
+   documents per `etendo_get_document_pdf` call are rendered synchronously; the rest are queued and answer `no_pdf` with "ask again in a few
+   seconds". **This is how documents completed in the GO app, by
+   create-and-complete handlers or in Classic get a server PDF**: on the first MCP request, never before.
+
+**Language — the same rule as the email.** A PDF the server renders through the MCP is printed in **Spanish (`es_ES`) by default**, the
+default of `etendo_send_document_email` (`McpDocumentEmailRequest.DEFAULT_LANGUAGE`, one constant): the eager render after `etendo_action` /
+`etendo_action_batch` and the render of `etendo_get_document_pdf` use it. `etendo_send_document_email` renders in **the email's own language**
+(`language`, `es_ES` when omitted), so an email and the PDF it carries always match. An MCP call carries no `Accept-Language`, so the
+context's language would have been the user's AD default (an `en_US` admin got an English PDF inside a Spanish email). **A stored PDF that is
+current is served as it is, whatever its language** — it is never re-rendered only to change language (kept simple on purpose).
+
+**Never two stores of one document.** A render queued or running in this JVM is joined, not duplicated (the agent's usual "Complete, then ask
+for the PDF" waits for the eager render, bounded at 40 s). Across nodes, every store first takes `pg_advisory_xact_lock` on the document
+(held until its transaction ends) and re-checks the stored PDF; a current one is served instead of stored again.
+
+**Never replaces a person's file.** Storing as main deletes the previous main file, so the renderer stores only when the record has no main
+attachment or its main attachment has a name Etendo gives the PDFs it generates (`<spec>-<documentNo>.pdf`, `<spec>-<id>.pdf`, the
+preview's `<id>.pdf`). Any other main file — a customer's own document marked main — is left untouched and the document gets no server PDF.
+
+**Stored like the SPA's send stores it.** `NeoAttachmentStore` with `markAsMain`, named `<spec>-<documentNo>.pdf` (`buildPreviewFileName`): a
+same-named main file is overwritten in place, an Etendo-named one replaced, so `updatedAt` always moves and both `NeoDocumentPdf` and the
+SPA's `attachmentFreshness` read it as fresh.
+
+**Never against the user or the document.** Read-only tier (D23): a role that cannot write the window and the document's attachments stores
+nothing, so the fallback answers the `409` as before. Supplier-source entities (purchase invoice, goods receipt) never declare `print`. Inert
+when no jsreport / printables location resolves. Every failure is logged under `[print]` with the exception class (and jsreport's HTTP
+status) only — never a message, which may carry record data — and stores nothing.
+
+**Configuration.** Both locations derive from the public app URL (`etendo.go.app.baseUrl` / `ETGO_APP_BASE_URL`): `<app>/jsreport` and
+`<app>/printables`. Local overrides: `etgo.jsreport.url` / `JSREPORT_URL` (e.g. `http://localhost:5488`) and `etgo.printables.url` /
+`ETGO_PRINTABLES_URL` (e.g. `http://localhost:3100/printables`, which `make dev` serves).
+
+**Limits of the on-request render.**
+
+- *Worst case per call.* `etendo_get_document_pdf` renders at most 3 documents synchronously, each waited for at most 40 s, so one call can
+  hold its request (and its database connection) for about 2 minutes in the worst case before answering; the remaining documents are only
+  queued.
+- *A lock held by the request itself.* The worker waits for the document row's lock (`FOR SHARE`, 30 s `lock_timeout`). If the MCP request's
+  own transaction holds that row lock, the worker gives up after 30 s, nothing is stored and the call answers `no_pdf`.
+- *A document number that changed.* The overwrite guard accepts only `<spec>-<current documentNo>.pdf`, `<spec>-<id>.pdf` and `<id>.pdf`. If
+  the document number changed after an earlier server or send store, the old `<spec>-<oldNo>.pdf` no longer matches: the guard refuses
+  (`FOREIGN_MAIN`) and the call answers `no_pdf`. Deliberately on the safe side — an unrecognized main file is never deleted.
+
+**A few seconds.** The eager render runs right after the commit, so an agent that asks for the PDF in its very next call joins it or, past
+the wait, gets `no_pdf` / `pdf_stale` with the hint to ask again in a few seconds.
+
+**Scope.** Commercial family: `sales-invoice/header` (`SalesInvoicePrintableData`), `sales-order/header` and `purchase-order/header`
+(`SalesOrderPrintableData` / `PurchaseOrderPrintableData` on `OrderPrintableData`, the port of `buildOrderData`) and `sales-quotation/quotation`
+(`QuotationPrintableData`). Orders and quotations follow the **print** path (`documentPdfRegistry.js`: no `currencyData`, so no exchange-rate
+row). Movement family (its own template per document, no prices, D9): `goods-shipment/goodsShipment`,
+`return-to-vendor-shipment/returnToVendorShipment` and `return-material-receipt/returnMaterialReceipt` (`ShipmentPrintableData`,
+`ReturnToVendorPrintableData`, `ReturnReceiptPrintableData` on `MovementPrintableData`, which reads the header's `issuerOrg` READ enrichment like
+the browser). The return material receipt is safe with D18 thanks to the rule above: a receipt whose main file is the customer's own document
+simply gets no server PDF.
 
 #### 4.12.39 Sending a document by email: `etendo_send_document_email` (ETP-5715)
 
@@ -12408,12 +12566,37 @@ small classes (`McpDocumentEmailTool`, `McpDocumentEmailRequest`, `McpDocumentEm
   must exist and belong to a client and readable organization (the same `404 not_found` for missing and foreign, `403 forbidden` for a role without write,
   `405` for a window with no Attachments tab), then the contract's own `authorize` inside the send path. A document the contract cannot resolve
   (e.g. a sales order id passed as `purchase-order`) is the same `404`.
-- **The PDF gate wording.** The 409 status and codes are `etendo_get_document_pdf`'s; the hint is the email tool's own ("open the document's preview in the application so its PDF is stored (or refreshed), then ask to send again"), because that tool's "or send it by email" is circular here. The closing sentence (a window whose preview stores nothing, a return receipt, needs its first send done from the application) is generic and true for every window: no declared property tells the backend which windows those are, and a spec literal is not allowed in shared code.
+- **The status gate (ETP-6013).** Right after the document's authorization and **before the PDF is looked at** — for the
+  preview and for the send — the document's `DocStatus` is checked against the rule its send contract declares
+  (`DefaultDocumentSendEmailContract#isSendableStatus`, per contract, no spec named in shared code): **only `CO`** for
+  `sales-invoice`, `sales-order`, `purchase-order`, `goods-shipment`, `return-to-vendor`, `return-material-receipt` and
+  `return-to-vendor-shipment` (the default), **any status but `DR`** for `sales-quotation` (`SalesQuotationSendEmailContract`
+  overrides it) — exactly where the SPA offers "Enviar" (`isCompleted` / `documentStatus === 'CO'` in the windows'
+  `*SecondaryActions.jsx`, preview and row action; `status !== 'DR'` in `QuotationSecondaryActions.jsx`). A refused document
+  answers **`409 conflict`**, `sent:false`, nothing sent, and the refusal **wins over `no_pdf`/`pdf_stale`**: a document
+  completed, printed and then reactivated keeps its old PDF, so the PDF alone would have let it through. The `detail` is the
+  contract's `AD_MESSAGE` in the request language (`NeoMessageText`, `neo_hints_<lang>.properties`), `{0}` the document number
+  and `{1}` the status name from the document status lists (`AD_Ref_List_Trl`): `ETGO_EmailOnlyCompleted` — "1000123 está en
+  Borrador: el envío por correo solo aplica a documentos Completados." / "1000123 is Draft: sending by email only applies to
+  Completed documents."; `ETGO_EmailNotForDraft` (quotation) — "… está en Borrador: el envío por correo no aplica a documentos
+  en Borrador." / "… is Draft: sending by email does not apply to Draft documents.". **The same rule is enforced on the
+  backend contract path**, so it holds for every channel: `DefaultDocumentSendEmailContract#authorize` refuses a send by
+  status with `409` (`VALIDATION_FAILED` in the service's answer, message in the command's `language`) after the write tier
+  and the document lookup, for the SPA's `POST /sws/neo/email-contracts/{window}-send` exactly as for the MCP. The status comes
+  from the document resolvers (`EmailDocumentRecord#getDocumentStatus`, filled by every `Dal*EmailDocumentResolver`); a
+  resolver that reports none applies no rule. No UI change: the SPA never offers the send in a refused status, so it never
+  receives the 409 — no divergence to declare in §4.12.9. **Language of the refusal:** the MCP answers in the **request
+  language** (the session's GO locale, `NeoLanguage.currentCode()`), because the sentence is for the user talking to the
+  agent; the MCP's `language` argument is the language of the email copy, not of the answer. The REST contract
+  (`authorize`) answers in the command's `language` field, which the SPA fills with its UI locale (falling back to the
+  request language when the command carries none).
+- **The PDF gate wording.** The 409 status and codes are `etendo_get_document_pdf`'s; the hint is the email tool's own ("if the document was just completed, its PDF is being generated: ask again in a few seconds. Otherwise open the document's preview in the application so its PDF is stored (or refreshed), then ask to send again", ETP-6013), because that tool's "or send it by email" is circular here. The closing sentence (a window whose preview stores nothing, a return receipt, needs its first send done from the application) is generic and true for every window: no declared property tells the backend which windows those are, and a spec literal is not allowed in shared code.
 - **The no-PDF hint depends on the document's state** (both PDF tools; `NeoDocumentPdf.Result#getDocumentStatus` / `isDraft`, read only for a MISSING PDF, after the document's authorization, in admin mode with the previous mode restored). The status is read **structurally**: the entity's status property is the one whose AD column uses a *document status* list as its reference value (`AD_Reference` `131` All_Document Status — invoices, receipts, shipments — and `FF80818130217A350130218D802B0011` Order_Document Status — the order windows; the order windows use their own list, so `131` alone would have left them without the draft advice). The column and the DAL property may be called anything. Draft is `DR`, the `AD_Ref_List` value of both lists. No column, more than one, an inactive one, no value or any failure leaves the status unknown and the hint generic. A draft gets only "This document is a draft and a draft never stores a PDF: complete it first, then open its preview in the application and ask again."; a document with another status gets the preview advice without the draft remark; unknown keeps the generic text.
 - **Explicit `null` arguments.** An explicit `null` for `subject`, `message` or `language` is `422`, like `preview` (omit the argument instead); `to`/`cc` `null` is still read as omitted.
-- **The PDF gate.** After authorization and before sending, `NeoDocumentPdf` decides: found and current continues; missing is `409 no_pdf`, stale is
-  `409 pdf_stale`, with the answers and hints `etendo_get_document_pdf` gives (open the document's preview in the application, or send it from there),
-  plus `sent:false`. A return material receipt's preview stores nothing (D18), so it can only be sent from the application first.
+- **The PDF gate.** After authorization and before sending, `NeoDocumentPdf` decides: found and current continues; for a declared printable a
+  missing or stale PDF is first rendered on the server (ETP-6013, §4.12.38.1) and the send continues with it; otherwise missing is `409 no_pdf`,
+  stale is `409 pdf_stale`, with the answers and hints `etendo_get_document_pdf` gives (right after a Complete, ask again in a few seconds;
+  otherwise open the document's preview in the application, or send it from there), plus `sent:false`. A return material receipt's preview stores nothing (D18), so it can only be sent from the application first.
 - **Outcomes.** Only `SENT` is `{sent:true, status:"SENT", spec, id, to, cc, detail, hint}`. Everything else is an error envelope with `sent:false` and
   `emailStatus`: `DUPLICATE` `409 email_duplicate` ("Not sent: an identical email was already sent at <ISO time>", `previousSentAt`);
   `THROTTLED` `429 email_throttled` (`retryAfterSeconds`, `throttleScope`); `SUPPRESSED` `403 email_suppressed`; `NO_RECIPIENT` `422 email_no_recipient`;
