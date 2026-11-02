@@ -17,7 +17,10 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
@@ -118,6 +121,133 @@ final class BankStatementLineSet {
     crit.setMaxResults(1);
     List<FIN_BankStatementLine> top = crit.list();
     return top.isEmpty() ? 0L : top.get(0).getLineNo();
+  }
+
+  /**
+   * What an unmatched line carries that a delete-and-recreate must not lose (ETP-5581): the bank's
+   * transaction id (without it the next PSD2 synchronization imports the movement a second time),
+   * the PSD2 discard flag and button, and the bounce-pair link of this module. Plain values only:
+   * the line it was read from is deleted before they are written back.
+   *
+   * @param transactionIdentifier the PSD2 transaction id, or {@code null}
+   * @param discarded             the PSD2 discard flag
+   * @param discardButton         the PSD2 Discard / Restore button value
+   * @param pairLineId            the id of the bounce-pair counterpart, or {@code null}
+   * @param bounceDiscardedAt     when the pair was discarded, or {@code null}
+   * @param bounceSignal          the pair's primary signal, or {@code null}
+   * @param bounceConfidence      the pair's confidence, or {@code null}
+   */
+  record BankIdentity(String transactionIdentifier, boolean discarded, String discardButton,
+      String pairLineId, Date bounceDiscardedAt, String bounceSignal, String bounceConfidence) {
+
+    /**
+     * Whether there is nothing to keep.
+     *
+     * @return {@code true} for a line with no bank id, no discard and no pair
+     */
+    boolean isEmpty() {
+      return transactionIdentifier == null && !discarded && pairLineId == null;
+    }
+  }
+
+  /**
+   * The {@link BankIdentity} of every UNMATCHED line of {@code statement} that has something to
+   * keep, by line id — i.e. of exactly the lines {@link #deleteUnmatched} is about to remove.
+   * {@code ?action=update} reads it before deleting, so a rebuilt line that carries its old
+   * {@code "id"} gets it back (reused from the first iteration, commit {@code 1a5140cb9}, without
+   * its ignored-transactions registry, which no longer exists).
+   *
+   * @param statement the statement being edited
+   * @return the identities by old line id
+   */
+  static Map<String, BankIdentity> bankIdentitiesOfUnmatched(FIN_BankStatement statement) {
+    OBCriteria<FIN_BankStatementLine> crit = linesOf(statement);
+    crit.add(Restrictions.isNull(FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION));
+    Map<String, BankIdentity> identities = new HashMap<>();
+    for (FIN_BankStatementLine line : crit.list()) {
+      Object pair = StatementLineDiscard.get(line, BankBouncePairService.COL_PAIR_LINE);
+      Object button = StatementLineDiscard.get(line, StatementLineDiscard.COL_DISCARD_LINE);
+      BankIdentity identity = new BankIdentity(StatementLineDiscard.transactionIdentifier(line),
+          StatementLineDiscard.isDiscarded(line), button != null ? button.toString() : null,
+          pair instanceof FIN_BankStatementLine ? ((FIN_BankStatementLine) pair).getId() : null,
+          (Date) StatementLineDiscard.get(line, BankBouncePairService.COL_DISCARDED_AT),
+          (String) StatementLineDiscard.get(line, BankBouncePairService.COL_SIGNAL),
+          (String) StatementLineDiscard.get(line, BankBouncePairService.COL_CONFIDENCE));
+      if (!identity.isEmpty()) {
+        identities.put(line.getId(), identity);
+      }
+    }
+    return identities;
+  }
+
+  /**
+   * Gives a rebuilt line back what the line it replaces carried: the PSD2 transaction id, the
+   * discard flag and button (written as captured, so they stay in sync as PSD2 keeps them) and the
+   * bounce signal, confidence and discard time. The pair link itself is restored afterwards by
+   * {@link #relinkBouncePairs}, once every line has its new id. No-op when {@code identity} is
+   * {@code null} (the body line is new, or its old line had nothing to keep). Not saved.
+   *
+   * @param line     the rebuilt line
+   * @param identity what its old line carried, or {@code null}
+   */
+  static void restoreBankIdentity(FIN_BankStatementLine line, BankIdentity identity) {
+    if (identity == null) {
+      return;
+    }
+    if (identity.transactionIdentifier() != null) {
+      StatementLineDiscard.set(line, StatementLineDiscard.COL_TRANSACTION_IDENTIFIER,
+          identity.transactionIdentifier());
+    }
+    if (identity.discarded() && StatementLineDiscard.isSupported()) {
+      StatementLineDiscard.set(line, StatementLineDiscard.COL_IS_DISCARDED, true);
+      StatementLineDiscard.set(line, StatementLineDiscard.COL_DISCARD_LINE,
+          identity.discardButton() != null ? identity.discardButton()
+              : StatementLineDiscard.BUTTON_DISCARDED);
+    }
+    if (identity.pairLineId() != null) {
+      StatementLineDiscard.set(line, BankBouncePairService.COL_DISCARDED_AT,
+          identity.bounceDiscardedAt());
+      StatementLineDiscard.set(line, BankBouncePairService.COL_SIGNAL, identity.bounceSignal());
+      StatementLineDiscard.set(line, BankBouncePairService.COL_CONFIDENCE,
+          identity.bounceConfidence());
+    }
+  }
+
+  /**
+   * Restores the bounce-pair links of the rebuilt lines, now that each has its new id. A pair whose
+   * two lines were both rebuilt is linked between the new lines. A pair whose counterpart lives in
+   * another statement (still there, its link set to null by the foreign key when the old line was
+   * deleted) is linked again in both directions. A counterpart that no longer exists leaves the
+   * rebuilt line discarded with no link, as a deleted counterpart always does. Saved, not flushed.
+   *
+   * @param identities    what the deleted lines carried, by old id
+   * @param rebuiltByOldId the rebuilt lines, by the old id their body line carried
+   */
+  static void relinkBouncePairs(Map<String, BankIdentity> identities,
+      Map<String, FIN_BankStatementLine> rebuiltByOldId) {
+    for (Map.Entry<String, FIN_BankStatementLine> rebuilt : rebuiltByOldId.entrySet()) {
+      BankIdentity identity = identities.get(rebuilt.getKey());
+      if (identity == null || identity.pairLineId() == null) {
+        continue;
+      }
+      FIN_BankStatementLine counterpart = rebuiltByOldId.get(identity.pairLineId());
+      boolean counterpartKept = counterpart == null;
+      if (counterpartKept) {
+        // tenant-ok: the id was read off a line of the caller's own, tenant-resolved statement
+        counterpart = OBDal.getInstance().get(FIN_BankStatementLine.class, identity.pairLineId());
+      }
+      if (counterpart == null) {
+        continue;
+      }
+      StatementLineDiscard.set(rebuilt.getValue(), BankBouncePairService.COL_PAIR_LINE,
+          counterpart);
+      OBDal.getInstance().save(rebuilt.getValue());
+      if (counterpartKept) {
+        StatementLineDiscard.set(counterpart, BankBouncePairService.COL_PAIR_LINE,
+            rebuilt.getValue());
+        OBDal.getInstance().save(counterpart);
+      }
+    }
   }
 
   /** Queues the removals and flushes once, as the original per-method loops did. */

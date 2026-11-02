@@ -59,6 +59,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.dao.TransactionsDao;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.advpaymentmngt.utility.APRM_MatchingUtility;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
@@ -70,6 +71,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
@@ -105,7 +107,10 @@ import org.openbravo.model.project.Project;
  *   <tr>
  *     <td>{@code GET ?action=pendingLines&accountId=X}</td>
  *     <td>Unmatched bank-statement lines (panel left). Optional filters
- *         {@code status}, {@code dateFrom}, {@code dateTo}, {@code q}.</td>
+ *         {@code status}, {@code dateFrom}, {@code dateTo}, {@code q}. Lines a
+ *         {@code BankStatementLineFilterHook} excludes (PSD2's discarded lines) are left out,
+ *         counted in {@code counts.discarded}, and listed alone with
+ *         {@code status=discarded} (ETP-5581).</td>
  *   </tr>
  *   <tr>
  *     <td>{@code GET ?action=candidates&accountId=X&lineId=Y}</td>
@@ -127,7 +132,16 @@ import org.openbravo.model.project.Project;
  *     <td>{@code POST action=applySuggestions}</td>
  *     <td>Commits the accepted groups from {@code autoMatch}. Creates GL-item
  *         payments when required by a rule and reconciles. Body: {@code
- *         { financialAccountId, groups:[{ statementLineId, operationIds:[], createPayment? }] }}.</td>
+ *         { financialAccountId, groups:[{ statementLineId, operationIds:[], createPayment? }] }}.
+ *         A {@code {kind:"bouncePair", statementLineId, counterpartLineId}} group discards a
+ *         bounce pair instead ({@link BankBouncePairService}, ETP-5581).</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code POST action=discardPair} / {@code POST action=restorePair}</td>
+ *     <td>Discards a bounce pair ({@code { financialAccountId, statementLineId,
+ *         counterpartLineId }}, behind the {@code bank-bounce-suggestions} flag) or restores the
+ *         pair of a line ({@code { financialAccountId, lineId }}, not gated). See
+ *         {@link BankBouncePairService}.</td>
  *   </tr>
  * </table>
  *
@@ -173,6 +187,8 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String ACTION_REMOVE_OPERATION = "removeOperation";
   private static final String ACTION_REACTIVATE_SELECTED = "reactivateSelected";
   private static final String ACTION_RECONCILE_DIFFERENCE = "reconcileDifference";
+  private static final String ACTION_DISCARD_PAIR = BankBouncePairService.ACTION_DISCARD_PAIR;
+  private static final String ACTION_RESTORE_PAIR = BankBouncePairService.ACTION_RESTORE_PAIR;
 
   /** One route of the {@code ?action=} dispatcher. */
   @FunctionalInterface
@@ -206,7 +222,11 @@ public class ReconciliationHandler implements NeoHandler {
       Map.entry(METHOD_POST + " " + ACTION_REACTIVATE_SELECTED,
           ReconciliationHandlerSupport::handleReactivateSelected),
       Map.entry(METHOD_POST + " " + ACTION_RECONCILE_DIFFERENCE,
-          ReconciliationHandlerSupport::handleReconcileDifference));
+          ReconciliationHandlerSupport::handleReconcileDifference),
+      // ETP-5581: bounce pairs. discardPair is gated by bank-bounce-suggestions inside the
+      // service; restorePair is not, so a pair can always be undone.
+      Map.entry(METHOD_POST + " " + ACTION_DISCARD_PAIR, BankBouncePairService::handleDiscardPair),
+      Map.entry(METHOD_POST + " " + ACTION_RESTORE_PAIR, BankBouncePairService::handleRestorePair));
 
   /** Match level recorded on the reconciliation lines produced by this handler. */
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
@@ -456,6 +476,7 @@ public class ReconciliationHandler implements NeoHandler {
     // The status parameter is no longer used to filter at SQL level: every line is returned with
     // its computed `state` and the per-state `counts`, and the frontend filters client-side. This
     // keeps the matching engine running once per panel load instead of once per filter change.
+    // The one exception is status=discarded (ETP-5581), handled after the query below.
     String descExpr = descriptionExpr();
     StringBuilder sql = new StringBuilder(String.format(PENDING_LINES_SQL, descExpr));
     if (StringUtils.isNotBlank(dateFrom)) {
@@ -537,11 +558,31 @@ public class ReconciliationHandler implements NeoHandler {
       }
     }
 
+    // ETP-5581: the lines a BankStatementLineFilterHook excludes from reconciliation (PSD2's
+    // discarded lines) are split off HERE, in Java, and PENDING_LINES_SQL stays as it is: the
+    // exclusion is an HQL condition the hooks contribute, which this native query cannot run, so
+    // their ids are read once through the hook (StatementLineFilter, not gated by any flag). By
+    // default they are left out of `lines`, `total` and every count except `counts.discarded`;
+    // status=discarded answers with only them.
+    Set<String> discardedIds =
+        StatementLineFilter.excludedLineIds(account, Usage.MATCH_STATEMENT_GRID);
+    JSONArray[] split = StatementLineFilter.splitRows(rawLines, discardedIds);
+    if (StatementLineFilter.STATUS_DISCARDED.equals(filterMap.get(KEY_STATUS))) {
+      JSONObject discardedData = StatementLineFilter.discardedLinesData(split[1]);
+      discardedData.put("draftReconciliationCount", ReactivationSupport.draftCount(account));
+      return envelope(discardedData);
+    }
     // Collapse the split sub-lines of a 1:N reconciliation into a single line, so a group shows as
     // one reconciled entry (same as the imported-statements view) instead of N separate sub-lines.
-    JSONArray lines = BankStatementsSupport.mergeMatchGroups(rawLines);
-    JSONObject data = ReconciliationHandlerSupport.summarizePendingLines(
-        lines, account, rules, pendingDateTolDays, pendingAmtTolPct);
+    JSONArray lines = BankStatementsSupport.mergeMatchGroups(split[0]);
+    // ETP-5581: bounce pairs (state `bounce`, the `bouncePair` row annotation, `counts.bounce`),
+    // only with the bank-bounce-suggestions flag on; with it off the panel is unchanged.
+    BankBounceSuggestions.Plan bounces = BankBounceSuggestions.plan(
+        BankBounceSuggestionsFlag.isEnabled(), account, () -> loadPendingLines(accountId),
+        pendingDateTolDays);
+    JSONObject data = ReconciliationHandlerSupport.summarizePendingLines(lines, account, rules,
+        pendingDateTolDays, pendingAmtTolPct, BankBounceSuggestions.panelView(bounces));
+    data.getJSONObject(KEY_COUNTS).put(StatementLineDiscard.KEY_DISCARDED, split[1].length());
     // How many reconciliations of this account are currently in draft. Core allows only ONE editable
     // reconciliation per account, so a non-zero value means a "Reactivar" will first CONFIRM that
     // draft — the UI warns about it up front, in the confirm dialog, instead of after the fact.
@@ -943,6 +984,13 @@ public class ReconciliationHandler implements NeoHandler {
     if (isOnDraftStatement(line)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ON_DRAFT_STATEMENT);
     }
+    // ETP-5581: a line a BankStatementLineFilterHook excludes (PSD2's discarded lines) is never
+    // reconciled — the hook's contract. Same place as the draft-statement guard, before any write.
+    NeoResponse discarded =
+        StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
+    if (discarded != null) {
+      return discarded;
+    }
     // ETP-5472: the client-supplied operations are checked BEFORE any invoice is paid, so an
     // unknown, foreign or already-reconciled id is refused before a payment exists. Only the
     // per-operation half: the sum/sign check below needs the invoice transactions.
@@ -1047,6 +1095,12 @@ public class ReconciliationHandler implements NeoHandler {
 
     // Collect all pending lines for this account.
     List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId);
+    // ETP-5581: bounce pairs, only with the bank-bounce-suggestions flag on (Plan.NONE otherwise).
+    // A high-confidence pair reserves its two lines BEFORE transaction matching: the loop skips
+    // them, so a line proposed as a bounce is never proposed for reconciliation too.
+    BankBounceSuggestions.Plan bounces = BankBounceSuggestions.plan(
+        BankBounceSuggestionsFlag.isEnabled(), account, () -> pendingLines, autoDateTolDays);
+    Set<String> reservedForBounces = bounces.reservedLineIds();
 
     JSONArray groups = new JSONArray();
     Set<String> usedTxnIds = new HashSet<>();
@@ -1058,6 +1112,9 @@ public class ReconciliationHandler implements NeoHandler {
     int willCreate = 0;
 
     for (FIN_BankStatementLine line : pendingLines) {
+      if (reservedForBounces.contains(line.getId())) {
+        continue;
+      }
       // Pass 1 (1:1): standard algorithm — uses lazy evaluation so findSignalGroup is not called
       // when a 1:1 match is already found, avoiding an unnecessary DB query.
       Set<String> suggested =
@@ -1082,13 +1139,18 @@ public class ReconciliationHandler implements NeoHandler {
     kpis.put("groupsFound", groups.length());
     kpis.put("opsToLink", opsToLink);
     kpis.put("willCreate", willCreate);
+    int transactionGroups = groups.length();
+    // ETP-5581: tags every transaction group kind:"transaction", then appends the bounce pairs
+    // (the review ones only when no line of theirs was taken above) and kpis.bouncePairs. A no-op
+    // with the flag off. groupsFound and the telemetry keep counting transaction groups only.
+    BankBounceSuggestions.appendGroups(bounces, groups, kpis);
 
     JSONObject data = new JSONObject();
     data.put("account", accountId);
     data.put("kpis", kpis);
     data.put(KEY_GROUPS, groups);
     ReconciliationKpiTelemetry.emitBankMatchAttempted(
-        pendingLines.size(), groups.length(), opsToLink);
+        pendingLines.size(), transactionGroups, opsToLink);
     return envelope(data);
   }
 
@@ -1143,8 +1205,17 @@ public class ReconciliationHandler implements NeoHandler {
     }
 
     JSONArray results = new JSONArray();
+    // ETP-5581: the {kind:"bouncePair"} groups are validated and discarded FIRST, in this same
+    // request transaction (refused with a 403 per group when bank-bounce-suggestions is off). The
+    // lines they discard join takenLineIds, the set the transaction groups are prepared against,
+    // so a line checked in two groups is refused the second time with a 409.
+    Set<String> takenLineIds = new HashSet<>();
+    int bounceGroups = BankBouncePairService.applyPairs(this, account, groupsJson, takenLineIds,
+        results);
+    int bounceResults = results.length();
     List<PreparedGroup> prepared = new ArrayList<>();
-    ReconciliationFlowSupport.prepareAllGroups(this, account, groupsJson, prepared, results);
+    ReconciliationFlowSupport.prepareAllGroups(this, account, groupsJson, prepared, results,
+        takenLineIds);
 
     // Matching every prepared group into the shared reconciliation and processing it once lives in
     // ReconciliationHandlerSupport — extracted so this method's cognitive complexity stays under the
@@ -1161,8 +1232,10 @@ public class ReconciliationHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put("applied", results.length());
     data.put("results", results);
+    // Transaction groups only, as before ETP-5581: the bounce pairs are not reconciliation matches.
     ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(
-        groupsJson.length(), results.length(), successfulGroups[0]);
+        groupsJson.length() - bounceGroups, results.length() - bounceResults,
+        successfulGroups[0]);
     return NeoResponse.createdWithData(data);
   }
 
@@ -1753,8 +1826,15 @@ public class ReconciliationHandler implements NeoHandler {
    * the intersection is empty, so repeating it here would only add a join no predicate reads. The
    * Automatch only ever looks at UNMATCHED lines; a reconciled one has nothing left to suggest.
    *
+   * <p><b>Lines excluded by a hook (ETP-5581).</b> The condition every
+   * {@code BankStatementLineFilterHook} contributes for {@code AUTO_MATCH_CANDIDATES} is appended,
+   * so a line PSD2 marks as discarded is never proposed — the same rule Classic's automatch
+   * applies through {@code APRM_MatchingUtility}. That is why this is an {@link OBQuery} now: the
+   * hooks answer HQL, which an {@code OBCriteria} cannot take. With no hook the query is the old
+   * criteria's, predicate for predicate.
+   *
    * <p><b>Tenant scoping (ETP-4950 pattern).</b> This goes through the DAL rather than a raw
-   * {@code getSession().createQuery} precisely so {@link OBCriteria} contributes
+   * {@code getSession().createQuery} precisely so the {@link OBQuery} contributes
    * {@code client.id in (readableClients)} and {@code organization.id in (readableOrganizations)}
    * itself: the filter cannot be forgotten by a caller, and it still applies under
    * {@code OBContext.setAdminMode(true)} - which this whole reconciliation path runs in - because
@@ -1769,19 +1849,30 @@ public class ReconciliationHandler implements NeoHandler {
    * @return the proposable lines, ordered by transaction date then line number
    */
   List<FIN_BankStatementLine> loadPendingLines(String accountId) {
-    OBCriteria<FIN_BankStatementLine> c =
-        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
-    c.createAlias(FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, "bs");
-    c.add(Restrictions.eq(FIN_BankStatementLine.PROPERTY_ACTIVE, true));
-    c.add(Restrictions.isNull(FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION));
-    c.add(Restrictions.eq("bs." + FIN_BankStatement.PROPERTY_ACTIVE, true));
-    c.add(Restrictions.eq("bs." + FIN_BankStatement.PROPERTY_PROCESSED, true));
-    c.add(Restrictions.eq("bs." + FIN_BankStatement.PROPERTY_ACCOUNT + ".id", accountId));
-    c.addOrder(Order.asc(FIN_BankStatementLine.PROPERTY_TRANSACTIONDATE));
-    c.addOrder(Order.asc(FIN_BankStatementLine.PROPERTY_LINENO));
-    @SuppressWarnings("unchecked")
-    List<FIN_BankStatementLine> rows = c.list();
-    return rows;
+    Map<String, Object> params = new HashMap<>();
+    params.put(StatementLineFilter.PARAM_ACCOUNT_ID, accountId);
+    // ETP-5581: the lines a BankStatementLineFilterHook excludes (PSD2's discarded lines) are never
+    // auto-match candidates. Not gated by any flag; with no hook the condition is empty.
+    FIN_FinancialAccount account = loadAccount(accountId);
+    String excluded = account == null ? ""
+        : StatementLineFilter.hql(StatementLineFilter.ALIAS, account,
+            Usage.AUTO_MATCH_CANDIDATES, params);
+    String bsl = StatementLineFilter.ALIAS + ".";
+    String statement = bsl + FIN_BankStatementLine.PROPERTY_BANKSTATEMENT + ".";
+    OBQuery<FIN_BankStatementLine> query = OBDal.getInstance().createQuery(
+        FIN_BankStatementLine.class,
+        "as " + StatementLineFilter.ALIAS
+            + " where " + bsl + FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION
+            + " is null"
+            + " and " + statement + FIN_BankStatement.PROPERTY_ACTIVE + " = true"
+            + " and " + statement + FIN_BankStatement.PROPERTY_PROCESSED + " = true"
+            + " and " + statement + FIN_BankStatement.PROPERTY_ACCOUNT + ".id = :"
+            + StatementLineFilter.PARAM_ACCOUNT_ID
+            + excluded
+            + " order by " + bsl + FIN_BankStatementLine.PROPERTY_TRANSACTIONDATE + " asc, "
+            + bsl + FIN_BankStatementLine.PROPERTY_LINENO + " asc");
+    query.setNamedParameters(params);
+    return query.list();
   }
 
   /**

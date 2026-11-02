@@ -820,10 +820,13 @@ entry in `etendo_schema_forge`.
 
 ### `bank-bounce-suggestions` (ETP-5581) — backend-only, per account, off by default
 
-> **Status: registered, not implemented.** The flag was registered on day one (registry entry
-> `bank-bounce-suggestions` in `etendo_schema_forge` `flags-registry.json`), before any code exists.
-> No class reads it yet. Update this section with the evaluating class and the toggle points when
-> they land.
+> **Status: backend implemented (ETP-5581 part 1), SPA pending.** Registered on day one (registry
+> entry `bank-bounce-suggestions` in `etendo_schema_forge` `flags-registry.json`). The only evaluator
+> is `BankBounceSuggestionsFlag` (`GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS`). Toggle points:
+> `ReconciliationHandler.buildAutoMatch` and `buildPendingLines` (bounce pairs, the `bounce` state),
+> `ReconciliationHandler.applySuggestions` (`bouncePair` groups) and
+> `BankBouncePairService.discardPair`. `restorePair` is deliberately not gated. Contract:
+> `docs/neo-headless.md` §4.12.1.1, *Discarded lines and bounce pairs*.
 
 Gates the automatic **bounce-pair suggestions** in the bank reconciliation of PSD2-synced financial
 accounts. A bounce is an outgoing bank-statement line plus the line that reverses it: same amount,

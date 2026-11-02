@@ -46,6 +46,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -472,7 +473,11 @@ public class BankStatementsHandler implements NeoHandler {
       if (ownedIds.isEmpty()) {
         return NeoResponse.error(400, MSG_STATEMENT_NOT_FOUND + statementIds);
       }
-      return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, loadLines(ownedIds)));
+      JSONArray lines = loadLines(ownedIds);
+      // ETP-5581: a line a BankStatementLineFilterHook excludes (PSD2's discarded lines) is still
+      // listed here, marked discarded:true. Not gated by any flag.
+      StatementLineFilter.markDiscarded(lines, ownedIds);
+      return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, lines));
     } catch (Exception e) {
       log.error("Error loading lines for statements {}", statementIds, e);
       return NeoResponse.error(500, "Internal Server Error");
@@ -599,7 +604,8 @@ public class BankStatementsHandler implements NeoHandler {
       OBDal.getInstance().save(statement);
 
       // A brand-new statement has no lines, so numbering starts at 10 with no lookup.
-      int lineCount = createLines(statement, body.optJSONArray(FIELD_LINES), 0L);
+      int lineCount = createLines(statement, body.optJSONArray(FIELD_LINES), 0L,
+          Collections.emptyMap(), new HashMap<>());
       // "Save and process" runs the statement like an import so its lines become
       // reconcilable; "Save as draft" (process=false) just persists it.
       boolean process = body.optBoolean(FIELD_PROCESS, true);
@@ -721,6 +727,12 @@ public class BankStatementsHandler implements NeoHandler {
    * {@code "process": true} also runs it after saving. {@code name} and both header
    * dates are required, exactly as on create
    * (see {@link BankStatementsSupport#validateHeaderDates}).
+   *
+   * <p>ETP-5581: a body line that carries the {@code "id"} of one of the statement's current
+   * unmatched lines keeps what that line carried — the PSD2 transaction id (else the next bank
+   * synchronization imports the movement twice), the PSD2 discard flag and button, and the
+   * bounce-pair link ({@link BankStatementLineSet#bankIdentitiesOfUnmatched}). A body line without
+   * it is a new line, as before.
    */
   NeoResponse handleUpdate(NeoContext context) {
     JSONObject body = context.getRequestBody();
@@ -748,13 +760,21 @@ public class BankStatementsHandler implements NeoHandler {
       applyEditableHeader(statement, body);
       OBDal.getInstance().save(statement);
 
+      // ETP-5581: what the unmatched lines carry (PSD2 id, discard, bounce-pair link) is read
+      // BEFORE deleteUnmatched removes them, and handed back to the rebuilt line of the same "id".
+      Map<String, BankStatementLineSet.BankIdentity> identities =
+          BankStatementLineSet.bankIdentitiesOfUnmatched(statement);
       // Matched lines are never deleted-and-recreated — see deleteUnmatched's javadoc for
       // why that would fail loudly against core's own line-level trigger.
       BankStatementLineSet.deleteUnmatched(statement);
       // Numbering continues past whatever matched lines survived deleteUnmatched, so a
       // rebuilt line cannot take a LineNo one of them already holds.
-      int newLineCount =
-          hasBodyLines ? createLines(statement, bodyLines, BankStatementLineSet.maxLineNo(statement)) : 0;
+      Map<String, FIN_BankStatementLine> rebuiltByOldId = new HashMap<>();
+      int newLineCount = hasBodyLines
+          ? createLines(statement, bodyLines, BankStatementLineSet.maxLineNo(statement),
+              identities, rebuiltByOldId)
+          : 0;
+      BankStatementLineSet.relinkBouncePairs(identities, rebuiltByOldId);
       int lineCount = newLineCount + matchedLineCount;
 
       boolean process = body.optBoolean(FIELD_PROCESS, false);
@@ -978,10 +998,15 @@ public class BankStatementsHandler implements NeoHandler {
    *     rather than this method querying for it: on the create path there is nothing to collide
    *     with, and looking it up would be a wasted round-trip. {@code handleUpdate} is the one
    *     caller that needs it, because it keeps the matched lines (see BankStatementLineSet).
+   * @param identities what the lines {@code handleUpdate} just deleted carried, by their old id; a
+   *     body line carrying one of those ids gets it back (ETP-5581). Empty on create.
+   * @param rebuiltByOldId filled with every line rebuilt from an old id, so the bounce-pair links
+   *     can be restored once all lines exist
    * @return the number of lines actually created
    */
-  private int createLines(FIN_BankStatement statement, JSONArray lines, long startAfterLineNo)
-      throws Exception {
+  private int createLines(FIN_BankStatement statement, JSONArray lines, long startAfterLineNo,
+      Map<String, BankStatementLineSet.BankIdentity> identities,
+      Map<String, FIN_BankStatementLine> rebuiltByOldId) throws Exception {
     int count = 0;
     long lineNo = startAfterLineNo + 10L;
     for (int i = 0; i < lines.length(); i++) {
@@ -1007,8 +1032,14 @@ public class BankStatementsHandler implements NeoHandler {
       line.setReferenceNo(StringUtils.isBlank(ref) ? DEFAULT_REFERENCE : truncate(ref, 30));
 
       resolveLineReferences(line, l);
+      String oldId = l.optString(FIELD_ID, "");
+      BankStatementLineSet.BankIdentity identity = identities.get(oldId);
+      BankStatementLineSet.restoreBankIdentity(line, identity);
 
       OBDal.getInstance().save(line);
+      if (identity != null) {
+        rebuiltByOldId.put(oldId, line);
+      }
       lineNo += 10L;
       count++;
     }

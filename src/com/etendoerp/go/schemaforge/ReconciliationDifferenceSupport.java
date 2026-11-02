@@ -34,6 +34,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.financialmgmt.gl.GLItem;
@@ -226,6 +227,13 @@ final class ReconciliationDifferenceSupport {
     if (isOnDraftStatement(line)) {
       return Preflight.failed(NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT));
+    }
+    // ETP-5581: a line excluded by a BankStatementLineFilterHook (PSD2's discarded lines) is never
+    // reconciled; read-only here too, so returning is safe.
+    NeoResponse discarded =
+        StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
+    if (discarded != null) {
+      return Preflight.failed(discarded);
     }
 
     NeoResponse toleranceError = checkTolerance(handler, accountId, snap);

@@ -438,6 +438,29 @@ public final class GoFeatureFlags {
   public static final String FLAG_PRODUCT_MOVEMENTS_TAB = "product-movements-tab";
 
   /**
+   * ETP-5581 — the automatic <b>bounce-pair suggestions</b> of the bank reconciliation of
+   * PSD2-synced financial accounts. A bounce is an outgoing bank-statement line plus the line that
+   * reverses it (same amount, opposite sign). Positive polarity: {@code true} = suggestions on;
+   * the default and every failure read {@code false}.
+   *
+   * <p><b>What it gates.</b> The bounce pairs in the {@code autoMatch} answer (and the {@code bounce}
+   * state and pair annotations of {@code pendingLines}), the {@code discardPair} action and the
+   * {@code bouncePair} groups of {@code applySuggestions}. <b>Not gated:</b> excluding lines that
+   * are already discarded, refusing to reconcile them, and {@code restorePair}, so a pair can
+   * always be undone.
+   *
+   * <p><b>One reader.</b> Only {@code BankBounceSuggestionsFlag} reads this key, evaluated per
+   * request and never cached. <b>Targeted per account</b>: the {@code ETGO_ACCOUNT} email of the
+   * request user, resolved as {@link #FLAG_BP_PORTAL_LINK} does; no account, no email or a failed
+   * lookup reads off. Locally {@code etendo.go.flags.bank-bounce-suggestions} /
+   * {@code ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}; the web client renders only what
+   * the answers carry. TTL 2026-12-31 (placeholder).
+   */
+  public static final String FLAG_BANK_BOUNCE_SUGGESTIONS = "bank-bounce-suggestions";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

@@ -84,6 +84,8 @@ final class ReconciliationHandlerSupport {
   private static final String ACTION_REMOVE_OPERATION = "removeOperation";
   private static final String ACTION_REACTIVATE_SELECTED = "reactivateSelected";
   private static final String ACTION_RECONCILE_DIFFERENCE = "reconcileDifference";
+  private static final String ACTION_DISCARD_PAIR = BankBouncePairService.ACTION_DISCARD_PAIR;
+  private static final String ACTION_RESTORE_PAIR = BankBouncePairService.ACTION_RESTORE_PAIR;
 
   // ---------------------------------------------------------------------------
   // POST action dispatch wrappers (OBContext admin mode + rollback boilerplate)
@@ -245,8 +247,12 @@ final class ReconciliationHandlerSupport {
    * {@code rollbackAndClose} finds the pool closed and does nothing. Work Core already committed
    * mid-flow ({@code SessionHandler#commitAndStart} in its removal utilities) stays committed, as
    * before.
+   *
+   * <p>Package-private so the bounce-pair actions ({@link BankBouncePairService#handleDiscardPair},
+   * {@link BankBouncePairService#handleRestorePair}, ETP-5581) get this same envelope without
+   * another wrapper here.
    */
-  private static NeoResponse runPostAction(ReconciliationHandler handler, NeoContext context,
+  static NeoResponse runPostAction(ReconciliationHandler handler, NeoContext context,
       String action) {
     JSONObject body = context.getRequestBody();
     if (body == null) {
@@ -302,6 +308,11 @@ final class ReconciliationHandlerSupport {
         // sits at the Sonar S1448 method-count ceiling (see ReconciliationDifferenceSupport).
         case ACTION_RECONCILE_DIFFERENCE:
           return ReconciliationDifferenceSupport.reconcileDifference(handler, body);
+        // ETP-5581: the bounce-pair actions live in their own service, for the same reason.
+        case ACTION_DISCARD_PAIR:
+          return BankBouncePairService.discardPair(handler, body);
+        case ACTION_RESTORE_PAIR:
+          return BankBouncePairService.restorePair(handler, body);
         default:
           throw new ReconciliationActionException(
               new IllegalArgumentException("Unknown reconciliation action: " + action));
@@ -349,10 +360,25 @@ final class ReconciliationHandlerSupport {
    * Derives per-line reconciled amounts / progress and the fine-grained {@code state}, accumulates
    * the running total and the per-state counts, and builds the {@code pendingLines} data envelope
    * body. Extracted verbatim from {@code ReconciliationHandler.buildPendingLines}.
+   *
+   * <p>ETP-5581: with a {@code bounceView} (flag {@code bank-bounce-suggestions} on), a line
+   * reserved by a high-confidence bounce pair is classified {@code bounce} without consuming a
+   * movement — as the auto-match loop skips it — and {@link BankBounceSuggestions.PanelView#finish}
+   * then offers the review pairs, annotates the rows and sets {@code counts.bounce}. With
+   * {@code null} (flag off) nothing changes.
+   *
+   * @param lines              the merged pending-panel rows
+   * @param account            the financial account
+   * @param rules              the account's matching rules
+   * @param pendingDateTolDays the account's date tolerance
+   * @param pendingAmtTolPct   the account's amount tolerance
+   * @param bounceView         the bounce pairs of this request, or {@code null}
+   * @return the data body
+   * @throws JSONException when a row cannot be written
    */
   static JSONObject summarizePendingLines(JSONArray lines, FIN_FinancialAccount account,
-      List<MatchRuleEngine.Rule> rules, int pendingDateTolDays, BigDecimal pendingAmtTolPct)
-      throws JSONException {
+      List<MatchRuleEngine.Rule> rules, int pendingDateTolDays, BigDecimal pendingAmtTolPct,
+      BankBounceSuggestions.PanelView bounceView) throws JSONException {
     BigDecimal total = BigDecimal.ZERO;
     Map<String, Integer> counts = AutoMatchSupport.newCounts();
     // Shared across every PENDING row below (same rows/order as ReconciliationHandler.buildAutoMatch
@@ -384,6 +410,10 @@ final class ReconciliationHandlerSupport {
         state = ReconciliationHandler.STATUS_PENDING;
         row.put(ReconciliationHandler.KEY_STATUS, ReconciliationHandler.STATUS_PENDING);
         row.put("partial", true);
+      } else if (bounceView != null
+          && bounceView.reserved(row.optString(ReconciliationHandler.KEY_ID))) {
+        state = BankBounceSuggestions.STATE_BOUNCE;
+        row.put(ReconciliationHandler.KEY_STATUS, ReconciliationHandler.STATUS_PENDING);
       } else {
         state = AutoMatchSupport.classifyPendingLine(account,
             row.optString(ReconciliationHandler.KEY_ID), rules, pendingDateTolDays,
@@ -393,6 +423,9 @@ final class ReconciliationHandlerSupport {
       row.put("state", state);
       counts.put("all", counts.get("all") + 1);
       counts.put(state, counts.getOrDefault(state, 0) + 1);
+    }
+    if (bounceView != null) {
+      bounceView.finish(lines, counts);
     }
     JSONObject countsJson = new JSONObject();
     for (Map.Entry<String, Integer> entry : counts.entrySet()) {

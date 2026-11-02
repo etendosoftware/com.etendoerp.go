@@ -30,6 +30,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -160,6 +161,14 @@ final class ReconciliationLineTargetSupport {
     if (ReconciliationSupport.isOnDraftStatement(line)) {
       return Target.failed(NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT));
+    }
+    // ETP-5581: never free a line a BankStatementLineFilterHook excludes: it cannot be reconciled
+    // afterwards anyway, so the heal (a write) must not happen. A pending line (no movement) is
+    // returned above unchanged and its caller runs the same guard next to its draft check.
+    NeoResponse discarded =
+        StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
+    if (discarded != null) {
+      return Target.failed(discarded);
     }
     NeoResponse healError = healStuckLine(handler, line);
     if (healError != null) {

@@ -33,6 +33,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
@@ -396,17 +397,48 @@ final class ReconciliationFlowSupport {
    * redirected to its remainder, so a batch carrying both the head and the remainder names one row
    * twice. The ids of the accepted groups' lines are tracked, and a later group landing on one of
    * them is rejected (409) before anything is matched.
+   *
+   * @param handler    the reconciliation handler
+   * @param account    the account of the call
+   * @param groupsJson the submitted groups
+   * @param prepared   the groups that passed, appended to
+   * @param results    the per-group failures, appended to
+   * @throws Exception when a group cannot be prepared
    */
   static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results)
       throws Exception {
-    Set<String> takenLineIds = new HashSet<>();
+    prepareAllGroups(handler, account, groupsJson, prepared, results, new HashSet<>());
+  }
+
+  /**
+   * {@link #prepareAllGroups(ReconciliationHandler, FIN_FinancialAccount, JSONArray, List,
+   * JSONArray)} against lines an earlier step of the same call already took (ETP-5581: the lines
+   * of the bounce pairs {@code applySuggestions} discarded first). The
+   * {@code {kind:"bouncePair"}} groups are skipped here — that earlier step answered them — and a
+   * group of any other {@code kind} than {@code "transaction"} is refused (400); a group with no
+   * {@code kind} is a transaction group, as before.
+   *
+   * @param handler      the reconciliation handler
+   * @param account      the account of the call
+   * @param groupsJson   the submitted groups
+   * @param prepared     the groups that passed, appended to
+   * @param results      the per-group failures, appended to
+   * @param takenLineIds the lines already taken in this call, updated with every accepted group
+   * @throws Exception when a group cannot be prepared
+   */
+  static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
+      JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results,
+      Set<String> takenLineIds) throws Exception {
     for (int i = 0; i < groupsJson.length(); i++) {
       JSONObject groupEntry = groupsJson.optJSONObject(i);
-      if (groupEntry == null) {
+      if (groupEntry == null || BankBouncePairService.isBouncePairGroup(groupEntry)) {
         continue;
       }
-      NeoResponse prepError = prepareGroup(handler, account, groupEntry, prepared, takenLineIds);
+      String kind = groupEntry.optString(BankBounceSuggestions.KEY_KIND, "");
+      NeoResponse prepError = kind.isEmpty() || BankBounceSuggestions.KIND_TRANSACTION.equals(kind)
+          ? prepareGroup(handler, account, groupEntry, prepared, takenLineIds)
+          : NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Unsupported group kind: " + kind);
       if (prepError != null) {
         JSONObject failure = prepError.getBody();
         if (failure != null && !failure.has(ReconciliationHandler.KEY_STATEMENT_LINE_ID)) {
@@ -455,6 +487,13 @@ final class ReconciliationFlowSupport {
     if (ReconciliationSupport.isOnDraftStatement(line)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT);
+    }
+    // ETP-5581: a line excluded by a BankStatementLineFilterHook (PSD2's discarded lines) is never
+    // reconciled. Above createTransactionForRule for the same reason as the draft guard.
+    NeoResponse discarded =
+        StatementLineFilter.discardedLineError(line, Usage.AUTO_MATCH_CANDIDATES);
+    if (discarded != null) {
+      return discarded;
     }
 
     List<String> operationIds = readOperationIds(groupEntry);
