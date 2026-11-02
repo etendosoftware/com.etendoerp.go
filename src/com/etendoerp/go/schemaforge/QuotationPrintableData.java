@@ -99,7 +99,8 @@ public class QuotationPrintableData implements NeoPrintableDataBuilder {
       line.put("quantity", coalesce(value(l, "orderedQuantity"), 0));
       line.put("unitPrice", coalesce(value(l, "unitPrice"), 0));
       Object discount = value(l, DISCOUNT_FIELD);
-      line.put("discount", isTruthy(discount) ? json(number(discount)) : JSONObject.NULL);
+      // The data shape names the output after the line field it reads.
+      line.put(DISCOUNT_FIELD, isTruthy(discount) ? json(number(discount)) : JSONObject.NULL);
       line.put("taxName", truthy(value(l, "tax$_identifier"), ""));
       line.put("lineTotal", coalesce(value(l, "lineNetAmount"), 0));
       lines.put(line);

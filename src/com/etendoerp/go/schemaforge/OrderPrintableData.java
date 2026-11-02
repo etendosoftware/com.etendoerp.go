@@ -97,7 +97,8 @@ public abstract class OrderPrintableData implements NeoPrintableDataBuilder {
       line.put("unitPrice", coalesce(value(l, PRICE_FIELD), value(l, "unitPrice"),
           value(l, "priceActual"), 0));
       Object discount = value(l, DISCOUNT_FIELD);
-      line.put("discount", isTruthy(discount) ? json(number(discount)) : JSONObject.NULL);
+      // The data shape names the output after the line field it reads.
+      line.put(DISCOUNT_FIELD, isTruthy(discount) ? json(number(discount)) : JSONObject.NULL);
       line.put("taxName", truthy(value(l, "tax$_identifier"), value(l, "taxRate"), ""));
       line.put("lineTotal", coalesce(value(l, "lineGrossAmount"), value(l, "grossAmount"),
           value(l, "lineNetAmount"), value(l, "lineAmount"), 0));
