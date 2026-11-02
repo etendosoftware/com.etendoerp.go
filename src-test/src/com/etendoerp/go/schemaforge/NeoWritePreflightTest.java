@@ -253,6 +253,56 @@ public class NeoWritePreflightTest {
   }
 
   /**
+   * ETP-6062: an update asks the waiver-aware guard, with the request itself, so a customization
+   * can declare the update consumed; a refusal from it still stops the write before any
+   * reference check.
+   */
+  @Test
+  public void updateAsksTheWaiverAwareTargetGuard() throws Exception {
+    NeoContext request = NeoContext.builder().httpMethod("PATCH").recordId("tax-1")
+        .requestBody(new JSONObject().put("etvfacVatRegime", "01")).adTab(adTab)
+        .sfEntity(sfEntity).build();
+    targets.when(() -> NeoActionRecordGuard.updateRefusalFor(sfEntity, request))
+        .thenReturn(NeoResponse.error(404, "Record not found"));
+
+    NeoResponse refusal = NeoWritePreflight.refusalFor(request);
+
+    assertNotNull(refusal);
+    assertEquals(404, refusal.getHttpStatus());
+    targets.verify(() -> NeoActionRecordGuard.writeRefusalFor(any(), any()), Mockito.never());
+    ownership.verifyNoInteractions();
+  }
+
+  /**
+   * ETP-6062: a waived update still runs the reference checks — the waiver covers the target row
+   * only.
+   */
+  @Test
+  public void aWaivedUpdateStillChecksItsReferences() throws Exception {
+    NeoContext request = NeoContext.builder().httpMethod("PUT").recordId("tax-1")
+        .requestBody(new JSONObject().put("etvfacVatRegime", "01")).adTab(adTab)
+        .sfEntity(sfEntity).build();
+    targets.when(() -> NeoActionRecordGuard.updateRefusalFor(sfEntity, request)).thenReturn(null);
+
+    assertNull(NeoWritePreflight.refusalFor(request));
+
+    ownership.verify(() -> NeoReferenceOwnership.refuseUnownedReferences(eq(adTab), any(),
+        isNull()));
+  }
+
+  /** ETP-6062: a delete is never waivable — it keeps the strict guard. */
+  @Test
+  public void deleteKeepsTheStrictTargetGuard() {
+    NeoContext request = NeoContext.builder().httpMethod("DELETE").recordId("tax-1")
+        .adTab(adTab).sfEntity(sfEntity).build();
+
+    NeoWritePreflight.refusalFor(request);
+
+    targets.verify(() -> NeoActionRecordGuard.writeRefusalFor(sfEntity, "tax-1"));
+    targets.verify(() -> NeoActionRecordGuard.updateRefusalFor(any(), any()), Mockito.never());
+  }
+
+  /**
    * ETP-5802: a reference the request SETS to an inactive row is refused with a structured 422,
    * the same way REST answers {@link ReadOnlyFieldRejectedException}, before any customization
    * runs.

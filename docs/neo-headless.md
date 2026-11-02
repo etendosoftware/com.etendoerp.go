@@ -1197,6 +1197,42 @@ Existing entity method and role gates still apply. MCP updates also reject blank
 and the literal string `"null"` with the existing `422` missing-argument envelope; these values
 cannot disable optimistic locking.
 
+**An update consumed into tenant-owned storage (ETP-6062).** Some customizations never write
+the row an update addresses: `TaxSifOverrideHandler` stores a SIF-only update of a tax (a System
+row shared by every client) in the tenant's own `etsg_tax_sif_config` and answers the request
+itself. The strict guard refused those saves with `404` from ETP-5785 on. A customization can now
+declare such an update through the `NeoHandler#consumesTargetWrite(NeoContext)` hook (default
+`false`); `NeoActionRecordGuard.updateRefusalFor` — what REST `PUT`/`PATCH` (`NeoWritePreflight`)
+and MCP `etendo_update` call instead of `writeRefusalFor` — then waives the target-row check for
+that request. The waiver is structural and narrow:
+
+- only an update (`PUT`/`PATCH`); a `DELETE` always gets `writeRefusalFor`'s answer;
+- only a row that exists and that `TenantOwnership.isVisibleToCurrentTenant` lets the caller read:
+  another tenant's row and an unknown id are the same `404` as before, whatever the hook answers;
+- only when the entity's customization, resolved by `NeoHandlerLookup.forEntityQuietly`, answers
+  `true` for this very request; a failure to resolve or to answer keeps the guard;
+- the reference-ownership and activeness checks below still run on the waived request.
+
+The customization must answer `true` only for a body its `handle()` short-circuits without writing
+the target. The engine enforces it: a waived request is marked on the context, and if `handle()`
+declines after all, the default write step (`NeoCrudHandler.handleDefault`) — or, on MCP, the
+code right after the update pre-hook — refuses it with the same `404`. A body that also carries a
+field of the row itself is not declared, so on a System tax it is refused before `handle()` runs
+and nothing is upserted. Batch writes are creates and have no target row.
+
+A consumed SIF-only update ignores the `updated` version token the SPA sends: `c_tax` is not
+written, so no stale-record check runs, and the `etsg_tax_sif_config` upsert carries no
+optimistic lock of its own — two concurrent saves of the same override resolve last write wins.
+
+The context organization must belong to the caller. The SIF save can carry `sifContextOrgId` (the
+organization of the invoice or order line it was opened from), which picks the legal entity the
+override is keyed on. `TaxSifOverrideHandler` accepts it on a write only when it is one of the
+caller's writable organizations, belongs to the caller's own client and is not `*` (`0`);
+otherwise the write is refused with the same `404 Record not found`, before anything is stored —
+it never falls back to the session organization in silence. On a read (`GET`, and the overlay on
+a write response) a param that is not a readable organization of the caller's client is ignored
+and the session organization is used, as when the param is absent.
+
 The rules below concern references supplied by the caller, separately from the target record.
 
 **References do not write secondary records.** Scalar FK values and direct `reference.id` keys

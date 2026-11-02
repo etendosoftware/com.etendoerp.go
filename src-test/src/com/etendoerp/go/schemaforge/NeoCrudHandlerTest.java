@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
@@ -336,14 +337,16 @@ class NeoCrudHandlerTest {
   class HandleWindowEntityCrud {
 
     /**
-     * ETP-5785: a PUT/PATCH/DELETE first asks {@link NeoActionRecordGuard#writeRefusalFor} whether
-     * the target record may be written, and that guard fails closed (404) without a session. The
-     * routing tests below are about what happens once the write is allowed, so only that target
-     * check is stubbed to allow; the rest of {@link NeoWritePreflight} still runs for real.
+     * ETP-5785: a PUT/PATCH/DELETE first asks {@link NeoActionRecordGuard} whether the target
+     * record may be written ({@code updateRefusalFor} for an update since ETP-6062,
+     * {@code writeRefusalFor} for a delete), and that guard fails closed (404) without a session.
+     * The routing tests below are about what happens once the write is allowed, so only that
+     * target check is stubbed to allow; the rest of {@link NeoWritePreflight} still runs for real.
      */
     private MockedStatic<NeoActionRecordGuard> allowWriteTarget() {
       MockedStatic<NeoActionRecordGuard> guard = Mockito.mockStatic(NeoActionRecordGuard.class);
       guard.when(() -> NeoActionRecordGuard.writeRefusalFor(any(), any())).thenReturn(null);
+      guard.when(() -> NeoActionRecordGuard.updateRefusalFor(any(), any())).thenReturn(null);
       return guard;
     }
 
@@ -490,7 +493,8 @@ class NeoCrudHandlerTest {
 
         verify(servlet).handleWithHooks(eq("assetsHandler"), any(), eq(putRequest), eq(response));
         verify(servlet, never()).writeResponse(eq(response), any());
-        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+        guard.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity),
+            argThat(ctx -> "REC-1".equals(ctx.getRecordId()))));
       }
     }
 
@@ -530,7 +534,8 @@ class NeoCrudHandlerTest {
         handler.handleWindowEntityCrud(spec,
             new NeoServlet.NeoPathInfo("testSpec", "lines", "LINE-1"), method, request, response);
 
-        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "LINE-1"));
+        guard.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity),
+            argThat(ctx -> "LINE-1".equals(ctx.getRecordId()))));
       }
 
       verify(servlet).handleWithHooks(eq("linesHook"), any(), eq(request), eq(response));
@@ -647,7 +652,8 @@ class NeoCrudHandlerTest {
       try (MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         handler.handleWindowEntityCrud(spec, pathInfo, "PUT", request, response);
 
-        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+        guard.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity),
+            argThat(ctx -> "REC-1".equals(ctx.getRecordId()))));
       }
 
       verify(servlet).writeResponse(eq(response), eq(hookResponse));
@@ -680,7 +686,8 @@ class NeoCrudHandlerTest {
       try (MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         handler.handleWindowEntityCrud(spec, pathInfo, "PATCH", request, response);
 
-        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+        guard.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity),
+            argThat(ctx -> "REC-1".equals(ctx.getRecordId()))));
       }
 
       verify(servlet).writeResponse(eq(response), eq(hookResponse));
@@ -877,6 +884,21 @@ class NeoCrudHandlerTest {
 
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("ETP-6062: a waived update that reaches the default write is refused with 404")
+    void waivedUpdateNeverReachesTheDefaultWrite() {
+      Tab adTab = mock(Tab.class);
+      NeoContext context = buildContext("PATCH", "tax-1", adTab,
+          mock(SFEntity.class), null, null);
+      context.setAttribute(NeoActionRecordGuard.ATTR_TARGET_WRITE_DELEGATED, Boolean.TRUE);
+
+      NeoResponse result = handler.handleDefault(context);
+
+      assertNotNull(result);
+      assertEquals(404, result.getHttpStatus());
+      verify(adTab, never()).getTable();
     }
 
     @Test

@@ -1736,7 +1736,6 @@
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <JAVA_QUALIFIER><![CDATA[taxSifOverrideHandler]]></JAVA_QUALIFIER>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <AGENT_PROMPT><![CDATA[The catalogue of every tax rate of the tenant, including inactive and future ones and the variants with surcharge or for specific business partner tax categories. To know which tax applies to an order or invoice line, do not pick from here: omit tax on the line and the server resolves it, or call etendo_selectors for 'tax' on that line entity with recordContext {product, businessPartner, date}.]]></AGENT_PROMPT>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4--></ETGO_SF_ENTITY>
