@@ -65,6 +65,7 @@ public class NeoCertificateHelper {
   private static final Logger log = LogManager.getLogger(NeoCertificateHelper.class);
   private static final String DATE_FORMAT = "dd/MM/yyyy";
   private static final String PARAM_ORG_ID = "orgId";
+  private static final String KEY_EXISTS = "exists";
 
   // RPJ certs (Representante Persona Jurídica): organizationIdentifier=VATES-A39200019
   // OID 2.5.4.97 — some JDK versions return the OID string instead of the attribute name.
@@ -101,16 +102,16 @@ public class NeoCertificateHelper {
         return NeoResponse.error(400, "Required parameter: orgId");
       }
       if (!isCallersOrg(orgId)) {
-        return NeoResponse.ok(new JSONObject().put("exists", false));
+        return NeoResponse.ok(new JSONObject().put(KEY_EXISTS, false));
       }
       Object row = activeCertificateExpiry(orgId);
       JSONObject resp = new JSONObject();
       if (row != null) {
-        resp.put("exists", true);
+        resp.put(KEY_EXISTS, true);
         SimpleDateFormat sdf = new SimpleDateFormat(DATE_FORMAT);
         resp.put("validTo", sdf.format(row));
       } else {
-        resp.put("exists", false);
+        resp.put(KEY_EXISTS, false);
       }
       return NeoResponse.ok(resp);
     } catch (Exception e) {
