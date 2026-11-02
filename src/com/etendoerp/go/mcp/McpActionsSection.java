@@ -86,6 +86,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  *   <li>{@code valuesByStatus} — optional {@code action → {property, values:{status:[values]}}}
  *       (ETP-5714): for a list-backed button such as {@code documentAction}, which of its values
  *       apply in each status. Advisory, like {@code availableWhen}.</li>
+ *   <li>{@code valueReasons} — optional {@code button → {value → reason}} (ETP-5848): what the
+ *       refusal of ONE value that {@code values} does not offer tells the agent, in place of the
+ *       bare list of allowed values. For a value whose intent has another route: {@code VO} on an
+ *       issued invoice is a credit note, not a reactivation. Each button must be narrowed by
+ *       {@code values}, and each value must be one {@code values} refuses.</li>
  *   <li>{@code REPLACE}, entity level. Fails closed: an unusable {@code MCP_CONFIG} refuses every
  *       action through {@code etendo_action}.</li>
  * </ul>
@@ -103,12 +108,13 @@ final class McpActionsSection {
   static final String KEY_REDIRECT_REASON = "redirectReason";
   static final String KEY_VALUES = "values";
   static final String KEY_REASONS = "reasons";
+  static final String KEY_VALUE_REASONS = "valueReasons";
   static final String KEY_AVAILABLE_WHEN = NeoActionAvailability.KEY_AVAILABLE_WHEN;
   static final String KEY_VALUES_BY_STATUS = NeoActionAvailability.KEY_VALUES_BY_STATUS;
 
   private static final Set<String> ALLOWED_KEYS =
       Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON, KEY_VALUES, KEY_REASONS,
-          KEY_AVAILABLE_WHEN, KEY_VALUES_BY_STATUS);
+          KEY_VALUE_REASONS, KEY_AVAILABLE_WHEN, KEY_VALUES_BY_STATUS);
 
   /**
    * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
@@ -153,6 +159,7 @@ final class McpActionsSection {
     validateHidden(body, problems);
     validateRedirect(body, problems);
     validateReasons(body, problems);
+    validateValueReasons(body, problems);
     if (body.has(KEY_REDIRECT_REASON)
         && !(body.opt(KEY_REDIRECT_REASON) instanceof String
             && StringUtils.isNotBlank(body.optString(KEY_REDIRECT_REASON)))) {
@@ -305,6 +312,44 @@ final class McpActionsSection {
     }
   }
 
+  /**
+   * {@code valueReasons}: {@code button → {value → reason}}, for buttons narrowed by {@code values}
+   * and values those refuse — a reason for a value that is offered could never be read.
+   */
+  private static void validateValueReasons(JSONObject body, List<String> problems) {
+    if (!body.has(KEY_VALUE_REASONS)) {
+      return;
+    }
+    JSONObject byButton = body.optJSONObject(KEY_VALUE_REASONS);
+    if (byButton == null || byButton.length() == 0) {
+      problems.add(KEY_VALUE_REASONS + " must be a non-empty object {button: {value: reason}}");
+      return;
+    }
+    Map<String, Set<String>> narrowed = parseValues(body);
+    for (Iterator<?> it = byButton.keys(); it.hasNext();) {
+      String button = String.valueOf(it.next());
+      JSONObject reasons = byButton.optJSONObject(button);
+      Set<String> allowed = narrowed.get(button);
+      if (reasons == null || reasons.length() == 0) {
+        problems.add(KEY_VALUE_REASONS + "." + button + " must be a non-empty object {value: reason}");
+        continue;
+      }
+      if (allowed == null) {
+        problems.add(KEY_VALUE_REASONS + "." + button + " names no button of " + KEY_VALUES);
+        continue;
+      }
+      for (Iterator<?> vit = reasons.keys(); vit.hasNext();) {
+        String value = String.valueOf(vit.next());
+        if (allowed.contains(value)) {
+          problems.add(KEY_VALUE_REASONS + "." + button + "." + value + " is a value " + KEY_VALUES
+              + " offers, so it is never refused");
+        } else if (StringUtils.isBlank(reasons.optString(value, null))) {
+          problems.add(KEY_VALUE_REASONS + "." + button + "." + value + " must be a non-blank reason");
+        }
+      }
+    }
+  }
+
   /** One entity's resolved {@code actions} configuration. */
   static final class View {
     private static final View NONE =
@@ -320,17 +365,20 @@ final class McpActionsSection {
     private final Map<String, String> reasons;
     /** {@code action → availability} (ETP-5714); empty when the section declares none. */
     private final Map<String, NeoActionAvailability> availability;
+    /** {@code button → value → reason} (ETP-5848); empty when the section declares none. */
+    private final Map<String, Map<String, String>> valueReasons;
 
     private View(Set<String> hidden, Map<String, String> redirect, String reason,
         String redirectReason, boolean unusable) {
       this(hidden, redirect, Collections.emptyMap(), reason, redirectReason, unusable,
-          Collections.emptyMap(), Collections.emptyMap());
+          Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
     }
 
     @SuppressWarnings("java:S107") // the section's resolved parts; a holder would only rename them
     private View(Set<String> hidden, Map<String, String> redirect,
         Map<String, Set<String>> values, String reason, String redirectReason, boolean unusable,
-        Map<String, String> reasons, Map<String, NeoActionAvailability> availability) {
+        Map<String, String> reasons, Map<String, NeoActionAvailability> availability,
+        Map<String, Map<String, String>> valueReasons) {
       this.hidden = hidden;
       this.redirect = redirect;
       this.values = values;
@@ -339,6 +387,19 @@ final class McpActionsSection {
       this.unusable = unusable;
       this.reasons = reasons;
       this.availability = availability;
+      this.valueReasons = valueReasons;
+    }
+
+    /**
+     * What the refusal of {@code value} on {@code button} tells the agent (ETP-5848).
+     *
+     * @param button the list-backed button, under the name it was matched by
+     * @param value  the refused value
+     * @return the configured reason, or {@code null} when the section declares none for it
+     */
+    String valueReasonOf(String button, String value) {
+      Map<String, String> byValue = button == null ? null : valueReasons.get(button);
+      return byValue == null || value == null ? null : byValue.get(value);
     }
 
     /**
@@ -481,7 +542,30 @@ final class McpActionsSection {
     return new View(parseHidden(body), parseRedirect(body), parseValues(body),
         StringUtils.trim(body.optString(KEY_REASON, "")),
         StringUtils.trimToNull(body.optString(KEY_REDIRECT_REASON, null)), false,
-        parseReasons(body), parseAvailability(body));
+        parseReasons(body), parseAvailability(body), parseValueReasons(body));
+  }
+
+  /** {@code valueReasons}: {@code button → value → reason}, trimmed; empty when absent. */
+  private static Map<String, Map<String, String>> parseValueReasons(JSONObject body) {
+    Map<String, Map<String, String>> out = new LinkedHashMap<>();
+    JSONObject byButton = body.optJSONObject(KEY_VALUE_REASONS);
+    if (byButton == null) {
+      return out;
+    }
+    for (Iterator<?> it = byButton.keys(); it.hasNext();) {
+      String button = String.valueOf(it.next());
+      JSONObject reasons = byButton.optJSONObject(button);
+      Map<String, String> byValue = new LinkedHashMap<>();
+      for (Iterator<?> vit = reasons == null ? null : reasons.keys(); vit != null && vit.hasNext();) {
+        String value = String.valueOf(vit.next());
+        String reason = StringUtils.trimToNull(reasons.optString(value, null));
+        if (reason != null) {
+          byValue.put(value, reason);
+        }
+      }
+      out.put(button, Collections.unmodifiableMap(byValue));
+    }
+    return Collections.unmodifiableMap(out);
   }
 
   /** {@code availableWhen} + {@code valuesByStatus}, merged per action; empty when absent. */

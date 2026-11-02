@@ -1143,6 +1143,45 @@ class McpWindowDeclaredActionsTest {
       assertNull(view.allowedValuesOf(null));
     }
 
+    /** ETP-5848: the VO an agent sends to void an issued invoice must lead to the credit note. */
+    private static final String VO_REASON = "{\"actions\":{\"values\":{\"DocAction\":[\"CO\",\"RE\"]},"
+        + "\"valueReasons\":{\"DocAction\":{\"VO\":\"issue a credit note instead\"}},"
+        + "\"reason\":\"the UI completes or reactivates\"}}";
+
+    @Test
+    @DisplayName("a refused value with a valueReason names its route; others keep the bare list")
+    void refusedValueNamesItsRoute() throws Exception {
+      McpRoutingException vo = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", VO_REASON), "documentAction",
+              new JSONObject("{\"docAction\":\"VO\"}")));
+      String detail = vo.toEnvelope().getString(McpConstants.KEY_DETAIL);
+      assertEquals(422, vo.toEnvelope().getInt(McpConstants.KEY_STATUS));
+      assertTrue(detail.contains("[CO, RE]") && detail.contains("issue a credit note instead"), detail);
+
+      McpRoutingException other = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", VO_REASON), "documentAction",
+              new JSONObject("{\"docAction\":\"CL\"}")));
+      assertFalse(other.toEnvelope().getString(McpConstants.KEY_DETAIL).contains("credit note"));
+      assertNull(McpDeclaredActions.precheck(entity("W", VO_REASON), "documentAction",
+          new JSONObject("{\"docAction\":\"CO\"}")), "an offered value is not refused");
+    }
+
+    @Test
+    @DisplayName("validation: valueReasons name a narrowed button and a value it refuses")
+    void valueReasonsValidation() throws Exception {
+      assertTrue(McpActionsSection.validate(new JSONObject(VO_REASON).getJSONObject("actions"))
+          .isEmpty());
+      for (String bad : List.of(
+          // a button values does not narrow
+          "{\"values\":{\"b\":[\"CO\"]},\"valueReasons\":{\"other\":{\"VO\":\"x\"}},\"reason\":\"r\"}",
+          // a value values offers: its reason could never be read
+          "{\"values\":{\"b\":[\"CO\"]},\"valueReasons\":{\"b\":{\"CO\":\"x\"}},\"reason\":\"r\"}",
+          "{\"values\":{\"b\":[\"CO\"]},\"valueReasons\":{\"b\":{\"VO\":\" \"}},\"reason\":\"r\"}",
+          "{\"values\":{\"b\":[\"CO\"]},\"valueReasons\":{},\"reason\":\"r\"}")) {
+        assertFalse(McpActionsSection.validate(new JSONObject(bad)).isEmpty(), bad);
+      }
+    }
+
     @Test
     @DisplayName("view: a narrowed button lists only the allowed values; the others are untouched")
     void viewNarrowsTheButton() throws Exception {
