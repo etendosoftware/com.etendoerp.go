@@ -153,9 +153,10 @@ final class DocActionIdempotency {
    * The single property of {@code document} that is its document status for {@code status}: an
    * active List column of the table whose reference list holds the draft status and
    * {@code status}. One query over {@code AD_Ref_List} for all the table's List references; none or
-   * several candidate columns mean {@code null} (do not decide).
+   * several candidate columns mean {@code null} (do not decide). Shared with
+   * {@link DocActionReactivationRule} (ETP-6013), which reads the status the same way.
    */
-  private static Property statusProperty(Tab tab, BaseOBObject document, String status) {
+  static Property statusProperty(Tab tab, BaseOBObject document, String status) {
     Map<String, List<Column>> columnsByReference = listColumnsByReference(tab);
     if (columnsByReference.isEmpty()) {
       return null;

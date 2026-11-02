@@ -108,9 +108,22 @@ final class InvoiceCompletionService {
    * @param invoiceId the id of the invoice to complete
    * @param obContext the context used to build the classic {@code VariablesSecureApp}
    * @return {@code 200} with the process message on success, {@code 400} with the business message
-   *     when the completion is rejected, {@code 500} on infrastructure failure
+   *     when the completion is rejected, {@code 403 QUOTA_EXCEEDED} when a {@code block} plan quota
+   *     refuses it (ETP-6060, rolled back), {@code 500} on infrastructure failure
    */
   static NeoResponse completeInvoice(String invoiceId, OBContext obContext) {
+    try {
+      return completeOrRefuse(invoiceId, obContext);
+    } catch (NeoQuotaCreateCheck.Refused refused) {
+      return refused.toResponse();
+    }
+  }
+
+  /**
+   * {@link #completeInvoice}, throwing the plan-quota refusal of {@link InvoiceCompletionQuotaHook}
+   * (ETP-6060) instead of answering it, for the creation handlers that map it themselves.
+   */
+  private static NeoResponse completeOrRefuse(String invoiceId, OBContext obContext) {
     if (StringUtils.isBlank(invoiceId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Missing invoice record id for completion");
@@ -137,7 +150,13 @@ final class InvoiceCompletionService {
       // Void-date/supplier-reference params are only consulted for the void action (docAction RC).
       // ProcessInvoiceUtil calls .isEmpty() on the date strings unconditionally, so they must be
       // non-null. Empty strings are the correct null-safe default for a normal "CO" completion.
+      // A refusal left on this thread by a completion nobody answered must not answer this one.
+      InvoiceCompletionQuotaHook.takeRefusal();
       OBError result = processInvoiceUtil.process(invoiceId, "CO", "", "", "", vars, conn);
+      NeoQuotaCreateCheck.Refused quotaRefusal = InvoiceCompletionQuotaHook.takeRefusal();
+      if (quotaRefusal != null) {
+        throw quotaRefusal;
+      }
       Process process = OBDal.getInstance().get(Process.class, COMPLETE_PROCESS_ID_INVOICE);
       if (process == null) {
         log.error("[INVOICE-COMPLETE] Process record {} not found", COMPLETE_PROCESS_ID_INVOICE);
@@ -145,6 +164,8 @@ final class InvoiceCompletionService {
             "Completion process configuration missing");
       }
       return NeoProcessService.translateClassicResult(result, process);
+    } catch (NeoQuotaCreateCheck.Refused refused) {
+      throw refused;
     } catch (Exception e) {
       log.error("[INVOICE-COMPLETE] Completion failed for invoice {}: {}",
           invoiceId, e.getMessage(), e);
@@ -166,9 +187,11 @@ final class InvoiceCompletionService {
    * @throws OBException when the completion is rejected for a business reason (the message is the
    *     translated one produced by the process and its hook chain, safe to show to the user)
    * @throws IllegalStateException when the completion fails for an infrastructure reason
+   * @throws NeoQuotaCreateCheck.Refused when a {@code block} plan quota refuses the completion
+   *     (ETP-6060); the creation handlers answer it with its own 403 {@code QUOTA_EXCEEDED}
    */
   static void completeInvoiceOrThrow(String invoiceId, OBContext obContext) {
-    NeoResponse response = completeInvoice(invoiceId, obContext);
+    NeoResponse response = completeOrRefuse(invoiceId, obContext);
     int status = response.getHttpStatus();
     if (status == HttpServletResponse.SC_OK) {
       return;

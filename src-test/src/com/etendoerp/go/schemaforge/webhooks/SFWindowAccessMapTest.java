@@ -34,6 +34,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -46,6 +47,8 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -563,6 +566,108 @@ class SFWindowAccessMapTest {
             JSONObject result = new JSONObject(responseVars.get(RESULT));
             assertFalse(result.getJSONObject("capabilities").getBoolean("isOwner"));
             assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+
+    // ── productMovements capability (ETP-5889) ──────────────────────────────
+
+    /** The tab's capability follows the flag for a restricted role, on and off. */
+    @Test
+    @DisplayName("Restricted role resolves productMovements from the flag, on and off")
+    void testProductMovementsFollowsTheFlagForRestrictedRole() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenRestrictedRole("role-movements-" + on);
+            stubWindowAccessRows(Collections.emptyList());
+            stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+            try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+                flags.when(() -> GoFeatureFlags.isEnabled(
+                        eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), any())).thenReturn(on);
+
+                webhook.get(parameters, responseVars);
+
+                assertNull(responseVars.get(ERROR));
+                JSONObject result = new JSONObject(responseVars.get(RESULT));
+                assertEquals(on, result.getJSONObject("capabilities").getBoolean("productMovements"));
+            }
+        }
+    }
+
+    /**
+     * The flag is evaluated for the account resolved for this request, with its tenant: the same
+     * account the {@code structuredAddressForSepa} capability is targeted on.
+     */
+    @Test
+    @DisplayName("productMovements is evaluated for the account resolved for the request")
+    void testProductMovementsIsTargetedOnTheRequestAccount() throws Exception {
+        givenRestrictedRole("role-movements-target");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+             MockedStatic<GoAccountResolver> resolver = mockStatic(GoAccountResolver.class)) {
+            resolver.when(GoAccountResolver::currentAccountEmail).thenReturn("Owner@Example.com");
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), any())).thenReturn(true);
+
+            webhook.get(parameters, responseVars);
+
+            ArgumentCaptor<FeatureFlagContext> context = ArgumentCaptor.forClass(FeatureFlagContext.class);
+            flags.verify(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), context.capture()));
+            assertEquals("Owner@Example.com", context.getValue().getTargetingKey());
+            assertEquals("owner@example.com",
+                    context.getValue().getAttributes().get(FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE));
+        }
+    }
+
+    /** Admin bypass: productMovements still follows the flag (it is not folded into the blanket trues). */
+    @Test
+    @DisplayName("Admin bypass resolves productMovements from the flag, on and off")
+    void testProductMovementsFollowsTheFlagForAdminBypass() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenSystemAdminRole();
+            stubSpecRows(Collections.emptyList());
+            stubWindowAccessRows(Collections.emptyList());
+
+            try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+                flags.when(() -> GoFeatureFlags.isEnabled(
+                        eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), any())).thenReturn(on);
+
+                webhook.get(parameters, responseVars);
+
+                assertNull(responseVars.get(ERROR));
+                JSONObject capabilities = new JSONObject(responseVars.get(RESULT)).getJSONObject("capabilities");
+                assertEquals(on, capabilities.getBoolean("productMovements"));
+                assertTrue(capabilities.getBoolean("isAdminOrClientAdmin"));
+            }
+        }
+    }
+
+    /** No account resolves for the user: the flag is evaluated account-less (no targeting key, no email). */
+    @Test
+    @DisplayName("productMovements is evaluated account-less when no account resolves for the user")
+    void testProductMovementsWithNoAccountIsEvaluatedAccountLess() throws Exception {
+        givenRestrictedRole("role-movements-no-account");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+             MockedStatic<GoAccountResolver> resolver = mockStatic(GoAccountResolver.class)) {
+            resolver.when(GoAccountResolver::currentAccountEmail).thenReturn(null);
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), any())).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertFalse(result.getJSONObject("capabilities").getBoolean("productMovements"));
+            flags.verify(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB),
+                    argThat(ctx -> ctx.getTargetingKey() == null
+                            && !ctx.getAttributes().containsKey(FeatureFlagContext.ATTRIBUTE_EMAIL))));
         }
     }
 

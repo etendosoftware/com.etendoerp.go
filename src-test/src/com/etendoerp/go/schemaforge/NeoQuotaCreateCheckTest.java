@@ -436,6 +436,95 @@ class NeoQuotaCreateCheckTest {
     }
   }
 
+  /** ETP-6060 — a row checked before a status change (an invoice about to be completed). */
+  @Nested
+  @DisplayName("a status change")
+  class StatusChange {
+
+    private static final String STATUS = "documentStatus";
+
+    private void requireCompletion(BaseOBObject row) {
+      NeoQuotaCreateCheck.requireAllowedStatusChange(row, STATUS, "CO", guard);
+    }
+
+    @Test
+    void anEntityNoBlockQuotaCountsIsNeitherFlushedNorChecked() {
+      requireCompletion(row(HEADER_ENTITY, HEADER_ID));
+
+      verify(dal, never()).flush();
+      verify(guard, never()).refusalForStatusChange(any(), anyString(), anyString(), anyString(),
+          anyString());
+    }
+
+    @Test
+    void aRowWithoutAnIdOrEntityIsIgnored() {
+      requireCompletion(null);
+      requireCompletion(row(HEADER_ENTITY, null));
+      requireCompletion(row(" ", HEADER_ID));
+
+      verify(guard, never()).entryIfChecked(anyString());
+    }
+
+    @Test
+    void aChangeUnderTheQuotaRunsAfterAFlush() {
+      when(guard.entryIfChecked(HEADER_ENTITY)).thenReturn(Optional.of(entry));
+      when(guard.refusalForStatusChange(entry, HEADER_ENTITY, HEADER_ID, STATUS, "CO"))
+          .thenReturn(Optional.empty());
+
+      requireCompletion(row(HEADER_ENTITY, HEADER_ID));
+
+      verify(dal).flush();
+    }
+
+    @Test
+    void aChangeOverTheQuotaIsRefusedWith403() throws Exception {
+      when(guard.entryIfChecked(HEADER_ENTITY)).thenReturn(Optional.of(entry));
+      when(guard.refusalForStatusChange(entry, HEADER_ENTITY, HEADER_ID, STATUS, "CO"))
+          .thenReturn(Optional.of(denial()));
+
+      NeoQuotaCreateCheck.Refused refused = assertThrows(NeoQuotaCreateCheck.Refused.class,
+          () -> requireCompletion(row(HEADER_ENTITY, HEADER_ID)));
+
+      assertRefusal(refused.response());
+      verify(dal, never()).rollbackAndClose();
+    }
+
+    @Test
+    void aDatabaseErrorFailsClosedWith500() throws Exception {
+      when(guard.entryIfChecked(HEADER_ENTITY)).thenReturn(Optional.of(entry));
+      RuntimeException failure = databaseFailure();
+      when(guard.refusalForStatusChange(entry, HEADER_ENTITY, HEADER_ID, STATUS, "CO"))
+          .thenThrow(failure);
+
+      NeoQuotaCreateCheck.Refused refused = assertThrows(NeoQuotaCreateCheck.Refused.class,
+          () -> requireCompletion(row(HEADER_ENTITY, HEADER_ID)));
+
+      assertCheckFailed(refused.response());
+      assertSame(failure, refused.getCause());
+    }
+
+    @Test
+    void anUnreadableQuotaEntryFailsClosed() throws Exception {
+      when(guard.entryIfChecked(HEADER_ENTITY)).thenThrow(databaseFailure());
+
+      NeoQuotaCreateCheck.Refused refused = assertThrows(NeoQuotaCreateCheck.Refused.class,
+          () -> requireCompletion(row(HEADER_ENTITY, HEADER_ID)));
+
+      assertCheckFailed(refused.response());
+      verify(dal, never()).flush();
+    }
+
+    @Test
+    void aFailureBeforeAnySqlLetsTheChangeRun() {
+      when(guard.entryIfChecked(HEADER_ENTITY)).thenReturn(Optional.of(entry));
+      when(guard.refusalForStatusChange(entry, HEADER_ENTITY, HEADER_ID, STATUS, "CO"))
+          .thenThrow(new IllegalArgumentException("bad restriction fragment"));
+
+      org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+          () -> requireCompletion(row(HEADER_ENTITY, HEADER_ID)));
+    }
+  }
+
   @Nested
   @DisplayName("a failed check")
   class FailedCheck {

@@ -30,6 +30,7 @@ import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -270,7 +271,7 @@ class NeoUsageEventEndpointTest {
           .put("source", "ai-bff").put("target", "sales-order").put("action", "complete")
           .put("outcome", "error").put("errorCode", "E42").put("durationMs", 1234)
           .put("occurredAt", "2026-09-23T11:59:00Z").put("sessionKey", "conv-1")
-          .put("appVersion", "3.1.0")
+          .put("appVersion", "3.1.0").put("costUsd", 0.00004725)
           .put("properties", new JSONObject().put("model", "kimi").put("inputTokens", 1200));
 
       NeoResponse response = postEvents(json);
@@ -288,7 +289,20 @@ class NeoUsageEventEndpointTest {
           () -> assertEquals(Instant.parse("2026-09-23T11:59:00Z"), e.occurredAt()),
           () -> assertEquals("conv-1", e.sessionKey()),
           () -> assertEquals("3.1.0", e.appVersion()),
+          () -> assertEquals(0, new BigDecimal("0.00004725").compareTo(e.costUsd())),
           () -> assertEquals("{\"model\":\"kimi\",\"inputTokens\":1200}", e.properties()));
+    }
+
+    @Test
+    void onlyAFiniteNonNegativeNumberIsACost() throws Exception {
+      // A negative cost would lower the tenant's AI spend, which billing limits sum.
+      assertNull(single(known().put("costUsd", -0.5)).costUsd());
+      sunk.clear();
+      assertNull(single(known().put("costUsd", "0.5")).costUsd());
+      sunk.clear();
+      assertNull(single(known()).costUsd());
+      sunk.clear();
+      assertEquals(0, BigDecimal.ZERO.compareTo(single(known().put("costUsd", 0)).costUsd()));
     }
 
     @Test

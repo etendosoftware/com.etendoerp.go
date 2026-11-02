@@ -48,6 +48,7 @@ import org.openbravo.test.base.OBBaseTest;
  * roll back beyond closing the session.
  *
  * @covers com.etendoerp.go.schemaforge.DocActionIdempotency
+ * @covers com.etendoerp.go.schemaforge.DocActionReactivationRule
  */
 public class DocActionIdempotencyIntegrationTest extends OBBaseTest {
 
@@ -155,6 +156,40 @@ public class DocActionIdempotencyIntegrationTest extends OBBaseTest {
         idWithStatus(Order.class, COMPLETED), "RE"));
     assertNull(DocActionIdempotency.alreadyApplied(ORDER_TAB, idWithStatus(Order.class, DRAFT),
         "RE"));
+  }
+
+  /**
+   * ETP-6013 — the same lookup on the real dictionary: Reactivate on a draft order, invoice or
+   * shipment is refused 422 before the procedure; on a completed one it runs. Read-only.
+   */
+  @Test
+  public void reactivateOnADraftIsRefusedOnTheThreeHeaders() throws Exception {
+    String[][] cases = { { ORDER_TAB, idWithStatus(Order.class, DRAFT) },
+        { INVOICE_TAB, idWithStatus(Invoice.class, DRAFT) },
+        { SHIPMENT_TAB, idWithStatus(ShipmentInOut.class, DRAFT) } };
+    for (String[] row : cases) {
+      NeoResponse refused = DocActionReactivationRule.refusal(row[0], row[1], "RE");
+      assertNotNull("tab " + row[0], refused);
+      assertEquals("tab " + row[0], 422, refused.getHttpStatus());
+      assertEquals("tab " + row[0], DocActionReactivationRule.MSG_REACTIVATE_ONLY_COMPLETED,
+          refused.getBody().getJSONArray("messageKeys").getString(0));
+      // The status name is read from the real document status lists in the session language
+      // (e.g. "Draft" for en_US, "Borrador" for es_ES), never the bare code.
+      String label = com.etendoerp.go.schemaforge.email.DocumentStatusLabel.of(DRAFT,
+          com.etendoerp.go.schemaforge.util.NeoLanguage.currentCode());
+      assertTrue("tab " + row[0] + ": the status name must be translated, got " + label,
+          !DRAFT.equals(label));
+      String message = refused.getBody().getString("message");
+      assertTrue("tab " + row[0], message.contains(label));
+      // The document number is substituted as {0} (not consumed as the language), and every
+      // placeholder is filled.
+      Object documentNo = OBDal.getInstance().get(OBDal.getInstance().get(Tab.class, row[0])
+          .getTable().getName(), row[1]).get("documentNo");
+      assertTrue("tab " + row[0] + ": " + message, message.startsWith(documentNo + " "));
+      assertTrue("tab " + row[0] + ": " + message, !message.contains("%") && !message.contains("{"));
+    }
+    assertNull(DocActionReactivationRule.refusal(ORDER_TAB,
+        idWithStatus(Order.class, COMPLETED), "RE"));
   }
 
   @Test

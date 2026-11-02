@@ -55,6 +55,9 @@ import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
  *
  * <p><b>What it checks today.</b>
  * <ul>
+ *   <li>{@link NeoActionRecordGuard}: the row a PUT/PATCH/DELETE targets must be writable by the
+ *       current tenant — or, for an update its customization declares consumed into tenant-owned
+ *       storage ({@link NeoHandler#consumesTargetWrite}, ETP-6062), readable.</li>
  *   <li>{@link NeoReferenceOwnership}: every reference the request sets and its {@code parentId}
  *       (body or query string) must be a row of the caller's client or of System.</li>
  *   <li>{@link NeoReferenceActiveness} (ETP-5802): every reference the request sets must not point
@@ -107,15 +110,26 @@ final class NeoWritePreflight {
    * The refusal for a PUT/PATCH/DELETE targeting a record {@link NeoActionRecordGuard} blocks, or
    * {@code null} to proceed with the rest of the preflight.
    *
+   * <p>An update goes through {@link NeoActionRecordGuard#updateRefusalFor}, which lets a
+   * customization that stores the whole update in tenant-owned rows declare so
+   * ({@link NeoHandler#consumesTargetWrite}, ETP-6062) — the target then only has to be readable.
+   * A delete always gets the strict answer.</p>
+   *
    * @param context the CRUD request context, possibly {@code null}
    * @return the response to send instead of dispatching, or {@code null}
    */
   private static NeoResponse targetRecordRefusal(NeoContext context) {
-    if (context == null || !("PUT".equals(context.getHttpMethod())
-        || "PATCH".equals(context.getHttpMethod()) || "DELETE".equals(context.getHttpMethod()))) {
+    if (context == null) {
       return null;
     }
-    return NeoActionRecordGuard.writeRefusalFor(context.getSfEntity(), context.getRecordId());
+    String method = context.getHttpMethod();
+    if ("PUT".equals(method) || "PATCH".equals(method)) {
+      return NeoActionRecordGuard.updateRefusalFor(context.getSfEntity(), context);
+    }
+    if ("DELETE".equals(method)) {
+      return NeoActionRecordGuard.writeRefusalFor(context.getSfEntity(), context.getRecordId());
+    }
+    return null;
   }
 
   /**

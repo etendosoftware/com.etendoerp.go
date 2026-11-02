@@ -234,6 +234,39 @@ public class NeoProcessServiceTest {
     }
   }
 
+  /**
+   * ETP-6013 — Reactivate on a draft is refused by {@link DocActionReactivationRule} before anything
+   * is written on the record or the procedure runs; the refusal is returned as is. This is the path
+   * the REST action, MCP etendo_action and each etendo_action_batch document share.
+   */
+  @Test
+  public void executeProcessReactivateOnADraftNeverCallsTheProcedure() throws Exception {
+    NeoResponse refused = DocActionReactivationRule.refusalBody(
+        "PC1000015 is Draft: Reactivate only applies to Completed documents.");
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoProcessPreconditionService> preconditions =
+             mockStatic(NeoProcessPreconditionService.class);
+         MockedStatic<DocActionReactivationRule> rule =
+             mockStatic(DocActionReactivationRule.class);
+         MockedStatic<DocActionIdempotency> idempotency = mockStatic(DocActionIdempotency.class);
+         MockedStatic<org.openbravo.service.db.CallProcess> callProcess =
+             mockStatic(org.openbravo.service.db.CallProcess.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);
+      rule.when(() -> DocActionReactivationRule.refusal("tab-1", "rec-1", "RE"))
+          .thenReturn(refused);
+
+      NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
+          docActionParams("RE"));
+
+      assertEquals(422, resp.getHttpStatus());
+      assertEquals("PC1000015 is Draft: Reactivate only applies to Completed documents.",
+          resp.getBody().getString("message"));
+      callProcess.verifyNoInteractions();
+      idempotency.verifyNoInteractions();
+    }
+  }
+
   /** Any other status runs the procedure exactly as before, and its refusal is a 422 business_rule. */
   @Test
   public void executeProcessARefusedDocActionIs422BusinessRule() throws Exception {

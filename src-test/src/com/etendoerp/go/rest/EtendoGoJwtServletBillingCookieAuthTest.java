@@ -965,9 +965,13 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     if (withForeignParams) {
       when(req.getQueryString()).thenReturn("subscriptionId=" + FOREIGN_SUBSCRIPTION
           + "&customer=" + FOREIGN_CUSTOMER);
-      when(req.getParameter(anyString())).thenAnswer(call ->
-          String.valueOf(call.getArgument(0)).toLowerCase().contains("customer")
-              ? FOREIGN_CUSTOMER : FOREIGN_SUBSCRIPTION);
+      // ETP-6060 — clientId is the one parameter the subscription read honours (ownership is the
+      // store query's); it has its own tests, so the foreign-ids request does not send it.
+      when(req.getParameter(anyString())).thenAnswer(call -> {
+        String name = call.getArgument(0);
+        if ("clientId".equals(name)) return null;
+        return name.toLowerCase().contains("customer") ? FOREIGN_CUSTOMER : FOREIGN_SUBSCRIPTION;
+      });
       when(req.getHeader(anyString())).thenReturn(FOREIGN_SUBSCRIPTION);
       // ETP-5675 — X-Go-Account is not an arbitrary header: it names the account the tab believes
       // it is signed in as, and a foreign value is refused outright (covered below). Absent here,

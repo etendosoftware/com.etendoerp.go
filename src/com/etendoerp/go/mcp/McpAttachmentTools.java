@@ -75,6 +75,11 @@ final class McpAttachmentTools {
 
   private static final int HTTP_BAD_REQUEST = 400;
 
+  /** The advice of a read-only refusal (ETP-6013): the reads still work, only changes are refused. */
+  static final String HINT_READ_ONLY = "The attachments of this document type can be listed and "
+      + "downloaded with " + McpConstants.TOOL_NEO_LIST_ATTACHMENTS + ", but not added or removed "
+      + "through this API. Do not retry.";
+
   /**
    * Longest file name accepted. {@code C_File.name} is {@code varchar(1000)}, but 255 is what a file
    * name can be on the file systems the attachments live on, and the name becomes a path segment.
@@ -408,6 +413,11 @@ final class McpAttachmentTools {
       return errorEnvelope(status, McpConstants.ERROR_FORBIDDEN, refused.getMessage(),
           "This role cannot change this document's attachments. Ask for the access, or ask "
               + "someone who has it.");
+    }
+    if (status == McpConstants.STATUS_METHOD_NOT_ALLOWED && refused.isReadOnly()) {
+      // ETP-6013: attachments of this type are read-only through the MCP (MCP_CONFIG.attachments).
+      return errorEnvelope(status, McpConstants.ERROR_METHOD_NOT_ALLOWED, refused.getMessage(),
+          HINT_READ_ONLY);
     }
     if (status == McpConstants.STATUS_METHOD_NOT_ALLOWED) {
       return errorEnvelope(status, McpConstants.ERROR_METHOD_NOT_ALLOWED, refused.getMessage(),

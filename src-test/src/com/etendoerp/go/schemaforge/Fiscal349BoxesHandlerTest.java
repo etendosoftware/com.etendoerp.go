@@ -619,6 +619,78 @@ public class Fiscal349BoxesHandlerTest {
     assertFalse(json.has("total"));
   }
 
+  // ── correctedBase: restated total on rectificative rows (ETP-5725) ──
+
+  /** A corrective row with an explicit (non-default) {@code BPFormerAmount}. */
+  private static Map<String, Object> daoCorrectiveRowWithFormer(String bpId, String magnitude,
+      String key, String former) {
+    Map<String, Object> r = daoCorrectiveRow(bpId, magnitude, key);
+    r.put("BPFormerAmount", new BigDecimal(former));
+    return r;
+  }
+
+  /**
+   * Real 3-record declaration from ETP-5725 (QA CP-19 follow-up): the AEAT's own "Resumen de la
+   * declaración" screen reads "Importe de las rectificaciones: 2.152,00" — the sum of the three
+   * RESTATED totals below, not the sum of the signed deltas (which was the pre-fix, wrong, 452,00
+   * figure). {@code correctedBase} must carry {@code former + delta} to the cent for each row.
+   */
+  @Test
+  public void testAppendOperatorsWritesCorrectedBaseMatchingRealAeatDeclaration() throws Exception {
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(Arrays.asList(
+        daoCorrectiveRowWithFormer("bp1", "402", "E", "2010.00"),  // former 2010.00, delta -402.00
+        daoCorrectiveRowWithFormer("bp2", "88", "E", "264.00"),    // former 264.00,  delta -88.00
+        daoCorrectiveRowWithFormer("bp3", "-138", "E", "230.00"))); // former 230.00,  delta +138.00
+
+    JSONArray arr = handler.appendOperators(
+        new JSONArray(), signed, new HashMap<>(), emptySummary(), true);
+
+    assertEquals(3, arr.length());
+    assertEquals("1608.00", arr.getJSONObject(0).getString("correctedBase"));
+    assertEquals("176.00",  arr.getJSONObject(1).getString("correctedBase"));
+    assertEquals("368.00",  arr.getJSONObject(2).getString("correctedBase"));
+  }
+
+  /** Regular (non-rectificative) rows never carry {@code correctedBase}, even with a former amount. */
+  @Test
+  public void testAppendOperatorsOmitsCorrectedBaseForRegularRows() throws Exception {
+    JSONArray arr = handler.buildOperatorsArray(
+        Collections.singletonList(row("bp1", "10", "E")), new HashMap<>(), emptySummary());
+
+    assertFalse(arr.getJSONObject(0).has("correctedBase"));
+  }
+
+  /**
+   * Defensive guard: a rectificative row with no {@code BPFormerAmount} at all (shouldn't happen
+   * given {@link AEAT3492010ReportDao}'s contract, but must not NPE) omits {@code correctedBase}
+   * rather than writing a garbage value.
+   */
+  @Test
+  public void testAppendOperatorsOmitsCorrectedBaseWhenFormerAmountMissing() throws Exception {
+    Map<String, Object> noFormer = row("bp1", "30", "E"); // no BPFormerAmount key at all
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(
+        Collections.singletonList(noFormer));
+
+    JSONArray arr = handler.appendOperators(
+        new JSONArray(), signed, new HashMap<>(), emptySummary(), true);
+
+    assertEquals(1, arr.length());
+    assertFalse(arr.getJSONObject(0).has("correctedBase"));
+  }
+
+  /** {@code correctedBase} is rounded HALF_UP to 2 decimals, same as {@code base}. */
+  @Test
+  public void testAppendOperatorsRoundsCorrectedBaseHalfUp() throws Exception {
+    // former 50.02, delta -0.005 (magnitude 0.005) → 50.015 → HALF_UP → 50.02
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(
+        Collections.singletonList(daoCorrectiveRowWithFormer("bp1", "0.005", "E", "50.02")));
+
+    JSONArray arr = handler.appendOperators(
+        new JSONArray(), signed, new HashMap<>(), emptySummary(), true);
+
+    assertEquals("50.02", arr.getJSONObject(0).getString("correctedBase"));
+  }
+
   // ── buildOperatorsArray VIES status mapping (ETP-4755) ─────────────
 
   @Test

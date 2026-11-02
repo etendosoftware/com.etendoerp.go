@@ -37,6 +37,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.schemaforge.ProductMovementsPolicy;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
@@ -102,6 +103,14 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * rollout — the value is still computed once, identically regardless of which branch below
  * resolved, since it does not itself depend on role/admin status.</p>
  *
+ * <p>{@code capabilities.productMovements} (ETP-5889) mirrors the backend-only
+ * {@code product-movements-tab} flag ({@link GoFeatureFlags#FLAG_PRODUCT_MOVEMENTS_TAB}). Like
+ * {@code structuredAddressForSepa} it is per account: it is evaluated for the account resolved for
+ * this request (see {@link ProductMovementsPolicy}), so two users of the same role can get different
+ * values. It is the only signal the frontend reads for it: the Product "Movements" tab hides itself,
+ * requests nothing and emits no telemetry while it is {@code false}. It is read when the session loads
+ * the access map, so a change on the control plane reaches a user at the next load.</p>
+ *
  * GET /webhooks/SFWindowAccessMap
  */
 public class SFWindowAccessMap extends BaseWebhookService {
@@ -133,6 +142,14 @@ public class SFWindowAccessMap extends BaseWebhookService {
    * {@code isAdminOrClientAdmin} which do vary by branch — it does not itself depend on role.
    */
   private static final String STRUCTURED_ADDRESS = "structuredAddressForSepa";
+
+  /**
+   * JSON key used for the {@code product-movements-tab} backend-only flag's capability signal
+   * (ETP-5889). Per account like {@link #STRUCTURED_ADDRESS}: evaluated with the account of the user
+   * making the request, so it can differ between two users of the same role. Same value in both
+   * branches of {@link #buildAccessMap}, like {@code isOwner}.
+   */
+  private static final String PRODUCT_MOVEMENTS = "productMovements";
 
   /** Access-tier value for a role with full (read+write) access to a window. */
   private static final String FULL = "full";
@@ -238,6 +255,9 @@ public class SFWindowAccessMap extends BaseWebhookService {
     capabilities.put(STRUCTURED_ADDRESS,
         GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA,
             FeatureFlagContext.forAccount(accountEmail)));
+
+    // ETP-5889 — same account, same reasoning: per account, identical in both branches above.
+    capabilities.put(PRODUCT_MOVEMENTS, ProductMovementsPolicy.isEnabledFor(accountEmail));
 
     JSONObject result = new JSONObject();
     result.put(WINDOW_ACCESS, windowAccess);

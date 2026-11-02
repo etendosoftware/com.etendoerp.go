@@ -1197,6 +1197,42 @@ Existing entity method and role gates still apply. MCP updates also reject blank
 and the literal string `"null"` with the existing `422` missing-argument envelope; these values
 cannot disable optimistic locking.
 
+**An update consumed into tenant-owned storage (ETP-6062).** Some customizations never write
+the row an update addresses: `TaxSifOverrideHandler` stores a SIF-only update of a tax (a System
+row shared by every client) in the tenant's own `etsg_tax_sif_config` and answers the request
+itself. The strict guard refused those saves with `404` from ETP-5785 on. A customization can now
+declare such an update through the `NeoHandler#consumesTargetWrite(NeoContext)` hook (default
+`false`); `NeoActionRecordGuard.updateRefusalFor` — what REST `PUT`/`PATCH` (`NeoWritePreflight`)
+and MCP `etendo_update` call instead of `writeRefusalFor` — then waives the target-row check for
+that request. The waiver is structural and narrow:
+
+- only an update (`PUT`/`PATCH`); a `DELETE` always gets `writeRefusalFor`'s answer;
+- only a row that exists and that `TenantOwnership.isVisibleToCurrentTenant` lets the caller read:
+  another tenant's row and an unknown id are the same `404` as before, whatever the hook answers;
+- only when the entity's customization, resolved by `NeoHandlerLookup.forEntityQuietly`, answers
+  `true` for this very request; a failure to resolve or to answer keeps the guard;
+- the reference-ownership and activeness checks below still run on the waived request.
+
+The customization must answer `true` only for a body its `handle()` short-circuits without writing
+the target. The engine enforces it: a waived request is marked on the context, and if `handle()`
+declines after all, the default write step (`NeoCrudHandler.handleDefault`) — or, on MCP, the
+code right after the update pre-hook — refuses it with the same `404`. A body that also carries a
+field of the row itself is not declared, so on a System tax it is refused before `handle()` runs
+and nothing is upserted. Batch writes are creates and have no target row.
+
+A consumed SIF-only update ignores the `updated` version token the SPA sends: `c_tax` is not
+written, so no stale-record check runs, and the `etsg_tax_sif_config` upsert carries no
+optimistic lock of its own — two concurrent saves of the same override resolve last write wins.
+
+The context organization must belong to the caller. The SIF save can carry `sifContextOrgId` (the
+organization of the invoice or order line it was opened from), which picks the legal entity the
+override is keyed on. `TaxSifOverrideHandler` accepts it on a write only when it is one of the
+caller's writable organizations, belongs to the caller's own client and is not `*` (`0`);
+otherwise the write is refused with the same `404 Record not found`, before anything is stored —
+it never falls back to the session organization in silence. On a read (`GET`, and the overlay on
+a write response) a param that is not a readable organization of the caller's client is ignored
+and the session organization is used, as when the param is absent.
+
 The rules below concern references supplied by the caller, separately from the target record.
 
 **References do not write secondary records.** Scalar FK values and direct `reference.id` keys
@@ -1366,9 +1402,29 @@ classification.)
   column of the record's table whose reference list holds both the draft status (`DR`) and the target
   status (the action's own list never holds `DR`); two candidates count as ambiguous.
   `DocActionIdempotency`.
-- Both changes live in `NeoProcessService.executeDbProcedure`, which MCP (`etendo_action`) also
-  reaches, so both channels behave the same; MCP reads `status >= 400` and the flat body, so the
-  422 needs no change there.
+- **Reactivate on a draft is refused before the procedure (ETP-6013).** `RE` on a record whose
+  document status is `DR` answers the same `422 business_rule` envelope as a procedure refusal,
+  with `messageKeys:["ETGO_ReactivateOnlyCompleted"]` and the sentence in the request language
+  (`NeoMessageText`; `{0}` the record's `DocumentNo`, or its identifier when the table has none;
+  `{1}` the status name from the document status lists, `DocumentStatusLabel`):
+  "PC1000015 está en Borrador: Reactivar solo aplica a documentos Completados." /
+  "PC1000015 is Draft: Reactivate only applies to Completed documents.". Before it, the core
+  procedure answered `ActionNotSupported` ("Esta acción no se puede sostener"), which explains
+  nothing. Nothing is written on the record and the procedure is not called. The status column is
+  found with the same structural lookup as above (list holding `DR` and `CO`); undecidable (no or
+  several columns, a missing record, a failing lookup) runs the procedure as before.
+  **Only the draft status is decided**, not "anything but `CO`": a voided sales quotation is
+  reactivated by design (ETP-5704, its pre-hook refuses every other status with its own message,
+  and that pre-hook runs first), so "not completed" is not a structural rule. Closed/voided orders
+  and invoices still get the procedure's own refusal. Decided on the request's root `docAction`
+  (exact `RE`, the value written on the record). `DocActionReactivationRule`.
+  The GO app never offers Reactivate on a draft (row action and form gated on `CO`); the only UI
+  path that can send it is the bulk "Procesar" over a mixed draft+completed selection with
+  "Reactivar" chosen, where a draft row already failed and now fails with this sentence instead.
+- All three live in `NeoProcessService.executeDbProcedure`, which MCP (`etendo_action`, and each
+  document of `etendo_action_batch`, where it is that document's `ok:false` result while the
+  others carry on) also reaches, so every channel behaves the same; MCP reads `status >= 400` and
+  the flat body, so the 422 needs no change there. No divergence to declare in §4.12.9.
 
 ### 4.4 Selectors (FK Dropdowns)
 
@@ -3947,7 +4003,7 @@ The shape and the rules are in §4.12.1.3.
 | `return-material-receipt/returnMaterialReceipt` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `RM_Receipt_PickEdit` → `importShipmentLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | the sales mirror of the previous row |
 | `purchase-order/header` | — | redirect `rMReceiveMaterials` → `createGoodsReceipt`, `rMCreateInvoice` → `createPurchaseInvoice` (ETP-5709) | the classic *Receive Materials* button has no process connected for an agent, and *Create Invoice* is undocumented for it. The targets are the header's declared contracts (`PurchaseOrderHeaderHandler`): `createGoodsReceipt` creates a DRAFT receipt, `createPurchaseInvoice` creates AND completes a purchase invoice. The preconditions (source must be completed, draft-aware pending quantity) are described in the ETP-5709 paragraphs of §4.12.9 and apply to a redirected call exactly as to a direct one |
 | `purchase-order/header` (ETP-5714) | `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines` (ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE | *Pick from Receipt* is a pick-and-edit window with no process an agent can run; Cancel and Replace is a classic multi-step flow (replacement order plus reversal of the original's documents) with no MCP equivalent, and its second step has no meaning alone. The redirect row above is kept. `valuesByStatus` is advisory availability (§4.12.35), from core's `ActionButtonUtility.docAction` |
-| `sales-order/header` (ETP-5714) | `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines`, `RM_Pickfromreceipt` (the last two: ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: as the purchase order | the sales order had no `MCP_CONFIG` until now. Cancel and Replace is a real flow in the app, but it is a multi-step flow with no declared contract, so it is withheld from agents with a reason rather than offered half-supported; reactivate (RE, only without linked documents), edit and complete again instead |
+| `sales-order/header` (ETP-5714) | `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines`, `RM_Pickfromreceipt` (the last two: ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → RE only. CL was removed in the ETP-5704 QA round because the app does not offer Close; `SalesOrderHeaderHandler` also refuses it with 400 `ETGO_SalesOrderCloseNotOffered` | the sales order had no `MCP_CONFIG` until now. Cancel and Replace is a real flow in the app, but it is a multi-step flow with no declared contract, so it is withheld from agents with a reason rather than offered half-supported; reactivate (RE, only without linked documents), edit and complete again instead |
 | `sales-quotation/quotation` (ETP-5714 follow-up) | `Create_POLines`, `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace` (the last two added after the live test), each with its own `reasons` entry | — | the quotation tab carries the same two classic buttons. *Create Lines From* and *Pick from Receipt* open pick-and-edit windows that no Etendo GO screen renders (`api.actions` in the generated pages is metadata, `processes` is empty), so an agent that could call them would do something the app cannot show. `Create_POLines` is also hidden on `purchase-order/header`, where `decisions.json` keeps it `discarded` (it has no spec field there; the hidden entry is what lists it under `withheldActions` and refuses it with its reason). The legacy return specs have no screen and are left as they are |
 
 **A redirect target is not validated at runtime (ETP-5709).** `McpActionsSection.validateRedirect` only requires each target to be a non-blank string; it never checks that the target is an action the entity serves. A typo or a renamed action still loads, and the agent is then told to call something that answers 404. Every `redirect` target must therefore be an action the entity declares (an `actionContracts()` entry or a handler-served action). Also, `reason` is mandatory in every `actions` section, `redirect`-only ones included: `validate` rejects a section without it, and an unusable section fails the entity closed (§4.12.6). `redirectReason` and `reasons` refine the text per action; they do not replace `reason`.
@@ -4430,14 +4486,15 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | document actions over several documents (ETP-5715) | one document per call (`etendo_action`), one transaction, the call's own answer | `etendo_batch` is **create-only and atomic**; it has no ACTION surface | **`etendo_action_batch` is neither: per-document, NOT atomic, capped at 50 ids**, one result per document. Each document runs the `etendo_action` path in its own transaction (commit on success, rollback and a clean session on failure) and the batch carries on after a failure. REST has no equivalent call: the SPA's list toolbar posts one request per record. **Aligned with the SPA (bulk bar, row kebab, form kebab) and the same in single `etendo_action`:** reactivating a *posted* invoice or amortization un-posts it first, on the server (ETP-5684; goods documents, returns and journals do not), §4.12.36. **Not aligned, on purpose:** concurrency, the client-side `rowFilter` omission, and the SPA clone dialog stopping at the first failure. Declared in §4.12.36 |
 | attachments of a document — **read authorization and parent ownership** (ETP-5715) | `GET /sws/neo/attachments/{table}/{record}` and `/file/{id}` check **nothing** about the parent: no client/organization ownership, no window-access tier for a read, no existence check on a download (ADR-0003 is still "Proposed", ETP-4570). Writes check only the window-access tier of *a* window that shows the table (`NeoAttachmentAuthorizer`, ETP-5205) | **enforced, on every operation** (`etendo_request_attachment_upload`, `etendo_list_attachments`, `etendo_delete_attachment`; §4.12.37): the role must have access to the **spec** (read tier to list, write tier to upload and delete), the record must exist and belong to a client AND organization the session reads (`TenantOwnership`), a missing and a foreign record answer the same `404`, and an attachment id must belong to **that** record (a bare id of another document is the same `404` as an unknown one) | the MCP does not inherit a gap the platform is about to close. Until ETP-4570 lands in REST, a REST caller can still list/download/delete the attachments of another tenant's record by id; the MCP cannot. **Do not "fix" this by relaxing the MCP side** |
 | attachments on windows the SPA gives no Attachments tab (ETP-5715) | REST serves attachments of any table | **refused `405`** on the spec whose root entity carries `MCP_CONFIG.attachments.enabled:false` (the nine windows with `attachments:false` in `decisions.json`); parity with the SPA is enforced, REST is not changed | the MCP must not offer what the application hides; see §4.12.37 |
+| attachments of a type declared read-only for the MCP (ETP-6013) | REST serves and accepts attachments of any table (writes gated by the window-access tier only) | on the spec whose root entity carries `MCP_CONFIG.attachments.readOnly:true` (today `tax`), list and download work and **every write is refused `405`** with the declared, translated `messageKey` ("Los impuestos no se pueden modificar.") before any record lookup; REST is not changed | a product decision for the agent surface, not an SPA parity rule; see §4.12.37 |
  | attachment writes — organization (ETP-5715) | upload/delete do not check that the record's organization is writable by the role | **required** (`getWritableOrganizations`); a readable-only organization is the same `404` | as the row above |
 | attachment upload (ETP-5715) | multipart `POST` with the caller's bearer token | a **single-use link** (`PUT /sws/neo/attachment/upload/{token}`, no bearer: the token is the credential) bound to session, role, document, file name and the main flag; the upload runs **as the session that asked for the link** and the document is authorized again at upload time | the bytes must not pass through the conversation; the validation and the storage are the SAME code (`NeoAttachmentStore`) |
-| the PDF of a document (ETP-5715) | REST has no "PDF" operation: the SPA renders it in the browser (jsreport) when the document's preview is opened and stores it as the record's main attachment | `etendo_get_document_pdf` **never renders**: it returns the PDF the application already stored (link + metadata) or a `409` saying there is none (§4.12.38) | the PDF is produced by the front end from the template and the data the browser fetches; a server-side render would be a second renderer to keep identical (five consumption points, `docs/document-printables.md`). Declared so nobody "fixes" the 409 by adding a render |
+| the PDF of a document (ETP-5715, **reversed by ETP-6013**) | REST has no "PDF" operation: the SPA renders it in the browser (jsreport) when the document's preview is opened and stores it as the record's main attachment — unchanged by ETP-6013 | `etendo_get_document_pdf` returns the stored PDF (link + metadata). For an entity that declares `MCP_CONFIG.pdf.print` the **server renders it too, for the MCP only**: after an MCP Complete, and on an MCP request when the stored one is missing or stale (§4.12.38.1). Only when that is not possible (no declaration, read-only tier, a person's own main file, no jsreport, a failed render) does it answer the `409` | ETP-5715 declared "never renders" to avoid a second renderer to keep identical. ETP-6013 renders on the server **without** a second template: the frontend build publishes the exact template, helpers and labels the browser sends to jsreport (`printables/<document>.json`), and only the data builder is ported to Java, with a parity fixture shared by a Vitest and a JUnit test |
 | staleness of the stored PDF (ETP-5715) | the SPA serves a cached PDF only if it is not older than the record (`updated`) or the company branding (`brandingUpdated`) or the bundle that rendered it (`attachmentFreshness.js`); otherwise it **re-renders and re-uploads** | the MCP applies the first two (whole-second, strict, fail-open, the same inputs) to the main attachment of a `rendered` entity — **whatever the file is named**, as `fetchCachedBlob` does — and answers `409 pdf_stale` instead of regenerating; it **cannot** apply the bundle rule (the build epoch lives in the browser), so a PDF rendered by an older template is served as long as the data did not change | a stale PDF must not be handed out as current, and the MCP cannot regenerate; it asks for the preview to be opened again |
 | the uploaded document of a purchase invoice or goods receipt as its "PDF" (ETP-5715) | those windows pass no `recordUpdated`: their main attachment is the counterparty's own file, never judged stale | declared per entity: `MCP_CONFIG.pdf.source:"supplier"` returns the main file as is, never stale, and answers `409 no_pdf` "This document has no supplier document attached." when there is none (§4.12.38) | the main-attachment flag marks both kinds of file; the SPA tells them apart by window (a frontend decision), so the backend must be told. **Rule: a window whose preview shows an uploaded document instead of a rendered one MUST declare `pdf.source:"supplier"`**; `McpConfigSourcedataTest.supplierPdfEntitiesAreDeclared` is the drift guard |
 | a legacy customer file as the PDF of a return material receipt (ETP-5715) | since ETP-5124 the preview renders fresh and never reads the stored file, so a customer file marked main by the retired ETP-4408 upload is invisible there | the window is `rendered`: its main file is returned as "the PDF" when newer than the record, `pdf_stale` when older | the main-attachment flag cannot tell a legacy upload from an emailed copy; declared so it is not mistaken for a bug. The fix is a data check that no such files remain (D18), not code |
 | attachment download (ETP-5715) | `GET /sws/neo/attachments/file/{id}` with a bearer token, no parent check | a signed link (`/sws/neo/document-download/{token}`, the email link's token plus an attachment-id claim), valid **10 minutes**, bound to the record, the client and the attachment | the agent never receives bytes; the email links (7 days, main attachment only) are unchanged |
-| sending a document by email (ETP-5715) | `POST /sws/neo/email-contracts/{window}-send` from the send modal, which first renders the document in the browser and stores that PDF as the record's main attachment, then posts the command | `etendo_send_document_email` posts **the same command** to the **same `TransactionalEmailService`** (same contract checks, throttles, idempotency, suppression, audit rows) but **cannot render**: it refuses with `409 no_pdf` / `pdf_stale` (the `etendo_get_document_pdf` answers) before sending when the record has no current stored PDF (§4.12.39) | the email's "Descargar documento" link serves the record's main attachment when clicked; the server does NOT check it exists (the application guarantees it by caching first), so a send without a PDF would deliver a link that answers 404. The MCP has no render, so the gate is the only safe equivalent |
+| sending a document by email (ETP-5715) | `POST /sws/neo/email-contracts/{window}-send` from the send modal, which first renders the document in the browser and stores that PDF as the record's main attachment, then posts the command | `etendo_send_document_email` posts **the same command** to the **same `TransactionalEmailService`** (same contract checks, throttles, idempotency, suppression, audit rows) and resolves the PDF through the same `NeoDocumentPdf.resolve`: for a declared printable a missing or stale PDF is **rendered on the server first** (ETP-6013, MCP only, §4.12.38.1); otherwise it refuses with `409 no_pdf` / `pdf_stale` (the `etendo_get_document_pdf` answers) before sending (§4.12.39) | the email's "Descargar documento" link serves the record's main attachment when clicked; the server does NOT check it exists (the application guarantees it by caching first), so a send without a PDF would deliver a link that answers 404. Where the server cannot render (§4.12.38.1), the gate is the only safe equivalent |
 | a `DUPLICATE` email (ETP-5715) | the modal shows the duplicate as a **success** toast ("<document> ya fue enviado") and closes | reported as an **error envelope**, `409 email_duplicate`, `sent:false`, "Not sent: an identical email was already sent at <time>" (`previousSentAt`, new additive field of the `DUPLICATE` answer) | nothing is delivered on a duplicate; an agent that read it as success would tell the user a mail is on its way. Every non-`SENT` status (`DUPLICATE`, `THROTTLED`, `SUPPRESSED`, `NO_RECIPIENT`, `PROVIDER_FAILED`, `VALIDATION_FAILED`, `UNAUTHORIZED`) is `sent:false` with the server's status in `emailStatus` |
 | email subject, recipients and message from an agent (ETP-5715) | an operator types them; the server repairs a subject's CR/LF silently and validates an address with a permissive regex | **refused, never repaired**: CR/LF/control characters in an address or the subject, a malformed address (`a..b`, leading/trailing dot, `-` labels, more than 254 characters), more than the contract's recipient cap (10) between `to` and `cc`, a subject over 200 or a message over 5000 characters; no rejected value is echoed back | an agent's text is not an operator's keystrokes; the refusal happens before anything reaches the send path, which re-validates as before (§4.12.39) |
 | the detected supplier number and date of a scanned invoice (ETP-5715) | the review modal has a toggle for each, but the batch builder falls back to the OCR value when the toggle is off (`buildHeaderBody`: `extras.documentNo ?? safe.document_no`), so a user who declines the number or the date still gets them | **respected**: `etendo_extract_invoice_document` offers them as `apply_documentNo` / `apply_invoiceDate` decisions (default `true`, asked of the user) and the `batchTemplate` carries them only as **optional** entries, to be sent only if the user accepted. The SPA's behaviour is deliberately NOT changed | a user's explicit "do not apply" is a decision, not a hint (§4.12.40) |
@@ -4513,7 +4570,7 @@ Other MCP-only refusals declared in §4.12.6:
 | `etendo_defaults` input that depends on the record's current values (ETP-5680, ETP-5852) | `GET .../defaults?productType=S` | optional `recordContext` object; its scalar entries (≤ 32, ≤ 256 characters each) become `NeoContext#getQueryParams()` of the DEFAULTS hooks, with `parentId`/`assetId`/`view`/`spec`/`entity` never overridden. They reach the entity's DEFAULTS customization exactly as `?key=value` does on REST `/defaults` — there is no allowlist, and some handlers read generic keys (e.g. `action`, `accountId`, `statementId`), so a caller should send only current field values of the record. Since ETP-5852 the generic resolver applies every entry that names an included field of the entity before the callout cascade (`NeoDefaultsRecordContext#apply`, protected from the cascade), so `{businessPartner}` on a document header returns that partner's payment terms, method and price list; other keys are ignored there. The entities that need a value first declare it in `MCP_CONFIG.defaults.context`, listed in the `etendo_defaults` `recordContext` description. `ProductDefaultsHandler` reads `productType` and returns the defaults of that type: `productType` is set to the requested one (no stale `productType$_identifier`), `taxCategory` becomes the type's named category when the tenant has it, and `typeTaxCategory` repeats it for the UI (absent when the category does not exist, then `taxCategory` is unchanged) — so copying `taxCategory` from these defaults into `etendo_create` stays consistent with the type |
 | get, update, delete or action by id on a record outside the entity's tab filter (ETP-5852) — a purchase invoice id on `sales-invoice/header`, a sales order id on `purchase-order/header` | **served** — core's read by id (`DefaultJsonDataService` with `id`) and the write paths ignore the tab's HQL where clause | **404 `not_found`**, nothing read or changed; when the caller's role can see the record, `detail` and `foundIn` name the `spec/entity` pairs over the same table whose filter admits it (`McpSpecScope`). A filter with `@…@` placeholders is not judged |
 | response shape of `etendo_create` / `etendo_update` / `etendo_action` (ETP-5945, ETP-5852) | n/a (REST keeps core's `{response:{data:[…]}}`) | `etendo_create` and `etendo_update` answer one record as `{data:{…}}`, like `etendo_get`; `etendo_update` also carries the record `url`. Every `etendo_action` result carries `success` (boolean) and `message` (first of `message`/`processMessage`/`detail`/`title`, Etendo message keys translated) next to its own keys (`McpActionEnvelope`). `etendo_batch` (sync result and every `etendo_job_status` row) adds the same `url` to each committed op on a primary entity (`McpRecordUrls#addBatchUrls`), and answers a keyed refusal (`error.messageKeys`, e.g. `PeriodNotValid`) as `etendo_create` does: 422, `code`, `messageKeys` and the key's hint, instead of REST's 400 (`McpBatchEnvelope`). `PeriodNotValid` gets the open-the-period hint on every tool |
-| list of a child entity across every parent (ETP-5852, M-13 / M-46) | n/a (the SPA reads lines inside their document) | `etendo_list(allParents:true)`, on purpose and only where `MCP_CONFIG.parent.allParents` (with `reason`) allows it — today `sales-order/lines`, `purchase-order/lines`, `goods-movements/movementLine`, `sales-invoice/paymentPlan`, `purchase-invoice/paymentPlan`. The rows are scoped to the parent tab's own filter (`e.<parentField>.id in (select p.id from <Parent> p where …)`, `McpAllParents`), so sales lines never include purchase or quotation lines; the answer carries `allParents:true` and `allParentsNote`. Without the argument the parent stays required (`parent_required`, whose hint then names `allParents`); with `parentId` too, or on another entity, 422. `etendo_schema`/`etendo_discover` publish `allParentsAllowed` and `allParentsReason` |
+| list of a child entity across every parent (ETP-5852, M-13 / M-46) | n/a (the SPA reads lines inside their document) | `etendo_list(allParents:true)`, on purpose and only where `MCP_CONFIG.parent.allParents` (with `reason`) allows it — today `sales-order/lines`, `purchase-order/lines`, `goods-movements/movementLine`, `sales-invoice/paymentPlan`, `purchase-invoice/paymentPlan`, `fiscal-calendar/year` (ETP-6036: its parent `calendar` is excluded from the spec, so there is no parent id to pass and the years are only reachable this way). The rows are scoped to the parent tab's own filter (`e.<parentField>.id in (select p.id from <Parent> p where …)`, `McpAllParents`), so sales lines never include purchase or quotation lines; the answer carries `allParents:true` and `allParentsNote` (which says "parent record" when the parent entity is not in the spec). Without the argument the parent stays required (`parent_required`, whose hint then names `allParents`); with `parentId` too, or on another entity, 422. `etendo_schema`/`etendo_discover` publish `allParentsAllowed` and `allParentsReason`. The scope keeps the parent tab's id and re-reads the tab in each request (ETP-6036): the cached `Tab` belongs to an earlier request's session, and reading its table lazily answered 500 (`LazyInitializationException`) on every `allParents` read after the first |
 | `etendo_selectors` on a field whose rule reads the payment direction (`@Isreceipt@`, e.g. `documentType` of `payment-in`/`payment-out`) (ETP-5852, M-57) | the form sends the direction | the direction is taken from `recordContext.receipt` (or `IsReceipt`) and otherwise from the window's sales flag (payments in = receipt), and passed under the rule's exact spelling `Isreceipt` too — ComboTableData looks a rule parameter up by exact name, so the selector used to answer empty |
 | aging report totals and column meaning (ETP-5852, M-36) | partner rows and `meta` only | also `response.totals` (each amount column summed over the partners, plus `partners`) and `meta.columns` (each column for the bucket limits of the call: buckets by due date against `currentDate`, `credits` = payments not yet applied, `net` = total − credits). MCP report runs carry `mcpOrigin` since this change; no other report handler branches on it |
 | `etendo_widget` period and range (ETP-5852, M-38 / M-42 / M-24) | `GET /sws/neo/dashboard/{entity}?range=` unchanged: an unknown range falls back to the rolling 12 months | an unknown `params.range` is refused **422** with the accepted values (`WidgetPeriod.RANGES`); every answer carries `response.period` — the effective `range` (the widget's default when none was sent: `kpis` ytd, `revenue-trend` lastYear) with `from`/`to` computed by the same expression the query uses, or the widget's default `window`, and `asOf` (widgets are computed per call). The tool describes each figure's basis (net without VAT vs total/outstanding with VAT, period flow vs point in time) |
@@ -4632,6 +4689,9 @@ Customizations that compared with a DB column literal were made tolerant of both
 (`Convertquotation` / `convertquotation`). `AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction`
 (the quotation's `DocAction` path) also serves an MCP call that arrives under `documentAction` when
 it is not a completion (a completion is recalculated once by `applyTotalDiscountBeforeComplete`).
+For the quotation this was not enough: the button's DAL property is `createOrder`, not
+`convertquotation`, so the customization receives `createOrder` and every MCP conversion missed
+the handler until ETP-5704, which matches `createOrder` too (see §4.12.21).
 
 ##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
 
@@ -5711,9 +5771,18 @@ this endpoint — some are recorded by the backend itself through `UsageEventRec
 
 | Event type | Recorded by | When | Columns |
 |------------|-------------|------|---------|
-| `ai.agent.message` | AI BFF, through this endpoint (defined; no caller yet) | One completed AI agent chat turn | `properties`: model, token counts |
+| `ai.agent.message` | AI BFF (`tools/ai-bff/src/usage.js`), through this endpoint | One AI agent chat or page-help turn, also when it failed or was aborted (`outcome = error`) | `target` = `agent-chat`/`page-help`, `sessionKey` = the conversation's external id; `COST_USD` from the body's `costUsd` (when the provider priced it); `properties`: `model`, `inputTokens`, `outputTokens`, `cachedInputTokens`, `steps`, `toolCalls`, `finishReason` |
 | `ai.support.message` | Backend (defined; no caller yet) | One completed support chat (ValerIA) turn | `properties`: model, token counts |
+| `ai.tool.execute` | Backend (`CopilotToolUsageRecorder`, a `CopilotToolUsageHook` of `com.etendoerp.copilot`) | One `/sws/copilot/executeTool` call whose tool reported model usage — today the document OCR (`SimpleOcrTool`). Never on a non-2xx answer. | client/org/user/role from `OBContext`; `target` = tool name, `action = execute`, `outcome = ok`, `durationMs` = Copilot's answer time; `COST_USD` (when the LiteLLM proxy priced it); `properties`: `model`, `inputTokens`, `outputTokens` |
 | `session.login` | Backend (`SessionLoginUsage`) | One successful entry into an environment, after the credential is issued: `GET /sws/go/login?userId=` (`action = login`) and `POST /sws/go/session/environment` (`action = cookie-login`, the path the SPA uses). Never on a 4xx/5xx. | client/org/user/role of the environment entered — set explicitly, not from `OBContext`, which is the system context on both paths; `target = environment`, `outcome = ok`, `durationMs` = login handling; `properties.authMethod` = `password`/`sso` on the cookie path only |
+
+`COST_USD` (`NUMERIC`, nullable) is the money the LiteLLM proxy (`llm.etendo.software`) charged
+for the call, in USD, as it reports it (`usage.cost` when streaming, header
+`x-litellm-response-cost` otherwise). It is a column and not a property so the billing engine can
+sum it: the `aiSpend` strategy (`AiSpendCounter`, [`plan-quotas.md`](plan-quotas.md) §4.7) turns
+it into a Billing Resource. The ingest body carries it as the top-level number `costUsd`; anything
+but a finite, non-negative number is stored as null, because a negative cost would lower a
+tenant's spend. Null means "not priced", never "free".
 
 Recording is the last statement of the success path, after the response is written, and never
 throws; the INSERT happens on the recorder's writer thread, so a slow or locked
@@ -6456,7 +6525,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
 **Real-world example — `AbstractOrderHeaderHandler`'s GET annotations (`hasLinkedDocuments`, plus `needsPrimaryDoc`/`needsInvoiceDoc`, ETP-5295):** the shared base of `SalesOrderHeaderHandler`, `PurchaseOrderHeaderHandler` and `SalesQuotationHeaderHandler` appends three computed booleans to **every** record of **every** order GET — list and single-record alike — so the React list view can make document-flow decisions per row without any extra round trip.
 
-  - `hasLinkedDocuments` (pre-existing) — is there *any* `C_Invoice` or `M_InOut` with this `C_Order_ID`. Single-record GETs use a `LIMIT 1` query, list GETs one batch `IN` query. **Since ETP-5704 the single-record query is also the backend rule for Reactivate:** `AbstractOrderHeaderHandler.hasLinkedDocuments(orderId)` (static, lets a DB failure propagate) is called by `OrderReactivationGuard.refuseIfLinkedDocuments`, which `SalesOrderHeaderHandler.handle()` runs before the `DocAction` button on both channels — a POST whose *effective* DocAction is `RE` — resolved by `DocActionResolution.docActionToRun`: root `docAction` when `setDocAction` can actually write it (non-blank and accepted by `Property.checkIsValidValue` — an exact, case-sensitive member of the list — and `checkIsWritable`, the checks `BaseOBObject.set` runs), else the record's stored DocAction, which the procedure then runs (`setDocAction` swallows a refused write, so `"re"`, `" RE"` or `"XX"` run the stored action); `fieldValues` is not read, as the procedure does not read it — on an order with linked documents answers 400 `ETGO_OrderReactivateLinkedDocs`, an order id that does not exist answers 404 `Record not found` (reusing `NeoActionRecordGuard`'s not-found status and message — that guard itself only refuses another tenant's record, an unknown id passes it — signalled by `DocActionResolution.DocActionRecordNotFoundException`), and an order that cannot be loaded or resolved (no tab, no DocAction property — the action that will run is then unknown) or a linked-documents lookup that cannot run answers 500 `ETGO_OrderLinkedDocsCheckFailed` (fails closed). The quotation's RJ re-routing (`DocActionRequestSupport.requests`) reads root `docAction` first too, then the legacy `fieldValues.documentAction` / root `documentAction`, and never the stored value. The GET annotation keeps degrading to `false` on a DB error. Core's `C_Order_Post` RE branch has no such check. Only the sales order opts in; purchase orders do not call the guard.
+  - `hasLinkedDocuments` (pre-existing) — is there *any* `C_Invoice` or `M_InOut` with this `C_Order_ID`. Single-record GETs use a `LIMIT 1` query, list GETs one batch `IN` query. **Since ETP-5704 the single-record query is also the backend rule for Reactivate:** `AbstractOrderHeaderHandler.hasLinkedDocuments(orderId)` (static, lets a DB failure propagate) is called by `OrderReactivationGuard.refuseIfLinkedDocuments`, which `SalesOrderHeaderHandler.handle()` runs before the `DocAction` button on both channels — a POST whose *effective* DocAction is `RE` — resolved by `DocActionResolution.docActionToRun`: root `docAction` when `setDocAction` can actually write it (non-blank and accepted by `Property.checkIsValidValue` — an exact, case-sensitive member of the list — and `checkIsWritable`, the checks `BaseOBObject.set` runs), else the record's stored DocAction, which the procedure then runs (`setDocAction` swallows a refused write, so `"re"`, `" RE"` or `"XX"` run the stored action); `fieldValues` is not read, as the procedure does not read it — on an order with linked documents answers 400 `ETGO_OrderReactivateLinkedDocs`, an order id that does not exist answers 404 `Record not found` (reusing `NeoActionRecordGuard`'s not-found status and message — that guard itself only refuses another tenant's record, an unknown id passes it — signalled by `DocActionResolution.DocActionRecordNotFoundException`), and an order that cannot be loaded or resolved (no tab, no DocAction property — the action that will run is then unknown) or a linked-documents lookup that cannot run answers 500 `ETGO_OrderLinkedDocsCheckFailed` (fails closed). The quotation's RJ re-routing (`DocActionRequestSupport.requests`) reads root `docAction` first too, then the legacy `fieldValues.documentAction` / root `documentAction`, and never the stored value. The GET annotation keeps degrading to `false` on a DB error. Core's `C_Order_Post` RE branch has no such check. Only the sales order opts in; purchase orders do not call the guard. **ETP-5704 QA (CP-20, CP-17) — "refuse what the UI does not offer".** The resolution, the 404 and the fail-closed handling now live in the shared, entity-agnostic `DocActionRefusalGuard.refuse(context, docAction, RecordCheck, …)` (`OrderReactivationGuard` delegates to it and keeps its own messages and statuses). Two more opt-ins use it: `SalesOrderHeaderHandler.handle()` refuses an effective `CL` (Close) on **every** sales order (`RecordCheck` `ALWAYS`; the Sales Order window never offers Close, and core's Close zeroed the pending quantities and left a draft shipment dangling) — 400 `ETGO_SalesOrderCloseNotOffered`; and `SalesQuotationHeaderHandler.handle()` refuses an effective `RE` unless the quotation's stored `documentStatus` is `VO` (the only status the window offers Reactivate in) — 400 `ETGO_QuotationReactivateNotVoided`, run right after the RJ re-routing so Reject, `Convertquotation` and the `SendToEvaluationModal` DR→UE post are unaffected. Both answer in the request language through `NeoMessageText` (`messageKeys` set; Spanish in `neo_hints_es.properties`), 500 `ETGO_DocActionCheckFailed` when the record, its tab/DocAction or the condition cannot be read, and 404 `Record not found` on an unknown id. Same rule on REST single, REST batch and MCP (all reach the pre-hook); no path divergence. Purchase orders still do not opt in to either refusal.
   - `needsPrimaryDoc` / `needsInvoiceDoc` (ETP-5295) — "a shipment/receipt is still pending" and "an invoice is still pending". The names are deliberately **neutral across sales and purchase** ("primary doc" = goods shipment for a sales order, goods receipt for a purchase order — both `M_InOut`), so the one shared frontend hook that reads them (`useOrderWindow.jsx` in `etendo_schema_forge`) needs no per-window parameterization.
 
   **Why they exist.** The row kebab menu's "Gestionar envío/factura" entry derived its visibility and label from the `DeliveryStatus`/`InvoiceStatus` percent columns, while the "Gestionar" button on the detail form derives the same decision from the real documents. The two disagreed — the kebab showed or hid the entry, and picked its label, wrongly. Making the kebab issue the form's three requests *per row* was not an option, so the form's derivation moved server-side.
@@ -10237,6 +10306,16 @@ the button's process-access check.
 - **UI unchanged:** the modal's own RE call only fires when the fetched order is `CO`, so against
   a Draft order it is a no-op. The UI still ends with a Draft order, and nothing is reactivated
   twice.
+- **Names it is reached under (ETP-5704).** The button is column `Convertquotation`, DAL property
+  `createOrder` (the name `etendo_schema` lists). The SPA posts `action/Convertquotation`, and the
+  REST path hands the customization that URL segment. MCP (`etendo_action` and
+  `etendo_action_batch`) hands it the button's **property name**, whichever spelling the agent
+  typed (`McpDeclaredActions.customizationNameOf`, ETP-5710). Until ETP-5704 the handler matched
+  only `Convertquotation` and `convertquotation`, so every MCP conversion missed it and ran core's
+  classic process instead: the order stayed `CO` and the response was core's message, not
+  `{salesOrderId, documentStatus}`. `SalesQuotationHeaderHandler.isConvertQuotationAction` now
+  also matches `createOrder`, so all channels run this flow, with its missing-rate (ETP-5840) and
+  quota (ETP-5051) checks.
 
 #### 4.12.22 Rejecting a quotation and creating its lines over MCP behave as in the UI (ETP-5535)
 
@@ -10465,7 +10544,7 @@ hand links to the user and reach nobody else, so they stay closed-world.
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
 |---|---|---|---|
-| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, every `generate_*` report | true | false | true |
+| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, `etendo_whoami`, every `generate_*` report | true | false | true |
 | `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback`, `etendo_request_document_extraction_upload` | false | false | false |
 | `etendo_delete`, `etendo_delete_attachment` | false | true | true |
 | `etendo_update`, `etendo_batch`, `etendo_job_cancel`, `etendo_action`, `etendo_action_batch`, `etendo_request_attachment_upload` (`main:true` replaces the previous main file), `etendo_send_document_email` (two calls are two emails), `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
@@ -11222,6 +11301,8 @@ the window's pickers (`availableReceiptLines` / `availableShipmentLines` and the
 (`VO`) frees its quantity. A reversal that should give the units back is out of scope of this rule; if it is ever
 wanted it has to change the pickers and this cap together.
 
+**One rule, four readers (ETP-6054).** The rule lives in `ReturnableQuantity.COUNTED_RETURN_LINES_FROM` / `COUNTED_RETURN_LINES_FILTER` and is read by the cap (`alreadyReturned`), the goods receipt's `returnStatus` (`GoodsReceiptHeaderHandler.RETURN_STATUS_SQL`), the picker `availableReceiptLines` (`ReturnToVendorShipmentHeaderHandler.AVAILABLE_LINES_SQL`) and the 201 of the create-from-document actions. That 201 (`ReturnFromDocumentSupport.describe`, shared by `createPurchaseReturn` and the sales `createReturn`, so both directions gain the keys) now adds per line `alreadyReturnedQuantity` (what OTHER returns hold of the source line, the one just created excluded) and `returns: [{id, documentNo, documentStatus}]`; every existing key is kept. The lookup is informational: it runs under a savepoint and a failure is logged at warn and leaves the two keys out of that line, so it can never fail or roll back the creation of the return. `availableReceiptLines` adds `receivedQuantity` (the receipt line's quantity) next to `movementQuantity` (still returnable); `availableShipmentLines` is unchanged. Not a channel divergence: REST, batch and MCP reach the same code.
+
 **`reason`.** It is stored as `M_InOut.Description`. Over the AD length of that column (255 today, read from the
 model at runtime, `ReturnFromDocumentSupport.descriptionMaxLength`) the action answers **422 `returnReasonTooLong`**
 before creating anything, instead of cutting the end of what the user wrote.
@@ -11237,7 +11318,7 @@ copies through `CloneRecordHook` / `DalUtil.copy`, none of them through the line
 CRUD pre-hook of the two return line customizations (`ReturnableQuantity.refuseDirectCreate`, called explicitly, no
 entity name in shared code). `PUT` / `PATCH` of `movementQuantity` of an existing line stay allowed and capped.
 `refuseQuantityEdit` still answers `null` (no cap) for a **legacy** line without a source link (`canceledInoutLine`
-is `discarded` in both windows): loose lines can no longer be created, but ones that already exist have nothing to be
+is `discarded` on the customer return and, since ETP-6054, API-only `readOnly` with `grid: false, form: false` on the return to vendor, so MCP reads it and the screen is unchanged): loose lines can no longer be created, but ones that already exist have nothing to be
 capped against. Every line linked to a receipt/shipment arrives by import or by create-from-the-document, both capped.
 `etendo_batch` has no ACTION surface and no update, so the actions and the quantity edit are not reachable through it;
 its `create` on a return line is refused like REST's.
@@ -11638,7 +11719,7 @@ verdict. Shared code names no entity; the handlers' customizations declare their
 | goods receipt, goods shipment | **derived** (ETP-5714 follow-up, `InOutInvoiceAvailability`): `createPurchaseInvoice` / `createDraftInvoice` is `availableNow:false` when `NeoInvoiceSupport.computePendingQtyPerLineOrThrow(id, true)` is empty, i.e. everything is invoiced ("Nothing is left to invoice") or only a draft invoice covers it (the same question as `pendingExists`, and the call's own "has nothing left to invoice" refusal); a failed lookup answers "nothing derived" and is logged by `McpDeclaredActions.unavailableFor` |
 | return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again is refused with 409 `returnInvoiceAlreadyExists` and creates nothing, unless `allowDuplicate:true` is passed"), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
 | purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, `CO` → RE only: the screen offers Reactivate and nothing else on a completed invoice, and Confirm on a draft (its menu, the bulk bar and every custom component were searched: none sends RC or VO), and a classic reversal of an issued invoice is a fiscal risk next to the factura rectificativa flow. `valuesByStatus` itself is advisory, so the invoice header entities also carry `MCP_CONFIG.actions.values: {"DocAction": ["CO","RE"]}`, which IS enforced: `etendo_action` and each item of `etendo_action_batch` (both go through `McpDeclaredActions.precheck`) answer **422** `422 validation_error` listing `allowedValues` for any other `docAction` (RC, VO, PR, AP, CL, XL...), and the actions view narrows `actionValues` to the two. `etendo_update` cannot run a document action (the CRUD layer never calls a process; `documentAction` is a system field there). MCP-only: the REST and SPA layers never read `MCP_CONFIG`. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified). `RE` on a posted invoice un-posts it first, on the server, for every channel (ETP-5684, §4.12.36); when RE is ruled out nothing is un-posted |
-| purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`; **derived** (ETP-5714 follow-up, `OrderDocumentAvailability.unavailable(subject, Flow)`): the goods action is `availableNow:false` when no line has quantity left to receive/ship (`InOutLineFromOrderFactory.collectPendingLines`, the call's own rule) or a draft receipt/shipment covers it (the reason names the draft), the invoice action when no line has quantity left to invoice (ordered minus invoiced with the ordered sign) or a draft invoice of the order exists (HQL over active `Invoice`s and lines by `salesOrder` or by its lines, restricted to the clients and organizations the role reads inside the query itself, since `Session.createQuery` applies no readable filter, the app's "needs an invoice" rule), each with a reason that says what to do instead; each action is judged on its own, so a failure in one is logged at warn and does not drop the Reactivate advice or the other action. Advisory, and the calls agree: the invoice actions refuse a linked draft with 409 `draftInvoiceExists` unless `allowDuplicate:true` (see "From an order" in §4.12.9). `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order) |
+| purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`; **derived** (ETP-5714 follow-up, `OrderDocumentAvailability.unavailable(subject, Flow)`): the goods action is `availableNow:false` when no line has quantity left to receive/ship (`InOutLineFromOrderFactory.collectPendingLines`, the call's own rule) or a draft receipt/shipment covers it (the reason names the draft), the invoice action when no line has quantity left to invoice (ordered minus invoiced with the ordered sign) or a draft invoice of the order exists (HQL over active `Invoice`s and lines by `salesOrder` or by its lines, restricted to the clients and organizations the role reads inside the query itself, since `Session.createQuery` applies no readable filter, the app's "needs an invoice" rule), each with a reason that says what to do instead; each action is judged on its own, so a failure in one is logged at warn and does not drop the Reactivate advice or the other action. Advisory, and the calls agree: the invoice actions refuse a linked draft with 409 `draftInvoiceExists` unless `allowDuplicate:true` (see "From an order" in §4.12.9). `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → RE on the sales order (CL removed in the ETP-5704 QA round: the app does not offer Close), CL, RE on the purchase order. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order); on the **sales order** CL is ruled out on every record whatever its status (`SalesOrderHeaderHandler.unavailableActions`, ETP-5704 QA: the app does not offer Close; enforced by `DocActionRefusalGuard`). Sales quotation: `documentAction:RE` is ruled out on any quotation whose `documentStatus` is not `VO` (`SalesQuotationHeaderHandler.unavailableActions`, enforced in its pre-hook) |
 
 The `documentAction` values come from core's `ActionButtonUtility.docAction` (the real transitions), not from the AD list:
 a draft **invoice** is completed (CO) and, unlike a draft order, cannot be voided from the combo; goods documents offer CO
@@ -11653,7 +11734,7 @@ the document is in a final state. The header handlers inject keys that no spec f
 
 | Entity | Keys | Meaning |
 |---|---|---|
-| goods receipt | `invoiceStatus`, `returnStatus`, `linkedInvoices`, `linkedReturns`, `linkedOrders`, `resolvedPriceListId`, `resolvedPriceList$_identifier` | `invoiceStatus` / `returnStatus`: percentage (0 to 100, rounded, capped) of the receipt already invoiced / returned; the linked lists are `[{id, documentNo, documentStatus, ...}]` |
+| goods receipt | `invoiceStatus`, `returnStatus`, `linkedInvoices`, `linkedReturns`, `linkedOrders`, `resolvedPriceListId`, `resolvedPriceList$_identifier` | `invoiceStatus` / `returnStatus`: percentage (0 to 100, rounded, capped) of the receipt already invoiced / returned. `returnStatus` (ETP-6054) is units returned over units received summed across every line (it mixes the units of different products), counting returns with the rule of `ReturnableQuantity` (non-voided, drafts included): the received quantity of each line is read once and the returned quantity is aggregated per source line in a sub-select (the former join repeated the line once per return and inflated the denominator); the linked lists are `[{id, documentNo, documentStatus, ...}]` |
 | goods shipment | `invoiceStatus`, `linkedOrders`, `linkedInvoices`, `returnReceipts`, `canCreateReturn`, `issuerOrg`, `resolvedPriceListId`, `resolvedPriceList$_identifier` | as above, sales side |
 | return to vendor, customer return | `sourceReceipts` / `sourceShipments`, `sourceReceiptDocNo` / `sourceShipmentDocNo`, `returnInvoices`, `hasReturnInvoice`, `linesCount`, `invoiceStatus`, `issuerOrg` | |
 | purchase and sales order | `hasLinkedDocuments`, `needsPrimaryDoc`, `needsInvoiceDoc` | `hasLinkedDocuments`: an active invoice or goods document points at the order |
@@ -12111,6 +12192,27 @@ MCP — and nothing derives one from the other yet: a window that sets `attachme
 implemented, it needs `schema_forge_core`):* have the pusher (`sf-push-neo`) write the section from `window.attachments` so there is a single
 source. The flags are sourcedata (`ETGO_SF_ENTITY.xml`) and reach an instance through `update.database`; no separate SQL is shipped.
 
+**Read-only attachments (ETP-6013).** The same section has a second mode, for a document type whose attachments the MCP may
+list but never change: `{"attachments":{"readOnly":true,"reason":"...","messageKey":"<AD_MESSAGE value>"}}`. Reads
+(`etendo_list_attachments`, the download links) work as on any document; every write — `etendo_request_attachment_upload`
+(link request, staged document, **and** the PUT of an already issued link, which re-authorizes through the same
+`NeoAttachmentTarget`), `etendo_delete_attachment`, and anything else that authorizes as a write on the target (including
+`etendo_send_document_email`, since the application's send stores the PDF as an attachment first) — is refused with
+**`405 method_not_allowed`**, decided from the declaration alone **before** any role or record lookup, so it is a clear
+answer and never the 404 of a record the tenant cannot write. The `detail` is the declared `messageKey` resolved in the
+request language by `NeoMessageText` (`AD_MESSAGE` + the versioned `neo_hints_<lang>.properties` catalog), or
+`ETGO_AttachmentsReadOnly` ("The attachments of this document type cannot be modified." / "Los adjuntos de este tipo de
+documento no se pueden modificar.") when none is declared; the `hint` says the attachments can still be listed. Validation
+(`NeoAttachmentsConfig.validate`): a mode is required (`enabled` boolean, or `readOnly:true`), `readOnly:true` with
+`enabled:false` is a contradiction, `reason` is mandatory, and `messageKey` must be key-shaped (`[A-Za-z][A-Za-z0-9_]*`), never
+prose. Reading stays fail-closed: a `readOnly` that is not the boolean `true`, or contradicted by `enabled:false`, closes
+everything. **Declared on:** `tax` (root entity `tax`, product decision: a tax cannot be modified through the MCP, its
+attachments included) with `messageKey: "ETGO_TaxNotModifiable"` → "Los impuestos no se pueden modificar." / "Taxes cannot be
+modified.". Before this, an upload on a tax answered `404 Record not found` because the tax row is not writable by the
+tenant (`TenantOwnership.isWritableByCurrentTenant`), while the list worked. `readOnly` has no SPA counterpart (the
+application's tab is unchanged); `McpConfigSourcedataTest.attachmentLessWindowsAreDeclared` lists the specs that declare it
+next to the `enabled:false` ones. REST attachments are unchanged (§4.12.9 row).
+
 **Upload flow.** `etendo_request_attachment_upload` answers `{uploadUrl, expiresAt, maxBytes: 10485760, allowedExtensions, spec, entity,
 id, name, main, curlExample, hint}`. Whoever holds the file does `curl -X PUT --upload-file ./factura.pdf "<uploadUrl>"`; no
 `Authorization` header (the 192-bit token is the credential, exactly as for the image link and the email download links, and
@@ -12195,8 +12297,9 @@ request itself; a document of another client → `404 Record not found`, identic
 
 #### 4.12.38 The PDF of a document: `etendo_get_document_pdf` (ETP-5715)
 
-One read-only MCP tool, piece B1 of ETP-5715 stage 2: "give me the PDF of invoice X". It **returns the PDF the application already
-stored; it never renders one.** Reuses piece A (§4.12.37): the document is authorized by `NeoAttachmentTarget` and the file is handed out as
+One read-only MCP tool, piece B1 of ETP-5715 stage 2: "give me the PDF of invoice X". It **returns the PDF the application stored** — and,
+since ETP-6013, for an entity that declares a printable it renders a missing or stale one on the server first (§4.12.38.1; this reverses
+ETP-5715's "never renders"). Reuses piece A (§4.12.37): the document is authorized by `NeoAttachmentTarget` and the file is handed out as
 the same signed, 10-minute attachment link (`att` claim). Emailing a document (B2) and OCR are separate.
 
 **What the SPA does (measured, `tools/app-shell`).** The PDF of a document is rendered **in the browser** (jsreport; `documentPdf.js`,
@@ -12258,9 +12361,9 @@ others.
 | document missing, or of another client/organization | `404 not_found` | `Record not found` (identical for both; never mentions a PDF) |
 | role cannot read the window | `403 forbidden` | access denied |
 | window with no Attachments tab (payments, fiscal monitors) | `405 method_not_allowed` | `Attachments are not available for this document type, as in the application.` |
-| `rendered` entity with no main attachment | `409 no_pdf` | `This document has no PDF yet.` + hint: open the document's preview in the application, or send the document by email (a return receipt's preview stores nothing, only sending it does), and ask again; a draft never stores a PDF: complete it first |
+| `rendered` entity with no main attachment (and no server render possible) | `409 no_pdf` | `This document has no PDF yet.` + hint: if the document was just completed its PDF is being generated, ask again in a few seconds; otherwise open the document's preview in the application, or send the document by email (a return receipt's preview stores nothing, only sending it does), and ask again; a draft never stores a PDF: complete it first |
 | `supplier` entity with no main attachment | `409 no_pdf` | `This document has no supplier document attached.` + hint: attach it as main with `etendo_request_attachment_upload` (`main:true`) |
-| `rendered` main file older than the document or the branding | `409 pdf_stale` | `The stored PDF of this document is out of date…` + hint: ask the user to open the document's preview (or send it by email, where the preview stores nothing) so the application regenerates it |
+| `rendered` main file older than the document or the branding (and no server render possible) | `409 pdf_stale` | `The stored PDF of this document is out of date…` + hint: if the document was just completed, ask again in a few seconds; otherwise ask the user to open the document's preview (or send it by email, where the preview stores nothing) so the application regenerates it |
 | unexpected failure on one document | `500 server_error` | `The PDF of this document could not be looked up.`; in `ids[]` it is that entry only, the others still answer (the exception class is logged, never its message) |
 | lookup failed | `500 server_error` | the helper's message |
 | spec header entity missing / a line entity | `422` | as the attachment tools |
@@ -12281,13 +12384,128 @@ unchanged data is served. A document that was changed by raw SQL does not move `
 
 *Purchases — the supplier's PDF of a purchase invoice:* `etendo_get_document_pdf({spec:"purchase-invoice", id:<invoice id>})` →
 `file:{name:"segundo-documento.pdf", …}` and a link; with no main attachment → `409 no_pdf` and the hint to attach it.
-*Sales — the PDF of a completed sales invoice whose preview was opened:* `etendo_get_document_pdf({spec:"sales-invoice", id})` →
-`file:{name:"<id>.pdf"}` and a link. Never opened → `409 no_pdf`; edited after it was opened → `409 pdf_stale`.
+*Sales — the PDF of a completed sales invoice:* `etendo_get_document_pdf({spec:"sales-invoice", id})` →
+`file:{name:"<id>.pdf"}` (rendered by the preview) or `file:{name:"sales-invoice-<number>.pdf"}` (rendered by the server after Complete or on this
+request) and a link. `409 no_pdf` / `pdf_stale` only when the server cannot render (§4.12.38.1). A document completed in the GO app gets its
+server PDF on this first request.
 *Several:* `etendo_get_document_pdf({spec:"sales-invoice", ids:[a, b, c]})` → one `results` entry each.
 
 **Tests:** `NeoDocumentPdfTest` (the decision and its inputs), `NeoPdfSourceConfigTest` (the section), `McpDocumentPdfToolTest` (answers, errors, bulk, definition), `McpEntityConfigTest` and `McpConfigSourcedataTest` (registration, validation, the declared set), plus the wiring in
 `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`,
 `McpUsageTenantQaTest`, `McpAttachmentToolsTest`.
+
+##### 4.12.38.1 Server-side render of a document's printable — MCP only (ETP-6013)
+
+**Why.** Before ETP-6013 a document's PDF existed only once someone opened its preview (or sent it) in the browser, so
+`etendo_get_document_pdf` and `etendo_send_document_email` answered `409 no_pdf` for every document completed by an agent and never opened.
+The server now renders the **same** printable itself — **for the MCP only**. The GO app is unchanged: a Complete or a preview made in
+the app keeps producing the PDF in the browser exactly as before. Jasper is not an option (ETP-4255) and the Node report server only
+accepts the SPA session cookie, so it is jsreport — what the browser uses.
+
+**One template source.** The backend holds no template. The frontend build publishes, next to the SPA bundle, one manifest per document,
+`<app>/printables/<document>.json` (`tools/app-shell/vite-plugins/printables-publish.js`, from `printableSources.js`, the module the browser
+renders from): Handlebars template, CSS, the `helpers` string, chrome-pdf options and the labels resolved per locale. `NeoPrintableTemplates`
+fetches it (cached 1 minute per document, redirects not followed), fills the three render-time placeholders of the commercial helpers
+(instance thousands/decimal separators from `NeoCurrencyFormatConfig`, exchange-rate precision) exactly as the browser bakes them, and builds
+the browser's jsreport payload (`{template:{content, engine, recipe, helpers, chrome}, data:{css, ...data, labels}}`). `NeoJsreportClient`
+posts it to `<app>/jsreport/api/report` (5 s connect, 30 s render, no redirects; the answer must start with `%PDF-`; on a non-2xx answer only
+the status is kept — jsreport's error body echoes the template and the data).
+
+**Known limit — the manifest cache.** For up to that minute after a frontend deploy a server render may still use the previous manifest. The
+file is written after the new bundle's build instant, so the SPA's bundle-identity check (D16/D17) reads it as fresh and keeps serving the
+previous design until the record or the branding changes again. The short cache keeps the window small; it does not close it.
+
+**The data is a Java port** of each browser builder (`NeoPrintableDataBuilder`), fed by the very NEO reads the browser makes
+(`NeoPrintableReads`: the REST GET pipeline, READ customizations included, in admin mode as `NeoServlet.service` runs), with JavaScript's
+`||` / `??` / `Number()` semantics kept (`NeoPrintableCommons`). Dual-implementation drift is guarded by one fixture per builder shared by
+`printableSources.vitest.js` (runs the real browser builder) and `PrintableDataTest` (runs the port): same input, same expected data.
+The Verifactu QR is encoded with zxing from the stored URL **verbatim** (D1; the browser trims it, the stored value has no blanks), level M,
+laid out like node `qrcode` `{width:400, margin:1}` so it prints at the browser's size; unlike the browser, a QR that fails to generate fails
+the render, so a stored PDF never lacks it.
+
+**Declared per entity, no document names in shared code.** `MCP_CONFIG.pdf` gains `print`:
+
+```json
+{"pdf":{"source":"rendered","print":{"document":"sales-invoice"},"reason":"..."}}
+```
+
+`print.document` is the manifest key and the `NeoPrintableDataBuilder#document()` of the builder that fills it (only with `source:"rendered"`;
+`McpConfigSourcedataTest` lists the declaring entities). No declaration → today's browser-only behaviour. The builder decides the statuses that
+get a stored PDF (`storesFor`, default: completed `CO`; a quotation: any non-draft, as its preview does; a draft never).
+
+**Two triggers, MCP only, one renderer (`NeoPrintableRenderer`).**
+
+1. **Eager, after an MCP Complete** (`NeoPrintAfterComplete`). Called from `McpToolRouter.handleAction` only — `etendo_action`, and
+   `etendo_action_batch`, which runs every document through it. **Not** from the REST action the GO app posts its Complete to. Any successful
+   call of the `DocAction` button on a declaring entity queues a job (ids, the caller's user, role, client and organization, and the
+   MCP's PDF language — see *Language* below); a bounded pool (2 daemon threads,
+   queue 200; overflow is logged and left to the fallback) runs it on its own thread and session and commits its own store. The job is **held
+   until the MCP call has done all its work** (`McpServlet` releases it after writing the answer, `NeoPrintAfterComplete.deferUntilEnd`): a
+   completion may commit mid-call (`ProcessInvoiceUtil`) while the call keeps changing the invoice, and a render started at that first commit
+   stored a PDF already stale (seen live: the invoice's `updated` 4 s after the file). A call that fails drops its held jobs. (The wait covers the final commit only when the call wrote the header row after a mid-call
+   commit; if only child rows change afterwards, the stored PDF can be stale — then the staleness check and the on-request fallback
+   re-render it.) The worker first
+   takes `SELECT … FOR SHARE` on the document's row with a 30 s `lock_timeout`, so it starts **after** the completing transaction commits,
+   whoever commits (the request, the batch's own `commitAndClose`, a `ProcessInvoiceUtil` that committed mid-request); it then reads the
+   committed status, so a Complete or a re-Complete after Reactivate renders and a Reactivate, a Void or a rolled-back action does not.
+2. **Fallback, on MCP request** (`NeoDocumentPdf.resolve`, whose only callers are `McpDocumentPdfTool` and `McpDocumentEmailTool`). When the
+   stored PDF is `MISSING` or `STALE` for a declared printable whose status the builder stores, it hands the render to the same pool and
+   waits for it (at most 40 s): the render runs **isolated** — its own thread, session and commit, never the MCP request's transaction, so a
+   failed store or read cannot roll back or break what the request already did — and the request then reads the committed file. At most 3
+   documents per `etendo_get_document_pdf` call are rendered synchronously; the rest are queued and answer `no_pdf` with "ask again in a few
+   seconds". **This is how documents completed in the GO app, by
+   create-and-complete handlers or in Classic get a server PDF**: on the first MCP request, never before.
+
+**Language — the same rule as the email.** A PDF the server renders through the MCP is printed in **Spanish (`es_ES`) by default**, the
+default of `etendo_send_document_email` (`McpDocumentEmailRequest.DEFAULT_LANGUAGE`, one constant): the eager render after `etendo_action` /
+`etendo_action_batch` and the render of `etendo_get_document_pdf` use it. `etendo_send_document_email` renders in **the email's own language**
+(`language`, `es_ES` when omitted), so an email and the PDF it carries always match. An MCP call carries no `Accept-Language`, so the
+context's language would have been the user's AD default (an `en_US` admin got an English PDF inside a Spanish email). **A stored PDF that is
+current is served as it is, whatever its language** — it is never re-rendered only to change language (kept simple on purpose).
+
+**Never two stores of one document.** A render queued or running in this JVM is joined, not duplicated (the agent's usual "Complete, then ask
+for the PDF" waits for the eager render, bounded at 40 s). Across nodes, every store first takes `pg_advisory_xact_lock` on the document
+(held until its transaction ends) and re-checks the stored PDF; a current one is served instead of stored again.
+
+**Never replaces a person's file.** Storing as main deletes the previous main file, so the renderer stores only when the record has no main
+attachment or its main attachment has a name Etendo gives the PDFs it generates (`<spec>-<documentNo>.pdf`, `<spec>-<id>.pdf`, the
+preview's `<id>.pdf`). Any other main file — a customer's own document marked main — is left untouched and the document gets no server PDF.
+
+**Stored like the SPA's send stores it.** `NeoAttachmentStore` with `markAsMain`, named `<spec>-<documentNo>.pdf` (`buildPreviewFileName`): a
+same-named main file is overwritten in place, an Etendo-named one replaced, so `updatedAt` always moves and both `NeoDocumentPdf` and the
+SPA's `attachmentFreshness` read it as fresh.
+
+**Never against the user or the document.** Read-only tier (D23): a role that cannot write the window and the document's attachments stores
+nothing, so the fallback answers the `409` as before. Supplier-source entities (purchase invoice, goods receipt) never declare `print`. Inert
+when no jsreport / printables location resolves. Every failure is logged under `[print]` with the exception class (and jsreport's HTTP
+status) only — never a message, which may carry record data — and stores nothing.
+
+**Configuration.** Both locations derive from the public app URL (`etendo.go.app.baseUrl` / `ETGO_APP_BASE_URL`): `<app>/jsreport` and
+`<app>/printables`. Local overrides: `etgo.jsreport.url` / `JSREPORT_URL` (e.g. `http://localhost:5488`) and `etgo.printables.url` /
+`ETGO_PRINTABLES_URL` (e.g. `http://localhost:3100/printables`, which `make dev` serves).
+
+**Limits of the on-request render.**
+
+- *Worst case per call.* `etendo_get_document_pdf` renders at most 3 documents synchronously, each waited for at most 40 s, so one call can
+  hold its request (and its database connection) for about 2 minutes in the worst case before answering; the remaining documents are only
+  queued.
+- *A lock held by the request itself.* The worker waits for the document row's lock (`FOR SHARE`, 30 s `lock_timeout`). If the MCP request's
+  own transaction holds that row lock, the worker gives up after 30 s, nothing is stored and the call answers `no_pdf`.
+- *A document number that changed.* The overwrite guard accepts only `<spec>-<current documentNo>.pdf`, `<spec>-<id>.pdf` and `<id>.pdf`. If
+  the document number changed after an earlier server or send store, the old `<spec>-<oldNo>.pdf` no longer matches: the guard refuses
+  (`FOREIGN_MAIN`) and the call answers `no_pdf`. Deliberately on the safe side — an unrecognized main file is never deleted.
+
+**A few seconds.** The eager render runs right after the commit, so an agent that asks for the PDF in its very next call joins it or, past
+the wait, gets `no_pdf` / `pdf_stale` with the hint to ask again in a few seconds.
+
+**Scope.** Commercial family: `sales-invoice/header` (`SalesInvoicePrintableData`), `sales-order/header` and `purchase-order/header`
+(`SalesOrderPrintableData` / `PurchaseOrderPrintableData` on `OrderPrintableData`, the port of `buildOrderData`) and `sales-quotation/quotation`
+(`QuotationPrintableData`). Orders and quotations follow the **print** path (`documentPdfRegistry.js`: no `currencyData`, so no exchange-rate
+row). Movement family (its own template per document, no prices, D9): `goods-shipment/goodsShipment`,
+`return-to-vendor-shipment/returnToVendorShipment` and `return-material-receipt/returnMaterialReceipt` (`ShipmentPrintableData`,
+`ReturnToVendorPrintableData`, `ReturnReceiptPrintableData` on `MovementPrintableData`, which reads the header's `issuerOrg` READ enrichment like
+the browser). The return material receipt is safe with D18 thanks to the rule above: a receipt whose main file is the customer's own document
+simply gets no server PDF.
 
 #### 4.12.39 Sending a document by email: `etendo_send_document_email` (ETP-5715)
 
@@ -12348,12 +12566,37 @@ small classes (`McpDocumentEmailTool`, `McpDocumentEmailRequest`, `McpDocumentEm
   must exist and belong to a client and readable organization (the same `404 not_found` for missing and foreign, `403 forbidden` for a role without write,
   `405` for a window with no Attachments tab), then the contract's own `authorize` inside the send path. A document the contract cannot resolve
   (e.g. a sales order id passed as `purchase-order`) is the same `404`.
-- **The PDF gate wording.** The 409 status and codes are `etendo_get_document_pdf`'s; the hint is the email tool's own ("open the document's preview in the application so its PDF is stored (or refreshed), then ask to send again"), because that tool's "or send it by email" is circular here. The closing sentence (a window whose preview stores nothing, a return receipt, needs its first send done from the application) is generic and true for every window: no declared property tells the backend which windows those are, and a spec literal is not allowed in shared code.
+- **The status gate (ETP-6013).** Right after the document's authorization and **before the PDF is looked at** — for the
+  preview and for the send — the document's `DocStatus` is checked against the rule its send contract declares
+  (`DefaultDocumentSendEmailContract#isSendableStatus`, per contract, no spec named in shared code): **only `CO`** for
+  `sales-invoice`, `sales-order`, `purchase-order`, `goods-shipment`, `return-to-vendor`, `return-material-receipt` and
+  `return-to-vendor-shipment` (the default), **any status but `DR`** for `sales-quotation` (`SalesQuotationSendEmailContract`
+  overrides it) — exactly where the SPA offers "Enviar" (`isCompleted` / `documentStatus === 'CO'` in the windows'
+  `*SecondaryActions.jsx`, preview and row action; `status !== 'DR'` in `QuotationSecondaryActions.jsx`). A refused document
+  answers **`409 conflict`**, `sent:false`, nothing sent, and the refusal **wins over `no_pdf`/`pdf_stale`**: a document
+  completed, printed and then reactivated keeps its old PDF, so the PDF alone would have let it through. The `detail` is the
+  contract's `AD_MESSAGE` in the request language (`NeoMessageText`, `neo_hints_<lang>.properties`), `{0}` the document number
+  and `{1}` the status name from the document status lists (`AD_Ref_List_Trl`): `ETGO_EmailOnlyCompleted` — "1000123 está en
+  Borrador: el envío por correo solo aplica a documentos Completados." / "1000123 is Draft: sending by email only applies to
+  Completed documents."; `ETGO_EmailNotForDraft` (quotation) — "… está en Borrador: el envío por correo no aplica a documentos
+  en Borrador." / "… is Draft: sending by email does not apply to Draft documents.". **The same rule is enforced on the
+  backend contract path**, so it holds for every channel: `DefaultDocumentSendEmailContract#authorize` refuses a send by
+  status with `409` (`VALIDATION_FAILED` in the service's answer, message in the command's `language`) after the write tier
+  and the document lookup, for the SPA's `POST /sws/neo/email-contracts/{window}-send` exactly as for the MCP. The status comes
+  from the document resolvers (`EmailDocumentRecord#getDocumentStatus`, filled by every `Dal*EmailDocumentResolver`); a
+  resolver that reports none applies no rule. No UI change: the SPA never offers the send in a refused status, so it never
+  receives the 409 — no divergence to declare in §4.12.9. **Language of the refusal:** the MCP answers in the **request
+  language** (the session's GO locale, `NeoLanguage.currentCode()`), because the sentence is for the user talking to the
+  agent; the MCP's `language` argument is the language of the email copy, not of the answer. The REST contract
+  (`authorize`) answers in the command's `language` field, which the SPA fills with its UI locale (falling back to the
+  request language when the command carries none).
+- **The PDF gate wording.** The 409 status and codes are `etendo_get_document_pdf`'s; the hint is the email tool's own ("if the document was just completed, its PDF is being generated: ask again in a few seconds. Otherwise open the document's preview in the application so its PDF is stored (or refreshed), then ask to send again", ETP-6013), because that tool's "or send it by email" is circular here. The closing sentence (a window whose preview stores nothing, a return receipt, needs its first send done from the application) is generic and true for every window: no declared property tells the backend which windows those are, and a spec literal is not allowed in shared code.
 - **The no-PDF hint depends on the document's state** (both PDF tools; `NeoDocumentPdf.Result#getDocumentStatus` / `isDraft`, read only for a MISSING PDF, after the document's authorization, in admin mode with the previous mode restored). The status is read **structurally**: the entity's status property is the one whose AD column uses a *document status* list as its reference value (`AD_Reference` `131` All_Document Status — invoices, receipts, shipments — and `FF80818130217A350130218D802B0011` Order_Document Status — the order windows; the order windows use their own list, so `131` alone would have left them without the draft advice). The column and the DAL property may be called anything. Draft is `DR`, the `AD_Ref_List` value of both lists. No column, more than one, an inactive one, no value or any failure leaves the status unknown and the hint generic. A draft gets only "This document is a draft and a draft never stores a PDF: complete it first, then open its preview in the application and ask again."; a document with another status gets the preview advice without the draft remark; unknown keeps the generic text.
 - **Explicit `null` arguments.** An explicit `null` for `subject`, `message` or `language` is `422`, like `preview` (omit the argument instead); `to`/`cc` `null` is still read as omitted.
-- **The PDF gate.** After authorization and before sending, `NeoDocumentPdf` decides: found and current continues; missing is `409 no_pdf`, stale is
-  `409 pdf_stale`, with the answers and hints `etendo_get_document_pdf` gives (open the document's preview in the application, or send it from there),
-  plus `sent:false`. A return material receipt's preview stores nothing (D18), so it can only be sent from the application first.
+- **The PDF gate.** After authorization and before sending, `NeoDocumentPdf` decides: found and current continues; for a declared printable a
+  missing or stale PDF is first rendered on the server (ETP-6013, §4.12.38.1) and the send continues with it; otherwise missing is `409 no_pdf`,
+  stale is `409 pdf_stale`, with the answers and hints `etendo_get_document_pdf` gives (right after a Complete, ask again in a few seconds;
+  otherwise open the document's preview in the application, or send it from there), plus `sent:false`. A return material receipt's preview stores nothing (D18), so it can only be sent from the application first.
 - **Outcomes.** Only `SENT` is `{sent:true, status:"SENT", spec, id, to, cc, detail, hint}`. Everything else is an error envelope with `sent:false` and
   `emailStatus`: `DUPLICATE` `409 email_duplicate` ("Not sent: an identical email was already sent at <ISO time>", `previousSentAt`);
   `THROTTLED` `429 email_throttled` (`retryAfterSeconds`, `throttleScope`); `SUPPRESSED` `403 email_suppressed`; `NO_RECIPIENT` `422 email_no_recipient`;
@@ -12737,3 +12980,73 @@ Tests: `ImportInOutLinesIntoInvoiceHandlerTest` (returns), `ImportOriginInvoiceL
 `RectificativeImportGateTest`, `DocumentAvailabilityTest` (the advice), `SalesInvoiceHeaderHandlerTest` /
 `PurchaseInvoiceHeaderHandlerTest` (contracts and routing), and the real-model HQL parse in
 `ImportOrderLinesIntoInvoiceHandlerIntegrationTest`.
+
+#### 4.12.43 Who the connection is: `etendo_whoami` (etendo-ai#53, gap G17)
+
+Each MCP connection runs as its own user, role, client and organization, and what an agent can read or change
+depends on the role. Without a way to ask, an agent that saw a spec answer `forbidden` on a second connection
+read it as "permissions changed mid-session" and created and deleted a test purchase order to learn who it was
+(etendo-ai#50). `etendo_whoami` answers that in one call.
+
+- **One optional argument**, `includePermissions` (boolean, default `false`); no side effects. Any other argument
+  except `_indentResponse` is refused (`unknown_argument`).
+- **Read tier** (`etendo:read`), listed first among the built-ins for every role with read; annotated read-only
+  and idempotent. It addresses no spec, so the spec access gate does not apply.
+- **Source**: the `OBContext` the servlet entered for the call (the same one every other tool runs under) and
+  the token's scopes. Nothing is cached.
+
+```json
+{
+  "user": {"id": "…", "name": "Compras", "username": "compras@acme.test"},
+  "role": {"id": "…", "name": "Purchasing", "isAdmin": false},
+  "client": {"id": "…", "name": "ACME"},
+  "organization": {"id": "…", "name": "ACME Spain"},
+  "warehouse": {"id": "…", "name": "Main warehouse"},
+  "capabilities": {"showAccountingFields": false, "scopes": ["etendo:read", "etendo:write"]},
+  "currentDate": "2026-10-30",
+  "timeZone": "Europe/Madrid",
+  "currency": {"id": "…", "isoCode": "EUR", "standardPrecision": 2},
+  "language": "es_ES",
+  "hint": "This is the identity every other tool runs under on this connection. …"
+}
+```
+
+- `role.isAdmin`: the System role or a client-admin role — the same bypass the access checks apply
+  (`NeoAccessHelper.isAdminOrClientAdmin`).
+- `capabilities.showAccountingFields`: `NeoAccountingAccessPolicy.canSeeAccounting`, the single source of truth
+  behind accounting tabs and the `post`/`unpost` refusal.
+- `capabilities.scopes`: the token's scopes under their current `etendo:` names (legacy `neo:` mapped), sorted.
+- `currentDate` / `timeZone`: today in the server's zone, the zone business dates are interpreted in.
+- `currency`: the organization's functional currency by `OBCurrencyUtils.getOrgCurrency` (organization, legal
+  entity, client). `null` when none resolves — unlike `GET /sws/neo/session` there is no `USD` placeholder, which an
+  agent would take for the real currency.
+- `language`: the user's Etendo language.
+- `warehouse`: the session's default warehouse (`OBContext.getWarehouse`), `null` when there is none.
+
+**`includePermissions:true`** adds `permissions`: the rows of the "Configuración > Roles" matrix this role can
+reach. Rows, categories and order come from `RoleAccessMatrix.buildMatrix` / `buildReportsMatrix` (the same builder
+`SFRolesOverview` and `SFSystemRoleTemplates` use), reduced to this one role:
+
+- **Only reachable rows.** A `none` row is left out, and so is a category left empty: absent means no access. The
+  roles page lists `none` rows because it compares several roles; an agent only needs its own.
+- **Spec names, not `AD_Window_ID`s.** A window row carries `specs`: the active window specs of that window
+  published in the MCP catalog (`ShowInMCP`), sorted — what `etendo_list` and the other tools take as `spec`. It is
+  empty for a reachable row no catalog spec serves (the windowless GO pages, e.g. "Fiscal Models"). A report row
+  carries `spec`: the report ids of `ReportAccessCatalog` are their spec names (`generate_<snake>`).
+- `access` is `full` or `read-only`. An admin or client-admin role gets every row as `full` — the bypass
+  `NeoAccessHelper.hasWindowAccess` and `SFMyReportAccess` apply — not the tiers its own grant rows would give.
+
+```json
+"permissions": {
+  "windows": {"categories": [{"name": "Procurement Management",
+    "windows": [{"name": "Purchase Order", "specs": ["purchase-order"], "access": "full"}]}]},
+  "reports": {"categories": [{"name": "Finance",
+    "reports": [{"spec": "aging-payable", "name": "Aging Report (Payables)", "access": "full"}]}]}
+}
+```
+
+Size, measured on a local database (2026-10-30, compact JSON as the MCP answers): 1,296 bytes for the Purchasing
+template role (14 of 44 rows reachable); ~4.2 KB for an admin role, which reaches every row.
+
+Usage telemetry records the call with verb `whoami`. Tests: `McpWhoamiToolTest`, `McpToolAnnotationsTest`,
+`McpToolTitlesTest`, `ToolRegistryGenerateToolsTest`.

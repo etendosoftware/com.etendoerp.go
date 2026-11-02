@@ -31,7 +31,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -72,12 +74,14 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpParentSection
  * @covers com.etendoerp.go.mcp.McpEntityConfig
  * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
  * @covers com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler
  * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
  * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.NeoAttachmentsConfig
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {
@@ -198,8 +202,16 @@ class McpConfigSourcedataTest {
       "matched-purchase-invoices", "monitor-verifactu", "payment-in", "payment-out", "sii-config",
       "sii-monitor", "tbai-config", "tbai-facturas-enviadas", "verifactu-config"));
 
+  /**
+   * ETP-6013 — the specs whose attachments the MCP keeps read-only ({@code readOnly:true}: list and
+   * download, every write refused). An MCP-only product decision with no SPA counterpart, so this
+   * list is its only record outside the sourcedata. Each declares its refusal by AD_MESSAGE key.
+   */
+  private static final Map<String, String> SPECS_WITH_READ_ONLY_ATTACHMENTS =
+      new TreeMap<>(Map.of("tax", "ETGO_TaxNotModifiable"));
+
   @Test
-  @DisplayName("exactly the windows without an Attachments tab in the app declare attachments.enabled:false")
+  @DisplayName("exactly the declared windows carry attachments.enabled:false or readOnly:true, validly")
   void attachmentLessWindowsAreDeclared() throws Exception {
     Path dir = sourcedataDir();
     String specXml = new String(Files.readAllBytes(dir.resolve("ETGO_SF_SPEC.xml")),
@@ -216,6 +228,7 @@ class McpConfigSourcedataTest {
     Matcher rows = Pattern.compile("<!--[0-9A-F]{32}--><ETGO_SF_ENTITY>(.*?)</ETGO_SF_ENTITY>",
         Pattern.DOTALL).matcher(entityXml);
     Set<String> declared = new TreeSet<>();
+    Map<String, String> readOnly = new TreeMap<>();
     McpConfigSections.resetForTests();
     while (rows.find()) {
       Matcher config = ROW.matcher(rows.group(1));
@@ -228,15 +241,28 @@ class McpConfigSourcedataTest {
       }
       JSONObject section = body.getJSONObject("attachments");
       assertEquals(List.of(), com.etendoerp.go.schemaforge.NeoAttachmentsConfig.validate(section));
-      assertFalse(section.getBoolean("enabled"), "only the opt-out is declared in data");
       // Internal pointers (decisions.json) belong in comments, never in data an agent can receive.
       assertFalse(section.getString("reason").contains("decisions.json"));
       Matcher spec = Pattern.compile("<ETGO_SF_SPEC_ID><!\\[CDATA\\[([0-9A-F]{32})]]>")
           .matcher(rows.group(1));
       assertTrue(spec.find());
-      declared.add(specNames.get(spec.group(1)));
+      String specName = specNames.get(spec.group(1));
+      if (section.optBoolean("readOnly", false)) {
+        assertFalse(section.has("enabled"), "readOnly is its own mode: " + specName);
+        readOnly.put(specName, section.optString("messageKey", null));
+      } else {
+        assertFalse(section.getBoolean("enabled"), "only the opt-out is declared in data");
+        declared.add(specName);
+      }
     }
     assertEquals(SPECS_WITHOUT_ATTACHMENTS, declared);
+    assertEquals(SPECS_WITH_READ_ONLY_ATTACHMENTS, readOnly);
+    // A declared key that no AD_MESSAGE row ships would answer the raw key to the agent.
+    String messages = new String(Files.readAllBytes(dir.resolve("AD_MESSAGE.xml")),
+        StandardCharsets.UTF_8);
+    for (String key : readOnly.values()) {
+      assertTrue(messages.contains("<VALUE><![CDATA[" + key + "]]></VALUE>"), key);
+    }
   }
 
   /**
@@ -250,8 +276,24 @@ class McpConfigSourcedataTest {
   private static final Set<String> SUPPLIER_PDF_ENTITIES = new TreeSet<>(List.of(
       "goods-receipt/goodsReceipt", "purchase-invoice/header"));
 
+  /**
+   * ETP-6013 — the document entities whose printable the server renders: they declare
+   * {@code pdf.source:"rendered"} with {@code print.document} naming the manifest the frontend build
+   * publishes and the {@code NeoPrintableDataBuilder} that fills it. Each key maps to the entity that
+   * declares it.
+   */
+  private static final java.util.Map<String, String> PRINTED_PDF_ENTITIES = new java.util.TreeMap<>(
+      java.util.Map.of("sales-invoice/header", "sales-invoice",
+          "sales-order/header", "sales-order",
+          "purchase-order/header", "purchase-order",
+          "sales-quotation/quotation", "sales-quotation",
+          "goods-shipment/goodsShipment", "goods-shipment",
+          "return-to-vendor-shipment/returnToVendorShipment", "return-to-vendor-shipment",
+          "return-material-receipt/returnMaterialReceipt", "return-material-receipt"));
+
   @Test
-  @DisplayName("exactly the upload-layout document entities declare pdf.source:supplier, validly")
+  @DisplayName("exactly the upload-layout document entities declare pdf.source:supplier, validly; "
+      + "the server-printed ones declare pdf.print")
   void supplierPdfEntitiesAreDeclared() throws Exception {
     Path dir = sourcedataDir();
     String specXml = new String(Files.readAllBytes(dir.resolve("ETGO_SF_SPEC.xml")),
@@ -268,6 +310,7 @@ class McpConfigSourcedataTest {
     Matcher rows = Pattern.compile("<!--[0-9A-F]{32}--><ETGO_SF_ENTITY>(.*?)</ETGO_SF_ENTITY>",
         Pattern.DOTALL).matcher(entityXml);
     Set<String> declared = new TreeSet<>();
+    java.util.Map<String, String> printed = new java.util.TreeMap<>();
     McpConfigSections.resetForTests();
     while (rows.find()) {
       Matcher config = ROW.matcher(rows.group(1));
@@ -280,14 +323,21 @@ class McpConfigSourcedataTest {
       }
       JSONObject section = body.getJSONObject("pdf");
       assertEquals(List.of(), com.etendoerp.go.schemaforge.NeoPdfSourceConfig.validate(section));
-      assertEquals("supplier", section.getString("source"), "only the exception is declared in data");
       Matcher spec = Pattern.compile("<ETGO_SF_SPEC_ID><!\\[CDATA\\[([0-9A-F]{32})]]>")
           .matcher(rows.group(1));
       Matcher name = Pattern.compile("<NAME><!\\[CDATA\\[(.*?)]]></NAME>").matcher(rows.group(1));
       assertTrue(spec.find() && name.find());
-      declared.add(specNames.get(spec.group(1)) + "/" + name.group(1));
+      String entity = specNames.get(spec.group(1)) + "/" + name.group(1);
+      if ("supplier".equals(section.getString("source"))) {
+        declared.add(entity);
+      } else {
+        // A rendered section in data exists only to name the server-side printable (ETP-6013).
+        assertEquals("rendered", section.getString("source"), entity);
+        printed.put(entity, section.getJSONObject("print").getString("document"));
+      }
     }
     assertEquals(SUPPLIER_PDF_ENTITIES, declared);
+    assertEquals(PRINTED_PDF_ENTITIES, printed);
   }
 
   private static final String SALES_INVOICE_HEADER = "7240CAF07810439B85DE61E70BE8DC0B";
@@ -595,21 +645,28 @@ class McpConfigSourcedataTest {
    * ETP-5714: the {@code documentAction} values per status follow core's
    * {@code ActionButtonUtility.docAction} (the real DocAction transitions), not the AD list: an
    * invoice offers CO on a draft and only RE once completed (the screen's Reactivate; no reversal, RC removed
-   * in the QA follow-up), an order CO/VO/PR on a draft and CL/RE
-   * once completed. Advisory data, so its content is asserted here.
+   * in the QA follow-up), an order CO/VO/PR on a draft. Once completed a purchase order offers
+   * CL/RE, while a sales order offers only RE: the app never offers Close on a sales order and its
+   * pre-hook refuses it (ETP-5704). Advisory data, so its content is asserted here.
    */
   @Test
   @DisplayName("order and invoice headers declare documentAction values per status from core's transitions")
   void documentActionValuesByStatus() throws IOException, JSONException {
+    Map<String, Set<String>> completedValues = Map.of(
+        PURCHASE_ORDER_HEADER_ID, Set.of("CL", "RE"),
+        SALES_ORDER_HEADER_ID, Set.of("RE"));
     for (String id : List.of(PURCHASE_ORDER_HEADER_ID, SALES_ORDER_HEADER_ID)) {
       JSONObject values = valuesByStatusOf(id);
       assertEquals(Set.of("CO", "VO", "PR"), setOf(values.getJSONArray("DR")), id);
-      assertEquals(Set.of("CL", "RE"), setOf(values.getJSONArray("CO")), id);
+      assertEquals(completedValues.get(id), setOf(values.getJSONArray("CO")), id);
       // review W2: final statuses are listed explicitly (empty), never left to be guessed
       assertEquals(0, values.getJSONArray("VO").length(), id);
       assertEquals(0, values.getJSONArray("CL").length(), id);
       assertResolvesCleanly(id);
     }
+    // ETP-5704: the sales order's advisory list must never offer Close again.
+    assertFalse(setOf(valuesByStatusOf(SALES_ORDER_HEADER_ID).getJSONArray("CO")).contains("CL"),
+        "a completed sales order is not offered CL");
     for (String id : INVOICE_HEADERS) {
       JSONObject values = valuesByStatusOf(id);
       assertEquals(Set.of("CO"), setOf(values.getJSONArray("DR")), id);
