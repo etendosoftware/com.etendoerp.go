@@ -26,8 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import javax.inject.Named;
-
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -78,9 +76,14 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * and orders without one, and answers 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} before anything
  * is written, so the caller can ask the user and resend with {@code carryGlobalDiscount:false}: the
  * lines are imported and the header's total discount is not touched. The lines always keep their own line discount. The
- * discount line itself is materialised when the invoice is completed, as always.
+ * discount line itself is materialised when the invoice is completed, as always. Like the popup,
+ * each {@code availableOrders} row carries the order's {@code globalDiscount} % and a successful
+ * import says what happened to it ({@link InvoiceGlobalDiscountRule#outcome}), so an agent can
+ * tell the user what the popup's tag and toast would have shown.
+ *
+ * <p>Not a binding of its own: an {@code @Inject}ed delegate of the sales and purchase invoice
+ * header NeoExtensions, resolved by type (no {@code @Named}, no {@code Java_Qualifier}).
  */
-@Named("importOrderLinesIntoInvoiceHandler")
 public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImportHandler {
 
   static final String ACTION_AVAILABLE_ORDERS = "availableOrders";
@@ -102,6 +105,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   private static final String PARAM_ORDER_ID = OrderImportRequest.PARAM_ORDER_ID;
   private static final String PARAM_ORDERS = OrderImportRequest.PARAM_ORDERS;
   private static final String PARAM_CARRY_DISCOUNT = OrderImportRequest.PARAM_CARRY_DISCOUNT;
+  /**
+   * The order's global discount on an {@code availableOrders} row, and what happened to it on an
+   * {@code importOrderLines} answer (see {@link InvoiceGlobalDiscountRule#outcome}).
+   */
+  static final String KEY_GLOBAL_DISCOUNT = "globalDiscount";
   /** The three order actions of a normal invoice (a rectificative takes none, ETP-5876). */
   static final Set<String> ACTIONS =
       Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES, ACTION_IMPORT);
@@ -130,7 +138,9 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     contracts.put(ACTION_AVAILABLE_ORDERS, NeoActionContract.read(ACTION_AVAILABLE_ORDERS,
         "Lists the completed " + order + "s of this " + doc + "'s business partner and currency "
             + "that still have quantity to invoice: {data:[{id, documentNo, date, businessPartner, "
-            + "businessPartner$_identifier, currency, pendingLines}], hasMore, limit, scanLimit}. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending counts what draft "
+            + "businessPartner$_identifier, currency, pendingLines, globalDiscount}], hasMore, "
+            + "limit, scanLimit}; globalDiscount is the order's global discount as a % (0 when it "
+            + "has none), the one importOrderLines carries to the invoice. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending counts what draft "
             + "invoices already hold. Step 1." + flow)
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
@@ -174,7 +184,13 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "completed. Refused (422) when the invoice is not a draft, an order is not "
             + "completed, or business partner, currency or direction differ. Returns "
             + "{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], "
-            + "headerLinked, salesOrder}} (salesOrder is the order the header points at now; headerLinked is true only when an imported line belongs to it). Step 3." + flow,
+            + "headerLinked, salesOrder, globalDiscount:{applied, percent, reason}}} (salesOrder "
+            + "is the order the header points at now; headerLinked is true only when an imported "
+            + "line belongs to it; globalDiscount says whether the invoice's total discount now "
+            + "holds the orders' %: applied true with that percent, or applied false, percent "
+            + "null and reason " + InvoiceGlobalDiscountRule.REASON_NOT_REQUESTED + " (sent "
+            + "carryGlobalDiscount:false) or " + InvoiceGlobalDiscountRule.REASON_NO_ORDER_DISCOUNT
+            + " (the orders have no global discount); tell the user which). Step 3." + flow,
         NeoActionContract.Param.optional(PARAM_ORDER_ID, NeoActionContract.TYPE_STRING,
             "Id of the order to import from, returned by availableOrders. Required unless "
                 + "orders is given."),
@@ -280,8 +296,10 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     }
     InvoiceGlobalDiscountRule.apply(invoice, discount);
     requireQuotaAllowed(InvoiceLine.ENTITY_NAME, created);
+    Map<String, Object> extra = new LinkedHashMap<>();
+    extra.put(KEY_GLOBAL_DISCOUNT, InvoiceGlobalDiscountRule.outcome(carryDiscount, discount));
     return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
-        : invoice.getSalesOrder().getId());
+        : invoice.getSalesOrder().getId(), extra);
   }
 
   /**
@@ -484,8 +502,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         return null;
       }
       String orderCurrency = order.getCurrency() == null ? null : order.getCurrency().getId();
-      return documentRow(order.getId(), order.getDocumentNo(), day(order.getOrderDate()),
+      JSONObject row = documentRow(order.getId(), order.getDocumentNo(), day(order.getOrderDate()),
           partnerId, order.getBusinessPartner().getName(), orderCurrency, pendingLines);
+      // The popup's "Dto. global X %" tag: always a %, 0 when the order has none.
+      row.put(KEY_GLOBAL_DISCOUNT,
+          InvoiceGlobalDiscountRule.normalizedPercent(order.getEtgoTotalDiscount()));
+      return row;
     });
   }
 

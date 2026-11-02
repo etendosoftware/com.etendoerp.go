@@ -48,6 +48,10 @@ final class InvoiceGlobalDiscountRule {
   static final String CONFLICT_INVOICE_OTHER_DISCOUNT = "invoiceHasOtherDiscount";
   /** Conflict (c): the invoice already has lines and no total discount. */
   static final String CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT = "invoiceHasLinesWithoutDiscount";
+  /** Not carried: the call sent {@code carryGlobalDiscount:false}. */
+  static final String REASON_NOT_REQUESTED = "carryGlobalDiscountFalse";
+  /** Not carried: the selected orders have no global discount, nothing to carry. */
+  static final String REASON_NO_ORDER_DISCOUNT = "ordersWithoutDiscount";
 
   private InvoiceGlobalDiscountRule() {
   }
@@ -131,6 +135,26 @@ final class InvoiceGlobalDiscountRule {
     invoice.setEtgoTotalDiscount(discount);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
+  }
+
+  /**
+   * What a successful import did with the global discount, as the popup's toast says it
+   * ("descuento global del X % aplicado a la factura"): {@code {applied:true, percent, reason:null}}
+   * when the invoice's total discount holds the orders' % after the call (set now or already
+   * there), else {@code {applied:false, percent:null, reason}} with {@value #REASON_NOT_REQUESTED}
+   * or {@value #REASON_NO_ORDER_DISCOUNT}. A conflict never gets here: it is the 422.
+   *
+   * @param carryRequested {@code carryGlobalDiscount} of the call
+   * @param carried        what {@link #toCarry} returned, {@code null} when nothing was carried
+   */
+  static JSONObject outcome(boolean carryRequested, BigDecimal carried) throws JSONException {
+    JSONObject outcome = new JSONObject();
+    boolean applied = carryRequested && carried != null;
+    outcome.put("applied", applied);
+    outcome.put("percent", applied ? normalizedPercent(carried) : JSONObject.NULL);
+    String reason = carryRequested ? REASON_NO_ORDER_DISCOUNT : REASON_NOT_REQUESTED;
+    outcome.put("reason", applied ? JSONObject.NULL : reason);
+    return outcome;
   }
 
   /**

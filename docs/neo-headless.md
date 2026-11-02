@@ -11462,9 +11462,17 @@ still pending**; given, it imports **exactly** those lines (the same line twice 
 `{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], headerLinked, salesOrder?}}`
 (`salesOrder` is the order the header points at NOW when it has one; `headerLinked` is `true` only when an imported
 line belongs to that order, so the answer never claims a link to an order none of the lines is from).
+`importOrderLines` into an invoice also answers `globalDiscount:{applied, percent, reason}` (ETP-5828 QA, the popup's
+toast *«N líneas importadas · descuento global del X % aplicado a la factura»*): `applied:true, percent:<%>,
+reason:null` when the invoice's total discount holds the orders' % after the call (set now, or already there), else
+`applied:false, percent:null` and `reason` `carryGlobalDiscountFalse` (the call sent `carryGlobalDiscount:false`) or
+`ordersWithoutDiscount` (the orders have none, nothing to carry). A discount that cannot be carried never reaches a 200:
+it is the 422 `globalDiscountConflict`. Example:
+`{"data":{"importedCount":2,"lines":[…],"headerLinked":true,"salesOrder":"A1B2…","globalDiscount":{"applied":true,"percent":10,"reason":null}}}`.
 `availableOrders` / `availableReceipts` / `availableShipments` answer
 `{data:[{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines}], hasMore, limit,
-scanLimit}`, the `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
+scanLimit}`; `availableOrders` of an **invoice** adds `globalDiscount`, the order's `etgoTotalDiscount` as a % (null,
+zero or negative read as 0, same normalisation as the carry rule), the popup's *«Dto. global X %»* tag. The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
 hasMore:false, limit, scanLimit}`, where the line `id` is the `sourceLineId` the import takes. **Discovery is a bounded
 scan**: it reads the `scanLimit` (200) most recent completed candidates of the target's partner, client and currency and
 returns at most `limit` (50) documents, filtered by the same pending rule the import enforces. `hasMore` is `true` when

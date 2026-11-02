@@ -968,9 +968,31 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       } else {
         verify(probe.invoice, never()).setEtgoTotalDiscount(any());
       }
+      if (CARRIED.equals(expected) || UNTOUCHED.equals(expected)) {
+        assertGlobalDiscountReported(data(response), expected, carry, orderDiscount);
+      }
     } catch (AssertionError e) {
       throw new AssertionError(label, e);
     }
+  }
+
+  /**
+   * The answer says what the popup's toast says: the % the invoice now holds, or why nothing was
+   * carried (carryGlobalDiscount:false wins over "the orders have none").
+   */
+  private static void assertGlobalDiscountReported(JSONObject data, String expected, Boolean carry,
+      BigDecimal orderDiscount) throws Exception {
+    JSONObject outcome = data.getJSONObject(ImportOrderLinesIntoInvoiceHandler.KEY_GLOBAL_DISCOUNT);
+    if (CARRIED.equals(expected)) {
+      assertTrue(outcome.getBoolean("applied"));
+      assertEquals(0, orderDiscount.compareTo(new BigDecimal(outcome.getString("percent"))));
+      assertTrue(outcome.isNull("reason"));
+      return;
+    }
+    assertFalse(outcome.getBoolean("applied"));
+    assertTrue(outcome.isNull("percent"));
+    assertEquals(Boolean.FALSE.equals(carry) ? InvoiceGlobalDiscountRule.REASON_NOT_REQUESTED
+        : InvoiceGlobalDiscountRule.REASON_NO_ORDER_DISCOUNT, outcome.getString("reason"));
   }
 
   /**
@@ -1196,6 +1218,25 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
     assertEquals(List.of("o1"), ids(rows));
     assertEquals(2, rows.getJSONObject(0).getInt("pendingLines"));
+    assertEquals("an order without a global discount reads 0", 0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(rows.getJSONObject(0).getString("globalDiscount"))));
+  }
+
+  /** Each row carries the order's global discount %, the popup's "Dto. global X %" tag. */
+  @Test
+  public void availableOrders_reportsEachOrdersGlobalDiscount() throws Exception {
+    Object[][] cases = { { "12.5", "12.5" }, { "0", "0" }, { "-3", "0" } };
+    for (Object[] row : cases) {
+      Probe probe = scenario();
+      when(probe.order.getEtgoTotalDiscount()).thenReturn(bd((String) row[0]));
+      probe.candidates = List.of(probe.order);
+
+      JSONObject first = run(probe, "availableOrders", null).getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+
+      assertEquals((String) row[0], 0, bd((String) row[1]).compareTo(
+          new BigDecimal(first.getString("globalDiscount"))));
+    }
   }
 
   @Test
