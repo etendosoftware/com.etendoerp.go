@@ -919,17 +919,26 @@ public class McpServlet extends HttpServlet {
         toolName, identity.userId, identity.roleId, identity.clientId, identity.orgId);
 
     // ETP-5819: outside executeInContext so its closing flush, and its rollback, are guarded too.
-    return NeoTenantWriteGuard.call(() -> McpSessionManager.executeInContext(
-        identity.userId, identity.roleId, identity.clientId,
-        identity.orgId, null, () -> {
-          OBContext.setAdminMode(true);
-          try {
-            McpToolRouter router = new McpToolRouter();
-            return router.route(toolName, arguments, parseScopes(identity.scopes));
-          } finally {
-            OBContext.restorePreviousMode();
-          }
-        }));
+    try {
+      return NeoTenantWriteGuard.call(() -> McpSessionManager.executeInContext(
+          identity.userId, identity.roleId, identity.clientId,
+          identity.orgId, null, () -> {
+            OBContext.setAdminMode(true);
+            try {
+              McpToolRouter router = new McpToolRouter();
+              return router.route(toolName, arguments, parseScopes(identity.scopes));
+            } finally {
+              OBContext.restorePreviousMode();
+            }
+          }));
+    } catch (org.openbravo.base.exception.OBSecurityException e) {
+      // A write refused at the closing flush, after the router already answered: still a
+      // permanent refusal, so forbidden like the router's own, not a retryable server error.
+      log.warn("MCP tool '{}' write refused for the current tenant: {} session={}", toolName,
+          e.getMessage(), McpUsageTelemetry.sessionForLog());
+      return McpToolRouter.wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName,
+          e.getMessage()));
+    }
   }
 
   // ── Handler: resources/list ─────────────────────────────────────────────

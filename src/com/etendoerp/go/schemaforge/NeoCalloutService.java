@@ -709,7 +709,7 @@ public class NeoCalloutService {
       BaseOBObject referenced = OBDal.getInstance().get(
           prop.getTargetEntity().getName(), strVal);
       // ETP-5819: never label another tenant's row.
-      if (referenced != null && TenantOwnership.isVisibleToCurrentTenant(referenced)) {
+      if (referenced != null && TenantOwnership.belongsToReadableClient(referenced)) {
         String identifier = referenced.getIdentifier();
         if (identifier != null && !identifier.isEmpty()) {
           entry.put(IDENTIFIER_KEY, identifier);

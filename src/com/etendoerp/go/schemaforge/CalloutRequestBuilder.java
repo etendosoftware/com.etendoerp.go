@@ -542,7 +542,7 @@ class CalloutRequestBuilder {
       Object parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
       // ETP-5819: parentId comes from the request; another tenant's parent injects nothing.
       if (parentRecord == null
-          || !TenantOwnership.isVisibleToCurrentTenant((BaseOBObject) parentRecord)) {
+          || !TenantOwnership.belongsToReadableClient((BaseOBObject) parentRecord)) {
         log.debug("[NEO-CALLOUT] Parent record not found: {} / {}", parentEntity.getName(), parentId);
         return;
       }
@@ -763,7 +763,7 @@ class CalloutRequestBuilder {
   private static boolean isOwnedOrMissing(Entity target, String id) {
     try {
       BaseOBObject row = (BaseOBObject) OBDal.getInstance().get(target.getName(), id);
-      return row == null || TenantOwnership.isVisibleToCurrentTenant(row);
+      return row == null || TenantOwnership.belongsToReadableClient(row);
     } catch (RuntimeException e) {
       // Not an id of that entity at all: it names no row, so there is nothing to leak.
       return true;

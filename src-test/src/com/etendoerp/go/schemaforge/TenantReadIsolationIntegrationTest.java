@@ -63,6 +63,7 @@ public class TenantReadIsolationIntegrationTest extends WeldBaseTest {
 
   private static final String SALES_ORDER_LINES_TAB_ID = "187";
   private static final String INP_PARTNER = "inpcBpartnerId";
+  private static final String INP_CLIENT = "inpadClientId";
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
   private Tab linesTab;
@@ -126,6 +127,27 @@ public class TenantReadIsolationIntegrationTest extends WeldBaseTest {
     CalloutRequestBuilder.blankForeignReferences(linesTab, params);
 
     assertEquals(ownPartnerId, params.get(INP_PARTNER)[0]);
+  }
+
+  /** A Client row is not ClientEnabled: it must be judged by its own id, not waved through. */
+  @Test
+  public void testCalloutClientParamOfAnotherTenantIsBlanked() {
+    Map<String, String[]> params = new HashMap<>();
+    params.put(INP_CLIENT, new String[] { QA_TEST_CLIENT_ID });
+
+    CalloutRequestBuilder.blankForeignReferences(linesTab, params);
+
+    assertEquals("", params.get(INP_CLIENT)[0]);
+  }
+
+  @Test
+  public void testCalloutClientParamOfTheCallerIsKept() {
+    Map<String, String[]> params = new HashMap<>();
+    params.put(INP_CLIENT, new String[] { TEST_CLIENT_ID });
+
+    CalloutRequestBuilder.blankForeignReferences(linesTab, params);
+
+    assertEquals(TEST_CLIENT_ID, params.get(INP_CLIENT)[0]);
   }
 
   /** An id that names no row is left to the callout, as before: an unsaved record's id is one. */

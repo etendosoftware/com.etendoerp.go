@@ -78,8 +78,9 @@ public final class TenantOwnership {
   /**
    * True when {@code entity} is readable by the current client and organization.
    *
-   * <p>An entity that is not client-enabled (a system/reference table) is always visible: those rows
-   * are shared by design and carry no tenant of their own.
+   * <p>A {@link Client} row is judged by its own id: it IS the tenant. Any other entity that is not
+   * client-enabled (a system/reference table) is always visible: those rows are shared by design and
+   * carry no tenant of their own.
    */
   static boolean isVisibleToCurrentTenant(BaseOBObject entity) {
     if (entity == null) {
@@ -150,9 +151,6 @@ public final class TenantOwnership {
       // Same fail-open contract as isVisibleToCurrentTenant: no session, no tenant to compare.
       return true;
     }
-    if (entity instanceof Client) {
-      return contains(context.getReadableClients(), ((Client) entity).getId());
-    }
     return hasReadableClient(entity, context);
   }
 
@@ -208,6 +206,10 @@ public final class TenantOwnership {
   }
 
   private static boolean hasReadableClient(BaseOBObject entity, OBContext context) {
+    if (entity instanceof Client) {
+      // Client is not ClientEnabled: without this every tenant's Client row would pass.
+      return contains(context.getReadableClients(), entity.getId().toString());
+    }
     if (!(entity instanceof ClientEnabled)) {
       return true;
     }
