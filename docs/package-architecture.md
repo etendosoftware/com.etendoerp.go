@@ -162,6 +162,7 @@ New validity-related policy belongs with these constants and `normalizeValidityS
 - `--all-issues` produces full-project reports;
 - `--allow-dirty` is an explicit exploratory escape hatch, not the canonical path;
 - PR-only reports combine `git diff "$BASE_REF"...HEAD` with Sonar `inNewCodePeriod=true` so local reports match the Cloud PR view more closely.
+- with `--base-ref origin/<name>`, `scripts/sonar-base-branch.sh` first makes the local `<name>` match `origin/<name>`, because Sonar gets the base as a bare name and reads the local branch before origin's (ETP-6067): it fast-forwards a branch that is only behind, and stops the run on one that is checked out or has commits of its own.
 
 Generated reports include both full-project and PR/new-code views:
 

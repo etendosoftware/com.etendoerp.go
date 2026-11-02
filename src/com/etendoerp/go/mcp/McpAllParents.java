@@ -87,7 +87,10 @@ final class McpAllParents {
   static void annotate(JSONObject flat, SFEntity sfEntity) throws JSONException {
     McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
     flat.put(McpConstants.PARAM_ALL_PARENTS, true);
-    flat.put(KEY_NOTE, "Records across every " + scope.getParentEntity() + " this spec lists"
+    // ETP-6036: the parent entity may be excluded from the spec (fiscal-calendar/calendar), and
+    // then the scope has no entity name to give; say "parent record" rather than "null".
+    String parent = scope.getParentEntity() != null ? scope.getParentEntity() : "parent record";
+    flat.put(KEY_NOTE, "Records across every " + parent + " this spec lists"
         + (scope.getParentField() == null ? "" : "; each row names its parent in '"
             + scope.getParentField() + "'")
         + ". To read one parent's records, call etendo_list with parentId instead.");

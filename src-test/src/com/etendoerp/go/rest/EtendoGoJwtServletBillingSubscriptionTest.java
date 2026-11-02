@@ -621,6 +621,58 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     verify(fixture.dal).rollbackAndClose();
   }
 
+  // ===================== GET /billing/subscription?clientId= =====================
+
+  /** ETP-6060 — "Mis empresas" reads a named owned company's subscription, not the newest one. */
+  @Test
+  public void aNamedClientReadsThatCompanysOwnSubscription() throws Exception {
+    Fixture fixture = new Fixture();
+    CheckoutRequest named = purchase("sub_named", "cus_named", "client-named");
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        "client-named")).thenReturn(named);
+    when(fixture.portalService.retrieveSubscription("sub_named")).thenReturn(fixture.live);
+
+    ResponseCapture resp = getForClient(fixture, " client-named ");
+
+    assertEquals(200, resp.status);
+    JSONObject body = resp.json();
+    assertTrue(body.getBoolean("hasSubscription"));
+    assertEquals("client-named", body.getString("clientId"));
+    verify(fixture.requestStore, never()).findSubscriptionForAccount(anyString(), anyString());
+    verify(fixture.lifecycle).resolve("client-named");
+  }
+
+  /** A company the account did not buy matches nothing: no subscription, never another one. */
+  @Test
+  public void aClientTheAccountDidNotBuyAnswersNoSubscription() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        "client-of-someone-else")).thenReturn(null);
+
+    ResponseCapture resp = getForClient(fixture, "client-of-someone-else");
+
+    assertEquals(200, resp.status);
+    assertFalse(resp.json().getBoolean("hasSubscription"));
+    verify(fixture.requestStore, never()).findSubscriptionForAccount(anyString(), anyString());
+    verifyNoInteractions(fixture.portalService);
+  }
+
+  /** A blank value or the System client names no company: the page's own rule applies. */
+  @Test
+  public void aBlankOrSystemClientKeepsTheAccountsSubscription() throws Exception {
+    for (String none : new String[] { "", "  ", "0" }) {
+      Fixture fixture = subscribedFixture(null);
+
+      ResponseCapture resp = getForClient(fixture, none);
+
+      assertEquals(200, resp.status);
+      assertTrue(resp.json().getBoolean("hasSubscription"));
+      verify(fixture.requestStore).findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL);
+      verify(fixture.requestStore, never()).findSubscriptionForAccountClient(anyString(),
+          anyString(), anyString());
+    }
+  }
+
   // ===================== Page and portal agree =====================
 
   /**
@@ -858,19 +910,24 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
   }
 
   private static ResponseCapture get(Fixture fixture, String token) throws Exception {
-    return send(fixture, SUBSCRIPTION_PATH, token, false);
+    return send(fixture, SUBSCRIPTION_PATH, token, false, null);
+  }
+
+  /** A subscription read naming a company through the {@code clientId} query parameter. */
+  private static ResponseCapture getForClient(Fixture fixture, String clientId) throws Exception {
+    return send(fixture, SUBSCRIPTION_PATH, VALID_TOKEN, false, clientId);
   }
 
   private static ResponseCapture post(Fixture fixture, String token) throws Exception {
-    return send(fixture, PORTAL_PATH, token, true);
+    return send(fixture, PORTAL_PATH, token, true, null);
   }
 
   /**
    * Sends a request that carries a foreign subscription and customer id on every channel a caller
    * controls: query string, every parameter, every header except Authorization, and the body.
    */
-  private static ResponseCapture send(Fixture fixture, String path, String token, boolean post)
-      throws Exception {
+  private static ResponseCapture send(Fixture fixture, String path, String token, boolean post,
+      String clientId) throws Exception {
     String foreignBody = "{\"subscriptionId\":\"" + FOREIGN_SUBSCRIPTION
         + "\",\"stripeSubscription\":\"" + FOREIGN_SUBSCRIPTION + "\",\"customer\":\""
         + FOREIGN_CUSTOMER + "\",\"customerId\":\"" + FOREIGN_CUSTOMER + "\"}";
@@ -879,9 +936,13 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     when(req.getMethod()).thenReturn(post ? "POST" : "GET");
     when(req.getQueryString()).thenReturn("subscriptionId=" + FOREIGN_SUBSCRIPTION
         + "&customer=" + FOREIGN_CUSTOMER);
-    when(req.getParameter(anyString())).thenAnswer(call ->
-        String.valueOf(call.getArgument(0)).toLowerCase().contains("customer")
-            ? FOREIGN_CUSTOMER : FOREIGN_SUBSCRIPTION);
+    // ETP-6060 — clientId is the one parameter the subscription read honours (ownership is the
+    // store query's); only the tests that name a company send it.
+    when(req.getParameter(anyString())).thenAnswer(call -> {
+      String name = call.getArgument(0);
+      if ("clientId".equals(name)) return clientId;
+      return name.toLowerCase().contains("customer") ? FOREIGN_CUSTOMER : FOREIGN_SUBSCRIPTION;
+    });
     when(req.getHeader(anyString())).thenReturn(FOREIGN_SUBSCRIPTION);
     when(req.getHeader("Authorization")).thenReturn(token == null ? null : "Bearer " + token);
     when(req.getContentType()).thenReturn("application/json");

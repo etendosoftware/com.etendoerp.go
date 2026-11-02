@@ -621,23 +621,19 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
         String bplId = nullIfEmpty(rec.optString("id", null));
-        if (bplId == null) {
-          continue;
-        }
-        org.openbravo.model.common.businesspartner.Location bpLoc =
-            OBDal.getInstance().get(org.openbravo.model.common.businesspartner.Location.class, bplId);
+        org.openbravo.model.common.businesspartner.Location bpLoc = bplId == null ? null
+            : OBDal.getInstance().get(org.openbravo.model.common.businesspartner.Location.class, bplId);
         if (bpLoc == null || bpLoc.getLocationAddress() == null) {
           continue;
         }
         putGeoLocFields(rec, bpLoc.getLocationAddress(), structuredAddressEnabled);
         modified = true;
         String name = rec.optString("name", "");
-        if (!"Location".equals(name) && !name.isEmpty()) {
-          continue;
-        }
-        String computed = buildDisplayName(bpLoc.getLocationAddress());
-        if (computed != null && !computed.equals(name)) {
-          rec.put("name", computed);
+        if ("Location".equals(name) || name.isEmpty()) {
+          String computed = buildDisplayName(bpLoc.getLocationAddress());
+          if (computed != null) {
+            rec.put("name", computed);
+          }
         }
       }
       return modified ? NeoResponse.ok(ctx.getPreviousResult().getBody()) : null;

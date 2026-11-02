@@ -52,10 +52,14 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.businesspartner.Location;
@@ -495,6 +499,48 @@ public class PurchaseOrderHeaderHandlerTest {
     when(mockClone.handle(ctx)).thenReturn(null);
 
     assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * Purchase orders do not opt into the sales order's Close refusal (ETP-5704): a {@code DocAction}
+   * whose effective value is {@code CL} — sent at the root and stored on the record alike —
+   * reaches the action router, where the same request on a sales order answers 400.
+   */
+  @Test
+  public void testHandleLetsCloseThroughOnAPurchaseOrder() throws Exception {
+    final String tabId = "tab-purchase-order";
+    final String orderId = "po-cl-1";
+    NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+    PurchaseOrderHeaderHandler handler = handlerWithMockClone(router);
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    Property documentAction = mock(Property.class);
+    Entity entity = mock(Entity.class);
+    BaseOBObject order = mock(BaseOBObject.class);
+    OBDal dal = mock(OBDal.class);
+    when(tab.getId()).thenReturn(tabId);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getName()).thenReturn("Order");
+    when(entity.hasProperty("documentAction")).thenReturn(true);
+    when(entity.getProperty("documentAction")).thenReturn(documentAction);
+    when(order.getEntity()).thenReturn(entity);
+    when(order.get("documentAction")).thenReturn("CL");
+    when(dal.get(Tab.class, tabId)).thenReturn(tab);
+    when(dal.get("Order", orderId)).thenReturn(order);
+    NeoContext ctx = NeoContext.builder()
+        .specName("purchase-order").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("DocAction").recordId(orderId).adTab(tab)
+        .requestBody(new JSONObject("{\"docAction\":\"CL\"}"))
+        .build();
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      assertNull(handler.handle(ctx));
+      verify(router).handle(ctx);
+    }
   }
 
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────

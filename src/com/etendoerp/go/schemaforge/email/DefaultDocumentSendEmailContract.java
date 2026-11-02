@@ -104,6 +104,20 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   public static final String ENV_MAX_PER_DOMAIN = "ETGO_EMAIL_THROTTLE_MAX_PER_DOMAIN";
 
   private static final String DOCUMENT_RECORD_NOT_FOUND = "Email document record was not found";
+
+  /** {@code DocStatus} of a completed document: the only one most windows send (ETP-6013). */
+  protected static final String STATUS_COMPLETED = "CO";
+  /** {@code DocStatus} of a draft. */
+  protected static final String STATUS_DRAFT = "DR";
+  /** {@code AD_MESSAGE}: only completed documents can be emailed ({0} number, {1} status). */
+  public static final String MSG_ONLY_COMPLETED = "ETGO_EmailOnlyCompleted";
+  /** {@code AD_MESSAGE}: a draft cannot be emailed ({0} number, {1} status). */
+  public static final String MSG_NOT_FOR_DRAFT = "ETGO_EmailNotForDraft";
+  /**
+   * HTTP status of a send refused by the document's status: the request is fine, the document's
+   * state is what conflicts, as for the MCP's {@code no_pdf} answer.
+   */
+  public static final int STATUS_NOT_SENDABLE = 409;
   private static final String SPEC_ACCESS_DENIED = "Access denied to spec for current role";
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
@@ -246,9 +260,67 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     if (!canWriteSpec()) {
       return EmailAuthorizationResult.rejected(403, SPEC_ACCESS_DENIED);
     }
-    return resolveDocument(command).isPresent()
-        ? EmailAuthorizationResult.allowed()
-        : EmailAuthorizationResult.rejected(404, DOCUMENT_RECORD_NOT_FOUND);
+    Optional<EmailDocumentRecord> document = resolveDocument(command);
+    if (!document.isPresent()) {
+      return EmailAuthorizationResult.rejected(404, DOCUMENT_RECORD_NOT_FOUND);
+    }
+    // ETP-6013 — the status rule lives here, on the one path every channel goes through (the SPA's
+    // REST send and the MCP tool), not only in the UI that hides the button. A document completed,
+    // printed and then reactivated still has its old PDF: the status decides, not the PDF.
+    Optional<String> refusal = statusRefusal(document.get(), EmailContractCommandSupport.text(
+        command, EmailContractCommandSupport.FIELD_LANGUAGE));
+    return refusal.isPresent()
+        ? EmailAuthorizationResult.rejected(STATUS_NOT_SENDABLE, refusal.get())
+        : EmailAuthorizationResult.allowed();
+  }
+
+  /**
+   * Why this document cannot be emailed in its current status, if it cannot (ETP-6013).
+   *
+   * <p>A caller that answers before sending — the MCP preview — asks here, so it refuses with the
+   * same rule and the same words as {@link #authorize}. Empty when the document is sendable, when
+   * its resolver reports no status, and when it cannot be resolved (that is a 404, answered by the
+   * caller's own lookup).</p>
+   *
+   * @param recordId the document id
+   * @param language the language of the message, such as {@code es_ES}; blank falls back to the
+   *                 request language
+   * @return the translated refusal, or empty
+   */
+  public Optional<String> statusRefusal(String recordId, String language) {
+    Optional<EmailDocumentRecord> document = documentResolver.resolve(recordId);
+    return document.isPresent() ? statusRefusal(document.get(), language) : Optional.empty();
+  }
+
+  private Optional<String> statusRefusal(EmailDocumentRecord document, String requestedLanguage) {
+    return DocumentSendStatusGate.refusal(document, requestedLanguage, this::isSendableStatus,
+        unsendableStatusMessageKey());
+  }
+
+  /**
+   * Per-contract declaration of the statuses a document can be emailed in (ETP-6013).
+   *
+   * <p>Mirrors what the application offers: the document windows show "Enviar" only on a completed
+   * document ({@code isCompleted}, {@code documentStatus === 'CO'}), so that is the default. A
+   * contract whose window offers it in other statuses overrides this (the sales quotation: any status
+   * but draft).</p>
+   *
+   * @param documentStatus the document's {@code DocStatus} code, never {@code null}
+   * @return {@code true} when the document can be emailed in that status
+   */
+  protected boolean isSendableStatus(String documentStatus) {
+    return STATUS_COMPLETED.equals(documentStatus);
+  }
+
+  /**
+   * Per-contract declaration of the {@code AD_MESSAGE} that refuses a send by status, with
+   * {@code {0}} the document number and {@code {1}} the status name. Overridden together with
+   * {@link #isSendableStatus} so the sentence describes the rule the contract declares.
+   *
+   * @return the message key
+   */
+  protected String unsendableStatusMessageKey() {
+    return MSG_ONLY_COMPLETED;
   }
 
   /**

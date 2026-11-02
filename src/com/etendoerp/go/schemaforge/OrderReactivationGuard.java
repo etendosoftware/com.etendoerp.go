@@ -19,9 +19,6 @@ package com.etendoerp.go.schemaforge;
 
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
@@ -59,10 +56,12 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * <p><b>Called explicitly</b> by each order customization that opts in, from its pre-hook — today
  * only {@link SalesOrderHeaderHandler}. It names no entity, so it adds nothing entity-specific to
  * shared code; an entity gets the rule only by calling it.</p>
+ *
+ * <p>The resolution, the 404 and the fail-closed handling are {@link DocActionRefusalGuard}'s,
+ * shared with the other "the app does not offer it" refusals (ETP-5704 QA: Close on a sales order,
+ * Reactivate on a quotation that is not voided); this class keeps its own messages.</p>
  */
 final class OrderReactivationGuard {
-
-  private static final Logger log = LogManager.getLogger(OrderReactivationGuard.class);
 
   static final String DOC_ACTION_REACTIVATE = "RE";
   static final String MSG_LINKED_DOCUMENTS = "ETGO_OrderReactivateLinkedDocs";
@@ -84,31 +83,11 @@ final class OrderReactivationGuard {
    * @return the error response, or {@code null}
    */
   static NeoResponse refuseIfLinkedDocuments(NeoContext context) {
-    if (!DocActionRequestSupport.isDocActionButtonPost(context)) {
-      return null;
-    }
-    String orderId = context.getRecordId();
-    if (StringUtils.isBlank(orderId)) {
-      return null;
-    }
-    try {
-      if (!DOC_ACTION_REACTIVATE.equals(DocActionRequestSupport.effectiveDocAction(context))
-          || !AbstractOrderHeaderHandler.hasLinkedDocuments(orderId)) {
-        return null;
-      }
-    } catch (DocActionResolution.DocActionRecordNotFoundException e) {
-      // No such order: nothing can run, let alone be reactivated. Reuses NeoActionRecordGuard's
-      // not-found status and message — not the fail-closed "could not be checked".
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          NeoActionRecordGuard.MSG_RECORD_NOT_FOUND);
-    } catch (Exception e) {
-      log.error("DocAction on order {} refused: its action or linked documents could not be read",
-          orderId, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          OBMessageUtils.messageBD(MSG_CHECK_FAILED));
-    }
-    log.info("Reactivation of order {} refused: it has linked shipments or invoices", orderId);
-    return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-        OBMessageUtils.messageBD(MSG_LINKED_DOCUMENTS));
+    return DocActionRefusalGuard.refuse(context, DOC_ACTION_REACTIVATE,
+        AbstractOrderHeaderHandler::hasLinkedDocuments,
+        () -> NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            OBMessageUtils.messageBD(MSG_LINKED_DOCUMENTS)),
+        () -> NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            OBMessageUtils.messageBD(MSG_CHECK_FAILED)));
   }
 }

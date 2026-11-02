@@ -1413,6 +1413,210 @@ class McpToolRouterRouteTest {
     }
   }
 
+  /**
+   * ETP-6062: the target-row guard of {@code etendo_update} (a System row shared by every client
+   * is not writable by a tenant) can be waived by the entity's customization when it declares the
+   * update consumed into tenant-owned rows ({@code NeoHandler#consumesTargetWrite}).
+   *
+   * <p>The guard's own decision tree is covered by {@code NeoActionRecordGuardTest}; here it is
+   * stubbed to the answer each case needs (the waiver sets the same context attribute the real one
+   * sets), and what is asserted is the router's reaction: whether the update reaches the
+   * customization's pre-hook, whether a declining pre-hook is refused, and whether the write
+   * service is ever called.</p>
+   */
+  @Nested
+  @DisplayName("route — etendo_update target guard (ETP-6062)")
+  class UpdateTargetGuardTests {
+
+    private static final String RECORD_ID = "rec-1";
+    /** Context attribute {@code NeoActionRecordGuard#updateRefusalFor} sets when it waives. */
+    private static final String DELEGATED_ATTR = "neo.targetWriteDelegated";
+
+    private MockedStatic<NeoActionRecordGuard> guardMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcherMock;
+    private MockedStatic<McpWriteRequestSupport> writeSupportMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.NeoFieldFilter> filterMock;
+    private MockedStatic<org.openbravo.base.model.ModelProvider> modelMock;
+    private MockedStatic<McpImageFieldSupport> imageMock;
+    private MockedStatic<McpFkResolver> fkMock;
+    private MockedStatic<McpSelectorContextHelper> selectorCtxMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.util.NeoRecordVersion> versionMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.util.NeoLanguage> languageMock;
+
+    private SFEntity entity;
+
+    @BeforeEach
+    void setUpUpdatePath() throws Exception {
+      guardMock = mockStatic(NeoActionRecordGuard.class);
+      dispatcherMock = mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class);
+      writeSupportMock = mockStatic(McpWriteRequestSupport.class);
+      batchMock = mockStatic(com.etendoerp.go.schemaforge.BatchService.class);
+      filterMock = mockStatic(com.etendoerp.go.schemaforge.NeoFieldFilter.class);
+      modelMock = mockStatic(org.openbravo.base.model.ModelProvider.class);
+      imageMock = mockStatic(McpImageFieldSupport.class);
+      fkMock = mockStatic(McpFkResolver.class);
+      selectorCtxMock = mockStatic(McpSelectorContextHelper.class);
+      versionMock = mockStatic(com.etendoerp.go.schemaforge.util.NeoRecordVersion.class);
+      languageMock = mockStatic(com.etendoerp.go.schemaforge.util.NeoLanguage.class);
+
+      modelMock.when(org.openbravo.base.model.ModelProvider::getInstance)
+          .thenReturn(mock(org.openbravo.base.model.ModelProvider.class));
+
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      entity = mockEntity();
+      Tab tab = mockTab();
+      setupEntityLookup(entity, tab);
+
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+      supportMock.when(() -> McpToolRouterSupport.wrapForSmartclient(any(), anyString(),
+          anyString(), any())).thenReturn("{}");
+      supportMock.when(() -> McpToolRouterSupport.flattenCoreResponse(any()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+
+      writeSupportMock.when(() -> McpWriteRequestSupport.getAdTabOrThrow(any(), anyString()))
+          .thenReturn(tab);
+      writeSupportMock.when(() -> McpWriteRequestSupport.buildBaseParams(any(), anyString()))
+          .thenAnswer(invocation -> new java.util.HashMap<String, String>());
+      writeSupportMock.when(() -> McpWriteRequestSupport.mapFieldsToDalProperties(any(), any(),
+          any(), any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
+      writeSupportMock.when(() -> McpWriteRequestSupport.coerceFieldTypes(any(), any(), any(),
+          any())).thenReturn(new JSONArray());
+
+      // DefaultJsonDataService cannot be mocked here (its static initialiser needs a servlet
+      // container, see this class's javadoc), so the write service is never handed out: every case
+      // either stops before it or at the stale-record check, which sits right in front of it.
+      filterMock.when(() -> com.etendoerp.go.schemaforge.NeoFieldFilter.forEntity(any(),
+          anyString())).thenReturn(mock(com.etendoerp.go.schemaforge.NeoFieldFilter.class));
+      versionMock.when(() -> com.etendoerp.go.schemaforge.util.NeoRecordVersion.isStale(
+          anyString(), anyString(), anyString(), any())).thenReturn(false);
+
+      // refusalForUndeliveredDelegation is the router's second guard call: keep the real answer,
+      // which reads the attribute the (stubbed) waiver sets on the probe context.
+      guardMock.when(() -> NeoActionRecordGuard.refusalForUndeliveredDelegation(any()))
+          .thenCallRealMethod();
+    }
+
+    @AfterEach
+    void closeUpdatePath() {
+      for (MockedStatic<?> mock : java.util.Arrays.asList(guardMock, dispatcherMock, writeSupportMock, batchMock,
+          filterMock, modelMock, imageMock, fkMock, selectorCtxMock, versionMock, languageMock)) {
+        if (mock != null) {
+          mock.close();
+        }
+      }
+    }
+
+    private JSONObject updateArgs(JSONObject fields) throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", RECORD_ID);
+      args.put("fields", fields);
+      args.put("updated", STALE_SAFE_VERSION);
+      return args;
+    }
+
+    /** The guard waives the target row, as it does when the customization consumes the update. */
+    private void guardWaives() {
+      guardMock.when(() -> NeoActionRecordGuard.updateRefusalFor(any(SFEntity.class),
+          any(NeoContext.class))).thenAnswer(invocation -> {
+            invocation.<NeoContext>getArgument(1).setAttribute(DELEGATED_ATTR, Boolean.TRUE);
+            return null;
+          });
+    }
+
+    private com.etendoerp.go.schemaforge.NeoExtensionResult dispatchResult(NeoHandler customization,
+        NeoResponse response) {
+      return new com.etendoerp.go.schemaforge.NeoExtensionResult(customization, response, null);
+    }
+
+    @Test
+    @DisplayName("a consumed update reaches the pre-hook and returns the hook's response")
+    void consumedUpdateReturnsThePreHookResponse() throws Exception {
+      guardWaives();
+      JSONObject hookBody = new JSONObject().put("stored", "override");
+      dispatcherMock.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenReturn(dispatchResult(mock(NeoHandler.class), NeoResponse.ok(hookBody)));
+
+      JSONObject result = router.route("etendo_update",
+          updateArgs(new JSONObject().put("sif", "x")), WRITE_SCOPES);
+
+      assertFalse(result.has("isError") && result.getBoolean("isError"), result.toString());
+      assertEquals("override", new JSONObject(contentText(result)).getString("stored"));
+      // The probe the guard was asked about carries the agent's fields on a PUT of the record.
+      ArgumentCaptor<NeoContext> probe = ArgumentCaptor.forClass(NeoContext.class);
+      guardMock.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity), probe.capture()));
+      assertEquals("PUT", probe.getValue().getHttpMethod());
+      assertEquals(RECORD_ID, probe.getValue().getRecordId());
+      assertEquals("x", probe.getValue().getRequestBody().getString("sif"));
+      // The stale-record check sits right in front of the write: never reaching it means no write.
+      versionMock.verify(() -> com.etendoerp.go.schemaforge.util.NeoRecordVersion.isStale(
+          anyString(), anyString(), anyString(), any()), never());
+    }
+
+    @Test
+    @DisplayName("a pre-hook that declines after the opt-in is refused with 404 and writes nothing")
+    void decliningPreHookAfterOptInIsRefused() throws Exception {
+      guardWaives();
+      dispatcherMock.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenReturn(dispatchResult(mock(NeoHandler.class), null));
+
+      JSONObject result = router.route("etendo_update",
+          updateArgs(new JSONObject().put("sif", "x")), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      assertEquals(404, new JSONObject(contentText(result)).getJSONObject("error").getInt("status"));
+      // The stale-record check sits right in front of the write: never reaching it means no write.
+      versionMock.verify(() -> com.etendoerp.go.schemaforge.util.NeoRecordVersion.isStale(
+          anyString(), anyString(), anyString(), any()), never());
+    }
+
+    @Test
+    @DisplayName("a mixed body on a System row is refused before any field mapping or hook")
+    void mixedBodyIsRefusedBeforeAnyWork() throws Exception {
+      guardMock.when(() -> NeoActionRecordGuard.updateRefusalFor(any(SFEntity.class),
+          any(NeoContext.class))).thenReturn(NeoResponse.error(404, "Record not found"));
+
+      JSONObject result = router.route("etendo_update",
+          updateArgs(new JSONObject().put("sif", "x").put("name", "y")), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      assertEquals(404, new JSONObject(contentText(result)).getJSONObject("error").getInt("status"));
+      writeSupportMock.verify(() -> McpWriteRequestSupport.mapFieldsToDalProperties(any(), any(),
+          any(), any(), any()), never());
+      dispatcherMock.verifyNoInteractions();
+      batchMock.verify(com.etendoerp.go.schemaforge.BatchService::currentJsonService, never());
+    }
+
+    /**
+     * The row is tenant-owned, so the guard has no waiver to grant and the update goes the normal
+     * way: past the (empty) pre-hook dispatch and the undelivered-delegation check, up to the
+     * stale-record check that precedes the write. That check is made to refuse, which is the
+     * observable proof the request got that far, and the refusal is not the guard's 404.
+     */
+    @Test
+    @DisplayName("a tenant-owned row still updates through the normal path")
+    void tenantOwnedRowUpdatesNormally() throws Exception {
+      guardMock.when(() -> NeoActionRecordGuard.updateRefusalFor(any(SFEntity.class),
+          any(NeoContext.class))).thenReturn(null);
+      dispatcherMock.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenReturn(dispatchResult(null, null));
+      versionMock.when(() -> com.etendoerp.go.schemaforge.util.NeoRecordVersion.isStale(
+          anyString(), anyString(), anyString(), any())).thenReturn(true);
+      writeSupportMock.when(McpWriteRequestSupport::buildStaleRecordError)
+          .thenReturn(new JSONObject().put("status", 409).put("error", "stale_record"));
+
+      JSONObject result = router.route("etendo_update",
+          updateArgs(new JSONObject().put("name", "y")), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      assertEquals(409, new JSONObject(contentText(result)).getInt("status"));
+      dispatcherMock.verify(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(
+          any()));
+    }
+  }
+
   // ── etendo_delete ────────────────────────────────────────────────────────
 
   @Nested

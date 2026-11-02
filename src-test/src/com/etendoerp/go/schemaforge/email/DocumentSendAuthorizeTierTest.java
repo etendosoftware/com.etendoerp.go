@@ -21,7 +21,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -29,20 +31,45 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Language;
 
+import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * ETP-5205 — the document email-send endpoint is dispatched before the NEO spec router, so
  * {@link DefaultDocumentSendEmailContract#authorize} is where a Solo-Lectura role must be refused.
  * These tests pin that it asks for WRITE access on the contract's own spec, fails closed, and
- * does not even resolve the document for a denied role.
+ * does not even resolve the document for a denied role. ETP-6013 adds the status rule each contract
+ * declares, enforced on the same path.
+ *
+ * @covers com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract
+ * @covers com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract
+ * @covers com.etendoerp.go.schemaforge.email.DocumentStatusLabel
  */
 public class DocumentSendAuthorizeTierTest {
 
   private static final String CONTRACT_NAME = "sales-order-send";
   private static final String SPEC_NAME = "sales-order";
   private static final String RECORD_ID = "doc-1";
+
+  /**
+   * java:S2077 — the status-name SQL is a compile-time constant with one bound {@code IN} placeholder
+   * per document status list; adding a list to {@code DOCUMENT_STATUS_REFERENCES} must fail here
+   * until the SQL gets its placeholder.
+   */
+  @Test
+  public void statusLabelSqlHasOnePlaceholderPerStatusList() {
+    String in = DocumentStatusLabel.SQL
+        .replaceAll("(?s).*ad_reference_id IN \\(([^)]*)\\).*", "$1");
+    int placeholders = in.split(",").length;
+    assertEquals(DocumentStatusLabel.REFERENCE_PLACEHOLDERS, placeholders);
+    assertEquals(com.etendoerp.go.schemaforge.NeoDocumentPdf.DOCUMENT_STATUS_REFERENCES.size(),
+        DocumentStatusLabel.REFERENCE_PLACEHOLDERS);
+    assertEquals(DocumentStatusLabel.REFERENCE_PLACEHOLDERS, DocumentStatusLabel.REFERENCES.size());
+  }
 
   @Test
   public void fullAccessRoleIsAllowed() throws Exception {
@@ -111,6 +138,64 @@ public class DocumentSendAuthorizeTierTest {
 
       assertFalse(result.isAllowed());
       assertEquals(404, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * ETP-6013 repro — the send itself (the path the SPA's REST call and the MCP tool both take) is
+   * refused by status, with the rule the contract declares: a completed-only contract refuses a
+   * draft or closed document, the quotation refuses only a draft, and a resolver that reports no
+   * status leaves the rule out. The refusal is 409 with the message in the command's language.
+   */
+  @Test
+  public void sendIsRefusedByTheStatusTheContractDeclares() throws Exception {
+    Object[][] cases = {
+        // contract, status, allowed, expected refusal (es_ES, no database: the code is the name)
+        {"sales-order-send", "CO", true, null},
+        {"sales-order-send", "DR", false,
+            "doc-1 est\u00e1 en DR: el env\u00edo por correo solo aplica a documentos Completados."},
+        {"sales-order-send", "CL", false,
+            "doc-1 est\u00e1 en CL: el env\u00edo por correo solo aplica a documentos Completados."},
+        {"sales-order-send", null, true, null},
+        {"sales-quotation-send", "UE", true, null},
+        {"sales-quotation-send", "DR", false,
+            "doc-1 est\u00e1 en DR: el env\u00edo por correo no aplica a documentos en Borrador."},
+    };
+    OBDal dal = mock(OBDal.class);
+    when(dal.getConnection()).thenThrow(new IllegalStateException("no database in this test"));
+    Language adLanguage = mock(Language.class);
+    when(adLanguage.getLanguage()).thenReturn("es_ES");
+    OBContext context = mock(OBContext.class);
+    when(context.getLanguage()).thenReturn(adLanguage);
+    // OBContext is mocked so setAdminMode/restorePreviousMode never run for real without a context.
+    try (MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      access.when(() -> NeoAccessHelper.canWriteSpec(any())).thenReturn(true);
+      obContext.when(OBContext::getOBContext).thenReturn(context);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      for (Object[] row : cases) {
+        String name = (String) row[0];
+        String status = (String) row[1];
+        EmailDocumentRecordResolver resolver = recordId -> Optional.of(new EmailDocumentRecord(
+            "Cliente", "customer@example.com", RECORD_ID, RECORD_ID, null,
+            "https://example.test/download/doc-1", "client-1").withDocumentStatus(status));
+        DefaultDocumentSendEmailContract contract = "sales-quotation-send".equals(name)
+            ? new SalesQuotationSendEmailContract(resolver)
+            : new DefaultDocumentSendEmailContract(name, "Documento", resolver);
+
+        EmailAuthorizationResult result = contract.authorize(new EmailContractCommand(name,
+            new JSONObject().put(EmailContractCommandSupport.FIELD_RECORD_ID, RECORD_ID)
+                .put(EmailContractCommandSupport.FIELD_LANGUAGE, "es_ES")));
+
+        String label = name + "/" + status;
+        assertEquals(label, row[2], result.isAllowed());
+        if (!result.isAllowed()) {
+          assertEquals(label, DefaultDocumentSendEmailContract.STATUS_NOT_SENDABLE,
+              result.getHttpStatus());
+          assertEquals(label, row[3], result.getMessage());
+        }
+      }
     }
   }
 

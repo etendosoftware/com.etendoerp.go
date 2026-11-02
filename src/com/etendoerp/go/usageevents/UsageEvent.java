@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.usageevents;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -48,7 +49,7 @@ import com.etendoerp.go.supportaccess.SupportAccessGuard;
  * serialized JSON text, and why the who-columns are plain ids captured by
  * {@link Builder#fromContext()} — the writer thread has no {@code OBContext} of its own.</p>
  *
- * <p>Built through {@link #builder()} and never through the canonical constructor. With fifteen
+ * <p>Built through {@link #builder()} and never through the canonical constructor. With sixteen
  * components, almost all of them {@code String}, a positional call lets {@code target} and
  * {@code action} be swapped with the compiler saying nothing — and the symptom would be events
  * silently landing in the wrong column for months.</p>
@@ -72,6 +73,9 @@ import com.etendoerp.go.supportaccess.SupportAccessGuard;
  * @param appVersion UI build or module version, or null
  * @param properties event-specific attributes as a JSON object text of at most
  *                   {@value #PROPERTIES_MAX_BYTES} bytes, or null — see the class javadoc
+ * @param costUsd    money a provider charged for the operation, in USD ({@code COST_USD}), or null
+ *                   when nothing was priced. A column and not a property because billing sums it
+ *                   (the {@code aiSpend} resource, {@code AiSpendCounter}); never negative
  */
 public record UsageEvent(
     String clientId,
@@ -88,7 +92,8 @@ public record UsageEvent(
     Long durationMs,
     Instant occurredAt,
     String appVersion,
-    String properties) {
+    String properties,
+    BigDecimal costUsd) {
 
   public static final String SOURCE_BACKEND = "backend";
   public static final String SOURCE_UI = "ui";
@@ -144,6 +149,22 @@ public record UsageEvent(
   }
 
   /**
+   * Read a cost in USD from a parsed JSON value, as the AI BFF and the Copilot service report it.
+   * Only a finite, non-negative JSON number is a cost: anything else (a string, NaN, a negative that
+   * would lower a tenant's AI spend) gives null.
+   *
+   * @param value the JSON value, possibly null
+   * @return the exact decimal the JSON number spells, or null
+   */
+  public static BigDecimal costOf(Object value) {
+    if (!(value instanceof Number)) {
+      return null;
+    }
+    double cost = ((Number) value).doubleValue();
+    return Double.isFinite(cost) && cost >= 0 ? new BigDecimal(value.toString()) : null;
+  }
+
+  /**
    * Start a new event.
    *
    * @return an empty builder; see {@link Builder} for the defaults
@@ -153,7 +174,7 @@ public record UsageEvent(
   }
 
   /**
-   * Named-setter builder, so a fifteen-component row is assembled at a call site where each value is
+   * Named-setter builder, so a sixteen-component row is assembled at a call site where each value is
    * spelled next to the column it lands in. Every component is optional; the ones the table declares
    * NOT NULL are defaulted either here ({@code source}, {@code occurredAt}) or by the writer
    * (client, org, audit user). {@link #build()} never throws.
@@ -173,6 +194,7 @@ public record UsageEvent(
     private Long durationMs;
     private Instant occurredAt;
     private String appVersion;
+    private BigDecimal costUsd;
     private final Map<String, Object> properties = new LinkedHashMap<>();
 
     private Builder() {
@@ -371,6 +393,18 @@ public record UsageEvent(
     }
 
     /**
+     * Set what a provider charged for the operation, in USD. A negative value is dropped (stored
+     * as null): it would lower a tenant's spend, and the UI ingest endpoint is not a trust boundary.
+     *
+     * @param v the value, or null when nothing was priced
+     * @return this builder
+     */
+    public Builder costUsd(BigDecimal v) {
+      this.costUsd = v != null && v.signum() >= 0 ? v : null;
+      return this;
+    }
+
+    /**
      * Add one event-specific attribute. Shape, never content — see the record javadoc. Strings,
      * numbers and booleans are stored as such; any other value is stored as its string form; a null
      * key or value is ignored.
@@ -425,7 +459,7 @@ public record UsageEvent(
       }
       return new UsageEvent(clientId, orgId, userId, roleId, eventType, source, sessionKey, target,
           action, outcome, errorCode, durationMs, occurredAt != null ? occurredAt : Instant.now(),
-          appVersion, serialized);
+          appVersion, serialized, costUsd);
     }
   }
 

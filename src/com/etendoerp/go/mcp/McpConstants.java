@@ -328,12 +328,14 @@ final class McpConstants {
   /** HTTP-style status for a validation failure on a write (IMP-5). */
   static final int STATUS_UNPROCESSABLE = 422;
   /**
-   * Machine-detectable error code for a write the current data refuses — a duplicate business key
-   * (ETP-4793 / IMP-17). Distinct from {@link #ERROR_VALIDATION}: the request is well-formed, so
-   * re-sending corrected values is not necessarily the remedy; the agent may need a different record.
+   * Machine-detectable error code for an operation the current data refuses: a duplicate business
+   * key (ETP-4793 / IMP-17), or a record whose current state refuses the operation — e.g. emailing a
+   * document that is not in a sendable status (ETP-6013). Distinct from {@link #ERROR_VALIDATION}:
+   * the request is well-formed, so re-sending corrected values is not necessarily the remedy; the
+   * agent may need a different record, or the record must change state first.
    */
   static final String ERROR_CONFLICT = "conflict";
-  /** HTTP-style status for a duplicate-key conflict (ETP-4793 / IMP-17). */
+  /** HTTP-style status for a {@link #ERROR_CONFLICT} answer (ETP-4793 / IMP-17, ETP-6013). */
   static final int STATUS_CONFLICT = 409;
   /**
    * Machine-detectable error code for a write refused because the record changed underneath the
@@ -392,6 +394,8 @@ final class McpConstants {
           + "who build this API find out what it is like to use.";
   /** Tool an agent calls to report friction in its own words (B3). */
   static final String TOOL_NEO_FEEDBACK = "etendo_feedback";
+  /** Tool that tells the agent the user, role, client and organization of its connection (G17). */
+  static final String TOOL_NEO_WHOAMI = "etendo_whoami";
   /**
    * Told to the agent by etendo_get and etendo_create so it knows a ready-made link is in the response
    * and never has to invent one (ETP-5200). Emitted only for header records, and only when the

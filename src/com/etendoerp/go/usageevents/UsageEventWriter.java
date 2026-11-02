@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.usageevents;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -128,8 +129,8 @@ final class UsageEventWriter {
           + "etgo_usage_event_id, ad_client_id, ad_org_id, isactive, created, createdby, "
           + "updated, updatedby, event_type, source, ad_user_id, ad_role_id, session_key, "
           + "target, action, outcome, error_code, duration_ms, occurred_at, app_version, "
-          + "properties) "
-          + "VALUES (?, ?, ?, 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+          + "properties, cost_usd) "
+          + "VALUES (?, ?, ?, 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
   private final BlockingQueue<UsageEvent> queue;
   private final Sink sink;
@@ -368,9 +369,15 @@ final class UsageEventWriter {
     // because a clipped JSON text would break every properties::jsonb query.
     String properties = StringUtils.trimToNull(event.properties());
     if (properties == null) {
-      statement.setNull(i, Types.VARCHAR);
+      statement.setNull(i++, Types.VARCHAR);
     } else {
-      statement.setString(i, properties);
+      statement.setString(i++, properties);
+    }
+    BigDecimal cost = event.costUsd();
+    if (cost == null || cost.signum() < 0) {
+      statement.setNull(i, Types.NUMERIC);
+    } else {
+      statement.setBigDecimal(i, cost);
     }
   }
 

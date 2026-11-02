@@ -72,7 +72,14 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * them reach {@code c_tax}) and the read-side overlay ({@code afterHandle} rewrites the 8
  * properties on a GET response — single record or list — with the D5 effective value).
  *
+ * <p>ETP-6062: {@code consumesTargetWrite} declares a SIF-only update (version token aside)
+ * consumed, so the CRUD target guard lets a tenant save its override of a System tax; a body with
+ * a plain {@code c_tax} field is not declared. Every declared body is one {@code handle}
+ * short-circuits, and the class is bound by {@code @NeoExtension(spec = "tax", entity = "tax")}.
+ *
  * <p>{@code OBDal}/Hibernate {@code Session}/{@code NativeQuery} are mocked; no real DB access.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.TaxSifOverrideHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -281,6 +288,95 @@ class TaxSifOverrideHandlerTest {
     assertNull(result);
   }
 
+  // ── consumesTargetWrite() — ETP-6062 ─────────────────────────────────────────
+
+  /**
+   * ETP-6062 repro: a SIF-only update — from the Tax window or from the invoice-line modal, which
+   * also sends {@code sifContextOrgId} — never writes {@code c_tax}, so it is declared consumed
+   * and the target guard lets a tenant save it on a System tax. The body is left untouched.
+   */
+  @Test
+  void consumesTargetWriteForASifOnlyUpdate() throws Exception {
+    JSONObject body = new JSONObject().put("etvfacVatRegime", "01")
+        .put("tbaiClaveregimeniva", "02");
+
+    assertTrue(handler.consumesTargetWrite(patchContext(body).build()));
+    assertTrue(handler.consumesTargetWrite(patchContextWithQueryParams(body,
+        Map.of("sifContextOrgId", "ORG_INVOICE_001")).build()));
+    assertTrue(handler.consumesTargetWrite(patchContext(body).httpMethod("PUT").build()));
+    assertEquals(2, body.length());
+    verify(mockSession, never()).createNativeQuery(anyString());
+  }
+
+  /** ETP-6062: the version token the SPA adds to every update does not make it a c_tax write. */
+  @Test
+  void consumesTargetWriteIgnoresTheVersionToken() throws Exception {
+    JSONObject body = new JSONObject().put("etvfacVatRegime", "01")
+        .put("updated", "2026-10-30T10:00:00.000Z");
+
+    assertTrue(handler.consumesTargetWrite(patchContext(body).build()));
+  }
+
+  /**
+   * ETP-6062: a body that also carries a plain {@code c_tax} field writes the tax row, so it is
+   * not declared — on a System tax the guard then refuses it before {@link
+   * TaxSifOverrideHandler#handle} could upsert anything.
+   */
+  @Test
+  void doesNotConsumeAnUpdateCarryingATaxField() throws Exception {
+    JSONObject body = new JSONObject().put("name", "IVA 21% Ventas")
+        .put("etvfacExemptionCause", "E2");
+
+    assertFalse(handler.consumesTargetWrite(patchContext(body).build()));
+    assertTrue(body.has("etvfacExemptionCause"));
+  }
+
+  /** ETP-6062: nothing SIF in the body, no record id, another method or entity: not consumed. */
+  @Test
+  void doesNotConsumeAnythingElse() throws Exception {
+    JSONObject sif = new JSONObject().put("etvfacVatRegime", "01");
+
+    assertFalse(handler.consumesTargetWrite(patchContext(new JSONObject()).build()));
+    assertFalse(handler.consumesTargetWrite(
+        patchContext(new JSONObject().put("updated", "2026-10-30T10:00:00.000Z")).build()));
+    assertFalse(handler.consumesTargetWrite(patchContext(null).build()));
+    assertFalse(handler.consumesTargetWrite(patchContext(sif).recordId(null).build()));
+    assertFalse(handler.consumesTargetWrite(patchContext(sif).httpMethod("DELETE").build()));
+    assertFalse(handler.consumesTargetWrite(patchContext(sif).httpMethod("POST").build()));
+    assertFalse(handler.consumesTargetWrite(patchContext(sif).entityName("accounting").build()));
+  }
+
+  /**
+   * ETP-6062: {@link TaxSifOverrideHandler#handle} keeps the promise
+   * {@code consumesTargetWrite} makes — a SIF-only body with the version token is answered by
+   * the handler itself, never handed to the default CRUD that would write {@code c_tax}.
+   */
+  @Test
+  void handleShortCircuitsASifOnlyUpdateCarryingTheVersionToken() throws Exception {
+    NativeQuery<?> upsertQuery = stubUpsertQuery();
+    JSONObject body = new JSONObject().put("etvfacVatRegime", "09")
+        .put("updated", "2026-10-30T10:00:00.000Z");
+    NeoContext request = patchContext(body).build();
+    assertTrue(handler.consumesTargetWrite(request));
+
+    NeoResponse result = handler.handle(request);
+
+    verify((NativeQuery) upsertQuery).executeUpdate();
+    assertTrue(result != null, "a consumed update must not fall through to the default CRUD");
+    assertEquals(200, result.getHttpStatus());
+  }
+
+  /** ETP-6062: migrated off the Java_Qualifier — bound by annotation, no {@code @Named}. */
+  @Test
+  void isBoundByNeoExtensionOnly() {
+    com.etendoerp.go.schemaforge.NeoExtension binding =
+        TaxSifOverrideHandler.class.getAnnotation(com.etendoerp.go.schemaforge.NeoExtension.class);
+
+    assertEquals("tax", binding.spec());
+    assertEquals("tax", binding.entity());
+    assertNull(TaxSifOverrideHandler.class.getAnnotation(javax.inject.Named.class));
+  }
+
   // ── handle() — PATCH clearing a SIF field ───────────────────────────────────
 
   /**
@@ -402,6 +498,7 @@ class TaxSifOverrideHandlerTest {
     lenient().when(leQuery.uniqueResult()).thenAnswer(invocation ->
         invoiceOrgId.equals(boundOrgId.get()) ? invoiceLegalEntityOrgId : LEGAL_ENTITY_ORG_ID);
 
+    ownContextOrganization(invoiceOrgId);
     NativeQuery<?> upsertQuery = stubUpsertQuery();
     Map<String, String> queryParams = new HashMap<>();
     queryParams.put("sifContextOrgId", invoiceOrgId);
@@ -417,6 +514,138 @@ class TaxSifOverrideHandlerTest {
   }
 
   private static final String PARAM_ORG_ID_TEST = "orgId";
+
+  // ── ETP-6062 — the context organization must belong to the caller ───────────
+
+  private static final String OTHER_CLIENT_ID = "CLIENT_OTHER";
+
+  /** Registers {@code orgId} as an organization of {@code clientId}, known to the DAL. */
+  private void organizationOf(String orgId, String clientId) {
+    Client owner = mock(Client.class);
+    when(owner.getId()).thenReturn(clientId);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    when(org.getClient()).thenReturn(owner);
+    when(mockOBDal.get(Organization.class, orgId)).thenReturn(org);
+  }
+
+  /** {@code orgId} is an organization of the caller's client that it may read and write. */
+  private void ownContextOrganization(String orgId) {
+    organizationOf(orgId, CLIENT_ID);
+    when(obContext.getWritableOrganizations()).thenReturn(Set.of(CURRENT_ORG_ID, orgId));
+    when(obContext.getReadableOrganizations()).thenReturn(new String[] { CURRENT_ORG_ID, orgId });
+  }
+
+  private NeoResponse patchWithContextOrganization(String orgId) throws Exception {
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("sifContextOrgId", orgId);
+    return handler.handle(patchContextWithQueryParams(
+        new JSONObject().put("tbaiClaveregimeniva", "01"), queryParams).build());
+  }
+
+  private static void assertRecordNotFound(NeoResponse response) throws Exception {
+    assertEquals(404, response.getHttpStatus());
+    assertEquals("Record not found",
+        response.getBody().getJSONObject("error").getString("message"));
+  }
+
+  /** ETP-6062: an organization outside the caller's writable ones is refused before any write. */
+  @Test
+  void handleRefusesAContextOrganizationTheCallerCannotWrite() throws Exception {
+    stubUpsertQuery();
+    organizationOf("ORG_NOT_WRITABLE", CLIENT_ID);
+    when(obContext.getWritableOrganizations()).thenReturn(Set.of(CURRENT_ORG_ID));
+
+    assertRecordNotFound(patchWithContextOrganization("ORG_NOT_WRITABLE"));
+
+    verify(mockSession, never()).createNativeQuery(
+        argThat(sql -> sql != null && sql.startsWith("INSERT INTO etsg_tax_sif_config")));
+    verify(mockSession, never()).createNativeQuery(
+        argThat(sql -> sql != null && sql.contains("ad_get_org_le_bu(:orgId, 'LE')")
+            && !sql.startsWith("SELECT t.c_tax_id")));
+  }
+
+  /** ETP-6062: an organization of another client is refused, even if listed as writable. */
+  @Test
+  void handleRefusesAContextOrganizationOfAnotherClient() throws Exception {
+    stubUpsertQuery();
+    organizationOf("ORG_OTHER_CLIENT", OTHER_CLIENT_ID);
+    when(obContext.getWritableOrganizations())
+        .thenReturn(Set.of(CURRENT_ORG_ID, "ORG_OTHER_CLIENT"));
+
+    assertRecordNotFound(patchWithContextOrganization("ORG_OTHER_CLIENT"));
+
+    verify(mockSession, never()).createNativeQuery(
+        argThat(sql -> sql != null && sql.startsWith("INSERT INTO etsg_tax_sif_config")));
+  }
+
+  /** ETP-6062: an unknown organization and {@code *} ({@code 0}) are refused as well. */
+  @Test
+  void handleRefusesAnUnknownOrStarContextOrganization() throws Exception {
+    stubUpsertQuery();
+    organizationOf("0", "0");
+    when(obContext.getWritableOrganizations()).thenReturn(Set.of(CURRENT_ORG_ID, "0", "GHOST"));
+
+    assertRecordNotFound(patchWithContextOrganization("0"));
+    assertRecordNotFound(patchWithContextOrganization("GHOST"));
+
+    verify(mockSession, never()).createNativeQuery(
+        argThat(sql -> sql != null && sql.startsWith("INSERT INTO etsg_tax_sif_config")));
+  }
+
+  /** ETP-6062: the caller's own writable organization is accepted and keys the upsert. */
+  @Test
+  void handleAcceptsTheCallersOwnContextOrganization() throws Exception {
+    ownContextOrganization("ORG_INVOICE_003");
+    NativeQuery<?> upsertQuery = stubUpsertQuery();
+
+    NeoResponse result = patchWithContextOrganization("ORG_INVOICE_003");
+
+    assertEquals(200, result.getHttpStatus());
+    verify((NativeQuery) upsertQuery).executeUpdate();
+    verify((NativeQuery) upsertQuery).setParameter(PARAM_ORG_ID_TEST, LEGAL_ENTITY_ORG_ID);
+  }
+
+  private NeoContext getWithContextOrganization(String orgId, JSONObject data) {
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("sifContextOrgId", orgId);
+    return NeoContext.builder()
+        .specName("tax").entityName("tax")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .obContext(obContext).queryParams(queryParams)
+        .previousResult(new NeoResponse(200, data))
+        .build();
+  }
+
+  /**
+   * ETP-6062: a read with an organization that does not belong to the caller ignores it and
+   * overlays the session organization's values, as if the param were absent.
+   */
+  @Test
+  void afterHandleIgnoresAContextOrganizationOfAnotherClient() throws Exception {
+    NativeQuery<Object> effectiveQuery = stubEffectiveValuesQuery(
+        row(TAX_ID, null, null, null, null, null, null, null, null));
+    organizationOf("ORG_OTHER_CLIENT", OTHER_CLIENT_ID);
+    when(obContext.getReadableOrganizations())
+        .thenReturn(new String[] { CURRENT_ORG_ID, "ORG_OTHER_CLIENT" });
+
+    handler.afterHandle(getWithContextOrganization("ORG_OTHER_CLIENT", singleRowResponse(TAX_ID)));
+
+    verify(effectiveQuery).setParameter(PARAM_ORG_ID_TEST, CURRENT_ORG_ID);
+    verify(effectiveQuery, never()).setParameter(PARAM_ORG_ID_TEST, "ORG_OTHER_CLIENT");
+  }
+
+  /** ETP-6062: a read honours an organization of the caller's client that it may read. */
+  @Test
+  void afterHandleHonoursTheCallersReadableContextOrganization() throws Exception {
+    NativeQuery<Object> effectiveQuery = stubEffectiveValuesQuery(
+        row(TAX_ID, null, null, null, null, null, null, null, null));
+    ownContextOrganization("ORG_INVOICE_004");
+
+    handler.afterHandle(getWithContextOrganization("ORG_INVOICE_004", singleRowResponse(TAX_ID)));
+
+    verify(effectiveQuery).setParameter(PARAM_ORG_ID_TEST, "ORG_INVOICE_004");
+  }
 
   /**
    * When {@code sifContextOrgId} is ABSENT (the standalone Tax admin window's own PATCH flow,
@@ -441,6 +670,7 @@ class TaxSifOverrideHandlerTest {
    */
   @Test
   void handlePatchWithSifContextOrgIdUsesSameOrgForImmediateReadBack() throws Exception {
+    ownContextOrganization("ORG_INVOICE_002");
     stubUpsertQuery();
     NativeQuery<Object> effectiveQuery =
         stubEffectiveValuesQuery(row(TAX_ID, null, null, null, null, null, "01", null, null));
