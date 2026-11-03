@@ -194,7 +194,7 @@ public class FiscalSystemConfigureAction {
     boolean addingSii = isAddingSiiToTbai(system, territory, active);
     if (!addingSii && !FiscalSifRules.isAllowed(system, territory)) {
       return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_NOT_ALLOWED,
-          FiscalSifGuard.displayName(system), territory,
+          FiscalSifGuard.displayName(system), FiscalSifGuard.territoryName(territory),
           String.join(", ", displayNames(FiscalSifRules.allowedSystems(territory))));
     }
     if (addingSii) {
@@ -202,7 +202,7 @@ public class FiscalSystemConfigureAction {
       if (tbaiTerritory != null
           && !tbaiTerritory.equals(FiscalSifRules.tbaiTerritory(territory))) {
         return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_TERRITORY_MISMATCH,
-            tbaiTerritory);
+            FiscalSifGuard.territoryName(FiscalSifRules.territoryOfTbai(tbaiTerritory)));
       }
     } else if (!active.isEmpty()) {
       return FiscalSifGuard.refusal(HttpServletResponse.SC_CONFLICT, MSG_ALREADY_CONFIGURED,
@@ -215,6 +215,15 @@ public class FiscalSystemConfigureAction {
             FiscalSifRules.recordPayload(FiscalSifRules.SII, territory, day))
         : FiscalSifRules.onboardingPayloads(system, territory, day);
 
+    // Unlike the wizard, which posts SII with acogidaAlSII 'N' and leaves it acogido on its detail
+    // save, the agent has no second step: the SII it activates is acogido from the start.
+    // SiiConfigDeactivateHandler also sets INSIISYSTEM = 'Y' by native SQL after the create,
+    // inside this batch, when it sees FiscalSifGuard#isAgentOnboarding — the same statement its
+    // PUT runs, so the outcome does not depend on how the create converts this value.
+    JSONObject sii = payloads.get(FiscalSifRules.SII);
+    if (sii != null) {
+      sii.put("acogidaAlSII", "Y");
+    }
     JSONArray operations = new JSONArray();
     for (Map.Entry<String, JSONObject> e : payloads.entrySet()) {
       String[] endpoint = ENDPOINTS.get(e.getKey());
@@ -224,7 +233,7 @@ public class FiscalSystemConfigureAction {
           .put("entity", endpoint[1])
           .put("body", e.getValue()));
     }
-    JSONObject outcome = batch.apply(operations);
+    JSONObject outcome = FiscalSifGuard.asAgentOnboarding(() -> batch.apply(operations));
     if (outcome == null || !outcome.optBoolean(BatchService.FIELD_COMMITTED, false)) {
       return batchFailure(outcome);
     }

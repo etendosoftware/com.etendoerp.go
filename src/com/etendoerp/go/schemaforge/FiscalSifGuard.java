@@ -69,6 +69,20 @@ public final class FiscalSifGuard {
 
   static final String FIELD_ACTIVE = "active";
 
+  /**
+   * Prefix of the catalog keys that name a territory as the SPA does ({@code fiscal.territory.*}
+   * of its locales): {@code ETGO_FiscalSifTerritory_<territory id>}.
+   */
+  static final String TERRITORY_NAME_PREFIX = "ETGO_FiscalSifTerritory_";
+
+  /**
+   * Set while {@code configureFiscalSystem} creates its records: the SII created then is
+   * "acogido al SII" ({@code INSIISYSTEM = 'Y'}) from the start, as the wizard leaves it after
+   * its detail save. A thread flag because the records go through {@link BatchService}, whose
+   * hook context carries nothing from the caller.
+   */
+  private static final ThreadLocal<Boolean> AGENT_ONBOARDING = new ThreadLocal<>();
+
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
@@ -239,6 +253,45 @@ public final class FiscalSifGuard {
    */
   public static String displayName(String system) {
     return DISPLAY_NAMES.getOrDefault(system, system);
+  }
+
+  /**
+   * The territory as the SPA names it, in the request language.
+   *
+   * @param territory a territory id ({@code navarra}, ..., {@code ceuta})
+   * @return the name, or {@code territory} itself when it has none
+   */
+  public static String territoryName(String territory) {
+    if (territory == null) {
+      return null;
+    }
+    String key = TERRITORY_NAME_PREFIX + territory;
+    String name = NeoMessageText.text(key);
+    return name == null || name.equals(key) ? territory : name;
+  }
+
+  /**
+   * Runs {@code action} as the agent onboarding ({@link #isAgentOnboarding()} is {@code true}
+   * inside it).
+   *
+   * @param action the work
+   * @param <T>    its result
+   * @return what {@code action} returns
+   */
+  public static <T> T asAgentOnboarding(java.util.function.Supplier<T> action) {
+    AGENT_ONBOARDING.set(Boolean.TRUE);
+    try {
+      return action.get();
+    } finally {
+      AGENT_ONBOARDING.remove();
+    }
+  }
+
+  /**
+   * @return whether the current thread is creating the records of {@code configureFiscalSystem}
+   */
+  public static boolean isAgentOnboarding() {
+    return Boolean.TRUE.equals(AGENT_ONBOARDING.get());
   }
 
   /**

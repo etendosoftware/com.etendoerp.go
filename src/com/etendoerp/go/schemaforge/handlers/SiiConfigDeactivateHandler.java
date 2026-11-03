@@ -233,6 +233,17 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
     if (StringUtils.isBlank(recordId)) {
       return null;
     }
+    if (isPost && FiscalSifGuard.isAgentOnboarding()) {
+      // ETP-6053: an SII activated by an agent (configureFiscalSystem) is acogido from the start —
+      // it has no detail save to do it later, as the wizard's has. Outside the non-fatal block on
+      // purpose: if AEATSII_CHECK_SIFS_CONFIGS_TRG refuses it, the whole activation rolls back.
+      OBContext.setAdminMode(true);
+      try {
+        setInSiiSystemY(recordId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    }
     try {
       OBContext.setAdminMode(true);
       try {

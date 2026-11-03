@@ -142,6 +142,21 @@ public final class FiscalSifRules {
   }
 
   /**
+   * The territory a TicketBAI territory value belongs to — the inverse of {@link #tbaiTerritory}.
+   *
+   * @param tbaiTerritory {@code ARABA}, {@code BIZKAIA} or {@code GIPUZKOA}
+   * @return the territory id, or {@code null}
+   */
+  public static String territoryOfTbai(String tbaiTerritory) {
+    for (Map.Entry<String, String> e : TBAI_TERRITORY.entrySet()) {
+      if (e.getValue().equals(tbaiTerritory)) {
+        return e.getKey();
+      }
+    }
+    return null;
+  }
+
+  /**
    * The body of each record the onboarding creates for {@code system} in {@code territory}, by
    * record system — {@code buildOnboardingPayloads} of the SPA, field for field. Derived values
    * (SII {@code navarra}/{@code guipuzcoa}/{@code taxtype}, TicketBAI {@code etsgSifTerritory},

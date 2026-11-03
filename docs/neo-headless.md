@@ -3745,6 +3745,17 @@ SII `navarra`, `guipuzcoa` and `taxtype`, TicketBAI `etsgSifTerritory`, VERI*FAC
 `nextSendWaitTime`, `defaultQR`). `FiscalSifRules.onboardingPayloads` mirrors
 `buildOnboardingPayloads` field for field; the two copies must change together.
 
+One deliberate difference: the SII an agent activates is **acogido al SII** from the start
+(`AEATSII_CONFIG.INSIISYSTEM = 'Y'`, with `fechaAcogidaSII` = today). The wizard posts it with
+`acogidaAlSII: 'N'` and turns it on with its detail save (`SiiConfigDeactivateHandler.afterHandle`
+on PUT); an agent has no second step. The action sends `acogidaAlSII: 'Y'` and, so the result does
+not depend on how the create converts that value, marks its batch
+(`FiscalSifGuard.asAgentOnboarding`) so the SII customization's `afterHandle` also sets
+`INSIISYSTEM = 'Y'` by native SQL on that POST, inside the batch — the same statement its PUT runs: `AEATSII_CHECK_SIFS_CONFIGS_TRG` then runs as it does
+for the wizard, and if it refuses, the whole activation rolls back. Territories are named in
+refusals as the SPA names them (`ETGO_FiscalSifTerritory_<id>` catalog keys, e.g. *Ceuta / Melilla
+(IPSI)*, *España / Baleares*), never by their parameter value.
+
 The records are created through `BatchService.executeBatch` — the `/sws/neo/batch` pipeline —
 so the role's access to each fiscal window is checked, each entity's customization runs as it
 does for the wizard (TicketBAI sequences, auto-send schedules, VERI*FACTU adoption date), and
