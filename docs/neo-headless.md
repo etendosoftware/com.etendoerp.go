@@ -8184,6 +8184,29 @@ must therefore use `loadOwned` itself. The same gap also affects the default CRU
 foreign-id DELETE was confirmed live, and a PATCH answers 409 for a foreign id vs 500 for an unknown
 one. Tracked as ETP-5880.
 
+**Accounting-schema fallback for an org without a general ledger (ETP-5794).** When the org has no
+`AD_Org.C_AcctSchema_ID` (e.g. org `"0"`), the report handlers fall back to an `OBQuery` over the
+active `OrganizationAcctSchema`-linked schemas, picking the lowest `C_AcctSchema_ID` (`order by
+s.id`, the same rule `TaxReportHandler`, `AgingReportHandler` and `ReportSelectorsServlet` use).
+That fallback used to fail on every call, which had three visible effects, all fixed:
+- `tax-report` (and MCP `generate_tax_report`) without `currencyId` answered 500. It now takes the
+  linked schema's currency, and the client currency when no schema is linked.
+- The aging reports' fallback no longer fails. An org with no ledger and no active link still
+  answers 422 `accounting_schema_unresolved`, as intended.
+- **Declared behaviour change:** `report-trial-balance`, `report-journal-entries` and
+  `report-general-ledger` called with `orgId: ""` and no `acctSchemaId` now resolve the client's
+  active accounting schema (lowest `C_AcctSchema_ID`) instead of answering 422. With an org, the
+  link-table fallback uses the same order (`AbstractSqlReportHandler#resolveAcctSchemaId`).
+
+Two DAL traps caused this, and both apply to any `OBQuery`. First, `OBQuery` does not translate a
+bare `this`, nor a column name such as `ad_client`: it passes them to PostgreSQL as written. Give
+the root an alias and qualify every root property with it (`as s where s.client.id = :clientId and
+exists (... oas.accountingSchema = s ...)`). Second, catching the DAL exception does not save the
+request: PostgreSQL has already aborted the transaction, so the next SQL statement of the same
+request fails with "current transaction is aborted". That is how a best-effort currency lookup
+turned the tax report into a 500. Pinned by `TaxReportHandlerTest`, `AgingReportHandlerTest` and
+`TrialBalanceReportHandlerTest`, which capture the HQL and reject a bare `this`.
+
 Both honour the account's `ShowValueCond` (ETP-5662), like Classic's `AccountTree`: a SUMMARY
 account with `P` (Positive ONLY) shows its balance only when strictly positive, `N` only when
 strictly negative; otherwise it is 0, that 0 is what rolls up to its parent, and every descendant
