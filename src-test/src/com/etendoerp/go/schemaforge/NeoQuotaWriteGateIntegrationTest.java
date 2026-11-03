@@ -24,6 +24,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -119,8 +120,9 @@ import com.etendoerp.go.usage.quota.QuotaWriteGuard;
  * default guard is a JVM-wide singleton. The CRUD cases therefore build their own guard over a new
  * cache (the production pieces: {@link DalQuotaLookup}, {@link CreatedRowMatcher#dal()}, the default
  * {@link QuotaEvaluator}), so each sees its own fixture. The action case goes through the default
- * guard, as production does; it is the only case that does, and this class runs in its own JVM
- * ({@code goIsolatedDalTest}), so that guard's cache is empty when it first reads F&amp;B.
+ * guard, as production does; it is the only case that does. It shares its JVM with the other DAL
+ * tests ({@code goIsolatedDalTest}), any of which may have cached F&amp;B in that guard before this
+ * fixture existed, so it first drops F&amp;B's entry ({@link #forgetTenantInTheDefaultGuard}).
  *
  * @covers com.etendoerp.go.schemaforge.NeoQuotaWriteGate
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
@@ -297,6 +299,7 @@ public class NeoQuotaWriteGateIntegrationTest extends WeldBaseTest {
     BillingResource resource = resource(ShipmentInOutLine.ENTITY_NAME,
         "e.description like '" + token + "%'");
     givenBlockQuota(resource, ConsumptionSource.LIVE, 1L);
+    forgetTenantInTheDefaultGuard();
     // The builder links every flushed line before the quota check runs, so the linker sees the
     // header this attempt really created — the one row the assertion must find gone.
     AtomicReference<String> headerId = new AtomicReference<>();
@@ -357,6 +360,21 @@ public class NeoQuotaWriteGateIntegrationTest extends WeldBaseTest {
     return new QuotaWriteGuard(
         new QuotaClientCache(new DalQuotaLookup(), () -> System.nanoTime() / 1_000_000L),
         CreatedRowMatcher.dal(), new QuotaEvaluator(), () -> TENANT);
+  }
+
+  /**
+   * Drops F&amp;B's entry from the default guard's cache, so the action case reads the quota its
+   * fixture just committed. Another DAL test of this JVM may have cached F&amp;B within the last
+   * {@link QuotaClientCache#TTL_MS}; production accepts that delay, this test cannot wait it out.
+   * The cache has no eviction API, so its map is reached by reflection.
+   */
+  private static void forgetTenantInTheDefaultGuard() throws ReflectiveOperationException {
+    Field cacheField = QuotaWriteGuard.class.getDeclaredField("cache");
+    cacheField.setAccessible(true);
+    Object cache = cacheField.get(QuotaWriteGuard.getDefault());
+    Field entriesField = QuotaClientCache.class.getDeclaredField("entries");
+    entriesField.setAccessible(true);
+    ((Map<?, ?>) entriesField.get(cache)).remove(TENANT);
   }
 
   private void tenantContext() {

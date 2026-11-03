@@ -37,6 +37,9 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.junit.After;
+import org.junit.Before;
+import org.openbravo.model.common.invoice.InvoiceLine;
 
 /**
  * Unit tests for {@link GoodsShipmentLineHandler}.
@@ -50,8 +53,25 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  *
  * <p>Tests that require DB access (orderLineQty / productCode enrichment via SQL)
  * are not included here — those are covered by integration tests.
+ *
+ * @covers com.etendoerp.go.schemaforge.GoodsShipmentLineHandler
  */
 public class GoodsShipmentLineHandlerTest {
+
+  /** ETP-5819: the handler only serves the caller's own invoice lines; every id here is one. */
+  private MockedStatic<TenantOwnership> ownership;
+
+  @Before
+  public void ownEveryRecord() {
+    ownership = Mockito.mockStatic(TenantOwnership.class);
+    ownership.when(() -> TenantOwnership.loadOwned(Mockito.eq(InvoiceLine.class),
+        Mockito.anyString())).thenReturn(Mockito.mock(InvoiceLine.class));
+  }
+
+  @After
+  public void closeOwnership() {
+    ownership.close();
+  }
 
   /**
    * Builds a GET/CRUD {@link NeoContext} targeting the goods-shipment line entity.

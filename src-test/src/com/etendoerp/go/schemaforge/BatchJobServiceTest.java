@@ -832,4 +832,42 @@ public class BatchJobServiceTest {
       unbinds++;
     }
   }
+
+  /** ETP-5819: a tenant refusal is permanent for its row: 403, not a retryable 500. */
+  @Test
+  public void aRowRefusedByTheTenantWriteGuardIsReported403AndNotSafeToResend() throws Exception {
+    String id = submit(ALICE, rows(1), rowOps -> {
+      throw new org.openbravo.base.exception.OBSecurityException("Write access denied");
+    });
+    executor.runAll();
+    JSONObject row = status(ALICE, id).getJSONArray("rows").getJSONObject(0);
+    assertFalse(row.getBoolean("committed"));
+    assertEquals(403, row.getJSONObject("error").getInt("status"));
+    assertFalse(row.getBoolean("safeToResend"));
+  }
+
+  /** Negative pair: any other exception stays a 500. */
+  @Test
+  public void aRowThatThrewAnythingElseStaysA500() throws Exception {
+    String id = submit(ALICE, rows(1), rowOps -> {
+      throw new IllegalStateException("boom");
+    });
+    executor.runAll();
+    assertEquals(500, status(ALICE, id).getJSONArray("rows").getJSONObject(0)
+        .getJSONObject("error").getInt("status"));
+  }
+
+  /** The worker thread must run the row INSIDE the guard (the guard is thread-local). */
+  @Test
+  public void theRowRunnerExecutesWithTheWriteGuardActive() throws Exception {
+    boolean[] active = new boolean[1];
+    String id = submit(ALICE, rows(1), rowOps -> {
+      active[0] = NeoTenantWriteGuard.isActive();
+      return committing(new ArrayList<>()).run(rowOps);
+    });
+    executor.runAll();
+    assertTrue(active[0]);
+    assertFalse(NeoTenantWriteGuard.isActive());
+    assertEquals("SUCCEEDED", status(ALICE, id).getString("state"));
+  }
 }

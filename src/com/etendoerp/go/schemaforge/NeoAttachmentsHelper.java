@@ -213,7 +213,9 @@ public final class NeoAttachmentsHelper {
     try {
       String tableId = resolveTableId(tableName);
       Attachment main = findMainAttachment(tableId, recordId);
-      if (main == null) {
+      // ETP-5819: another tenant's main attachment reads as "none marked". Checked here and not
+      // in findMainAttachment, which the signed email download link also uses.
+      if (main == null || !TenantOwnership.isVisibleToCurrentTenant(main)) {
         return NeoResponse.ok(new JSONObject());
       }
       return NeoResponse.ok(toAttachmentJson(main));
@@ -243,7 +245,8 @@ public final class NeoAttachmentsHelper {
       return NeoResponse.error(400, ATTACHMENTID_REQUIRED);
     }
     try {
-      Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
+      // ETP-5819: setMainFlag is native SQL the write guard cannot see.
+      Attachment attachment = TenantOwnership.loadOwned(Attachment.class, attachmentId);
       if (attachment == null) {
         return NeoResponse.error(404, ERR_ATTACHMENT_NOT_FOUND);
       }
@@ -448,7 +451,9 @@ public final class NeoAttachmentsHelper {
       return NeoResponse.error(400, ATTACHMENTID_REQUIRED);
     }
     try {
-      Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
+      // ETP-5819: the attach manager removes the file from disk before the row reaches the flush
+      // the write guard checks, so the ownership check must come first.
+      Attachment attachment = TenantOwnership.loadOwned(Attachment.class, attachmentId);
       if (attachment == null) {
         return NeoResponse.error(404, ERR_ATTACHMENT_NOT_FOUND);
       }

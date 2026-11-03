@@ -203,12 +203,12 @@ class McpSchemaViewRequiredTest {
      * while refusing it at runtime would turn IMP-44 into a round trip the agent pays for.
      */
     @Test
-    @DisplayName("required is [spec, entity, view]")
+    @DisplayName("required is [spec, view]: entity is optional (ETP-5848)")
     void viewIsRequired() throws Exception {
       Object required = schemaToolInputSchema().get("required");
       assertTrue(required instanceof List, "required was " + required);
       List<?> names = (List<?>) required;
-      assertEquals(List.of("spec", McpConstants.PARAM_ENTITY, McpActionsView.PARAM_VIEW), names,
+      assertEquals(List.of("spec", McpActionsView.PARAM_VIEW), names,
           "a client that validates the schema must reject a view-less call before it is sent");
     }
 

@@ -444,9 +444,15 @@ final class McpConstants {
   static final String KEY_FIELD_VALUES = "fieldValues";
 
   static final String LABEL_SPEC_NAME = "Spec name";
-  static final String LABEL_ENTITY_NAME = "Entity name within the spec";
-  static final String LABEL_ENTITY_NAME_WITH_EXAMPLE =
-      "Entity name within the spec (e.g. 'header', 'lines')";
+  /**
+   * ETP-5848: an omitted entity is the spec's primary entity, and the old example ('header') named
+   * the primary entity of some specs only — agents copied it onto specs whose main record is called
+   * otherwise (contacts → businessPartner) and missed.
+   */
+  static final String LABEL_ENTITY_NAME = "Optional. Omit it to work on the spec's main record "
+      + "(its primaryEntity in etendo_discover: an invoice, an order, a contact, a product). Name "
+      + "an entity only for a child record such as the lines, with the exact name etendo_discover "
+      + "lists.";
 
   /** Tool name for the amortization plan generation tool. */
   static final String TOOL_GENERATE_AMORTIZATION_PLAN = "etendo_generate_amortization_plan";

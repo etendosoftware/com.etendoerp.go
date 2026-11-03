@@ -303,9 +303,9 @@ final class McpQuerySupport {
    *       have cost most of the gate — <b>79 of the 128 writable entities declare a qualifier, and
    *       783 curated read-only fields behind them are AD-updatable</b>, so the rejection would
    *       have fired on under two fifths of the surface. It was kept in the first implementation
-   *       and a live probe caught it: {@code etendo_update} on {@code sales-order/header}, whose
-   *       qualifier is {@code salesOrderHeaderHandler}, accepted {@code documentNo} and answered
-   *       200.</li>
+   *       and a live probe caught it: {@code etendo_update} on {@code sales-order/header}, then
+   *       bound by a qualifier (it moved to {@code @NeoExtension} in ETP-6026), accepted
+   *       {@code documentNo} and answered 200.</li>
    *   <li><b>Kept: the configured-AD-default exemption.</b> The platform fills that column, and an
    *       agent following {@code etendo_defaults} is actively invited to send resolved values back in
    *       {@code fields} (the subject of IMP-45), so a default echoed into a write is a shape the
@@ -659,7 +659,10 @@ final class McpQuerySupport {
    */
   private static String containsCondition(String path, Property prop, Class<?> type, String key,
       Object text) {
-    if (!prop.isPrimitive() || !String.class.equals(type)) {
+    if (!prop.isPrimitive()) {
+      throw McpRequestRefusals.containsOnReference(key, text);
+    }
+    if (!String.class.equals(type)) {
       throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
           "'contains' works only on text fields; use exact match, 'in' or a range here");
     }
