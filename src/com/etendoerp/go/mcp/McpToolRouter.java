@@ -556,10 +556,11 @@ public class McpToolRouter {
     }
     responseJson = readHook.body();
 
-    // IMP-2: optional projection — explicit `fields:[...]` or view:"summary". No-op when neither
-    // is present, so the default returns every column.
+    // IMP-2: projection — explicit `fields:[...]` or view:"summary"; ETP-5848: with neither, the
+    // entity's default list columns (MCP_CONFIG list.fields, else the window's list), unless
+    // view:"full".
     // IMP-18: the filter is passed in so an unknown requested name is reported, not dropped.
-    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter, true);
 
     // IMP-5 clause (iii): flatten last, so projection and field filtering keep operating on the
     // wrapped shape core produced and only the body handed to the agent changes.
@@ -655,7 +656,7 @@ public class McpToolRouter {
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
     // IMP-18: unknown requested names are reported as unknownFields — lifted to the top level by
     // the flatten below, along with the rest of the wrapper's contents.
-    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter, false);
 
     // IMP-5 clause (iii): see handleList — flatten last, after every stage that reads the wrapper.
     JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);

@@ -797,10 +797,40 @@ final class McpQuerySupport {
   }
 
   /**
-   * Apply the optional IMP-2 field projection to a {@code etendo_list}/{@code etendo_get} response.
-   * Precedence: an explicit {@code fields:[...]} whitelist wins; otherwise {@code view:"summary"}
-   * uses the entity's business-critical fields; anything else leaves the response full. A no-op
-   * when neither is present, so the default behavior is unchanged.
+   * The DAL property names of the window's list columns ({@code ETGO_SF_FIELD.GRID_SEQNO}, written
+   * by push-to-neo from the frontend contract), in list order (ETP-5848). Empty when the entity has
+   * none, in which case the caller leaves the response full.
+   */
+  static java.util.Set<String> gridFields(SFEntity sfEntity, Tab adTab) {
+    java.util.Set<String> result = new java.util.LinkedHashSet<>();
+    Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
+        .getEntityByTableName(adTab.getTable().getDBTableName());
+    if (dalEntity == null) {
+      return result;
+    }
+    OBCriteria<SFField> crit = OBDal.getInstance().createCriteria(SFField.class);
+    crit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    crit.add(Restrictions.isNotNull(SFField.PROPERTY_GRIDPOSITION));
+    crit.addOrder(org.hibernate.criterion.Order.asc(SFField.PROPERTY_GRIDPOSITION));
+    for (SFField sfField : crit.list()) {
+      Column col = sfField.getADColumn();
+      Property prop = col == null ? null
+          : dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
+      if (prop != null) {
+        result.add(prop.getName());
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Apply the field projection to a {@code etendo_list}/{@code etendo_get} response. Precedence:
+   * an explicit {@code fields:[...]} whitelist wins; otherwise {@code view:"summary"} uses the
+   * entity's business-critical fields; otherwise {@code view:"full"} leaves the response full.
+   * With none of those, a list ({@code listDefault}) is cut to its default columns — the entity's
+   * {@code MCP_CONFIG} {@code list.fields}, else the window's list columns — and names the fields
+   * it left out; a get, or an entity with no default columns, stays full.
    *
    * <p>IMP-18: an explicit whitelist is also validated, and any name the entity cannot emit comes
    * back as {@code response.unknownFields} instead of vanishing. {@code fieldFilter} is the same
@@ -808,18 +838,22 @@ final class McpQuerySupport {
    * emittable set has to be the spec's exposure post-rename, not the DAL model.
    */
   static void applyProjection(JSONObject responseJson, JSONObject args, SFEntity sfEntity, Tab adTab,
-      NeoFieldFilter fieldFilter) throws JSONException {
-    if (args == null) {
-      return;
-    }
+      NeoFieldFilter fieldFilter, boolean listDefault) throws JSONException {
+    JSONObject safeArgs = args == null ? new JSONObject() : args;
+    String view = safeArgs.optString(McpFieldProjection.PARAM_VIEW, null);
     java.util.Set<String> requested;
-    JSONArray fields = args.optJSONArray(McpFieldProjection.PARAM_FIELDS);
+    JSONArray fields = safeArgs.optJSONArray(McpFieldProjection.PARAM_FIELDS);
     boolean explicitWhitelist = fields != null;
     if (explicitWhitelist) {
       requested = McpFieldProjection.baseNames(McpFieldProjection.parseFields(fields));
-    } else if (McpFieldProjection.isSummaryView(
-        args.optString(McpFieldProjection.PARAM_VIEW, null))) {
+    } else if (McpFieldProjection.isSummaryView(view)) {
       requested = summaryFields(sfEntity, adTab);
+    } else if (listDefault && !McpFieldProjection.isFullView(view)) {
+      requested = McpListSection.configuredFields(sfEntity);
+      if (requested == null) {
+        requested = gridFields(sfEntity, adTab);
+      }
+      McpFieldProjection.reportOmittedFields(responseJson, requested);
     } else {
       return;
     }

@@ -3946,6 +3946,7 @@ metadata.
 | `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `userRequired`, `reason`. |
 | `verbs` | entity (spec applies to every entity without its own) | Hides MCP write verbs the `ETGO_SF_ENTITY` flags still enable for REST and the SPA — `create`, `update`, `delete`, `reason`, `instead` (ETP-5558). |
 | `actions` | entity (spec applies to every entity without its own) | Hides actions (declared handler actions or AD buttons) from the MCP and redirects buttons to the action to use instead — `hidden`, `redirect`, `reason` (ETP-5558). See §4.12.1.3. |
+| `list` | entity (spec applies to every entity without its own) | The columns `etendo_list` returns when the agent names none — `fields` (ETP-5848). Replaces the window's list columns. |
 
 ##### The `fields` section
 
@@ -4031,6 +4032,36 @@ reader that queried `ISINCLUDED` in its own criteria would honour the override i
 ignore it in the other two — reproducing exactly the three-way disagreement §4.12.10 exists to end.
 `McpQuerySupport.excludedPropertyNames` and `filterablePropertyNames` therefore load the rows and
 resolve through `McpFieldView`, never through a `Restrictions.eq` on the column.
+
+##### The `list` section (ETP-5848)
+
+`etendo_list` without `fields` used to answer every field of every row: 57 to 109 fields and 1.5 to
+3 kB per row, 30% of all the text agents read in the OKR O2 sweep. A list now returns, by default,
+the columns the window's own list shows: `ETGO_SF_FIELD.GRID_SEQNO`, which push-to-neo writes from
+the frontend contract (`grid: true`, ordered by `gridOrder`; NULL when the list does not show the
+field). The response names the fields it left out in `otherFields`, with a `fieldsNote` saying how to
+ask for them. When the window's list is not what an agent needs to pick a record, the entity
+declares its own:
+
+```json
+{ "list": { "fields": ["documentNo", "businessPartner", "grandTotalAmount"] } }
+```
+
+`fields` is a non-empty array of field names as `etendo_list` returns them (`id` always comes back).
+Precedence on `etendo_list`, first match wins:
+
+| Argument / configuration | Rows carry |
+|---|---|
+| `fields:[...]` | those fields (unknown names in `unknownFields`) |
+| `view:"summary"` | the business-critical fields |
+| `view:"full"` | every field |
+| `MCP_CONFIG.list.fields` | those fields, plus `otherFields` |
+| `GRID_SEQNO` | the window's list columns, plus `otherFields` |
+| none of the above | every field |
+
+`etendo_get` is not affected: one record is read whole. An unusable `MCP_CONFIG` is logged and read
+as unconfigured, falling back to the window's list columns — nothing is hidden that `fields` cannot
+ask for, so failing open is safe here. REST never reads the section or `GRID_SEQNO`.
 
 ##### The `verbs` section (ETP-5558)
 

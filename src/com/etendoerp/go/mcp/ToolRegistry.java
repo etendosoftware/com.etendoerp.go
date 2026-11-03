@@ -819,11 +819,13 @@ public class ToolRegistry {
             + "[\"documentNo\",\"businessPartner\",\"grandTotalAmount\"]). A FK's $_identifier "
             + "label is included automatically. Names this entity cannot return come back in "
             + "\"unknownFields\" alongside \"data\" — check it if a field you expected is missing, "
-            + "including when \"data\" is empty. Omit to return every column."));
+            + "including when \"data\" is empty. Omitted, rows carry the window's list columns and "
+            + "\"otherFields\" names the rest."));
     props.put(McpFieldProjection.PARAM_VIEW, enumProp(
-        "Optional curated view. \"summary\" returns only the spec's business-critical fields — a "
-            + "compact row for compliance-heavy specs. Ignored when `fields` is given; omit for the "
-            + "full row.", List.of(McpFieldProjection.VIEW_SUMMARY)));
+        "Optional view, ignored when `fields` is given. \"summary\" returns only the spec's "
+            + "business-critical fields. \"full\" returns every field of every row (large: prefer "
+            + "naming them in `fields`). Omit for the window's list columns.",
+        List.of(McpFieldProjection.VIEW_SUMMARY, McpFieldProjection.VIEW_FULL)));
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_LIST,
