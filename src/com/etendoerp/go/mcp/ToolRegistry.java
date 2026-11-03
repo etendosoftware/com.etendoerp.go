@@ -1241,11 +1241,12 @@ public class ToolRegistry {
         "REQUIRED — which projection you want. \"create\": ONLY the fields you may send to "
             + "etendo_create/etendo_update, split into required/optional. This is the one you want "
             + "before a write, and it is by far the smallest (~5 kB on sales-order/header). "
-            + "\"actions\": only the buttons/processes ({name, label, action, processName, "
-            + "processId, ...}) — use it when you need to know what can be triggered on this "
-            + "entity, not every column. Fire only the ones carrying invokeVia:\"etendo_action\"; the "
-            + "rest report invokable:false plus a notInvokableReason, and \"invokableCount\" next "
-            + "to \"actionCount\" tells you the split up front. \"full\": every field, including "
+            + "\"actions\": an index of the actions you can run on this entity — per action its "
+            + "name, a one-line summary and when it applies — and under notOffered the ones you "
+            + "cannot, with the reason or what to use instead. Then pass action:\"<name>\" for that "
+            + "action's parameters and values (etendo_discover lists the names, so you can go "
+            + "straight there). "
+            + "\"full\": every field, including "
             + "read-only and system ones — ~40 kB on sales-order/header and more on "
             + "compliance-heavy windows, where it may not fit your context. Ask for it when you "
             + "are reading, filtering or projecting, not when you are about to write.",
@@ -1258,6 +1259,10 @@ public class ToolRegistry {
             + "(availableValuesNow). Without it you get each action's static availableWhen / "
             + "valuesByStatus only. Advice only: it never blocks a call. Ask for it before "
             + "offering the user an action on a document."));
+    props.put(McpActionsCompact.PARAM_ACTION, stringProp(
+        "Optional, only for view:\"actions\": the name of ONE action (e.g. \"registerPayment\"). "
+            + "Returns that action in full — its parameters, values and description — which the "
+            + "index leaves out. A name that does not exist is refused with the names that do."));
     props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
         "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "
             + "Returns only those descriptors instead of all of them. Names that match nothing come "

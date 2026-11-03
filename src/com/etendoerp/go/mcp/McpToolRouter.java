@@ -1552,6 +1552,12 @@ public class McpToolRouter {
         : new String[] { McpConstants.PARAM_ENTITY };
   }
 
+  /** ETP-5848: the one action {@code etendo_schema(view:"actions")} was asked for, or null. */
+  static String onlyAction(JSONObject args) {
+    return args == null ? null
+        : McpArgumentUtils.optionalString(args, McpActionsCompact.PARAM_ACTION);
+  }
+
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
     // ETP-5468: a report spec whose handler declares named actions (bank-reconciliation) is
     // answered with its action catalog BEFORE the generic path, which rejects every SPEC_TYPE=R
@@ -1580,9 +1586,9 @@ public class McpToolRouter {
     // below; every other view is unchanged.
     Map<String, NeoActionContract> declaredActions = McpDeclaredActions.of(sfEntity);
     if (McpReportActionsSchema.isActionOnlyEntity(sfEntity, declaredActions)) {
-      return wrapAsTextContent(
+      return wrapAsTextContent(McpActionsCompact.shape(
           McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions,
-              McpActionsSection.forEntity(sfEntity)));
+              McpActionsSection.forEntity(sfEntity)), onlyAction(args)));
     }
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
@@ -1645,8 +1651,9 @@ public class McpToolRouter {
     if (McpActionsView.isActionsView(view)) {
       // ETP-5714: with an id, each action is also judged against that record (advisory only).
       McpActionAvailabilityContext asked = availabilityContextOf(args, spec, sfEntity, dalEntity);
-      return wrapAsTextContent(McpActionsView.buildResponse(specName, entityName, fieldsArray,
-          declaredActions, actionsConfig, excludedActions, asked));
+      return wrapAsTextContent(McpActionsCompact.shape(McpActionsView.buildResponse(specName,
+          entityName, fieldsArray, declaredActions, actionsConfig, excludedActions, asked),
+          onlyAction(args)));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
