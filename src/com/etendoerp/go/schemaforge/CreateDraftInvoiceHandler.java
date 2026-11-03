@@ -116,7 +116,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           + "is refused with 409 draftInvoiceExists, creating nothing (one draft per order, as on "
           + "the screen, which hides the button): the refusal lists the draft numbers in "
           + "existingDraftInvoices, and allowDuplicate:true creates the invoice anyway and lists "
-          + "the drafts the order had.",
+          + "the drafts the order had. The order's global discount (etgoTotalDiscount, always a %) "
+          + "is carried to the new invoice's total discount as the same %, never as an amount.",
       NeoActionContract.Param.array(PARAM_LINES, NeoActionContract.TYPE_OBJECT, false,
           "Partial invoicing: [{orderLineId, quantity}] with the quantity to invoice per order "
               + "line. Honoured only for order lines that have NO completed shipment not yet "
