@@ -63,6 +63,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
@@ -862,12 +863,14 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
     assertTrue(linked.getBoolean("headerLinked"));
     assertEquals("o1", linked.getString("salesOrder"));
+    assertEquals("the direction-neutral name says the same", "o1", linked.getString("order"));
 
     probe = scenario();
     when(probe.invoice.getSalesOrder()).thenReturn(null);
     JSONObject mixed = data(run(probe, "importOrderLines", "{\"orderId\":\"o1\"}"));
     assertFalse(mixed.getBoolean("headerLinked"));
     assertFalse(mixed.has("salesOrder"));
+    assertFalse(mixed.has("order"));
   }
 
   private static final String CARRIED = "carried";
@@ -1274,17 +1277,59 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     }
   }
 
+  /** Prices the scenario's lines and gives its currency 2 decimals, as the popup sees them. */
+  private static void pricedLines(Probe probe) {
+    OrderLine agua = probe.lineById.get("ol1");
+    OrderLine pan = probe.lineById.get("ol2");
+    when(agua.getUnitPrice()).thenReturn(bd("47.50"));
+    when(agua.getDiscount()).thenReturn(bd("10.0000"));
+    when(pan.getUnitPrice()).thenReturn(bd("20"));
+    Currency currency = probe.order.getCurrency();
+    when(currency.getStandardPrecision()).thenReturn(2L);
+  }
+
+  /**
+   * Each line carries what the import popup shows for it (ETP-5828, UI/MCP parity): the net unit
+   * price, the line discount as a % without trailing zeros, and the amount, price x pending.
+   */
   @Test
   public void availableOrderLines_reportsThePendingAfterDrafts() throws Exception {
     Probe probe = scenario();
+    pricedLines(probe);
     probe.drafts.put("ol1", bd("3"));
 
     JSONArray rows = run(probe, "availableOrderLines", "{\"orderId\":\"o1\"}").getBody()
         .getJSONObject("response").getJSONArray("data");
 
     assertEquals(List.of("ol1", "ol2"), ids(rows));
-    assertEquals(5, rows.getJSONObject(0).getInt("pendingQuantity"));
+    JSONObject agua = rows.getJSONObject(0);
+    assertEquals(5, agua.getInt("pendingQuantity"));
+    assertEquals(0, bd("47.50").compareTo(new BigDecimal(agua.getString("unitPrice"))));
+    assertEquals("10", agua.get("discount").toString());
+    assertEquals("47.50 x 5", "237.50", agua.get("amount").toString());
+    JSONObject pan = rows.getJSONObject(1);
+    assertEquals("no line discount reads 0", "0", pan.get("discount").toString());
+    assertEquals("20 x 5", "100.00", pan.get("amount").toString());
     assertNull(probe.nativeSelection);
+  }
+
+  /**
+   * The order's amount is the popup row: the plain sum of its pending lines' amounts, never
+   * reduced by the order's global discount.
+   */
+  @Test
+  public void availableOrders_reportsTheOrderAmountAsThePopupRow() throws Exception {
+    Probe probe = scenario();
+    pricedLines(probe);
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
+    probe.candidates = List.of(probe.order);
+
+    JSONObject first = run(probe, "availableOrders", null).getBody().getJSONObject("response")
+        .getJSONArray("data").getJSONObject(0);
+
+    assertEquals("47.50 x 8 + 20 x 5, no global discount", "480.00",
+        first.get("amount").toString());
+    assertEquals("10", first.get("globalDiscount").toString());
   }
 
   // ── contracts ─────────────────────────────────────────────────────────────

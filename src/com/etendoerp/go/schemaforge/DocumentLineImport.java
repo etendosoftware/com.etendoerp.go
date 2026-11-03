@@ -511,7 +511,8 @@ final class DocumentLineImport {
 
   /**
    * {@code {response:{data:{importedCount, lines:[{id, sourceLineId, product, productName,
-   * quantity}], headerLinked, salesOrder?}}}} — the envelope of the module's other import actions.
+   * quantity}], headerLinked, salesOrder?, order?}}}} — the envelope of the module's other import
+   * actions. {@code order} repeats {@code salesOrder} under a direction-neutral name.
    *
    * <p>The header link is reported as it is: {@code salesOrder} is the order the header points at
    * NOW (when it has one) and {@code headerLinked} is {@code true} only when an imported line
@@ -548,7 +549,11 @@ final class DocumentLineImport {
     data.put(KEY_LINES, array);
     data.put("headerLinked", linked);
     if (headerOrderId != null) {
+      // `salesOrder` is the header's DAL property name (C_Order_ID), the same on purchase
+      // documents, and is kept for the callers that read it; `order` says the same with a
+      // direction-neutral name (ETP-5828).
       data.put("salesOrder", headerOrderId);
+      data.put("order", headerOrderId);
     }
     for (Map.Entry<String, Object> entry : extra.entrySet()) {
       data.put(entry.getKey(), entry.getValue());

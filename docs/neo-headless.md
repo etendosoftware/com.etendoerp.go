@@ -11459,8 +11459,9 @@ any order creates nothing. `carryGlobalDiscount` (default `true`) is described u
 `importReceiptLines`: `{receiptId, lines?}`; `importShipmentLines`: `{shipmentId, lines?}`. `lines` omitted or empty imports **everything
 still pending**; given, it imports **exactly** those lines (the same line twice is summed; an entry without
 `sourceLineId` or with a missing / zero / non-numeric `quantity` is refused, never skipped). The answer is
-`{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], headerLinked, salesOrder?}}`
-(`salesOrder` is the order the header points at NOW when it has one; `headerLinked` is `true` only when an imported
+`{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], headerLinked, salesOrder?, order?}}` (`salesOrder` is the order the header points at NOW when it has one — the name
+of the header's DAL property, the same on purchase documents; `order` repeats it under a direction-neutral name since
+ETP-5828, and `salesOrder` stays for the callers that read it; `headerLinked` is `true` only when an imported
 line belongs to that order, so the answer never claims a link to an order none of the lines is from).
 `importOrderLines` into an invoice also answers `globalDiscount:{applied, percent, reason}` (ETP-5828 QA, the popup's
 toast *«N líneas importadas · descuento global del X % aplicado a la factura»*): `applied:true, percent:<%>,
@@ -11468,13 +11469,17 @@ reason:null` when the invoice's total discount holds the orders' % after the cal
 `applied:false, percent:null` and `reason` `carryGlobalDiscountFalse` (the call sent `carryGlobalDiscount:false`) or
 `ordersWithoutDiscount` (the orders have none, nothing to carry). A discount that cannot be carried never reaches a 200:
 it is the 422 `globalDiscountConflict`. Example:
-`{"data":{"importedCount":2,"lines":[…],"headerLinked":true,"salesOrder":"A1B2…","globalDiscount":{"applied":true,"percent":10,"reason":null}}}`.
+`{"data":{"importedCount":2,"lines":[…],"headerLinked":true,"salesOrder":"A1B2…","order":"A1B2…","globalDiscount":{"applied":true,"percent":10,"reason":null}}}`.
 `availableOrders` / `availableReceipts` / `availableShipments` answer
 `{data:[{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines}], hasMore, limit,
 scanLimit}`; `availableOrders` of an **invoice** adds `globalDiscount`, the order's `etgoTotalDiscount` as a % (null,
 zero or negative read as 0, same normalisation as the carry rule), the popup's *«Dto. global X %»* tag. It is rounded to 4 decimals for
 the comparisons and written without trailing zeros (`12.5`, `10`, never `12.5000`), like `globalDiscount.percent` of
-`importOrderLines` (ETP-5828). The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
+`importOrderLines` (ETP-5828). It also adds `amount`, the sum of the order's pending lines (unit price × pending quantity), WITHOUT
+the global discount — the import popup's row amount. `availableOrderLines` of an **invoice** adds, per line, `unitPrice`
+(the order line's net price, its line discount already applied), `discount` (that line discount as a %, written like
+`globalDiscount`) and `amount` (`unitPrice` × `pendingQuantity`, at the currency's precision), which is what the popup
+shows per line (ETP-5828, UI/MCP parity). The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
 hasMore:false, limit, scanLimit}`, where the line `id` is the `sourceLineId` the import takes. **Discovery is a bounded
 scan**: it reads the `scanLimit` (200) most recent completed candidates of the target's partner, client and currency and
 returns at most `limit` (50) documents, filtered by the same pending rule the import enforces. `hasMore` is `true` when
@@ -12900,8 +12905,7 @@ return.
 | `sales-invoice/header`, `purchase-invoice/header` | `availableReturns`, `availableReturnLines`, `importReturnLines` (param `returnId`) | `ImportInOutLinesIntoInvoiceHandler` (the ETP-5713 receipt / shipment delegate, with a return mode) |
 | same | `availableOriginInvoices`, `availableOriginInvoiceLines`, `importOriginInvoiceLines` (param `invoiceId`) | `ImportOriginInvoiceLinesHandler` |
 
-They take the same body and answer in the same envelope as §4.12.34 (`{data:{importedCount, lines:[…], headerLinked,
-salesOrder?}}`; the origin import adds `originInvoices:[{id, documentNo}]`), the same `error.code`s, and the `id` of
+They take the same body and answer in the same envelope as §4.12.34 (`{data:{importedCount, lines:[…], headerLinked, salesOrder?, order?}}`; the origin import adds `originInvoices:[{id, documentNo}]`), the same `error.code`s, and the `id` of
 `etendo_action` is the **draft rectificative**. The quantity a caller sends is always a **positive** number ("Return Qty",
 as the return's own lines show it); what is written is its negative, and `quantity` in the answer is negative.
 
