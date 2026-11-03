@@ -929,6 +929,50 @@ class McpDocumentEmailToolTest {
 
       assertEquals("not_found", result.getString("error"));
     }
+
+    @Test
+    @DisplayName("lists the document's past sends, newest first, compact and at most ten")
+    void listsThePastSends() throws Exception {
+      JSONArray rows = new JSONArray();
+      for (int i = 0; i < 12; i++) {
+        rows.put(new JSONObject().put("sentAt", "2026-11-0" + (i % 9 + 1) + "T10:00:00Z")
+            .put("status", i == 0 ? "SENT" : "FAILED")
+            .put("recipientsTo", new JSONArray(List.of("compras@x.test")))
+            .put("subject", "Factura " + i).put("messageBody", "secret body")
+            .put("downloadLink", "https://link"));
+      }
+      try (MockedStatic<com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory> log =
+          mockStatic(com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory.class)) {
+        log.when(() -> com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory.read(
+            anyString(), anyString())).thenReturn(rows);
+
+        JSONArray history = McpDocumentEmailTool.run(args().put("preview", true))
+            .getJSONArray("history");
+
+        assertEquals(McpDocumentEmailTool.MAX_HISTORY, history.length());
+        JSONObject newest = history.getJSONObject(0);
+        assertEquals("SENT", newest.getString("status"));
+        assertEquals("Factura 0", newest.getString("subject"));
+        assertEquals(List.of("compras@x.test"), strings(newest.getJSONArray("to")));
+        assertFalse(newest.has("messageBody"), "the body stays in the application");
+        assertFalse(newest.has("downloadLink"), "the link stays in the application");
+      }
+    }
+
+    @Test
+    @DisplayName("a history that cannot be read is an empty list, not a failed preview")
+    void unreadableHistoryIsEmpty() throws Exception {
+      try (MockedStatic<com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory> log =
+          mockStatic(com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory.class)) {
+        log.when(() -> com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory.read(
+            anyString(), anyString())).thenThrow(new IllegalStateException("db down"));
+
+        JSONObject result = McpDocumentEmailTool.run(args().put("preview", true));
+
+        assertFalse(result.has("error"), result.toString());
+        assertEquals(0, result.getJSONArray("history").length());
+      }
+    }
   }
 
   // ── which documents are offered ─────────────────────────────────────────

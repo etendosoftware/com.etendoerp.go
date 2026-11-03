@@ -53,9 +53,11 @@ final class McpWhoamiToolDefinition {
             + "client, the organization and the default warehouse every other tool runs under, "
             + "plus what the role and token can do (showAccountingFields, the granted scopes), "
             + "today's server date and time zone, the organization's currency and the user's "
-            + "language. Changes nothing and is cheap: call it first, and again whenever a call "
-            + "is refused unexpectedly. Each connection can use a different role, so never "
-            + "assume the role of a previous session.",
+            + "language. Changes nothing and is cheap. Call it when the task depends on one of "
+            + "these (today's date, the role's permissions, the currency, the default warehouse) "
+            + "or when a call is refused unexpectedly; a task that does not need them does not "
+            + "need this call. Each connection can use a different role, so never assume the role "
+            + "of a previous session.",
         buildObjectSchema(props, List.of()));
   }
 }

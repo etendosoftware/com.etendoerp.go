@@ -135,8 +135,7 @@ final class McpActionBatch {
         "Process parameters, the same for every document, exactly as etendo_action takes them — "
             + "e.g. {\"docAction\": \"CO\"}."));
     return new McpToolDefinition(McpConstants.TOOL_NEO_ACTION_BATCH, description(),
-        buildObjectSchema(props, List.of(McpConstants.PARAM_SPEC, McpConstants.PARAM_ENTITY,
-            PARAM_ACTION, PARAM_IDS)));
+        buildObjectSchema(props, List.of(McpConstants.PARAM_SPEC, PARAM_ACTION, PARAM_IDS)));
   }
 
   /** The text the agent reads: what the tool does, what it does not, and the shape it answers. */

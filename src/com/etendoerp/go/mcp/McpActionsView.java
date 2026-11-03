@@ -384,9 +384,9 @@ final class McpActionsView {
    */
   private static final List<String> BUTTON_KEYS = List.of("triggerValue", "action",
       McpConstants.KEY_ACTION_VALUES, McpConstants.KEY_ACTION_PARAMETER, "processType",
-      "processName", "processId", McpSchemaFieldBuilder.KEY_INVOKE_VIA,
-      McpSchemaFieldBuilder.KEY_INVOKABLE, McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON,
-      "useInstead");
+      "processName", "processId", McpSchemaActionFields.KEY_PROCESS_PARAMETERS,
+      McpSchemaFieldBuilder.KEY_INVOKE_VIA, McpSchemaFieldBuilder.KEY_INVOKABLE,
+      McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON, "useInstead");
 
   /**
    * Whether a button the configuration withholds is ALSO a value the window displays: its curated
@@ -443,6 +443,7 @@ final class McpActionsView {
       if (contract != null) {
         field.remove(McpConstants.KEY_ACTION_VALUES);
         field.remove(McpConstants.KEY_ACTION_PARAMETER);
+        field.remove(McpSchemaActionFields.KEY_PROCESS_PARAMETERS);
         JSONObject described = contract.toJson();
         field.put(McpConstants.PARAM_PARAMETERS,
             described.getJSONObject(McpConstants.PARAM_PARAMETERS));
