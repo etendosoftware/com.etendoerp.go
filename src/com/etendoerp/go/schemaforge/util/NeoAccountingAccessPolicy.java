@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -85,11 +86,12 @@ public final class NeoAccountingAccessPolicy {
   /**
    * Every name (lower case) a caller may use for an accounting column in a filter or a sort: the
    * DAL property of {@link #ACCOUNTING_PROPERTIES} or its DB column, since the MCP filter resolves
-   * either.
+   * either. The status columns plus the bulk-posting button's column.
    */
-  private static final Set<String> ACCOUNTING_FIELD_NAMES = Set.of("posted",
-      "etblkpaccountingstatus", "etblkpbulkposting", "em_etblkp_accountingstatus",
-      "em_etblkp_bulkposting");
+  private static final Set<String> ACCOUNTING_FIELD_NAMES = Stream.concat(
+      Stream.concat(ACCOUNTING_PROPERTIES.stream().map(p -> p.toLowerCase(Locale.ROOT)),
+          ACCOUNTING_STATUS_COLUMNS.stream()),
+      Stream.of("em_etblkp_bulkposting")).collect(Collectors.toUnmodifiableSet());
 
   /** Structural verdict per {@code AD_Tab_ID}; AD metadata does not change without a restart. */
   private static final Map<String, Boolean> ACCOUNTING_TAB_CACHE = new ConcurrentHashMap<>();
