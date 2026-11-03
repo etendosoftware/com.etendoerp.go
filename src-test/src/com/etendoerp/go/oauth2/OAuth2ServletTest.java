@@ -83,6 +83,9 @@ import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.etendoerp.go.usageevents.LogCapture;
+import com.etendoerp.go.usageevents.PublicApiCall;
+import com.etendoerp.go.usageevents.PublicApiCaller;
+import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 import org.openbravo.dal.core.OBContext;
@@ -347,6 +350,183 @@ public class OAuth2ServletTest {
 
     JSONObject body = new JSONObject(resp.body());
     assertEquals("invalid_client", body.getString("error"));
+  }
+
+  // ETP-6057 — a wrong-secret exchange for a public key is recorded as oauth2.token / POST / 401.
+
+  private OBDal lastObDal;
+
+  private PublicApiUsageCounter runWrongSecretExchange(boolean knownClient, String keyScopes)
+      throws Exception {
+    return runWrongSecretExchange(knownClient, keyScopes, "TENANT7", "ROLECLI");
+  }
+
+  private PublicApiUsageCounter runWrongSecretExchange(boolean knownClient, String keyScopes,
+      String ownerOrgClientId, String roleClientId) throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("POST", "/token");
+    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(req.getParameter("grant_type")).thenReturn("client_credentials");
+    when(req.getParameter("client_id")).thenReturn(TEST_CLIENT_ID);
+    when(req.getParameter("client_secret")).thenReturn("wrong-secret");
+
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(knownClient);
+    when(rs.getString("client_secret_hash")).thenReturn(OAuth2Utils.hashSecret("correct-secret"));
+    when(rs.getString("scopes")).thenReturn(keyScopes);
+    when(rs.getString("redirect_uris")).thenReturn("[]");
+    when(rs.getString("ad_client_id")).thenReturn("0");
+    when(rs.getString("ad_org_id")).thenReturn("ORG7");
+    when(rs.getString("ad_user_id")).thenReturn("user-1");
+    when(rs.getString("ad_role_id")).thenReturn("role-1");
+    // The key's tenant comes with the key row (SQL_FIND_CLIENT): no second query.
+    when(rs.getString("owner_org_client_id")).thenReturn(ownerOrgClientId);
+    when(rs.getString("role_client_id")).thenReturn(roleClientId);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+    lastObDal = obDal;
+    PublicApiUsageCounter counter = mock(PublicApiUsageCounter.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<PublicApiUsageCounter> counterMock =
+             mockStatic(PublicApiUsageCounter.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      counterMock.when(PublicApiUsageCounter::getDefault).thenReturn(counter);
+
+      servlet.doPost(req, resp.response);
+    }
+    assertEquals("invalid_client", new JSONObject(resp.body()).getString("error"));
+    return counter;
+  }
+
+  @Test
+  public void wrongSecretForAPublicKeyIsCountedAsATokenExchange401() throws Exception {
+    PublicApiUsageCounter counter =
+        runWrongSecretExchange(true, "neo:public-api-key etendo:read");
+
+    org.mockito.ArgumentCaptor<PublicApiCaller> caller =
+        org.mockito.ArgumentCaptor.forClass(PublicApiCaller.class);
+    org.mockito.ArgumentCaptor<PublicApiCall> call =
+        org.mockito.ArgumentCaptor.forClass(PublicApiCall.class);
+    org.mockito.Mockito.verify(counter).record(caller.capture(), call.capture());
+    assertEquals("TENANT7", caller.getValue().clientId());
+    assertEquals("ORG7", caller.getValue().orgId());
+    assertEquals("user-1", caller.getValue().userId());
+    assertEquals("role-1", caller.getValue().roleId());
+    assertEquals(TEST_CLIENT_ID, caller.getValue().keyId());
+    assertEquals(PublicApiCall.TARGET_TOKEN, call.getValue().target());
+    assertEquals("POST", call.getValue().method());
+    assertEquals(401, call.getValue().status());
+    assertEquals(PublicApiCall.KIND_TOKEN_EXCHANGE, call.getValue().kind());
+  }
+
+  @Test
+  public void wrongSecretTenantFallsBackToTheRolesClientWhenTheOrgClientIsSystem()
+      throws Exception {
+    PublicApiUsageCounter counter = runWrongSecretExchange(true, "neo:public-api-key", "0",
+        "ROLECLI");
+
+    org.mockito.ArgumentCaptor<PublicApiCaller> caller =
+        org.mockito.ArgumentCaptor.forClass(PublicApiCaller.class);
+    org.mockito.Mockito.verify(counter).record(caller.capture(), org.mockito.ArgumentMatchers.any());
+    assertEquals("ROLECLI", caller.getValue().clientId());
+  }
+
+  @Test
+  public void wrongSecretTenantIsTheOwnerOrgsClientWhenItIsARealClient() throws Exception {
+    PublicApiUsageCounter counter = runWrongSecretExchange(true, "neo:public-api-key", "TENANT7",
+        "ROLECLI");
+
+    org.mockito.ArgumentCaptor<PublicApiCaller> caller =
+        org.mockito.ArgumentCaptor.forClass(PublicApiCaller.class);
+    org.mockito.Mockito.verify(counter).record(caller.capture(), org.mockito.ArgumentMatchers.any());
+    assertEquals("TENANT7", caller.getValue().clientId());
+  }
+
+  @Test
+  public void wrongSecretCountingDoesNoExtraDatabaseWork() throws Exception {
+    runWrongSecretExchange(true, "neo:public-api-key");
+
+    // The tenant came with the key row: no Hibernate session, no second query.
+    org.mockito.Mockito.verify(lastObDal, org.mockito.Mockito.never()).getSession();
+  }
+
+  /** ETP-6057 contract: the key row carries its tenant, so a refused exchange costs no query. */
+  @Test
+  public void findClientSqlSelectsTheKeysTenantInTheSameQuery() throws Exception {
+    java.lang.reflect.Field field = OAuth2Servlet.class.getDeclaredField("SQL_FIND_CLIENT");
+    field.setAccessible(true);
+    String sql = ((String) field.get(null)).replaceAll("\\s+", " ");
+
+    assertTrue(sql, sql.contains("AS owner_org_client_id"));
+    assertTrue(sql, sql.contains("AS role_client_id"));
+    // Anchored on a whole scope (L5); the group before the prefix is non-capturing.
+    assertTrue(sql, sql.contains("COALESCE(substring(c.scopes from '(?:^| )"
+        + PublicApiKeyPolicy.OWNER_ORG_SCOPE_PREFIX + "([^ ]+)'), c.ad_org_id)"));
+    assertTrue(sql, sql.contains("SELECT o.ad_client_id FROM ad_org o WHERE o.ad_org_id = "));
+    assertTrue(sql, sql.contains("SELECT r.ad_client_id FROM ad_role r "
+        + "WHERE r.ad_role_id = c.ad_role_id"));
+    assertTrue(sql, sql.contains("FROM etgo_oauth2_client c WHERE c.client_identifier = ? "
+        + "AND c.isactive = 'Y'"));
+  }
+
+  @Test
+  public void aCounterThatThrowsStillDeliversTheInvalidClient401() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("POST", "/token");
+    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(req.getParameter("grant_type")).thenReturn("client_credentials");
+    when(req.getParameter("client_id")).thenReturn(TEST_CLIENT_ID);
+    when(req.getParameter("client_secret")).thenReturn("wrong-secret");
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString("client_secret_hash")).thenReturn(OAuth2Utils.hashSecret("correct-secret"));
+    when(rs.getString("scopes")).thenReturn("neo:public-api-key");
+    when(rs.getString("redirect_uris")).thenReturn("[]");
+    when(rs.getString("ad_org_id")).thenReturn("ORG7");
+    when(rs.getString("owner_org_client_id")).thenReturn("TENANT7");
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+    PublicApiUsageCounter counter = mock(PublicApiUsageCounter.class);
+    org.mockito.Mockito.doThrow(new IllegalStateException("counter down")).when(counter)
+        .record(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<PublicApiUsageCounter> counterMock =
+             mockStatic(PublicApiUsageCounter.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      counterMock.when(PublicApiUsageCounter::getDefault).thenReturn(counter);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    org.mockito.Mockito.verify(counter).record(org.mockito.ArgumentMatchers.any(),
+        org.mockito.ArgumentMatchers.any());
+    verify(resp.response).setStatus(401);
+    assertEquals("invalid_client", new JSONObject(resp.body()).getString("error"));
+  }
+
+  @Test
+  public void wrongSecretForANonPublicKeyRecordsNothing() throws Exception {
+    PublicApiUsageCounter counter = runWrongSecretExchange(true, "neo:read");
+
+    // ofKeyRow answers null for a key that is not public, and the counter is not called at all.
+    org.mockito.Mockito.verifyNoInteractions(counter);
+  }
+
+  @Test
+  public void anUnknownClientRecordsNothing() throws Exception {
+    PublicApiUsageCounter counter = runWrongSecretExchange(false, "neo:public-api-key");
+
+    org.mockito.Mockito.verifyNoInteractions(counter);
   }
 
   @Test
@@ -1255,6 +1435,102 @@ public class OAuth2ServletTest {
     assertEquals(TEST_CLIENT_DB_ID, body.getString("id"));
     assertEquals("Updated Name", body.getString("name"));
     assertEquals(TEST_CLIENT_ID, body.getString("clientId"));
+  }
+
+  // ETP-6057 — the generic client CRUD refuses the public API key markers.
+
+  private static final String[] MARKER_SCOPES = { "neo:public-api-key",
+      "etendo:read neo:public-api-key", "neo:public-api-owner-org:ORG1" };
+
+  private ResponseCapture adminClientCall(String method, String path, JSONObject requestBody,
+      Connection conn) throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest(method, path);
+    when(req.getHeader("Authorization")).thenReturn("Bearer " + ADMIN_TOKEN);
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(requestBody.toString())));
+    DecodedJWT jwt = mockJwt(ADMIN_USER_ID, ADMIN_ROLE_ID);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+    try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(ADMIN_TOKEN)).thenReturn(jwt);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      if ("POST".equals(method)) {
+        servlet.doPost(req, resp.response);
+      } else {
+        servlet.doPut(req, resp.response);
+      }
+    }
+    return resp;
+  }
+
+  private static Connection existingClientConnection(PreparedStatement updatePs)
+      throws Exception {
+    ResultSet findRs = mock(ResultSet.class);
+    when(findRs.next()).thenReturn(true);
+    when(findRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findRs.getString("name")).thenReturn("Old Name");
+    when(findRs.getString("client_identifier")).thenReturn(TEST_CLIENT_ID);
+    when(findRs.getString("ad_user_id")).thenReturn("user-1");
+    when(findRs.getString("ad_role_id")).thenReturn("role-1");
+    when(findRs.getString("scopes")).thenReturn("neo:read");
+    when(findRs.getString("redirect_uris")).thenReturn("[]");
+    when(findRs.getString("isactive")).thenReturn("Y");
+    PreparedStatement findPs = mock(PreparedStatement.class);
+    when(findPs.executeQuery()).thenReturn(findRs);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(findPs, updatePs);
+    return conn;
+  }
+
+  @Test
+  public void createClientWithAPublicApiMarkerScopeIs400InvalidScopeAndInsertsNothing()
+      throws Exception {
+    for (String scopes : MARKER_SCOPES) {
+      Connection conn = mock(Connection.class);
+      JSONObject requestBody = new JSONObject().put("name", "Test Client")
+          .put("adUserId", "user-1").put("adRoleId", "role-1").put("scopes", scopes);
+
+      ResponseCapture resp = adminClientCall("POST", "/clients", requestBody, conn);
+
+      assertEquals(scopes, 400, resp.status);
+      assertEquals(scopes, "invalid_scope", new JSONObject(resp.body()).getString("error"));
+      org.mockito.Mockito.verify(conn, never()).prepareStatement(anyString());
+    }
+  }
+
+  @Test
+  public void updateClientWithAPublicApiMarkerScopeIs400AndUpdatesNothing() throws Exception {
+    for (String scopes : MARKER_SCOPES) {
+      PreparedStatement updatePs = mock(PreparedStatement.class);
+      Connection conn = existingClientConnection(updatePs);
+
+      ResponseCapture resp = adminClientCall("PUT", "/clients/" + TEST_CLIENT_DB_ID,
+          new JSONObject().put("scopes", scopes), conn);
+
+      assertEquals(scopes, 400, resp.status);
+      assertEquals(scopes, "invalid_scope", new JSONObject(resp.body()).getString("error"));
+      org.mockito.Mockito.verify(updatePs, never()).executeUpdate();
+    }
+  }
+
+  @Test
+  public void updateClientWithoutScopesOrWithPlainScopesStillWorks() throws Exception {
+    for (JSONObject requestBody : new JSONObject[] { new JSONObject().put("name", "Renamed"),
+        new JSONObject().put("name", "Renamed").put("scopes", "etendo:*"),
+        new JSONObject().put("name", "Renamed").put("scopes", "etendo:read etendo:write") }) {
+      PreparedStatement updatePs = mock(PreparedStatement.class);
+      when(updatePs.executeUpdate()).thenReturn(1);
+      Connection conn = existingClientConnection(updatePs);
+
+      ResponseCapture resp = adminClientCall("PUT", "/clients/" + TEST_CLIENT_DB_ID, requestBody,
+          conn);
+
+      JSONObject body = new JSONObject(resp.body());
+      assertEquals(requestBody.toString(), "Renamed", body.getString("name"));
+      org.mockito.Mockito.verify(updatePs).executeUpdate();
+    }
   }
 
   /**

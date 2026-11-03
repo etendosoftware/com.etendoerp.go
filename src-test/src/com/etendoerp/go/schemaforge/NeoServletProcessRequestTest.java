@@ -21,15 +21,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -43,6 +46,10 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.MalformedJsonException;
+import com.etendoerp.go.oauth2.PublicApiKeyAttribution;
+import com.etendoerp.go.usageevents.PublicApiCall;
+import com.etendoerp.go.usageevents.PublicApiCaller;
+import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 
 /**
  * How {@link NeoServlet}'s request entry point maps a failure inside the routed handler to an HTTP
@@ -50,6 +57,7 @@ import com.etendoerp.go.common.MalformedJsonException;
  * {@code mockConstruction} so the routed call can be made to throw.
  *
  * @covers com.etendoerp.go.schemaforge.NeoServlet
+ * @covers com.etendoerp.go.schemaforge.NeoPublicApiUsage
  * @covers com.etendoerp.go.schemaforge.NeoErrorResponses
  */
 class NeoServletProcessRequestTest {
@@ -225,5 +233,132 @@ class NeoServletProcessRequestTest {
           org.mockito.Mockito.never());
     }
     verify(authenticators.constructed().get(0)).authenticateRequest(request, response);
+  }
+
+  // ── public API usage (ETP-6057): the answer is counted whichever path wrote it ──
+
+  private static final PublicApiCaller KEY =
+      new PublicApiCaller("TENANT", "ORG", "USER", "ROLE", "key-public");
+
+  private final AtomicInteger answeredStatus = new AtomicInteger(0);
+  private PublicApiUsageCounter usageCounter;
+
+  private HttpServletRequest publicKeyRequest(PublicApiCaller caller) {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getAttribute(PublicApiKeyAttribution.REQUEST_ATTRIBUTE)).thenReturn(caller);
+    when(request.getPathInfo()).thenReturn("/sales-order/order");
+    doAnswer(inv -> {
+      answeredStatus.set(inv.getArgument(0));
+      return null;
+    }).when(response).setStatus(org.mockito.ArgumentMatchers.anyInt());
+    when(response.getStatus()).thenAnswer(inv -> answeredStatus.get());
+    return request;
+  }
+
+  /** Runs {@code call} with the servlet's usage recorder wired to a mock counter. */
+  private void counting(java.util.concurrent.Callable<Object> call) throws Exception {
+    usageCounter = mock(PublicApiUsageCounter.class);
+    NeoPublicApiUsage real = new NeoPublicApiUsage(usageCounter, () -> 0L);
+    try (MockedStatic<NeoPublicApiUsage> usage = mockStatic(NeoPublicApiUsage.class);
+        MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+            mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      usage.when(NeoPublicApiUsage::getDefault).thenReturn(real);
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance)
+          .thenReturn(mock(org.openbravo.dal.service.OBDal.class));
+      call.call();
+    }
+  }
+
+  private void routedCallAnswers(int status) throws Exception {
+    doAnswer(inv -> {
+      response.setStatus(status);
+      return null;
+    }).when(routers.constructed().get(0)).handleSpecRequest(any(), anyString(), any(), any());
+  }
+
+  private void verifyCounted(String method, int status) {
+    verify(usageCounter).record(KEY, PublicApiCall.of("sales-order", "order", null, method, status));
+  }
+
+  @Test
+  void aPublicKeyRequestAnswered2xxIsCountedWithThatStatus() throws Exception {
+    HttpServletRequest request = publicKeyRequest(KEY);
+    routedCallAnswers(200);
+
+    counting(() -> {
+      servlet.doGet(request, response);
+      return null;
+    });
+
+    verifyCounted("GET", 200);
+  }
+
+  @Test
+  void aHandlerAnswering4xxIsCountedWithThatStatus() throws Exception {
+    HttpServletRequest request = publicKeyRequest(KEY);
+    routedCallAnswers(404);
+
+    counting(() -> {
+      servlet.doPost(request, response);
+      return null;
+    });
+
+    verifyCounted("POST", 404);
+  }
+
+  @Test
+  void aRefusedAccessIsCountedAs403() throws Exception {
+    HttpServletRequest request = publicKeyRequest(KEY);
+    routedCallThrows(new org.openbravo.base.exception.OBSecurityException("not writable"));
+
+    counting(() -> {
+      servlet.doPut(request, response);
+      return null;
+    });
+
+    verifyCounted("PUT", 403);
+  }
+
+  @Test
+  void anExceptionPathIsCountedWithTheStatusItAnswered() throws Exception {
+    HttpServletRequest request = publicKeyRequest(KEY);
+    routedCallThrows(new IllegalStateException("boom"));
+
+    counting(() -> {
+      servlet.doDelete(request, response);
+      return null;
+    });
+
+    verifyCounted("DELETE", 500);
+  }
+
+  @Test
+  void aRequestRefusedByAuthenticationIsStillCounted() throws Exception {
+    HttpServletRequest request = publicKeyRequest(KEY);
+    when(authenticators.constructed().get(0).authenticateRequest(any(), any()))
+        .thenAnswer(inv -> {
+          response.setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+          return false;
+        });
+
+    counting(() -> {
+      servlet.doGet(request, response);
+      return null;
+    });
+
+    verifyCounted("GET", 402);
+  }
+
+  @Test
+  void aTokenOrCookieSessionThatIsNotAPublicKeyIsNotCounted() throws Exception {
+    HttpServletRequest request = publicKeyRequest(null);
+    routedCallAnswers(200);
+
+    counting(() -> {
+      servlet.doGet(request, response);
+      return null;
+    });
+
+    verify(usageCounter, never()).record(any(), any());
   }
 }
