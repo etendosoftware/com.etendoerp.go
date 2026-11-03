@@ -986,6 +986,9 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     if (CARRIED.equals(expected)) {
       assertTrue(outcome.getBoolean("applied"));
       assertEquals(0, orderDiscount.compareTo(new BigDecimal(outcome.getString("percent"))));
+      // Reported without trailing zeros nor exponent (ETP-5828): "10", "12.5", never "10.0000".
+      String reported = outcome.get("percent").toString();
+      assertFalse(reported, reported.matches(".*\\.\\d*0$") || reported.contains("E"));
       assertTrue(outcome.isNull("reason"));
       return;
     }
@@ -1222,20 +1225,27 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
         new BigDecimal(rows.getJSONObject(0).getString("globalDiscount"))));
   }
 
-  /** Each row carries the order's global discount %, the popup's "Dto. global X %" tag. */
+  /**
+   * Each row carries the order's global discount %, the popup's "Dto. global X %" tag, as the
+   * API reports it: rounded at scale 4 for comparisons but serialised without trailing zeros
+   * (ETP-5828) — {@code 12.5}, {@code 10}, never {@code 12.5000} nor {@code 1E+1}.
+   */
   @Test
   public void availableOrders_reportsEachOrdersGlobalDiscount() throws Exception {
-    Object[][] cases = { { "12.5", "12.5" }, { "0", "0" }, { "-3", "0" } };
+    Object[][] cases = {
+        { "12.5000", "12.5" }, { "10.0000", "10" }, { "7.12345", "7.1235" }, { "0", "0" },
+        { "-3", "0" },
+    };
     for (Object[] row : cases) {
       Probe probe = scenario();
-      when(probe.order.getEtgoTotalDiscount()).thenReturn(bd((String) row[0]));
+      BigDecimal stored = bd((String) row[0]);
+      when(probe.order.getEtgoTotalDiscount()).thenReturn(stored);
       probe.candidates = List.of(probe.order);
 
       JSONObject first = run(probe, "availableOrders", null).getBody().getJSONObject("response")
           .getJSONArray("data").getJSONObject(0);
 
-      assertEquals((String) row[0], 0, bd((String) row[1]).compareTo(
-          new BigDecimal(first.getString("globalDiscount"))));
+      assertEquals((String) row[0], row[1], first.get("globalDiscount").toString());
     }
   }
 

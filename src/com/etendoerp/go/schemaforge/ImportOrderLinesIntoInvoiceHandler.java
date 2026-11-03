@@ -506,7 +506,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
           partnerId, order.getBusinessPartner().getName(), orderCurrency, pendingLines);
       // The popup's "Dto. global X %" tag: always a %, 0 when the order has none.
       row.put(KEY_GLOBAL_DISCOUNT,
-          InvoiceGlobalDiscountRule.normalizedPercent(order.getEtgoTotalDiscount()));
+          InvoiceGlobalDiscountRule.reportedPercent(order.getEtgoTotalDiscount()));
       return row;
     });
   }

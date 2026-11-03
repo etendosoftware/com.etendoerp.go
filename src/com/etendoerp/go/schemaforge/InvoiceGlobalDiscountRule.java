@@ -116,6 +116,16 @@ final class InvoiceGlobalDiscountRule {
         : value.setScale(4, RoundingMode.HALF_UP);
   }
 
+  /**
+   * The % as the API reports it: {@link #normalizedPercent} (comparisons stay at scale 4) without
+   * trailing zeros, so a caller reads {@code 12.5} or {@code 10}, never {@code 12.5000} — and
+   * never the exponent form {@code 1E+1} that a bare {@code stripTrailingZeros} gives for 10.
+   */
+  static BigDecimal reportedPercent(BigDecimal value) {
+    BigDecimal stripped = normalizedPercent(value).stripTrailingZeros();
+    return stripped.scale() < 0 ? stripped.setScale(0) : stripped;
+  }
+
   /** Whether the invoice holds an active line other than the total-discount line. */
   static boolean hasProductLines(Invoice invoice) {
     for (InvoiceLine line : invoice.getInvoiceLineList()) {
@@ -151,7 +161,7 @@ final class InvoiceGlobalDiscountRule {
     JSONObject outcome = new JSONObject();
     boolean applied = carryRequested && carried != null;
     outcome.put("applied", applied);
-    outcome.put("percent", applied ? normalizedPercent(carried) : JSONObject.NULL);
+    outcome.put("percent", applied ? reportedPercent(carried) : JSONObject.NULL);
     String reason = carryRequested ? REASON_NO_ORDER_DISCOUNT : REASON_NOT_REQUESTED;
     outcome.put("reason", applied ? JSONObject.NULL : reason);
     return outcome;
