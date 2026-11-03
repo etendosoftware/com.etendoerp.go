@@ -34,8 +34,18 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  *
  * <p><b>Toggle points.</b> {@code ReconciliationHandler.buildAutoMatch} and
  * {@code buildPendingLines} (bounce pairs and the {@code bounce} state),
- * {@code ReconciliationHandler.applySuggestions} ({@code bouncePair} groups) and
- * {@code BankBouncePairService.discardPair}. {@code restorePair} is deliberately not gated.
+ * {@code ReconciliationHandler.applySuggestions} ({@code bouncePair} groups),
+ * {@code BankBouncePairService.discardPair} and {@code restorePair}, and every caller of
+ * {@link StatementLineFilter} (whether discarded lines are honoured at all: their exclusion from
+ * {@code pendingLines} and auto-match, {@code counts.discarded}, {@code status=discarded}, the
+ * {@code LINE_DISCARDED} write guards, the {@code discarded} marker of the statement lines) and
+ * {@code BankStatementsHandler.loadStatements} ({@code discardedCount} and the status). With the
+ * flag off every one of them answers as before ETP-5581.
+ *
+ * <p><b>Not gated, because it is stored:</b> the account counter {@code EM_ETGO_Pending_Count}
+ * ({@code ETGO_ACCOUNT_PENDING_COUNT} leaves discarded lines out) and the statement's
+ * {@code EM_ETGO_DISCARDED_COUNT} / {@code EM_ETGO_STATUS}, computed in SQL or in persistence
+ * events that cannot see a per-account, per-request flag. See {@code docs/neo-headless.md}.
  */
 public final class BankBounceSuggestionsFlag {
 

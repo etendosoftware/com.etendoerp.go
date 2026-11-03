@@ -190,9 +190,11 @@ final class ReconciliationAgentActions {
             optional(P_DATE_FROM, NeoActionContract.TYPE_DATE, "Earliest line date (yyyy-MM-dd)."),
             optional(P_DATE_TO, NeoActionContract.TYPE_DATE, "Latest line date (yyyy-MM-dd)."),
             optional("q", S, "Free-text search on the line description."),
-            options(ReconciliationHandler.KEY_STATUS, "discarded lists ONLY the discarded lines "
-                + "(left out of every other answer and never reconcilable; counts.discarded says "
-                + "how many there are). Any other value, or none, lists the rest.",
+            options(ReconciliationHandler.KEY_STATUS, "With bounce suggestions enabled for the "
+                + "account, discarded lists ONLY the discarded lines (left out of every other "
+                + "answer and never reconcilable; counts.discarded says how many there are). Any "
+                + "other value, or none, lists the rest. With them disabled the value is ignored "
+                + "and discarded lines are ordinary pending lines.",
                 List.of(StatementLineFilter.STATUS_DISCARDED))),
         NeoActionContract.read(CANDIDATES,
             "Lists what a statement line can be reconciled against: existing movements "
@@ -316,7 +318,8 @@ final class ReconciliationAgentActions {
         NeoActionContract.write(RESTORE_PAIR,
             "Restores a discarded line and the line it was discarded with as a pair, and removes "
                 + "the link between them: both return to the pending list. A line discarded on "
-                + "its own is restored alone.",
+                + "its own is restored alone. Only available when bounce suggestions are enabled "
+                + "for the account (403 BOUNCE_SUGGESTIONS_OFF otherwise).",
             required(BankBouncePairService.KEY_LINE_ID, S, "Id of either discarded line "
                 + "(pendingLines with status discarded).")));
   }

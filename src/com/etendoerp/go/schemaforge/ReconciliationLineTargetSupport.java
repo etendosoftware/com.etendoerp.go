@@ -162,9 +162,10 @@ final class ReconciliationLineTargetSupport {
       return Target.failed(NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT));
     }
-    // ETP-5581: never free a line a BankStatementLineFilterHook excludes: it cannot be reconciled
-    // afterwards anyway, so the heal (a write) must not happen. A pending line (no movement) is
-    // returned above unchanged and its caller runs the same guard next to its draft check.
+    // ETP-5581 toggle point: with bank-bounce-suggestions on, never free a line a
+    // BankStatementLineFilterHook excludes: it cannot be reconciled afterwards anyway, so the heal
+    // (a write) must not happen. Off, it answers null. A pending line (no movement) is returned
+    // above unchanged and its caller runs the same guard next to its draft check.
     NeoResponse discarded =
         StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
     if (discarded != null) {

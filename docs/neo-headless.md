@@ -2718,7 +2718,7 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
 
 | Action | Kind | Parameters (required in **bold**) | SPA route reused |
 |---|---|---|---|
-| `pendingLines` | read | `dateFrom`, `dateTo`, `q`, `status` (`discarded`) | `GET ?action=pendingLines` |
+| `pendingLines` | read | `dateFrom`, `dateTo`, `q`, `status` (`discarded`, honoured only with flag `bank-bounce-suggestions` on) | `GET ?action=pendingLines` |
 | `candidates` | read | **`statementLineId`**, `kind` (transactions\|invoices), `docType` (receipts\|payments), `dateFrom`, `dateTo` | `GET ?action=candidates` |
 | `autoMatch` | read | — | `GET ?action=autoMatch` |
 | `reconcileGroup` | write | **`statementLineId`**, `operationIds[]`, `invoices[{invoiceId,scheduleId}]`, `paymentMethodId`, `writeoffDifference`, `actualPayment` (number), `conversionRate` (number), `convertedAmount` (number), `glItemId`, `description` | `POST ?action=reconcileGroup` |
@@ -2728,7 +2728,7 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
 | `removeOperation` | write | **`statementLineId`**, **`transactionIds[]`** | `POST ?action=removeOperation` |
 | `reactivateSelected` | write | **`statementLineId`**, **`transactionIds[]`** | `POST ?action=reactivateSelected` |
 | `discardPair` | write | **`statementLineId`**, **`counterpartLineId`** | `POST ?action=discardPair` (ETP-5581, flag `bank-bounce-suggestions`) |
-| `restorePair` | write | **`lineId`** | `POST ?action=restorePair` (ETP-5581, not gated) |
+| `restorePair` | write | **`lineId`** | `POST ?action=restorePair` (ETP-5581, flag `bank-bounce-suggestions`) |
 
 Notes: 1:1, 1:N and partial matches are all `reconcileGroup` (a shortfall beyond tolerance leaves
 a pending remainder, exactly as in the UI). `glItemId` is optional on `reconcileDifference`
@@ -2882,26 +2882,43 @@ and for `etendo_action` alike — both enter the same `ReconciliationHandlerSupp
   same effective line (e.g. a partial head redirected to its remainder plus the remainder itself).
   The first accepted group keeps it; any later one is reported in `results[]` as a 409
   `Statement line is already reconciled: <requested id>`, before anything is matched.
-- **A discarded line is never reconciled (ETP-5581).** A line that a
-  `BankStatementLineFilterHook` excludes — PSD2's discarded lines (`EM_PSD2_Is_Discarded = Y`), or
-  any other module's exclusion — is refused with the coded **409 `LINE_DISCARDED`**
-  (`AD_MESSAGE` `ETGO_StatementLineDiscarded`) by `reconcileGroup`, every `applySuggestions` group,
-  `reconcileDifference`, and the stuck-line heal of `resolveForMatch` (before it writes). Each
-  check sits next to the draft-statement guard and runs before any write. Restore the line first
-  (`restorePair`, or PSD2's Restore button in Classic).
+- **A discarded line is never reconciled (ETP-5581, with `bank-bounce-suggestions` on).** With the
+  flag on for the account, an unmatched line that a `BankStatementLineFilterHook` excludes —
+  PSD2's discarded lines (`EM_PSD2_Is_Discarded = Y`), or any other module's exclusion — is refused
+  with the coded **409 `LINE_DISCARDED`** (`AD_MESSAGE` `ETGO_StatementLineDiscarded`) by
+  `reconcileGroup`, every `applySuggestions` group, `reconcileDifference`, and the stuck-line heal
+  of `resolveForMatch` (before it writes). Each check sits next to the draft-statement guard and
+  runs before any write. Restore the line first (`restorePair`, or PSD2's Restore button in
+  Classic). **With the flag off there is no such refusal**: a discarded line is a plain pending
+  line and is reconciled like any other.
 
 ##### Discarded lines and bounce pairs (ETP-5581)
 
-Two layers. The first is **unconditional**: Etendo GO honours the lines APRM's
-`BankStatementLineFilterHook` excludes (`StatementLineFilter`, the GO side of the hook; PSD2's
-`Psd2DiscardedLineFilter` excludes its discarded lines). With no hook, or no excluded line, every
-answer is exactly as before. The second, **bounce-pair suggestions**, is behind the backend-only
-flag `bank-bounce-suggestions`, evaluated per account by `BankBounceSuggestionsFlag` (see
-`docs/feature-flags-and-tenant-upgrade.md`).
+Everything here is behind the backend-only flag `bank-bounce-suggestions`, evaluated per account
+and per request by `BankBounceSuggestionsFlag` (see `docs/feature-flags-and-tenant-upgrade.md`).
+**With the flag off, Etendo behaves exactly as before ETP-5581**: Etendo GO does not honour the
+lines APRM's `BankStatementLineFilterHook` excludes at all, so a line PSD2 discarded (in Classic, or
+here while the flag was on) is a plain pending line — listed in `pendingLines` and counted under
+*Pendientes* / *Todos*, proposed by `autoMatch`, reconcilable on every write path (no
+`LINE_DISCARDED`); there is no `counts.discarded`, `status=discarded` is ignored like any status the
+panel filters client-side, no row of `bank-statements?action=lines` carries `discarded`,
+`bank-statements?action=list` has no `discardedCount` and does not count discarded lines as
+resolved, and `discardPair` / `restorePair` answer 403 `BOUNCE_SUGGESTIONS_OFF`. The two stored
+counters below are the exception (*Not gated: the stored counters*). With the flag on, two layers
+apply: honouring the discarded lines, and the bounce-pair suggestions.
 
-**Respecting discarded lines (not gated).**
+**Respecting discarded lines (flag on).** `StatementLineFilter` is the GO side of the hook (PSD2's
+`Psd2DiscardedLineFilter` excludes its discarded lines) and the toggle point of every caller below:
+with the flag off each of its answers is "nothing excluded". With the flag on and no hook, or no
+excluded line, every answer is the same as with the flag off, plus `counts.discarded: 0` and
+`discarded:false` on the statement lines. **Only unmatched lines count as discarded**: a line matched
+to a transaction counts as reconciled whatever its PSD2 flag says (the case of a line discarded
+while the flag was on and reconciled while it was off) — in the exclusion, the counts, the status
+and the pair validation (`DISCARD_NOT_ALLOWED`, not `LINE_DISCARDED`). The write guards never meet
+such a line: the reconcile paths refuse it as already reconciled first. A stuck line (a movement
+with no reconciliation) is not reconciled, so a discarded one is still refused before its heal.
 
-| Where | Usage passed to the hook | Behaviour |
+| Where | Usage passed to the hook | Behaviour (flag on) |
 |---|---|---|
 | `pendingLines` | `MATCH_STATEMENT_GRID` | Excluded lines are left out of `lines`, `total` and every count, and counted in **`counts.discarded`**. `status=discarded` answers **only** them: each row has `state`/`status` `discarded`, `discarded:true`, nothing reconciled, and `bounceLink` (`{counterpartLineId, discardedAt, signal, confidence}`, or `null` for a line discarded on its own); `counts` then carries only `discarded` — the other filters keep the counts of the default request, so this call does not run the matching engine. `PENDING_LINES_SQL` is unchanged: the hooks answer HQL, so the excluded ids are read once through the hook and the rows are split in Java. |
 | `autoMatch` candidates (`loadPendingLines`) | `AUTO_MATCH_CANDIDATES` | Excluded lines are never proposed (now an `OBQuery`, keeping the readable client/org filter). |
@@ -2922,19 +2939,57 @@ proposed** when either line is the bank movement of a real ERP payment (`BankBou
 answered `HAS_PAYMENT` on the write paths), including a line that may be one invoice of a larger
 multi-invoice payment.
 
+**Statement adjacency.** Banks write a return next to the line it reverses, but the order of the
+lines **within a day is not taken as chronological**: PSD2 numbers a statement's lines by their
+position in the bank's (Salt Edge) transaction list, the booking day carries no time, and real
+statements show a return written *before* its payment. So both neighbours of a bounce count the
+same: the line just before it and the line just after it among the account's auto-match candidate
+lines of the **same `FIN_BankStatement`, ordered by `Line`** (a line already reconciled or
+discarded between the two is not in that list and does not separate them; an edited statement that
+renumbers its lines changes who is adjacent to whom — accepted, adjacency follows the current
+numbering). A neighbour **qualifies** when it is one of the bounce's eligible originals (opposite
+sign, exact amount, the date rules above, at least one signal) and the payment guard lets the two
+lines go. Adjacency decides only when that is unambiguous:
+
+- **exactly one** qualifying neighbour → it is the original: a plain pair, `adjacent:true`. These
+  are settled first and their originals reserved;
+- **both** neighbours qualify → after dropping the neighbours reserved above (one left makes it the
+  previous case, which is settled again), an **ambiguous** `review` pair whose candidates are
+  **only those two neighbours**, `adjacent:true` (the panel reads it as *2 salidas posibles*). Two
+  such pairs may share a neighbour; both are offered;
+- **no** qualifying neighbour (or all of them reserved, or a single neighbour that is also the only
+  one of another bounce) → the ordinary rules, unchanged, over the lines adjacency did not reserve.
+
+Adjacency only decides **who pairs with whom**. It is neither a signal nor a reason for confidence:
+`signals`/`signal`, the stored `EM_ETGO_Bounce_Signal` and `confidence` follow the rules above, so
+an adjacent pair with only the counterparty, or with bounce wording on a later day, stays `review`
+(unchecked). Example (one statement, lines dated 24/08 in this order): `-0,61` (120), `+0,61`
+RETROCESIÓN (130), `-0,61` (140), `+0,61` RETROCESIÓN (150), `-0,61` (160), `+0,15` RETROCESIÓN
+(170), `-0,15` (180) gives 180↔170 `high` (the 0,15 return comes before its payment) and two
+ambiguous `review` pairs, 130 over [120, 140] and 150 over [140, 160], both offered although they
+share 140.
+
 - **`autoMatch`.** A `high` pair reserves its two lines before transaction matching (the loop skips
-  them); a `review` pair is offered after, only when none of its lines was taken by a transaction
-  group or an earlier pair. Every transaction group gains `kind:"transaction"`; each pair is a
-  group `{kind:"bouncePair", groupKey, origin:"bounce", statementLine (the original, null when
-  ambiguous), counterpartLine (the bounce line), candidates ([{line, signals, signal}], ambiguous
-  only), ambiguous, confidence, signals, signal (primary: pis_link > return_text > counterparty),
-  operations:[], isNew:false, difference:0}`. `kpis.bouncePairs` counts them; `kpis.groupsFound`
-  and the `bank_match_attempted` telemetry keep counting transaction groups only.
+  them); a `review` pair is offered after, blocked only by the lines it would really take: its
+  bounce and, for a plain pair, its original — taken by a transaction group, a `high` pair or
+  another plain pair. An ambiguous pair loses the candidates taken that way and is offered while one
+  is left (exactly one left makes it a plain `review` pair on that candidate); candidates shared by
+  several ambiguous pairs do **not** block each other, so every such pair is offered. Every
+  transaction group gains `kind:"transaction"`; each pair is a group `{kind:"bouncePair", groupKey,
+  origin:"bounce", statementLine (the original, null when ambiguous), counterpartLine (the bounce
+  line), candidates ([{line, signals, signal}], ambiguous only), ambiguous, adjacent (the original,
+  or the two candidates, are the bounce's statement neighbours; never raises the confidence),
+  confidence, signals, signal (primary: pis_link > return_text > counterparty), operations:[],
+  isNew:false, difference:0}`. `kpis.bouncePairs` counts them; `kpis.groupsFound` and the
+  `bank_match_attempted` telemetry keep counting transaction groups only.
 - **`pendingLines`.** Same detection over the same candidate lines and the same precedence, so the
   panel and the modal agree: a line of an offered pair gets `state:"bounce"` (counted in
   **`counts.bounce`**, out of `pending`) and `bouncePair: {groupKey, role (original | bounce |
-  candidate), ambiguous, confidence, signals, signal, counterpartLine, candidates}`. Under a date
-  or text filter, a `review` pair is judged on its visible lines only.
+  candidate), ambiguous, adjacent, confidence, signals, signal, counterpartLine, candidates}`. A
+  candidate line shared by several ambiguous pairs is annotated once, by the first of them; every
+  pair's bounce line still carries its own `groupKey` and lists all its candidates, so the distinct
+  `groupKey`s of the `bounce` rows still equal `kpis.bouncePairs`. Under a date or text filter, a
+  `review` pair is judged on its visible lines only.
 - **`applySuggestions`.** `{kind:"bouncePair", statementLineId, counterpartLineId}` groups are
   validated and discarded **first**, in the same request transaction; their lines join the set the
   transaction groups are prepared against, so a line checked in two groups is refused (409) the
@@ -2947,10 +3002,12 @@ multi-invoice payment.
   `BOUNCE_SUGGESTIONS_OFF` otherwise): the panel's discard, also for an ambiguous pair once its
   original is chosen. Same validation as the `applySuggestions` groups. Answers 200
   `{discarded:true, statementLineId, counterpartLineId, signal, confidence}`.
-- **`restorePair {financialAccountId, lineId}`** (**not gated**, so a pair can always be undone):
-  restores the line AND the counterpart it is linked to, and clears the link on both. A discarded
-  line with no link (discarded alone in Classic) is restored alone; a line that is neither
-  discarded nor linked is left as it is. Answers 200 `{restored:[ids], lineId, counterpartLineId}`.
+- **`restorePair {financialAccountId, lineId}`** (flag required, 403 `BOUNCE_SUGGESTIONS_OFF`
+  otherwise, like `discardPair`: with the flag off Etendo does not honour discarded lines, so there
+  is nothing to undo here; Classic's PSD2 Restore button still works): restores the line AND the
+  counterpart it is linked to, and clears the link on both. A discarded line with no link
+  (discarded alone in Classic) is restored alone; a line that is neither discarded nor linked is
+  left as it is. Answers 200 `{restored:[ids], lineId, counterpartLineId}`.
 - **Always by pair.** Etendo GO has no single-line discard; Classic keeps PSD2's per-line Discard /
   Restore button.
 
@@ -2969,7 +3026,7 @@ this order; every refusal has the top-level `code`, `message`, and `error.messag
 | Code | Status | `AD_MESSAGE` | When |
 |---|---|---|---|
 | — | 400 / 404 | — | missing id, the same line twice, a line not found or of another account |
-| `LINE_DISCARDED` | 409 | `ETGO_StatementLineDiscarded` | a line is already excluded |
+| `LINE_DISCARDED` | 409 | `ETGO_StatementLineDiscarded` | an unmatched line is already excluded (PSD2-discarded or excluded by a hook); a matched one is `DISCARD_NOT_ALLOWED`, the hooks are not asked for it |
 | `DISCARD_NOT_ALLOWED` | 409 | `ETGO_BounceDiscardNotAllowed` | a line is reconciled or not imported by PSD2, the bounce is outside the 60-day window, or the PSD2 discard columns are not installed |
 | `LINE_NOT_PENDING` | 409 | `ETGO_BounceLineNotPending` | a line is inactive, on a draft statement, in a split group, or already taken by another group of the same call |
 | `SIGN_MISMATCH` | 409 | `ETGO_BounceSignMismatch` | the lines do not have opposite signs |
@@ -2987,10 +3044,10 @@ PSD2 transaction id, the PSD2 discard flag and button and the bounce-pair link
 A body line without `id` is a new line, as before — the SPA's statement editor does not send it
 yet, so until it does an edit still loses them.
 
-**Discarded lines count as resolved in every Etendo counter.** Product decision: in Etendo a
-line is only ever discarded as part of a bounce pair, so a discarded line is **resolved** —
-never pending, and never reported as matched to a transaction. The counters outside this API
-agree with the pending panel:
+**Discarded lines count as resolved in every Etendo counter — with the flag on.** Product
+decision: in Etendo a line is only ever discarded as part of a bounce pair, so a discarded line is
+**resolved** — never pending, and never reported as matched to a transaction. With the flag on, the
+counters outside this API agree with the pending panel:
 
 - **Statement aggregates and status** (`BankStatementAggregates`,
   `BankStatementsSupport.deriveStatementStatus(processed, lineCount, matchedCount,
@@ -3000,8 +3057,11 @@ agree with the pending panel:
   discarded` as resolved: none → `PENDING`, some → `PARTIAL`, all → `RECONCILED`, so a
   statement whose lines are all matched or discarded is `RECONCILED`. Still pending is
   `lineCount − matchedCount − discardedCount`. `EM_ETGO_Total_In` / `_Out` remain the
-  statement's totals and include discarded lines. `bank-statements?action=list` returns
-  `discardedCount` next to `matchedCount`. The discard flag is read by column name
+  statement's totals and include discarded lines. With the flag on, `bank-statements?action=list`
+  returns `discardedCount` next to `matchedCount` and the stored status; **with it off** the row has
+  no `discardedCount`, and a statement whose stored `EM_ETGO_Discarded_Count` is above 0 derives its
+  status again with `discardedCount = 0` (`BankStatementsHandler.loadStatements`), so the list shows
+  what it showed before ETP-5581. The discard flag is read by column name
   (`StatementLineDiscard`), not through the APRM hook, because `BankStatementLineAggregateHandler`
   must see the in-flight value of the line being saved; that observer recomputes on every line
   update, so a discard or restore — by Classic's PSD2 button, or by `discardPair` /
@@ -3022,6 +3082,30 @@ agree with the pending panel:
   module dependencies, and `ETGO_SF_FIELD.xml` already references PSD2 columns without it. What
   it would guard is an AD-level install of this module without PSD2, where the watched-column row
   would point at a missing `AD_COLUMN` and the function would fail at run time.
+
+**Not gated: the stored counters.** Three values are computed in SQL or in persistence events,
+which cannot see a per-account, per-request flag, so they count discarded lines whatever the flag
+says:
+
+- `FIN_Financial_Account.EM_ETGO_Pending_Count` (*Por conciliar*, `ETGO_ACCOUNT_PENDING_COUNT`):
+  read by the account list column `eTGOPendingCount` (and its advanced filter), by
+  `financial-accounts-page` as `pendingCount` (the *Conciliación* tab badge, the *Conciliar (N)*
+  pill) and by its sidebar count of accounts with pending items;
+- `FIN_BankStatement.EM_ETGO_Discarded_Count` and `EM_ETGO_Status`, written by
+  `BankStatementAggregates` / `BankStatementHeaderStatusHandler` (Java, but in persistence events,
+  whatever user or process triggers them). The statements list re-derives the status with the flag
+  off, as said above; the generic `bank-statements` CRUD still serves the stored values (both are
+  `system` fields, not shown by the SPA).
+
+**Known limitation, accepted for the flag's lifetime.** If the flag is turned off for an account
+that already discarded pairs, its *Por conciliar* counter keeps leaving those lines out while the
+reconciliation panel lists them as pending again — e.g. **47 in the account list against 49 in the
+panel**, until the flag is turned back on or the lines are restored in Classic. No data-fix is
+planned: if the feature is killed, removing its code — **including the change to
+`ETGO_ACCOUNT_PENDING_COUNT`, which must be reverted** (back to counting every unmatched line, and
+the `EM_PSD2_Is_Discarded` watched column removed) — restores the old counter; the stored values
+then need the same refresh as below. Registered in `flags-registry.json` (`etendo_schema_forge`),
+feature `bank-bounce-suggestions`.
 
 Classic APRM is unchanged: these are Etendo-only columns. **Deploying this change on a database
 that already holds discarded lines** needs one refresh of each: `SELECT

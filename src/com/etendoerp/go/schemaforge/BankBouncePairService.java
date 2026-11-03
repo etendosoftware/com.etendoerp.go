@@ -58,13 +58,15 @@ import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
  * {@code EM_ETGO_Bounce_Confidence}. The columns are written through their column names
  * ({@link StatementLineDiscard#set}), so this compiles before the DAL is regenerated.
  *
- * <p><b>Gating.</b> {@code discardPair} and the {@code bouncePair} groups require
- * {@link BankBounceSuggestionsFlag} (403 {@code BOUNCE_SUGGESTIONS_OFF} otherwise);
- * {@code restorePair} does not, so a pair can always be undone.
+ * <p><b>Gating.</b> {@code discardPair}, {@code restorePair} and the {@code bouncePair} groups
+ * require {@link BankBounceSuggestionsFlag} (403 {@code BOUNCE_SUGGESTIONS_OFF} otherwise): with
+ * the flag off Etendo does not honour discarded lines at all ({@link StatementLineFilter}), so
+ * there is nothing to discard or restore from here.
  *
  * <p><b>Validation</b>, shared by both discard paths, in this order: the two ids differ and both
  * lines belong to the account; the PSD2 discard is installed; neither line is already excluded from
- * reconciliation ({@code LINE_DISCARDED}); both are unreconciled PSD2 lines
+ * reconciliation ({@code LINE_DISCARDED}; a discarded line matched to a transaction counts as
+ * reconciled instead); both are unreconciled PSD2 lines
  * ({@code DISCARD_NOT_ALLOWED}); both are in the pending pool — active, on a processed statement,
  * outside any split group ({@code LINE_NOT_PENDING}); opposite sign ({@code SIGN_MISMATCH}) and the
  * exact amount ({@code AMOUNT_MISMATCH}); the later line within
@@ -140,7 +142,7 @@ final class BankBouncePairService {
 
   /**
    * {@code POST restorePair}: the same envelope around
-   * {@link #restorePair(ReconciliationHandler, JSONObject)}. Not gated by the flag.
+   * {@link #restorePair(ReconciliationHandler, JSONObject)}. Gated by the flag, like the discard.
    *
    * @param handler the reconciliation handler
    * @param context the request
@@ -300,7 +302,10 @@ final class BankBouncePairService {
 
   /**
    * {@code POST restorePair {financialAccountId, lineId}}: restores the line AND its linked
-   * counterpart, and clears the link on both. Not gated by the flag.
+   * counterpart, and clears the link on both. Requires the flag (403 {@code BOUNCE_SUGGESTIONS_OFF}
+   * before anything is read otherwise): with it off Etendo does not honour discarded lines at all,
+   * so there is nothing to undo here; a line can still be restored in Classic with PSD2's own
+   * Discard / Restore button.
    *
    * <p>A discarded line with no link (discarded one by one in Classic) is restored alone: there is
    * no pair to keep consistent. A line that is not discarded and has no link is left as it is and
@@ -313,6 +318,9 @@ final class BankBouncePairService {
    */
   static NeoResponse restorePair(ReconciliationHandler handler, JSONObject body)
       throws JSONException {
+    if (!BankBounceSuggestionsFlag.isEnabled()) {
+      return BankBounceErrors.suggestionsOff();
+    }
     FIN_FinancialAccount account = requireAccount(handler, body);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -578,18 +586,21 @@ final class BankBouncePairService {
   /**
    * The refusal for a line that cannot take part in a discard, or {@code null}: excluded already
    * ({@code LINE_DISCARDED}), reconciled or not imported by PSD2 ({@code DISCARD_NOT_ALLOWED}),
-   * outside the pending pool ({@code LINE_NOT_PENDING}).
+   * outside the pending pool ({@code LINE_NOT_PENDING}). Only an unmatched line can be refused as
+   * discarded: a line matched to a transaction (a discarded line reconciled while the flag was off)
+   * counts as reconciled, so neither its PSD2 flag nor the hooks are consulted for it — PSD2's hook
+   * condition looks at the discard flag alone and would call it discarded.
    *
    * @param line the line, owned by the account
    * @return the refusal, or {@code null}
    */
   private static NeoResponse lineError(FIN_BankStatementLine line) {
-    if (StatementLineDiscard.isDiscarded(line)
-        || StatementLineFilter.isExcluded(line, Usage.AUTO_MATCH_CANDIDATES)) {
+    boolean unmatched = line.getFinancialAccountTransaction() == null;
+    if (unmatched && (StatementLineDiscard.isDiscarded(line)
+        || StatementLineFilter.isExcluded(line, Usage.AUTO_MATCH_CANDIDATES))) {
       return StatementLineDiscard.discardedError();
     }
-    if (line.getFinancialAccountTransaction() != null
-        || StatementLineDiscard.transactionIdentifier(line) == null) {
+    if (!unmatched || StatementLineDiscard.transactionIdentifier(line) == null) {
       return BankBounceErrors.conflict(BankBounceErrors.CODE_DISCARD_NOT_ALLOWED);
     }
     if (!Boolean.TRUE.equals(line.isActive()) || ReconciliationSupport.isOnDraftStatement(line)

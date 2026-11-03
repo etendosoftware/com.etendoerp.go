@@ -228,8 +228,9 @@ final class ReconciliationDifferenceSupport {
       return Preflight.failed(NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT));
     }
-    // ETP-5581: a line excluded by a BankStatementLineFilterHook (PSD2's discarded lines) is never
-    // reconciled; read-only here too, so returning is safe.
+    // ETP-5581 toggle point: with bank-bounce-suggestions on, a line excluded by a
+    // BankStatementLineFilterHook (PSD2's discarded lines) is never reconciled; off, it answers
+    // null. Read-only here too, so returning is safe.
     NeoResponse discarded =
         StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
     if (discarded != null) {

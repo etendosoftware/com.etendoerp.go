@@ -186,7 +186,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
 | `invoice-inbox` | `etendo.go.flags.invoice-inbox` | `ETGO_FLAG_INVOICE_INBOX` | absent ⇒ **`false`** (inbox upload refused; per account on a hosted arm only; TTL 2027-01-31, provisional) — see its section below |
 | `product-movements-tab` | `etendo.go.flags.product-movements-tab` | `ETGO_FLAG_PRODUCT_MOVEMENTS_TAB` | absent ⇒ **`false`** (no Movements tab on the Product window; placeholder TTL 2027-01-31) |
-| `bank-bounce-suggestions` | `etendo.go.flags.bank-bounce-suggestions` | `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS` | absent ⇒ **`false`** (no bounce-pair suggestions; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
+| `bank-bounce-suggestions` | `etendo.go.flags.bank-bounce-suggestions` | `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS` | absent ⇒ **`false`** (no bounce-pair suggestions and discarded lines not honoured: Etendo as before ETP-5581; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -824,9 +824,10 @@ entry in `etendo_schema_forge`.
 > entry `bank-bounce-suggestions` in `etendo_schema_forge` `flags-registry.json`). The only evaluator
 > is `BankBounceSuggestionsFlag` (`GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS`). Toggle points:
 > `ReconciliationHandler.buildAutoMatch` and `buildPendingLines` (bounce pairs, the `bounce` state),
-> `ReconciliationHandler.applySuggestions` (`bouncePair` groups) and
-> `BankBouncePairService.discardPair`. `restorePair` is deliberately not gated. Contract:
-> `docs/neo-headless.md` §4.12.1.1, *Discarded lines and bounce pairs*.
+> `ReconciliationHandler.applySuggestions` (`bouncePair` groups),
+> `BankBouncePairService.discardPair` and `restorePair`, every caller of `StatementLineFilter`
+> (whether discarded lines are honoured at all) and `BankStatementsHandler.loadStatements`.
+> Contract: `docs/neo-headless.md` §4.12.1.1, *Discarded lines and bounce pairs*.
 
 Gates the automatic **bounce-pair suggestions** in the bank reconciliation of PSD2-synced financial
 accounts. A bounce is an outgoing bank-statement line plus the line that reverses it: same amount,
@@ -839,11 +840,21 @@ opposite sign. Positive polarity: `true` = suggestions on. Default and every fai
   can be reviewed in the reconciliation panel.
 - Accepting a pair logically discards **both** statement lines (`EM_PSD2_IS_DISCARDED`, a column of
   the PSD2 module) and links them as a pair. Discard and restore always act on the pair, never on a
-  single line.
+  single line; both answer 403 `BOUNCE_SUGGESTIONS_OFF` with the flag off.
+- Honouring discarded lines at all. With the flag off a discarded line (discarded in Classic, or
+  here while the flag was on) is a plain pending line: listed, counted under *Pendientes*, proposed
+  by auto-match and reconcilable, with no `counts.discarded`, no `status=discarded`, no
+  `discarded` marker on the statement lines and no `discardedCount` in the statements list — the
+  behaviour from before ETP-5581. With it on, only an UNMATCHED discarded line counts as discarded;
+  a reconciled one counts as reconciled.
 
-**What it does not gate.** Lines that are already discarded are excluded from the pending lists and
-from auto-match whatever the flag says. That is unconditional because it changes nothing while no
-line is discarded.
+**What it does not gate: the stored counters.** The account's *Por conciliar* counter
+(`EM_ETGO_Pending_Count`, function `ETGO_ACCOUNT_PENDING_COUNT`) and the statement's
+`EM_ETGO_Discarded_Count` / `EM_ETGO_Status` are computed in SQL or in persistence events, which
+cannot see a per-account flag, so they leave discarded lines out whatever the flag says. Known
+limitation: turning the flag off for an account that already discarded pairs leaves its counter
+lower than its reconciliation panel (e.g. 47 against 49) until the flag is turned back on. Killing
+the feature must revert the `ETGO_ACCOUNT_PENDING_COUNT` change (see the retirement note below).
 
 **Backend-only.** No key in the web client's `flag-keys.js`, and none must be added. The SPA renders
 only what the auto-match answer carries, so a browser key would be a second evaluator.
@@ -867,7 +878,11 @@ attribute. Until then nobody can be targeted and no pilot can start: an undefine
 **TTL 2026-12-31 — placeholder, not a commitment.** It is the end of the current quarter (Q4 2026).
 Revisit it once the first account is targeted. Retiring the flag means the suggestions ship to
 everyone: unwrap the toggle points, delete the flag constant, this section and its
-configuration-table row, and delete the hosted setting. Keep the registry feature entry.
+configuration-table row, and delete the hosted setting. Keep the registry feature entry. **Killing
+it instead** removes the owned code and every toggle point AND reverts the ETP-5581 change to
+`ETGO_ACCOUNT_PENDING_COUNT` (count every unmatched line again, drop the `EM_PSD2_Is_Discarded`
+watched column), then `ad_scd_rebuild` of the counter: that, not a data-fix, restores the old
+*Por conciliar*.
 
 ### `usage-aggregation-schedule` (ETP-5051) — backend-only, strictly off by default
 

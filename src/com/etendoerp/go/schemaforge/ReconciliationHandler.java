@@ -107,10 +107,11 @@ import org.openbravo.model.project.Project;
  *   <tr>
  *     <td>{@code GET ?action=pendingLines&accountId=X}</td>
  *     <td>Unmatched bank-statement lines (panel left). Optional filters
- *         {@code status}, {@code dateFrom}, {@code dateTo}, {@code q}. Lines a
- *         {@code BankStatementLineFilterHook} excludes (PSD2's discarded lines) are left out,
- *         counted in {@code counts.discarded}, and listed alone with
- *         {@code status=discarded} (ETP-5581).</td>
+ *         {@code status}, {@code dateFrom}, {@code dateTo}, {@code q}. With
+ *         {@code bank-bounce-suggestions} on, lines a {@code BankStatementLineFilterHook}
+ *         excludes (PSD2's discarded lines) are left out, counted in
+ *         {@code counts.discarded}, and listed alone with {@code status=discarded}; off, they
+ *         are plain pending lines (ETP-5581).</td>
  *   </tr>
  *   <tr>
  *     <td>{@code GET ?action=candidates&accountId=X&lineId=Y}</td>
@@ -476,7 +477,8 @@ public class ReconciliationHandler implements NeoHandler {
     // The status parameter is no longer used to filter at SQL level: every line is returned with
     // its computed `state` and the per-state `counts`, and the frontend filters client-side. This
     // keeps the matching engine running once per panel load instead of once per filter change.
-    // The one exception is status=discarded (ETP-5581), handled after the query below.
+    // The one exception is status=discarded (ETP-5581, only with bank-bounce-suggestions on),
+    // handled after the query below.
     String descExpr = descriptionExpr();
     StringBuilder sql = new StringBuilder(String.format(PENDING_LINES_SQL, descExpr));
     if (StringUtils.isNotBlank(dateFrom)) {
@@ -558,16 +560,17 @@ public class ReconciliationHandler implements NeoHandler {
       }
     }
 
-    // ETP-5581: the lines a BankStatementLineFilterHook excludes from reconciliation (PSD2's
+    // ETP-5581 toggle point (StatementLineFilter.discards, gated by bank-bounce-suggestions): with
+    // the flag on, the lines a BankStatementLineFilterHook excludes from reconciliation (PSD2's
     // discarded lines) are split off HERE, in Java, and PENDING_LINES_SQL stays as it is: the
     // exclusion is an HQL condition the hooks contribute, which this native query cannot run, so
-    // their ids are read once through the hook (StatementLineFilter, not gated by any flag). By
-    // default they are left out of `lines`, `total` and every count except `counts.discarded`;
-    // status=discarded answers with only them.
-    Set<String> discardedIds =
-        StatementLineFilter.excludedLineIds(account, Usage.MATCH_STATEMENT_GRID);
-    JSONArray[] split = StatementLineFilter.splitRows(rawLines, discardedIds);
-    if (StatementLineFilter.STATUS_DISCARDED.equals(filterMap.get(KEY_STATUS))) {
+    // their ids are read once through the hook. They are left out of `lines`, `total` and every
+    // count except `counts.discarded`; status=discarded answers with only them. With the flag off
+    // nothing is split off, status=discarded is ignored and there is no counts.discarded.
+    StatementLineFilter.Discards discards =
+        StatementLineFilter.discards(account, Usage.MATCH_STATEMENT_GRID);
+    JSONArray[] split = discards.split(rawLines);
+    if (discards.listsOnlyDiscarded(filterMap.get(KEY_STATUS))) {
       JSONObject discardedData = StatementLineFilter.discardedLinesData(split[1]);
       discardedData.put("draftReconciliationCount", ReactivationSupport.draftCount(account));
       return envelope(discardedData);
@@ -582,7 +585,7 @@ public class ReconciliationHandler implements NeoHandler {
         pendingDateTolDays);
     JSONObject data = ReconciliationHandlerSupport.summarizePendingLines(lines, account, rules,
         pendingDateTolDays, pendingAmtTolPct, BankBounceSuggestions.panelView(bounces));
-    data.getJSONObject(KEY_COUNTS).put(StatementLineDiscard.KEY_DISCARDED, split[1].length());
+    discards.putCount(data.getJSONObject(KEY_COUNTS), split[1].length());
     // How many reconciliations of this account are currently in draft. Core allows only ONE editable
     // reconciliation per account, so a non-zero value means a "Reactivar" will first CONFIRM that
     // draft — the UI warns about it up front, in the confirm dialog, instead of after the fact.
@@ -984,8 +987,9 @@ public class ReconciliationHandler implements NeoHandler {
     if (isOnDraftStatement(line)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ON_DRAFT_STATEMENT);
     }
-    // ETP-5581: a line a BankStatementLineFilterHook excludes (PSD2's discarded lines) is never
-    // reconciled — the hook's contract. Same place as the draft-statement guard, before any write.
+    // ETP-5581 toggle point: with bank-bounce-suggestions on, a line a BankStatementLineFilterHook
+    // excludes (PSD2's discarded lines) is never reconciled — the hook's contract. Same place as
+    // the draft-statement guard, before any write. With the flag off it answers null.
     NeoResponse discarded =
         StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
     if (discarded != null) {
@@ -1826,11 +1830,12 @@ public class ReconciliationHandler implements NeoHandler {
    * the intersection is empty, so repeating it here would only add a join no predicate reads. The
    * Automatch only ever looks at UNMATCHED lines; a reconciled one has nothing left to suggest.
    *
-   * <p><b>Lines excluded by a hook (ETP-5581).</b> The condition every
-   * {@code BankStatementLineFilterHook} contributes for {@code AUTO_MATCH_CANDIDATES} is appended,
-   * so a line PSD2 marks as discarded is never proposed — the same rule Classic's automatch
-   * applies through {@code APRM_MatchingUtility}. That is why this is an {@link OBQuery} now: the
-   * hooks answer HQL, which an {@code OBCriteria} cannot take. With no hook the query is the old
+   * <p><b>Lines excluded by a hook (ETP-5581).</b> With {@code bank-bounce-suggestions} on for
+   * the account, the condition every {@code BankStatementLineFilterHook} contributes for
+   * {@code AUTO_MATCH_CANDIDATES} is appended ({@link StatementLineFilter#hql}), so a line PSD2
+   * marks as discarded is never proposed — the same rule Classic's automatch applies through
+   * {@code APRM_MatchingUtility}. That is why this is an {@link OBQuery} now: the hooks answer HQL,
+   * which an {@code OBCriteria} cannot take. With the flag off, or no hook, the query is the old
    * criteria's, predicate for predicate.
    *
    * <p><b>Tenant scoping (ETP-4950 pattern).</b> This goes through the DAL rather than a raw
@@ -1851,8 +1856,9 @@ public class ReconciliationHandler implements NeoHandler {
   List<FIN_BankStatementLine> loadPendingLines(String accountId) {
     Map<String, Object> params = new HashMap<>();
     params.put(StatementLineFilter.PARAM_ACCOUNT_ID, accountId);
-    // ETP-5581: the lines a BankStatementLineFilterHook excludes (PSD2's discarded lines) are never
-    // auto-match candidates. Not gated by any flag; with no hook the condition is empty.
+    // ETP-5581 toggle point (StatementLineFilter.hql): with bank-bounce-suggestions on, the lines a
+    // BankStatementLineFilterHook excludes (PSD2's discarded lines) are never auto-match
+    // candidates. With the flag off, or no hook, the condition is empty.
     FIN_FinancialAccount account = loadAccount(accountId);
     String excluded = account == null ? ""
         : StatementLineFilter.hql(StatementLineFilter.ALIAS, account,

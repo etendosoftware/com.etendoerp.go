@@ -49,8 +49,22 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * and every caller here honours all of them, because nothing in this class names a module, a column
  * or an entity — it only runs the conditions the hooks contribute.
  *
- * <p><b>Not gated by any feature flag.</b> With no hook installed, or with no excluded line, every
- * method here answers "nothing is excluded" and the callers behave exactly as before.
+ * <p><b>Gated by {@code bank-bounce-suggestions}</b> ({@link #honoured()}, evaluated per account
+ * and per request by {@link BankBounceSuggestionsFlag}). With the flag off nothing is excluded,
+ * hook or not: no condition, no {@code LINE_DISCARDED}, no {@code discarded} marker, no
+ * {@code counts.discarded} and no {@code status=discarded} — every answer is the one from before
+ * ETP-5581, and a discarded line is a plain pending line that can be matched and reconciled. This
+ * class is the toggle point of every caller (the reconciliation panel, auto-match, the write guards
+ * and the statement-lines view): retiring the flag is a grep for it. With the flag on and no hook
+ * installed, or no excluded line, every method answers "nothing is excluded" as well.
+ *
+ * <p><b>A reconciled line counts as reconciled.</b> The exclusion lists ({@link #excludedLineIds},
+ * the auto-match candidates) read only unmatched lines, so a line matched to a transaction counts as
+ * reconciled whatever its discard flag says — the case of a line discarded while the flag was on
+ * and reconciled while it was off. The write guards ({@link #discardedLineError}) never meet such a
+ * line: the reconcile paths refuse it as already reconciled first. They do meet a stuck line (a
+ * movement with no reconciliation) before its heal frees it, and that one is not reconciled, so a
+ * discarded stuck line is still refused.
  *
  * <p><b>The hook's contract.</b> An excluded line must never be reconciled: a write path that finds
  * one answers the coded 409 {@code LINE_DISCARDED} ({@link StatementLineDiscard#discardedError()}).
@@ -87,7 +101,119 @@ final class StatementLineFilter {
   }
 
   /**
-   * The condition every hook contributes for {@code alias}, ready to append to a where clause.
+   * How the discarded lines of one account shape a {@code pendingLines} answer: the toggle point
+   * of {@code ReconciliationHandler.buildPendingLines}. Not honoured ({@link #NOT_HONOURED}, the
+   * flag off): nothing is split off, {@code status=discarded} is ignored like any other status and
+   * there is no {@code counts.discarded}.
+   */
+  static final class Discards {
+
+    /** The view of a request with {@code bank-bounce-suggestions} off. */
+    static final Discards NOT_HONOURED = new Discards(false, Collections.emptySet());
+
+    private final boolean honoured;
+    private final Set<String> excludedIds;
+
+    /**
+     * A view over the excluded lines of one account.
+     *
+     * @param honoured    whether the discarded lines are honoured for this request
+     * @param excludedIds the ids the hooks exclude; ignored when not honoured
+     */
+    private Discards(boolean honoured, Set<String> excludedIds) {
+      this.honoured = honoured;
+      this.excludedIds = excludedIds;
+    }
+
+    /**
+     * Whether the discarded lines are honoured for this request.
+     *
+     * @return {@code true} with {@code bank-bounce-suggestions} on
+     */
+    boolean isHonoured() {
+      return honoured;
+    }
+
+    /**
+     * Splits the raw rows into the rows to show and the excluded ones ({@link #splitRows}); when
+     * not honoured every row is kept.
+     *
+     * @param rows the raw rows, each with an {@code id}
+     * @return {@code [kept, excluded]}
+     */
+    JSONArray[] split(JSONArray rows) {
+      return honoured ? splitRows(rows, excludedIds) : new JSONArray[] { rows, new JSONArray() };
+    }
+
+    /**
+     * Whether {@code status} asks for the excluded lines alone ({@code status=discarded}). Never
+     * when not honoured: the value is then ignored like any status the panel filters client-side.
+     *
+     * @param status the {@code status} request parameter, possibly {@code null}
+     * @return {@code true} when the answer lists only the excluded lines
+     */
+    boolean listsOnlyDiscarded(String status) {
+      return honoured && STATUS_DISCARDED.equals(status);
+    }
+
+    /**
+     * Puts {@code counts.discarded} when honoured; leaves {@code counts} untouched otherwise.
+     *
+     * @param counts    the answer's per-state counts
+     * @param discarded how many lines were split off
+     * @throws JSONException when the count cannot be written
+     */
+    void putCount(JSONObject counts, int discarded) throws JSONException {
+      if (honoured) {
+        counts.put(StatementLineDiscard.KEY_DISCARDED, discarded);
+      }
+    }
+  }
+
+  /**
+   * Whether the discarded (hook-excluded) lines are honoured for the account of the request: only
+   * with {@code bank-bounce-suggestions} on ({@link BankBounceSuggestionsFlag#isEnabled()}, per
+   * account and per request). Off, Etendo behaves as before ETP-5581.
+   *
+   * @return {@code true} when the flag is on for the request's account
+   */
+  static boolean honoured() {
+    return BankBounceSuggestionsFlag.isEnabled();
+  }
+
+  /**
+   * The {@code pendingLines} view of the account's discarded lines: one flag evaluation and, when
+   * honoured, the excluded ids ({@link #excludedLineIds}).
+   *
+   * @param account the account; {@code null} excludes nothing
+   * @param usage   what the caller uses the answer for
+   * @return the view, {@link Discards#NOT_HONOURED} with the flag off
+   */
+  static Discards discards(FIN_FinancialAccount account, Usage usage) {
+    return honoured() ? new Discards(true, excludedLineIds(account, usage))
+        : Discards.NOT_HONOURED;
+  }
+
+  /**
+   * The condition every hook contributes for {@code alias}, ready to append to a where clause, when
+   * the discarded lines are honoured ({@link #honoured()}); with the flag off no hook is asked and
+   * no parameter is added.
+   *
+   * @param alias   the alias of {@code FIN_BankStatementLine} in the caller's query
+   * @param account the account whose lines are queried; never {@code null}
+   * @param usage   what the query is for
+   * @param params  the query's named parameters; the hooks' parameters are added to it
+   * @return {@code ""} when the flag is off or no hook restricts the lines, else
+   *     {@code " and (c1) and (c2)"}
+   */
+  static String hql(String alias, FIN_FinancialAccount account, Usage usage,
+      Map<String, Object> params) {
+    return honoured() ? hookCondition(alias, account, usage, params) : "";
+  }
+
+  /**
+   * The condition every hook contributes for {@code alias}, whatever the flag: the raw answer of
+   * the hooks, for the methods of this class that check {@link #honoured()} themselves.
    *
    * @param alias   the alias of {@code FIN_BankStatementLine} in the caller's query
    * @param account the account whose lines are queried; never {@code null}
@@ -95,7 +221,7 @@ final class StatementLineFilter {
    * @param params  the query's named parameters; the hooks' parameters are added to it
    * @return {@code ""} when no hook restricts the lines, else {@code " and (c1) and (c2)"}
    */
-  static String hql(String alias, FIN_FinancialAccount account, Usage usage,
+  private static String hookCondition(String alias, FIN_FinancialAccount account, Usage usage,
       Map<String, Object> params) {
     return BankStatementLineFilterHelper.buildHqlCondition(alias,
         new BankStatementLineFilterContext(account, null, usage), params);
@@ -106,6 +232,9 @@ final class StatementLineFilter {
    * query, and none at all when no hook contributes a condition. Only unmatched lines are read
    * because a hook must never exclude a reconciled line (the hook's own contract).
    *
+   * <p>The raw answer of the hooks: it does not check the flag. Callers outside this class go
+   * through {@link #discards} or {@link #markDiscarded}, which do.
+   *
    * @param account the account; {@code null} answers an empty set
    * @param usage   what the caller uses the answer for
    * @return the excluded line ids, never {@code null}
@@ -115,7 +244,7 @@ final class StatementLineFilter {
       return Collections.emptySet();
     }
     Map<String, Object> params = new HashMap<>();
-    String condition = hql(ALIAS, account, usage, params);
+    String condition = hookCondition(ALIAS, account, usage, params);
     if (StringUtils.isBlank(condition)) {
       return Collections.emptySet();
     }
@@ -133,8 +262,9 @@ final class StatementLineFilter {
   }
 
   /**
-   * Whether a hook excludes this one line for {@code usage}. One query when a hook contributes a
-   * condition, none otherwise.
+   * Whether a hook excludes this one line for {@code usage}: only while the discarded lines are
+   * honoured ({@link #honoured()}). The hooks are asked first (no query); the flag is evaluated
+   * only when one of them contributes a condition, and then one query.
    *
    * @param line  the line; {@code null} is never excluded
    * @param usage what the caller is about to do with the line
@@ -146,8 +276,8 @@ final class StatementLineFilter {
       return false;
     }
     Map<String, Object> params = new HashMap<>();
-    String condition = hql(ALIAS, account, usage, params);
-    if (StringUtils.isBlank(condition)) {
+    String condition = hookCondition(ALIAS, account, usage, params);
+    if (StringUtils.isBlank(condition) || !honoured()) {
       return false;
     }
     params.put(PARAM_LINE_ID, line.getId());
@@ -162,8 +292,9 @@ final class StatementLineFilter {
   }
 
   /**
-   * The coded 409 {@code LINE_DISCARDED} when a hook excludes the line, {@code null} otherwise:
-   * the guard every reconcile path runs next to its draft-statement check.
+   * The coded 409 {@code LINE_DISCARDED} when a hook excludes the line ({@link #isExcluded}: only
+   * with the flag on), {@code null} otherwise: the guard every reconcile path runs next to its
+   * draft-statement check.
    *
    * @param line  the line about to be reconciled
    * @param usage what the caller is about to do with the line
@@ -177,12 +308,16 @@ final class StatementLineFilter {
    * Sets {@code discarded} ({@code true}/{@code false}) on every row of the statement-lines view,
    * so a discarded line is still listed and visibly marked. Rows are matched by {@code id}; the
    * excluded ids are read once per financial account of the listed statements. Never fails the
-   * listing: on any error every row is left unmarked and the error is logged.
+   * listing: on any error every row is left unmarked and the error is logged. With the flag off
+   * ({@link #honoured()}) no row gets the key at all, as before ETP-5581.
    *
    * @param rows         the rows of {@code bank-statements?action=lines}
    * @param statementIds the tenant-resolved statements the rows come from
    */
   static void markDiscarded(JSONArray rows, Collection<String> statementIds) {
+    if (!honoured()) {
+      return;
+    }
     try {
       Map<String, FIN_FinancialAccount> accounts = new LinkedHashMap<>();
       for (String statementId : statementIds) {

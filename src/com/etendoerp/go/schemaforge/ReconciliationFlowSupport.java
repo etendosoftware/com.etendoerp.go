@@ -488,8 +488,9 @@ final class ReconciliationFlowSupport {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT);
     }
-    // ETP-5581: a line excluded by a BankStatementLineFilterHook (PSD2's discarded lines) is never
-    // reconciled. Above createTransactionForRule for the same reason as the draft guard.
+    // ETP-5581 toggle point: with bank-bounce-suggestions on, a line excluded by a
+    // BankStatementLineFilterHook (PSD2's discarded lines) is never reconciled; off, it answers
+    // null. Above createTransactionForRule for the same reason as the draft guard.
     NeoResponse discarded =
         StatementLineFilter.discardedLineError(line, Usage.AUTO_MATCH_CANDIDATES);
     if (discarded != null) {

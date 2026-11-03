@@ -49,8 +49,15 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
  * ({@link #isSupported()}) at runtime instead of failing the build. The same holds for the four
  * {@code EM_ETGO_Bounce_*} columns of this module until the DAL is regenerated.
  *
- * <p><b>Not gated by any feature flag:</b> reading the flag, restoring a pair and refusing to
- * reconcile a discarded line work whatever {@code bank-bounce-suggestions} says.
+ * <p><b>The primitives are not gated; the decisions are.</b> Reading and writing the columns works
+ * whatever {@code bank-bounce-suggestions} says, because unconditional code needs it too: a
+ * statement edit keeps the bank's transaction id and the PSD2 flag of a recreated line
+ * ({@code BankStatementLineSet}), and the stored {@code EM_ETGO_DISCARDED_COUNT} is maintained
+ * ({@code BankStatementAggregates}). What a discarded line MEANS in Etendo is decided behind the
+ * flag: its exclusion and the {@code LINE_DISCARDED} refusal ({@link StatementLineFilter}), the
+ * pair actions ({@code BankBouncePairService}) and the statements list
+ * ({@code BankStatementsHandler.loadStatements}). With the flag off a discarded line is a plain
+ * pending line.
  */
 final class StatementLineDiscard {
 
@@ -184,7 +191,8 @@ final class StatementLineDiscard {
 
   /**
    * The 409 {@code LINE_DISCARDED}: the line is excluded from reconciliation (discarded by PSD2, or
-   * excluded by another module's hook) and must be restored first.
+   * excluded by another module's hook) and must be restored first. Only answered while
+   * {@code bank-bounce-suggestions} is on ({@link StatementLineFilter#discardedLineError}).
    *
    * @return the refusal
    */

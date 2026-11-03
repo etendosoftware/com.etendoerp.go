@@ -475,8 +475,9 @@ public class BankStatementsHandler implements NeoHandler {
         return NeoResponse.error(400, MSG_STATEMENT_NOT_FOUND + statementIds);
       }
       JSONArray lines = loadLines(ownedIds);
-      // ETP-5581: a line a BankStatementLineFilterHook excludes (PSD2's discarded lines) is still
-      // listed here, marked discarded:true. Not gated by any flag.
+      // ETP-5581 toggle point: with bank-bounce-suggestions on, a line a
+      // BankStatementLineFilterHook excludes (PSD2's discarded lines) is still listed here, marked
+      // discarded:true. With the flag off no row carries the key.
       StatementLineFilter.markDiscarded(lines, ownedIds);
       return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, lines));
     } catch (Exception e) {
@@ -1305,6 +1306,8 @@ public class BankStatementsHandler implements NeoHandler {
 
   JSONArray loadStatements(String accountId) throws Exception {
     JSONArray arr = new JSONArray();
+    // ETP-5581 toggle point, read once per list: whether discarded lines count as resolved.
+    boolean discardsHonoured = StatementLineFilter.honoured();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(STATEMENTS_SQL)) {
@@ -1313,8 +1316,8 @@ public class BankStatementsHandler implements NeoHandler {
         while (rs.next()) {
           int lineCount = rs.getInt("em_etgo_line_count");
           int matchedCount = rs.getInt("em_etgo_matched_count");
-          // ETP-5581: discarded lines are resolved without being matched; NULL (a row not yet
-          // recomputed since the column was added) reads as 0.
+          // ETP-5581: with bank-bounce-suggestions on, discarded lines are resolved without being
+          // matched; NULL (a row not yet recomputed since the column was added) reads as 0.
           int discardedCount = rs.getInt("em_etgo_discarded_count");
           BigDecimal totalIn = nullSafeBigDecimal(rs.getBigDecimal("em_etgo_total_in"));
           BigDecimal totalOut = nullSafeBigDecimal(rs.getBigDecimal("em_etgo_total_out"));
@@ -1337,7 +1340,9 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put(FIELD_LINE_COUNT, lineCount);
           row.put("matchedCount", matchedCount);
-          row.put("discardedCount", discardedCount);
+          if (discardsHonoured) {
+            row.put("discardedCount", discardedCount);
+          }
           // totalAmount is kept for the existing conditional filter; it is just the
           // sum of the two persisted columns, derived here so we store one less column.
           row.put("totalAmount", totalIn.add(totalOut));
@@ -1346,10 +1351,13 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("periodFrom", periodFrom);
           row.put("periodTo", periodTo);
           // Read the persisted status; fall back to deriving it for rows that
-          // predate the column and have not been backfilled yet.
+          // predate the column and have not been backfilled yet. ETP-5581: the persisted status
+          // counts discarded lines as resolved; with bank-bounce-suggestions off they are not, so
+          // a statement holding one derives its status again without them.
           String status = StringUtils.trimToEmpty(rs.getString("em_etgo_status"));
-          if (StringUtils.isBlank(status)) {
-            status = deriveStatementStatus(processed, lineCount, matchedCount, discardedCount);
+          if (StringUtils.isBlank(status) || (!discardsHonoured && discardedCount > 0)) {
+            status = deriveStatementStatus(processed, lineCount, matchedCount,
+                discardsHonoured ? discardedCount : 0);
           }
           row.put("status", status);
           arr.put(row);
