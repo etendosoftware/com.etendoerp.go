@@ -54,6 +54,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 /**
  * ETP-5848: {@code assignRoles} on {@code user/user} sets a user's template roles the way the
  * Users window does, through the same service and with the same guards.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.UserRolesAssignAction
  */
 class UserRolesAssignActionTest {
 

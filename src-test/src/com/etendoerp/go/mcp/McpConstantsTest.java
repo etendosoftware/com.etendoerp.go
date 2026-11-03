@@ -27,6 +27,8 @@ import org.junit.jupiter.api.Test;
 /**
  * Unit tests for {@link McpConstants}.
  * Verifies constant values used across MCP tool generation.
+ *
+ * @covers com.etendoerp.go.mcp.McpConstants
  */
 class McpConstantsTest {
 

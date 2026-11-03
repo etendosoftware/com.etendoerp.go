@@ -37,6 +37,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 /**
  * ETP-5848: when semantic search cannot run or finds nothing, {@code etendo_vector_search} searches
  * the same targets by text through {@code etendo_list}.
+ *
+ * @covers com.etendoerp.go.mcp.McpVectorTextFallback
  */
 class McpVectorTextFallbackTest {
 

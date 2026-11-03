@@ -60,6 +60,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * Additional unit tests for {@link NeoProcessService} covering validation,
  * process type resolution, OBUIAPP overloads, buildBundleParams,
  * collectColumnInfo, translateObuiappResult branches, and RequestContextScope.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoProcessService
  */
 public class NeoProcessServiceValidationTest {
 

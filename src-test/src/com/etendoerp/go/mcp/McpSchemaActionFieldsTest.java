@@ -41,6 +41,8 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
 /**
  * ETP-5848: a Classic process button publishes the parameters its process reads, so an agent
  * pressing it knows the keys, which ones it must send and the values a list takes.
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaActionFields
  */
 class McpSchemaActionFieldsTest {
 

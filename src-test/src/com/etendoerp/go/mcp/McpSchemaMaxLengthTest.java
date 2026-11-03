@@ -27,7 +27,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.openbravo.model.ad.datamodel.Column;
 
-/** ETP-5848: a text field says how many characters it takes; nothing else does. */
+/**
+ * ETP-5848: a text field says how many characters it takes; nothing else does.
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ */
 class McpSchemaMaxLengthTest {
 
   private static Column column(Long length) {
