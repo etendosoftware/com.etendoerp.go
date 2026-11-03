@@ -20,6 +20,8 @@ package com.etendoerp.go.schemaforge.handlers;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -40,6 +42,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -53,7 +56,9 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.data.AEATSIIFacturas;
 
+import com.etendoerp.go.schemaforge.FiscalSifGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
 
@@ -65,6 +70,10 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * {@link SiiConfigDeactivateHandler#smartDeactivate}: config not found, no adoption date (→
  * delete), adoption date set with SII invoices (→ null / fall through to CRUD), and adoption date
  * set without SII invoices (→ delete).
+ *
+ * <p>Also the Fiscal Configuration write rules ({@link FiscalSifGuard}) run first in
+ * {@code handle}, and the SII an agent activates ({@code configureFiscalSystem}) is marked
+ * {@code INSIISYSTEM = 'Y'} on its create, with a trigger refusal propagated, not swallowed.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler
  */
@@ -1261,5 +1270,136 @@ public class SiiConfigDeactivateHandlerTest {
       verify(nq).executeUpdate();
     }
   }
-}
 
+  // ─── Fiscal Configuration write rules (FiscalSifGuard) ───────────────────────
+
+  @Test
+  public void handleRefusesAnInactiveCreateThroughTheFiscalGuard() throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+      NeoResponse refusal = handler.handle(NeoContext.builder()
+          .endpointType(NeoEndpointType.CRUD)
+          .httpMethod("POST")
+          .requestBody(new JSONObject().put("active", false))
+          .build());
+
+      assertEquals(400, refusal.getHttpStatus());
+      assertEquals("ETGO_FiscalSifInactiveCreate", refusal.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+    }
+  }
+
+  @Test
+  public void handleRefusesAnAgentActiveChangeReadingTheSiiTable() throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("rawtypes")
+      NativeQuery nq = stubInSiiSystemNativeQuery(dal);
+      when(nq.uniqueResult()).thenReturn("Y");
+
+      NeoResponse refusal = handler.handle(NeoContext.builder()
+          .endpointType(NeoEndpointType.CRUD)
+          .httpMethod("PUT")
+          .recordId(RECORD_ID)
+          .requestBody(new JSONObject().put("active", false))
+          .mcpOrigin(true)
+          .build());
+
+      assertEquals(400, refusal.getHttpStatus());
+      assertEquals("ETGO_FiscalSifActiveByAgent", refusal.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(dal.getSession()).createNativeQuery(sql.capture());
+      assertTrue(sql.getValue(), sql.getValue().contains("FROM aeatsii_config"));
+      // Refused before smartDeactivate: the config is never loaded.
+      verify(dal, never()).get(eq(AEATSIIConfig.class), Mockito.anyString());
+    }
+  }
+
+  /** The POST response envelope of a created SII config. */
+  private static NeoContext createdSiiContext() throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("id", RECORD_ID));
+    return NeoContext.builder()
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(new JSONObject()
+            .put("response", new JSONObject().put("data", data))))
+        .build();
+  }
+
+  @Test
+  public void afterHandleMarksTheAgentActivatedSiiAsInSiiSystem() throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+    NeoContext ctx = createdSiiContext();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      AEATSIIConfig config = mock(AEATSIIConfig.class);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+      @SuppressWarnings("rawtypes")
+      NativeQuery nq = stubInSiiSystemNativeQuery(dal);
+
+      assertNull(FiscalSifGuard.asAgentOnboarding(() -> handler.afterHandle(ctx)));
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(dal.getSession()).createNativeQuery(sql.capture());
+      assertTrue(sql.getValue(), sql.getValue().contains("SET INSIISYSTEM = 'Y'"));
+      verify(nq).setParameter("id", RECORD_ID);
+      verify(nq).executeUpdate();
+      verify(config).setRedeme(false);
+    }
+  }
+
+  @Test
+  public void afterHandlePropagatesATriggerRefusalOfTheAgentInSiiSystemFlag() throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+    NeoContext ctx = createdSiiContext();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("rawtypes")
+      NativeQuery nq = stubInSiiSystemNativeQuery(dal);
+      when(nq.executeUpdate()).thenThrow(new IllegalStateException("AEATSII_CHECK_SIFS refused"));
+
+      try {
+        FiscalSifGuard.asAgentOnboarding(() -> handler.afterHandle(ctx));
+        fail("the trigger refusal must roll the activation back, not be swallowed");
+      } catch (IllegalStateException thrown) {
+        assertEquals("AEATSII_CHECK_SIFS refused", thrown.getMessage());
+      }
+      // The admin mode opened for the flag is restored, and nothing after it ran.
+      obCtxMock.verify(OBContext::restorePreviousMode);
+      verify(dal, never()).save(any());
+    }
+  }
+
+  @Test
+  public void afterHandleLeavesTheUiCreateOutOfTheSiiSystemFlag() throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+    NeoContext ctx = createdSiiContext();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      AEATSIIConfig config = mock(AEATSIIConfig.class);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(dal, never()).getSession();
+      verify(config).setRedeme(false);
+    }
+  }
+}

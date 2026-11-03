@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.handlers.PaymentInReactivateHandler;
 import com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler;
 import com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandler;
+import com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler;
+import com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler;
 import com.etendoerp.go.schemaforge.util.NeoExtensionIndex;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
@@ -81,6 +83,9 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler
+ * @covers com.etendoerp.go.schemaforge.VerifactuConfigReadyHandler
  * @covers com.etendoerp.go.schemaforge.util.NeoHandlerLookup
  */
 @DisplayName("ETP-5588 — migrated handlers resolve through @NeoExtension alone")
@@ -98,7 +103,11 @@ class NeoExtensionMigrationTest {
       new Binding(PaymentInReactivateHandler.class, "payment-in", "finPayment"),
       new Binding(PaymentOutReactivateHandler.class, "payment-out", "header"),
       new Binding(GoodsShipmentHeaderHandler.class, "goods-shipment", "goodsShipment"),
-      new Binding(SalesQuotationHeaderHandler.class, "sales-quotation", "quotation") };
+      new Binding(SalesQuotationHeaderHandler.class, "sales-quotation", "quotation"),
+      new Binding(SiiConfigDeactivateHandler.class, "sii-config", "siiConfiguration"),
+      new Binding(TbaiConfigSequenceHandler.class, "tbai-config", "header"),
+      new Binding(VerifactuConfigReadyHandler.class, "verifactu-config",
+          "cabeceraDeConfiguraciónVerifactu") };
 
   /** The bean classes to deploy in the mocked CDI container, one per migrated binding. */
   private static final List<Class<? extends NeoHandler>> MIGRATED_TYPES = Stream.of(MIGRATED)

@@ -1,0 +1,434 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge;
+
+import static com.etendoerp.go.schemaforge.FiscalSifGuardTest.message;
+import static com.etendoerp.go.schemaforge.FiscalSifGuardTest.messageKey;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.function.Function;
+
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.go.common.FiscalTestModeResolver;
+
+/**
+ * The {@code configureFiscalSystem} action: its refusals (status and message key), the records it
+ * sends through the batch seam per system and territory, "Añadir SII" on an existing TicketBAI,
+ * the certificate warning, and how a batch failure is reported.
+ *
+ * @covers com.etendoerp.go.schemaforge.FiscalSystemConfigureAction
+ */
+class FiscalSystemConfigureActionTest {
+
+  private static final String ORG = FiscalSifGuardTest.ORG;
+  private static final LocalDate TODAY = LocalDate.of(2026, 11, 3);
+
+  private MockedStatic<OBDal> dalStatic;
+  private MockedStatic<OBContext> obContextStatic;
+  private MockedStatic<FiscalTestModeResolver> testModeStatic;
+  private FiscalSifGuardTest.FakeFiscalTables tables;
+  private OBContext obContext;
+
+  /** What the batch seam received, and whether it ran as the agent onboarding. */
+  private final List<JSONArray> batches = new ArrayList<>();
+  private final List<Boolean> onboardingFlags = new ArrayList<>();
+  private Function<JSONArray, JSONObject> batchAnswer;
+  private Date certificate;
+
+  @BeforeEach
+  void setUp() {
+    tables = new FiscalSifGuardTest.FakeFiscalTables();
+    dalStatic = mockStatic(OBDal.class);
+    obContextStatic = mockStatic(OBContext.class);
+    testModeStatic = mockStatic(FiscalTestModeResolver.class);
+    OBDal dal = mock(OBDal.class);
+    dalStatic.when(OBDal::getInstance).thenReturn(dal);
+    Session session = tables.session();
+    when(dal.getSession()).thenReturn(session);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG);
+    when(dal.get(Organization.class, ORG)).thenReturn(org);
+    when(dal.get(Organization.class, "ORG-2")).thenReturn(mock(Organization.class));
+
+    obContext = mock(OBContext.class);
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(obContext.getCurrentClient()).thenReturn(mock(Client.class));
+    when(obContext.getReadableOrganizations()).thenReturn(new String[] { "0", ORG, "ORG-2" });
+    obContextStatic.when(OBContext::getOBContext).thenReturn(obContext);
+
+    batchAnswer = FiscalSystemConfigureActionTest::committed;
+    certificate = new Date();
+  }
+
+  @AfterEach
+  void tearDown() {
+    testModeStatic.close();
+    obContextStatic.close();
+    dalStatic.close();
+  }
+
+  private FiscalSystemConfigureAction action() {
+    return new FiscalSystemConfigureAction(ops -> {
+      batches.add(ops);
+      onboardingFlags.add(FiscalSifGuard.isAgentOnboarding());
+      return batchAnswer.apply(ops);
+    }, () -> TODAY, orgId -> certificate);
+  }
+
+  private NeoResponse run(String orgId, JSONObject params) {
+    return action().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(FiscalSystemConfigureAction.ACTION)
+        .httpMethod("POST")
+        .recordId(orgId)
+        .requestBody(params)
+        .obContext(obContext)
+        .mcpOrigin(true)
+        .build());
+  }
+
+  private NeoResponse run(String system, String territory) throws Exception {
+    return run(ORG, new JSONObject().put("system", system).put("territory", territory));
+  }
+
+  /** A committed batch outcome with one created record per operation. */
+  private static JSONObject committed(JSONArray ops) {
+    try {
+      JSONArray created = new JSONArray();
+      for (int i = 0; i < ops.length(); i++) {
+        String id = ops.getJSONObject(i).getString("id");
+        created.put(new JSONObject().put("id", id).put("recordId", "NEW-" + id));
+      }
+      return new JSONObject().put(BatchService.FIELD_COMMITTED, true).put("operations", created);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  private JSONObject operation(int index) throws Exception {
+    return batches.get(0).getJSONObject(index);
+  }
+
+  // ── refusals ─────────────────────────────────────────────────────────────
+
+  @Test
+  void anOrganizationOtherThanTheSessionsIsRefused() throws Exception {
+    NeoResponse response = run("ORG-2",
+        new JSONObject().put("system", "SII").put("territory", "navarra"));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_ORG_MISMATCH, messageKey(response));
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void forcedTestModeIsRefused() throws Exception {
+    testModeStatic.when(() -> FiscalTestModeResolver.isForceTestModeActive(any()))
+        .thenReturn(true);
+
+    NeoResponse response = run("SII", "navarra");
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals("ETGO_FiscalSifTestMode", messageKey(response));
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void aTerritoryThatDoesNotAllowTheSystemIsRefusedByName() throws Exception {
+    NeoResponse response = run("SII", "ceuta");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_NOT_ALLOWED, messageKey(response));
+    String text = message(response);
+    assertTrue(text.contains("Ceuta / Melilla (IPSI)"), text);
+    assertTrue(text.contains("VERI*FACTU"), "says what is allowed there: " + text);
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void siiInABasqueTerritoryWithoutTicketBaiIsNotAllowed() throws Exception {
+    NeoResponse response = run("SII", "alava");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_NOT_ALLOWED, messageKey(response));
+  }
+
+  @Test
+  void anOrganizationWithAnActiveSifIsRefused() throws Exception {
+    tables.active.put("etvfac_verifactu_config", "V");
+
+    NeoResponse response = run("SII", "baleares");
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_ALREADY_CONFIGURED, messageKey(response));
+    assertTrue(message(response).contains("VERI*FACTU"), message(response));
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void aMissingParameterIsRefusedBeforeAnyLookup() throws Exception {
+    NeoResponse response = run(ORG, new JSONObject().put("system", "SII"));
+
+    assertEquals(422, response.getHttpStatus());
+    JSONArray missing = response.getBody().getJSONObject("error")
+        .getJSONArray("missingParameters");
+    assertEquals("territory", missing.getString(0));
+    assertTrue(tables.sqls.isEmpty());
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void noParametersAtAllIsRefused() {
+    NeoResponse response = run(ORG, (JSONObject) null);
+
+    assertEquals(422, response.getHttpStatus());
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void anUnknownTerritoryIsRefused() throws Exception {
+    NeoResponse response = run("SII", "madrid");
+
+    assertEquals(422, response.getHttpStatus());
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void anOrganizationTheRoleCannotReadIsNotFound() throws Exception {
+    NeoResponse response = run("ORG-X",
+        new JSONObject().put("system", "SII").put("territory", "navarra"));
+
+    assertEquals(404, response.getHttpStatus());
+  }
+
+  @Test
+  void onlyPostRuns() {
+    NeoResponse response = action().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(FiscalSystemConfigureAction.ACTION)
+        .httpMethod("GET")
+        .recordId(ORG)
+        .build());
+
+    assertEquals(405, response.getHttpStatus());
+  }
+
+  @Test
+  void anotherActionOrSurfaceIsNotServed() {
+    assertNull(action().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION).fieldName("certificate").httpMethod("POST")
+        .build()));
+    assertNull(action().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD).fieldName(FiscalSystemConfigureAction.ACTION)
+        .httpMethod("POST").build()));
+  }
+
+  // ── what is created ──────────────────────────────────────────────────────
+
+  @Test
+  void verifactuInCanariasCreatesOneRecordWithTaxType03() throws Exception {
+    NeoResponse response = run("VERIFACTU", "canarias");
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(1, batches.get(0).length());
+    JSONObject op = operation(0);
+    assertEquals("verifactu-config", op.getString("spec"));
+    assertEquals("cabeceraDeConfiguraciónVerifactu", op.getString("entity"));
+    assertEquals("03", op.getJSONObject("body").getString("tAXType"));
+
+    JSONObject body = response.getBody();
+    assertEquals("VERIFACTU", body.getString("system"));
+    assertEquals("canarias", body.getString("territory"));
+    JSONObject created = body.getJSONArray("created").getJSONObject(0);
+    assertEquals("VERIFACTU", created.getString("system"));
+    assertEquals("verifactu-config", created.getString("spec"));
+    assertEquals("NEW-VERIFACTU", created.getString("id"));
+  }
+
+  @Test
+  void siiByAnAgentIsAcogidoFromTheStartAndRunsAsTheAgentOnboarding() throws Exception {
+    NeoResponse response = run("SII", "navarra");
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject op = operation(0);
+    assertEquals("sii-config", op.getString("spec"));
+    assertEquals("siiConfiguration", op.getString("entity"));
+    JSONObject sii = op.getJSONObject("body");
+    assertEquals("Y", sii.getString("acogidaAlSII"));
+    assertEquals("Y", sii.getString("navarra"));
+    assertEquals("IVA", sii.getString("taxtype"));
+    assertEquals("2026-11-03", sii.getString("fechaAcogidaSII"));
+    assertEquals(List.of(Boolean.TRUE), onboardingFlags);
+    assertFalse(FiscalSifGuard.isAgentOnboarding(), "the flag never outlives the batch");
+  }
+
+  @Test
+  void siiPlusTbaiCreatesSiiThenTicketBaiInOneBatch() throws Exception {
+    NeoResponse response = run("SII+TBAI", "bizkaia");
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(2, batches.get(0).length());
+    assertEquals("SII", operation(0).getString("id"));
+    assertEquals("Y", operation(0).getJSONObject("body").getString("acogidaAlSII"));
+    assertEquals("TBAI", operation(1).getString("id"));
+    assertEquals("tbai-config", operation(1).getString("spec"));
+    assertEquals("header", operation(1).getString("entity"));
+    assertEquals("BIZKAIA", operation(1).getJSONObject("body").getString("etsgSifTerritory"));
+    assertEquals("SII+TBAI", response.getBody().getString("system"));
+    assertEquals(2, response.getBody().getJSONArray("created").length());
+  }
+
+  @Test
+  void addingSiiToTicketBaiInItsTerritoryAnswersSiiPlusTbai() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = "GIPUZKOA";
+
+    NeoResponse response = run("SII", "gipuzkoa");
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals("SII+TBAI", response.getBody().getString("system"));
+    assertEquals(1, batches.get(0).length());
+    JSONObject sii = operation(0).getJSONObject("body");
+    assertEquals("SII", operation(0).getString("id"));
+    assertEquals("Y", sii.getString("guipuzcoa"));
+    assertEquals("Y", sii.getString("acogidaAlSII"));
+  }
+
+  @Test
+  void addingSiiToTicketBaiOfAnotherTerritoryIsRefused() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = "ARABA";
+
+    NeoResponse response = run("SII", "bizkaia");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_TERRITORY_MISMATCH, messageKey(response));
+    assertTrue(message(response).contains("Álava"), message(response));
+    assertTrue(batches.isEmpty());
+  }
+
+  // ── certificate ──────────────────────────────────────────────────────────
+
+  @Test
+  void withACertificateThereIsNoWarning() throws Exception {
+    NeoResponse response = run("VERIFACTU", "ceuta");
+
+    JSONObject body = response.getBody();
+    assertTrue(body.getJSONObject("certificate").getBoolean("exists"));
+    assertFalse(body.has("messages"));
+  }
+
+  @Test
+  void withoutACertificateTheAnswerWarnsToUploadIt() throws Exception {
+    certificate = null;
+
+    NeoResponse response = run("VERIFACTU", "ceuta");
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject body = response.getBody();
+    assertFalse(body.getJSONObject("certificate").getBoolean("exists"));
+    JSONObject warning = body.getJSONArray("messages").getJSONObject(0);
+    assertEquals("warning", warning.getString("type"));
+    assertTrue(warning.getString("text").contains("certificate"), warning.getString("text"));
+  }
+
+  // ── batch failure ────────────────────────────────────────────────────────
+
+  @Test
+  void aBatchRefusalKeepsItsStatusMessageAndKeys() throws Exception {
+    batchAnswer = ops -> json("{\"committed\":false,\"error\":{\"status\":409,"
+        + "\"message\":\"already there\",\"messageKeys\":[\"ETGO_FiscalSifOneActive\"]}}");
+
+    NeoResponse response = run("VERIFACTU", "baleares");
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals("already there", message(response));
+    assertEquals("ETGO_FiscalSifOneActive", messageKey(response));
+  }
+
+  @Test
+  void aBatchRefusalNestedInTheOperationDetailKeepsItsKeys() throws Exception {
+    batchAnswer = ops -> json("{\"committed\":false,\"error\":{\"status\":400,"
+        + "\"message\":\"op failed\",\"detail\":{\"error\":{\"messageKeys\":[\"K1\"]}}}}");
+
+    NeoResponse response = run("VERIFACTU", "baleares");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("K1", messageKey(response));
+  }
+
+  @Test
+  void aBatchWithNoAnswerIsAServerError() throws Exception {
+    batchAnswer = ops -> null;
+
+    NeoResponse response = run("VERIFACTU", "baleares");
+
+    assertEquals(500, response.getHttpStatus());
+    assertFalse(response.getBody().getJSONObject("error").has("messageKeys"));
+  }
+
+  @Test
+  void anUncommittedBatchWithoutErrorDetailIsABadRequest() throws Exception {
+    batchAnswer = ops -> json("{\"committed\":false,\"error\":{}}");
+
+    NeoResponse response = run("VERIFACTU", "baleares");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Could not configure the fiscal system.", message(response));
+  }
+
+  // ── contract ─────────────────────────────────────────────────────────────
+
+  @Test
+  void theActionIsDeclaredWithItsName() {
+    assertTrue(FiscalSystemConfigureAction.actionContracts()
+        .containsKey(FiscalSystemConfigureAction.ACTION));
+    assertTrue(FiscalSystemConfigureAction.serves("configureFiscalSystem"));
+    assertFalse(FiscalSystemConfigureAction.serves("certificate"));
+  }
+
+  private static JSONObject json(String text) {
+    try {
+      return new JSONObject(text);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+  }
+}

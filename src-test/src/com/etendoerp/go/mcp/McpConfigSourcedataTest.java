@@ -82,6 +82,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsConfig
+ * @covers com.etendoerp.go.schemaforge.FiscalSystemConfigureAction
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {
@@ -1157,5 +1158,38 @@ class McpConfigSourcedataTest {
             row[0] + " relaxes the write verb '" + verb + "'");
       }
     }
+  }
+
+  // ── ETP-6053: Fiscal Configuration — activation and certificate only in the app ──
+
+  /** sii-config, tbai-config and verifactu-config header entities. */
+  private static final List<String> FISCAL_CONFIGS = List.of(
+      "57DE601DBE42468BA9963E81DA56BB1C", "52E6AF2963894C128EE72E0A10D5F01B",
+      "5AAAB7DE44364794AE70BB19C9D66F90");
+  /** The organization's digital certificate entity. */
+  private static final String CERTIFICATE = "2FB4EB163355420D8DD676D5F92C546E";
+
+  @Test
+  @DisplayName("the fiscal configs hide create and delete and point to configureFiscalSystem")
+  void fiscalConfigsHideCreateAndDelete() throws IOException, JSONException {
+    for (String id : FISCAL_CONFIGS) {
+      JSONObject verbs = payloadOf(id).getJSONObject(McpVerbsSection.NAME);
+      assertFalse(verbs.optBoolean(McpVerbsSection.KEY_CREATE, true), id + " create");
+      assertFalse(verbs.optBoolean(McpVerbsSection.KEY_DELETE, true), id + " delete");
+      assertTrue(verbs.optBoolean(McpVerbsSection.KEY_UPDATE, true),
+          id + ": update stays open, the active change is refused by FiscalSifGuard instead");
+      assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD)
+          .contains("action:'configureFiscalSystem'"), id);
+      assertResolvesCleanly(id);
+    }
+  }
+
+  @Test
+  @DisplayName("the digital certificate hides every write and points to the certificate action")
+  void certificateHidesEveryWrite() throws IOException, JSONException {
+    JSONObject verbs = payloadOf(CERTIFICATE).getJSONObject(McpVerbsSection.NAME);
+    assertEveryWriteHidden(verbs, CERTIFICATE);
+    assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD).contains("action:'certificate'"));
+    assertResolvesCleanly(CERTIFICATE);
   }
 }

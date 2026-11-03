@@ -43,7 +43,9 @@ import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
 import org.hibernate.criterion.Criterion;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
@@ -62,6 +64,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 
+import com.etendoerp.go.common.FiscalTestModeResolver;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -85,6 +88,10 @@ import com.smf.ticketbai.data.TbaiConfig;
  *
  * <p>{@link TbaiConfigSequenceHandler#handle} is always a pre-hook no-op and is asserted
  * separately; all the interesting behavior lives in {@code afterHandle}.
+ *
+ * <p>Also that the Fiscal Configuration write rules ({@link
+ * com.etendoerp.go.schemaforge.FiscalSifGuard}) run first in {@code handle}, on this entity's
+ * own table.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler
  */
@@ -1695,6 +1702,67 @@ public class TbaiConfigSequenceHandlerTest {
       verifyNoInteractions(obDal);
       verify(obProvider, never()).get(Sequence.class);
       obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+    }
+  }
+
+  // ─── Fiscal Configuration write rules (FiscalSifGuard) ───────────────────────
+
+  @Test
+  public void handleRefusesAnInactiveCreateThroughTheFiscalGuard() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+      NeoResponse refusal = handler.handle(NeoContext.builder()
+          .endpointType(NeoEndpointType.CRUD)
+          .httpMethod("POST")
+          .requestBody(new JSONObject().put("active", false))
+          .build());
+
+      assertEquals(400, refusal.getHttpStatus());
+      assertEquals("ETGO_FiscalSifInactiveCreate", refusal.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+    }
+  }
+
+  @Test
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  public void handleRefusesASecondActiveConfigReadingItsOwnTable() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(obContext.getCurrentClient()).thenReturn(mock(Client.class));
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<FiscalTestModeResolver> testMode = mockStatic(FiscalTestModeResolver.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+      NativeQuery nq = mock(NativeQuery.class);
+      when(session.createNativeQuery(Mockito.anyString())).thenReturn(nq);
+      when(nq.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nq);
+      when(nq.uniqueResult()).thenReturn("EXISTING");
+
+      NeoResponse refusal = handler.handle(NeoContext.builder()
+          .endpointType(NeoEndpointType.CRUD)
+          .httpMethod("POST")
+          .requestBody(new JSONObject())
+          .obContext(obContext)
+          .build());
+
+      assertEquals(409, refusal.getHttpStatus());
+      JSONObject error = refusal.getBody().getJSONObject("error");
+      assertEquals("ETGO_FiscalSifOneActive", error.getJSONArray("messageKeys").getString(0));
+      assertTrue(error.getString("message"), error.getString("message").contains("TicketBAI"));
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session).createNativeQuery(sql.capture());
+      assertTrue(sql.getValue(), sql.getValue().contains("FROM tbai_config "));
     }
   }
 }

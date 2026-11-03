@@ -25,13 +25,17 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.FiscalSystemConfigureAction;
 import com.etendoerp.go.schemaforge.NeoCertificateHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -39,7 +43,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * ETP-5852 (M-170): the certificate status an agent reads — the expiry as a date and the days left,
- * negative once expired; no certificate answers exists:false and nothing else.
+ * negative once expired; no certificate answers exists:false and nothing else. As the single
+ * {@code @NeoExtension} of {@code organization/organization} it also declares and serves
+ * {@code configureFiscalSystem}, by delegating to {@code FiscalSystemConfigureAction}.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.OrganizationCertificateAction
  */
@@ -91,6 +97,37 @@ class OrganizationCertificateActionTest {
 
       assertEquals(404, response.getHttpStatus());
       obDalMock.verifyNoInteractions();
+      helperMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  void declaresTheCertificateAndTheFiscalSystemActions() {
+    List<String> actions = new ArrayList<>(new OrganizationCertificateAction().actionContracts()
+        .keySet());
+
+    assertEquals(List.of(OrganizationCertificateAction.ACTION,
+        FiscalSystemConfigureAction.ACTION), actions);
+  }
+
+  @Test
+  void configureFiscalSystemIsServedByTheFiscalSystemAction() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn(FiscalSystemConfigureAction.ACTION);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRecordId()).thenReturn("ORG_A");
+    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+    try (MockedStatic<NeoCertificateHelper> helperMock = mockStatic(NeoCertificateHelper.class)) {
+
+      NeoResponse response = new OrganizationCertificateAction().handle(ctx);
+
+      // The configureFiscalSystem contract answers: both of its parameters are missing.
+      assertEquals(422, response.getHttpStatus());
+      JSONArray missing = response.getBody().getJSONObject("error")
+          .getJSONArray("missingParameters");
+      assertEquals("system", missing.getString(0));
+      assertEquals("territory", missing.getString(1));
       helperMock.verifyNoInteractions();
     }
   }
