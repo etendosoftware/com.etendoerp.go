@@ -212,7 +212,9 @@ public class McpToolRouter {
     // handlers use admin mode for DAL metadata and therefore cannot safely host this check.
     // Dispatching before setAdminMode preserves AD_Window/entity organization isolation.
     if (McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
-      return McpVectorSearchTool.handle(arguments);
+      // ETP-5848: its text fallback lists through route(), so role, spec access and scopes apply.
+      return McpVectorSearchTool.handle(arguments,
+          listArgs -> route("etendo_list", listArgs, scopes));
     }
     try {
       OBContext.setAdminMode();
@@ -225,6 +227,7 @@ public class McpToolRouter {
         // Resolve spec name from tool name or arguments
         String specName = ToolRegistry.resolveSpecName(toolName, arguments);
         authorizeSpecAccess(specName, resolveAccessMethod(toolName));
+        McpEntityNames.defaultToPrimary(toolName, specName, arguments);
 
         switch (toolName) {
           case "etendo_discover":
@@ -342,7 +345,7 @@ public class McpToolRouter {
 
   /**
    * Handle the {@code docs} tool: fetch documentation from Context7 for the
-   * {@code etendosoftware/etendo-go-docs} library, filtered by a topic.
+   * {@code etendosoftware/etendo-docs} library, filtered by a topic.
    * <p>
    * Delegates to {@link #handleDocs(JSONObject, Context7DocsClient)} with a default
    * client. Tests should call the package-private overload with a mocked client.
@@ -452,6 +455,9 @@ public class McpToolRouter {
     String allParentsWhere = allParents
         ? McpAllParents.scopeWhere(specName, entityName, sfEntity, parentId) : null;
     filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters, allParents);
+    // ETP-6087: a role that cannot see `posted` cannot filter or sort by it either. Before the read
+    // provider, which receives the same filters and order.
+    McpQuerySupport.refuseHiddenAccountingFields(filters, orderBy, sfEntity, entityName);
 
     // ETP-5405 + ETP-5415 (D13): the read's PRE phase, which must run before the tab is demanded.
     // A customization that answers here is serving the whole list itself — over REST that has

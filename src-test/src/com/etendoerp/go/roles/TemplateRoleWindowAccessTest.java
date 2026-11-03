@@ -22,14 +22,26 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
+
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import com.etendoerp.go.roles.TemplateRoleWindowAccess.WindowGrant;
 
@@ -47,6 +59,9 @@ import com.etendoerp.go.roles.TemplateRoleWindowAccess.WindowGrant;
  * proxy grants — see the affected tests below). See {@link TemplateRoleWindowAccess}'s own
  * javadoc for the full per-role breakdown and the 3 deferred, windowless matrix rows this suite
  * does not (and should never) reference.</p>
+ *
+ * <p>ETP-6047: also pins the Invoice Inbox grants and the parity between this matrix and the
+ * inlined copy kept by {@code EnsureSystemRoleTemplatesScript}.</p>
  *
  * @covers com.etendoerp.go.roles.TemplateRoleWindowAccess
  */
@@ -95,17 +110,18 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void financeHasThirtyThreeGrantsIncludingTheResolvedManualJournals() {
+  void financeHasThirtyFourGrantsIncludingTheResolvedManualJournals() {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
-    assertEquals(33, finance.size(),
+    assertEquals(34, finance.size(),
         "Finance's ETP-4878 column has 25 non-dash rows once the 12 windowless rows and the 2 "
             + "ETP-5116 over-grants (Categoría del producto, Inventario físico) are excluded, plus "
             + "window 107 (Receipt-Invoice Link, ETP-5075), 2 ETP-5116 proxy grants (SII "
             + "Monitor, Tax Report), 3 more ETP-5116 direct grants for Configuración fiscal "
             + "(SII/TBAI/Verifactu Configuration), 2 more ETP-5116 direct grants from a later "
             + "pass (Informes financieros, Escaneo inteligente), and 1 more from a still-later "
-            + "pass (Informes de inventario), minus Escaneo inteligente again (ETP-5830)");
+            + "pass (Informes de inventario), minus Escaneo inteligente again (ETP-5830), plus "
+            + "Invoice Inbox (ETP-6047)");
 
     WindowGrant glJournalGrant = grantFor(finance, WINDOW_MANUAL_JOURNALS);
     assertNotNull(glJournalGrant,
@@ -173,14 +189,14 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void purchasingHasThirteenGrants() {
+  void purchasingHasFourteenGrants() {
     List<WindowGrant> purchasing = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.PURCHASING_ROLE_ID);
-    assertEquals(13, purchasing.size(),
+    assertEquals(14, purchasing.size(),
         "Purchasing's ETP-4878 column has 11 rows, plus window 107 (Receipt-Invoice Link) added "
             + "post-matrix by ETP-5075, plus 1 more ETP-5116 grant from a later pass (Escaneo "
             + "inteligente, removed again by ETP-5830), plus 1 more from a still-later pass "
-            + "(Informes de inventario)");
+            + "(Informes de inventario), plus Invoice Inbox (ETP-6047)");
     WindowGrant contacts = grantFor(purchasing, WINDOW_CONTACTS);
     assertTrue(contacts != null && !contacts.isReadOnly(),
         "Purchasing has full access to Contactos per the matrix");
@@ -384,8 +400,8 @@ class TemplateRoleWindowAccessTest {
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       total += grants.size();
     }
-    assertEquals(72, total,
-        "12 (Sales) + 13 (Purchasing) + 33 (Finance) + 14 (Inventory) = 72 — from the original "
+    assertEquals(74, total,
+        "12 (Sales) + 14 (Purchasing) + 34 (Finance) + 14 (Inventory) = 74 — from the original "
             + "64: +2 for window 107 (Receipt-Invoice Link) added to Purchasing and Finance by "
             + "ETP-5075, then ETP-5116 removed 1 net grant (Sales -1 for dropping full(\"168\")) "
             + "and added 3 net to Finance (+2/-2 for the 144/168 over-grant removals and the 2 "
@@ -394,7 +410,100 @@ class TemplateRoleWindowAccessTest {
             + "ETP-5116 pass added Escaneo inteligente to all 4 roles (+4) and Informes "
             + "financieros to Finance only (+1), reaching 73, then a still-later ETP-5116 pass "
             + "added Informes de inventario to Purchasing/Finance/Inventory (+3), reaching 76, "
-            + "then ETP-5830 removed Escaneo inteligente from all 4 roles (-4), reaching 72");
+            + "then ETP-5830 removed Escaneo inteligente from all 4 roles (-4), reaching 72, then ETP-6047 "
+            + "added Invoice Inbox to Purchasing and Finance (+2), reaching 74");
+  }
+
+  /**
+   * ETP-6047 — the Invoice Inbox window is granted FULL to Compras and Financiero, because its
+   * upload is a {@code POST} and {@code NeoAccessHelper#hasWindowAccess} needs
+   * {@code IsReadWrite='Y'} for write methods. Ventas and Almacén never see it.
+   */
+  @Test
+  void invoiceInboxIsFullForPurchasingAndFinanceAndAbsentForSalesAndInventory() {
+    Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
+    String windowId = TemplateRoleWindowAccess.INVOICE_INBOX_WINDOW_ID;
+
+    WindowGrant purchasing = grantFor(byRoleId.get(SystemRoleTemplates.PURCHASING_ROLE_ID), windowId);
+    assertTrue(purchasing != null && !purchasing.isReadOnly(),
+        "ETP-6047: Compras must have FULL access to Invoice Inbox");
+    WindowGrant finance = grantFor(byRoleId.get(SystemRoleTemplates.FINANCE_ROLE_ID), windowId);
+    assertTrue(finance != null && !finance.isReadOnly(),
+        "ETP-6047: Financiero must have FULL access to Invoice Inbox");
+    assertNull(grantFor(byRoleId.get(SystemRoleTemplates.SALES_ROLE_ID), windowId),
+        "ETP-6047: Ventas must have NO access to Invoice Inbox");
+    assertNull(grantFor(byRoleId.get(SystemRoleTemplates.INVENTORY_ROLE_ID), windowId),
+        "ETP-6047: Almacén must have NO access to Invoice Inbox");
+  }
+
+  /**
+   * ETP-6047 — parity guardrail. {@code EnsureSystemRoleTemplatesScript} lives in a separate
+   * source root ({@code src-util/modulescript}, not on the test classpath) and keeps an inlined
+   * copy of this matrix by design, so nothing but this test notices when the two drift. Like
+   * {@code EnsureLegacyPlanScriptTest}, it compiles the script's real source in memory against
+   * the test classpath and reads its matrix through reflection, so there is no source parsing to
+   * go stale and a compile error in the script fails here.
+   */
+  @Test
+  void theModuleScriptMatrixEqualsTheRuntimeMatrixForTheFourRoles(@TempDir Path classesDir)
+      throws Exception {
+    Path scriptRelative = Paths.get("src-util", "modulescript", "src", "com", "etendoerp", "go",
+        "modulescript", "EnsureSystemRoleTemplatesScript.java");
+    Path here = Paths.get("");
+    Optional<Path> root = List.of(here, here.resolve(Paths.get("modules", "com.etendoerp.go")))
+        .stream()
+        .filter(candidate -> Files.isRegularFile(candidate.resolve(scriptRelative)))
+        .findFirst();
+    assertTrue(root.isPresent(),
+        "com.etendoerp.go module root not found from " + here.toAbsolutePath());
+    JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+    assertNotNull(compiler, "a JDK (system Java compiler) is needed to compile the module script");
+    int status = compiler.run(null, null, null, "-proc:none", "-encoding", "UTF-8", "-classpath",
+        System.getProperty("java.class.path"), "-d", classesDir.toString(),
+        root.get().resolve(scriptRelative).toString());
+    assertEquals(0, status, "EnsureSystemRoleTemplatesScript.java must compile");
+
+    Map<String, Map<String, Boolean>> script;
+    try (URLClassLoader loader = new URLClassLoader(new URL[] {classesDir.toUri().toURL()},
+        TemplateRoleWindowAccessTest.class.getClassLoader())) {
+      Class<?> scriptClass = Class.forName(
+          "com.etendoerp.go.modulescript.EnsureSystemRoleTemplatesScript", true, loader);
+      Method matrix = scriptClass.getDeclaredMethod("windowAccessByRoleId");
+      matrix.setAccessible(true);
+      script = readScriptMatrix((Map<?, ?>) matrix.invoke(null));
+    }
+
+    Map<String, Map<String, Boolean>> runtime = new TreeMap<>();
+    TemplateRoleWindowAccess.byRoleId().forEach((roleId, grants) -> {
+      Map<String, Boolean> windows = new TreeMap<>();
+      grants.forEach(grant -> windows.put(grant.getWindowId(), grant.isReadOnly()));
+      assertEquals(grants.size(), windows.size(), "duplicate window in the runtime matrix of " + roleId);
+      runtime.put(roleId, windows);
+    });
+
+    assertEquals(4, script.size(), "the module script must carry the four template roles");
+    assertEquals(runtime, script,
+        "The inlined matrix of EnsureSystemRoleTemplatesScript drifted from "
+            + "TemplateRoleWindowAccess.byRoleId() (window ids or read-only flags): change both");
+  }
+
+  private static Map<String, Map<String, Boolean>> readScriptMatrix(Map<?, ?> raw)
+      throws Exception {
+    Map<String, Map<String, Boolean>> result = new TreeMap<>();
+    for (Map.Entry<?, ?> role : raw.entrySet()) {
+      Map<String, Boolean> windows = new TreeMap<>();
+      for (Object grant : (List<?>) role.getValue()) {
+        Method windowId = grant.getClass().getDeclaredMethod("getWindowId");
+        Method readOnly = grant.getClass().getDeclaredMethod("isReadOnly");
+        windowId.setAccessible(true);
+        readOnly.setAccessible(true);
+        Object previous = windows.put((String) windowId.invoke(grant),
+            (Boolean) readOnly.invoke(grant));
+        assertNull(previous, "duplicate window in the module script matrix of " + role.getKey());
+      }
+      result.put((String) role.getKey(), windows);
+    }
+    return result;
   }
 
   @Test
@@ -423,18 +532,19 @@ class TemplateRoleWindowAccessTest {
    * inteligente) = 41. Escaneo inteligente is granted to all 4 roles but counts once here. A
    * still-later ETP-5116 pass added 1 more brand-new distinct window (Informes de inventario,
    * shared by Purchasing/Finance/Inventory but counted once) = 42. ETP-5830 removed Escaneo
-   * inteligente from every role again = 41.</p>
+   * inteligente from every role again = 41. ETP-6047 added the Invoice Inbox window (Purchasing and
+   * Finance, counted once) = 42.</p>
    */
   @Test
-  void fortyOneDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
+  void fortyTwoDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
     Set<String> distinctWindowIds = new TreeSet<>();
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       for (WindowGrant grant : grants) {
         distinctWindowIds.add(grant.getWindowId());
       }
     }
-    assertEquals(41, distinctWindowIds.size(),
-        "The matrix's 72 grants must resolve to exactly 41 distinct AD_Window_IDs once shared "
+    assertEquals(42, distinctWindowIds.size(),
+        "The matrix's 74 grants must resolve to exactly 42 distinct AD_Window_IDs once shared "
             + "windows (e.g. Contactos, Producto, Tarifa) are counted once — "
             + "34 from ETP-4878/ETP-5075 (window 107 added to both Purchasing and Finance), plus "
             + "2 ETP-5116 proxy windows (SII Monitor, Tax Report) and 3 more ETP-5116 direct "
@@ -442,7 +552,8 @@ class TemplateRoleWindowAccessTest {
             + "brand-new ETP-5116 windows from a later pass (Informes financieros — Finance only; "
             + "Escaneo inteligente — all 4 roles, counted once), plus 1 more brand-new ETP-5116 "
             + "window from a still-later pass (Informes de inventario — Purchasing/Finance/"
-            + "Inventory, counted once), minus Escaneo inteligente removed again by ETP-5830");
+            + "Inventory, counted once), minus Escaneo inteligente removed again by ETP-5830, plus 1 brand-new ETP-6047 "
+            + "window (Invoice Inbox — Purchasing/Finance, counted once)");
   }
 
   /**

@@ -995,7 +995,7 @@ public class NeoProcessService {
           && (!params.has(columnName) || params.isNull(columnName)) && StringUtils.isBlank(param.getDefaultValue())) {
         return NeoResponse.error(400,
             "Missing mandatory parameter: " + columnName
-                + " (" + param.getName() + ")");
+                + " (" + param.getName() + ")" + NeoListValues.oneOf(param.getReferenceSearchKey()));
       }
     }
     return null;

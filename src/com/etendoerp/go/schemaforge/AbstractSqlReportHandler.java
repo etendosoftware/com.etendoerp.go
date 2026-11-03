@@ -350,11 +350,17 @@ abstract class AbstractSqlReportHandler implements NeoHandler {
       }
       if (schema == null) {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
-        StringBuilder hql = new StringBuilder("ad_client.id = :clientId and active = true");
+        // OBQuery does not translate a bare `this`, so the root entity carries an explicit
+        // alias (`as s`) and every root property is qualified with it (ETP-5794).
+        StringBuilder hql =
+            new StringBuilder("as s where s.client.id = :clientId and s.active = true");
         if (!orgId.isEmpty()) {
-          hql.append(" and exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
-              + " and oas.organization.id=:orgId and oas.active=true)");
+          hql.append(" and exists (from OrganizationAcctSchema oas where oas.accountingSchema = s"
+              + " and oas.organization.id = :orgId and oas.active = true)");
         }
+        // Deterministic pick when several schemas match; same order as TaxReportHandler,
+        // AgingReportHandler and ReportSelectorsServlet so all of them agree.
+        hql.append(" order by s.id");
         org.openbravo.dal.service.OBQuery<AcctSchema> query =
             OBDal.getInstance().createQuery(AcctSchema.class, hql.toString());
         query.setNamedParameter(SQL_PARAM_CLIENT_ID, clientId);

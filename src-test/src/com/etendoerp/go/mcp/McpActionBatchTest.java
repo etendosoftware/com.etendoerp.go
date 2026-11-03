@@ -526,7 +526,7 @@ class McpActionBatchTest {
     assertTrue(tool.getDescription().contains("etendo_batch"));
     assertTrue(tool.getDescription().contains("NOT atomic"));
     java.util.Map<String, Object> schema = tool.getInputSchema();
-    assertEquals(List.of("spec", "entity", "action", "ids"), schema.get("required"));
+    assertEquals(List.of("spec", "action", "ids"), schema.get("required"));
     @SuppressWarnings("unchecked")
     java.util.Map<String, Object> props = (java.util.Map<String, Object>) schema.get("properties");
     assertEquals(List.of("spec", "entity", "action", "ids", "parameters"),

@@ -47,7 +47,13 @@ import com.smf.securewebservices.SWSConfig;
  * which point directly to AD_Window, AD_Tab, and AD_Column.
  * Hooks are discovered via CDI using the Java_Qualifier on ETGO_SF_Entity.
  */
-@MultipartConfig(maxFileSize = 10L * 1024 * 1024, maxRequestSize = 12L * 1024 * 1024, fileSizeThreshold = 1024 * 1024)
+// maxFileSize is the per-file guard: NeoAttachmentPolicy.MAX_SIZE_MB (10 MB) in bytes.
+// maxRequestSize bounds the whole multipart request: the invoice inbox bulk upload (ETP-6047)
+// carries up to NeoAttachmentPolicy.BULK_MAX_FILES files, so it is that many files plus a 10 MB
+// margin for the multipart framing = 210 MB. It is container-wide, so it applies to ALL multipart
+// NEO endpoints (decided trade-off, see NeoAttachmentPolicy.MAX_REQUEST_BYTES).
+@MultipartConfig(maxFileSize = NeoAttachmentPolicy.MAX_SIZE_MB * 1024L * 1024L,
+    maxRequestSize = NeoAttachmentPolicy.MAX_REQUEST_BYTES, fileSizeThreshold = 1024 * 1024)
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
@@ -171,14 +177,11 @@ public class NeoServlet extends HttpBaseServlet {
 
     try {
       OBContext.setAdminMode();
-      if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
-        return;
-      }
-
-      if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
-        return;
-      }
-      requestRouter.handleSpecRequest(pathInfo, method, request, response);
+      // ETP-5819: admin mode skips the DAL's tenant check on writes; the guard restores it.
+      NeoTenantWriteGuard.call(() -> {
+        dispatch(pathInfo, method, request, response);
+        return null;
+      });
     } catch (MalformedJsonException e) {
       // A body or JSON parameter the client sent could not be parsed: its error, not ours.
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
@@ -191,6 +194,17 @@ public class NeoServlet extends HttpBaseServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private void dispatch(NeoPathInfo pathInfo, String method, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
+      return;
+    }
+    if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
+      return;
+    }
+    requestRouter.handleSpecRequest(pathInfo, method, request, response);
   }
 
   /**
