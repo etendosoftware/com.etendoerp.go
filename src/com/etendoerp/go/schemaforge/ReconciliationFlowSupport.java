@@ -408,7 +408,8 @@ final class ReconciliationFlowSupport {
   static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results)
       throws Exception {
-    prepareAllGroups(handler, account, groupsJson, prepared, results, new HashSet<>());
+    prepareAllGroups(handler, account, groupsJson, prepared, results, new HashSet<>(),
+        BankBounceSuggestionsFlag.isEnabled());
   }
 
   /**
@@ -419,17 +420,19 @@ final class ReconciliationFlowSupport {
    * group of any other {@code kind} than {@code "transaction"} is refused (400); a group with no
    * {@code kind} is a transaction group, as before.
    *
-   * @param handler      the reconciliation handler
-   * @param account      the account of the call
-   * @param groupsJson   the submitted groups
-   * @param prepared     the groups that passed, appended to
-   * @param results      the per-group failures, appended to
-   * @param takenLineIds the lines already taken in this call, updated with every accepted group
+   * @param handler          the reconciliation handler
+   * @param account          the account of the call
+   * @param groupsJson       the submitted groups
+   * @param prepared         the groups that passed, appended to
+   * @param results          the per-group failures, appended to
+   * @param takenLineIds     the lines already taken in this call, updated with every accepted group
+   * @param discardsHonoured whether discarded lines are honoured: {@code bank-bounce-suggestions}
+   *                         as {@code applySuggestions} evaluated it, once for the whole call
    * @throws Exception when a group cannot be prepared
    */
   static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results,
-      Set<String> takenLineIds) throws Exception {
+      Set<String> takenLineIds, boolean discardsHonoured) throws Exception {
     for (int i = 0; i < groupsJson.length(); i++) {
       JSONObject groupEntry = groupsJson.optJSONObject(i);
       if (groupEntry == null || BankBouncePairService.isBouncePairGroup(groupEntry)) {
@@ -437,7 +440,7 @@ final class ReconciliationFlowSupport {
       }
       String kind = groupEntry.optString(BankBounceSuggestions.KEY_KIND, "");
       NeoResponse prepError = kind.isEmpty() || BankBounceSuggestions.KIND_TRANSACTION.equals(kind)
-          ? prepareGroup(handler, account, groupEntry, prepared, takenLineIds)
+          ? prepareGroup(handler, account, groupEntry, prepared, takenLineIds, discardsHonoured)
           : NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Unsupported group kind: " + kind);
       if (prepError != null) {
         JSONObject failure = prepError.getBody();
@@ -450,9 +453,23 @@ final class ReconciliationFlowSupport {
     }
   }
 
+  /**
+   * Validates one transaction group of {@code applySuggestions} and, when it passes, appends it to
+   * {@code out} and its line to {@code takenLineIds}.
+   *
+   * @param handler          the reconciliation handler
+   * @param account          the account of the call
+   * @param groupEntry       the submitted group
+   * @param out              the groups that passed, appended to
+   * @param takenLineIds     the lines already taken in this call, updated on success
+   * @param discardsHonoured whether discarded lines are honoured: {@code bank-bounce-suggestions}
+   *                         as {@code applySuggestions} evaluated it, once for the whole call
+   * @return the refusal, or {@code null} when the group was prepared
+   * @throws Exception when the group cannot be prepared
+   */
   static NeoResponse prepareGroup(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONObject groupEntry, List<ReconciliationHandler.PreparedGroup> out,
-      Set<String> takenLineIds) throws Exception {
+      Set<String> takenLineIds, boolean discardsHonoured) throws Exception {
     String statementLineId = groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, null);
     if (StringUtils.isBlank(statementLineId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "statementLineId is required");
@@ -472,7 +489,7 @@ final class ReconciliationFlowSupport {
     // to its pending remainder, a stuck line is freed first, a draft-held or fully reconciled one is
     // refused — plus the batch-only rule: an effective line already taken by an accepted group.
     ReconciliationLineTargetSupport.Target target =
-        resolveGroupLine(handler, requested, statementLineId, takenLineIds);
+        resolveGroupLine(handler, requested, statementLineId, takenLineIds, discardsHonoured);
     if (target.error() != null) {
       return target.error();
     }
@@ -491,8 +508,8 @@ final class ReconciliationFlowSupport {
     // ETP-5581 toggle point: with bank-bounce-suggestions on, a line excluded by a
     // BankStatementLineFilterHook (PSD2's discarded lines) is never reconciled; off, it answers
     // null. Above createTransactionForRule for the same reason as the draft guard.
-    NeoResponse discarded =
-        StatementLineFilter.discardedLineError(line, Usage.AUTO_MATCH_CANDIDATES);
+    NeoResponse discarded = StatementLineFilter.discardedLineError(discardsHonoured, line,
+        Usage.AUTO_MATCH_CANDIDATES);
     if (discarded != null) {
       return discarded;
     }
@@ -553,14 +570,22 @@ final class ReconciliationFlowSupport {
    * line in {@code takenLineIds} is already pending, so the usual duplicates (the same id twice, or
    * a partial head plus its remainder) reach this refusal without any heal. Split out of
    * {@link #prepareGroup} to keep it under Sonar java:S3776.
+   *
+   * @param handler          the reconciliation handler
+   * @param requested        the requested line, owned by the account
+   * @param statementLineId  its id as requested
+   * @param takenLineIds     the lines already taken in this call
+   * @param discardsHonoured whether discarded lines are honoured, as the call evaluated the flag
+   * @return the line to operate on, or the refusal
+   * @throws Exception when the line cannot be resolved
    */
   private static ReconciliationLineTargetSupport.Target resolveGroupLine(
       ReconciliationHandler handler, FIN_BankStatementLine requested, String statementLineId,
-      Set<String> takenLineIds) throws Exception {
+      Set<String> takenLineIds, boolean discardsHonoured) throws Exception {
     String conflictMessage = ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED + ": "
         + statementLineId;
-    ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, requested, conflictMessage);
+    ReconciliationLineTargetSupport.Target target = ReconciliationLineTargetSupport
+        .resolveForMatch(handler, requested, conflictMessage, discardsHonoured);
     if (target.error() == null && takenLineIds.contains(target.line().getId())) {
       return ReconciliationLineTargetSupport.Target.failed(
           NeoResponse.error(HttpServletResponse.SC_CONFLICT, conflictMessage));

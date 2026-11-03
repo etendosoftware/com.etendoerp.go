@@ -128,6 +128,9 @@ final class ReconciliationDifferenceSupport {
    *     deliberately NO amount: the remainder is recomputed server-side and a client-sent amount is
    *     never read
    * @return 201 with the reconciliation envelope, or the first failing validation's error
+   *
+   * <p>ETP-5581: {@code bank-bounce-suggestions} is evaluated once here, for the preflight and for
+   * the delegated {@code reconcileGroup}.
    */
   static NeoResponse reconcileDifference(ReconciliationHandler handler, JSONObject body)
       throws Exception {
@@ -155,7 +158,8 @@ final class ReconciliationDifferenceSupport {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LOCK_BUSY);
     }
 
-    Preflight pre = preflight(handler, accountId, lineId, body);
+    boolean discardsHonoured = BankBounceSuggestionsFlag.isEnabled();
+    Preflight pre = preflight(handler, accountId, lineId, body, discardsHonoured);
     if (pre.error() != null) {
       return pre.error();
     }
@@ -168,7 +172,7 @@ final class ReconciliationDifferenceSupport {
         defaultDifferenceDescription(pre.description(), pre.glItemId())));
 
     NeoResponse delegated = handler.reconcileGroup(
-        reconcileGroupBody(accountId, lineId, trxId));
+        reconcileGroupBody(accountId, lineId, trxId), discardsHonoured);
     if (delegated == null
         || delegated.getHttpStatus() >= HttpServletResponse.SC_BAD_REQUEST) {
       // Unreachable for a synthesized single-operation body (see class javadoc), but a returned
@@ -195,9 +199,16 @@ final class ReconciliationDifferenceSupport {
   /**
    * Every read-only guard, in order. Split out of {@link #reconcileDifference} to keep both methods
    * under the cognitive-complexity limit (Sonar java:S3776).
+   *
+   * @param handler          the owning handler
+   * @param accountId        the account of the call
+   * @param lineId           the requested line
+   * @param body             the request body
+   * @param discardsHonoured whether discarded lines are honoured, as the entry evaluated the flag
+   * @return the validated inputs, or the first refusal
    */
   private static Preflight preflight(ReconciliationHandler handler, String accountId,
-      String lineId, JSONObject body) {
+      String lineId, JSONObject body, boolean discardsHonoured) {
     FIN_FinancialAccount account = handler.loadAccount(accountId);
     if (account == null) {
       return Preflight.failed(NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -231,8 +242,8 @@ final class ReconciliationDifferenceSupport {
     // ETP-5581 toggle point: with bank-bounce-suggestions on, a line excluded by a
     // BankStatementLineFilterHook (PSD2's discarded lines) is never reconciled; off, it answers
     // null. Read-only here too, so returning is safe.
-    NeoResponse discarded =
-        StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
+    NeoResponse discarded = StatementLineFilter.discardedLineError(discardsHonoured, line,
+        Usage.MATCH_STATEMENT_GRID);
     if (discarded != null) {
       return Preflight.failed(discarded);
     }

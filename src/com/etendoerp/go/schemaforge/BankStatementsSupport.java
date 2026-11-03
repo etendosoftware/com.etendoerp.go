@@ -282,8 +282,9 @@ public final class BankStatementsSupport {
   /**
    * Three-state status derived from how many of the statement's lines are
    * <em>resolved</em>: matched to a financial-account transaction, or discarded
-   * (ETP-5581 — in Etendo a line is only ever discarded as part of a PSD2 bounce
-   * pair). A discarded line is resolved without being matched, so it counts toward
+   * (ETP-5581 — Etendo discards lines as PSD2 bounce pairs; Classic's PSD2 button
+   * discards single lines, and {@code restorePair} restores those alone). A discarded
+   * line is resolved without being matched, so it counts toward
    * the status but never toward {@code matchedCount}. With
    * {@code resolved = matched + discarded}: {@code resolved == 0} → PENDING;
    * {@code 0 < resolved < total} → PARTIAL; {@code resolved >= total > 0} →

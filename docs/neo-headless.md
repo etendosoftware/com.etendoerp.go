@@ -2925,7 +2925,9 @@ with no reconciliation) is not reconciled, so a discarded one is still refused b
 | `bank-statements?action=lines` | `MATCH_STATEMENT_GRID` | Excluded lines are still listed, with **`discarded:true`** (every row carries `discarded`). |
 | Write paths | per path | 409 `LINE_DISCARDED`, see *Line targeting* above. |
 
-**Bounce suggestions (flag `bank-bounce-suggestions`; off ⇒ every answer unchanged, byte for byte).**
+**Bounce suggestions (flag `bank-bounce-suggestions`; off ⇒ every answer unchanged, byte for byte —
+except the MCP's static action list, a declared exception in §4.12.9, and the stored counters
+below).**
 A bounce is a line and the line that reverses it: opposite sign, **exact** amount, the bounce dated
 on or after the original and at most **60 days** later (`BankBounceDetector`). Only pending,
 not-excluded lines that carry `EM_PSD2_Transaction_Identifier` and belong to no split group are
@@ -3018,6 +3020,25 @@ public service), plus this module's link columns on `FIN_BankStatementLine`:
 `EM_ETGO_Bounce_Pair_Line_ID` (the counterpart; `ON DELETE SET NULL`), `EM_ETGO_Bounce_Discarded`
 (when), `EM_ETGO_Bounce_Signal` (list `pis_link` / `return_text` / `counterparty`, null for a pair
 with no signal) and `EM_ETGO_Bounce_Confidence` (list `high` / `review`). Restoring clears all four.
+**The stored confidence records what the system suggested, not the user's final choice** (the KPI
+counts `high` pairs only): it is `high` ONLY when detection proposed exactly this pair (same bounce,
+same original, not ambiguous) as `high`. Any other pair is stored `review`, whatever its signals
+would give in isolation — an ambiguous pair resolved in the panel by choosing one of its candidates
+(e.g. the return 924 with the transfer 925 out of [923, 925]), a pair detection proposed for review,
+or a pair detection did not propose at all (sent through the panel, the API or the MCP). The stored
+signal is still the one detection gave that pair or candidate, else the signals of the two lines.
+The `confidence` of the `discardPair` answer is the stored one.
+
+**Concurrency and reads per action.** Every path that writes a pair (`discardPair`, the
+`applySuggestions` bounce groups, `restorePair`) locks both lines `FOR UPDATE` in id order and
+re-reads them before checking their state (`BankBouncePairService.lockLines`, `Session.refresh`
+with `PESSIMISTIC_WRITE`), once they are known to belong to the account; two requests over the same
+lines run one after the other and the second sees the first's result. `restorePair` treats a link
+as a pair only when the counterpart points back: a one-sided link restores the line alone and
+leaves the other line as it is. The flag is evaluated ONCE per action entry
+(`BankBounceSuggestionsFlag`, the only reader) and handed down — `StatementLineFilter` and the
+guards take it as a parameter — and an `applySuggestions` call with several bounce groups loads the
+account's detection once and shares it (`BankBouncePairService.Detection`).
 
 **Validation and coded refusals** (shared by `discardPair` and the `applySuggestions` groups, in
 this order; every refusal has the top-level `code`, `message`, and `error.messageKeys` with the
@@ -3045,7 +3066,8 @@ A body line without `id` is a new line, as before — the SPA's statement editor
 yet, so until it does an edit still loses them.
 
 **Discarded lines count as resolved in every Etendo counter — with the flag on.** Product
-decision: in Etendo a line is only ever discarded as part of a bounce pair, so a discarded line is
+decision: Etendo discards lines as bounce pairs (Classic's PSD2 button can discard a single line,
+which `restorePair` restores alone), and a discarded line is
 **resolved** — never pending, and never reported as matched to a transaction. With the flag on, the
 counters outside this API agree with the pending panel:
 
@@ -4959,6 +4981,19 @@ The transfer (§4.12.1.5) follows the same pattern:
 | `OpenClose` (DB column name) | Classic button path, not the handler (fails in `OB.OpenClose.openClose`) | the contract's alias: run as `openClose` by the handler |
 | `N`, `docAction` or any undeclared key | reaches the handler (unread keys ignored; `N` goes to Process 167) | **422** before anything runs |
 | `documents.openClose` | served | **405** — `MCP_CONFIG.actions` hides it (not offered by the calendar) |
+
+##### REST and MCP on the bounce-pair surface with `bank-bounce-suggestions` off (ETP-5581, declared exception)
+
+The MCP's declared actions are static (`ReconciliationAgentActions.CONTRACTS`, built once), so
+`etendo_schema(view:"actions")` and `etendo_discover` show `discardPair`, `restorePair` and the
+`status` option `discarded` of `pendingLines` whatever the flag says. The behaviour is the same on
+both channels — it is only the advertised surface that differs. User decision: declared, not
+filtered per request.
+
+| what | REST / SPA, flag off | MCP, flag off |
+|---|---|---|
+| `discardPair`, `restorePair` | 403 `BOUNCE_SUGGESTIONS_OFF`; the SPA never offers them (it renders what the backend sends) | listed, and answer the same 403 (their descriptions say "only available when bounce suggestions are enabled") |
+| `pendingLines` `status=discarded` | ignored like any status the panel filters client-side | `discarded` listed as the option's only value; ignored the same way (the description says so) |
 
 ##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, aligned)
 

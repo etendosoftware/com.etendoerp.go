@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -30,6 +31,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.LockMode;
+import org.hibernate.LockOptions;
+import org.hibernate.Session;
 import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
@@ -55,7 +59,9 @@ import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
  * and the four link columns of this module — {@code EM_ETGO_Bounce_Pair_Line_ID} (the counterpart;
  * the foreign key is set to null when that line is deleted), {@code EM_ETGO_Bounce_Discarded} (when),
  * {@code EM_ETGO_Bounce_Signal} (the primary signal, or null for a pair with none) and
- * {@code EM_ETGO_Bounce_Confidence}. The columns are written through their column names
+ * {@code EM_ETGO_Bounce_Confidence} — what the system suggested, not the user's choice:
+ * {@code high} only for a pair detection proposed exactly as high, {@code review} for any other
+ * ({@link #signalAndConfidence}). The columns are written through their column names
  * ({@link StatementLineDiscard#set}), so this compiles before the DAL is regenerated.
  *
  * <p><b>Gating.</b> {@code discardPair}, {@code restorePair} and the {@code bouncePair} groups
@@ -73,6 +79,12 @@ import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
  * {@value BankBounceDetector#WINDOW_DAYS} days of the earlier ({@code DISCARD_NOT_ALLOWED}); and no
  * real ERP payment on either line ({@code HAS_PAYMENT}, {@link BankBouncePaymentGuard}). A pair the
  * detection did not propose (no signal) is accepted when it passes all of this: the user chose it.
+ *
+ * <p><b>Concurrency.</b> Once both lines are known to belong to the account, they are locked
+ * {@code FOR UPDATE} in id order and re-read before their state is checked ({@link #lockLines}),
+ * on every path that writes them (both discard paths and {@code restorePair}). <b>One read per
+ * action.</b> The flag is evaluated once per action and handed down; the account's detection is
+ * read once per action and shared by all its pairs ({@link Detection}).
  */
 final class BankBouncePairService {
 
@@ -168,6 +180,7 @@ final class BankBouncePairService {
    * @throws Exception when the account data cannot be read
    */
   static NeoResponse discardPair(ReconciliationHandler handler, JSONObject body) throws Exception {
+    // The flag is evaluated once for the whole action; everything below runs with it on.
     if (!BankBounceSuggestionsFlag.isEnabled()) {
       return BankBounceErrors.suggestionsOff();
     }
@@ -183,7 +196,8 @@ final class BankBouncePairService {
     if (missing != null) {
       return missing;
     }
-    Validated pair = validate(handler, account, lineId, counterpartId);
+    Validated pair = validate(handler, account, lineId, counterpartId,
+        new Detection(handler, account, true));
     if (pair.error() != null) {
       return pair.error();
     }
@@ -213,19 +227,24 @@ final class BankBouncePairService {
    * {@code takenLineIds}, the set the transaction groups are then prepared against, so a line
    * checked in two groups is refused the second time (409). Each pair succeeds or fails on its own;
    * a refusal is appended to {@code results} tagged with its lines and kind. With the flag off,
-   * every such group is refused with the 403 and nothing is written.
+   * every such group is refused with the 403 and nothing is written. The account's detection is
+   * read once, on the first pair that needs it, and shared by every pair of the call
+   * ({@link Detection}).
    *
    * @param handler      the reconciliation handler, for its DAL seams
    * @param account      the account of the call, already resolved
    * @param groups       every submitted group
    * @param takenLineIds the lines already taken in this call, updated
    * @param results      the per-group results, appended to
+   * @param enabled      whether {@code bank-bounce-suggestions} is on for the request, as
+   *                     {@code applySuggestions} evaluated it once for the whole call
    * @return how many bounce-pair groups were submitted
    * @throws Exception when the account data cannot be read or a result cannot be written
    */
   static int applyPairs(ReconciliationHandler handler, FIN_FinancialAccount account,
-      JSONArray groups, Set<String> takenLineIds, JSONArray results) throws Exception {
-    Boolean enabled = null;
+      JSONArray groups, Set<String> takenLineIds, JSONArray results, boolean enabled)
+      throws Exception {
+    Detection detection = enabled ? new Detection(handler, account, true) : null;
     int submitted = 0;
     for (int i = 0; i < groups.length(); i++) {
       JSONObject group = groups.optJSONObject(i);
@@ -233,13 +252,10 @@ final class BankBouncePairService {
         continue;
       }
       submitted++;
-      if (enabled == null) {
-        enabled = BankBounceSuggestionsFlag.isEnabled();
-      }
       String lineId = group.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, null);
       String counterpartId = group.optString(KEY_COUNTERPART_LINE_ID, null);
-      NeoResponse refusal = Boolean.TRUE.equals(enabled)
-          ? applyOne(handler, account, lineId, counterpartId, takenLineIds)
+      NeoResponse refusal = enabled
+          ? applyOne(handler, account, lineId, counterpartId, takenLineIds, detection)
           : BankBounceErrors.suggestionsOff();
       results.put(refusal != null ? tagged(refusal.getBody(), lineId, counterpartId)
           : tagged(new JSONObject().put(KEY_DISCARDED, true), lineId, counterpartId));
@@ -255,11 +271,13 @@ final class BankBouncePairService {
    * @param lineId        the group's {@code statementLineId}
    * @param counterpartId the group's {@code counterpartLineId}
    * @param takenLineIds  the lines already taken in this call, updated on success
+   * @param detection     the detection of the call, read once and shared by its pairs
    * @return the refusal, or {@code null} when the pair was discarded
    * @throws Exception when the account data cannot be read
    */
   private static NeoResponse applyOne(ReconciliationHandler handler, FIN_FinancialAccount account,
-      String lineId, String counterpartId, Set<String> takenLineIds) throws Exception {
+      String lineId, String counterpartId, Set<String> takenLineIds, Detection detection)
+      throws Exception {
     NeoResponse missing = missingIds(lineId, counterpartId);
     if (missing != null) {
       return missing;
@@ -267,7 +285,7 @@ final class BankBouncePairService {
     if (takenLineIds.contains(lineId) || takenLineIds.contains(counterpartId)) {
       return BankBounceErrors.conflict(BankBounceErrors.CODE_LINE_NOT_PENDING);
     }
-    Validated pair = validate(handler, account, lineId, counterpartId);
+    Validated pair = validate(handler, account, lineId, counterpartId, detection);
     if (pair.error() != null) {
       return pair.error();
     }
@@ -308,8 +326,14 @@ final class BankBouncePairService {
    * Discard / Restore button.
    *
    * <p>A discarded line with no link (discarded one by one in Classic) is restored alone: there is
-   * no pair to keep consistent. A line that is not discarded and has no link is left as it is and
+   * no pair to keep consistent; so is a line whose counterpart does not point back at it
+   * ({@link #linkedCounterpart}). A line that is not discarded and has no link is left as it is and
    * the answer lists nothing restored, so repeating the call is harmless.
+   *
+   * <p><b>Concurrency.</b> The line and the counterpart its link names are locked
+   * {@code FOR UPDATE} in id order and re-read before the link is checked and anything is written
+   * ({@link #lockLines}), so two restores, or a restore and a discard, of the same pair run one
+   * after the other.
    *
    * @param handler the reconciliation handler, for its DAL seams
    * @param body    the request body
@@ -340,7 +364,14 @@ final class BankBouncePairService {
     if (!StatementLineDiscard.isSupported()) {
       return BankBounceErrors.conflict(BankBounceErrors.CODE_DISCARD_NOT_ALLOWED);
     }
+    FIN_BankStatementLine named = linkTarget(line, account);
+    lockLines(line, named);
     FIN_BankStatementLine counterpart = linkedCounterpart(line, account);
+    if (counterpart != null && counterpart != named) {
+      // The link changed between the first read and the lock: lock its new target as well.
+      lockLines(counterpart);
+      counterpart = linkedCounterpart(line, account);
+    }
     List<String> restored = new ArrayList<>();
     restoreOne(line, restored);
     if (counterpart != null) {
@@ -355,7 +386,10 @@ final class BankBouncePairService {
   }
 
   /**
-   * The counterpart the line is linked to, when it belongs to the same account.
+   * The counterpart of a pair: the line {@code line}'s link names, when it belongs to the same
+   * account AND its own link points back at {@code line}. A one-sided link (the named line was
+   * restored, or re-discarded with another line) is not a pair: the line is restored alone and the
+   * other line is left as it is.
    *
    * @param line    the line
    * @param account the account of the call
@@ -363,20 +397,66 @@ final class BankBouncePairService {
    */
   private static FIN_BankStatementLine linkedCounterpart(FIN_BankStatementLine line,
       FIN_FinancialAccount account) {
+    FIN_BankStatementLine target = linkTarget(line, account);
+    if (target == null) {
+      return null;
+    }
+    Object back = StatementLineDiscard.get(target, COL_PAIR_LINE);
+    return back instanceof FIN_BankStatementLine
+        && line.getId().equals(((FIN_BankStatementLine) back).getId()) ? target : null;
+  }
+
+  /**
+   * The line {@code line}'s link names, when it belongs to the same account, whether or not its
+   * own link points back.
+   *
+   * @param line    the line
+   * @param account the account of the call
+   * @return the named line, or {@code null}
+   */
+  private static FIN_BankStatementLine linkTarget(FIN_BankStatementLine line,
+      FIN_FinancialAccount account) {
     Object linked = StatementLineDiscard.get(line, COL_PAIR_LINE);
     if (!(linked instanceof FIN_BankStatementLine)) {
       return null;
     }
-    FIN_BankStatementLine counterpart = (FIN_BankStatementLine) linked;
-    return ReconciliationSupport.belongsToAccount(counterpart, account.getId()) ? counterpart
-        : null;
+    FIN_BankStatementLine target = (FIN_BankStatementLine) linked;
+    return ReconciliationSupport.belongsToAccount(target, account.getId()) ? target : null;
+  }
+
+  /**
+   * Locks the given lines {@code FOR UPDATE} and re-reads them, one by one in id order, through the
+   * request's session ({@code Session.refresh} with {@link LockMode#PESSIMISTIC_WRITE}, the
+   * precedent of {@code CheckoutRequestStore}). The lock lives until the request's transaction
+   * ends, so a concurrent discard or restore of the same lines waits and then sees this one's
+   * result; the id order means two requests over the same two lines can never deadlock.
+   * Re-reading under the lock is what makes the checks that follow see the committed state, not
+   * the one read before the lock. Only lines already resolved for the account are passed here;
+   * {@code null}s and repeats are skipped.
+   *
+   * @param lines the lines to lock
+   */
+  static void lockLines(FIN_BankStatementLine... lines) {
+    List<FIN_BankStatementLine> ordered = new ArrayList<>();
+    Set<String> seen = new HashSet<>();
+    for (FIN_BankStatementLine line : lines) {
+      if (line != null && seen.add(line.getId())) {
+        ordered.add(line);
+      }
+    }
+    ordered.sort(Comparator.comparing(FIN_BankStatementLine::getId));
+    Session session = OBDal.getInstance().getSession();
+    for (FIN_BankStatementLine line : ordered) {
+      session.refresh(line, new LockOptions(LockMode.PESSIMISTIC_WRITE));
+    }
   }
 
   /**
    * The pair a discarded line was discarded with, for the {@code status=discarded} listing:
    * {@code {counterpartLineId, discardedAt, signal, confidence}}, or {@link JSONObject#NULL} when
    * the line has no link (discarded on its own in Classic) or the link columns are not mapped yet.
-   * Read-only, so not gated by the flag.
+   * Only reached through {@code status=discarded}, i.e. with the flag on; it does not read the flag
+   * itself.
    *
    * @param line the line, or {@code null}
    * @return the link, or {@link JSONObject#NULL}
@@ -442,18 +522,100 @@ final class BankBouncePairService {
   // ---------------------------------------------------------------------------
 
   /**
+   * What the pair validations of one action read once and share: the account's detection data
+   * (its auto-match candidate lines, PSD2 payments and open movements) and the pairs detected over
+   * it. Read on first use, after a flush, so an {@code applySuggestions} call with several bounce
+   * groups loads and detects once instead of once per pair. Pairs validated later in the same call
+   * see the data as it was before the earlier pairs of that call were discarded; their lines are
+   * refused by the call's taken-line set before they reach the detection.
+   */
+  static final class Detection {
+
+    private final ReconciliationHandler handler;
+    private final FIN_FinancialAccount account;
+    private final boolean honoured;
+    private AccountData data;
+    private List<Pair> pairs;
+
+    /**
+     * The detection of one action, not read yet.
+     *
+     * @param handler  the reconciliation handler, for its DAL seams
+     * @param account  the account of the action, already resolved
+     * @param honoured whether discarded lines are honoured ({@code bank-bounce-suggestions} on, as
+     *                 the action evaluated it)
+     */
+    Detection(ReconciliationHandler handler, FIN_FinancialAccount account, boolean honoured) {
+      this.handler = handler;
+      this.account = account;
+      this.honoured = honoured;
+    }
+
+    /**
+     * Whether discarded lines are honoured for this action.
+     *
+     * @return the flag as the action evaluated it
+     */
+    boolean honoured() {
+      return honoured;
+    }
+
+    /**
+     * The account's detection data, read on the first call.
+     *
+     * @return the data
+     * @throws Exception when it cannot be read
+     */
+    AccountData data() throws Exception {
+      read();
+      return data;
+    }
+
+    /**
+     * The pairs detected over {@link #data()}, computed on the first call.
+     *
+     * @return the pairs
+     * @throws Exception when the data cannot be read
+     */
+    List<Pair> pairs() throws Exception {
+      read();
+      return pairs;
+    }
+
+    /**
+     * Reads the data and detects the pairs, once.
+     *
+     * @throws Exception when the data cannot be read
+     */
+    private void read() throws Exception {
+      if (data != null) {
+        return;
+      }
+      OBDal.getInstance().flush();
+      int dateTolDays = handler.loadTolerances(account.getId())[0].intValue();
+      data = BankBounceDetector.load(account,
+          handler.loadPendingLines(account.getId(), honoured), dateTolDays);
+      pairs = BankBounceDetector.detect(data);
+    }
+  }
+
+  /**
    * Validates a pair for discard (see the class Javadoc for the order) and resolves its roles,
-   * primary signal and confidence.
+   * primary signal and confidence. Once both lines are known to belong to the account they are
+   * locked {@code FOR UPDATE} in id order and re-read ({@link #lockLines}) before any of their
+   * state is checked, so two requests discarding the same line run one after the other and the
+   * second is refused.
    *
    * @param handler       the reconciliation handler
    * @param account       the account, already resolved
    * @param lineId        one line
    * @param counterpartId the other line
+   * @param detection     the action's detection, read once and shared by its pairs
    * @return the validated pair, or the refusal
    * @throws Exception when the account data cannot be read
    */
   static Validated validate(ReconciliationHandler handler, FIN_FinancialAccount account,
-      String lineId, String counterpartId) throws Exception {
+      String lineId, String counterpartId, Detection detection) throws Exception {
     if (lineId.equals(counterpartId)) {
       return Validated.failed(NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "statementLineId and counterpartLineId must be two different lines"));
@@ -465,17 +627,16 @@ final class BankBouncePairService {
     if (owned != null) {
       return Validated.failed(owned);
     }
+    lockLines(a, b);
     if (!StatementLineDiscard.isSupported()) {
       return Validated.failed(BankBounceErrors.conflict(BankBounceErrors.CODE_DISCARD_NOT_ALLOWED));
     }
-    NeoResponse lineError = firstError(lineError(a), lineError(b), shapeError(a, b));
+    NeoResponse lineError = firstError(lineError(a, detection.honoured()),
+        lineError(b, detection.honoured()), shapeError(a, b));
     if (lineError != null) {
       return Validated.failed(lineError);
     }
-    OBDal.getInstance().flush();
-    int dateTolDays = handler.loadTolerances(account.getId())[0].intValue();
-    AccountData data = BankBounceDetector.load(account,
-        handler.loadPendingLines(account.getId()), dateTolDays);
+    AccountData data = detection.data();
     StatementLine la = data.find(a.getId());
     StatementLine lb = data.find(b.getId());
     if (la == null || lb == null) {
@@ -489,7 +650,7 @@ final class BankBouncePairService {
     if (!BankBounceDetector.withinWindow(original.date(), bounce.date())) {
       return Validated.failed(BankBounceErrors.conflict(BankBounceErrors.CODE_DISCARD_NOT_ALLOWED));
     }
-    List<Pair> detected = BankBounceDetector.detect(data);
+    List<Pair> detected = detection.pairs();
     String blocker = BankBouncePaymentGuard.blocker(data, otherPairLines(detected, la, lb), la, lb);
     if (blocker != null) {
       return Validated.failed(BankBounceErrors.conflict(blocker));
@@ -521,9 +682,14 @@ final class BankBouncePairService {
   }
 
   /**
-   * The primary signal and confidence to store: those the detection offered for this exact pair
-   * (an ambiguous pair stays {@code review} once its original is chosen), else the detection's
-   * rules applied to the two lines (a pair with no signal stores none, for review).
+   * The primary signal and the confidence to store. The confidence records what the system
+   * suggested, not the user's final choice — the KPI counts the {@code high} pairs only: it is
+   * {@code high} ONLY when detection proposed exactly this pair (same bounce, same original, not
+   * ambiguous) as high. Any other pair is stored {@code review}, whatever its signals would give
+   * in isolation: an ambiguous pair resolved by choosing one of its candidates, a pair detection
+   * proposed for review, and a pair it did not propose at all (sent through the panel, the API or
+   * the MCP). The signal is the one detection gave this pair or this candidate, else the signals
+   * of the two lines ({@code null} for a pair with none).
    *
    * @param data     the loaded data
    * @param detected the pairs detected over the same data
@@ -543,14 +709,13 @@ final class BankBouncePairService {
       for (Candidate c : p.candidates()) {
         if (c.line().id().equals(original.id())) {
           return new String[] { BankBounceDetector.primarySignalOf(c.signals()),
-              p.confidence() };
+              BankBounceDetector.CONFIDENCE_REVIEW };
         }
       }
     }
-    List<String> signals = BankBounceDetector.signals(data, original, bounce);
-    String confidence = signals.isEmpty() ? BankBounceDetector.CONFIDENCE_REVIEW
-        : BankBounceDetector.confidence(data, original, bounce, signals);
-    return new String[] { BankBounceDetector.primarySignalOf(signals), confidence };
+    return new String[] {
+        BankBounceDetector.primarySignalOf(BankBounceDetector.signals(data, original, bounce)),
+        BankBounceDetector.CONFIDENCE_REVIEW };
   }
 
   /**
@@ -591,13 +756,14 @@ final class BankBouncePairService {
    * counts as reconciled, so neither its PSD2 flag nor the hooks are consulted for it — PSD2's hook
    * condition looks at the discard flag alone and would call it discarded.
    *
-   * @param line the line, owned by the account
+   * @param line     the line, owned by the account
+   * @param honoured whether discarded lines are honoured, as the action evaluated the flag
    * @return the refusal, or {@code null}
    */
-  private static NeoResponse lineError(FIN_BankStatementLine line) {
+  private static NeoResponse lineError(FIN_BankStatementLine line, boolean honoured) {
     boolean unmatched = line.getFinancialAccountTransaction() == null;
     if (unmatched && (StatementLineDiscard.isDiscarded(line)
-        || StatementLineFilter.isExcluded(line, Usage.AUTO_MATCH_CANDIDATES))) {
+        || StatementLineFilter.isExcluded(honoured, line, Usage.AUTO_MATCH_CANDIDATES))) {
       return StatementLineDiscard.discardedError();
     }
     if (!unmatched || StatementLineDiscard.transactionIdentifier(line) == null) {

@@ -192,9 +192,9 @@ final class ReconciliationAgentActions {
             optional("q", S, "Free-text search on the line description."),
             options(ReconciliationHandler.KEY_STATUS, "With bounce suggestions enabled for the "
                 + "account, discarded lists ONLY the discarded lines (left out of every other "
-                + "answer and never reconcilable; counts.discarded says how many there are). Any "
-                + "other value, or none, lists the rest. With them disabled the value is ignored "
-                + "and discarded lines are ordinary pending lines.",
+                + "answer and never reconcilable; counts.discarded says how many there are). Omit "
+                + "it to list the rest. With bounce suggestions disabled the value is ignored and "
+                + "discarded lines are ordinary pending lines.",
                 List.of(StatementLineFilter.STATUS_DISCARDED))),
         NeoActionContract.read(CANDIDATES,
             "Lists what a statement line can be reconciled against: existing movements "

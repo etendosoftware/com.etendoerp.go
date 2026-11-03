@@ -138,10 +138,12 @@ final class ReconciliationLineTargetSupport {
    *                        account
    * @param conflictMessage message of the 409 for a fully reconciled line (the two callers word it
    *                        differently and the frontend matches both by text)
+   * @param discardsHonoured whether discarded lines are honoured: {@code bank-bounce-suggestions}
+   *                         as the action entry evaluated it, once for the whole request
    * @return the line to operate on, or the refusal
    */
   static Target resolveForMatch(ReconciliationHandler handler, FIN_BankStatementLine line,
-      String conflictMessage) throws Exception {
+      String conflictMessage, boolean discardsHonoured) throws Exception {
     FIN_FinaccTransaction trx = line.getFinancialAccountTransaction();
     if (trx == null) {
       return Target.of(line);
@@ -166,8 +168,8 @@ final class ReconciliationLineTargetSupport {
     // BankStatementLineFilterHook excludes: it cannot be reconciled afterwards anyway, so the heal
     // (a write) must not happen. Off, it answers null. A pending line (no movement) is returned
     // above unchanged and its caller runs the same guard next to its draft check.
-    NeoResponse discarded =
-        StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
+    NeoResponse discarded = StatementLineFilter.discardedLineError(discardsHonoured, line,
+        Usage.MATCH_STATEMENT_GRID);
     if (discarded != null) {
       return Target.failed(discarded);
     }

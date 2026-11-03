@@ -49,9 +49,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * and every caller here honours all of them, because nothing in this class names a module, a column
  * or an entity — it only runs the conditions the hooks contribute.
  *
- * <p><b>Gated by {@code bank-bounce-suggestions}</b> ({@link #honoured()}, evaluated per account
- * and per request by {@link BankBounceSuggestionsFlag}). With the flag off nothing is excluded,
- * hook or not: no condition, no {@code LINE_DISCARDED}, no {@code discarded} marker, no
+ * <p><b>Gated by {@code bank-bounce-suggestions}.</b> Every gated method takes the flag as its
+ * first argument ({@code honoured}): the action entry evaluates it ONCE
+ * ({@link BankBounceSuggestionsFlag#isEnabled()}, per account and per request) and passes the
+ * boolean down, so one request never asks the control plane twice. With the flag off nothing is
+ * excluded, hook or not: no condition, no {@code LINE_DISCARDED}, no {@code discarded} marker, no
  * {@code counts.discarded} and no {@code status=discarded} — every answer is the one from before
  * ETP-5581, and a discarded line is a plain pending line that can be matched and reconciled. This
  * class is the toggle point of every caller (the reconciliation panel, auto-match, the write guards
@@ -89,6 +91,9 @@ final class StatementLineFilter {
 
   /** Named parameter of a single line, prefixed for the same reason as {@link #PARAM_ACCOUNT_ID}. */
   private static final String PARAM_LINE_ID = "etgoLineId";
+
+  /** Named parameter of a set of lines, prefixed like {@link #PARAM_ACCOUNT_ID}. */
+  private static final String PARAM_LINE_IDS = "etgoLineIds";
 
   /** {@code pendingLines?status=discarded}: list only the excluded lines. */
   static final String STATUS_DISCARDED = StatementLineDiscard.KEY_DISCARDED;
@@ -171,49 +176,40 @@ final class StatementLineFilter {
   }
 
   /**
-   * Whether the discarded (hook-excluded) lines are honoured for the account of the request: only
-   * with {@code bank-bounce-suggestions} on ({@link BankBounceSuggestionsFlag#isEnabled()}, per
-   * account and per request). Off, Etendo behaves as before ETP-5581.
+   * The {@code pendingLines} view of the account's discarded lines: when honoured, the excluded ids
+   * ({@link #excludedLineIds}); otherwise {@link Discards#NOT_HONOURED}, with no query.
    *
-   * @return {@code true} when the flag is on for the request's account
+   * @param honoured whether {@code bank-bounce-suggestions} is on for the request, as its action
+   *                 entry evaluated it
+   * @param account  the account; {@code null} excludes nothing
+   * @param usage    what the caller uses the answer for
+   * @return the view
    */
-  static boolean honoured() {
-    return BankBounceSuggestionsFlag.isEnabled();
-  }
-
-  /**
-   * The {@code pendingLines} view of the account's discarded lines: one flag evaluation and, when
-   * honoured, the excluded ids ({@link #excludedLineIds}).
-   *
-   * @param account the account; {@code null} excludes nothing
-   * @param usage   what the caller uses the answer for
-   * @return the view, {@link Discards#NOT_HONOURED} with the flag off
-   */
-  static Discards discards(FIN_FinancialAccount account, Usage usage) {
-    return honoured() ? new Discards(true, excludedLineIds(account, usage))
-        : Discards.NOT_HONOURED;
+  static Discards discards(boolean honoured, FIN_FinancialAccount account, Usage usage) {
+    return honoured ? new Discards(true, excludedLineIds(account, usage)) : Discards.NOT_HONOURED;
   }
 
   /**
    * The condition every hook contributes for {@code alias}, ready to append to a where clause, when
-   * the discarded lines are honoured ({@link #honoured()}); with the flag off no hook is asked and
-   * no parameter is added.
+   * the discarded lines are honoured; with the flag off no hook is asked and no parameter is added.
    *
-   * @param alias   the alias of {@code FIN_BankStatementLine} in the caller's query
-   * @param account the account whose lines are queried; never {@code null}
-   * @param usage   what the query is for
-   * @param params  the query's named parameters; the hooks' parameters are added to it
+   * @param honoured whether {@code bank-bounce-suggestions} is on for the request, as its action
+   *                 entry evaluated it
+   * @param alias    the alias of {@code FIN_BankStatementLine} in the caller's query
+   * @param account  the account whose lines are queried; never {@code null}
+   * @param usage    what the query is for
+   * @param params   the query's named parameters; the hooks' parameters are added to it
    * @return {@code ""} when the flag is off or no hook restricts the lines, else
    *     {@code " and (c1) and (c2)"}
    */
-  static String hql(String alias, FIN_FinancialAccount account, Usage usage,
+  static String hql(boolean honoured, String alias, FIN_FinancialAccount account, Usage usage,
       Map<String, Object> params) {
-    return honoured() ? hookCondition(alias, account, usage, params) : "";
+    return honoured ? hookCondition(alias, account, usage, params) : "";
   }
 
   /**
    * The condition every hook contributes for {@code alias}, whatever the flag: the raw answer of
-   * the hooks, for the methods of this class that check {@link #honoured()} themselves.
+   * the hooks, for the methods of this class that are handed the flag themselves.
    *
    * @param alias   the alias of {@code FIN_BankStatementLine} in the caller's query
    * @param account the account whose lines are queried; never {@code null}
@@ -232,8 +228,8 @@ final class StatementLineFilter {
    * query, and none at all when no hook contributes a condition. Only unmatched lines are read
    * because a hook must never exclude a reconciled line (the hook's own contract).
    *
-   * <p>The raw answer of the hooks: it does not check the flag. Callers outside this class go
-   * through {@link #discards} or {@link #markDiscarded}, which do.
+   * <p>The raw answer of the hooks: it does not look at the flag. Callers outside this class go
+   * through {@link #discards} or {@link #markDiscarded}, which are handed it.
    *
    * @param account the account; {@code null} answers an empty set
    * @param usage   what the caller uses the answer for
@@ -263,21 +259,23 @@ final class StatementLineFilter {
 
   /**
    * Whether a hook excludes this one line for {@code usage}: only while the discarded lines are
-   * honoured ({@link #honoured()}). The hooks are asked first (no query); the flag is evaluated
-   * only when one of them contributes a condition, and then one query.
+   * honoured. With the flag off no hook is asked and nothing is queried; with it on, one query when
+   * a hook contributes a condition, none otherwise.
    *
-   * @param line  the line; {@code null} is never excluded
-   * @param usage what the caller is about to do with the line
+   * @param honoured whether {@code bank-bounce-suggestions} is on for the request, as its action
+   *                 entry evaluated it
+   * @param line     the line; {@code null} is never excluded
+   * @param usage    what the caller is about to do with the line
    * @return {@code true} when the line must not be matched or reconciled
    */
-  static boolean isExcluded(FIN_BankStatementLine line, Usage usage) {
+  static boolean isExcluded(boolean honoured, FIN_BankStatementLine line, Usage usage) {
     FIN_FinancialAccount account = accountOf(line);
-    if (account == null) {
+    if (!honoured || account == null) {
       return false;
     }
     Map<String, Object> params = new HashMap<>();
     String condition = hookCondition(ALIAS, account, usage, params);
-    if (StringUtils.isBlank(condition) || !honoured()) {
+    if (StringUtils.isBlank(condition)) {
       return false;
     }
     params.put(PARAM_LINE_ID, line.getId());
@@ -296,12 +294,15 @@ final class StatementLineFilter {
    * with the flag on), {@code null} otherwise: the guard every reconcile path runs next to its
    * draft-statement check.
    *
-   * @param line  the line about to be reconciled
-   * @param usage what the caller is about to do with the line
+   * @param honoured whether {@code bank-bounce-suggestions} is on for the request, as its action
+   *                 entry evaluated it
+   * @param line     the line about to be reconciled
+   * @param usage    what the caller is about to do with the line
    * @return the refusal, or {@code null} when the line may be reconciled
    */
-  static NeoResponse discardedLineError(FIN_BankStatementLine line, Usage usage) {
-    return isExcluded(line, usage) ? StatementLineDiscard.discardedError() : null;
+  static NeoResponse discardedLineError(boolean honoured, FIN_BankStatementLine line,
+      Usage usage) {
+    return isExcluded(honoured, line, usage) ? StatementLineDiscard.discardedError() : null;
   }
 
   /**
@@ -309,13 +310,15 @@ final class StatementLineFilter {
    * so a discarded line is still listed and visibly marked. Rows are matched by {@code id}; the
    * excluded ids are read once per financial account of the listed statements. Never fails the
    * listing: on any error every row is left unmarked and the error is logged. With the flag off
-   * ({@link #honoured()}) no row gets the key at all, as before ETP-5581.
+   * no row gets the key at all, as before ETP-5581, and nothing is read.
    *
+   * @param honoured     whether {@code bank-bounce-suggestions} is on for the request, as its
+   *                     action entry evaluated it
    * @param rows         the rows of {@code bank-statements?action=lines}
    * @param statementIds the tenant-resolved statements the rows come from
    */
-  static void markDiscarded(JSONArray rows, Collection<String> statementIds) {
-    if (!honoured()) {
+  static void markDiscarded(boolean honoured, JSONArray rows, Collection<String> statementIds) {
+    if (!honoured) {
       return;
     }
     try {
@@ -393,6 +396,7 @@ final class StatementLineFilter {
    * @throws JSONException when a row cannot be written
    */
   static JSONObject discardedLinesData(JSONArray rows) throws JSONException {
+    Map<String, FIN_BankStatementLine> linesById = linesById(rows);
     BigDecimal total = BigDecimal.ZERO;
     for (int i = 0; i < rows.length(); i++) {
       JSONObject row = rows.getJSONObject(i);
@@ -403,10 +407,8 @@ final class StatementLineFilter {
       row.put(StatementLineDiscard.KEY_DISCARDED, true);
       row.put("reconciledAmount", BigDecimal.ZERO);
       row.put("reconciledPct", 0);
-      // tenant-ok: the id comes from PENDING_LINES_SQL, scoped by client and organization
-      FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class,
-          row.optString(ReconciliationHandler.KEY_ID, ""));
-      row.put(KEY_BOUNCE_LINK, BankBouncePairService.linkJson(line));
+      row.put(KEY_BOUNCE_LINK, BankBouncePairService.linkJson(
+          linesById.get(row.optString(ReconciliationHandler.KEY_ID, ""))));
     }
     JSONObject counts = new JSONObject();
     counts.put(STATUS_DISCARDED, rows.length());
@@ -415,6 +417,39 @@ final class StatementLineFilter {
     data.put(ReconciliationHandler.KEY_TOTAL, total);
     data.put(ReconciliationHandler.KEY_COUNTS, counts);
     return data;
+  }
+
+  /**
+   * The statement lines of {@code rows}, by id, read in ONE query (not one per row). The ids come
+   * from {@code PENDING_LINES_SQL}, already scoped by client and organization; the query keeps the
+   * readable client/organization filter and reads inactive lines too, as the single reads it
+   * replaces did.
+   *
+   * @param rows the rows, each with an {@code id}
+   * @return the lines found, by id; empty when no row has an id
+   */
+  private static Map<String, FIN_BankStatementLine> linesById(JSONArray rows) {
+    Set<String> ids = new HashSet<>();
+    for (int i = 0; i < rows.length(); i++) {
+      JSONObject row = rows.optJSONObject(i);
+      String id = row != null ? row.optString(ReconciliationHandler.KEY_ID, "") : "";
+      if (!id.isEmpty()) {
+        ids.add(id);
+      }
+    }
+    Map<String, FIN_BankStatementLine> byId = new HashMap<>();
+    if (ids.isEmpty()) {
+      return byId;
+    }
+    OBQuery<FIN_BankStatementLine> query = OBDal.getInstance().createQuery(
+        FIN_BankStatementLine.class,
+        "as " + ALIAS + " where " + ALIAS + ".id in (:" + PARAM_LINE_IDS + ")");
+    query.setNamedParameter(PARAM_LINE_IDS, ids);
+    query.setFilterOnActive(false);
+    for (FIN_BankStatementLine line : query.list()) {
+      byId.put(line.getId(), line);
+    }
+    return byId;
   }
 
   /**

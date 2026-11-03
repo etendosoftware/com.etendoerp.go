@@ -820,7 +820,8 @@ entry in `etendo_schema_forge`.
 
 ### `bank-bounce-suggestions` (ETP-5581) — backend-only, per account, off by default
 
-> **Status: backend implemented (ETP-5581 part 1), SPA pending.** Registered on day one (registry
+> **Status: implemented — backend (com.etendoerp.go) and SPA (`etendo_schema_forge`, which ships
+> with it and never evaluates the flag).** Registered on day one (registry
 > entry `bank-bounce-suggestions` in `etendo_schema_forge` `flags-registry.json`). The only evaluator
 > is `BankBounceSuggestionsFlag` (`GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS`). Toggle points:
 > `ReconciliationHandler.buildAutoMatch` and `buildPendingLines` (bounce pairs, the `bounce` state),
@@ -857,7 +858,13 @@ lower than its reconciliation panel (e.g. 47 against 49) until the flag is turne
 the feature must revert the `ETGO_ACCOUNT_PENDING_COUNT` change (see the retirement note below).
 
 **Backend-only.** No key in the web client's `flag-keys.js`, and none must be added. The SPA renders
-only what the auto-match answer carries, so a browser key would be a second evaluator.
+only what the auto-match answer carries, so a browser key would be a second evaluator. **Evaluated
+once per action** and handed down (`StatementLineFilter` and the guards take the boolean).
+
+**Declared exception: the MCP surface.** The MCP's declared actions are static, so
+`etendo_schema` / `etendo_discover` list `discardPair`, `restorePair` and `pendingLines`'
+`status=discarded` option even with the flag off; they answer 403 / are ignored exactly as on REST.
+User decision: declared (`docs/neo-headless.md` §4.12.9), not filtered per request.
 
 **Targeting.** Per account: `FeatureFlagContext.forAccount(<ETGO_ACCOUNT email>)`, the email resolved
 the way `PortalLinkPolicy#currentAccountEmail` does (`GoAccountResolver.currentAccountEmail()`), the

@@ -140,9 +140,10 @@ import org.openbravo.model.project.Project;
  *   <tr>
  *     <td>{@code POST action=discardPair} / {@code POST action=restorePair}</td>
  *     <td>Discards a bounce pair ({@code { financialAccountId, statementLineId,
- *         counterpartLineId }}, behind the {@code bank-bounce-suggestions} flag) or restores the
- *         pair of a line ({@code { financialAccountId, lineId }}, not gated). See
- *         {@link BankBouncePairService}.</td>
+ *         counterpartLineId }}) or restores the pair of a line
+ *         ({@code { financialAccountId, lineId }}), both behind the
+ *         {@code bank-bounce-suggestions} flag (403 otherwise; with it off the undo path is
+ *         Classic's PSD2 Restore button). See {@link BankBouncePairService}.</td>
  *   </tr>
  * </table>
  *
@@ -224,8 +225,9 @@ public class ReconciliationHandler implements NeoHandler {
           ReconciliationHandlerSupport::handleReactivateSelected),
       Map.entry(METHOD_POST + " " + ACTION_RECONCILE_DIFFERENCE,
           ReconciliationHandlerSupport::handleReconcileDifference),
-      // ETP-5581: bounce pairs. discardPair is gated by bank-bounce-suggestions inside the
-      // service; restorePair is not, so a pair can always be undone.
+      // ETP-5581: bounce pairs. discardPair and restorePair are both gated by
+      // bank-bounce-suggestions inside the service (403 otherwise); with the flag off the undo path
+      // is Classic's PSD2 Restore button.
       Map.entry(METHOD_POST + " " + ACTION_DISCARD_PAIR, BankBouncePairService::handleDiscardPair),
       Map.entry(METHOD_POST + " " + ACTION_RESTORE_PAIR, BankBouncePairService::handleRestorePair));
 
@@ -494,6 +496,8 @@ public class ReconciliationHandler implements NeoHandler {
     sql.append(PENDING_LINES_ORDER);
 
     FIN_FinancialAccount account = loadAccount(accountId);
+    // ETP-5581: bank-bounce-suggestions, evaluated once for the whole request and handed down.
+    boolean bounceSuggestions = BankBounceSuggestionsFlag.isEnabled();
     BigDecimal[] tols = loadTolerances(accountId);
     int pendingDateTolDays = tols[0].intValue();
     BigDecimal pendingAmtTolPct = tols[1];
@@ -568,7 +572,7 @@ public class ReconciliationHandler implements NeoHandler {
     // count except `counts.discarded`; status=discarded answers with only them. With the flag off
     // nothing is split off, status=discarded is ignored and there is no counts.discarded.
     StatementLineFilter.Discards discards =
-        StatementLineFilter.discards(account, Usage.MATCH_STATEMENT_GRID);
+        StatementLineFilter.discards(bounceSuggestions, account, Usage.MATCH_STATEMENT_GRID);
     JSONArray[] split = discards.split(rawLines);
     if (discards.listsOnlyDiscarded(filterMap.get(KEY_STATUS))) {
       JSONObject discardedData = StatementLineFilter.discardedLinesData(split[1]);
@@ -580,9 +584,8 @@ public class ReconciliationHandler implements NeoHandler {
     JSONArray lines = BankStatementsSupport.mergeMatchGroups(split[0]);
     // ETP-5581: bounce pairs (state `bounce`, the `bouncePair` row annotation, `counts.bounce`),
     // only with the bank-bounce-suggestions flag on; with it off the panel is unchanged.
-    BankBounceSuggestions.Plan bounces = BankBounceSuggestions.plan(
-        BankBounceSuggestionsFlag.isEnabled(), account, () -> loadPendingLines(accountId),
-        pendingDateTolDays);
+    BankBounceSuggestions.Plan bounces = BankBounceSuggestions.plan(bounceSuggestions, account,
+        () -> loadPendingLines(accountId, bounceSuggestions), pendingDateTolDays);
     JSONObject data = ReconciliationHandlerSupport.summarizePendingLines(lines, account, rules,
         pendingDateTolDays, pendingAmtTolPct, BankBounceSuggestions.panelView(bounces));
     discards.putCount(data.getJSONObject(KEY_COUNTS), split[1].length());
@@ -936,8 +939,29 @@ public class ReconciliationHandler implements NeoHandler {
    * line goes through {@link ReconciliationLineTargetSupport#resolveForMatch} (partial-group head
    * redirected to its remainder, stuck line freed, draft-held line refused), and the 201 reports
    * {@code partial}, {@code pendingAmount} and {@code remainderLineId}.
+   *
+   * <p>ETP-5581: the action entry. {@code bank-bounce-suggestions} is evaluated here, once, and
+   * handed to {@link #reconcileGroup(JSONObject, boolean)}.
+   *
+   * @param body the request body
+   * @return the answer
+   * @throws Exception when the reconciliation fails
    */
   NeoResponse reconcileGroup(JSONObject body) throws Exception {
+    return reconcileGroup(body, BankBounceSuggestionsFlag.isEnabled());
+  }
+
+  /**
+   * {@link #reconcileGroup(JSONObject)} with {@code bank-bounce-suggestions} already evaluated by
+   * the action entry: {@code reconcileGroup} itself, or {@code reconcileDifference}, which
+   * delegates here and must not evaluate the flag a second time.
+   *
+   * @param body             the request body
+   * @param discardsHonoured whether discarded lines are honoured (the flag, as the entry read it)
+   * @return the answer
+   * @throws Exception when the reconciliation fails
+   */
+  NeoResponse reconcileGroup(JSONObject body, boolean discardsHonoured) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
     String statementLineId = body.optString(KEY_STATEMENT_LINE_ID, null);
     List<String> operationIds = readOperationIds(body);
@@ -973,8 +997,8 @@ public class ReconciliationHandler implements NeoHandler {
     // line whose movement sits in a draft reconciliation is refused (409, the draft is never
     // discarded here), a fully reconciled line is refused with the 409 as before. See
     // ReconciliationLineTargetSupport.
-    ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(this, line, MSG_LINE_ALREADY_RECONCILED);
+    ReconciliationLineTargetSupport.Target target = ReconciliationLineTargetSupport
+        .resolveForMatch(this, line, MSG_LINE_ALREADY_RECONCILED, discardsHonoured);
     if (target.error() != null) {
       return target.error();
     }
@@ -990,8 +1014,8 @@ public class ReconciliationHandler implements NeoHandler {
     // ETP-5581 toggle point: with bank-bounce-suggestions on, a line a BankStatementLineFilterHook
     // excludes (PSD2's discarded lines) is never reconciled — the hook's contract. Same place as
     // the draft-statement guard, before any write. With the flag off it answers null.
-    NeoResponse discarded =
-        StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
+    NeoResponse discarded = StatementLineFilter.discardedLineError(discardsHonoured, line,
+        Usage.MATCH_STATEMENT_GRID);
     if (discarded != null) {
       return discarded;
     }
@@ -1097,13 +1121,15 @@ public class ReconciliationHandler implements NeoHandler {
     AutoMatchSupport.MatchSettings matchSettings =
         new AutoMatchSupport.MatchSettings(autoDateTolDays, autoAmtTolPct, canPostDifferences);
 
+    // ETP-5581: bank-bounce-suggestions, evaluated once for the whole request and handed down.
+    boolean bounceSuggestions = BankBounceSuggestionsFlag.isEnabled();
     // Collect all pending lines for this account.
-    List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId);
+    List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId, bounceSuggestions);
     // ETP-5581: bounce pairs, only with the bank-bounce-suggestions flag on (Plan.NONE otherwise).
     // A high-confidence pair reserves its two lines BEFORE transaction matching: the loop skips
     // them, so a line proposed as a bounce is never proposed for reconciliation too.
     BankBounceSuggestions.Plan bounces = BankBounceSuggestions.plan(
-        BankBounceSuggestionsFlag.isEnabled(), account, () -> pendingLines, autoDateTolDays);
+        bounceSuggestions, account, () -> pendingLines, autoDateTolDays);
     Set<String> reservedForBounces = bounces.reservedLineIds();
 
     JSONArray groups = new JSONArray();
@@ -1213,13 +1239,15 @@ public class ReconciliationHandler implements NeoHandler {
     // request transaction (refused with a 403 per group when bank-bounce-suggestions is off). The
     // lines they discard join takenLineIds, the set the transaction groups are prepared against,
     // so a line checked in two groups is refused the second time with a 409.
+    // bank-bounce-suggestions is evaluated once for the whole call and handed to both steps.
+    boolean bounceSuggestions = BankBounceSuggestionsFlag.isEnabled();
     Set<String> takenLineIds = new HashSet<>();
     int bounceGroups = BankBouncePairService.applyPairs(this, account, groupsJson, takenLineIds,
-        results);
+        results, bounceSuggestions);
     int bounceResults = results.length();
     List<PreparedGroup> prepared = new ArrayList<>();
     ReconciliationFlowSupport.prepareAllGroups(this, account, groupsJson, prepared, results,
-        takenLineIds);
+        takenLineIds, bounceSuggestions);
 
     // Matching every prepared group into the shared reconciliation and processing it once lives in
     // ReconciliationHandlerSupport — extracted so this method's cognitive complexity stays under the
@@ -1850,10 +1878,12 @@ public class ReconciliationHandler implements NeoHandler {
    * <p>No date filter, deliberately: the modal proposes every pending line regardless of age.
    * Package-private for testability.
    *
-   * @param accountId the financial account whose statement lines are collected
+   * @param accountId        the financial account whose statement lines are collected
+   * @param discardsHonoured whether discarded lines are honoured: {@code bank-bounce-suggestions}
+   *                         as the action entry evaluated it, once for the whole request
    * @return the proposable lines, ordered by transaction date then line number
    */
-  List<FIN_BankStatementLine> loadPendingLines(String accountId) {
+  List<FIN_BankStatementLine> loadPendingLines(String accountId, boolean discardsHonoured) {
     Map<String, Object> params = new HashMap<>();
     params.put(StatementLineFilter.PARAM_ACCOUNT_ID, accountId);
     // ETP-5581 toggle point (StatementLineFilter.hql): with bank-bounce-suggestions on, the lines a
@@ -1861,7 +1891,7 @@ public class ReconciliationHandler implements NeoHandler {
     // candidates. With the flag off, or no hook, the condition is empty.
     FIN_FinancialAccount account = loadAccount(accountId);
     String excluded = account == null ? ""
-        : StatementLineFilter.hql(StatementLineFilter.ALIAS, account,
+        : StatementLineFilter.hql(discardsHonoured, StatementLineFilter.ALIAS, account,
             Usage.AUTO_MATCH_CANDIDATES, params);
     String bsl = StatementLineFilter.ALIAS + ".";
     String statement = bsl + FIN_BankStatementLine.PROPERTY_BANKSTATEMENT + ".";

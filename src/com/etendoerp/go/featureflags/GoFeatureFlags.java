@@ -444,10 +444,14 @@ public final class GoFeatureFlags {
    * the default and every failure read {@code false}.
    *
    * <p><b>What it gates.</b> The bounce pairs in the {@code autoMatch} answer (and the {@code bounce}
-   * state and pair annotations of {@code pendingLines}), the {@code discardPair} action and the
-   * {@code bouncePair} groups of {@code applySuggestions}. <b>Not gated:</b> excluding lines that
-   * are already discarded, refusing to reconcile them, and {@code restorePair}, so a pair can
-   * always be undone.
+   * state and pair annotations of {@code pendingLines}), the {@code discardPair} and
+   * {@code restorePair} actions, the {@code bouncePair} groups of {@code applySuggestions}, and
+   * whether discarded lines are honoured at all (their exclusion, the {@code LINE_DISCARDED}
+   * refusal, {@code counts.discarded}, {@code status=discarded}, the {@code discarded} marker and
+   * {@code discardedCount}). With the flag off Etendo behaves as before ETP-5581 and the undo path
+   * of a discarded line is Classic's PSD2 Restore button. <b>Not gated:</b> the stored counters
+   * computed in SQL or in persistence events ({@code EM_ETGO_Pending_Count},
+   * {@code EM_ETGO_Discarded_Count}, {@code EM_ETGO_Status}).
    *
    * <p><b>One reader.</b> Only {@code BankBounceSuggestionsFlag} reads this key, evaluated per
    * request and never cached. <b>Targeted per account</b>: the {@code ETGO_ACCOUNT} email of the

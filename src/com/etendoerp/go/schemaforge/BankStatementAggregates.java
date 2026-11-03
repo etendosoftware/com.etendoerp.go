@@ -58,8 +58,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
  * entity than the line), so it never re-triggers the line observer.
  *
  * <p><b>Discarded lines are resolved, not matched (ETP-5581).</b> A line discarded
- * by PSD2 ({@code EM_PSD2_Is_Discarded = Y}; in Etendo only ever as part of a
- * bounce pair) is counted in {@code EM_ETGO_DISCARDED_COUNT}, never in
+ * by PSD2 ({@code EM_PSD2_Is_Discarded = Y}: in Etendo always as part of a bounce
+ * pair, but Classic's PSD2 button discards single lines too, and {@code restorePair}
+ * restores them alone) is counted in {@code EM_ETGO_DISCARDED_COUNT}, never in
  * {@code EM_ETGO_MATCHED_COUNT}: it is reported as resolved without pretending it
  * was matched to a transaction. The two counts are disjoint — a line with a
  * transaction is matched whatever its flag says. The status treats both as

@@ -478,7 +478,7 @@ public class BankStatementsHandler implements NeoHandler {
       // ETP-5581 toggle point: with bank-bounce-suggestions on, a line a
       // BankStatementLineFilterHook excludes (PSD2's discarded lines) is still listed here, marked
       // discarded:true. With the flag off no row carries the key.
-      StatementLineFilter.markDiscarded(lines, ownedIds);
+      StatementLineFilter.markDiscarded(BankBounceSuggestionsFlag.isEnabled(), lines, ownedIds);
       return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, lines));
     } catch (Exception e) {
       log.error("Error loading lines for statements {}", statementIds, e);
@@ -1304,10 +1304,23 @@ public class BankStatementsHandler implements NeoHandler {
     return new GenericCsvBankStatementImporter().loadFile(stream, statement);
   }
 
+  /**
+   * The imported statements of an account with their stored aggregates, for the "Extractos
+   * importados" list. ETP-5581: with {@code bank-bounce-suggestions} on for the account
+   * ({@link BankBounceSuggestionsFlag#isEnabled()}, evaluated once per list), each row carries
+   * {@code discardedCount} and the status counts discarded lines as resolved, as the stored
+   * {@code EM_ETGO_STATUS} does. With the flag off the row has no {@code discardedCount} and a
+   * statement holding a discarded line derives its status again without it, so the list reads as
+   * before ETP-5581.
+   *
+   * @param accountId the financial account
+   * @return one row per statement
+   * @throws Exception when the query fails
+   */
   JSONArray loadStatements(String accountId) throws Exception {
     JSONArray arr = new JSONArray();
     // ETP-5581 toggle point, read once per list: whether discarded lines count as resolved.
-    boolean discardsHonoured = StatementLineFilter.honoured();
+    boolean discardsHonoured = BankBounceSuggestionsFlag.isEnabled();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(STATEMENTS_SQL)) {
