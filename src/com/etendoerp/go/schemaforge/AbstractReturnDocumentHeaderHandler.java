@@ -65,7 +65,18 @@ public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler 
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
-    return ReturnDocumentAvailability.unavailable(subject);
+    return ReturnDocumentAvailability.unavailable(subject, acceptsAllowDuplicate());
+  }
+
+  /**
+   * Whether this header's {@code createReturnInvoice} lets {@code allowDuplicate:true} create a
+   * second rectificativa (ETP-5712). Each customization answers for its own window: the customer
+   * return overrides it with {@code false} (ETP-6026, one per return as on the screen).
+   *
+   * @return {@code true} when the flag is declared and honoured
+   */
+  protected boolean acceptsAllowDuplicate() {
+    return true;
   }
 
   /**
