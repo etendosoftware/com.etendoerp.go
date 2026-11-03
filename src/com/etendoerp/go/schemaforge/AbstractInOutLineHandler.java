@@ -32,6 +32,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.InvoiceLine;
 
 /**
  * Shared hook logic for M_InOutLine-based entities (goods receipts and shipments).
@@ -88,7 +89,10 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
       JSONObject body = context.getRequestBody();
       if (body != null) {
         String invoiceLineId = body.optString("invoiceLineId", null);
-        if (invoiceLineId != null && !invoiceLineId.isEmpty()) {
+        // ETP-5819: the id is not a DAL field of this tab, so no preflight checked it; the link
+        // below is native SQL the write guard cannot see.
+        if (invoiceLineId != null && !invoiceLineId.isEmpty()
+            && TenantOwnership.loadOwned(InvoiceLine.class, invoiceLineId) != null) {
           PENDING_INVOICE_LINE_ID.set(invoiceLineId);
         }
       }

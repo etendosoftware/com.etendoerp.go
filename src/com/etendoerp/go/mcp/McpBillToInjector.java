@@ -29,6 +29,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.common.businesspartner.Location;
 
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.TenantOwnership;
 
 /**
  * Fills the bill-to address of a document the agent created without one, resolving it from the
@@ -235,7 +236,8 @@ final class McpBillToInjector {
     if (StringUtils.isBlank(locationId)) {
       return false;
     }
-    Location location = OBDal.getInstance().get(Location.class, locationId);
+    // ETP-5819: the id comes from the request; another tenant's location is never a match.
+    Location location = TenantOwnership.loadOwned(Location.class, locationId);
     return location != null
         && Boolean.TRUE.equals(location.isActive())
         && Boolean.TRUE.equals(location.isInvoiceToAddress())

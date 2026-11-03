@@ -213,7 +213,9 @@ public final class NeoAttachmentsHelper {
     try {
       String tableId = resolveTableId(tableName);
       Attachment main = findMainAttachment(tableId, recordId);
-      if (main == null) {
+      // ETP-5819: another tenant's main attachment reads as "none marked". Checked here and not
+      // in findMainAttachment, which the signed email download link also uses.
+      if (main == null || !TenantOwnership.isVisibleToCurrentTenant(main)) {
         return NeoResponse.ok(new JSONObject());
       }
       return NeoResponse.ok(toAttachmentJson(main));
@@ -243,7 +245,8 @@ public final class NeoAttachmentsHelper {
       return NeoResponse.error(400, ATTACHMENTID_REQUIRED);
     }
     try {
-      Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
+      // ETP-5819: setMainFlag is native SQL the write guard cannot see.
+      Attachment attachment = TenantOwnership.loadOwned(Attachment.class, attachmentId);
       if (attachment == null) {
         return NeoResponse.error(404, ERR_ATTACHMENT_NOT_FOUND);
       }
@@ -448,7 +451,9 @@ public final class NeoAttachmentsHelper {
       return NeoResponse.error(400, ATTACHMENTID_REQUIRED);
     }
     try {
-      Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
+      // ETP-5819: the attach manager removes the file from disk before the row reaches the flush
+      // the write guard checks, so the ownership check must come first.
+      Attachment attachment = TenantOwnership.loadOwned(Attachment.class, attachmentId);
       if (attachment == null) {
         return NeoResponse.error(404, ERR_ATTACHMENT_NOT_FOUND);
       }
@@ -767,6 +772,53 @@ public final class NeoAttachmentsHelper {
       method = config.getAttachmentMethod().getValue();
     }
     return getAttachManager().getHandler(method);
+  }
+
+  /**
+   * Copies the main attachment of a record into a temporary file of its own (ETP-6048), so a caller
+   * can read the bytes after its DAL session is closed, e.g. to send them to an extraction service.
+   *
+   * <p>The bytes are fetched through the configured attach handler ({@link
+   * AttachImplementation#downloadFile}), never from a hand-built path; the handler's own temporary
+   * copy, if any, is removed. The copy sits alone in an owner-only directory, named after the
+   * attachment. The caller removes it with {@link #cleanupTempFile(File)}.</p>
+   *
+   * @param tableName the table of the record, as {@code ETGO_INCOMING_DOCUMENT}'s {@code TABLE_NAME}
+   * @param recordId  the record id
+   * @return the copy, or {@code null} when the record has no main attachment or its bytes are gone
+   * @throws IOException when the copy cannot be written
+   */
+  static File copyMainAttachmentToTemp(String tableName, String recordId) throws IOException {
+    Attachment attachment = findMainAttachment(resolveTableId(tableName), recordId);
+    AttachImplementation handler = attachment == null || StringUtils.isBlank(attachment.getName())
+        ? null : resolveAttachHandler(attachment);
+    if (handler == null) {
+      return null;
+    }
+    File source = handler.downloadFile(attachment);
+    try {
+      if (source == null || !source.exists()) {
+        return null;
+      }
+      return copyToOwnerOnlyTemp(source, sanitizeFileName(attachment.getName()));
+    } finally {
+      if (handler.isTempFile()) {
+        cleanupTempFile(source);
+      }
+    }
+  }
+
+  private static File copyToOwnerOnlyTemp(File source, String fileName) throws IOException {
+    java.nio.file.Path directory = NeoAttachmentUploadEndpoint.createOwnerOnlyTempDirectory();
+    File copy = new File(directory.toFile(), fileName);
+    try {
+      Files.copy(source.toPath(), copy.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+      return copy;
+    } catch (IOException | RuntimeException e) {
+      Files.deleteIfExists(copy.toPath());
+      Files.deleteIfExists(directory);
+      throw e;
+    }
   }
 
   /**

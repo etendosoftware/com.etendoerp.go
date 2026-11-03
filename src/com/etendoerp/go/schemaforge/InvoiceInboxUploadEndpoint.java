@@ -153,6 +153,7 @@ final class InvoiceInboxUploadEndpoint {
     for (Part part : files) {
       results.add(InvoiceInboxIntake.ingest(part, part.getSubmittedFileName(), clientId, orgId));
     }
+    submitAccepted(results);
     try {
       JSONArray array = new JSONArray();
       int accepted = 0;
@@ -171,6 +172,28 @@ final class InvoiceInboxUploadEndpoint {
       // The rows are already committed: report it as a server error, the caller must read the inbox.
       log.error("Invoice inbox upload: the answer could not be built", e);
       return NeoResponse.error(500, "The upload was processed but the answer could not be built");
+    }
+  }
+
+  /**
+   * Hands the accepted rows to the background worker (ETP-6048). Every row is already committed, so
+   * the worker finds it; a row that cannot be queued stays {@code PROCESSING} for the sweeper.
+   */
+  private static void submitAccepted(List<InvoiceInboxIntake.Result> results) {
+    for (InvoiceInboxIntake.Result result : results) {
+      if (result.isAccepted()) {
+        submitQuietly(result.getIncomingDocumentId());
+      }
+    }
+  }
+
+  /** Queues one row; whatever goes wrong, the upload still answers and the sweeper takes the row. */
+  private static void submitQuietly(String incomingDocumentId) {
+    try {
+      InvoiceInboxProcessor.submit(incomingDocumentId);
+    } catch (Throwable t) { // NOSONAR the answer of a committed upload must never be lost
+      log.warn("Invoice inbox upload: could not queue {}: {}", incomingDocumentId,
+          t.getClass().getSimpleName());
     }
   }
 

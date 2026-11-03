@@ -33,10 +33,13 @@ import java.sql.ResultSet;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.InvoiceLine;
 
 /**
  * Unit tests for {@link AbstractInOutLineHandler}.
@@ -51,6 +54,25 @@ import org.openbravo.dal.service.OBDal;
  * @covers com.etendoerp.go.schemaforge.AbstractInOutLineHandler
  */
 public class AbstractInOutLineHandlerTest {
+
+  private static final String FOREIGN_INVOICE_LINE_ID = "inv-line-of-another-tenant";
+
+  /** ETP-5819: handle() links only an invoice line of the caller's tenant; here every id is. */
+  private MockedStatic<TenantOwnership> ownership;
+
+  @Before
+  public void ownEveryInvoiceLineButTheForeignOne() {
+    ownership = Mockito.mockStatic(TenantOwnership.class);
+    ownership.when(() -> TenantOwnership.loadOwned(Mockito.eq(InvoiceLine.class),
+        Mockito.anyString())).thenReturn(mock(InvoiceLine.class));
+    ownership.when(() -> TenantOwnership.loadOwned(InvoiceLine.class, FOREIGN_INVOICE_LINE_ID))
+        .thenReturn(null);
+  }
+
+  @After
+  public void closeOwnership() {
+    ownership.close();
+  }
 
   // ── Group A — handle() (no DB) ────────────────────────────────────────────
 
@@ -333,6 +355,35 @@ public class AbstractInOutLineHandlerTest {
           sqlCaptor.getValue().contains("UPDATE c_invoiceline"));
       Mockito.verify(nq).setParameter("lineId", "new-line-id");
       Mockito.verify(nq).setParameter("invLineId", "inv-line-abc");
+    }
+  }
+
+  /** ETP-5819: another tenant's invoice line is never linked: the native UPDATE is not run. */
+  @Test
+  public void afterHandle_post_withAnotherTenantsInvoiceLineId_skipsUpdate() throws Exception {
+    GoodsReceiptLineHandler handler = new GoodsReceiptLineHandler();
+    handler.handle(NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(new JSONObject().put("invoiceLineId", FOREIGN_INVOICE_LINE_ID))
+        .build());
+
+    JSONObject prevBody = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", "new-line-id"))));
+    NeoContext afterCtx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .previousResult(new NeoResponse(201, prevBody))
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      assertNull(handler.afterHandle(afterCtx));
+      verify(session, never()).createNativeQuery(Mockito.anyString());
     }
   }
 

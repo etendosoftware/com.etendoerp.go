@@ -46,6 +46,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.TenantOwnership;
 
 /**
  * Static helpers for the image endpoints, and the one place an {@code AD_Image} row is created.
@@ -390,7 +391,8 @@ public final class NeoImageHelper {
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Image ID required");
       return;
     }
-    Image image = OBDal.getInstance().get(Image.class, imageId);
+    // ETP-5819: another tenant's image is answered exactly like a missing one.
+    Image image = TenantOwnership.loadOwned(Image.class, imageId);
     if (image == null) {
       sendError(response, HttpServletResponse.SC_NOT_FOUND, "Image not found: " + imageId);
       return;
