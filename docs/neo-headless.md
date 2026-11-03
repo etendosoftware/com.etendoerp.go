@@ -2111,8 +2111,9 @@ policy refused the bytes; its message is passed through) and `store_failed`.
 `UPLOAD`, `targetType` `PURCHASE_INVOICE`) is saved and flushed, the file is stored as the row's
 main attachment through `NeoAttachmentStore`, then the transaction commits (any failure rolls back
 that file only). Only ids cross iterations; client and organization are re-read per file because
-the session is closed between files. Creating the `PROCESSING` row is the whole "enqueue":
-extraction and matching are ETP-6048, and `C_Invoice` is never touched. There is no quota gate (a
+the session is closed between files. Creating the `PROCESSING` row is the whole "enqueue"
+(after the loop, each accepted id is also handed to the background worker, see "Processing"
+below), and `C_Invoice` is never touched. There is no quota gate (a
 staging row is not an invoice).
 
 **Synchronous, long call.** The upload is synchronous and can carry up to 20 files / about 200 MB,
@@ -2128,6 +2129,122 @@ of a name is replaced by a full-width one, so a name can never read as an `AD_ME
 attachment store, so ANY failure after that point (the main-document marker, the lookup of the new
 attachment, or the commit) rolls the rows back but leaves that file orphaned. A WARN with the row id
 and the file name is logged in every such branch and nothing compensates.
+
+#### Processing (ETP-6048)
+
+A background worker (`InvoiceInboxProcessor`) takes each `PROCESSING` row, reads its main
+attachment through the OCR, matches and validates, and leaves it in `PENDING_REVIEW` or `ERROR`
+with an `ERROR_CODE`. It never writes `ADJUSTED`, never creates a `C_Invoice` and never evaluates
+the feature flag (the upload that created the row already passed it).
+
+**The `PROCESSING` row is the queue.** The upload hands the accepted ids to an in-memory executor
+(2 daemon threads per node, queue of 200; a full queue is only logged). `InvoiceInboxSweeperStartup`
+is the safety net: at startup and every 2 minutes it re-submits the rows older than a minute with
+no live lease and passes left, and ends as `ERROR/SERVICE_FAILURE` those that used 3 passes.
+Multi-node safe: the claim is
+`UPDATE ... SET processing_lease = now() + 10 min, processing_attempts = processing_attempts + 1
+WHERE status = 'PROCESSING' AND (processing_lease IS NULL OR processing_lease < now())
+AND processing_attempts < 3` (database clock; 1 row updated = this node owns the pass).
+
+**One document, one isolated unit.** Context: the row's user, client and organization with the
+user's default role (else any active role of the user in the client), admin mode; access is not
+re-validated on resume. The OCR runs outside any transaction; the extraction is stored write-once
+in `EXTRACTED_DATA` (with `_meta`) before matching, so a later pass skips the OCR; the final write
+(`CURRENT_DATA`, summary columns, status, `PROCESSED_AT`, lease cleared) is one transaction
+conditioned on the row still being `PROCESSING` (`SELECT ... FOR UPDATE`). Unexpected failures leave
+the row for the sweeper.
+
+**Context and admin mode.** The worker runs the whole unit in admin mode under the row's user,
+client, organization and resolved default role, exactly like a NEO or MCP request. Admin mode only
+skips the DAL's entity-access check; a business role cannot read the Schema Forge configuration
+tables (`ETGO_SF_SPEC`/`ENTITY`/`FIELD`) the selector lookups need, so in normal mode every selector
+lookup (vendor name search, vendor address, products) silently found nothing. Tenant isolation does
+not depend on the mode: `OBQuery`/`OBCriteria` filter by the role's readable clients and
+organizations in admin mode too, and `vendorsByTaxId` also filters by the current client. Lookups
+are scoped by client plus the role's readable organizations, not by the row's organization tree
+(known behaviour, same as the `/purchase-invoice` flow); if the role cannot read an organization,
+its candidates do not appear. After an unexpected failure the lease is released, so the sweeper
+retries without waiting for it to expire. Selector failures are logged at WARN with their kind
+(spec missing, HTTP status, exception class).
+
+**In-inbox duplicates.** `duplicate.inbox[]` lists the other live (non-discarded) rows of the same
+client and document number that were already persisted. The issuer is identified by the vendor id
+when the vendor is `linked`, and by the extracted tax id (cleaned, with or without VAT prefix,
+compared against `EXTRACTED_TAXID`) when it is not, which is the common case of a vendor that does
+not exist yet. No usable tax id (under 5 characters) or no document number: no check. Best-effort:
+two documents processed at the same time can miss each other.
+
+**Retries.** `OcrUnavailableException.isRetryable()`: 5xx, 408, 429, timeout and connection failure
+are retryable, any other 4xx is not. Up to 3 OCR attempts per pass (waits 0, 15, 45 s); then
+`ERROR/SERVICE_FAILURE`. An answer with no data is `ERROR/UNREADABLE` (not retried). The MCP tool
+does not retry and ignores that flag.
+
+| Situation | `STATUS` | `ERROR_CODE` |
+|---|---|---|
+| Nothing readable / no main attachment | `ERROR` | `UNREADABLE` |
+| Service failure after retries, or a 4xx | `ERROR` | `SERVICE_FAILURE` |
+| Receiver tax id is not the organization's (no matching is done) | `ERROR` | `FOREIGN_RECEIVER` |
+| Document number over 20 characters | `ERROR` | `REFERENCE_TOO_LONG` |
+| Mandatory data missing | `ERROR` | `MISSING_FIELDS` |
+| Complete | `PENDING_REVIEW` | `NULL` |
+
+Priority when several apply: `FOREIGN_RECEIVER > REFERENCE_TOO_LONG > MISSING_FIELDS`. A duplicate
+is a warning, not an error.
+
+**Matching** (`InboxMatcher`, in `ocr/`, names no document type; the type's lookups are
+`PurchaseInvoiceOcrLookups`):
+- Vendor: by tax id first (`vendorsByTaxId`, with or without VAT prefix; one hit `linked`, several
+  `ambiguous`), then by name: `linked` only for a unique exact normalized name with no conflicting
+  tax id; a contains hit stays `ambiguous`; nothing is `new` (name read) or `none`.
+- Products per line: `OcrProductMatch.classify` as is (`AUTO_MATCHED` -> `linked`, `SUGGESTED` ->
+  `ambiguous`, `NONE` -> `new`).
+- Tax per line: `resolved` (vendor with address), `pending_vendor` (new vendor or no address; valid
+  only when the line prints a rate), `no_tax_at_rate`, `unknown`.
+- Duplicate: linked vendor + document number against non-voided purchase invoices
+  (`duplicate.state` `none|found|unknown`); other live inbox rows of the same vendor and number
+  are listed in `duplicate.inbox[]`. `DUPLICATE_INVOICE_ID` is the first invoice found.
+- Total: the printed `total_amount`, else the sum of quantity x price x (1 + rate/100)
+  (`totalSource` `printed|lines`). `total_amount` was added to the shared `purchase-invoice` OCR
+  schema (`ocr-config.json`), so it also reaches the SPA's "Extract and complete" and the MCP tool.
+
+**`CURRENT_DATA` contract** (version 1; codes only, the UI translates; every text read from the
+document is untrusted data):
+
+```json
+{ "version": 1,
+  "header": {
+    "vendor": { "state": "linked|ambiguous|new|none", "matchedBy": "taxId|name", "id": null,
+      "name": "...", "candidates": [{ "id": "", "name": "", "taxId": "" }],
+      "extracted": { "name": "", "taxId": "", "address": "", "postalCode": "", "city": "",
+        "country": "", "email": "", "phone": "" },
+      "addressState": "PRESENT|MISSING|UNKNOWN", "locationId": null },
+    "documentNo": "", "invoiceDate": "yyyy-MM-dd|null", "invoiceDateRaw": "",
+    "totalAmount": 0.0, "totalSource": "printed|lines",
+    "duplicate": { "state": "none|found|unknown", "invoices": [{ "id": "", "documentNo": "" }],
+      "inbox": [{ "id": "", "fileName": "" }] },
+    "receiver": { "check": "match|absent|no-org-tax-id|same-as-issuer|mismatch",
+      "taxId": "", "orgTaxId": "" } },
+  "lines": [{ "index": 0, "description": "", "quantity": 1, "unitPrice": 10.0, "taxRate": 21,
+    "taxLabel": "",
+    "product": { "state": "linked|ambiguous|new", "id": null, "matchedBy": "exact|similarity",
+      "candidates": [{ "id": "", "name": "", "similarity": "92" }] },
+    "tax": { "state": "resolved|pending_vendor|no_tax_at_rate|unknown", "id": null, "name": "",
+      "rate": 21, "candidates": [] } }],
+  "validation": { "valid": false, "missing": ["vendor", "invoiceDate", "amount", "lines",
+    "line[2].tax", "line[3].product"] },
+  "notices": ["receiver_tax_id_absent", "org_tax_id_missing", "vendor_address_missing",
+    "duplicate_check_unknown", "duplicate_in_inbox"] }
+```
+
+**Reusable pieces for the review panel (ETP-6050).** `InvoiceInboxValidator.validate(document)`
+is pure (no DB); `InvoiceInboxStatusPolicy.apply(row, result)` only moves `PENDING_REVIEW` <->
+`ERROR(MISSING_FIELDS|REFERENCE_TOO_LONG|FOREIGN_RECEIVER)` and leaves every other state alone;
+`InvoiceInboxSummary.syncFrom(document, row)` copies the header into the summary columns
+(`C_BPARTNER_ID` only for a `linked` vendor, `POREFERENCE` empty when over 20 characters). Edits
+must be bound with `@NeoExtension(spec = "invoice-inbox", ...)`, never `Java_Qualifier`.
+
+**Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
+not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
 
 ### 4.7 Preview File Endpoint — retired for preview panels, pending removal (ETP-4315 Phase 9)
 
