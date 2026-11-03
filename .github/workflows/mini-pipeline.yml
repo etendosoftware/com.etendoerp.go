@@ -162,19 +162,17 @@ jobs:
           ./gradlew setup
           ./gradlew install
 
-      - name: goTestUnit
+      # Both halves in one Gradle invocation: each separate ./gradlew call paid ~2.5 min of
+      # configuration. --continue still runs goIsolatedDalTest when goTestUnit fails, so one run
+      # reports both halves, each under its own build/reports/tests folder. goTestUnit never writes
+      # to the database, so the DAL tests start from the same clean data as on Jenkins.
+      # goIsolatedDalTest is called directly, not through `test --tests '...IntegrationTest'`: that
+      # root test task matched nothing (it excludes these classes) and cost ~2 min before finalizing
+      # into goIsolatedDalTest, which runs them all in one JVM (docs/test-jvm-isolation.md).
+      - name: goTestUnit and integration tests
         if: github.event_name != 'push'
         working-directory: etendo_core
-        run: ./gradlew goTestUnit
-
-      # Runs even when goTestUnit failed, so one run reports both halves. goTestUnit never writes to
-      # the database, so these start from the same clean data as on Jenkins. The root test task skips
-      # the Go *IntegrationTest classes and finalizes into goIsolatedDalTest, which runs them all in
-      # one JVM with no mocked test in it (docs/test-jvm-isolation.md).
-      - name: Integration tests
-        if: ${{ !cancelled() && github.event_name != 'push' && steps.install.outcome == 'success' }}
-        working-directory: etendo_core
-        run: ./gradlew test --tests 'com.etendoerp.go.*IntegrationTest'
+        run: ./gradlew goTestUnit goIsolatedDalTest --continue
 
       - name: Upload the test reports
         if: always() && github.event_name != 'push'

@@ -88,6 +88,11 @@ Consequences worth knowing:
 
 - **It runs in CI automatically.** `finalizedBy` means anything invoking `:test` also runs it, so
   the Jenkins pipeline needed no change. Failures still fail the build.
+- **It can also be called directly.** `./gradlew goIsolatedDalTest` runs only the DAL tests and
+  skips the root `test` task, which matches nothing when the filter selects only DAL tests and
+  costs about 2 minutes to get there. The GitHub mini-pipeline runs
+  `./gradlew goTestUnit goIsolatedDalTest --continue`, both halves in a single Gradle
+  configuration.
 - **`--tests` reaches it.** A filter given to `test` also selects what `goIsolatedDalTest` runs,
   and `test` does not fail with "No tests found" when the filter only matches DAL tests. A filter
   that matches no Go DAL test skips `goIsolatedDalTest`.
