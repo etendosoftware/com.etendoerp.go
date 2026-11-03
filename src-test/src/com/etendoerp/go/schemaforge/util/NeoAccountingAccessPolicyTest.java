@@ -39,6 +39,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -279,5 +281,14 @@ class NeoAccountingAccessPolicyTest {
   void aNonPostingActionNeverReadsTheRoleFlag() {
     assertNull(NeoAccountingAccessPolicy.refusalForPostingAction(null, "reactivate"));
     accessMock.verify(NeoAccessHelper::resolveCurrentRole, never());
+  }
+
+  @ParameterizedTest(name = "{0} -> {1}")
+  @CsvSource({ "posted,true", "Posted,true", "posted$_identifier,true",
+      "etblkpAccountingstatus,true", "EM_Etblkp_Accountingstatus,true",
+      "etblkpBulkposting,true", "invoice.posted,true", "postedBy,false", "postingDate,false",
+      "documentNo,false", "'',false" })
+  void accountingFieldNamesCoverPropertiesColumnsAndPaths(String name, boolean accounting) {
+    assertEquals(accounting, NeoAccountingAccessPolicy.isAccountingFieldName(name));
   }
 }
