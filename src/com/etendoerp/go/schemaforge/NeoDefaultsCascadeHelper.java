@@ -26,6 +26,7 @@ import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoValueEquivalence;
 
 /**
  * Cascade and selector-aux helpers extracted from {@link NeoDefaultsService}.
@@ -661,7 +662,7 @@ public class NeoDefaultsCascadeHelper {
         // one) is told to stand down in favour of a value the caller may simply have echoed back
         // from etendo_defaults. Recorded so the divergence can be reported; nothing here changes what
         // gets persisted.
-        recordSupersededDefault(result, defaults, updatedField, updateObj);
+        recordSupersededDefault(result, defaults, updatedField, updateObj, adTab);
         continue;
       }
       Object newValue = updateObj.get(FIELD_VALUE);
@@ -871,9 +872,10 @@ public class NeoDefaultsCascadeHelper {
    * @param defaults     the in-progress payload, holding the caller's value
    * @param fieldName    the protected field
    * @param updateObj    the callout's proposed update for that field
+   * @param adTab        the tab, to tell a Yes/No field from a text one; may be {@code null}
    */
   private static void recordSupersededDefault(NeoDefaultsService.CalloutCascadeResult result,
-      JSONObject defaults, String fieldName, JSONObject updateObj) {
+      JSONObject defaults, String fieldName, JSONObject updateObj, Tab adTab) {
     if (result == null || fieldName.endsWith(IDENTIFIER_SUFFIX)) {
       return;
     }
@@ -882,10 +884,37 @@ public class NeoDefaultsCascadeHelper {
     if (proposed == null || JSONObject.NULL.equals(proposed)) {
       return;
     }
-    if (kept != null && NeoHandlerUtils.sameTextOrNumber(kept, proposed)) {
+    if (kept != null && sameValue(kept, proposed, adTab, fieldName)) {
       return;
     }
     result.recordSuperseded(fieldName, kept, proposed);
+  }
+
+  /**
+   * Same text or number, or — ETP-5680 — the same Yes/No flag ({@code false} vs {@code "N"}).
+   *
+   * <p>The Yes/No test is decided by the column's type when it is reachable: the DAL property of a
+   * Yes/No reference ({@link #YES_NO_REFERENCE}) is boolean, so a text field never gets the
+   * lenient comparison. When no property can be resolved (no tab, a name the entity does not
+   * know) the value-based equivalence stands in, and only holds when both sides are Yes/No
+   * tokens. See {@link NeoValueEquivalence}.</p>
+   */
+  private static boolean sameValue(Object kept, Object proposed, Tab adTab, String fieldName) {
+    return NeoValueEquivalence.same(kept, proposed, resolveProperty(adTab, fieldName));
+  }
+
+  private static Property resolveProperty(Tab adTab, String fieldName) {
+    if (adTab == null || adTab.getTable() == null) {
+      return null;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      return entity == null ? null : entity.getProperty(fieldName, false);
+    } catch (Exception e) {
+      log.debug("Could not resolve property '{}' for the superseded comparison: {}", fieldName,
+          e.getMessage());
+      return null;
+    }
   }
 
   private static boolean shouldKeepExistingValue(JSONObject defaults, String fieldName,

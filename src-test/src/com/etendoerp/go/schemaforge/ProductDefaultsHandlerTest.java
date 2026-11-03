@@ -1646,6 +1646,36 @@ public class ProductDefaultsHandlerTest {
     assertEquals(false, body.has("returnable"));
   }
 
+  // ── ETP-5680: governedCreateFields (opt-out of the superseded-defaults report) ────────────
+
+  private static Set<String> governed(JSONObject body) {
+    NeoContext ctx = NeoContext.builder().specName("product").entityName("product")
+        .httpMethod("POST").requestBody(body).build();
+    return new ProductDefaultsHandler().governedCreateFields(ctx);
+  }
+
+  @Test
+  public void testGovernedCreateFieldsForAStockableTypeIsOnlyTheTaxCategory() throws Exception {
+    assertEquals(Set.of("taxCategory"), governed(new JSONObject().put("productType", "I")));
+  }
+
+  @Test
+  public void testGovernedCreateFieldsForANonStockableTypeAddsTheStockFlags() throws Exception {
+    Set<String> expected = Set.of("taxCategory", "stocked", "returnable");
+    assertEquals(expected, governed(new JSONObject().put("productType", "S")));
+    assertEquals(expected, governed(new JSONObject().put("productType", "E")));
+    assertEquals(expected, governed(new JSONObject().put("productType", "R")));
+  }
+
+  @Test
+  public void testGovernedCreateFieldsIsEmptyWithoutAValidProductType() throws Exception {
+    assertTrue(governed(new JSONObject()).isEmpty());
+    assertTrue(governed(new JSONObject().put("productType", "X")).isEmpty());
+    assertTrue(new ProductDefaultsHandler().governedCreateFields(null).isEmpty());
+    assertTrue(new ProductDefaultsHandler()
+        .governedCreateFields(NeoContext.builder().specName("product").build()).isEmpty());
+  }
+
   // ── ETP-5009: readPredicates ─────────────────────────────────────────────────────────────
 
   @Test

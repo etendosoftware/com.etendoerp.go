@@ -250,6 +250,33 @@ public class ProductDefaultsHandler implements NeoHandler {
   }
 
   /**
+   * ETP-5680: the fields whose create-callout proposal is not worth reporting, because this
+   * handler's type rule applies instead. The create callout cascade proposes the generic tax
+   * category (and stocked) whatever the type.
+   *
+   * <ul>
+   *   <li>{@code taxCategory}: only for a valid product type. {@link #injectTaxCategoryIfMissing}
+   *       only FILLS a missing value; an explicit {@code taxCategory} is the caller's deliberate
+   *       choice and is neither corrected nor reported, even if it does not match the type;</li>
+   *   <li>{@code stocked} and {@code returnable}: only for a non-stockable type, where
+   *       {@link #enforceNonStockableProductTypes} FORCES them to {@code false}. A rewritten
+   *       value is still reported by {@code etendo_create} as {@code adjustedFields}.</li>
+   * </ul>
+   */
+  @Override
+  public Set<String> governedCreateFields(NeoContext context) {
+    JSONObject body = context != null ? context.getRequestBody() : null;
+    String productType = body != null ? body.optString(FIELD_PRODUCT_TYPE, null) : null;
+    if (productType == null || !PRODUCT_TYPES.contains(productType)) {
+      return Set.of();
+    }
+    if (NON_STOCKABLE_PRODUCT_TYPES.contains(productType)) {
+      return Set.of(FIELD_TAX_CATEGORY, FIELD_STOCKED, FIELD_RETURNABLE);
+    }
+    return Set.of(FIELD_TAX_CATEGORY);
+  }
+
+  /**
    * ETP-4943 / ETP-5091: Service, Expense and Resource products have no physical existence, so
    * none of them can ever be stocked or returnable. Forces both flags to {@code false} whenever
    * the request itself declares {@code productType} as one of {@link #NON_STOCKABLE_PRODUCT_TYPES}
