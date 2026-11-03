@@ -38,6 +38,8 @@ import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.MockedStatic;
@@ -67,7 +69,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
  * counted in {@code EM_ETGO_DISCARDED_COUNT}, the status treats it as resolved, and the totals
  * still include it. By default neither the flag column nor the discarded-count column is in the
  * mocked model; the tests that need them call {@link #withDiscardFlagColumn()} and
- * {@link #withDiscardedCountColumn()}.
+ * {@link #withDiscardedCountColumn()}. Not gated by {@code bank-bounce-suggestions}: the counters
+ * never read the flag.
  *
  * @covers com.etendoerp.go.schemaforge.BankStatementAggregates
  */
@@ -288,6 +291,35 @@ class BankStatementAggregatesTest {
     BankStatementAggregates.recompute(st);
 
     verify(st).set("matchedCount", 1L);
+    verify(st).set(DISCARDED_COUNT, 2L);
+    verify(st).set("status", "RECONCILED");
+  }
+
+  /**
+   * Not gated (ETP-5581): the stored counters run in persistence events, which cannot see the
+   * per-account, per-request {@code bank-bounce-suggestions} flag. Whatever it would answer, a
+   * discarded line is counted and resolved, and the flag is never read.
+   */
+  @ParameterizedTest
+  @ValueSource(booleans = { true, false })
+  void recomputeCountsDiscardedLinesWhateverTheBounceFlagAndNeverReadsIt(boolean flagOn) {
+    withDiscardFlagColumn();
+    withDiscardedCountColumn();
+    FIN_BankStatement st = mock(FIN_BankStatement.class);
+    when(st.isProcessed()).thenReturn(Boolean.TRUE);
+    stubLineQuery(Arrays.asList(
+        line("100.00", "0", true, false),
+        line("0", "40.00", false, true),
+        line("40.00", "0", false, true)));
+
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
+      flag.clearInvocations();
+
+      BankStatementAggregates.recompute(st);
+
+      flag.verifyNoInteractions();
+    }
     verify(st).set(DISCARDED_COUNT, 2L);
     verify(st).set("status", "RECONCILED");
   }

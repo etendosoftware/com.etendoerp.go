@@ -44,12 +44,14 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
 import com.etendoerp.go.schemaforge.BankBounceDetector.AccountData;
+import com.etendoerp.go.schemaforge.BankBounceDetector.Candidate;
 import com.etendoerp.go.schemaforge.BankBounceDetector.OpenTransaction;
 import com.etendoerp.go.schemaforge.BankBounceDetector.Pair;
 import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
@@ -57,7 +59,8 @@ import com.etendoerp.psd2.bank.integration.data.PisPayment;
 
 /**
  * Bounce-pair detection over the pending lines of one account: the signals, the confidence rules,
- * the date window, the same-day roles, ambiguous groups, which lines are candidates and the
+ * the date window, the same-day roles, ambiguous groups, statement adjacency (both neighbours of a
+ * bounce in its statement, never a reason for confidence), which lines are candidates and the
  * preference for originals without an ERP payment.
  *
  * <p>The pairing runs in memory over {@link AccountData}, so most cases build that data directly;
@@ -462,6 +465,397 @@ class BankBounceDetectorTest {
 
   // ---------------------------------------------------------------------------
 
+  /**
+   * Statement adjacency: both neighbours of a bounce in its statement count the same; one qualifying
+   * neighbour is the original, two are the only candidates of an ambiguous pair, and adjacency never
+   * raises the confidence.
+   */
+  @Nested
+  @DisplayName("statement adjacency")
+  class Adjacency {
+
+    private static final String ST = "ST-1";
+    private static final String RETURN = "RETROCESIÓN TRANSFERENCIA INMEDIATA";
+
+    /** A candidate line of statement {@code statementId} at position {@code lineNo}. */
+    private StatementLine at(String id, String statementId, long lineNo, int dayOffset,
+        String description, String partner, String amount) {
+      return new StatementLine(id, day(dayOffset), lineNo, description, partner,
+          new BigDecimal(amount), true, statementId);
+    }
+
+    private Pair onlyPair(AccountData data) {
+      List<Pair> pairs = BankBounceDetector.detect(data);
+      assertEquals(1, pairs.size(), "exactly one pair expected: " + pairs);
+      return pairs.get(0);
+    }
+
+    private void assertPlainAdjacent(Pair pair, StatementLine original, StatementLine bounce) {
+      assertSame(original, pair.original());
+      assertSame(bounce, pair.bounce());
+      assertFalse(pair.ambiguous());
+      assertTrue(pair.adjacent(), "the original was chosen by statement adjacency");
+      assertTrue(pair.candidates().isEmpty());
+    }
+
+    private List<String> candidateIds(Pair pair) {
+      List<String> ids = new ArrayList<>();
+      pair.candidates().forEach(c -> ids.add(c.line().id()));
+      return ids;
+    }
+
+    @Test
+    @DisplayName("the real bbva statement: 170↔180 high, 100/130/150 ambiguous over their neighbours")
+    void realStatement() {
+      LocalDate aug12 = LocalDate.of(2026, 8, 12);
+      LocalDate aug24 = LocalDate.of(2026, 8, 24);
+      StatementLine l90 = new StatementLine("L90", aug12, 90,
+          "TRANSFERENCIA INMEDIATA A FAVOR DE Galder Romo", "", new BigDecimal("-0.30"), true, ST);
+      StatementLine l100 = new StatementLine("L100", aug12, 100, RETURN, "",
+          new BigDecimal("0.30"), true, ST);
+      StatementLine l110 = new StatementLine("L110", aug12, 110,
+          "TRANSFERENCIA INMEDIATA A FAVOR DE Distribuciones Iberia", "",
+          new BigDecimal("-0.30"), true, ST);
+      StatementLine l120 = new StatementLine("L120", aug24, 120, "TRANSFERENCIA INMEDIATA", "",
+          new BigDecimal("-0.61"), true, ST);
+      StatementLine l130 = new StatementLine("L130", aug24, 130, RETURN, "",
+          new BigDecimal("0.61"), true, ST);
+      StatementLine l140 = new StatementLine("L140", aug24, 140, "TRANSFERENCIA INMEDIATA", "",
+          new BigDecimal("-0.61"), true, ST);
+      StatementLine l150 = new StatementLine("L150", aug24, 150, RETURN, "",
+          new BigDecimal("0.61"), true, ST);
+      StatementLine l160 = new StatementLine("L160", aug24, 160, "TRANSFERENCIA INMEDIATA", "",
+          new BigDecimal("-0.61"), true, ST);
+      StatementLine l170 = new StatementLine("L170", aug24, 170, RETURN, "",
+          new BigDecimal("0.15"), true, ST);
+      StatementLine l180 = new StatementLine("L180", aug24, 180, "TRANSFERENCIA INMEDIATA", "",
+          new BigDecimal("-0.15"), true, ST);
+
+      List<Pair> pairs = BankBounceDetector.detect(
+          data(3, l90, l100, l110, l120, l130, l140, l150, l160, l170, l180));
+
+      assertEquals(4, pairs.size(), pairs.toString());
+      List<String> bounces = new ArrayList<>();
+      pairs.forEach(p -> bounces.add(p.bounce().id()));
+      assertEquals(List.of("L100", "L130", "L150", "L170"), bounces,
+          "in statement order of the bounce line");
+      for (int i = 0; i < 3; i++) {
+        Pair ambiguous = pairs.get(i);
+        assertTrue(ambiguous.ambiguous(), ambiguous.bounce().id());
+        assertTrue(ambiguous.adjacent(), ambiguous.bounce().id());
+        assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, ambiguous.confidence());
+        assertEquals(List.of(BankBounceDetector.SIGNAL_RETURN_TEXT), ambiguous.signals());
+        assertEquals("bounce-" + ambiguous.bounce().id(), ambiguous.groupKey());
+      }
+      assertEquals(List.of("L90", "L110"), candidateIds(pairs.get(0)));
+      assertEquals(List.of("L120", "L140"), candidateIds(pairs.get(1)));
+      assertEquals(List.of("L140", "L160"), candidateIds(pairs.get(2)),
+          "two ambiguous pairs may share a neighbour");
+      Pair high = pairs.get(3);
+      assertPlainAdjacent(high, l180, l170);
+      assertEquals(BankBounceDetector.CONFIDENCE_HIGH, high.confidence(),
+          "same-day bounce wording; the return is written before its payment");
+      assertEquals(List.of(BankBounceDetector.SIGNAL_RETURN_TEXT), high.signals());
+    }
+
+    @Test
+    @DisplayName("one qualifying neighbour, after or before the bounce, is the original")
+    void singleNeighbourOnEitherSide() {
+      StatementLine o = at("O", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine r = at("R", ST, 20, 0, "Devolucion transferencia", "", "100");
+      StatementLine fee = at("F", ST, 30, 0, "Comision", "", "-7");
+      assertPlainAdjacent(onlyPair(data(0, o, r, fee)), o, r);
+
+      StatementLine fee2 = at("F2", ST, 10, 0, "Comision", "", "-7");
+      StatementLine r2 = at("R2", ST, 20, 0, "Devolucion transferencia", "", "100");
+      StatementLine o2 = at("O2", ST, 30, 0, "Transferencia", "", "-100");
+      assertPlainAdjacent(onlyPair(data(0, fee2, r2, o2)), o2, r2);
+    }
+
+    @Test
+    @DisplayName("two qualifying neighbours are the ONLY candidates, other same-day originals aside")
+    void bothNeighboursAreTheOnlyCandidates() {
+      StatementLine far = at("FAR", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine fee = at("F", ST, 20, 0, "Comision", "", "-7");
+      StatementLine a = at("A", ST, 30, 0, "Transferencia", "", "-100");
+      StatementLine r = at("R", ST, 40, 0, "Devolucion transferencia", "", "100");
+      StatementLine b = at("B", ST, 50, 0, "Transferencia", "", "-100");
+
+      Pair pair = onlyPair(data(0, far, fee, a, r, b));
+
+      assertTrue(pair.ambiguous());
+      assertTrue(pair.adjacent());
+      assertSame(r, pair.bounce());
+      assertEquals(List.of("A", "B"), candidateIds(pair), "FAR is an eligible original too");
+      assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, pair.confidence());
+    }
+
+    @Test
+    @DisplayName("a disqualified neighbour leaves the other one as the single original")
+    void disqualifiedNeighbour() {
+      StatementLine r = at("R", ST, 20, 0, "Devolucion transferencia", "", "100");
+      StatementLine next = at("N", ST, 30, 0, "Transferencia", "", "-100");
+      String[][] previous = {
+          { "different amount", "0", "Transferencia", "", "-100.01" },
+          { "same sign", "0", "Abono", "", "100" },
+          { "outside the window", "-61", "Transferencia", "", "-100" } };
+      for (String[] p : previous) {
+        StatementLine prev = at("P", ST, 10, Integer.parseInt(p[1]), p[2], p[3], p[4]);
+        Pair pair = onlyPair(data(0, prev, r, next));
+        assertSame(next, pair.original(), p[0]);
+        assertFalse(pair.ambiguous(), p[0]);
+        assertTrue(pair.adjacent(), p[0]);
+      }
+
+      // No signal: the bounce has no wording, only the counterparty links it to N.
+      StatementLine plain = at("R", ST, 20, 0, "Abono", ACME, "100");
+      StatementLine stranger = at("P", ST, 10, 0, "Transferencia", "Beta", "-100");
+      StatementLine sameParty = at("N", ST, 30, 0, "Transferencia", ACME, "-100");
+      assertPlainAdjacent(onlyPair(data(0, stranger, plain, sameParty)), sameParty, plain);
+    }
+
+    @Test
+    @DisplayName("a neighbour the payment guard holds leaves the other one as the single original")
+    void neighbourWithAPaymentIsNotQualifying() {
+      StatementLine paid = at("P", ST, 10, -1, "Transferencia", "", "-100");
+      StatementLine r = at("R", ST, 20, 0, "Devolucion transferencia", "", "100");
+      StatementLine next = at("N", ST, 30, 0, "Transferencia", "", "-100");
+      AccountData data = data(0, paid, r, next);
+      data.openTransactions.add(new OpenTransaction("T1", "PAY-1", day(-1),
+          new BigDecimal("-100"), "", 1));
+      assertTrue(data.attributionOf(paid).ref() != null, "P is the bank movement of PAY-1");
+
+      Pair pair = onlyPair(data);
+
+      assertPlainAdjacent(pair, next, r);
+      assertEquals(BankBounceDetector.CONFIDENCE_HIGH, pair.confidence());
+    }
+
+    @Test
+    @DisplayName("a reserved neighbour turns a two-neighbour bounce single, and that propagates")
+    void reservationsPropagate() {
+      LocalDate aug24 = LocalDate.of(2026, 8, 24);
+      StatementLine l120 = new StatementLine("L120", aug24, 120, "TRANSFERENCIA E2E120", "",
+          new BigDecimal("-0.61"), true, ST);
+      StatementLine l130 = new StatementLine("L130", aug24, 130, RETURN, "",
+          new BigDecimal("0.61"), true, ST);
+      StatementLine l140 = new StatementLine("L140", aug24, 140, "TRANSFERENCIA", "",
+          new BigDecimal("-0.61"), true, ST);
+      StatementLine l150 = new StatementLine("L150", aug24, 150, RETURN, "",
+          new BigDecimal("0.61"), true, ST);
+      StatementLine l160 = new StatementLine("L160", aug24, 160, "TRANSFERENCIA", "",
+          new BigDecimal("-0.61"), true, ST);
+      AccountData data = data(3, l120, l130, l140, l150, l160);
+      // L120 is the movement of an ERP payment: never part of a pair.
+      data.pisPaymentByEndToEnd.put("E2E120", "PAY-120");
+      data.openTransactions.add(new OpenTransaction("T120", "PAY-120", aug24,
+          new BigDecimal("-0.61"), "", 1));
+
+      List<Pair> pairs = BankBounceDetector.detect(data);
+
+      assertEquals(2, pairs.size(), pairs.toString());
+      assertPlainAdjacent(pairs.get(0), l140, l130);
+      assertPlainAdjacent(pairs.get(1), l160, l150);
+      assertTrue(pairs.get(0).high());
+      assertTrue(pairs.get(1).high());
+    }
+
+    @Test
+    @DisplayName("one neighbour that is the only one of two bounces: the ordinary rules decide")
+    void contestedNeighbourFallsToOrdinaryRules() {
+      StatementLine r1 = at("R1", ST, 10, 0, "Devolucion", "", "100");
+      StatementLine o = at("O", ST, 20, 0, "Transferencia", "", "-100");
+      StatementLine r2 = at("R2", ST, 30, 0, "Devolucion", "", "100");
+
+      Pair pair = onlyPair(data(0, r1, o, r2));
+
+      assertSame(o, pair.original());
+      assertSame(r1, pair.bounce(), "the ordinary rule: first bounce of the group");
+      assertFalse(pair.adjacent(), "adjacency decided neither");
+    }
+
+    @Test
+    @DisplayName("both neighbours reserved: the ordinary rules over the lines left")
+    void bothNeighboursReserved() {
+      StatementLine ra = at("RA", ST, 10, 0, "Devolucion", "", "100");
+      StatementLine o1 = at("O1", ST, 20, 0, "Transferencia", "", "-100");
+      StatementLine rx = at("RX", ST, 30, 0, "Devolucion", "", "100");
+      StatementLine o2 = at("O2", ST, 40, 0, "Transferencia", "", "-100");
+      StatementLine rb = at("RB", ST, 50, 0, "Devolucion", "", "100");
+      StatementLine o3 = at("O3", "ST-2", 10, 0, "Transferencia", "", "-100");
+
+      List<Pair> pairs = BankBounceDetector.detect(data(0, ra, o1, rx, o2, rb, o3));
+
+      assertEquals(3, pairs.size(), pairs.toString());
+      assertPlainAdjacent(pairs.get(0), o1, ra);
+      Pair ordinary = pairs.get(1);
+      assertSame(rx, ordinary.bounce());
+      assertSame(o3, ordinary.original());
+      assertFalse(ordinary.adjacent());
+      assertFalse(ordinary.ambiguous());
+      assertPlainAdjacent(pairs.get(2), o2, rb);
+    }
+
+    @Test
+    @DisplayName("adjacency never raises the confidence")
+    void neverRaisesConfidence() {
+      StatementLine o = at("O", ST, 10, 0, "Pago", ACME, "-100");
+      StatementLine r = at("R", ST, 20, 0, "Abono", ACME, "100");
+      Pair counterpartyOnly = onlyPair(data(5, o, r));
+      assertPlainAdjacent(counterpartyOnly, o, r);
+      assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, counterpartyOnly.confidence());
+
+      StatementLine o2 = at("O", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine late = at("R", ST, 20, 1, "Devolucion transferencia", "", "100");
+      Pair laterDay = onlyPair(data(5, o2, late));
+      assertPlainAdjacent(laterDay, o2, late);
+      assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, laterDay.confidence());
+
+      StatementLine sameDay = at("R", ST, 20, 0, "Devolucion transferencia", "", "100");
+      Pair worded = onlyPair(data(0, o2, sameDay));
+      assertTrue(worded.adjacent());
+      assertEquals(BankBounceDetector.CONFIDENCE_HIGH, worded.confidence());
+
+      StatementLine pis = at("O", ST, 10, 0, "Pago E2E1", "", "-100");
+      StatementLine abono = at("R", ST, 20, 2, "Abono", "", "100");
+      AccountData data = data(3, pis, abono);
+      data.pisPaymentByEndToEnd.put("E2E1", "PAY-1");
+      Pair linked = onlyPair(data);
+      assertTrue(linked.adjacent());
+      assertEquals(List.of(BankBounceDetector.SIGNAL_PIS_LINK), linked.signals());
+      assertEquals(BankBounceDetector.CONFIDENCE_HIGH, linked.confidence());
+    }
+
+    @Test
+    @DisplayName("lines reserved by adjacency are unavailable to the ordinary rules")
+    void reservedLinesAreUnavailable() {
+      // R2 comes first, so without adjacency its group would take O1 before R1's.
+      StatementLine r2 = at("R2", "ST-2", 10, 1, "Devolucion", "", "100");
+      StatementLine o1 = at("O1", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine r1 = at("R1", ST, 20, 0, "Devolucion", "", "100");
+
+      Pair pair = onlyPair(data(0, r2, o1, r1));
+
+      assertPlainAdjacent(pair, o1, r1);
+    }
+
+    @Test
+    @DisplayName("only the real neighbour counts; gaps do not; another or no statement never")
+    void whatIsANeighbour() {
+      StatementLine o = at("O", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine fee = at("F", ST, 20, 0, "Comision", "", "-7");
+      StatementLine r = at("R", ST, 30, 0, "Devolucion transferencia", "", "100");
+      Pair blocked = onlyPair(data(0, o, fee, r));
+      assertSame(o, blocked.original());
+      assertFalse(blocked.adjacent(), "a non-qualifying line in between separates them");
+
+      StatementLine farR = at("R", ST, 500, 0, "Devolucion transferencia", "", "100");
+      assertPlainAdjacent(onlyPair(data(0, o, farR)), o, farR);
+
+      StatementLine otherStatement = at("R", "ST-2", 20, 0, "Devolucion transferencia", "", "100");
+      assertFalse(onlyPair(data(0, o, otherStatement)).adjacent());
+
+      StatementLine noStatementO = new StatementLine("O", day(0), 10, "Transferencia", "",
+          new BigDecimal("-100"), true);
+      StatementLine noStatementR = new StatementLine("R", day(0), 20, "Devolucion transferencia",
+          "", new BigDecimal("100"), true);
+      assertNull(noStatementR.statementId());
+      Pair unknown = onlyPair(data(0, noStatementO, noStatementR));
+      assertSame(noStatementO, unknown.original());
+      assertFalse(unknown.adjacent());
+    }
+
+    @Test
+    @DisplayName("final payment guard: a blocked adjacent pair is dropped, not re-paired")
+    void finalGuardDropsABlockedAdjacentPair() {
+      // O_A and O_B both fit the one open movement T1 (unattributable): each passes the guard
+      // alone, but once both are paired no free line is left for T1, so both pairs are blocked.
+      StatementLine oa = at("OA", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine r1 = at("R1", ST, 20, 0, "Devolucion", "", "100");
+      StatementLine ob = at("OB", "ST-2", 10, 0, "Transferencia", "", "-100");
+      StatementLine r2 = at("R2", "ST-2", 20, 0, "Devolucion", "", "100");
+      StatementLine spare = at("OC", "ST-3", 10, -2, "Transferencia", "", "-100");
+      AccountData data = data(0, oa, r1, ob, r2, spare);
+      data.openTransactions.add(new OpenTransaction("T1", "PAY-1", day(0),
+          new BigDecimal("-100"), "", 1));
+      assertTrue(data.attributionOf(oa).unattributable());
+
+      assertTrue(BankBounceDetector.detect(data).isEmpty(),
+          "neither bounce is re-paired with OC, an eligible original adjacency did not choose");
+    }
+
+    @Test
+    @DisplayName("final payment guard: an adjacent ambiguous pair narrowed to one stays adjacent")
+    void finalGuardNarrowsAnAdjacentAmbiguousPair() {
+      StatementLine oa = at("OA", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine r = at("R", ST, 20, 0, "Devolucion", "", "100");
+      StatementLine oc = at("OC", ST, 30, 0, "Transferencia", "", "-100");
+      AccountData data = data(0, oa, r, oc);
+      data.openTransactions.add(new OpenTransaction("T1", "PAY-1", day(0),
+          new BigDecimal("-100"), "", 1));
+
+      Pair pair = onlyPair(data);
+
+      assertPlainAdjacent(pair, oa, r);
+      assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, pair.confidence(),
+          "narrowed from an ambiguous pair: still for review despite same-day wording");
+    }
+
+    @Test
+    @DisplayName("pairs come in loaded order of their bounce line; equal line numbers keep it")
+    void orderAndTies() {
+      StatementLine oq = at("OQ", "ST-3", 10, 0, "Transferencia", "", "-50");
+      StatementLine rq = at("RQ", "ST-2", 10, 1, "Devolucion", "", "50");
+      StatementLine o = at("O", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine r = at("R", ST, 20, 0, "Devolucion", "", "100");
+      List<Pair> pairs = BankBounceDetector.detect(data(0, oq, rq, o, r));
+      assertEquals(2, pairs.size());
+      assertSame(rq, pairs.get(0).bounce(), "the ordinary pair's bounce is loaded first");
+      assertFalse(pairs.get(0).adjacent());
+      assertSame(r, pairs.get(1).bounce());
+      assertTrue(pairs.get(1).adjacent());
+
+      // All on line 0: neighbours follow the loaded order, so A (not B) is R's neighbour.
+      StatementLine a = at("A", ST, 0, 0, "Transferencia", "", "-100");
+      StatementLine r0 = at("R", ST, 0, 0, "Devolucion", "", "100");
+      StatementLine fee = at("F", ST, 0, 0, "Comision", "", "-7");
+      StatementLine b = at("B", ST, 0, 0, "Transferencia", "", "-100");
+      assertPlainAdjacent(onlyPair(data(0, a, r0, fee, b)), a, r0);
+    }
+
+    @Test
+    @DisplayName("ofCandidates: none → null, one → plain review, several → ambiguous; adjacent kept")
+    void ofCandidates() {
+      StatementLine r = at("R", ST, 20, 0, "Devolucion", "", "100");
+      StatementLine a = at("A", ST, 10, 0, "Transferencia", "", "-100");
+      StatementLine b = at("B", ST, 30, 0, "Transferencia", "", "-100");
+      Candidate ca = new Candidate(a, List.of(BankBounceDetector.SIGNAL_RETURN_TEXT));
+      Candidate cb = new Candidate(b, List.of(BankBounceDetector.SIGNAL_COUNTERPARTY));
+
+      assertNull(BankBounceDetector.ofCandidates(r, List.of(), true));
+
+      for (boolean adjacent : new boolean[] { true, false }) {
+        Pair one = BankBounceDetector.ofCandidates(r, List.of(ca), adjacent);
+        assertSame(a, one.original());
+        assertFalse(one.ambiguous());
+        assertTrue(one.candidates().isEmpty());
+        assertEquals(ca.signals(), one.signals());
+        assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, one.confidence(),
+            "same-day wording, but it came out of an ambiguous pair");
+        assertEquals(adjacent, one.adjacent());
+
+        Pair several = BankBounceDetector.ofCandidates(r, List.of(ca, cb), adjacent);
+        assertTrue(several.ambiguous());
+        assertEquals(List.of(ca, cb), several.candidates());
+        assertEquals(ca.signals(), several.signals(), "the preferred candidate's signals");
+        assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, several.confidence());
+        assertEquals(adjacent, several.adjacent());
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+
   @Nested
   @DisplayName("payments and the payment guard")
   class Payments {
@@ -553,6 +947,23 @@ class BankBounceDetectorTest {
         assertEquals(0L, b.lineNo(), "a missing line number orders first");
         assertTrue(b.outflow());
         assertFalse(c.candidate(), "a line in a split match group is never a candidate");
+      }
+    }
+
+    @Test
+    @DisplayName("toStatementLine reads the statement id; a line with no statement has none")
+    void statementId() {
+      FIN_BankStatementLine onStatement = dalLine("L1", "10", "0", "Pago", "", 30L);
+      FIN_BankStatement statement = mock(FIN_BankStatement.class);
+      when(statement.getId()).thenReturn("ST-9");
+      when(onStatement.getBankStatement()).thenReturn(statement);
+      FIN_BankStatementLine orphan = dalLine("L2", "10", "0", "Pago", "", 40L);
+
+      try (MockedStatic<StatementLineDiscard> discard = mockStatic(StatementLineDiscard.class);
+          MockedStatic<ReactivationSupport> groups = mockStatic(ReactivationSupport.class)) {
+        assertEquals("ST-9", BankBounceDetector.toStatementLine(onStatement).statementId());
+        assertNull(BankBounceDetector.toStatementLine(orphan).statementId(),
+            "no statement: no neighbours, so no adjacency");
       }
     }
 

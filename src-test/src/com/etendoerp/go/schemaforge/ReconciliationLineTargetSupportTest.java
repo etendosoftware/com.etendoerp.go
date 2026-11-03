@@ -70,9 +70,11 @@ import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
  * model, see {@code ReactivationSupport.readMatchGroupId}) are mocked statically for every test.
  *
  * <p>ETP-5581: a stuck line a {@code BankStatementLineFilterHook} excludes (PSD2's discarded
- * lines) is refused with the 409 {@code LINE_DISCARDED} before the heal, the only write here.
+ * lines) is refused with the 409 {@code LINE_DISCARDED} before the heal, the only write here —
+ * only with {@code bank-bounce-suggestions} on; off, the same line is healed like any stuck line.
  *
  * @covers com.etendoerp.go.schemaforge.ReconciliationLineTargetSupport
+ * @covers com.etendoerp.go.schemaforge.StatementLineFilter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -426,6 +428,70 @@ class ReconciliationLineTargetSupportTest {
     assertEquals(DISCARDED_TEXT, errorMessage(target.error()));
     assertNoWrite();
     verify(handler, never()).loadMatchGroupLines(any(), any());
+  }
+
+  /**
+   * Resolves {@link #line}, a stuck line, with the REAL {@link StatementLineFilter}: one deployed
+   * hook, a database that answers "excluded" for it, and {@code bank-bounce-suggestions} as given.
+   */
+  @SuppressWarnings("unchecked")
+  private ReconciliationLineTargetSupport.Target resolveStuckLineWithARealHook(boolean flagOn)
+      throws Exception {
+    when(trx.getReconciliation()).thenReturn(null);
+    when(handler.normalizeReactivatedMatchGroup(line)).thenReturn(line);
+    org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+        (alias, ctx, params) -> alias + ".etgoTestDiscarded = false";
+    org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> excluded =
+        Mockito.mock(org.openbravo.dal.service.OBQuery.class);
+    when(excluded.count()).thenReturn(1);
+    when(dal.createQuery(Mockito.eq(FIN_BankStatementLine.class), Mockito.anyString()))
+        .thenReturn(excluded);
+    try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+        Mockito.mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag =
+            Mockito.mockStatic(BankBounceSuggestionsFlag.class);
+        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class)) {
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+          .thenReturn(Collections.singletonList(hook));
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
+      messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
+          .thenReturn(DISCARDED_TEXT);
+      return ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+    }
+  }
+
+  /**
+   * Flag off: a stuck line the hook would exclude is healed like any stuck line — the guard
+   * answers nothing and no line query runs.
+   */
+  @Test
+  void testResolveForMatchHealsADiscardedStuckLineWithTheBounceFlagOff() throws Exception {
+    ReconciliationLineTargetSupport.Target target = resolveStuckLineWithARealHook(false);
+
+    assertNull(target.error());
+    assertSame(line, target.line());
+    assertLineDetached(line);
+    verify(handler).normalizeReactivatedMatchGroup(line);
+    verify(dal, never()).createQuery(Mockito.eq(FIN_BankStatementLine.class),
+        Mockito.anyString());
+  }
+
+  /**
+   * Flag on, same real hook and database: the discarded stuck line is refused with the 409
+   * before the heal, and nothing is freed.
+   */
+  @Test
+  void testResolveForMatchRefusesADiscardedStuckLineWithTheBounceFlagOn() throws Exception {
+    ReconciliationLineTargetSupport.Target target = resolveStuckLineWithARealHook(true);
+
+    assertNotNull(target.error());
+    assertEquals(409, target.error().getHttpStatus());
+    assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED,
+        target.error().getBody().getString("code"));
+    verify(line, never()).setFinancialAccountTransaction(any());
+    verify(dal, never()).save(any());
+    verify(handler, never()).normalizeReactivatedMatchGroup(any());
   }
 
   /**

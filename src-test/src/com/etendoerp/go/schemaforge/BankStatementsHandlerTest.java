@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -53,6 +54,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -98,6 +100,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  *
  * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
  * @covers com.etendoerp.go.schemaforge.BankStatementLineSet
+ * @covers com.etendoerp.go.schemaforge.StatementLineFilter
  */
 // Silent runner: clearMocks() (below) wipes the inline mock maker registry after
 // each test to keep the shared test-worker heap flat; the strict runner would
@@ -734,10 +737,13 @@ public class BankStatementsHandlerTest {
     }
   }
 
-  /** Each row exposes the stored discarded count next to the matched one, and the stored status. */
+  /**
+   * With {@code bank-bounce-suggestions} on, each row exposes the stored discarded count next to
+   * the matched one, and the stored status.
+   */
   @Test
   public void loadStatementsReturnsTheDiscardedCount() throws Exception {
-    JSONObject row = loadOneStatementRow(3, 1, 2, "RECONCILED");
+    JSONObject row = loadOneStatementRow(true, 3, 1, 2, "RECONCILED");
 
     assertEquals(3, row.getInt("lineCount"));
     assertEquals(1, row.getInt("matchedCount"));
@@ -746,23 +752,174 @@ public class BankStatementsHandlerTest {
   }
 
   /**
-   * A row whose {@code em_etgo_status} is blank derives its status, and a discarded line counts as
-   * resolved there: 1 matched + 2 discarded of 3 is RECONCILED, while the same row without the
-   * discarded lines is PARTIAL.
+   * With {@code bank-bounce-suggestions} on, a row whose {@code em_etgo_status} is blank derives
+   * its status, and a discarded line counts as resolved there: 1 matched + 2 discarded of 3 is
+   * RECONCILED, while the same row without the discarded lines is PARTIAL.
    */
   @Test
   public void loadStatementsFallbackStatusCountsDiscardedLinesAsResolved() throws Exception {
-    assertEquals("RECONCILED", loadOneStatementRow(3, 1, 2, "  ").getString("status"));
-    assertEquals("PARTIAL", loadOneStatementRow(3, 1, 0, null).getString("status"));
-    assertEquals("PARTIAL", loadOneStatementRow(4, 0, 1, "").getString("status"));
+    assertEquals("RECONCILED", loadOneStatementRow(true, 3, 1, 2, "  ").getString("status"));
+    assertEquals("PARTIAL", loadOneStatementRow(true, 3, 1, 0, null).getString("status"));
+    assertEquals("PARTIAL", loadOneStatementRow(true, 4, 0, 1, "").getString("status"));
+  }
+
+  /**
+   * With {@code bank-bounce-suggestions} off the list is the one from before ETP-5581: no
+   * {@code discardedCount}, and a discarded line is not resolved. The stored status counts it as
+   * resolved, so a statement holding one derives its status again without it (1 matched of 3 is
+   * PARTIAL, not the stored RECONCILED); a statement without discarded lines keeps its stored
+   * status.
+   */
+  @Test
+  public void loadStatementsWithTheFlagOffDoesNotCountDiscardedLines() throws Exception {
+    JSONObject row = loadOneStatementRow(false, 3, 1, 2, "RECONCILED");
+
+    assertTrue("no discardedCount with the flag off", !row.has("discardedCount"));
+    assertEquals(1, row.getInt("matchedCount"));
+    assertEquals("PARTIAL", row.getString("status"));
+    assertEquals("PENDING", loadOneStatementRow(false, 2, 0, 2, "RECONCILED").getString("status"));
+    assertEquals("PARTIAL", loadOneStatementRow(false, 3, 1, 1, " ").getString("status"));
+    assertEquals("the stored status of a statement with nothing discarded is kept", "PARTIAL",
+        loadOneStatementRow(false, 3, 3, 0, "PARTIAL").getString("status"));
+  }
+
+  /**
+   * With {@code bank-bounce-suggestions} off, a statement that is not processed reads DRAFT however
+   * many discarded lines its stored counter holds, and carries no {@code discardedCount}.
+   */
+  @Test
+  public void loadStatementsWithTheFlagOffKeepsAnUnprocessedStatementDraft() throws Exception {
+    JSONObject row = loadOneStatementRow(false, false, 3, 0, 2, "DRAFT");
+
+    assertEquals("DRAFT", row.getString("status"));
+    assertFalse(row.has("discardedCount"));
+  }
+
+  /** The flag is read once per list, not once per statement row. */
+  @Test
+  public void loadStatementsReadsTheFlagOncePerList() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, true, false);
+    when(rs.getString("fin_bankstatement_id")).thenReturn("stmt-1", "stmt-2", "stmt-3");
+    when(rs.getTimestamp(anyString())).thenReturn(new Timestamp(0));
+    when(rs.getString("processed")).thenReturn("Y");
+    when(rs.getInt("em_etgo_line_count")).thenReturn(3);
+    when(rs.getInt("em_etgo_matched_count")).thenReturn(1);
+    when(rs.getInt("em_etgo_discarded_count")).thenReturn(2);
+    when(rs.getString("em_etgo_status")).thenReturn("RECONCILED");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag =
+            mockStatic(BankBounceSuggestionsFlag.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+      flag.clearInvocations();
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      JSONArray rows = handler.loadStatements("acc-1");
+
+      assertEquals(3, rows.length());
+      for (int i = 0; i < rows.length(); i++) {
+        assertEquals(2, rows.getJSONObject(i).getInt("discardedCount"));
+      }
+      flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
+    }
+  }
+
+  /**
+   * {@code ?action=lines} with a real hook deployed that excludes {@code line-2}: with
+   * {@code bank-bounce-suggestions} on every row carries {@code discarded} (true for the excluded
+   * line); off, no row carries the key and neither the hook nor the database is asked.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void linesMarkTheDiscardedLinesOnlyWithTheBounceFlagOn() throws Exception {
+    for (boolean flagOn : new boolean[] { true, false }) {
+      NeoContext ctx = mock(NeoContext.class);
+      Map<String, String> qp = new HashMap<>();
+      qp.put("action", "lines");
+      qp.put("statementId", "stmt-1");
+      when(ctx.getHttpMethod()).thenReturn("GET");
+      when(ctx.getQueryParams()).thenReturn(qp);
+      JSONArray loaded = new JSONArray();
+      loaded.put(new JSONObject().put("id", "line-1"));
+      loaded.put(new JSONObject().put("id", "line-2"));
+      doReturn(loaded).when(handler).loadLines(Collections.singletonList("stmt-1"));
+      doReturn(true).when(handler).owns(any(), anyString());
+      List<String> hookAsked = new ArrayList<>();
+      org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+          (alias, context, params) -> {
+            hookAsked.add(alias);
+            return alias + ".etgoTestDiscarded = false";
+          };
+      FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+      when(account.getId()).thenReturn("acc-1");
+      FIN_BankStatement statement = mock(FIN_BankStatement.class);
+      when(statement.getAccount()).thenReturn(account);
+      org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> query =
+          mock(org.openbravo.dal.service.OBQuery.class);
+      org.hibernate.query.Query<String> ids = mock(org.hibernate.query.Query.class);
+      when(query.createQuery(String.class)).thenReturn(ids);
+      when(ids.list()).thenReturn(Collections.singletonList("line-2"));
+
+      JSONArray rows;
+      try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+          MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+              mockStatic(org.openbravo.base.weld.WeldUtils.class);
+          MockedStatic<BankBounceSuggestionsFlag> flag =
+              mockStatic(BankBounceSuggestionsFlag.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(FIN_BankStatement.class, "stmt-1")).thenReturn(statement);
+        when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(query);
+        weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+            org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+            .thenReturn(Collections.singletonList(hook));
+        flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
+
+        NeoResponse response = handler.handle(ctx);
+
+        assertEquals(200, response.getHttpStatus());
+        rows = response.getBody().getJSONObject("response").getJSONObject("data")
+            .getJSONArray("lines");
+        if (!flagOn) {
+          verify(dal, never()).get(eq(FIN_BankStatement.class), anyString());
+          verify(dal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
+        }
+      }
+
+      assertEquals(2, rows.length());
+      if (flagOn) {
+        assertFalse(rows.getJSONObject(0).getBoolean("discarded"));
+        assertTrue(rows.getJSONObject(1).getBoolean("discarded"));
+        assertEquals(1, hookAsked.size());
+      } else {
+        assertFalse(rows.getJSONObject(0).has("discarded"));
+        assertFalse(rows.getJSONObject(1).has("discarded"));
+        assertTrue("no hook is asked with the flag off", hookAsked.isEmpty());
+      }
+    }
   }
 
   /**
    * Runs {@code loadStatements} over a single processed result-set row with the given stored counts
-   * and status, and returns that row.
+   * and status, with {@code bank-bounce-suggestions} in the given state, and returns that row.
    */
-  private JSONObject loadOneStatementRow(int lineCount, int matchedCount, int discardedCount,
-      String storedStatus) throws Exception {
+  private JSONObject loadOneStatementRow(boolean flagOn, int lineCount, int matchedCount,
+      int discardedCount, String storedStatus) throws Exception {
+    return loadOneStatementRow(flagOn, true, lineCount, matchedCount, discardedCount,
+        storedStatus);
+  }
+
+  /** {@link #loadOneStatementRow(boolean, int, int, int, String)} for a statement processed or not. */
+  private JSONObject loadOneStatementRow(boolean flagOn, boolean processed, int lineCount,
+      int matchedCount, int discardedCount, String storedStatus) throws Exception {
     Connection conn = mock(Connection.class);
     PreparedStatement ps = mock(PreparedStatement.class);
     ResultSet rs = mock(ResultSet.class);
@@ -772,13 +929,16 @@ public class BankStatementsHandlerTest {
     when(rs.next()).thenReturn(true, false);
     when(rs.getString("fin_bankstatement_id")).thenReturn("stmt-1");
     when(rs.getTimestamp(anyString())).thenReturn(new Timestamp(0));
-    when(rs.getString("processed")).thenReturn("Y");
+    when(rs.getString("processed")).thenReturn(processed ? "Y" : "N");
     when(rs.getInt("em_etgo_line_count")).thenReturn(lineCount);
     when(rs.getInt("em_etgo_matched_count")).thenReturn(matchedCount);
     when(rs.getInt("em_etgo_discarded_count")).thenReturn(discardedCount);
     when(rs.getString("em_etgo_status")).thenReturn(storedStatus);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag =
+            mockStatic(BankBounceSuggestionsFlag.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getConnection()).thenReturn(conn);

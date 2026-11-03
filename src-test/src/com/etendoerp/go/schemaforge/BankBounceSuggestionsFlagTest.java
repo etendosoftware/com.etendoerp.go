@@ -66,8 +66,9 @@ import dev.openfeature.sdk.Value;
  *
  * <p>End to end through the real {@link GoFeatureFlags} and, where the account resolution is what
  * is under test, the real {@link GoAccountResolver} over a mocked {@link OBContext} and
- * {@link OBDal}. {@code Openbravo.properties} is mocked empty so a developer's local override cannot
- * leak into the "unset" assertion (same isolation as {@code InvoiceInboxFlagTest}).
+ * {@link OBDal}. {@code Openbravo.properties} is mocked empty and a JVM {@code -D} override of the
+ * flag is lifted for each case (and put back after it), so neither a developer's local override nor
+ * a forced run can leak into the "unset" assertion (same isolation as {@code InvoiceInboxFlagTest}).
  *
  * @covers com.etendoerp.go.schemaforge.BankBounceSuggestionsFlag
  */
@@ -81,9 +82,14 @@ class BankBounceSuggestionsFlagTest {
   private static final String ACCOUNT_EMAIL_LOWERCASE = "ana.garcia@example.com";
 
   private MockedStatic<OBPropertiesProvider> propertiesMock;
+  /** The JVM's own value of the flag property (a {@code -D} override), restored after each case. */
+  private String jvmOverride;
 
   @BeforeEach
   void isolateFromOpenbravoProperties() {
+    // A -D override outranks every other source, so "unset" means unset here too; it is put back
+    // afterwards so the rest of the JVM still runs with it.
+    jvmOverride = System.clearProperty(FLAG_PROPERTY);
     OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
     when(provider.getOpenbravoProperties()).thenReturn(new Properties());
     propertiesMock = mockStatic(OBPropertiesProvider.class);
@@ -92,7 +98,11 @@ class BankBounceSuggestionsFlagTest {
 
   @AfterEach
   void clearOverride() {
-    System.clearProperty(FLAG_PROPERTY);
+    if (jvmOverride != null) {
+      System.setProperty(FLAG_PROPERTY, jvmOverride);
+    } else {
+      System.clearProperty(FLAG_PROPERTY);
+    }
     propertiesMock.close();
   }
 

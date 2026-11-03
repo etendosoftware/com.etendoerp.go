@@ -85,6 +85,10 @@ import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
  * static boundary so each case pins the composition: which lines a pair reserves, which pairs are
  * offered, what the answers carry and in what order {@code applySuggestions} writes.
  *
+ * <p>Statement adjacency reaches the offering only through the pairs: two adjacent ambiguous pairs
+ * may share a neighbour and are both offered, narrowing keeps {@code adjacent}, and every group and
+ * annotation carries it.
+ *
  * <p>Kept apart from {@code ReconciliationHandlerTest} (6,500 lines covering every other route):
  * this class is the flag's test, the one {@code flags-registry.json} names for it.
  *
@@ -226,15 +230,21 @@ public class ReconciliationHandlerBounceSuggestionsTest {
         plan(HIGH, REVIEW, AMBIGUOUS).reservedLineIds());
   }
 
-  /** A review pair is offered only when none of its lines was taken by a transaction group. */
+  /**
+   * A plain review pair is offered only when none of its lines was taken by a transaction group;
+   * an ambiguous pair only loses the candidates that were taken.
+   */
   @Test
   public void reviewPairsAreOfferedOnlyWhenNoneOfTheirLinesIsTaken() {
     BankBounceSuggestions.Plan plan = plan(HIGH, REVIEW, AMBIGUOUS);
 
     assertEquals(Arrays.asList(HIGH, REVIEW, AMBIGUOUS), plan.offered(Collections.emptySet()));
     assertEquals(Arrays.asList(HIGH, AMBIGUOUS), plan.offered(Set.of("O2")));
-    // A candidate original of an ambiguous pair counts as one of its lines.
-    assertEquals(Arrays.asList(HIGH, REVIEW), plan.offered(Set.of("C2")));
+    // A taken candidate original is dropped from the ambiguous pair; the one left makes it a
+    // plain review pair on that candidate.
+    assertEquals(Arrays.asList(HIGH, REVIEW, new Pair(C1, B3, Collections.emptyList(),
+        List.of(BankBounceDetector.SIGNAL_COUNTERPARTY), BankBounceDetector.CONFIDENCE_REVIEW)),
+        plan.offered(Set.of("C2")));
   }
 
   /**
@@ -617,6 +627,245 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     assertEquals(0, c2.getJSONArray("signals").length());
 
     assertEquals(5, out[0].getJSONObject("counts").getInt("bounce"));
+  }
+
+  /**
+   * Repro of a real statement (ETP-5581): on one day, three 0,61 transfers out (L120, L140, L160)
+   * and two returns with bank bounce wording (L130, L150). With no statement position the ambiguous
+   * assignment applies, so the detection yields one ambiguous pair per return, both listing the
+   * same three transfers. Both returns must be offered, in the modal and in the panel: candidates
+   * the two pairs share do not block each other. Before the fix only the first pair was offered and
+   * L150 disappeared from both answers. (With the real statement positions, adjacency narrows the
+   * two pairs to [L120, L140] and [L140, L160], which still share L140: the same offering path.)
+   */
+  @Test
+  public void ambiguousPairsSharingTheirCandidatesAreAllOffered() throws Exception {
+    LocalDate day = LocalDate.of(2026, 8, 24);
+    BankBounceDetector.AccountData detection = new BankBounceDetector.AccountData(null, 3);
+    detection.lines.addAll(Arrays.asList(
+        new StatementLine("L120", day, 120, "TRANSFERENCIA INMEDIATA A FAVOR DE Galder Romo", "",
+            new BigDecimal("-0.61"), true),
+        new StatementLine("L130", day, 130, "RETROCESIÓN TRANSFERENCIA INMEDIATA", "",
+            new BigDecimal("0.61"), true),
+        new StatementLine("L140", day, 140,
+            "TRANSFERENCIA INMEDIATA A FAVOR DE Distribuciones Iberia 10000268-2", "",
+            new BigDecimal("-0.61"), true),
+        new StatementLine("L150", day, 150, "RETROCESIÓN TRANSFERENCIA INMEDIATA", "",
+            new BigDecimal("0.61"), true),
+        new StatementLine("L160", day, 160,
+            "TRANSFERENCIA INMEDIATA A FAVOR DE Distribuciones Iberia 10000268-1", "",
+            new BigDecimal("-0.61"), true)));
+    List<Pair> detected = BankBounceDetector.detect(detection);
+    assertEquals(2, detected.size());
+    assertTrue(detected.get(0).ambiguous());
+    assertTrue(detected.get(1).ambiguous());
+    BankBounceSuggestions.Plan plan =
+        new BankBounceSuggestions.Plan(detected, Collections.emptyMap(), true);
+
+    // Modal: both returns are offered.
+    JSONArray groups = new JSONArray();
+    JSONObject kpis = new JSONObject();
+    BankBounceSuggestions.appendGroups(plan, groups, kpis);
+    Set<String> modalBounces = new HashSet<>();
+    for (int i = 0; i < groups.length(); i++) {
+      JSONObject group = groups.getJSONObject(i);
+      modalBounces.add(group.getJSONObject("counterpartLine").getString("id"));
+      assertEquals("each return keeps its three candidate transfers", 3,
+          group.getJSONArray("candidates").length());
+    }
+    assertEquals(new HashSet<>(Arrays.asList("L130", "L150")), modalBounces);
+    assertEquals(2, kpis.getInt("bouncePairs"));
+
+    // Panel: the same two pairs, every line in the bounce state and counted once.
+    JSONArray rows = new JSONArray(Arrays.asList(row("L120", -1), row("L130", 1),
+        row("L140", -1), row("L150", 1), row("L160", -1)));
+    JSONObject[] out = new JSONObject[1];
+    summarize(rows, BankBounceSuggestions.panelView(plan), Collections.emptyMap(), out);
+    Map<String, JSONObject> rowsById = byId(rows);
+    Set<String> panelKeys = new HashSet<>();
+    for (JSONObject r : rowsById.values()) {
+      assertEquals(r.getString("id"), "bounce", r.getString("state"));
+      panelKeys.add(r.getJSONObject("bouncePair").getString("groupKey"));
+    }
+    for (String bounceId : Arrays.asList("L130", "L150")) {
+      JSONObject marker = rowsById.get(bounceId).getJSONObject("bouncePair");
+      assertEquals("bounce", marker.getString("role"));
+      assertEquals("bounce-" + bounceId, marker.getString("groupKey"));
+      assertEquals(3, marker.getJSONArray("candidates").length());
+    }
+    for (String candidateId : Arrays.asList("L120", "L140", "L160")) {
+      JSONObject marker = rowsById.get(candidateId).getJSONObject("bouncePair");
+      assertEquals("candidate", marker.getString("role"));
+      assertTrue(modalBounces.contains(marker.getJSONObject("counterpartLine").getString("id")));
+    }
+    assertEquals(new HashSet<>(Arrays.asList("bounce-L130", "bounce-L150")), panelKeys);
+    assertEquals(kpis.getInt("bouncePairs"), panelKeys.size());
+    assertEquals(5, out[0].getJSONObject("counts").getInt("bounce"));
+    assertEquals(0, out[0].getJSONObject("counts").getInt("pending"));
+  }
+
+  /**
+   * The real statement with its positions (one {@code FIN_BankStatement}): adjacency narrows the two
+   * returns to [L120, L140] and [L140, L160], which share L140. Both are offered in the modal and
+   * in the panel; the shared row is annotated once, by the first pair, and the distinct group keys
+   * of the bounce rows still equal {@code kpis.bouncePairs}.
+   */
+  @Test
+  public void adjacentAmbiguousPairsSharingANeighbourAreBothOffered() throws Exception {
+    LocalDate day = LocalDate.of(2026, 8, 24);
+    BankBounceDetector.AccountData detection = new BankBounceDetector.AccountData(null, 3);
+    String[][] statement = { { "L120", "-0.61", "TRANSFERENCIA INMEDIATA" },
+        { "L130", "0.61", "RETROCESIÓN TRANSFERENCIA INMEDIATA" },
+        { "L140", "-0.61", "TRANSFERENCIA INMEDIATA" },
+        { "L150", "0.61", "RETROCESIÓN TRANSFERENCIA INMEDIATA" },
+        { "L160", "-0.61", "TRANSFERENCIA INMEDIATA" } };
+    for (String[] l : statement) {
+      detection.lines.add(new StatementLine(l[0], day, Long.parseLong(l[0].substring(1)), l[2],
+          "", new BigDecimal(l[1]), true, "ST-BBVA"));
+    }
+    List<Pair> detected = BankBounceDetector.detect(detection);
+    assertEquals(2, detected.size());
+    BankBounceSuggestions.Plan plan =
+        new BankBounceSuggestions.Plan(detected, Collections.emptyMap(), true);
+
+    JSONArray groups = new JSONArray();
+    JSONObject kpis = new JSONObject();
+    BankBounceSuggestions.appendGroups(plan, groups, kpis);
+    assertEquals(2, groups.length());
+    String[][] expected = { { "L130", "L120", "L140" }, { "L150", "L140", "L160" } };
+    for (int i = 0; i < expected.length; i++) {
+      JSONObject group = groups.getJSONObject(i);
+      assertEquals(expected[i][0], group.getJSONObject("counterpartLine").getString("id"));
+      assertTrue(group.getBoolean("ambiguous"));
+      assertTrue(group.getBoolean("adjacent"));
+      JSONArray candidates = group.getJSONArray("candidates");
+      assertEquals(2, candidates.length());
+      assertEquals(expected[i][1], candidates.getJSONObject(0).getJSONObject("line").getString("id"));
+      assertEquals(expected[i][2], candidates.getJSONObject(1).getJSONObject("line").getString("id"));
+    }
+    assertEquals(2, kpis.getInt("bouncePairs"));
+
+    JSONArray rows = new JSONArray(Arrays.asList(row("L120", -1), row("L130", 1),
+        row("L140", -1), row("L150", 1), row("L160", -1)));
+    JSONObject[] out = new JSONObject[1];
+    summarize(rows, BankBounceSuggestions.panelView(plan), Collections.emptyMap(), out);
+    Map<String, JSONObject> rowsById = byId(rows);
+    Set<String> bounceKeys = new HashSet<>();
+    for (String bounceId : Arrays.asList("L130", "L150")) {
+      JSONObject marker = rowsById.get(bounceId).getJSONObject("bouncePair");
+      assertEquals("bounce", marker.getString("role"));
+      assertEquals(2, marker.getJSONArray("candidates").length());
+      assertTrue(marker.getBoolean("adjacent"));
+      bounceKeys.add(marker.getString("groupKey"));
+    }
+    JSONObject shared = rowsById.get("L140").getJSONObject("bouncePair");
+    assertEquals("candidate", shared.getString("role"));
+    assertEquals("annotated by the first pair", "bounce-L130", shared.getString("groupKey"));
+    assertEquals("bounce-L150",
+        rowsById.get("L160").getJSONObject("bouncePair").getString("groupKey"));
+    assertEquals(kpis.getInt("bouncePairs"), bounceKeys.size());
+    assertEquals(5, out[0].getJSONObject("counts").getInt("bounce"));
+  }
+
+  /**
+   * Plain pairs are settled before ambiguous ones whatever the input order: the plain pair keeps
+   * the candidate it shares with an ambiguous pair, which is narrowed to the candidate left.
+   */
+  @Test
+  public void plainPairsAreSettledBeforeAmbiguousOnesWhateverTheOrder() {
+    StatementLine b5 = model("B5", 30, DAY.plusDays(2));
+    Pair plainOnC1 = new Pair(C1, b5, Collections.emptyList(),
+        List.of(BankBounceDetector.SIGNAL_COUNTERPARTY), BankBounceDetector.CONFIDENCE_REVIEW);
+    Pair narrowed = new Pair(C2, B3, Collections.emptyList(), Collections.emptyList(),
+        BankBounceDetector.CONFIDENCE_REVIEW);
+
+    assertEquals(Arrays.asList(narrowed, plainOnC1),
+        plan(AMBIGUOUS, plainOnC1).offered(Collections.emptySet()));
+    assertEquals(Arrays.asList(plainOnC1, narrowed),
+        plan(plainOnC1, AMBIGUOUS).offered(Collections.emptySet()));
+  }
+
+  /**
+   * Two ambiguous pairs left with the same single candidate: the first becomes a plain pair on it
+   * and the second, with nothing left, is dropped.
+   */
+  @Test
+  public void twoAmbiguousPairsLeftWithOneSharedCandidateOfferOnlyTheFirst() {
+    StatementLine x = model("X", -30, DAY);
+    StatementLine y = model("Y", -30, DAY);
+    StatementLine z = model("Z", -30, DAY);
+    StatementLine b4 = model("B4", 30, DAY.plusDays(1));
+    Pair first = new Pair(null, B3, List.of(new Candidate(x, List.of()), new Candidate(y,
+        List.of())), List.of(), BankBounceDetector.CONFIDENCE_REVIEW);
+    Pair second = new Pair(null, b4, List.of(new Candidate(x, List.of()), new Candidate(z,
+        List.of())), List.of(), BankBounceDetector.CONFIDENCE_REVIEW);
+
+    List<Pair> offered = plan(first, second).offered(Set.of("Y", "Z"));
+
+    assertEquals(1, offered.size());
+    assertSame(x, offered.get(0).original());
+    assertSame(B3, offered.get(0).bounce());
+    assertFalse(offered.get(0).ambiguous());
+  }
+
+  /** An ambiguous pair whose bounce, or every candidate, is taken is not offered. */
+  @Test
+  public void anAmbiguousPairWithItsBounceOrAllItsCandidatesTakenIsDropped() {
+    assertTrue(plan(AMBIGUOUS).offered(Set.of("B3")).isEmpty());
+    assertTrue(plan(AMBIGUOUS).offered(Set.of("C1", "C2")).isEmpty());
+    Pair plainOnB3 = new Pair(model("C3", -30, DAY), B3, Collections.emptyList(),
+        List.of(BankBounceDetector.SIGNAL_COUNTERPARTY), BankBounceDetector.CONFIDENCE_REVIEW);
+    assertEquals("a plain pair taking the bounce first drops the ambiguous one",
+        Collections.singletonList(plainOnB3),
+        plan(AMBIGUOUS, plainOnB3).offered(Collections.emptySet()));
+  }
+
+  /** Narrowing an adjacent ambiguous pair to one candidate keeps {@code adjacent}. */
+  @Test
+  public void narrowingAnAdjacentAmbiguousPairKeepsAdjacent() {
+    Pair adjacent = new Pair(null, B3, AMBIGUOUS.candidates(), AMBIGUOUS.signals(),
+        BankBounceDetector.CONFIDENCE_REVIEW, true);
+
+    List<Pair> offered = plan(adjacent).offered(Set.of("C2"));
+
+    assertEquals(1, offered.size());
+    assertSame(C1, offered.get(0).original());
+    assertFalse(offered.get(0).ambiguous());
+    assertTrue(offered.get(0).adjacent());
+    assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, offered.get(0).confidence());
+  }
+
+  /** {@code adjacent} is on every bouncePair group and every annotation role, true or false. */
+  @Test
+  public void adjacentIsOnEveryGroupAndEveryAnnotationRole() throws Exception {
+    Pair adjacentHigh = new Pair(O1, B1, Collections.emptyList(),
+        List.of(BankBounceDetector.SIGNAL_RETURN_TEXT), BankBounceDetector.CONFIDENCE_HIGH, true);
+    BankBounceSuggestions.Plan plan = plan(adjacentHigh, AMBIGUOUS);
+
+    JSONArray groups = new JSONArray();
+    BankBounceSuggestions.appendGroups(plan, groups, new JSONObject());
+    Map<String, Boolean> byKey = new HashMap<>();
+    for (int i = 0; i < groups.length(); i++) {
+      JSONObject group = groups.getJSONObject(i);
+      assertTrue(group.getString("groupKey"), group.has("adjacent"));
+      byKey.put(group.getString("groupKey"), group.getBoolean("adjacent"));
+    }
+    assertEquals(Boolean.TRUE, byKey.get("bounce-O1-B1"));
+    assertEquals(Boolean.FALSE, byKey.get("bounce-B3"));
+
+    JSONArray rows = panelRows();
+    JSONObject[] out = new JSONObject[1];
+    summarize(rows, BankBounceSuggestions.panelView(plan), Collections.emptyMap(), out);
+    Map<String, JSONObject> rowsById = byId(rows);
+    String[][] roles = { { "O1", "original", "true" }, { "B1", "bounce", "true" },
+        { "B3", "bounce", "false" }, { "C1", "candidate", "false" },
+        { "C2", "candidate", "false" } };
+    for (String[] r : roles) {
+      JSONObject marker = rowsById.get(r[0]).getJSONObject("bouncePair");
+      assertEquals(r[0], r[1], marker.getString("role"));
+      assertTrue(r[0], marker.has("adjacent"));
+      assertEquals(r[0], Boolean.parseBoolean(r[2]), marker.getBoolean("adjacent"));
+    }
   }
 
   /** With no view (flag off) no row gets a bounce state or annotation and there is no count. */

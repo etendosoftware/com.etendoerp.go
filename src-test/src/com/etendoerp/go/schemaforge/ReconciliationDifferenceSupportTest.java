@@ -99,6 +99,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * that includes a line a {@code BankStatementLineFilterHook} excludes (409 {@code LINE_DISCARDED}).
  *
  * @covers com.etendoerp.go.schemaforge.ReconciliationDifferenceSupport
+ * @covers com.etendoerp.go.schemaforge.StatementLineFilter
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationDifferenceSupportTest {
@@ -787,6 +788,53 @@ public class ReconciliationDifferenceSupportTest {
     assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, response.getBody().getString("code"));
     assertEquals("Discarded line", errorMessage(response));
     assertNoWrite();
+  }
+
+  /**
+   * ETP-5581, flag off: with {@code bank-bounce-suggestions} off a discarded remainder is a plain
+   * pending line. A real hook is deployed and the database would answer "excluded", yet the
+   * difference is reconciled (201): the flag is read, no line query runs and the write is reached.
+   * Same fixture as {@link #testDiscardedLineReturns409LineDiscardedAndWritesNothing}.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testDiscardedLineIsReconciledWithTheBounceFlagOff() throws Exception {
+    stubPartialGroup("12.00", null, "0.50", null);
+    List<String> hookAsked = new ArrayList<>();
+    org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+        (alias, ctx, params) -> {
+          hookAsked.add(alias);
+          return alias + ".etgoTestDiscarded = false";
+        };
+    org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> excludedQuery =
+        mock(org.openbravo.dal.service.OBQuery.class);
+    when(excludedQuery.count()).thenReturn(1);
+
+    NeoResponse response;
+    try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+        mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class)) {
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+          .thenReturn(Collections.singletonList(hook));
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+      OBDal[] dalSeen = new OBDal[1];
+      response = runActionReachingTheWrite(body(ACC_ID, REM_ID), dal -> {
+        dalSeen[0] = dal;
+        when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString()))
+            .thenReturn(excludedQuery);
+      });
+      flag.verify(BankBounceSuggestionsFlag::isEnabled);
+      verify(dalSeen[0], never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
+    }
+
+    assertEquals(201, response.getHttpStatus());
+    assertFalse("the hook is asked: the flag is read only when a hook has a condition",
+        hookAsked.isEmpty());
+    verify(handler).createTransactionForRule(eq(account), any(), any());
+    verify(handler).reconcileGroup(any());
   }
 
   /**

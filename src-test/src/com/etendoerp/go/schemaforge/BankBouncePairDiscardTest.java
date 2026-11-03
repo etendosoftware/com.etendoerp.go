@@ -75,7 +75,7 @@ import com.etendoerp.psd2.bank.integration.data.PisPayment;
  * {@code discardPair} and {@code restorePair} of the bounce pairs (ETP-5581): the validation order
  * of the coded refusals, what a discard writes on BOTH lines (the PSD2 flag and button, kept in
  * sync, and the four {@code EM_ETGO_Bounce_*} link columns), that a refusal writes nothing, the
- * flag gate on the discard, and the restore that always acts on the pair and is never gated.
+ * flag gate on the discard and on the restore, and the restore that always acts on the pair.
  *
  * <p>The DAL model is simulated column by column: {@link ModelProvider} answers a property for each
  * column the running model "has", and each line keeps its values in a map, so the service writes
@@ -263,6 +263,52 @@ class BankBouncePairDiscardTest {
       assertEquals(200, BankBouncePairService.discardPair(handler,
           body(original.id, bounce.id)).getHttpStatus());
     }
+    @Test
+    @DisplayName("an adjacent pair stores the signal and confidence of the rules, never high for adjacency")
+    void adjacentPairStoresTheRulesSignalAndConfidence() throws Exception {
+      // L-FAR is an eligible original too, but only L-OUT is L-IN's statement neighbour.
+      Line far = pendingLine("L-FAR", "-50.00", DAY, "ACME", "TRANSFER TO ACME");
+      Line original = pendingLine("L-OUT", "-50.00", DAY, "ACME", "TRANSFER TO ACME");
+      Line bounce = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "DEVOLUCION");
+      onStatement("ST-1", far, original, bounce);
+
+      NeoResponse response = BankBouncePairService.discardPair(handler,
+          body(original.id, bounce.id));
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(BankBounceDetector.SIGNAL_RETURN_TEXT, data(response).getString("signal"));
+      assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, data(response).getString("confidence"),
+          "bounce wording a day later stays review although adjacency chose the original");
+      for (Line line : new Line[] { original, bounce }) {
+        assertEquals(BankBounceDetector.SIGNAL_RETURN_TEXT,
+            line.value(BankBouncePairService.COL_SIGNAL));
+        assertEquals(BankBounceDetector.CONFIDENCE_REVIEW,
+            line.value(BankBouncePairService.COL_CONFIDENCE));
+      }
+      assertNothingWritten(far);
+    }
+
+    @Test
+    @DisplayName("an adjacent ambiguous pair is discarded on the neighbour the user chose, for review")
+    void adjacentAmbiguousPairOnTheChosenNeighbour() throws Exception {
+      Line before = pendingLine("L-BEFORE", "-0.61", DAY, "", "TRANSFERENCIA INMEDIATA");
+      Line bounce = pendingLine("L-RET", "0.61", DAY, "", "RETROCESIÓN TRANSFERENCIA INMEDIATA");
+      Line after = pendingLine("L-AFTER", "-0.61", DAY, "", "TRANSFERENCIA INMEDIATA");
+      onStatement("ST-1", before, bounce, after);
+
+      NeoResponse response = BankBouncePairService.discardPair(handler,
+          body(after.id, bounce.id));
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals("L-AFTER", data(response).getString("statementLineId"));
+      assertEquals(BankBounceDetector.SIGNAL_RETURN_TEXT, data(response).getString("signal"));
+      assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, data(response).getString("confidence"),
+          "the pair came out of an ambiguous one: review, not the high of same-day wording");
+      assertSame(bounce.mock, after.value(BankBouncePairService.COL_PAIR_LINE));
+      assertSame(after.mock, bounce.value(BankBouncePairService.COL_PAIR_LINE));
+      assertEquals(Boolean.TRUE, after.value(StatementLineDiscard.COL_IS_DISCARDED));
+      assertNothingWritten(before);
+    }
   }
 
   @Nested
@@ -289,11 +335,9 @@ class BankBouncePairDiscardTest {
     @DisplayName("LINE_DISCARDED: a line already discarded wins over every later check")
     void alreadyDiscardedWinsOverEverything() throws Exception {
       Line original = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
-      // Already discarded AND reconciled AND inactive AND same sign: the first check answers.
+      // Already discarded AND inactive AND same sign: the first check answers.
       Line other = pendingLine("L-OTHER", "-50.00", DAY.plusDays(1), "ACME", "Y");
       other.values.put(prop(StatementLineDiscard.COL_IS_DISCARDED), true);
-      when(other.mock.getFinancialAccountTransaction()).thenReturn(
-          mock(FIN_FinaccTransaction.class));
       when(other.mock.isActive()).thenReturn(false);
 
       NeoResponse response = BankBouncePairService.discardPair(handler,
@@ -303,6 +347,58 @@ class BankBouncePairDiscardTest {
       assertEquals("ETGO_StatementLineDiscarded", response.getBody().getJSONObject("error")
           .getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
       assertNothingWritten(original, other);
+    }
+
+    @Test
+    @DisplayName("DISCARD_NOT_ALLOWED: a discarded line that is reconciled counts as reconciled")
+    void discardedButReconciledLineCountsAsReconciled() throws Exception {
+      Line original = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
+      // Discarded while the flag was on, then reconciled while it was off.
+      Line other = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "Y");
+      other.values.put(prop(StatementLineDiscard.COL_IS_DISCARDED), true);
+      when(other.mock.getFinancialAccountTransaction()).thenReturn(
+          mock(FIN_FinaccTransaction.class));
+
+      assertCoded(BankBouncePairService.discardPair(handler, body(original.id, other.id)), 409,
+          BankBounceErrors.CODE_DISCARD_NOT_ALLOWED);
+      assertNothingWritten(original, other);
+    }
+
+
+    @Test
+    @DisplayName("DISCARD_NOT_ALLOWED: a matched PSD2-discarded line, through the real hook condition")
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    void realHookMatchedDiscardedLineIsNotAllowed() throws Exception {
+      Line original = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
+      Line matched = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "Y");
+      matched.values.put(prop(StatementLineDiscard.COL_IS_DISCARDED), true);
+      when(matched.mock.getFinancialAccountTransaction()).thenReturn(
+          mock(FIN_FinaccTransaction.class));
+      Map<String, Line> byId = Map.of(original.id, original, matched.id, matched);
+      filter.close();
+      filter = mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
+      org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook psd2Like =
+          (alias, context, params) -> alias + ".psd2IsDiscarded = false";
+      OBQuery lineQuery = mock(OBQuery.class);
+      Map<String, Object>[] bound = new Map[1];
+      doAnswer(inv -> {
+        bound[0] = inv.getArgument(0);
+        return inv.getMock();
+      }).when(lineQuery).setNamedParameters(any());
+      // The database evaluates "not (psd2IsDiscarded = false)" on the one line asked for.
+      when(lineQuery.count()).thenAnswer(inv -> Boolean.TRUE.equals(
+          byId.get((String) bound[0].get("etgoLineId")).value(StatementLineDiscard.COL_IS_DISCARDED))
+              ? 1 : 0);
+      when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(lineQuery);
+      try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+          mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+        weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+            org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+            .thenReturn(List.of(psd2Like));
+
+        assertCoded(BankBouncePairService.discardPair(handler, body(original.id, matched.id)), 409,
+            BankBounceErrors.CODE_DISCARD_NOT_ALLOWED);
+      }
     }
 
     @Test
@@ -493,13 +589,25 @@ class BankBouncePairDiscardTest {
   // ---------------------------------------------------------------------------
 
   @Nested
-  @DisplayName("restorePair — always the pair, never gated")
+  @DisplayName("restorePair — always the pair, gated by the flag like the discard")
   class Restore {
 
-    @BeforeEach
-    void flagOff() {
-      // Every restore case runs with the flag OFF: a discarded pair can always be undone.
+    @Test
+    @DisplayName("flag off → 403 BOUNCE_SUGGESTIONS_OFF before anything is read, nothing restored")
+    void flagOffRefusesAndRestoresNothing() throws Exception {
       flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+      Line a = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
+      Line b = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "Y");
+      discardedPair(a, b);
+
+      NeoResponse response = BankBouncePairService.restorePair(handler, restoreBody(b.id));
+
+      assertCoded(response, 403, BankBounceErrors.CODE_SUGGESTIONS_OFF);
+      verify(handler, never()).loadAccount(anyString());
+      verify(handler, never()).loadLine(anyString());
+      assertEquals(Boolean.TRUE, a.value(StatementLineDiscard.COL_IS_DISCARDED));
+      assertEquals(Boolean.TRUE, b.value(StatementLineDiscard.COL_IS_DISCARDED));
+      verify(dal, never()).save(any());
     }
 
     @Test
@@ -525,7 +633,6 @@ class BankBouncePairDiscardTest {
         }
         verify(dal).save(line.mock);
       }
-      flag.verify(BankBounceSuggestionsFlag::isEnabled, never());
     }
 
     @Test
@@ -656,6 +763,13 @@ class BankBouncePairDiscardTest {
     when(handler.loadLine(id)).thenReturn(mock);
     pending.add(mock);
     return line;
+  }
+
+  /** Puts the lines on one statement, in the given order (their line numbers already follow it). */
+  private static void onStatement(String statementId, Line... lines) {
+    for (Line line : lines) {
+      when(line.mock.getBankStatement().getId()).thenReturn(statementId);
+    }
   }
 
   /** Marks {@code a} and {@code b} discarded and linked, as a previous discardPair left them. */

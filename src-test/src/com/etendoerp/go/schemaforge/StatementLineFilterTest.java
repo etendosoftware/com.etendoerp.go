@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -64,9 +65,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 /**
  * Unit tests for {@link StatementLineFilter}, the Etendo GO side of APRM's
  * {@link BankStatementLineFilterHook}. The real {@code BankStatementLineFilterHelper} runs: only
- * {@link WeldUtils} is mocked, to deploy no hook or one hook, and {@link OBDal} to answer the
- * queries. With no hook every method must answer "nothing is excluded" without touching the
- * database; with a hook its condition must reach the query and decide the excluded ids.
+ * {@link WeldUtils} is mocked, to deploy no hook or one hook, {@link OBDal} to answer the queries
+ * and {@link BankBounceSuggestionsFlag}, on unless a case says otherwise. With no hook every method
+ * must answer "nothing is excluded" without touching the database; with a hook its condition must
+ * reach the query and decide the excluded ids; with the flag off nothing is honoured, hook or not,
+ * and the answers are the ones from before ETP-5581.
  *
  * @covers com.etendoerp.go.schemaforge.StatementLineFilter
  */
@@ -77,6 +80,7 @@ class StatementLineFilterTest {
 
   private MockedStatic<WeldUtils> weld;
   private MockedStatic<OBDal> obDalStatic;
+  private MockedStatic<BankBounceSuggestionsFlag> flag;
   private OBDal obDal;
   private final List<BankStatementLineFilterContext> hookContexts = new ArrayList<>();
 
@@ -86,10 +90,13 @@ class StatementLineFilterTest {
     obDal = mock(OBDal.class);
     obDalStatic = mockStatic(OBDal.class);
     obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+    flag = mockStatic(BankBounceSuggestionsFlag.class);
+    flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
   }
 
   @AfterEach
   void closeStatics() {
+    flag.close();
     obDalStatic.close();
     weld.close();
   }
@@ -303,6 +310,157 @@ class StatementLineFilterTest {
       StatementLineFilter.markDiscarded(rows, List.of("S1"));
 
       assertFalse(rows.getJSONObject(0).has(StatementLineDiscard.KEY_DISCARDED));
+    }
+
+    @Test
+    @DisplayName("discards splits the excluded rows off, answers status=discarded, counts them")
+    @SuppressWarnings("unchecked")
+    void discardsHonoured() throws Exception {
+      deployOneHook();
+      OBQuery<FIN_BankStatementLine> query = mock(OBQuery.class);
+      Query<String> ids = mock(Query.class);
+      when(obDal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(query);
+      when(query.createQuery(String.class)).thenReturn(ids);
+      when(ids.list()).thenReturn(List.of("L2"));
+
+      StatementLineFilter.Discards discards =
+          StatementLineFilter.discards(account(), Usage.MATCH_STATEMENT_GRID);
+      JSONArray[] split = discards.split(rows("L1", "L2"));
+      JSONObject counts = new JSONObject();
+      discards.putCount(counts, split[1].length());
+
+      assertTrue(discards.isHonoured());
+      assertEquals(List.of("L1"), ids(split[0]));
+      assertEquals(List.of("L2"), ids(split[1]));
+      assertTrue(discards.listsOnlyDiscarded(StatementLineFilter.STATUS_DISCARDED));
+      assertFalse(discards.listsOnlyDiscarded("pending"));
+      assertEquals(1, counts.getInt(StatementLineDiscard.KEY_DISCARDED));
+    }
+  }
+
+  // ── bank-bounce-suggestions off ──────────────────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("with bank-bounce-suggestions off nothing is honoured, hook or not")
+  class FlagOff {
+
+    @BeforeEach
+    void flagOff() {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+      deployOneHook();
+    }
+
+    @Test
+    @DisplayName("hql answers the empty condition, adds no parameter and asks no hook")
+    void noCondition() {
+      Map<String, Object> params = new HashMap<>();
+
+      assertEquals("", StatementLineFilter.hql("bsl", account(), Usage.AUTO_MATCH_CANDIDATES,
+          params));
+      assertTrue(params.isEmpty());
+      assertTrue(hookContexts.isEmpty());
+    }
+
+    @Test
+    @DisplayName("isExcluded is false and discardedLineError null, with no query")
+    void nothingRefused() {
+      FIN_BankStatementLine line = lineOf("L1", account());
+
+      assertFalse(StatementLineFilter.isExcluded(line, Usage.MATCH_STATEMENT_GRID));
+      assertNull(StatementLineFilter.discardedLineError(line, Usage.AUTO_MATCH_CANDIDATES));
+      verify(obDal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
+    }
+
+    @Test
+    @DisplayName("markDiscarded puts no discarded marker on any row and reads nothing")
+    void noMarker() throws Exception {
+      JSONArray rows = rows("L1", "L2");
+
+      StatementLineFilter.markDiscarded(rows, List.of("S1"));
+
+      assertFalse(rows.getJSONObject(0).has(StatementLineDiscard.KEY_DISCARDED));
+      assertFalse(rows.getJSONObject(1).has(StatementLineDiscard.KEY_DISCARDED));
+      verify(obDal, never()).get(eq(FIN_BankStatement.class), anyString());
+      verify(obDal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
+    }
+
+    @Test
+    @DisplayName("discards keeps every row, ignores status=discarded and adds no count")
+    void discardsNotHonoured() throws Exception {
+      StatementLineFilter.Discards discards =
+          StatementLineFilter.discards(account(), Usage.MATCH_STATEMENT_GRID);
+      JSONArray[] split = discards.split(rows("L1", "L2"));
+      JSONObject counts = new JSONObject();
+      discards.putCount(counts, split[1].length());
+
+      assertFalse(discards.isHonoured());
+      assertEquals(List.of("L1", "L2"), ids(split[0]));
+      assertEquals(0, split[1].length());
+      assertFalse(discards.listsOnlyDiscarded(StatementLineFilter.STATUS_DISCARDED));
+      assertFalse(counts.has(StatementLineDiscard.KEY_DISCARDED));
+      verify(obDal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
+    }
+  }
+
+  // ── when the flag is evaluated ───────────────────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("the flag is evaluated only when it can change the answer, and once")
+  class FlagEvaluation {
+
+    @Test
+    @DisplayName("isExcluded with no hook condition never reads the flag")
+    void isExcludedWithoutAHookDoesNotReadTheFlag() {
+      deployNoHook();
+      flag.clearInvocations();
+
+      assertFalse(StatementLineFilter.isExcluded(lineOf("L1", account()),
+          Usage.MATCH_STATEMENT_GRID));
+
+      flag.verifyNoInteractions();
+    }
+
+    @Test
+    @DisplayName("isExcluded with a hook condition reads the flag once, then one query")
+    @SuppressWarnings("unchecked")
+    void isExcludedWithAHookReadsTheFlagOnce() {
+      deployOneHook();
+      OBQuery<FIN_BankStatementLine> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(query);
+      when(query.count()).thenReturn(1);
+      flag.clearInvocations();
+
+      assertTrue(StatementLineFilter.isExcluded(lineOf("L1", account()),
+          Usage.MATCH_STATEMENT_GRID));
+
+      flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
+      verify(obDal, times(1)).createQuery(eq(FIN_BankStatementLine.class), anyString());
+    }
+
+    @Test
+    @DisplayName("discards reads the flag exactly once, honoured or not")
+    @SuppressWarnings("unchecked")
+    void discardsReadsTheFlagOnce() throws Exception {
+      deployOneHook();
+      OBQuery<FIN_BankStatementLine> query = mock(OBQuery.class);
+      Query<String> ids = mock(Query.class);
+      when(obDal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(query);
+      when(query.createQuery(String.class)).thenReturn(ids);
+      when(ids.list()).thenReturn(List.of("L2"));
+
+      for (boolean on : new boolean[] { true, false }) {
+        flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(on);
+        flag.clearInvocations();
+
+        StatementLineFilter.Discards discards =
+            StatementLineFilter.discards(account(), Usage.MATCH_STATEMENT_GRID);
+        discards.split(rows("L1", "L2"));
+        discards.listsOnlyDiscarded(StatementLineFilter.STATUS_DISCARDED);
+        discards.putCount(new JSONObject(), 1);
+
+        flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
+        assertEquals(on, discards.isHonoured());
+      }
     }
   }
 

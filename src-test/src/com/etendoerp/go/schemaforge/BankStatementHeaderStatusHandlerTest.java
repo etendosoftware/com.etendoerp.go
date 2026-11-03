@@ -14,6 +14,8 @@ import java.lang.reflect.Field;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -44,7 +46,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
  *
  * <p>Discarded lines count as resolved: the status also reads the header's own
  * {@code EM_ETGO_DISCARDED_COUNT} from the event, and reads it as {@code 0} when the running
- * model has no such column.
+ * model has no such column. Not gated by {@code bank-bounce-suggestions}: the flag is never read.
  *
  * @covers com.etendoerp.go.schemaforge.BankStatementHeaderStatusHandler
  */
@@ -214,6 +216,30 @@ class BankStatementHeaderStatusHandlerTest {
     handler.onUpdate(event);
 
     verify(event).setCurrentState(statusProp, "DRAFT");
+  }
+
+  /**
+   * Not gated (ETP-5581): a persistence event cannot see the per-account, per-request
+   * {@code bank-bounce-suggestions} flag, so the discarded count resolves lines whatever the flag
+   * would answer, and the flag is never read.
+   */
+  @ParameterizedTest
+  @ValueSource(booleans = { true, false })
+  void onUpdateCountsDiscardedLinesWhateverTheBounceFlagAndNeverReadsIt(boolean flagOn) {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, true, 3, 1);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(2L);
+
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
+      flag.clearInvocations();
+
+      handler.onUpdate(event);
+
+      flag.verifyNoInteractions();
+    }
+    verify(event).setCurrentState(statusProp, "RECONCILED");
   }
 
   /** A header not yet recomputed since the column was added holds NULL: it reads as 0. */
