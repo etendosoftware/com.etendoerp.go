@@ -565,7 +565,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       if (caller == null) {
         return;
       }
-      PublicApiUsageCounter.getDefault().record(caller,
+      PublicApiUsageCounter.getDefault().count(caller,
           PublicApiCall.tokenExchange(HttpServletResponse.SC_UNAUTHORIZED));
     } catch (RuntimeException e) {
       log.debug("Could not count a refused public API key exchange", e);

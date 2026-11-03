@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -40,7 +41,7 @@ import org.apache.logging.log4j.Logger;
  *
  * <h2>On the request thread: one map merge</h2>
  *
- * <p>{@link #record(PublicApiCaller, PublicApiCall)} adds one to the bucket of the request —
+ * <p>{@link #count(PublicApiCaller, PublicApiCall)} adds one to the bucket of the request —
  * tenant, key, spec, entity, action, HTTP method, status, kind and local day — with a
  * {@link ConcurrentHashMap#merge}: no I/O, no lock held for more than the merge, and it never
  * throws. The first recorded request starts the flush thread, so an instance with no public API
@@ -126,7 +127,7 @@ public final class PublicApiUsageCounter {
   /** One counted dimension set. The day keeps a bucket from straddling local midnight. */
   record Bucket(PublicApiCaller caller, PublicApiCall call, LocalDate day) {
     Bucket overflow() {
-      return new Bucket(caller, call.overflow(), day);
+      return new Bucket(caller, call.toOverflow(), day);
     }
   }
 
@@ -138,7 +139,7 @@ public final class PublicApiUsageCounter {
   private final Map<Bucket, Integer> rowAttempts = new ConcurrentHashMap<>();
   private final Object flushLock = new Object();
   private final LogThrottle losses;
-  private volatile ScheduledExecutorService scheduler;
+  private final AtomicReference<ScheduledExecutorService> scheduler = new AtomicReference<>();
   private volatile boolean stopped;
 
   PublicApiUsageCounter(Sink sink, Clock clock, boolean scheduled) {
@@ -159,7 +160,7 @@ public final class PublicApiUsageCounter {
    * @param caller the tenant and key; ignored when null
    * @param call   what was asked and how it was answered; ignored when null
    */
-  public void record(PublicApiCaller caller, PublicApiCall call) {
+  public void count(PublicApiCaller caller, PublicApiCall call) {
     try {
       if (caller == null || call == null || !UsageEventRecorder.isEnabled()) {
         return;
@@ -215,7 +216,7 @@ public final class PublicApiUsageCounter {
         return;
       }
       stopped = true;
-      ScheduledExecutorService local = scheduler;
+      ScheduledExecutorService local = scheduler.get();
       if (local != null) {
         local.shutdown();
         local.awaitTermination(SHUTDOWN_WAIT_MS, TimeUnit.MILLISECONDS);
@@ -291,7 +292,7 @@ public final class PublicApiUsageCounter {
 
   /**
    * Add to a bucket, under the bucket cap: a bucket not in the map while it is full is folded into
-   * its caller's overflow bucket. Used by {@link #record} and by every restore after a failed write,
+   * its caller's overflow bucket. Used by {@link #count} and by every restore after a failed write,
    * so a long outage cannot grow the map past the cap either.
    */
   private void add(Bucket bucket, long amount) {
@@ -339,11 +340,11 @@ public final class PublicApiUsageCounter {
   }
 
   private void startIfNeeded() {
-    if (!scheduled || scheduler != null) {
+    if (!scheduled || scheduler.get() != null) {
       return;
     }
     synchronized (this) {
-      if (scheduler != null || stopped) {
+      if (scheduler.get() != null || stopped) {
         return;
       }
       ScheduledExecutorService local = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -353,7 +354,7 @@ public final class PublicApiUsageCounter {
       });
       local.scheduleWithFixedDelay(this::flush, FLUSH_INTERVAL_MS, FLUSH_INTERVAL_MS,
           TimeUnit.MILLISECONDS);
-      scheduler = local;
+      scheduler.set(local);
     }
   }
 

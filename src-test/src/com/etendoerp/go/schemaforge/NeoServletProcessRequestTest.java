@@ -277,7 +277,7 @@ class NeoServletProcessRequestTest {
   }
 
   private void verifyCounted(String method, int status) {
-    verify(usageCounter).record(KEY, PublicApiCall.of("sales-order", "order", null, method, status));
+    verify(usageCounter).count(KEY, PublicApiCall.of("sales-order", "order", null, method, status));
   }
 
   @Test
@@ -359,6 +359,6 @@ class NeoServletProcessRequestTest {
       return null;
     });
 
-    verify(usageCounter, never()).record(any(), any());
+    verify(usageCounter, never()).count(any(), any());
   }
 }

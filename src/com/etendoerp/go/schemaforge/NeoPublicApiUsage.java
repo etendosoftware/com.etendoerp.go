@@ -45,7 +45,7 @@ import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 /**
  * ETP-6057 — counts every NEO request made with a public API key, once it has been answered.
  *
- * <p>{@link NeoServlet} calls {@link #record} in a {@code finally} around the whole request, so the
+ * <p>{@link NeoServlet} calls {@link #recordRequest} in a {@code finally} around the whole request, so the
  * status counted is the one the client got, whichever path wrote it: the 401/402/403 of
  * authentication, the RBAC 403, a handler's 4xx/5xx, a classified exception. A request is a public API
  * request when the authentication pipeline attached a {@link PublicApiCaller} to it
@@ -124,7 +124,7 @@ final class NeoPublicApiUsage {
    * @param response the response, already written
    * @param method   the HTTP method the servlet dispatched
    */
-  void record(HttpServletRequest request, HttpServletResponse response, String method) {
+  void recordRequest(HttpServletRequest request, HttpServletResponse response, String method) {
     try {
       PublicApiCaller caller = PublicApiKeyAttribution.of(request);
       if (caller == null) {
@@ -139,7 +139,7 @@ final class NeoPublicApiUsage {
       if (consumeRereadCredit(caller, path, verb)) {
         return;
       }
-      counter.record(caller, PublicApiCall.of(path.specName, path.entityName, path.actionName,
+      counter.count(caller, PublicApiCall.of(path.specName, path.entityName, path.actionName,
           verb, status));
       if (path.isAction && METHOD_POST.equals(verb) && status >= 200 && status < 300) {
         grantRereadCredit(caller, path);
@@ -150,7 +150,7 @@ final class NeoPublicApiUsage {
   }
 
   /**
-   * Note the operations of a batch call, for {@link #record}. Called by {@code BatchService} once
+   * Note the operations of a batch call, for {@link #recordRequest}. Called by {@code BatchService} once
    * the body is parsed; does nothing for a request that is not a public API request. Never throws.
    *
    * @param request    the batch request
@@ -182,7 +182,7 @@ final class NeoPublicApiUsage {
     }
     for (Object pair : (List<?>) noted) {
       String[] specAndEntity = pair instanceof String[] ? (String[]) pair : new String[2];
-      counter.record(caller,
+      counter.count(caller,
           PublicApiCall.batchOperation(specAndEntity[0], specAndEntity[1], status));
     }
     return true;

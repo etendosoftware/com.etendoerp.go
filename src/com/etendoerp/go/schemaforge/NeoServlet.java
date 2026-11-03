@@ -173,7 +173,7 @@ public class NeoServlet extends HttpBaseServlet {
       dispatchRequest(request, response, method);
     } finally {
       // ETP-6057: counts the answer of a public API request, whichever path wrote it.
-      NeoPublicApiUsage.getDefault().record(request, response, method);
+      NeoPublicApiUsage.getDefault().recordRequest(request, response, method);
     }
   }
 

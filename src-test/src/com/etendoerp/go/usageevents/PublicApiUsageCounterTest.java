@@ -139,9 +139,9 @@ class PublicApiUsageCounterTest {
 
   @Test
   void sameBucketMergesIntoOneRowWithTheCount() throws Exception {
-    counter.record(CALLER, call("sales-order", "get", 200));
-    counter.record(CALLER, call("sales-order", "GET", 200));
-    counter.record(CALLER, call("sales-order", "GET", 200));
+    counter.count(CALLER, call("sales-order", "get", 200));
+    counter.count(CALLER, call("sales-order", "GET", 200));
+    counter.count(CALLER, call("sales-order", "GET", 200));
 
     assertEquals(3, counter.pendingRequests());
     counter.flush();
@@ -153,10 +153,10 @@ class PublicApiUsageCounterTest {
 
   @Test
   void differentStatusMethodAndKeySplitBuckets() throws Exception {
-    counter.record(CALLER, call("sales-order", "GET", 200));
-    counter.record(CALLER, call("sales-order", "GET", 404));
-    counter.record(CALLER, call("sales-order", "POST", 200));
-    counter.record(new PublicApiCaller("CLIENT1", "ORG1", "USER1", "ROLE1", "other-key"),
+    counter.count(CALLER, call("sales-order", "GET", 200));
+    counter.count(CALLER, call("sales-order", "GET", 404));
+    counter.count(CALLER, call("sales-order", "POST", 200));
+    counter.count(new PublicApiCaller("CLIENT1", "ORG1", "USER1", "ROLE1", "other-key"),
         call("sales-order", "GET", 200));
 
     counter.flush();
@@ -167,9 +167,9 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aNewLocalDayStartsANewBucket() throws Exception {
-    counter.record(CALLER, call("sales-order", "GET", 200));
+    counter.count(CALLER, call("sales-order", "GET", 200));
     clock.set(Instant.parse("2026-10-11T00:00:01Z"));
-    counter.record(CALLER, call("sales-order", "GET", 200));
+    counter.count(CALLER, call("sales-order", "GET", 200));
 
     counter.flush();
 
@@ -178,8 +178,8 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aNullCallerOrCallIsIgnored() {
-    counter.record(null, call("sales-order", "GET", 200));
-    counter.record(CALLER, null);
+    counter.count(null, call("sales-order", "GET", 200));
+    counter.count(CALLER, null);
     assertEquals(0, counter.pendingRequests());
   }
 
@@ -188,12 +188,12 @@ class PublicApiUsageCounterTest {
   @Test
   void pastTheCapANewKeyGoesToTheCallersOverflowBucket() throws Exception {
     for (int i = 0; i < PublicApiUsageCounter.MAX_BUCKETS; i++) {
-      counter.record(CALLER, call("spec" + i, "GET", 200));
+      counter.count(CALLER, call("spec" + i, "GET", 200));
     }
-    counter.record(CALLER, call("brand-new", "GET", 200));
-    counter.record(CALLER, call("brand-new-too", "GET", 200));
+    counter.count(CALLER, call("brand-new", "GET", 200));
+    counter.count(CALLER, call("brand-new-too", "GET", 200));
     // An existing bucket still merges at the cap, it is not diverted.
-    counter.record(CALLER, call("spec0", "GET", 200));
+    counter.count(CALLER, call("spec0", "GET", 200));
 
     assertEquals(PublicApiUsageCounter.MAX_BUCKETS + 3L, counter.pendingRequests());
     counter.flush();
@@ -216,9 +216,9 @@ class PublicApiUsageCounterTest {
 
   @Test
   void callsOfDifferentKindsNeverMergeIntoOneBucket() throws Exception {
-    counter.record(CALLER, PublicApiCall.of("sales-order", "order", null, "POST", 200));
-    counter.record(CALLER, PublicApiCall.batchOperation("sales-order", "order", 200));
-    counter.record(CALLER, PublicApiCall.batchOperation("sales-order", "order", 200));
+    counter.count(CALLER, PublicApiCall.of("sales-order", "order", null, "POST", 200));
+    counter.count(CALLER, PublicApiCall.batchOperation("sales-order", "order", 200));
+    counter.count(CALLER, PublicApiCall.batchOperation("sales-order", "order", 200));
 
     counter.flush();
 
@@ -231,8 +231,8 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aBatchOperationAndATokenExchangeAreEachKeptWithTheirKind() throws Exception {
-    counter.record(CALLER, PublicApiCall.batchOperation("sales-order", "order", 200));
-    counter.record(CALLER, PublicApiCall.tokenExchange(401));
+    counter.count(CALLER, PublicApiCall.batchOperation("sales-order", "order", 200));
+    counter.count(CALLER, PublicApiCall.tokenExchange(401));
 
     counter.flush();
 
@@ -246,9 +246,9 @@ class PublicApiUsageCounterTest {
   @Test
   void theOverflowBucketKeepsTheKindOfTheCallThatOverflowed() throws Exception {
     for (int i = 0; i < PublicApiUsageCounter.MAX_BUCKETS; i++) {
-      counter.record(CALLER, call("spec" + i, "GET", 200));
+      counter.count(CALLER, call("spec" + i, "GET", 200));
     }
-    counter.record(CALLER, PublicApiCall.batchOperation("fresh", "entity", 200));
+    counter.count(CALLER, PublicApiCall.batchOperation("fresh", "entity", 200));
 
     counter.flush();
 
@@ -261,11 +261,11 @@ class PublicApiUsageCounterTest {
   @Test
   void aCallerWithANullOrBlankTenantIsNotCountedAndWarnsOnce() {
     try (LogCapture log = LogCapture.of(PublicApiUsageCounter.class)) {
-      counter.record(new PublicApiCaller(null, "ORG1", "USER1", "ROLE1", "k"),
+      counter.count(new PublicApiCaller(null, "ORG1", "USER1", "ROLE1", "k"),
           call("a", "GET", 200));
-      counter.record(new PublicApiCaller("  ", "ORG1", "USER1", "ROLE1", "k"),
+      counter.count(new PublicApiCaller("  ", "ORG1", "USER1", "ROLE1", "k"),
           call("a", "GET", 200));
-      counter.record(new PublicApiCaller("", "ORG1", "USER1", "ROLE1", "k"),
+      counter.count(new PublicApiCaller("", "ORG1", "USER1", "ROLE1", "k"),
           call("a", "GET", 200));
 
       assertEquals(0, counter.pendingRequests());
@@ -276,9 +276,9 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aValidCallerStillCountsAfterATenantlessOne() {
-    counter.record(new PublicApiCaller(null, "ORG1", "USER1", "ROLE1", "k"), call("a", "GET", 200));
+    counter.count(new PublicApiCaller(null, "ORG1", "USER1", "ROLE1", "k"), call("a", "GET", 200));
 
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
 
     assertEquals(1, counter.pendingRequests());
   }
@@ -287,8 +287,8 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aSinkThatThrowsKeepsEveryCount() throws Exception {
-    counter.record(CALLER, call("a", "GET", 200));
-    counter.record(CALLER, call("b", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("b", "GET", 200));
     sink = rows -> {
       throw new IllegalStateException("db down");
     };
@@ -307,8 +307,8 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aSinkThatRefusesTheOnlyRowKeepsItAtFirst() {
-    counter.record(CALLER, call("a", "GET", 200));
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
     sink = rows -> new boolean[rows.size()];
 
     counter.flush();
@@ -319,7 +319,7 @@ class PublicApiUsageCounterTest {
   @Test
   void aBucketRefusedAloneInItsChunkIsDroppedAfterFiveFlushesWithOneWarn() {
     sink = rows -> new boolean[] { false };
-    counter.record(CALLER, call("bad", "GET", 200));
+    counter.count(CALLER, call("bad", "GET", 200));
     try (LogCapture log = LogCapture.of(PublicApiUsageCounter.class)) {
       for (int flush = 1; flush < PublicApiUsageCounter.MAX_ROW_ATTEMPTS; flush++) {
         counter.flush();
@@ -341,8 +341,8 @@ class PublicApiUsageCounterTest {
     sink = rows -> {
       throw new IllegalStateException("db down");
     };
-    counter.record(CALLER, call("a", "GET", 200));
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
     try (LogCapture log = LogCapture.of(PublicApiUsageCounter.class)) {
       for (int flush = 0; flush < 4 * PublicApiUsageCounter.MAX_ROW_ATTEMPTS; flush++) {
         counter.flush();
@@ -355,8 +355,8 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aWrongLengthResultKeepsEverything() {
-    counter.record(CALLER, call("a", "GET", 200));
-    counter.record(CALLER, call("b", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("b", "GET", 200));
     sink = rows -> new boolean[] { true };
 
     counter.flush();
@@ -366,7 +366,7 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aNullResultKeepsEverything() {
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
     sink = rows -> null;
 
     counter.flush();
@@ -386,16 +386,16 @@ class PublicApiUsageCounterTest {
       }
       return ok;
     };
-    counter.record(CALLER, call("bad", "GET", 200));
+    counter.count(CALLER, call("bad", "GET", 200));
     try (LogCapture log = LogCapture.of(PublicApiUsageCounter.class)) {
       for (int attempt = 1; attempt < PublicApiUsageCounter.MAX_ROW_ATTEMPTS; attempt++) {
-        counter.record(CALLER, call("good" + attempt, "GET", 200));
+        counter.count(CALLER, call("good" + attempt, "GET", 200));
         counter.flush();
         assertEquals(1, counter.pendingRequests(), "the refused row is kept, attempt " + attempt);
       }
       assertTrue(log.messages(Level.WARN).isEmpty());
 
-      counter.record(CALLER, call("good-last", "GET", 200));
+      counter.count(CALLER, call("good-last", "GET", 200));
       counter.flush();
 
       assertEquals(0, counter.pendingRequests());
@@ -456,7 +456,7 @@ class PublicApiUsageCounterTest {
       final String spec = "spec" + (t % 2);
       futures.add(pool.submit(() -> {
         for (int i = 0; i < each; i++) {
-          counter.record(CALLER, call(spec, "GET", 200));
+          counter.count(CALLER, call(spec, "GET", 200));
         }
       }));
     }
@@ -469,7 +469,7 @@ class PublicApiUsageCounterTest {
   void anOutageOnTheSecondChunkKeepsOnlyThatChunkAndNeverRewritesTheFirst() throws Exception {
     int buckets = PublicApiUsageCounter.CHUNK_SIZE + 200;
     for (int i = 0; i < buckets; i++) {
-      counter.record(CALLER, call("spec" + i, "GET", 200));
+      counter.count(CALLER, call("spec" + i, "GET", 200));
     }
     AtomicInteger chunk = new AtomicInteger();
     sink = rows -> {
@@ -509,7 +509,7 @@ class PublicApiUsageCounterTest {
 
   private void fillTheMapToTheCap() {
     for (int i = 0; i < PublicApiUsageCounter.MAX_BUCKETS; i++) {
-      counter.record(FILLER, call("f" + i, "GET", 200));
+      counter.count(FILLER, call("f" + i, "GET", 200));
     }
   }
 
@@ -532,7 +532,7 @@ class PublicApiUsageCounterTest {
   @Test
   void anOutageRestoreOfABucketNotInAFullMapLandsInTheCallersOverflowBucket() throws Exception {
     for (int i = 0; i < 3; i++) {
-      counter.record(CALLER, call("victim", "GET", 200));
+      counter.count(CALLER, call("victim", "GET", 200));
     }
     AtomicInteger calls = new AtomicInteger();
     sink = rows -> {
@@ -560,7 +560,7 @@ class PublicApiUsageCounterTest {
   @Test
   void aRefusedRowRestoredWhileTheMapIsFullAlsoGoesToOverflow() throws Exception {
     for (int i = 0; i < 2; i++) {
-      counter.record(CALLER, call("victim", "GET", 200));
+      counter.count(CALLER, call("victim", "GET", 200));
     }
     AtomicInteger calls = new AtomicInteger();
     sink = rows -> {
@@ -583,14 +583,14 @@ class PublicApiUsageCounterTest {
   @Test
   void aCallerWithTheSystemClientIsNotCountedAndWarnsOnce() {
     try (LogCapture log = LogCapture.of(PublicApiUsageCounter.class)) {
-      counter.record(new PublicApiCaller("0", "ORG1", "USER1", "ROLE1", "k"), call("a", "GET", 200));
-      counter.record(new PublicApiCaller("0", "ORG1", "USER1", "ROLE1", "k"), call("a", "GET", 200));
+      counter.count(new PublicApiCaller("0", "ORG1", "USER1", "ROLE1", "k"), call("a", "GET", 200));
+      counter.count(new PublicApiCaller("0", "ORG1", "USER1", "ROLE1", "k"), call("a", "GET", 200));
 
       assertEquals(0, counter.pendingRequests());
       assertEquals(1, log.messages(Level.WARN).size(), "throttled to one line");
       assertTrue(log.messages(Level.WARN).get(0).contains("caller without a tenant"));
     }
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
     assertEquals(1, counter.pendingRequests());
   }
 
@@ -598,8 +598,8 @@ class PublicApiUsageCounterTest {
 
   @Test
   void shutdownFlushesWhatIsPending() throws Exception {
-    counter.record(CALLER, call("a", "GET", 200));
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
 
     counter.shutdown();
 
@@ -610,8 +610,8 @@ class PublicApiUsageCounterTest {
 
   @Test
   void leftoversAfterAFailedFinalFlushAreWarnedAndCountedLost() {
-    counter.record(CALLER, call("a", "GET", 200));
-    counter.record(CALLER, call("b", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("b", "GET", 200));
     sink = rows -> {
       throw new IllegalStateException("db down");
     };
@@ -633,7 +633,7 @@ class PublicApiUsageCounterTest {
     counter.shutdown();
 
     try (LogCapture log = LogCapture.of(PublicApiUsageCounter.class)) {
-      counter.record(CALLER, call("a", "GET", 200));
+      counter.count(CALLER, call("a", "GET", 200));
 
       assertEquals(0, counter.pendingRequests());
       assertEquals(1, log.messages(Level.WARN).size());
@@ -643,7 +643,7 @@ class PublicApiUsageCounterTest {
 
   @Test
   void shutdownIsIdempotent() {
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
     counter.shutdown();
     int calls = sinkCalls.get();
 
@@ -658,14 +658,14 @@ class PublicApiUsageCounterTest {
   void whenUsageEventsAreDisabledNothingIsCounted() {
     props.setProperty(UsageEventRecorder.PROP_ENABLED, "false");
 
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
 
     assertEquals(0, counter.pendingRequests());
   }
 
   @Test
   void whenDisabledAfterCountingTheFlushDiscardsWithoutWriting() {
-    counter.record(CALLER, call("a", "GET", 200));
+    counter.count(CALLER, call("a", "GET", 200));
     props.setProperty(UsageEventRecorder.PROP_ENABLED, "false");
 
     counter.flush();
@@ -678,7 +678,7 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aRowCarriesTheBucketDimensionsAndNoSecret() throws Exception {
-    counter.record(CALLER, PublicApiCall.of("sales-order", "order", "complete", "post", 403));
+    counter.count(CALLER, PublicApiCall.of("sales-order", "order", "complete", "post", 403));
 
     counter.flush();
 
@@ -707,7 +707,7 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aSuccessRowHasOkOutcomeAndNoErrorCode() {
-    counter.record(CALLER, call("sales-order", "GET", 204));
+    counter.count(CALLER, call("sales-order", "GET", 204));
 
     counter.flush();
 
@@ -717,7 +717,7 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aBucketOfAPastDayIsDatedAtTheEndOfThatDay() {
-    counter.record(CALLER, call("sales-order", "GET", 200));
+    counter.count(CALLER, call("sales-order", "GET", 200));
     clock.set(Instant.parse("2026-10-11T00:30:00Z"));
 
     counter.flush();
@@ -729,7 +729,7 @@ class PublicApiUsageCounterTest {
 
   @Test
   void aBucketOfTheSameDayIsDatedAtTheFlushTime() {
-    counter.record(CALLER, call("sales-order", "GET", 200));
+    counter.count(CALLER, call("sales-order", "GET", 200));
     clock.set(Instant.parse("2026-10-10T12:05:00Z"));
 
     counter.flush();

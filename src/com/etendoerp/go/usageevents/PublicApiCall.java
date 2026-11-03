@@ -121,7 +121,7 @@ public record PublicApiCall(
   }
 
   /** @return this call with its path dimensions replaced by {@link #OVERFLOW} */
-  PublicApiCall overflow() {
+  PublicApiCall toOverflow() {
     return new PublicApiCall(OVERFLOW, OVERFLOW, null, method, status, kind);
   }
 

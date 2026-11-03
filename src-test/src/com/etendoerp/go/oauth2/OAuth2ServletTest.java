@@ -412,7 +412,7 @@ public class OAuth2ServletTest {
         org.mockito.ArgumentCaptor.forClass(PublicApiCaller.class);
     org.mockito.ArgumentCaptor<PublicApiCall> call =
         org.mockito.ArgumentCaptor.forClass(PublicApiCall.class);
-    org.mockito.Mockito.verify(counter).record(caller.capture(), call.capture());
+    org.mockito.Mockito.verify(counter).count(caller.capture(), call.capture());
     assertEquals("TENANT7", caller.getValue().clientId());
     assertEquals("ORG7", caller.getValue().orgId());
     assertEquals("user-1", caller.getValue().userId());
@@ -432,7 +432,7 @@ public class OAuth2ServletTest {
 
     org.mockito.ArgumentCaptor<PublicApiCaller> caller =
         org.mockito.ArgumentCaptor.forClass(PublicApiCaller.class);
-    org.mockito.Mockito.verify(counter).record(caller.capture(), org.mockito.ArgumentMatchers.any());
+    org.mockito.Mockito.verify(counter).count(caller.capture(), org.mockito.ArgumentMatchers.any());
     assertEquals("ROLECLI", caller.getValue().clientId());
   }
 
@@ -443,7 +443,7 @@ public class OAuth2ServletTest {
 
     org.mockito.ArgumentCaptor<PublicApiCaller> caller =
         org.mockito.ArgumentCaptor.forClass(PublicApiCaller.class);
-    org.mockito.Mockito.verify(counter).record(caller.capture(), org.mockito.ArgumentMatchers.any());
+    org.mockito.Mockito.verify(counter).count(caller.capture(), org.mockito.ArgumentMatchers.any());
     assertEquals("TENANT7", caller.getValue().clientId());
   }
 
@@ -497,7 +497,7 @@ public class OAuth2ServletTest {
     when(obDal.getConnection()).thenReturn(conn);
     PublicApiUsageCounter counter = mock(PublicApiUsageCounter.class);
     org.mockito.Mockito.doThrow(new IllegalStateException("counter down")).when(counter)
-        .record(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        .count(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
 
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
          MockedStatic<PublicApiUsageCounter> counterMock =
@@ -508,7 +508,7 @@ public class OAuth2ServletTest {
       servlet.doPost(req, resp.response);
     }
 
-    org.mockito.Mockito.verify(counter).record(org.mockito.ArgumentMatchers.any(),
+    org.mockito.Mockito.verify(counter).count(org.mockito.ArgumentMatchers.any(),
         org.mockito.ArgumentMatchers.any());
     verify(resp.response).setStatus(401);
     assertEquals("invalid_client", new JSONObject(resp.body()).getString("error"));

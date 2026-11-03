@@ -91,7 +91,7 @@ class NeoPublicApiUsageTest {
   }
 
   private void answer(PublicApiCaller caller, String path, String method, int status) {
-    usage.record(request(caller, path), response(status), method);
+    usage.recordRequest(request(caller, path), response(status), method);
   }
 
   private static PublicApiCall callOf(String action, String method, int status) {
@@ -104,21 +104,21 @@ class NeoPublicApiUsageTest {
   void aRequestWithoutAPublicKeyIsNotCounted() {
     answer(null, RECORD_PATH, "GET", 200);
 
-    verify(counter, never()).record(any(), any());
+    verify(counter, never()).count(any(), any());
   }
 
   @Test
   void anAnsweredRequestIsCountedWithItsFinalStatusAndNormalizedMethod() {
     answer(KEY, "/sales-order/order", "get", 200);
 
-    verify(counter).record(KEY, callOf(null, "GET", 200));
+    verify(counter).count(KEY, callOf(null, "GET", 200));
   }
 
   @Test
   void everyStatusFamilyIsCounted() {
     for (int status : new int[] { 200, 201, 204, 400, 403, 404, 422, 500, 503 }) {
       answer(KEY, "/sales-order/order", "POST", status);
-      verify(counter).record(KEY, callOf(null, "POST", status));
+      verify(counter).count(KEY, callOf(null, "POST", status));
     }
   }
 
@@ -126,25 +126,25 @@ class NeoPublicApiUsageTest {
   void anActionRouteCarriesItsActionName() {
     answer(KEY, ACTION_PATH, "POST", 403);
 
-    verify(counter).record(KEY, callOf("complete", "POST", 403));
+    verify(counter).count(KEY, callOf("complete", "POST", 403));
   }
 
   @Test
   void aNullMethodIsStillCounted() {
     answer(KEY, "/sales-order/order", null, 200);
 
-    verify(counter).record(KEY, PublicApiCall.of("sales-order", "order", null, null, 200));
+    verify(counter).count(KEY, PublicApiCall.of("sales-order", "order", null, null, 200));
   }
 
   @Test
   void aFailureCountingNeverReachesTheCaller() {
-    doThrow(new IllegalStateException("boom")).when(counter).record(any(), any());
+    doThrow(new IllegalStateException("boom")).when(counter).count(any(), any());
     HttpServletRequest broken = mock(HttpServletRequest.class);
     when(broken.getAttribute(PublicApiKeyAttribution.REQUEST_ATTRIBUTE))
         .thenThrow(new IllegalStateException("boom"));
 
     assertDoesNotThrow(() -> answer(KEY, RECORD_PATH, "GET", 200));
-    assertDoesNotThrow(() -> usage.record(broken, response(200), "GET"));
+    assertDoesNotThrow(() -> usage.recordRequest(broken, response(200), "GET"));
   }
 
   // ── the re-read of an action ───────────────────────────────────────────
@@ -154,8 +154,8 @@ class NeoPublicApiUsageTest {
     answer(KEY, ACTION_PATH, "POST", 200);
     answer(KEY, RECORD_PATH, "GET", 200);
 
-    verify(counter, times(1)).record(any(), any());
-    verify(counter).record(KEY, callOf("complete", "POST", 200));
+    verify(counter, times(1)).count(any(), any());
+    verify(counter).count(KEY, callOf("complete", "POST", 200));
     assertEquals(0, usage.rereadCredits());
   }
 
@@ -164,12 +164,12 @@ class NeoPublicApiUsageTest {
     answer(KEY, ACTION_PATH, "POST", 200);
     now.addAndGet(NeoPublicApiUsage.REREAD_WINDOW_MS);
     answer(KEY, RECORD_PATH, "GET", 200);
-    verify(counter, times(1)).record(any(), any());
+    verify(counter, times(1)).count(any(), any());
 
     answer(KEY, ACTION_PATH, "POST", 200);
     now.addAndGet(NeoPublicApiUsage.REREAD_WINDOW_MS + 1);
     answer(KEY, RECORD_PATH, "GET", 200);
-    verify(counter).record(KEY, callOf(null, "GET", 200));
+    verify(counter).count(KEY, callOf(null, "GET", 200));
   }
 
   @Test
@@ -177,7 +177,7 @@ class NeoPublicApiUsageTest {
     answer(KEY, ACTION_PATH, "POST", 200);
     answer(OTHER_KEY, RECORD_PATH, "GET", 200);
 
-    verify(counter).record(OTHER_KEY, callOf(null, "GET", 200));
+    verify(counter).count(OTHER_KEY, callOf(null, "GET", 200));
   }
 
   @Test
@@ -185,7 +185,7 @@ class NeoPublicApiUsageTest {
     answer(KEY, ACTION_PATH, "POST", 200);
     answer(KEY, "/sales-order/order/REC2", "GET", 200);
 
-    verify(counter).record(KEY, callOf(null, "GET", 200));
+    verify(counter).count(KEY, callOf(null, "GET", 200));
     assertEquals(1, usage.rereadCredits());
   }
 
@@ -194,7 +194,7 @@ class NeoPublicApiUsageTest {
     answer(KEY, ACTION_PATH, "POST", 200);
     answer(KEY, "/purchase-order/order/REC1", "GET", 200);
 
-    verify(counter, times(1)).record(KEY, PublicApiCall.of("purchase-order", "order", null, "GET",
+    verify(counter, times(1)).count(KEY, PublicApiCall.of("purchase-order", "order", null, "GET",
         200));
   }
 
@@ -206,7 +206,7 @@ class NeoPublicApiUsageTest {
     answer(otherTenant, RECORD_PATH, "GET", 200);
 
     assertEquals(1, usage.rereadCredits(), "the credit of the real tenant is intact");
-    verify(counter).record(otherTenant, callOf(null, "GET", 200));
+    verify(counter).count(otherTenant, callOf(null, "GET", 200));
     answer(KEY, RECORD_PATH, "GET", 200);
     assertEquals(0, usage.rereadCredits());
   }
@@ -217,7 +217,7 @@ class NeoPublicApiUsageTest {
     answer(KEY, "/sales-order/order", "GET", 200);
 
     assertEquals(1, usage.rereadCredits());
-    verify(counter).record(KEY, callOf(null, "GET", 200));
+    verify(counter).count(KEY, callOf(null, "GET", 200));
   }
 
   @Test
@@ -228,7 +228,7 @@ class NeoPublicApiUsageTest {
     assertEquals(0, usage.rereadCredits());
 
     answer(KEY, RECORD_PATH, "GET", 200);
-    verify(counter).record(KEY, callOf(null, "GET", 200));
+    verify(counter).count(KEY, callOf(null, "GET", 200));
   }
 
   @Test
@@ -246,8 +246,8 @@ class NeoPublicApiUsageTest {
     answer(KEY, RECORD_PATH, "GET", 200);
 
     // the action and the second GET; the first GET rode on the credit
-    verify(counter, times(2)).record(any(), any());
-    verify(counter).record(KEY, callOf(null, "GET", 200));
+    verify(counter, times(2)).count(any(), any());
+    verify(counter).count(KEY, callOf(null, "GET", 200));
   }
 
   @Test
@@ -255,7 +255,7 @@ class NeoPublicApiUsageTest {
     answer(KEY, "/sales-order/Order/REC1/action/complete", "POST", 200);
     answer(KEY, "/sales-order/order/REC1", "GET", 200);
 
-    verify(counter, times(1)).record(any(), any());
+    verify(counter, times(1)).count(any(), any());
   }
 
   @Test
@@ -269,7 +269,7 @@ class NeoPublicApiUsageTest {
     assertEquals(NeoPublicApiUsage.MAX_REREAD_CREDITS, usage.rereadCredits());
     answer(KEY, "/sales-order/order/OVER", "GET", 200);
 
-    verify(counter).record(KEY, callOf(null, "GET", 200));
+    verify(counter).count(KEY, callOf(null, "GET", 200));
   }
 
   @Test
@@ -352,7 +352,7 @@ class NeoPublicApiUsageTest {
   }
 
   private void verifyBatchOperation(String spec, String entity, int status, int times) {
-    verify(counter, times(times)).record(KEY, PublicApiCall.batchOperation(spec, entity, status));
+    verify(counter, times(times)).count(KEY, PublicApiCall.batchOperation(spec, entity, status));
   }
 
   @Test
@@ -373,10 +373,10 @@ class NeoPublicApiUsageTest {
     JSONArray odd = new JSONArray().put((Object) null).put("text").put(42)
         .put(new JSONObject().put("spec", "sales-order").put("entity", "order"));
     assertDoesNotThrow(() -> NeoPublicApiUsage.noteBatchOperations(request, odd));
-    usage.record(request, response(200), "POST");
+    usage.recordRequest(request, response(200), "POST");
 
     // one record per operation, odd ones with no spec/entity, the real one with its own
-    verify(counter, times(4)).record(any(), any());
+    verify(counter, times(4)).count(any(), any());
     verifyBatchOperation("sales-order", "order", 200, 1);
     verifyBatchOperation(null, null, 200, 3);
   }
@@ -388,9 +388,9 @@ class NeoPublicApiUsageTest {
     NeoPublicApiUsage.noteBatchOperations(request,
         operations("sales-order", "order", "sales-order", "lines", "product", "product"));
 
-    usage.record(request, response(200), "POST");
+    usage.recordRequest(request, response(200), "POST");
 
-    verify(counter, times(3)).record(any(), any());
+    verify(counter, times(3)).count(any(), any());
     verifyBatchOperation("sales-order", "order", 200, 1);
     verifyBatchOperation("sales-order", "lines", 200, 1);
     verifyBatchOperation("product", "product", 200, 1);
@@ -403,7 +403,7 @@ class NeoPublicApiUsageTest {
       NeoPublicApiUsage.noteBatchOperations(request, operations("sales-order", "order",
           "sales-order", "lines"));
 
-      usage.record(request, response(status), "POST");
+      usage.recordRequest(request, response(status), "POST");
 
       verifyBatchOperation("sales-order", "order", status, 1);
       verifyBatchOperation("sales-order", "lines", status, 1);
@@ -414,12 +414,12 @@ class NeoPublicApiUsageTest {
   void anEmptyBodyBatchAnswering400IsCountedOnceAsARequest() {
     HttpServletRequest request = storingRequest(KEY, "/batch");
 
-    usage.record(request, response(400), "POST");
+    usage.recordRequest(request, response(400), "POST");
 
-    verify(counter, times(1)).record(any(), any());
+    verify(counter, times(1)).count(any(), any());
     org.mockito.ArgumentCaptor<PublicApiCall> call =
         org.mockito.ArgumentCaptor.forClass(PublicApiCall.class);
-    verify(counter).record(org.mockito.ArgumentMatchers.eq(KEY), call.capture());
+    verify(counter).count(org.mockito.ArgumentMatchers.eq(KEY), call.capture());
     assertEquals(PublicApiCall.KIND_REQUEST, call.getValue().kind());
     assertEquals(400, call.getValue().status());
   }
@@ -431,7 +431,7 @@ class NeoPublicApiUsageTest {
 
     HttpServletRequest batch = storingRequest(KEY, "/batch");
     NeoPublicApiUsage.noteBatchOperations(batch, operations("sales-order", "order"));
-    usage.record(batch, response(200), "POST");
+    usage.recordRequest(batch, response(200), "POST");
 
     assertEquals(1, usage.rereadCredits(), "the action's credit is untouched");
     verifyBatchOperation("sales-order", "order", 200, 1);
@@ -439,6 +439,6 @@ class NeoPublicApiUsageTest {
     // and the credit still rides on the next re-read of that record
     answer(KEY, RECORD_PATH, "GET", 200);
     assertEquals(0, usage.rereadCredits());
-    verify(counter, times(2)).record(any(), any());
+    verify(counter, times(2)).count(any(), any());
   }
 }

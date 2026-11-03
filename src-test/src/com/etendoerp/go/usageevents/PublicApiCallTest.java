@@ -98,11 +98,11 @@ class PublicApiCallTest {
   void aPlainCallIsOfKindRequestAndOverflowKeepsTheKind() {
     assertEquals(PublicApiCall.KIND_REQUEST, PublicApiCall.of("a", "b", null, "GET", 200).kind());
     assertEquals(PublicApiCall.KIND_BATCH_OPERATION,
-        PublicApiCall.batchOperation("a", "b", 200).overflow().kind());
+        PublicApiCall.batchOperation("a", "b", 200).toOverflow().kind());
     assertEquals(PublicApiCall.KIND_TOKEN_EXCHANGE,
-        PublicApiCall.tokenExchange(401).overflow().kind());
+        PublicApiCall.tokenExchange(401).toOverflow().kind());
     assertEquals(PublicApiCall.KIND_REQUEST,
-        PublicApiCall.of("a", "b", null, "GET", 200).overflow().kind());
+        PublicApiCall.of("a", "b", null, "GET", 200).toOverflow().kind());
   }
 
   @Test
@@ -131,7 +131,7 @@ class PublicApiCallTest {
 
   @Test
   void overflowReplacesThePathDimensionsAndKeepsMethodAndStatus() {
-    PublicApiCall overflow = PublicApiCall.of("a", "b", "c", "put", 500).overflow();
+    PublicApiCall overflow = PublicApiCall.of("a", "b", "c", "put", 500).toOverflow();
 
     assertEquals("_other", overflow.target());
     assertEquals("_other", overflow.entity());
