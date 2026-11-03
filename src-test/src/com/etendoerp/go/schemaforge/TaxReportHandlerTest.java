@@ -1588,6 +1588,15 @@ class TaxReportHandlerTest {
     List<Object> binds = captureBinds();
     assertEquals("org-schema-curr", binds.get(0),
         "target currency bound must be the OrganizationAcctSchema-linked currency");
+
+    // ETP-5794: OBQuery hands a bare `this` to PostgreSQL untranslated, which aborted the
+    // transaction and turned the report into a 500. The root must carry an explicit alias.
+    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+    verify(obDal).createQuery(eq(AcctSchema.class), hql.capture());
+    assertTrue(hql.getValue().startsWith("as s where "), hql.getValue());
+    assertTrue(hql.getValue().contains("oas.accountingSchema = s "), hql.getValue());
+    assertTrue(hql.getValue().endsWith("and s.active = true order by s.id"), hql.getValue());
+    assertFalse(hql.getValue().matches("(?s).*\\bthis\\b.*"), hql.getValue());
   }
 
   /**

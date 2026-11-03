@@ -568,11 +568,12 @@ public class AgingReportHandler implements NeoHandler {
     }
     return OBDal.getInstance()
         .createQuery(AcctSchema.class,
-            "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
-                + " and oas.organization.id=:" + PARAM_ORG_ID + " and oas.active=true)"
+            // OBQuery passes a bare `this` to SQL untranslated: alias the root (ETP-5794).
+            "as s where exists (from OrganizationAcctSchema oas where oas.accountingSchema = s"
+                + " and oas.organization.id = :" + PARAM_ORG_ID + " and oas.active = true)"
                 // Deterministic pick when an org is linked to several schemas; same order
                 // as TaxReportHandler and ReportSelectorsServlet so all three agree.
-                + " and active=true order by id")
+                + " and s.active = true order by s.id")
         .setNamedParameter(PARAM_ORG_ID, orgId)
         .setMaxResult(1)
         .uniqueResult();

@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -42,6 +43,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
@@ -299,6 +301,57 @@ class TrialBalanceReportHandlerTest {
       assertEquals(0, responseData.getInt("count"));
       assertFalse(responseData.getJSONObject("meta").toString().contains("attacker-supplied"),
           "the body's spoofed client id must never reach the response either");
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Accounting-schema fallback (AbstractSqlReportHandler#resolveAcctSchemaId)
+  // -------------------------------------------------------------------------
+
+  /**
+   * ETP-5794: an org without a general ledger falls back to an {@link OBQuery} over
+   * {@link AcctSchema}. OBQuery does not translate a bare {@code this} (it reached PostgreSQL
+   * literally and aborted the transaction) nor the column name {@code ad_client}, so the HQL
+   * must alias the root and qualify every root property with that alias.
+   */
+  @Test
+  @DisplayName("org without general ledger: the fallback HQL aliases the root, no bare this")
+  @SuppressWarnings("unchecked")
+  void acctSchemaFallbackHqlAliasesTheRoot() {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("sessionClientId1");
+    Organization org = mock(Organization.class);
+    when(org.getClient()).thenReturn(client);
+    when(org.getGeneralLedger()).thenReturn(null);
+
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
+
+    AcctSchema linked = mock(AcctSchema.class);
+    when(linked.getId()).thenReturn("linkedSchemaId");
+    OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
+    when(schemaQuery.setNamedParameter(anyString(), any())).thenReturn(schemaQuery);
+    when(schemaQuery.uniqueResult()).thenReturn(linked);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Organization.class, "orgNoLedger")).thenReturn(org);
+    when(dal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      contextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      assertEquals("linkedSchemaId", handler.resolveAcctSchemaId(new JSONObject(), "orgNoLedger"));
+
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(dal).createQuery(eq(AcctSchema.class), hql.capture());
+      assertEquals("as s where s.client.id = :clientId and s.active = true"
+          + " and exists (from OrganizationAcctSchema oas where oas.accountingSchema = s"
+          + " and oas.organization.id = :orgId and oas.active = true)", hql.getValue());
+      verify(schemaQuery).setNamedParameter("clientId", "sessionClientId1");
+      verify(schemaQuery).setNamedParameter("orgId", "orgNoLedger");
     }
   }
 }
