@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -59,10 +58,21 @@ import org.openbravo.model.common.invoice.Invoice;
  * dependency from {@code com.etendoerp.go} on {@code com.etendoerp.verifactu}, mirroring
  * {@link MarkSubsanationHandler}.
  */
-@Named("verifactu-config-ready-handler")
+@NeoExtension(spec = "verifactu-config", entity = "cabeceraDeConfiguraciónVerifactu")
 public class VerifactuConfigReadyHandler extends AbstractSmartDeactivationHandler {
 
   private static final Logger log = LogManager.getLogger(VerifactuConfigReadyHandler.class);
+
+  /**
+   * ETP-6053: the Fiscal Configuration write rules ({@link FiscalSifGuard}) run before the smart
+   * deactivation and the default CRUD — no inactive create, none in forced test mode, one active
+   * config per organization, and no {@code active} change by an agent.
+   */
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    NeoResponse refusal = FiscalSifGuard.preCheck(context, FiscalSifRules.VERIFACTU);
+    return refusal != null ? refusal : super.handle(context);
+  }
 
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PATCH = "PATCH";

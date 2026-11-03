@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.Date;
 
-import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -37,7 +36,10 @@ import org.openbravo.module.sii.data.AEATSIIFacturas;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
+import com.etendoerp.go.schemaforge.FiscalSifGuard;
+import com.etendoerp.go.schemaforge.FiscalSifRules;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoExtension;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
 
@@ -110,14 +112,24 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * <p>Without this, the schedule would keep firing the SII sending process twice a day for an
  * organization whose fiscal config no longer exists or is no longer active.
  *
- * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
- * {@code docs/neo-headless-extensibility.md} §2.2 (this qualifier silently stops being
- * discovered if a scope annotation such as {@code @ApplicationScoped} is added).
+ * <p>Bound by {@code @NeoExtension} (ETP-6053, migrated from the {@code Java_Qualifier}
+ * binding). Never give it a normal CDI scope.
  */
-@Named("sii-config-deactivate-handler")
+@NeoExtension(spec = "sii-config", entity = "siiConfiguration")
 public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler {
 
   private static final Logger log = LogManager.getLogger(SiiConfigDeactivateHandler.class);
+
+  /**
+   * ETP-6053: the Fiscal Configuration write rules ({@link FiscalSifGuard}) run before the smart
+   * deactivation and the default CRUD — no inactive create, none in forced test mode, one active
+   * config per organization, and no {@code active} change by an agent.
+   */
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    NeoResponse refusal = FiscalSifGuard.preCheck(context, FiscalSifRules.SII);
+    return refusal != null ? refusal : super.handle(context);
+  }
 
   private static final String METHOD_POST = "POST";
 

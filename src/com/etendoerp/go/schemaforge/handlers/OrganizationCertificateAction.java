@@ -21,6 +21,7 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.Collections;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
@@ -33,6 +34,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.FiscalSystemConfigureAction;
 import com.etendoerp.go.schemaforge.NeoCertificateHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -48,6 +50,10 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * Never the certificate itself or its password. An organization the caller's role cannot read
  * (outside {@link OBContext#getReadableOrganizations()}) answers 404, like a missing one: the
  * certificate query is raw SQL by organization id, so the role's org access is checked here.
+ *
+ * <p>ETP-6053: also the single {@code @NeoExtension} of {@code organization/organization}, so it
+ * serves the organization's other declared action, {@code configureFiscalSystem} (the Fiscal
+ * Configuration onboarding for agents), by delegating to {@link FiscalSystemConfigureAction}.</p>
  */
 @NeoExtension(spec = "organization", entity = "organization")
 public class OrganizationCertificateAction implements NeoHandler {
@@ -64,13 +70,20 @@ public class OrganizationCertificateAction implements NeoHandler {
               + "certificate is uploaded and replaced in the app.")
           .withIdDescription("the organization id"));
 
+  private final FiscalSystemConfigureAction fiscalSystemAction = new FiscalSystemConfigureAction();
+
   @Override
   public Map<String, NeoActionContract> actionContracts() {
-    return CONTRACTS;
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>(CONTRACTS);
+    contracts.putAll(FiscalSystemConfigureAction.actionContracts());
+    return contracts;
   }
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (FiscalSystemConfigureAction.serves(context.getFieldName())) {
+      return fiscalSystemAction.handle(context);
+    }
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
         || !ACTION.equals(context.getFieldName())) {
       return null;

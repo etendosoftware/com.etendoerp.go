@@ -3712,6 +3712,63 @@ first create without it was refused. The handler now declares
 `serverDefaulted`. `etendo_defaults` still answers the suggested country — a form may prefill it —
 but the schema no longer claims the server fills it.
 
+##### 4.12.1.10 Fiscal Configuration for agents — `configureFiscalSystem` on `organization` (ETP-6053)
+
+Agents activate a billing system (SIF) through one declared write action, never through
+`etendo_create` on the fiscal-configuration specs:
+
+```
+etendo_action(spec:'organization', entity:'organization', id:'<organizationId>',
+              action:'configureFiscalSystem',
+              parameters:{system:'TBAI', territory:'bizkaia'})
+```
+
+| Parameter | Values |
+|---|---|
+| `system` (required) | `SII`, `TBAI`, `SII+TBAI`, `VERIFACTU` |
+| `territory` (required) | `navarra`, `alava`, `bizkaia`, `gipuzkoa`, `baleares` (common territory and Balearic Islands), `canarias`, `ceuta` (Ceuta and Melilla) |
+
+The action applies the rules of the SPA's onboarding wizard (`OnboardingWizard.jsx`), in this
+order, refusing in the request language (`NeoMessageText`, keys in `error.messageKeys`):
+
+| Rule | Refusal |
+|---|---|
+| `id` must be the session's organization (the records land there, `organization` is server-owned, §4.12.17) | 400 `ETGO_FiscalSifOrgMismatch` |
+| no activation while `ETSG_ForceTestMode` is on for the client (`FiscalTestModeResolver`) | 409 `ETGO_FiscalSifTestMode` — *"Solo podrá activar un sistema fiscal en un entorno productivo."* (the SPA's `fiscal.testModeLock.warning`) |
+| the territory must allow the system (`FiscalSifRules`, the Java twin of the SPA's `TERRITORY_ALLOWED_SYSTEMS`): Navarra → SII; Álava/Bizkaia/Gipuzkoa → TBAI, SII+TBAI; Baleares/Canarias → SII, VERIFACTU; Ceuta/Melilla → VERIFACTU | 400 `ETGO_FiscalSifNotAllowed` |
+| no other active SIF in the organization | 409 `ETGO_FiscalSifAlreadyConfigured` |
+| exception, the SPA's "Añadir SII": `system:'SII'` on an organization whose only active SIF is TicketBAI, in a Basque territory, adds SII — the territory must be TicketBAI's own | 400 `ETGO_FiscalSifTerritoryMismatch` |
+
+Every value the wizard derives from the territory is derived here as well and is not a parameter:
+SII `navarra`, `guipuzcoa` and `taxtype`, TicketBAI `etsgSifTerritory`, VERI*FACTU `tAXType`
+(*Impuesto de aplicación*), plus the wizard's defaults (adoption dates = today, production flags,
+`nextSendWaitTime`, `defaultQR`). `FiscalSifRules.onboardingPayloads` mirrors
+`buildOnboardingPayloads` field for field; the two copies must change together.
+
+The records are created through `BatchService.executeBatch` — the `/sws/neo/batch` pipeline —
+so the role's access to each fiscal window is checked, each entity's customization runs as it
+does for the wizard (TicketBAI sequences, auto-send schedules, VERI*FACTU adoption date), and
+SII + TicketBAI commit or roll back together. A refusal raised inside (a trigger, the entity
+rules below) comes back with its status, message and `messageKeys`.
+
+Answer: `{system, territory, created:[{system, spec, entity, id}], certificate:{exists}}`. When
+the organization has no active signing certificate, a `warning` message
+(`ETGO_FiscalSifNoCertificate`) says it must be uploaded from Configuración fiscal: the
+certificate cannot be written by an agent (see §4.12.9, *Fiscal Configuration*). Afterwards an
+agent reads and edits the created records with `etendo_get` / `etendo_update` on
+`sii-config/siiConfiguration`, `tbai-config/header` and
+`verifactu-config/cabeceraDeConfiguraciónVerifactu`.
+
+**Entity rules on every channel** (`FiscalSifGuard`, run first in the `handle()` of
+`SiiConfigDeactivateHandler`, `TbaiConfigSequenceHandler` and `VerifactuConfigReadyHandler`,
+bound by `@NeoExtension` since ETP-6053): a config is never created inactive
+(400 `ETGO_FiscalSifInactiveCreate`), never in forced test mode (409 `ETGO_FiscalSifTestMode`),
+and only one is active per system and organization (409 `ETGO_FiscalSifOneActive`, also on a REST
+reactivation). TicketBAI had no database rule for the last one; SII and VERI*FACTU keep their
+triggers (`AEATSII_ONE_ACTIVE_CONFIG_TRG`, `ETVFAC_ONE_ACTIVE_CONFIG_TRG`), which are now reached
+only outside NEO. They hold on every channel on purpose: `BatchService` builds its hook context
+without `mcpOrigin`, so an MCP-only create rule would be bypassed by a batched create.
+
 #### 4.12.2 `etendo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
@@ -5361,6 +5418,27 @@ inherited it". GitHub issue
 Classic's own, separate SEPA-compliance work, which may eventually change Classic's behavior here —
 that work is out of scope for this flag and this divergence note.
 
+##### Fiscal Configuration — REST and MCP differ on purpose (ETP-6053, declared)
+
+The SPA's Fiscal Configuration window and agents reach the same three entities
+(`sii-config/siiConfiguration`, `tbai-config/header`,
+`verifactu-config/cabeceraDeConfiguraciónVerifactu`) and the certificate of `organization`, with
+deliberately different powers. Every MCP difference below is `MCP_CONFIG` or `isMcpOrigin()`, so
+REST and the SPA are unchanged.
+
+| Operation | REST (the SPA) | MCP |
+|---|---|---|
+| Create a config | `POST` per entity (the onboarding wizard, "Añadir SII") | `etendo_create` and `etendo_batch` hidden (`MCP_CONFIG.verbs.create:false`, 405); only `configureFiscalSystem` (§4.12.1.10) |
+| Deactivate ("Cambiar SIF") | `PUT {active:false}` → smart deactivation | refused: any change of `active` on `etendo_update` is 400 `ETGO_FiscalSifActiveByAgent` (an echo of the current value passes) |
+| Reactivate | `PUT {active:true}`, subject to one active per system | refused, as above |
+| Delete | `DELETE` (unused by the SPA, kept) | `etendo_delete` hidden (`MCP_CONFIG.verbs.delete:false`, 405) |
+| VERI*FACTU `tAXType` (*Impuesto de aplicación*) | editable until `isReady` | read-only: field-level `MCP_CONFIG.fields.readOnly:true`, 422 `read_only_field` on create and update |
+| Other territory-derived fields (SII `navarra`/`guipuzcoa`/`taxtype`, TicketBAI `etsgSifTerritory`) | sent by the wizard on create (customization exemption of `NeoFieldFilter`) | read-only already (curation), 422 `read_only_field` |
+| Certificate (`organization/certificadoDigital`, `ETSG_Certificate`) | uploaded, replaced and deleted through `/sws/neo/certificate` (not a spec) | `etendo_create` / `etendo_update` / `etendo_delete` hidden (`MCP_CONFIG.verbs`), status readable with the `certificate` action |
+
+The shared refusal of `read_only_field` (§4.12.11) stays in English, like every shared refusal;
+the fiscal refusals of `FiscalSifGuard` and `configureFiscalSystem` are in the request language.
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and
@@ -6674,7 +6752,7 @@ Both creation and active-state synchronization are best-effort secondary effects
 
 This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.3 — it carries no `error: "stale_record"` discriminator, since it can only ever happen on `POST` (`stale_record` is a `PUT`/`PATCH`-only concept). See `ChartOfAccountsSaveValidationSupport`'s class javadoc for the full save-validation rule list (code format, protected parent-like codes, code-immutability on update); this is the one new rule ETP-5101 added to it. *Known gap, not yet fixed:* the duplicate lookup (`findDuplicateSearchKey`) scopes only on `ElementValue.PROPERTY_CLIENT`, not the actual DB uniqueness pair `(C_Element_ID, VALUE)`, and omits `setFilterOnActive(false)` — so it can both miss a real duplicate and flag a false one relative to the real constraint. Treat the `409` contract above as the intended behavior, not yet a hardened guarantee.
 
-**Real-world example — `TbaiConfigSequenceHandler`** (`schemaforge/handlers/TbaiConfigSequenceHandler.java`, `@Named("tbai-config-sequence-handler")`, wired as the `header` entity's `JAVA_QUALIFIER` for the `tbai-config` spec): a post-hook (`afterHandle`) that runs on every successful `POST`/`PUT` of the TBAI Fiscal Configuration. It walks the config's organization tree — plus organization `*` (id `0`), added explicitly since Document Types are very commonly defined at org `*` and would otherwise be silently excluded (same precedent as `SelectorOrgFilter#buildOrganizationPredicate`) — and finds every **active** `DocumentType` whose backing table is `C_Invoice` — which naturally covers sales invoices (`ARI`), purchase invoices (`API`), and their credit notes (`ARC`/`APC`), since all four share that table. Rather than one sequence per Document Type, it ensures the whole scope shares **exactly one** chaining `Sequence` (prefix `TBAI-`): it reuses one already assigned to any qualifying Document Type in scope, or creates a single new one only if none exists yet. This is the core fiscal-correctness rule — TicketBAI chains invoice numbers with a single scope-wide counter, so independent per-Document-Type sequences could collide. A Document Type that already has a chaining sequence (`EM_Tbai_Ad_Sequence_ID`) is left untouched, so re-saving the config is safe (idempotent). Any error is logged and swallowed: this is a best-effort secondary side effect and must never fail the parent save request.
+**Real-world example — `TbaiConfigSequenceHandler`** (`schemaforge/handlers/TbaiConfigSequenceHandler.java`, bound by `@NeoExtension(spec = "tbai-config", entity = "header")` since ETP-6053; before that by `@Named("tbai-config-sequence-handler")` and the `header` entity's `JAVA_QUALIFIER`): a post-hook (`afterHandle`) that runs on every successful `POST`/`PUT` of the TBAI Fiscal Configuration. It walks the config's organization tree — plus organization `*` (id `0`), added explicitly since Document Types are very commonly defined at org `*` and would otherwise be silently excluded (same precedent as `SelectorOrgFilter#buildOrganizationPredicate`) — and finds every **active** `DocumentType` whose backing table is `C_Invoice` — which naturally covers sales invoices (`ARI`), purchase invoices (`API`), and their credit notes (`ARC`/`APC`), since all four share that table. Rather than one sequence per Document Type, it ensures the whole scope shares **exactly one** chaining `Sequence` (prefix `TBAI-`): it reuses one already assigned to any qualifying Document Type in scope, or creates a single new one only if none exists yet. This is the core fiscal-correctness rule — TicketBAI chains invoice numbers with a single scope-wide counter, so independent per-Document-Type sequences could collide. A Document Type that already has a chaining sequence (`EM_Tbai_Ad_Sequence_ID`) is left untouched, so re-saving the config is safe (idempotent). Any error is logged and swallowed: this is a best-effort secondary side effect and must never fail the parent save request.
 
 **Real-world example — `TbaiXmlgeneratorHandler` (failed TicketBAI sends leave a trace, ETP-5700):** `schemaforge/TbaiXmlgeneratorHandler.java` (`@Named("tbai-xmlgenerator")`, delegated to by `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler` for the `Em_Tbai_Xmlgenerator` action) runs ticketbai's `XMLConvertionFromInvoice`. That process only writes `tbai_syncinvoice` once the tax authority has answered; a send that fails earlier (a local validation while building the XML such as a missing postal code, signing, connection) only returns the error in `responseActions`. Since the invoice's stored computed status `EM_ETGO_Tbai_Status` (`ETGO_GET_TBAI_STATUS`) reads the latest `tbai_syncinvoice.estado` and answers `Pendiente` when there is none, the chip stayed `Pendiente` after a failed send. On a failed action (error `NeoResponse` or exception) the handler now writes the same trace ticketbai's own auto-send writes in `ProcessInvoiceTbaiHook#generateTbaiStatusLog`: a `TbaiSyncinvoice` (`estado = "Error"`, `descripcion = "01"`) plus a `TbaiValcode` with the message truncated to 1000 chars. It does so **only when the invoice's `tbai_syncinvoice` row count did not change during the call** — a rejection ticketbai already recorded (`Rechazado`, "already received") is never duplicated, and the check does not depend on the translated message text. The rows are flushed into the request transaction and committed with it: an error `NeoResponse` is a returned value, not a thrown exception, so neither `NeoServletSupport` nor `DalRequestFilter` rolls it back. A failure to write the trace is logged and never masks the original error. The handler also strips `<fully.qualified.ExceptionClass>: ` prefixes (ticketbai's `XMLUtils` wraps errors as `new OBException(e)`) from both the stored description and the returned message. Same handler on every channel (REST action and MCP `etendo_action`), so no divergence to declare in §4.12.9.
 
