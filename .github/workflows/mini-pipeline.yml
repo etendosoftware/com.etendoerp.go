@@ -131,8 +131,10 @@ jobs:
       # PR could use and which pushed develop's out of the repo's 10 GB. Now only a push to develop
       # saves (actions/cache saves on an exact-key miss only); a PR restores read-only, falling back
       # to the newest develop entry through restore-keys, so Gradle downloads just what changed.
+      # TEMPORARY (ETP-6069): saves on this PR too, to seed an entry the next run restores through
+      # restore-keys. Reverted before merge.
       - name: Gradle cache (saved on develop)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         uses: actions/cache@v4
         with:
           path: |
@@ -143,7 +145,7 @@ jobs:
             gradle-${{ runner.os }}-
 
       - name: Gradle cache (read-only)
-        if: github.event_name != 'push'
+        if: false
         uses: actions/cache/restore@v4
         with:
           path: |
