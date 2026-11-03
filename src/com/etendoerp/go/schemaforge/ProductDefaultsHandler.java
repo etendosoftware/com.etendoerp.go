@@ -75,8 +75,10 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
  * <p>ETP-4943 / ETP-5091: also forces {@code stocked}/{@code returnable} to {@code false}
  * whenever a request declares {@code productType} as Service ({@code "S"}), Expense
  * ({@code "E"}, "Gasto") or Resource ({@code "R"}, "Recurso") — see
- * {@link #enforceNonStockableProductTypes}. Runs on both POST and PATCH, unlike the
- * uOM/taxCategory defaulting above (POST-only): the frontend's own auto-correction
+ * {@link #enforceNonStockableProductTypes}. On an update (PATCH, and PUT as the MCP channel sends
+ * it) the type is the body's or, when absent, the persisted product's ({@link #enforceTypeRulesOnUpdate}),
+ * which also applies the type's tax category on a REAL type change with no explicit
+ * {@code taxCategory}. The uOM/taxCategory defaulting of a create stays create-only: the frontend's own auto-correction
  * (`ProductAdditionalInfoPanel.jsx`) only fires while the "Additional Info" tab is mounted, so a
  * user who sets the type to one of these on the "General" tab and saves immediately never
  * triggers it. This is the authoritative enforcement; the frontend one is a same-session UX
@@ -90,6 +92,8 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String SPEC = "product";
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PATCH = "PATCH";
+  /** The MCP update channel hands the hook {@code "PUT"}; REST PATCH hands {@code "PATCH"}. */
+  private static final String METHOD_PUT = "PUT";
   private static final String METHOD_GET = "GET";
   private static final String FIELD_UOM = "uOM";
   private static final String FIELD_TAX_CATEGORY = "taxCategory";
@@ -162,7 +166,7 @@ public class ProductDefaultsHandler implements NeoHandler {
     }
     String method = context.getHttpMethod();
     boolean isCreate = METHOD_POST.equals(method);
-    boolean isUpdate = METHOD_PATCH.equals(method);
+    boolean isUpdate = METHOD_PATCH.equals(method) || METHOD_PUT.equals(method);
     if (!isCreate && !isUpdate) {
       return null;
     }
@@ -177,7 +181,11 @@ public class ProductDefaultsHandler implements NeoHandler {
       context.setAttribute(ATTR_SKIP_PRICES_SEED, skipPricesSeed);
     }
     try {
-      enforceNonStockableProductTypes(body);
+      if (isUpdate) {
+        enforceTypeRulesOnUpdate(body, context);
+      } else {
+        enforceNonStockableProductTypes(body);
+      }
     } catch (Exception e) {
       log.error("product pre-hook: failed to enforce non-stockable product type stock flags", e);
     }
@@ -277,15 +285,67 @@ public class ProductDefaultsHandler implements NeoHandler {
   }
 
   /**
+   * ETP-5680: the product-type rules on an update (REST PATCH/PUT, MCP {@code etendo_update}).
+   *
+   * <ul>
+   *   <li>The effective type is the body's {@code productType}, else the persisted product's (read
+   *       from the record id), so a request that edits only {@code weight} on a Service is
+   *       enforced too. A non-stockable effective type forces {@code stocked} and
+   *       {@code returnable} to {@code false}.</li>
+   *   <li>A REAL type change (valid body type different from the persisted one) with no
+   *       {@code taxCategory} key in the body sets the type's named category, as a create does. An
+   *       explicit {@code taxCategory} always wins; an unchanged type never touches it (saving
+   *       never recalculates); a category that does not resolve leaves the body untouched.</li>
+   * </ul>
+   * Any failure of the persisted lookup leaves the body as received.
+   */
+  private void enforceTypeRulesOnUpdate(JSONObject body, NeoContext context) throws JSONException {
+    String bodyType = StringUtils.trimToNull(body.optString(FIELD_PRODUCT_TYPE, null));
+    boolean typeIsValid = bodyType != null && PRODUCT_TYPES.contains(bodyType);
+    boolean taxNeedsComparison = typeIsValid && !body.has(FIELD_TAX_CATEGORY);
+    String persisted = (bodyType == null || taxNeedsComparison)
+        ? persistedProductType(context.getRecordId()) : null;
+    String effective = bodyType != null ? bodyType : persisted;
+    if (effective != null && NON_STOCKABLE_PRODUCT_TYPES.contains(effective)) {
+      body.put(FIELD_STOCKED, false);
+      body.put(FIELD_RETURNABLE, false);
+    }
+    if (taxNeedsComparison && persisted != null && !bodyType.equals(persisted)) {
+      String id = resolveTaxCategoryIdForType(bodyType, resolveClientId(context));
+      if (id != null) {
+        body.put(FIELD_TAX_CATEGORY, id);
+      }
+    }
+  }
+
+  /**
+   * The persisted {@code productType} of a product, or {@code null} when there is no record id, the
+   * product is not found or the read fails — the caller then treats the type as unknown.
+   */
+  String persistedProductType(String recordId) {
+    if (StringUtils.isBlank(recordId)) {
+      return null;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Product product = OBDal.getInstance().get(Product.class, recordId);
+      return product != null ? StringUtils.trimToNull(product.getProductType()) : null;
+    } catch (Exception e) {
+      log.debug("Could not read the persisted product type of {}: {}", recordId, e.getMessage());
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * ETP-4943 / ETP-5091: Service, Expense and Resource products have no physical existence, so
    * none of them can ever be stocked or returnable. Forces both flags to {@code false} whenever
    * the request itself declares {@code productType} as one of {@link #NON_STOCKABLE_PRODUCT_TYPES}
    * — whether or not the caller sent a value for them, so an omitted flag can't silently resolve
-   * to {@code true} downstream. Deliberately scoped to requests that mention {@code productType}:
-   * a PATCH that edits something else on an already-non-stockable product (e.g. weight) and never
-   * touches the type is left alone — resolving the persisted type would need a DB lookup, out of
-   * scope for this ticket's reported cases (all of which change {@code productType} in the same
-   * request).
+   * to {@code true} downstream. Body-only: it is the create-path rule. An update goes through
+   * {@link #enforceTypeRulesOnUpdate}, which falls back to the persisted type when the body does
+   * not mention {@code productType}.
    */
   static void enforceNonStockableProductTypes(JSONObject body) throws JSONException {
     String productType = body.optString(FIELD_PRODUCT_TYPE, null);
@@ -710,8 +770,8 @@ public class ProductDefaultsHandler implements NeoHandler {
   /**
    * ETP-5680: create-time fill of {@code taxCategory}. An explicit value always wins; otherwise the
    * category matching the body's {@code productType} by name, falling back to the IsDefault row
-   * when the body has no type or the tenant lacks the named category. Create only — a PATCH never
-   * recalculates the category.
+   * when the body has no type or the tenant lacks the named category. Create only — an update applies the
+   * type's category solely on a real type change ({@link #enforceTypeRulesOnUpdate}).
    */
   private void injectTaxCategoryIfMissing(JSONObject body, String clientId, NeoContext context)
       throws JSONException {

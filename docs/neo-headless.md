@@ -5763,6 +5763,26 @@ equivalence that requires both sides to be Yes/No tokens (`NeoValueEquivalence`)
 No channel divergence: only `etendo_create` reports `supersededDefaults` (REST and `etendo_batch`
 never read it), so §4.12.9 is unchanged.
 
+##### Product type rules on an update (ETP-5680)
+
+`ProductDefaultsHandler.handle` accepts `POST` (create) and, as updates, both `PATCH` (what REST
+sends) and `PUT` (what `etendo_update` hands the hook): until ETP-5680 it matched `PATCH` only, so
+the MCP update skipped every product rule. On an update:
+
+- **Effective type** = the body's `productType`, else the persisted product's (read through OBDal
+  from the record id, only when the body lacks it). A non-stockable effective type (S, E, R) forces
+  `stocked` and `returnable` to `false`, so a PATCH/PUT that edits only `weight` on a Service is
+  enforced too.
+- **Tax category:** a REAL type change (valid body type different from the persisted one) with no
+  `taxCategory` key in the body sets the type's named category (same lookup as create: client, then
+  System). An explicit `taxCategory` always wins; an unchanged type never touches it; a category
+  that does not resolve leaves the body as received.
+- A failed persisted-type read leaves the body unchanged (the type is then unknown).
+
+No channel divergence remains (REST PATCH/PUT and MCP `etendo_update` reach the same handler;
+`etendo_batch` only creates and already applies the create rules); this does not mirror the form's "type becomes Item -> stocked true" watcher, so an API
+update to Item leaves `stocked` as it was.
+
 #### 4.12.15 Server identity and localized tool titles
 
 `initialize` advertises the server as `serverInfo.name = "etendo-mcp"` with
