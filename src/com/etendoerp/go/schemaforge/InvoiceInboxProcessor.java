@@ -32,6 +32,7 @@ import static com.etendoerp.go.schemaforge.ocr.InboxDocument.MAX_DOCUMENT_NO;
 import static com.etendoerp.go.schemaforge.ocr.InboxDocument.S_LINKED;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.Date;
 import java.util.Map;
 import java.util.Optional;
@@ -110,6 +111,12 @@ public final class InvoiceInboxProcessor {
 
   /** Waits between OCR attempts; a seam so tests do not sleep. */
   interface Sleeper {
+    /**
+     * Waits for the given time.
+     *
+     * @param seconds how long to wait, in seconds
+     * @throws InterruptedException when the thread is interrupted while waiting
+     */
     void sleep(long seconds) throws InterruptedException;
   }
 
@@ -211,7 +218,8 @@ public final class InvoiceInboxProcessor {
     }
   }
 
-  private void processClaimed(String id, Claimed claimed) throws Exception {
+  private void processClaimed(String id, Claimed claimed)
+      throws IOException, JSONException, InterruptedException {
     String spec = SPEC_BY_TARGET.get(claimed.targetType());
     Optional<OcrDocType> type = spec == null ? Optional.empty() : OcrConfig.get().forSpec(spec);
     String roleId = store.roleFor(claimed.userId(), claimed.clientId());
@@ -237,11 +245,12 @@ public final class InvoiceInboxProcessor {
 
   /** The body of a step that runs in admin mode. */
   private interface AdminStep<T> {
-    T run() throws Exception;
+    T run() throws IOException, JSONException, InterruptedException;
   }
 
   /** Runs a step in admin mode and restores the mode after it, whatever happens. */
-  private static <T> T inAdminMode(AdminStep<T> step) throws Exception {
+  private static <T> T inAdminMode(AdminStep<T> step)
+      throws IOException, JSONException, InterruptedException {
     OBContext.setAdminMode(true);
     try {
       return step.run();
@@ -251,7 +260,8 @@ public final class InvoiceInboxProcessor {
   }
 
   /** The stored extraction, or a fresh one (stored write-once); {@code null} when the row was ended. */
-  private JSONObject extractionOf(String id, Claimed claimed, OcrDocType type) throws Exception {
+  private JSONObject extractionOf(String id, Claimed claimed, OcrDocType type)
+      throws IOException, JSONException, InterruptedException {
     if (claimed.extractedData() != null) {
       return new JSONObject(claimed.extractedData());
     }
@@ -301,7 +311,7 @@ public final class InvoiceInboxProcessor {
   }
 
   private void matchAndStore(String id, JSONObject extraction, OcrDocType type)
-      throws Exception {
+      throws JSONException {
     Optional<OcrLookups> lookups = OcrLookupsRegistry.forResolver(type.getResolver());
     if (lookups.isEmpty()) {
       store.fail(id, ERR_SERVICE);

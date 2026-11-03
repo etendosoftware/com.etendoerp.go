@@ -22,6 +22,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import java.lang.reflect.Method;
+import java.util.Random;
 import java.util.UUID;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -56,7 +57,8 @@ public class InvoiceInboxProcessorInboxDuplicatesIntegrationTest extends WeldBas
   private static final String NOTICE = "duplicate_in_inbox";
 
   private final String marker = "etgo-dup-" + UUID.randomUUID().toString().substring(0, 8);
-  private final String base = "Q" + (1_000_000 + (int) (Math.random() * 8_999_999)) + "J";
+  private static final Random RANDOM = new Random();
+  private final String base = "Q" + (1_000_000 + RANDOM.nextInt(8_999_999)) + "J";
 
   @Before
   public void prepareContext() {
