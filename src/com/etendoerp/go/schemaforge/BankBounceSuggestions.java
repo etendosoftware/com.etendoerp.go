@@ -49,17 +49,22 @@ import com.etendoerp.go.schemaforge.BankBounceDetector.Pair;
  * <ol>
  *   <li>a {@code high} pair reserves its two lines BEFORE transaction matching: the auto-match loop
  *       skips them and the panel classifies them {@code bounce} without consuming a movement;</li>
- *   <li>a {@code review} pair is offered AFTER transaction matching, and only when none of its
- *       lines (the bounce plus its original, or plus every candidate original) was taken by a
- *       transaction group, by a high pair or by an earlier review pair.</li>
+ *   <li>a {@code review} pair is offered AFTER transaction matching, and only when the lines it
+ *       would take are free: its bounce and, for a plain pair, its original — not taken by a
+ *       transaction group, by a high pair or by another plain review pair. An ambiguous pair needs
+ *       its bounce free and at least one candidate original left; the candidates taken elsewhere
+ *       are dropped from it (one left makes it a plain pair), and the candidates it shares with
+ *       another ambiguous pair are offered in both ({@link Plan#offered}).</li>
  * </ol>
  *
  * <p><b>Group shape</b> ({@code kind:"bouncePair"}): {@code groupKey}, {@code origin:"bounce"},
  * {@code statementLine} (the original, {@code null} when ambiguous), {@code counterpartLine} (the
  * bounce line), {@code candidates} (the candidate originals of an ambiguous pair, each with its
- * {@code signals}; empty otherwise), {@code ambiguous}, {@code confidence}, {@code signals},
- * {@code signal} (the primary one), {@code operations:[]}, {@code isNew:false} and
- * {@code difference:0}. Every transaction group gains {@code kind:"transaction"}.
+ * {@code signals}; empty otherwise), {@code ambiguous}, {@code adjacent} (the original, or the two
+ * candidates, are the bounce's neighbours in its statement; it never raises the confidence),
+ * {@code confidence}, {@code signals}, {@code signal} (the primary one), {@code operations:[]},
+ * {@code isNew:false} and {@code difference:0}. Every transaction group gains
+ * {@code kind:"transaction"}.
  */
 final class BankBounceSuggestions {
 
@@ -87,6 +92,7 @@ final class BankBounceSuggestions {
   private static final String KEY_SIGNALS = "signals";
   private static final String KEY_SIGNAL = "signal";
   private static final String KEY_AMBIGUOUS = "ambiguous";
+  private static final String KEY_ADJACENT = "adjacent";
   private static final String KEY_STATE = "state";
 
   /** Utility class: static members only, never instantiated. */
@@ -143,26 +149,113 @@ final class BankBounceSuggestions {
     }
 
     /**
-     * The pairs that are offered once transaction matching has taken {@code taken}: every high
-     * pair, then every review pair none of whose lines is taken. {@code taken} is not modified.
+     * The pairs that are offered once transaction matching has taken {@code taken}. A pair is
+     * blocked only by the lines it would really take, settled in this order:
+     * <ol>
+     *   <li>every high pair is offered and takes its two lines;</li>
+     *   <li>a plain review pair is offered when neither its bounce nor its original is used, and
+     *       then takes both;</li>
+     *   <li>an ambiguous pair is offered when its bounce is not used and at least one candidate is
+     *       left once the used lines are removed ({@link #offeredAmbiguous}). It takes its bounce
+     *       only, so ambiguous pairs that share candidate originals do not block each other.</li>
+     * </ol>
+     * The plain pairs are settled before the ambiguous ones, so the original of an offered pair is
+     * never also listed as a candidate of another. {@code taken} is not modified.
      *
      * @param taken the lines taken by transaction groups
-     * @return the offered pairs, high first
+     * @return the offered pairs: high first, then the review pairs in detection order
      */
     List<Pair> offered(Set<String> taken) {
       Set<String> used = new HashSet<>(taken);
-      List<Pair> offered = new ArrayList<>();
-      for (Pair p : pairs) {
+      Pair[] chosen = new Pair[pairs.size()];
+      for (int i = 0; i < pairs.size(); i++) {
+        Pair p = pairs.get(i);
         if (p.high()) {
-          offered.add(p);
+          chosen[i] = p;
           used.addAll(p.lineIds());
         }
       }
-      for (Pair p : pairs) {
-        if (!p.high() && Collections.disjoint(used, p.lineIds())) {
-          offered.add(p);
-          used.addAll(p.lineIds());
+      for (int i = 0; i < pairs.size(); i++) {
+        Pair p = pairs.get(i);
+        if (!p.high() && !p.ambiguous()) {
+          chosen[i] = offeredPlain(p, used);
         }
+      }
+      for (int i = 0; i < pairs.size(); i++) {
+        Pair p = pairs.get(i);
+        if (p.ambiguous()) {
+          chosen[i] = offeredAmbiguous(p, used);
+        }
+      }
+      return highFirst(chosen);
+    }
+
+    /**
+     * A plain review pair is offered when neither its bounce nor its original is used; it then
+     * marks both used.
+     *
+     * @param p    a plain (non-ambiguous) review pair
+     * @param used the lines already used, updated
+     * @return {@code p}, or {@code null} when a line of it is used
+     */
+    private static Pair offeredPlain(Pair p, Set<String> used) {
+      if (used.contains(p.bounce().id()) || used.contains(p.original().id())) {
+        return null;
+      }
+      used.addAll(p.lineIds());
+      return p;
+    }
+
+    /**
+     * The offered pairs in answer order: the high ones, then the others, each in detection order.
+     *
+     * @param chosen the pair offered for each detected pair, {@code null} where none is
+     * @return the offered pairs
+     */
+    private static List<Pair> highFirst(Pair[] chosen) {
+      List<Pair> offered = new ArrayList<>();
+      for (Pair p : chosen) {
+        if (p != null && p.high()) {
+          offered.add(p);
+        }
+      }
+      for (Pair p : chosen) {
+        if (p != null && !p.high()) {
+          offered.add(p);
+        }
+      }
+      return offered;
+    }
+
+    /**
+     * How an ambiguous pair is offered once {@code used} is taken: {@code null} when its bounce is
+     * used or no candidate is left; otherwise the pair over its remaining candidates
+     * ({@link BankBounceDetector#ofCandidates}, so exactly one left makes it a plain review pair on
+     * that candidate). It marks its bounce used, and its original when it became a plain pair; the
+     * remaining candidates stay free for the other ambiguous pairs.
+     *
+     * @param p    an ambiguous pair
+     * @param used the lines already used, updated
+     * @return the pair as offered, or {@code null}
+     */
+    private static Pair offeredAmbiguous(Pair p, Set<String> used) {
+      if (used.contains(p.bounce().id())) {
+        return null;
+      }
+      List<Candidate> left = new ArrayList<>();
+      for (Candidate c : p.candidates()) {
+        if (!used.contains(c.line().id())) {
+          left.add(c);
+        }
+      }
+      Pair offered = left.size() == p.candidates().size() ? p
+          : BankBounceDetector.ofCandidates(p.bounce(), left, p.adjacent());
+      if (offered == null) {
+        return null;
+      }
+      used.add(offered.bounce().id());
+      if (!offered.ambiguous()) {
+        used.add(offered.original().id());
       }
       return offered;
     }
@@ -248,6 +341,7 @@ final class BankBounceSuggestions {
     group.put(KEY_COUNTERPART_LINE, lineJson(plan, p.bounce().id()));
     group.put(KEY_CANDIDATES, candidatesJson(plan, p));
     group.put(KEY_AMBIGUOUS, p.ambiguous());
+    group.put(KEY_ADJACENT, p.adjacent());
     putSignals(group, p);
     group.put("operations", new JSONArray());
     group.put("isNew", false);
@@ -411,6 +505,7 @@ final class BankBounceSuggestions {
     json.put(KEY_GROUP_KEY, p.groupKey());
     json.put("role", role);
     json.put(KEY_AMBIGUOUS, p.ambiguous());
+    json.put(KEY_ADJACENT, p.adjacent());
     putSignals(json, p);
     return json;
   }

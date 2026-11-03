@@ -76,6 +76,17 @@ import com.etendoerp.psd2.bank.integration.data.PisPayment;
  * not ambiguous; anything else is {@value #CONFIDENCE_REVIEW}. An ambiguous pair (several equally
  * eligible originals) is always for review, names no original and carries its candidate originals.
  *
+ * <p><b>Statement adjacency.</b> Banks write a return next to the line it reverses, before or
+ * after it: the order of the lines within a day is not taken as chronological. A neighbour of the
+ * bounce in its statement (the line just before or just after it, among the loaded lines of that
+ * statement ordered by line number) qualifies when it is one of its eligible originals
+ * ({@link #isOriginalOf} plus at least one signal) and the payment guard lets the two go. Exactly
+ * one qualifying neighbour is THE original; two make an ambiguous pair whose candidates are only
+ * those two; none leaves the bounce to the ordinary preference order and ambiguity rule
+ * ({@link #assignAdjacent}). Adjacency decides who pairs with whom and is flagged
+ * {@code adjacent}; it is neither a signal nor a reason for confidence, so the signals and the
+ * confidence of the pair are the ones above.
+ *
  * <p><b>Never a real payment.</b> A pair is not proposed when either line has a payment in the ERP
  * ({@link BankBouncePaymentGuard#blocker}): discarding it would leave that payment, and the invoice
  * it settles, without the bank movement that proves it.
@@ -129,14 +140,32 @@ final class BankBounceDetector {
    *
    * @param id          the line id
    * @param date        its calendar day
-   * @param lineNo      its line number, for a stable order
+   * @param lineNo      its line number: a stable order, and its position in its statement
    * @param description its description
    * @param partnerName the counterparty name the bank printed
    * @param amount      {@code cramount - dramount}
    * @param candidate   whether it may be part of a pair (PSD2 line outside any split group)
+   * @param statementId its bank statement ({@code FIN_BankStatement_ID}), or {@code null} when
+   *                    unknown: such a line has no statement neighbours, so no adjacency
    */
   record StatementLine(String id, LocalDate date, long lineNo, String description,
-      String partnerName, BigDecimal amount, boolean candidate) {
+      String partnerName, BigDecimal amount, boolean candidate, String statementId) {
+
+    /**
+     * A line with no known statement: it takes part in every rule but statement adjacency.
+     *
+     * @param id          the line id
+     * @param date        its calendar day
+     * @param lineNo      its line number, for a stable order
+     * @param description its description
+     * @param partnerName the counterparty name the bank printed
+     * @param amount      {@code cramount - dramount}
+     * @param candidate   whether it may be part of a pair (PSD2 line outside any split group)
+     */
+    StatementLine(String id, LocalDate date, long lineNo, String description, String partnerName,
+        BigDecimal amount, boolean candidate) {
+      this(id, date, lineNo, description, partnerName, amount, candidate, null);
+    }
 
     /**
      * Whether the line takes money out of the account.
@@ -180,9 +209,27 @@ final class BankBounceDetector {
    *                   otherwise
    * @param signals    the signals of the pair (of the preferred candidate when ambiguous)
    * @param confidence {@value #CONFIDENCE_HIGH} or {@value #CONFIDENCE_REVIEW}
+   * @param adjacent   whether statement adjacency chose the original, or the two candidates, of
+   *                   the pair: the bounce's neighbours in its statement. It never raises the
+   *                   confidence
    */
   record Pair(StatementLine original, StatementLine bounce, List<Candidate> candidates,
-      List<String> signals, String confidence) {
+      List<String> signals, String confidence, boolean adjacent) {
+
+    /**
+     * A pair whose original, or candidates, were not chosen by statement adjacency.
+     *
+     * @param original   the original line, {@code null} when the pair is ambiguous
+     * @param bounce     the line that reverses it
+     * @param candidates the candidate originals of an ambiguous pair, in preference order; empty
+     *                   otherwise
+     * @param signals    the signals of the pair (of the preferred candidate when ambiguous)
+     * @param confidence {@value #CONFIDENCE_HIGH} or {@value #CONFIDENCE_REVIEW}
+     */
+    Pair(StatementLine original, StatementLine bounce, List<Candidate> candidates,
+        List<String> signals, String confidence) {
+      this(original, bounce, candidates, signals, confidence, false);
+    }
 
     /**
      * Whether the original is left for the user to choose.
@@ -313,10 +360,11 @@ final class BankBounceDetector {
 
   /**
    * One raw assignment of the pairing, before the payment guard: the chosen original, the bounce,
-   * whether its group was ambiguous and the free originals the bounce could take.
+   * whether its group was ambiguous, whether the original was chosen by statement adjacency and the
+   * free originals the bounce could take.
    */
   private record Assignment(StatementLine original, StatementLine bounce, boolean ambiguous,
-      List<StatementLine> freeOriginals) {
+      boolean adjacent, List<StatementLine> freeOriginals) {
   }
 
   // ---------------------------------------------------------------------------
@@ -405,10 +453,13 @@ final class BankBounceDetector {
     BigDecimal amount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
     boolean candidate = StatementLineDiscard.transactionIdentifier(line) != null
         && StringUtils.isBlank(ReactivationSupport.readMatchGroupId(line));
+    // Statement adjacency only compares lines of the same statement; the pending lines of an
+    // account span a few statements, each one loaded at most once per session.
+    String statementId = line.getBankStatement() != null ? line.getBankStatement().getId() : null;
     return new StatementLine(line.getId(), dayOf(line.getTransactionDate()),
         line.getLineNo() != null ? line.getLineNo() : 0L,
         StringUtils.trimToEmpty(line.getDescription()),
-        StringUtils.trimToEmpty(line.getBpartnername()), amount, candidate);
+        StringUtils.trimToEmpty(line.getBpartnername()), amount, candidate, statementId);
   }
 
   /**
@@ -541,29 +592,207 @@ final class BankBounceDetector {
   // ---------------------------------------------------------------------------
 
   /**
-   * Pairs the candidate lines. Bounces are taken in date order and assigned per group of bounces
+   * Pairs the candidate lines in two steps. First statement adjacency ({@link #assignAdjacent}):
+   * a bounce whose statement neighbours settle its original — one qualifying neighbour, or two
+   * that become its only candidates — is assigned before anything else, and those originals are
+   * reserved. Then the bounces left are taken in date order and assigned per group of bounces
    * sharing (date, signed amount): within a group, the originals with no ERP payment are paired
    * first, so when there are more originals than bounces the one left free is the one the ERP can
    * still reconcile normally (the attempt that went through).
    *
    * @param data the loaded data
-   * @return the assignments, before the payment guard
+   * @return the assignments, before the payment guard, in statement order of their bounce line
    */
   private static List<Assignment> assign(AccountData data) {
     Map<String, List<StatementLine>> eligibleByBounce = eligibleOriginals(data);
+    Set<String> assigned = new HashSet<>();
+    List<Assignment> out = new ArrayList<>();
+    assignAdjacent(data, eligibleByBounce, assigned, out);
     Map<String, List<StatementLine>> groups = new LinkedHashMap<>();
     for (StatementLine r : data.lines) {
-      if (eligibleByBounce.containsKey(r.id())) {
+      if (eligibleByBounce.containsKey(r.id()) && !assigned.contains(r.id())) {
         groups.computeIfAbsent(r.date() + "|" + r.amount().stripTrailingZeros().toPlainString(),
             k -> new ArrayList<>()).add(r);
       }
     }
-    Set<String> assigned = new HashSet<>();
-    List<Assignment> out = new ArrayList<>();
     for (List<StatementLine> group : groups.values()) {
       assignGroup(data, group, eligibleByBounce, assigned, out);
     }
+    Map<String, Integer> position = new HashMap<>();
+    for (int i = 0; i < data.lines.size(); i++) {
+      position.putIfAbsent(data.lines.get(i).id(), i);
+    }
+    out.sort(Comparator.comparingInt(a -> position.get(a.bounce().id())));
     return out;
+  }
+
+  /**
+   * Statement adjacency: a bank writes a return next to the line it reverses, but not necessarily
+   * after it. The order of the lines within a day is NOT taken as chronological: PSD2 numbers the
+   * lines by their position in the bank's transaction list and the booking day has no time, and
+   * real statements show a return written before its payment. So both neighbours of a bounce — the
+   * line just before it and the line just after it in its statement ({@link #statementNeighbours})
+   * — count the same. A neighbour qualifies when it is one of the bounce's eligible originals
+   * ({@link #isOriginalOf} plus at least one signal) and the payment guard lets the two lines go
+   * ({@link BankBouncePaymentGuard#blocker} over the pair alone; {@link #detect} applies it again
+   * over every chosen pair). Adjacency decides only when that is unambiguous:
+   * <ol>
+   *   <li>a bounce with exactly one qualifying neighbour takes it as its original, not ambiguous
+   *       ({@link #settleUniqueNeighbours}); those originals are reserved first;</li>
+   *   <li>a bounce with two qualifying neighbours drops the ones reserved by step 1 — one left
+   *       makes it a step-1 bounce, so step 1 runs again — and with both left becomes an ambiguous
+   *       pair whose candidates are ONLY those two neighbours. Two such pairs may share a
+   *       neighbour; {@code BankBounceSuggestions.Plan#offered} offers both;</li>
+   *   <li>a bounce with no qualifying neighbour (or whose neighbours were all reserved, or whose
+   *       only neighbour is also the only neighbour of another bounce) is left to the ordinary
+   *       assignment, which no longer sees the lines reserved here.</li>
+   * </ol>
+   * Every adjacency assignment is flagged {@code adjacent}. Adjacency never raises the confidence:
+   * {@link #confidence} still decides it, and an ambiguous pair stays for review.
+   *
+   * @param data             the loaded data
+   * @param eligibleByBounce the eligible originals of every bounce
+   * @param assigned         the lines already assigned, updated
+   * @param out              the assignments, appended to
+   */
+  private static void assignAdjacent(AccountData data,
+      Map<String, List<StatementLine>> eligibleByBounce, Set<String> assigned,
+      List<Assignment> out) {
+    Map<String, List<StatementLine>> qualifying = qualifyingNeighbours(data, eligibleByBounce);
+    settleUniqueNeighbours(data, qualifying, assigned, out);
+    List<Assignment> ambiguous = new ArrayList<>();
+    for (StatementLine r : data.lines) {
+      List<StatementLine> neighbours = qualifying.get(r.id());
+      if (neighbours == null || assigned.contains(r.id())) {
+        continue;
+      }
+      List<StatementLine> left = unassigned(neighbours, assigned);
+      if (left.size() == 2) {
+        left.sort(originalPreference(data, r));
+        ambiguous.add(new Assignment(left.get(0), r, true, true, left));
+      }
+    }
+    // Reserved only now, so two ambiguous pairs can share a neighbour.
+    for (Assignment a : ambiguous) {
+      assigned.add(a.bounce().id());
+      a.freeOriginals().forEach(o -> assigned.add(o.id()));
+    }
+    out.addAll(ambiguous);
+  }
+
+  /**
+   * The qualifying statement neighbours of every bounce: its neighbours that are among its
+   * eligible originals and that the payment guard lets go together with it.
+   *
+   * @param data             the loaded data
+   * @param eligibleByBounce the eligible originals of every bounce
+   * @return the qualifying neighbours (one or two) by bounce line id; bounces with none are absent
+   */
+  private static Map<String, List<StatementLine>> qualifyingNeighbours(AccountData data,
+      Map<String, List<StatementLine>> eligibleByBounce) {
+    Map<String, StatementLine[]> neighbours = statementNeighbours(data);
+    Map<String, List<StatementLine>> qualifying = new HashMap<>();
+    for (StatementLine r : data.lines) {
+      List<StatementLine> eligible = eligibleByBounce.get(r.id());
+      StatementLine[] around = neighbours.get(r.id());
+      if (eligible == null || around == null) {
+        continue;
+      }
+      List<StatementLine> found = new ArrayList<>();
+      for (StatementLine n : around) {
+        if (n != null && eligible.contains(n)
+            && BankBouncePaymentGuard.blocker(data, Collections.emptySet(), n, r) == null) {
+          found.add(n);
+        }
+      }
+      if (!found.isEmpty()) {
+        qualifying.put(r.id(), found);
+      }
+    }
+    return qualifying;
+  }
+
+  /**
+   * Step 1 of {@link #assignAdjacent}: every bounce with exactly one qualifying neighbour left
+   * takes it, in statement order, until no bounce is left with one. A neighbour that is the only
+   * one left of two bounces is contested: neither takes it, because adjacency cannot tell them
+   * apart. Each round reserves at least one line, so the loop ends.
+   *
+   * @param data       the loaded data
+   * @param qualifying the qualifying neighbours by bounce line id
+   * @param assigned   the lines already assigned, updated
+   * @param out        the assignments, appended to
+   */
+  private static void settleUniqueNeighbours(AccountData data,
+      Map<String, List<StatementLine>> qualifying, Set<String> assigned, List<Assignment> out) {
+    Map<String, StatementLine> unique = uncontestedUniqueNeighbours(data, qualifying, assigned);
+    while (!unique.isEmpty()) {
+      for (StatementLine r : data.lines) {
+        StatementLine o = unique.get(r.id());
+        if (o != null && !assigned.contains(r.id()) && !assigned.contains(o.id())) {
+          assigned.add(o.id());
+          assigned.add(r.id());
+          out.add(new Assignment(o, r, false, true, List.of(o)));
+        }
+      }
+      unique = uncontestedUniqueNeighbours(data, qualifying, assigned);
+    }
+  }
+
+  /**
+   * The bounces, not yet assigned, left with exactly one free qualifying neighbour that no other
+   * such bounce has as its only one.
+   *
+   * @param data       the loaded data
+   * @param qualifying the qualifying neighbours by bounce line id
+   * @param assigned   the lines already assigned
+   * @return that neighbour by bounce line id
+   */
+  private static Map<String, StatementLine> uncontestedUniqueNeighbours(AccountData data,
+      Map<String, List<StatementLine>> qualifying, Set<String> assigned) {
+    Map<String, StatementLine> unique = new HashMap<>();
+    Map<String, Integer> claims = new HashMap<>();
+    for (StatementLine r : data.lines) {
+      List<StatementLine> neighbours = qualifying.get(r.id());
+      if (neighbours == null || assigned.contains(r.id())) {
+        continue;
+      }
+      List<StatementLine> left = unassigned(neighbours, assigned);
+      if (left.size() == 1) {
+        unique.put(r.id(), left.get(0));
+        claims.merge(left.get(0).id(), 1, Integer::sum);
+      }
+    }
+    unique.values().removeIf(o -> claims.get(o.id()) > 1);
+    return unique;
+  }
+
+  /**
+   * The statement neighbours of every line with a known statement: the line just before it and the
+   * line just after it among the loaded lines of the same statement, ordered by line number (ties
+   * keep the loaded order).
+   *
+   * @param data the loaded data
+   * @return {@code [preceding or null, following or null]} by line id; lines with no statement are
+   *     absent
+   */
+  private static Map<String, StatementLine[]> statementNeighbours(AccountData data) {
+    Map<String, List<StatementLine>> byStatement = new LinkedHashMap<>();
+    for (StatementLine l : data.lines) {
+      if (l.statementId() != null) {
+        byStatement.computeIfAbsent(l.statementId(), k -> new ArrayList<>()).add(l);
+      }
+    }
+    Map<String, StatementLine[]> neighbours = new HashMap<>();
+    for (List<StatementLine> lines : byStatement.values()) {
+      lines.sort(Comparator.comparingLong(StatementLine::lineNo));
+      for (int i = 0; i < lines.size(); i++) {
+        neighbours.put(lines.get(i).id(), new StatementLine[] {
+            i > 0 ? lines.get(i - 1) : null,
+            i + 1 < lines.size() ? lines.get(i + 1) : null });
+      }
+    }
+    return neighbours;
   }
 
   /**
@@ -638,7 +867,7 @@ final class BankBounceDetector {
     }
     boolean ambiguous = union.size() > bounces.size();
     for (StatementLine[] c : chosen) {
-      out.add(new Assignment(c[0], c[1], ambiguous, freeByBounce.get(c[1].id())));
+      out.add(new Assignment(c[0], c[1], ambiguous, false, freeByBounce.get(c[1].id())));
     }
   }
 
@@ -686,9 +915,11 @@ final class BankBounceDetector {
 
   /**
    * Applies the payment guard to one assignment and builds the pair. A non-ambiguous pair whose
-   * lines are blocked is dropped. An ambiguous pair keeps only the candidates that are not blocked:
-   * none left drops it, exactly one left makes it a plain pair (still for review), more keep it
-   * ambiguous.
+   * lines are blocked is dropped (an adjacency pair too: it is not re-paired with another
+   * original); otherwise its confidence is {@link #confidence}, whatever chose its original. An
+   * ambiguous pair keeps only the candidates that are not blocked ({@link #ofCandidates}): none
+   * left drops it, exactly one left makes it a plain pair (still for review), more keep it
+   * ambiguous. Both keep the assignment's {@code adjacent} flag.
    *
    * @param data   the loaded data
    * @param a      the assignment
@@ -703,7 +934,7 @@ final class BankBounceDetector {
       }
       List<String> signals = signals(data, a.original(), r);
       return new Pair(a.original(), r, Collections.emptyList(), signals,
-          confidence(data, a.original(), r, signals));
+          confidence(data, a.original(), r, signals), a.adjacent());
     }
     List<Candidate> candidates = new ArrayList<>();
     for (StatementLine o : a.freeOriginals()) {
@@ -711,15 +942,33 @@ final class BankBounceDetector {
         candidates.add(new Candidate(o, signals(data, o, r)));
       }
     }
+    return ofCandidates(r, candidates, a.adjacent());
+  }
+
+  /**
+   * The pair a bounce of an ambiguous group makes with the candidate originals it has left: none
+   * left is no pair, exactly one makes it a plain pair on that candidate, more keep it ambiguous.
+   * Always {@value #CONFIDENCE_REVIEW}: the pair came out of an ambiguous group. Shared by the
+   * payment guard ({@link #guarded}) and by the offering of the pairs
+   * ({@code BankBounceSuggestions.Plan#offered}), which both remove candidates.
+   *
+   * @param bounce     the bounce line
+   * @param candidates the candidates left, in preference order
+   * @param adjacent   whether the candidates are the bounce's statement neighbours
+   *                   ({@link #assignAdjacent}); kept on the pair
+   * @return the pair, or {@code null} when no candidate is left
+   */
+  static Pair ofCandidates(StatementLine bounce, List<Candidate> candidates, boolean adjacent) {
     if (candidates.isEmpty()) {
       return null;
     }
     if (candidates.size() == 1) {
       Candidate only = candidates.get(0);
-      return new Pair(only.line(), r, Collections.emptyList(), only.signals(),
-          CONFIDENCE_REVIEW);
+      return new Pair(only.line(), bounce, Collections.emptyList(), only.signals(),
+          CONFIDENCE_REVIEW, adjacent);
     }
-    return new Pair(null, r, candidates, candidates.get(0).signals(), CONFIDENCE_REVIEW);
+    return new Pair(null, bounce, List.copyOf(candidates), candidates.get(0).signals(),
+        CONFIDENCE_REVIEW, adjacent);
   }
 
   // ---------------------------------------------------------------------------
@@ -839,7 +1088,8 @@ final class BankBounceDetector {
    * wording — the bounce within the account's date tolerance of the original, or carrying bounce
    * wording. A PIS link alone with a bounce weeks later is {@value #CONFIDENCE_REVIEW}: it only
    * proves the outflow was a PSD2 payment, not that this inflow reversed it. The caller downgrades
-   * an ambiguous pair to review.
+   * an ambiguous pair to review. Statement adjacency ({@link #assignAdjacent}) never raises it: an
+   * adjacent pair with only the counterparty, or with bounce wording on a later day, stays review.
    *
    * @param data    the loaded data
    * @param o       the original
