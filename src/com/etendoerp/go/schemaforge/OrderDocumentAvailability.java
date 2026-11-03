@@ -63,8 +63,7 @@ final class OrderDocumentAvailability {
 
   /** Why Reactivate is ruled out: same rule as the SPA's {@code hasLinkedDocuments} flag. */
   static final String REASON_LINKED_DOCUMENTS = "This order has linked shipments, receipts or "
-      + "invoices, so it cannot be reactivated: the app hides Reactivate in that case. The other "
-      + "documentAction values still apply.";
+      + "invoices, so it cannot be reactivated: the app hides Reactivate in that case.";
 
   /**
    * The keys the order header adds to every GET record and no spec field backs, declared as the

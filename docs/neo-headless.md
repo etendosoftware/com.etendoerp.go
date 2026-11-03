@@ -11991,10 +11991,10 @@ With `etendo_schema(spec, entity, view:"actions", id:<recordId>)` each declared 
 
 | Key | Meaning |
 |---|---|
-| `availableNow` | `true` / `false` for this record. **Absent** when the record cannot give a declared property (unknown is not "unavailable") |
+| `availableNow` | `true` / `false` for this record. **Absent** when the record cannot give a declared property (unknown is not "unavailable"). Also `false` when every value of a list-backed action is ruled out (see `unavailableValues`) |
 | `unavailableReason` | when false: `Applies when documentStatus is DR; this record's documentStatus is CO.` plus the declaration's note (for goods documents: *A completed document cannot be reactivated or voided through MCP; it must be corrected with a return.*) |
 | `availableValuesNow` | for a list-backed action, the values that apply to this record |
-| `unavailableValues` | `{value: reason}` of values the handler ruled out through an `action:value` key |
+| `unavailableValues` | `{value: reason}` of values the handler ruled out through an `action:value` key. When that leaves `availableValuesNow` empty, the action itself reports `availableNow: false` with an `unavailableReason` naming each removed value (sorted) and why (an earlier `false` verdict and reason are kept). Only an action that carries an `availableValuesNow` list (`valuesByStatus`) is withdrawn this way; without a list nothing changes |
 
 The response also carries `recordId`. A record that does not exist for the caller answers `404 not_found` (`field: id`).
 The properties are read off the record **by name** through the DAL (`McpActionAvailabilityContext`): a foreign key reads as
