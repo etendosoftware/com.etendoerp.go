@@ -48,6 +48,9 @@ import org.codehaus.jettison.json.JSONObject;
  */
 public final class DecisionInput {
 
+  private static final String INPUT_TEXT = "input_text";
+  private static final String TEXT = "text";
+
   private String guidance;
   private final List<JSONObject> parts = new ArrayList<>();
 
@@ -82,7 +85,7 @@ public final class DecisionInput {
     if (StringUtils.isBlank(text)) {
       throw new IllegalArgumentException("text part cannot be blank");
     }
-    return add("input_text", "text", text);
+    return add(INPUT_TEXT, TEXT, text);
   }
 
   /**
@@ -95,7 +98,7 @@ public final class DecisionInput {
     if (!(data instanceof JSONObject) && !(data instanceof JSONArray)) {
       throw new IllegalArgumentException("json part must be a JSONObject or a JSONArray");
     }
-    return add("input_text", "text", data.toString());
+    return add(INPUT_TEXT, TEXT, data.toString());
   }
 
   /**
@@ -118,7 +121,7 @@ public final class DecisionInput {
   JSONArray toJson() throws JSONException {
     JSONArray content = new JSONArray();
     if (guidance != null) {
-      content.put(new JSONObject().put("type", "input_text").put("text", guidance));
+      content.put(new JSONObject().put("type", INPUT_TEXT).put(TEXT, guidance));
     }
     for (JSONObject part : parts) {
       content.put(part);

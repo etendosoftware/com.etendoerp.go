@@ -78,6 +78,8 @@ public final class DecisionQuestion {
   static final int MAX_CHOICES = 255;
   static final int MAX_LEVELS = 10;
 
+  private static final String QUESTION = "question ";
+
   private final Type type;
   private final String name;
   private final String instructions;
@@ -149,15 +151,15 @@ public final class DecisionQuestion {
   private static List<Option> checkOptions(String name, List<Option> options, int max,
       String what) {
     if (options == null || options.size() < 2 || options.size() > max) {
-      throw new IllegalArgumentException("question " + name + " needs 2 to " + max + " " + what);
+      throw new IllegalArgumentException(QUESTION + name + " needs 2 to " + max + " " + what);
     }
     Set<String> seen = new HashSet<>();
     for (Option option : options) {
       if (option == null || StringUtils.isBlank(option.value())) {
-        throw new IllegalArgumentException("question " + name + " has a blank entry in " + what);
+        throw new IllegalArgumentException(QUESTION + name + " has a blank entry in " + what);
       }
       if (!seen.add(option.value())) {
-        throw new IllegalArgumentException("question " + name + " repeats '" + option.value()
+        throw new IllegalArgumentException(QUESTION + name + " repeats '" + option.value()
             + "' in " + what);
       }
     }

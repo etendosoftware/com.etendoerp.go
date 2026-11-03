@@ -157,14 +157,14 @@ public class LlmDecider {
     try {
       response = send(requestBody);
     } catch (LlmDecisionException e) {
-      record(questions, started, "unreachable", null, 0);
+      recordUsage(questions, started, "unreachable", null, 0);
       throw e;
     }
     BigDecimal cost = cost(response);
     String body = response.body() == null ? "" : response.body();
     int status = response.statusCode();
     if (status < 200 || status >= 300) {
-      record(questions, started, "http_" + status, cost, 0);
+      recordUsage(questions, started, "http_" + status, cost, 0);
       throw new LlmDecisionException("Decision request failed with HTTP " + status + ": "
           + errorDetail(body), isRetryable(status));
     }
@@ -172,15 +172,15 @@ public class LlmDecider {
     try {
       result = parse(body, questions, cost);
     } catch (LlmDecisionException e) {
-      record(questions, started, "invalid_response", cost, 0);
+      recordUsage(questions, started, "invalid_response", cost, 0);
       throw e;
     }
-    record(questions, started, null, cost, result.inputTokens());
+    recordUsage(questions, started, null, cost, result.inputTokens());
     return result;
   }
 
   /** Recording must never break or change the decision: a failure here is only logged. */
-  private void record(List<DecisionQuestion> questions, long started, String errorCode,
+  private void recordUsage(List<DecisionQuestion> questions, long started, String errorCode,
       BigDecimal cost, long inputTokens) {
     try {
       usageSink.accept(new DecisionUsage(target, config.getModel(), errorCode == null, errorCode,

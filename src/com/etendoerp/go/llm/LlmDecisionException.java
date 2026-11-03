@@ -28,11 +28,24 @@ public class LlmDecisionException extends RuntimeException {
 
   private final boolean retryable;
 
+  /**
+   * Creates the exception.
+   *
+   * @param message what went wrong
+   * @param retryable whether the same call may succeed later
+   */
   public LlmDecisionException(String message, boolean retryable) {
     super(message);
     this.retryable = retryable;
   }
 
+  /**
+   * Creates the exception with its cause.
+   *
+   * @param message what went wrong
+   * @param retryable whether the same call may succeed later
+   * @param cause the underlying failure
+   */
   public LlmDecisionException(String message, boolean retryable, Throwable cause) {
     super(message, cause);
     this.retryable = retryable;
