@@ -526,17 +526,33 @@ class ReconciliationRefusedWriteTest {
   private static final String DISCARDED_TEXT = "The statement line is discarded";
 
   /**
-   * Marks {@code row} as excluded by a {@code BankStatementLineFilterHook} for {@code usage} only;
-   * any other line or usage falls through to the real method, which finds no hook. The refusal's
-   * text comes from a mocked dictionary.
+   * Turns {@code bank-bounce-suggestions} on and marks {@code row} as excluded by a
+   * {@code BankStatementLineFilterHook} for {@code usage} only, when the action hands the guard the
+   * flag on; any other line or usage falls through to the real method, which finds no hook. The
+   * refusal's text comes from a mocked dictionary.
+   *
+   * @param filter   the partial mock of {@link StatementLineFilter}
+   * @param messages the mocked dictionary
+   * @param flag     the mocked flag evaluator
+   * @param row      the excluded line
+   * @param usage    the usage it is excluded for
    */
   private static void discarded(MockedStatic<StatementLineFilter> filter,
-      MockedStatic<OBMessageUtils> messages, FIN_BankStatementLine row, Usage usage) {
-    filter.when(() -> StatementLineFilter.isExcluded(row, usage)).thenReturn(true);
+      MockedStatic<OBMessageUtils> messages, MockedStatic<BankBounceSuggestionsFlag> flag,
+      FIN_BankStatementLine row, Usage usage) {
+    flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+    filter.when(() -> StatementLineFilter.isExcluded(true, row, usage)).thenReturn(true);
     messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
         .thenReturn(DISCARDED_TEXT);
   }
 
+  /**
+   * Asserts the coded 409 {@code LINE_DISCARDED}: its code at the top level and in {@code error},
+   * the dictionary text and the {@code AD_MESSAGE} key.
+   *
+   * @param body the refusal body
+   * @throws Exception when the body cannot be read
+   */
   private static void assertLineDiscarded(JSONObject body) throws Exception {
     assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, body.getString("code"));
     JSONObject error = body.getJSONObject(KEY_ERROR);
@@ -547,6 +563,7 @@ class ReconciliationRefusedWriteTest {
         error.getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
   }
 
+  /** Reconcile group refuses a discarded line before any write. */
   @Test
   void testReconcileGroupRefusesADiscardedLineBeforeAnyWrite() throws Exception {
     doReturn(account).when(handler).loadAccount(ACC_ID);
@@ -557,11 +574,13 @@ class ReconciliationRefusedWriteTest {
     try (MockedStatic<StatementLineFilter> filter =
         Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
         MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag =
+            Mockito.mockStatic(BankBounceSuggestionsFlag.class);
         MockedStatic<ReconciliationPaymentService> payments =
             Mockito.mockStatic(ReconciliationPaymentService.class);
         MockedStatic<ReconciliationWriteoffSupport> writeoff =
             Mockito.mockStatic(ReconciliationWriteoffSupport.class)) {
-      discarded(filter, messages, line, Usage.MATCH_STATEMENT_GRID);
+      discarded(filter, messages, flag, line, Usage.MATCH_STATEMENT_GRID);
 
       response = handler.reconcileGroup(reconcileBody(true, OP_ID));
 
@@ -580,6 +599,7 @@ class ReconciliationRefusedWriteTest {
     verifyNoInteractions(dal);
   }
 
+  /** Reconcile group through the route rolls back the discarded refusal. */
   @Test
   void testReconcileGroupThroughTheRouteRollsBackTheDiscardedRefusal() throws Exception {
     doReturn(account).when(handler).loadAccount(ACC_ID);
@@ -589,8 +609,10 @@ class ReconciliationRefusedWriteTest {
     NeoResponse response;
     try (MockedStatic<StatementLineFilter> filter =
         Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
-        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class)) {
-      discarded(filter, messages, line, Usage.MATCH_STATEMENT_GRID);
+        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag =
+            Mockito.mockStatic(BankBounceSuggestionsFlag.class)) {
+      discarded(filter, messages, flag, line, Usage.MATCH_STATEMENT_GRID);
       response = ReconciliationHandlerSupport.handleReconcileGroup(handler, context);
     }
 
@@ -619,8 +641,10 @@ class ReconciliationRefusedWriteTest {
     try (MockedStatic<StatementLineFilter> filter =
         Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
         MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag =
+            Mockito.mockStatic(BankBounceSuggestionsFlag.class);
         MockedStatic<AutoMatchSupport> autoMatch = Mockito.mockStatic(AutoMatchSupport.class)) {
-      discarded(filter, messages, remainder, Usage.AUTO_MATCH_CANDIDATES);
+      discarded(filter, messages, flag, remainder, Usage.AUTO_MATCH_CANDIDATES);
 
       ReconciliationFlowSupport.prepareAllGroups(handler, account,
           new JSONArray().put(ruleGroup).put(group(LINE_ID, OP_ID)), prepared, results);
@@ -672,7 +696,8 @@ class ReconciliationRefusedWriteTest {
 
   /**
    * Flag off: {@code reconcileGroup} goes past the discard guard of a line the hook would exclude
-   * and on to the client-supplied operations; the line query never runs and no 409 comes back.
+   * and on to the client-supplied operations; the hook is not asked, the line query never runs
+   * and no 409 comes back.
    */
   @Test
   void testReconcileGroupIgnoresTheDiscardWithTheBounceFlagOff() throws Exception {
@@ -688,13 +713,13 @@ class ReconciliationRefusedWriteTest {
         response.getBody().toString());
     assertNotEquals(409, response.getHttpStatus());
     verify(handler).loadTransaction(UNKNOWN_OP_ID);
-    assertFalse(hookAsked.isEmpty());
+    assertTrue(hookAsked.isEmpty(), "with the flag off no hook is asked");
     verify(dal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
   }
 
   /**
    * Flag off: {@code applySuggestions}' {@code prepareGroup} prepares a group on a line the hook
-   * would exclude like any other: no 409, no line query.
+   * would exclude like any other: the hook is not asked, no 409, no line query.
    */
   @Test
   void testApplySuggestionsPreparesADiscardedLineWithTheBounceFlagOff() throws Exception {
@@ -713,7 +738,7 @@ class ReconciliationRefusedWriteTest {
     assertEquals(0, results.length(), results.toString());
     assertEquals(1, prepared.size());
     assertSame(remainder, prepared.get(0).line);
-    assertFalse(hookAsked.isEmpty());
+    assertTrue(hookAsked.isEmpty(), "with the flag off no hook is asked");
     verify(dal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
   }
 

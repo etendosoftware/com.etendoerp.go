@@ -54,6 +54,7 @@ class BankBouncePaymentGuardTest {
   @DisplayName("attribute — which ERP payment a pending line belongs to")
   class Attribute {
 
+    /** A PSD2 end-to-end id names the payment, even when the amount does not fit. */
     @Test
     @DisplayName("a PSD2 end-to-end id names the payment, even when the amount does not fit")
     void thePisLinkFindsThePayment() {
@@ -69,6 +70,7 @@ class BankBouncePaymentGuardTest {
       assertFalse(attribution.unattributable());
     }
 
+    /** The only open movement with the same amount within the tolerance is the payment. */
     @Test
     @DisplayName("the only open movement with the same amount within the tolerance is the payment")
     void aSingleFittingMovementIsThePayment() {
@@ -82,6 +84,7 @@ class BankBouncePaymentGuardTest {
           BankBouncePaymentGuard.attribute(data, line).ref());
     }
 
+    /** A movement outside the date tolerance, or of the opposite sign, is no payment. */
     @Test
     @DisplayName("a movement outside the date tolerance, or of the opposite sign, is no payment")
     void aMovementThatDoesNotFitIsNone() {
@@ -95,6 +98,7 @@ class BankBouncePaymentGuardTest {
       assertSame(Attribution.NONE, BankBouncePaymentGuard.attribute(data, line));
     }
 
+    /** A payment another line reaches through its PSD2 link is not the fallback's. */
     @Test
     @DisplayName("a payment another line reaches through its PSD2 link is not the fallback's")
     void aPaymentClaimedByAnotherLinesPisLinkIsNotAttributed() {
@@ -110,6 +114,7 @@ class BankBouncePaymentGuardTest {
       assertEquals("PAY-1", BankBouncePaymentGuard.attribute(data, linked).ref().paymentId());
     }
 
+    /** A movement another pending line also fits is contested: it cannot be attributed. */
     @Test
     @DisplayName("a movement another pending line also fits is contested: it cannot be attributed")
     void aContestedMovementCannotBeAttributed() {
@@ -124,6 +129,7 @@ class BankBouncePaymentGuardTest {
       assertSame(Attribution.CANNOT_ATTRIBUTE, BankBouncePaymentGuard.attribute(data, second));
     }
 
+    /** Two open movements that both fit cannot be told apart. */
     @Test
     @DisplayName("two open movements that both fit cannot be told apart")
     void twoFittingMovementsCannotBeAttributed() {
@@ -185,6 +191,7 @@ class BankBouncePaymentGuardTest {
           BankBouncePaymentGuard.blocker(data, Set.of(), o1, bounce));
     }
 
+    /** A line whose payment is attributable, or absent, is never ambiguous. */
     @Test
     @DisplayName("a line whose payment is attributable, or absent, is never ambiguous")
     void anAttributableOrAbsentPaymentIsNotAmbiguous() {
@@ -206,6 +213,7 @@ class BankBouncePaymentGuardTest {
   @DisplayName("containedInLargerPayment — one invoice of a multi-invoice payment")
   class ContainedInLargerPayment {
 
+    /** A larger multi-invoice movement of the same counterparty contains the line. */
     @Test
     @DisplayName("a larger multi-invoice movement of the same counterparty contains the line")
     void aLargerMultiInvoiceMovementOfTheSameCounterpartyContainsTheLine() {
@@ -219,6 +227,7 @@ class BankBouncePaymentGuardTest {
           Set.of(), line, line("B1", DAY.plusDays(3), "DEVOLUCION", "", "30")));
     }
 
+    /** A line that names no counterparty is contained in any such movement. */
     @Test
     @DisplayName("a line that names no counterparty is contained in any such movement")
     void aLineWithoutCounterpartyIsContained() {
@@ -230,6 +239,7 @@ class BankBouncePaymentGuardTest {
       assertTrue(BankBouncePaymentGuard.containedInLargerPayment(data, line));
     }
 
+    /** A single-invoice, smaller, opposite, distant, foreign or PSD2-claimed movement does not. */
     @Test
     @DisplayName("a single-invoice, smaller, opposite, distant, foreign or PSD2-claimed movement does not")
     void movementsThatCannotContainTheLine() {
@@ -250,6 +260,7 @@ class BankBouncePaymentGuardTest {
       assertFalse(BankBouncePaymentGuard.containedInLargerPayment(data, line));
     }
 
+    /** A line that has its own payment is never 'contained' in another. */
     @Test
     @DisplayName("a line that has its own payment is never 'contained' in another")
     void aLineWithItsOwnPaymentIsNotContained() {
@@ -269,6 +280,7 @@ class BankBouncePaymentGuardTest {
   @DisplayName("blocker — both lines of the pair are checked")
   class Blocker {
 
+    /** A pair with no ERP payment on either line may be discarded. */
     @Test
     @DisplayName("a pair with no ERP payment on either line may be discarded")
     void aPairWithoutPaymentsHasNoBlocker() {
@@ -282,6 +294,7 @@ class BankBouncePaymentGuardTest {
       assertNull(BankBouncePaymentGuard.blocker(data, Set.of(), original, bounce));
     }
 
+    /** A payment on the bounce side blocks too: the caller's roles are not trusted. */
     @Test
     @DisplayName("a payment on the bounce side blocks too: the caller's roles are not trusted")
     void aPaymentOnEitherSideBlocks() {
@@ -298,6 +311,7 @@ class BankBouncePaymentGuardTest {
           BankBouncePaymentGuard.blocker(data, Set.of(), bounce, original));
     }
 
+    /** The original reached through its PSD2 link blocks the pair. */
     @Test
     @DisplayName("the original reached through its PSD2 link blocks the pair")
     void aPisLinkedOriginalBlocks() {
@@ -316,15 +330,41 @@ class BankBouncePaymentGuardTest {
 
   // ── helpers ──────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Empty detection data with the fixtures' date tolerance and no account.
+   *
+   * @return the data
+   */
   private static AccountData data() {
     return new AccountData(null, DATE_TOLERANCE);
   }
 
+  /**
+   * A candidate pending line.
+   *
+   * @param id          the line id
+   * @param date        its day
+   * @param description its description
+   * @param partnerName the counterparty the bank printed
+   * @param amount      the signed amount
+   * @return the line
+   */
   private static StatementLine line(String id, LocalDate date, String description,
       String partnerName, String amount) {
     return new StatementLine(id, date, 10, description, partnerName, new BigDecimal(amount), true);
   }
 
+  /**
+   * An open payment movement.
+   *
+   * @param id          the movement id
+   * @param paymentId   its payment
+   * @param date        its statement date
+   * @param amount      the signed amount
+   * @param partnerName the payment's business partner
+   * @param detailCount how many invoice installments the payment settles
+   * @return the movement
+   */
   private static OpenTransaction movement(String id, String paymentId, LocalDate date,
       String amount, String partnerName, int detailCount) {
     return new OpenTransaction(id, paymentId, date, new BigDecimal(amount), partnerName,

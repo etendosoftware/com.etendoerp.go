@@ -75,16 +75,40 @@ class BankBounceDetectorTest {
   private static final LocalDate DAY0 = LocalDate.of(2026, 3, 2);
   private static final String ACME = "Acme Ltd";
 
+  /**
+   * The calendar day {@code offset} days after the fixtures' first day.
+   *
+   * @param offset days after {@code DAY0}
+   * @return the day
+   */
   private static LocalDate day(int offset) {
     return DAY0.plusDays(offset);
   }
 
+  /**
+   * A candidate pending line with no statement (so no adjacency); its line number follows its
+   * day, so lines keep their statement order.
+   *
+   * @param id          the line id
+   * @param dayOffset   days after {@code DAY0}
+   * @param description its description
+   * @param partner     the counterparty the bank printed
+   * @param amount      the signed amount
+   * @return the line
+   */
   private static StatementLine line(String id, int dayOffset, String description, String partner,
       String amount) {
     return new StatementLine(id, day(dayOffset), dayOffset * 10L + id.length(), description,
         partner, new BigDecimal(amount), true);
   }
 
+  /**
+   * Detection data over the given lines, with no account, no PSD2 payment and no movement.
+   *
+   * @param dateTolDays the account's date tolerance, in days
+   * @param lines       the pending lines, in loaded order
+   * @return the data
+   */
   private static AccountData data(int dateTolDays, StatementLine... lines) {
     AccountData data = new AccountData(null, dateTolDays);
     data.lines.addAll(Arrays.asList(lines));
@@ -97,6 +121,7 @@ class BankBounceDetectorTest {
   @DisplayName("signals")
   class Signals {
 
+    /** {@code pis_link}: an outflow whose description ends with a PSD2 end-to-end id. */
     @Test
     @DisplayName("pis_link: an outflow whose description ends with a PSD2 end-to-end id")
     void pisLink() {
@@ -111,6 +136,7 @@ class BankBounceDetectorTest {
           BankBounceDetector.signals(data, o, r));
     }
 
+    /** {@code pis_link} never comes from an inflow, even with a known end-to-end id. */
     @Test
     @DisplayName("pis_link never comes from an inflow, even with a known end-to-end id")
     void pisLinkNeedsAnOutflow() {
@@ -121,6 +147,7 @@ class BankBounceDetectorTest {
       assertNull(BankBounceDetector.pisPaymentId(data, inflow));
     }
 
+    /** {@code return_text}: bounce wording on the bounce line, not on the original. */
     @Test
     @DisplayName("return_text: bounce wording on the bounce line, not on the original")
     void returnTextIsReadOnTheBounce() {
@@ -137,6 +164,7 @@ class BankBounceDetectorTest {
           plainBounce).isEmpty(), "wording on the original is not a bounce signal");
     }
 
+    /** Counterparty: both lines name the same counterparty, normalized. */
     @Test
     @DisplayName("counterparty: both lines name the same counterparty, normalized")
     void counterparty() {
@@ -152,6 +180,7 @@ class BankBounceDetectorTest {
           "two blank counterparties are not the same counterparty");
     }
 
+    /** All three signals come in priority order, pis_link primary. */
     @Test
     @DisplayName("all three signals come in priority order, pis_link primary")
     void allSignalsInPriorityOrder() {
@@ -170,6 +199,7 @@ class BankBounceDetectorTest {
       assertNull(BankBounceDetector.primarySignalOf(List.of()));
     }
 
+    /** Amount and opposite sign alone never propose a pair. */
     @Test
     @DisplayName("amount and opposite sign alone never propose a pair")
     void amountAloneIsNotASignal() {
@@ -186,6 +216,15 @@ class BankBounceDetectorTest {
   @DisplayName("confidence")
   class Confidence {
 
+    /**
+     * Detects the data, asserts it yields exactly the pair {@code o -> r}, and that its confidence
+     * is the confidence rule's.
+     *
+     * @param data the detection data
+     * @param o    the expected original
+     * @param r    the expected bounce
+     * @return the pair's confidence
+     */
     private String confidenceOf(AccountData data, StatementLine o, StatementLine r) {
       List<Pair> pairs = BankBounceDetector.detect(data);
       assertEquals(1, pairs.size(), "exactly one pair expected");
@@ -197,6 +236,7 @@ class BankBounceDetectorTest {
       return pair.confidence();
     }
 
+    /** Bounce wording on the same day → high. */
     @Test
     @DisplayName("bounce wording on the same day → high")
     void wordingSameDayIsHigh() {
@@ -206,6 +246,7 @@ class BankBounceDetectorTest {
       assertEquals(BankBounceDetector.CONFIDENCE_HIGH, confidenceOf(data(0, o, r), o, r));
     }
 
+    /** Bounce wording on a later day, no PIS link → review. */
     @Test
     @DisplayName("bounce wording on a later day, no PIS link → review")
     void wordingLaterDayIsReview() {
@@ -215,6 +256,7 @@ class BankBounceDetectorTest {
       assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, confidenceOf(data(5, o, r), o, r));
     }
 
+    /** PIS link with the bounce within the date tolerance → high. */
     @Test
     @DisplayName("PIS link with the bounce within the date tolerance → high")
     void pisLinkCloseIsHigh() {
@@ -226,6 +268,7 @@ class BankBounceDetectorTest {
       assertEquals(BankBounceDetector.CONFIDENCE_HIGH, confidenceOf(data, o, r));
     }
 
+    /** PIS link alone with the bounce weeks later → review. */
     @Test
     @DisplayName("PIS link alone with the bounce weeks later → review")
     void pisLinkFarIsReview() {
@@ -237,6 +280,7 @@ class BankBounceDetectorTest {
       assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, confidenceOf(data, o, r));
     }
 
+    /** PIS link backed by wording, however late → high. */
     @Test
     @DisplayName("PIS link backed by wording, however late → high")
     void pisLinkWithWordingIsHigh() {
@@ -248,6 +292,7 @@ class BankBounceDetectorTest {
       assertEquals(BankBounceDetector.CONFIDENCE_HIGH, confidenceOf(data, o, r));
     }
 
+    /** Counterparty alone, even on the same day → review. */
     @Test
     @DisplayName("counterparty alone, even on the same day → review")
     void counterpartyAloneIsReview() {
@@ -264,6 +309,7 @@ class BankBounceDetectorTest {
   @DisplayName("pairing rules: amount, sign and the 60-day window")
   class Rules {
 
+    /** {@code withinWindow}: 0 and 60 days in, 61 out, a bounce before the original out. */
     @Test
     @DisplayName("withinWindow: 0 and 60 days in, 61 out, a bounce before the original out")
     void windowEdges() {
@@ -274,6 +320,7 @@ class BankBounceDetectorTest {
       assertFalse(BankBounceDetector.withinWindow(day(1), DAY0));
     }
 
+    /** Detect pairs a bounce 60 days later and not one 61 days later. */
     @Test
     @DisplayName("detect pairs a bounce 60 days later and not one 61 days later")
     void windowEdgesInDetection() {
@@ -288,6 +335,7 @@ class BankBounceDetectorTest {
       assertTrue(BankBounceDetector.detect(data(0, o2, out)).isEmpty());
     }
 
+    /** Same sign, different amount, a zero amount or the same line never pair. */
     @Test
     @DisplayName("same sign, different amount, a zero amount or the same line never pair")
     void onlyOppositeSignAndExactAmount() {
@@ -303,6 +351,7 @@ class BankBounceDetectorTest {
       assertFalse(BankBounceDetector.isOriginalOf(data, zero, line("Z2", 1, "x", ACME, "0")));
     }
 
+    /** An original dated after its bounce is not its original. */
     @Test
     @DisplayName("an original dated after its bounce is not its original")
     void originalMustNotBeLater() {
@@ -316,6 +365,7 @@ class BankBounceDetectorTest {
       assertSame(o, pairs.get(0).bounce());
     }
 
+    /** An incoming line reversed by a later outflow is a pair too. */
     @Test
     @DisplayName("an incoming line reversed by a later outflow is a pair too")
     void incomingOriginal() {
@@ -330,6 +380,7 @@ class BankBounceDetectorTest {
           BankBounceDetector.SIGNAL_COUNTERPARTY), pairs.get(0).signals());
     }
 
+    /** Each line belongs to at most one pair: two bounces take two originals. */
     @Test
     @DisplayName("each line belongs to at most one pair: two bounces take two originals")
     void eachLineInOnePair() {
@@ -358,6 +409,7 @@ class BankBounceDetectorTest {
   @DisplayName("same-day roles")
   class SameDayRoles {
 
+    /** The line with bounce wording is the bounce, whatever its sign. */
     @Test
     @DisplayName("the line with bounce wording is the bounce, whatever its sign")
     void wordingDecides() {
@@ -374,6 +426,7 @@ class BankBounceDetectorTest {
           "wording beats the outflow rule: the worded outflow is the bounce");
     }
 
+    /** Without wording, the outflow with a PSD2 link is the original. */
     @Test
     @DisplayName("without wording, the outflow with a PSD2 link is the original")
     void pisLinkDecides() {
@@ -386,6 +439,7 @@ class BankBounceDetectorTest {
       assertFalse(BankBounceDetector.originalFirstOnSameDay(data, inflow, outflow));
     }
 
+    /** With neither (or wording on both), the outflow is the original. */
     @Test
     @DisplayName("with neither (or wording on both), the outflow is the original")
     void outflowDecides() {
@@ -401,6 +455,7 @@ class BankBounceDetectorTest {
           wordedOut, wordedIn));
     }
 
+    /** Detect assigns same-day roles regardless of statement order. */
     @Test
     @DisplayName("detect assigns same-day roles regardless of statement order")
     void sameDayInDetection() {
@@ -422,6 +477,7 @@ class BankBounceDetectorTest {
   @DisplayName("ambiguous groups")
   class Ambiguous {
 
+    /** More eligible originals than bounces → one review pair with its candidates. */
     @Test
     @DisplayName("more eligible originals than bounces → one review pair with its candidates")
     void ambiguousGroupIsForReview() {
@@ -447,6 +503,7 @@ class BankBounceDetectorTest {
       assertEquals(List.of("R", "O2", "O1"), pair.lineIds());
     }
 
+    /** An ambiguous pair is review even when its signals would make it high. */
     @Test
     @DisplayName("an ambiguous pair is review even when its signals would make it high")
     void ambiguousIsDowngraded() {
@@ -484,12 +541,26 @@ class BankBounceDetectorTest {
           new BigDecimal(amount), true, statementId);
     }
 
+    /**
+     * Detects the data and asserts it yields exactly one pair.
+     *
+     * @param data the detection data
+     * @return that pair
+     */
     private Pair onlyPair(AccountData data) {
       List<Pair> pairs = BankBounceDetector.detect(data);
       assertEquals(1, pairs.size(), "exactly one pair expected: " + pairs);
       return pairs.get(0);
     }
 
+    /**
+     * Asserts {@code pair} is the plain pair {@code original -> bounce} chosen by statement
+     * adjacency: not ambiguous, no candidates.
+     *
+     * @param pair     the pair
+     * @param original the expected original
+     * @param bounce   the expected bounce
+     */
     private void assertPlainAdjacent(Pair pair, StatementLine original, StatementLine bounce) {
       assertSame(original, pair.original());
       assertSame(bounce, pair.bounce());
@@ -498,12 +569,19 @@ class BankBounceDetectorTest {
       assertTrue(pair.candidates().isEmpty());
     }
 
+    /**
+     * The ids of a pair's candidate originals, in their order.
+     *
+     * @param pair the pair
+     * @return the candidate ids
+     */
     private List<String> candidateIds(Pair pair) {
       List<String> ids = new ArrayList<>();
       pair.candidates().forEach(c -> ids.add(c.line().id()));
       return ids;
     }
 
+    /** The real bbva statement: 170↔180 high, 100/130/150 ambiguous over their neighbours. */
     @Test
     @DisplayName("the real bbva statement: 170↔180 high, 100/130/150 ambiguous over their neighbours")
     void realStatement() {
@@ -558,6 +636,7 @@ class BankBounceDetectorTest {
       assertEquals(List.of(BankBounceDetector.SIGNAL_RETURN_TEXT), high.signals());
     }
 
+    /** One qualifying neighbour, after or before the bounce, is the original. */
     @Test
     @DisplayName("one qualifying neighbour, after or before the bounce, is the original")
     void singleNeighbourOnEitherSide() {
@@ -572,6 +651,7 @@ class BankBounceDetectorTest {
       assertPlainAdjacent(onlyPair(data(0, fee2, r2, o2)), o2, r2);
     }
 
+    /** Two qualifying neighbours are the ONLY candidates, other same-day originals aside. */
     @Test
     @DisplayName("two qualifying neighbours are the ONLY candidates, other same-day originals aside")
     void bothNeighboursAreTheOnlyCandidates() {
@@ -590,6 +670,7 @@ class BankBounceDetectorTest {
       assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, pair.confidence());
     }
 
+    /** A disqualified neighbour leaves the other one as the single original. */
     @Test
     @DisplayName("a disqualified neighbour leaves the other one as the single original")
     void disqualifiedNeighbour() {
@@ -614,6 +695,7 @@ class BankBounceDetectorTest {
       assertPlainAdjacent(onlyPair(data(0, stranger, plain, sameParty)), sameParty, plain);
     }
 
+    /** A neighbour the payment guard holds leaves the other one as the single original. */
     @Test
     @DisplayName("a neighbour the payment guard holds leaves the other one as the single original")
     void neighbourWithAPaymentIsNotQualifying() {
@@ -631,6 +713,7 @@ class BankBounceDetectorTest {
       assertEquals(BankBounceDetector.CONFIDENCE_HIGH, pair.confidence());
     }
 
+    /** A reserved neighbour turns a two-neighbour bounce single, and that propagates. */
     @Test
     @DisplayName("a reserved neighbour turns a two-neighbour bounce single, and that propagates")
     void reservationsPropagate() {
@@ -660,6 +743,7 @@ class BankBounceDetectorTest {
       assertTrue(pairs.get(1).high());
     }
 
+    /** One neighbour that is the only one of two bounces: the ordinary rules decide. */
     @Test
     @DisplayName("one neighbour that is the only one of two bounces: the ordinary rules decide")
     void contestedNeighbourFallsToOrdinaryRules() {
@@ -674,6 +758,7 @@ class BankBounceDetectorTest {
       assertFalse(pair.adjacent(), "adjacency decided neither");
     }
 
+    /** Both neighbours reserved: the ordinary rules over the lines left. */
     @Test
     @DisplayName("both neighbours reserved: the ordinary rules over the lines left")
     void bothNeighboursReserved() {
@@ -696,6 +781,7 @@ class BankBounceDetectorTest {
       assertPlainAdjacent(pairs.get(2), o2, rb);
     }
 
+    /** Adjacency never raises the confidence. */
     @Test
     @DisplayName("adjacency never raises the confidence")
     void neverRaisesConfidence() {
@@ -726,6 +812,7 @@ class BankBounceDetectorTest {
       assertEquals(BankBounceDetector.CONFIDENCE_HIGH, linked.confidence());
     }
 
+    /** Lines reserved by adjacency are unavailable to the ordinary rules. */
     @Test
     @DisplayName("lines reserved by adjacency are unavailable to the ordinary rules")
     void reservedLinesAreUnavailable() {
@@ -739,6 +826,7 @@ class BankBounceDetectorTest {
       assertPlainAdjacent(pair, o1, r1);
     }
 
+    /** Only the real neighbour counts; gaps do not; another or no statement never. */
     @Test
     @DisplayName("only the real neighbour counts; gaps do not; another or no statement never")
     void whatIsANeighbour() {
@@ -765,6 +853,7 @@ class BankBounceDetectorTest {
       assertFalse(unknown.adjacent());
     }
 
+    /** Final payment guard: a blocked adjacent pair is dropped, not re-paired. */
     @Test
     @DisplayName("final payment guard: a blocked adjacent pair is dropped, not re-paired")
     void finalGuardDropsABlockedAdjacentPair() {
@@ -784,6 +873,7 @@ class BankBounceDetectorTest {
           "neither bounce is re-paired with OC, an eligible original adjacency did not choose");
     }
 
+    /** Final payment guard: an adjacent ambiguous pair narrowed to one stays adjacent. */
     @Test
     @DisplayName("final payment guard: an adjacent ambiguous pair narrowed to one stays adjacent")
     void finalGuardNarrowsAnAdjacentAmbiguousPair() {
@@ -801,6 +891,7 @@ class BankBounceDetectorTest {
           "narrowed from an ambiguous pair: still for review despite same-day wording");
     }
 
+    /** Pairs come in loaded order of their bounce line; equal line numbers keep it. */
     @Test
     @DisplayName("pairs come in loaded order of their bounce line; equal line numbers keep it")
     void orderAndTies() {
@@ -823,6 +914,9 @@ class BankBounceDetectorTest {
       assertPlainAdjacent(onlyPair(data(0, a, r0, fee, b)), a, r0);
     }
 
+    /**
+     * {@code ofCandidates}: none → null, one → plain review, several → ambiguous; adjacent kept.
+     */
     @Test
     @DisplayName("ofCandidates: none → null, one → plain review, several → ambiguous; adjacent kept")
     void ofCandidates() {
@@ -860,10 +954,20 @@ class BankBounceDetectorTest {
   @DisplayName("payments and the payment guard")
   class Payments {
 
+    /**
+     * An open payment movement of the {@code ACME} counterparty settling one invoice.
+     *
+     * @param id        the movement id
+     * @param paymentId its payment
+     * @param dayOffset days after {@code DAY0}
+     * @param amount    the signed amount
+     * @return the movement
+     */
     private OpenTransaction movement(String id, String paymentId, int dayOffset, String amount) {
       return new OpenTransaction(id, paymentId, day(dayOffset), new BigDecimal(amount), ACME, 1);
     }
 
+    /** An original without an ERP payment is preferred over a closer one with a payment. */
     @Test
     @DisplayName("an original without an ERP payment is preferred over a closer one with a payment")
     void originalWithoutPaymentPreferred() {
@@ -886,6 +990,7 @@ class BankBounceDetectorTest {
           "a pair that came out of an ambiguous group stays for review");
     }
 
+    /** A pair whose only original has an ERP payment is not proposed. */
     @Test
     @DisplayName("a pair whose only original has an ERP payment is not proposed")
     void originalWithPaymentDropsThePair() {
@@ -904,6 +1009,7 @@ class BankBounceDetectorTest {
   @DisplayName("candidate lines")
   class Candidates {
 
+    /** A non-candidate line pairs neither as original nor as bounce. */
     @Test
     @DisplayName("a non-candidate line pairs neither as original nor as bounce")
     void nonCandidatesNeverPair() {
@@ -918,6 +1024,7 @@ class BankBounceDetectorTest {
       assertTrue(BankBounceDetector.detect(data(0, nonCandidateOriginal, r)).isEmpty());
     }
 
+    /** {@code toStatementLine}: candidate only with a PSD2 id and outside any match group. */
     @Test
     @DisplayName("toStatementLine: candidate only with a PSD2 id and outside any match group")
     void candidateFlag() {
@@ -950,6 +1057,7 @@ class BankBounceDetectorTest {
       }
     }
 
+    /** {@code toStatementLine} reads the statement id; a line with no statement has none. */
     @Test
     @DisplayName("toStatementLine reads the statement id; a line with no statement has none")
     void statementId() {
@@ -967,6 +1075,7 @@ class BankBounceDetectorTest {
       }
     }
 
+    /** Load runs no query when no line is a candidate. */
     @Test
     @DisplayName("load runs no query when no line is a candidate")
     void loadWithoutCandidatesReadsNothing() {
@@ -985,6 +1094,7 @@ class BankBounceDetectorTest {
       }
     }
 
+    /** Load reads the PSD2 payments, the open movements and their detail counts. */
     @Test
     @DisplayName("load reads the PSD2 payments, the open movements and their detail counts")
     @SuppressWarnings("unchecked")
@@ -1042,6 +1152,7 @@ class BankBounceDetectorTest {
       }
     }
 
+    /** {@code detectQuietly} answers no pair when the reads fail. */
     @Test
     @DisplayName("detectQuietly answers no pair when the reads fail")
     void detectQuietlySwallowsFailures() {
@@ -1059,10 +1170,27 @@ class BankBounceDetectorTest {
       }
     }
 
+    /**
+     * The given query rows as a mutable list, as a Hibernate query returns them.
+     *
+     * @param rows the rows
+     * @return the list
+     */
     private List<Object[]> rows(Object[]... rows) {
       return new ArrayList<>(Arrays.asList(rows));
     }
 
+    /**
+     * A DAL statement line mock dated {@code DAY0}.
+     *
+     * @param id          the line id
+     * @param cr          the incoming amount
+     * @param dr          the outgoing amount
+     * @param description its description
+     * @param partner     the counterparty the bank printed
+     * @param lineNo      its line number, possibly {@code null}
+     * @return the mock
+     */
     private FIN_BankStatementLine dalLine(String id, String cr, String dr, String description,
         String partner, Long lineNo) {
       FIN_BankStatementLine l = mock(FIN_BankStatementLine.class);

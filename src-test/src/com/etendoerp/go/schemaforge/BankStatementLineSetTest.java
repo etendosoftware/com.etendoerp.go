@@ -84,6 +84,10 @@ class BankStatementLineSetTest {
   private MockedStatic<OBDal> dalStatic;
   private OBDal dal;
 
+  /**
+   * Simulates the running model with the PSD2 discard and bounce-link columns mapped, and mocks
+   * the DAL.
+   */
   @BeforeEach
   void setUp() {
     for (String column : new String[] { StatementLineDiscard.COL_IS_DISCARDED,
@@ -111,6 +115,7 @@ class BankStatementLineSetTest {
     dalStatic.when(OBDal::getInstance).thenReturn(dal);
   }
 
+  /** Closes the static mocks. */
   @AfterEach
   void tearDown() {
     dalStatic.close();
@@ -121,6 +126,7 @@ class BankStatementLineSetTest {
   @DisplayName("bankIdentitiesOfUnmatched")
   class Read {
 
+    /** Captures every unmatched line with something to keep, by line id. */
     @Test
     @DisplayName("captures every unmatched line with something to keep, by line id")
     void capturesWhatEachLineCarries() {
@@ -159,6 +165,7 @@ class BankStatementLineSetTest {
           "only UNMATCHED lines are read, the ones deleteUnmatched removes: " + applied);
     }
 
+    /** A discarded line with no bank id and no pair is still captured. */
     @Test
     @DisplayName("a discarded line with no bank id and no pair is still captured")
     void discardedLineAloneIsKept() {
@@ -178,6 +185,7 @@ class BankStatementLineSetTest {
   @DisplayName("restoreBankIdentity")
   class Restore {
 
+    /** Writes back the bank id, the discard flag and button and the bounce data. */
     @Test
     @DisplayName("writes back the bank id, the discard flag and button and the bounce data")
     void writesEverythingBack() {
@@ -197,6 +205,7 @@ class BankStatementLineSetTest {
           "the link itself waits for relinkBouncePairs, once every line has its new id");
     }
 
+    /** A discarded identity with no captured button gets the discarded value Y. */
     @Test
     @DisplayName("a discarded identity with no captured button gets the discarded value Y")
     void missingButtonDefaultsToDiscarded() {
@@ -208,6 +217,7 @@ class BankStatementLineSetTest {
           values.get(prop(StatementLineDiscard.COL_DISCARD_LINE)));
     }
 
+    /** PSD2 discard not installed: the bank id is kept, the discard is not written. */
     @Test
     @DisplayName("PSD2 discard not installed: the bank id is kept, the discard is not written")
     void discardSkippedWithoutPsd2Columns() {
@@ -221,6 +231,7 @@ class BankStatementLineSetTest {
       assertFalse(values.containsKey(prop(StatementLineDiscard.COL_IS_DISCARDED)));
     }
 
+    /** No pair: the bounce columns are not touched; no identity: nothing is written. */
     @Test
     @DisplayName("no pair: the bounce columns are not touched; no identity: nothing is written")
     void writesOnlyWhatThereIs() {
@@ -241,6 +252,7 @@ class BankStatementLineSetTest {
   @DisplayName("relinkBouncePairs")
   class Relink {
 
+    /** A pair inside one statement is linked between the two rebuilt lines. */
     @Test
     @DisplayName("a pair inside one statement is linked between the two rebuilt lines")
     void pairInsideOneStatement() {
@@ -264,6 +276,7 @@ class BankStatementLineSetTest {
       verify(dal, never()).get(eq(FIN_BankStatementLine.class), anyString());
     }
 
+    /** A pair across two statements is linked again in both directions. */
     @Test
     @DisplayName("a pair across two statements is linked again in both directions")
     void pairAcrossTwoStatements() {
@@ -283,6 +296,7 @@ class BankStatementLineSetTest {
       verify(dal).save(keptIn);
     }
 
+    /** A counterpart that no longer exists leaves the rebuilt line unlinked. */
     @Test
     @DisplayName("a counterpart that no longer exists leaves the rebuilt line unlinked")
     void deletedCounterpartLeavesNoLink() {
@@ -296,6 +310,7 @@ class BankStatementLineSetTest {
       verify(dal, never()).save(any());
     }
 
+    /** A rebuilt line whose identity has no pair is skipped. */
     @Test
     @DisplayName("a rebuilt line whose identity has no pair is skipped")
     void unpairedLineIsSkipped() {
@@ -312,11 +327,24 @@ class BankStatementLineSetTest {
 
   // ---------------------------------------------------------------------------
 
+  /**
+   * The identity of a discarded line, linked to {@code pairLineId}, stored for review.
+   *
+   * @param transactionId the PSD2 transaction id
+   * @param pairLineId    the counterpart's id, or {@code null}
+   * @return the identity
+   */
   private static BankIdentity identity(String transactionId, String pairLineId) {
     return new BankIdentity(transactionId, true, "Y", pairLineId, DISCARDED_AT, "counterparty",
         "review");
   }
 
+  /**
+   * Makes the next statement-line criteria answer {@code lines}.
+   *
+   * @param lines the lines to answer
+   * @return the criteria mock
+   */
   @SuppressWarnings("unchecked")
   private OBCriteria<FIN_BankStatementLine> criteria(List<FIN_BankStatementLine> lines) {
     OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
@@ -336,6 +364,12 @@ class BankStatementLineSetTest {
     return line;
   }
 
+  /**
+   * The DAL property name the simulated model maps a column to.
+   *
+   * @param column the column name
+   * @return the property name
+   */
   private static String prop(String column) {
     return "p_" + column.toLowerCase(Locale.ROOT);
   }

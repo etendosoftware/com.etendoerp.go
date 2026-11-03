@@ -182,6 +182,7 @@ class BankStatementHeaderStatusHandlerTest {
 
   // ── discarded lines count as resolved ────────────────────────────────────────
 
+  /** On update derives reconciled when matched plus discarded cover every line. */
   @Test
   void onUpdateDerivesReconciledWhenMatchedPlusDiscardedCoverEveryLine() {
     Property discardedCountProp = withDiscardedCountColumn();
@@ -194,6 +195,7 @@ class BankStatementHeaderStatusHandlerTest {
     verify(event).setCurrentState(statusProp, "RECONCILED");
   }
 
+  /** On new derives partial when only a discarded line is resolved. */
   @Test
   void onNewDerivesPartialWhenOnlyADiscardedLineIsResolved() {
     Property discardedCountProp = withDiscardedCountColumn();
@@ -206,6 +208,7 @@ class BankStatementHeaderStatusHandlerTest {
     verify(event).setCurrentState(statusProp, "PARTIAL");
   }
 
+  /** On update not processed stays draft whatever the discarded count. */
   @Test
   void onUpdateNotProcessedStaysDraftWhateverTheDiscardedCount() {
     Property discardedCountProp = withDiscardedCountColumn();

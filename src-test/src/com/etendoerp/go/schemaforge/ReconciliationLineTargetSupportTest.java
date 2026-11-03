@@ -248,7 +248,7 @@ class ReconciliationLineTargetSupportTest {
     when(line.getFinancialAccountTransaction()).thenReturn(null);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertSame(line, target.line());
     assertNull(target.error());
@@ -262,7 +262,7 @@ class ReconciliationLineTargetSupportTest {
     when(handler.loadLine(REM_ID)).thenReturn(remainder);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.error());
     assertSame(remainder, target.line());
@@ -277,7 +277,7 @@ class ReconciliationLineTargetSupportTest {
     groupOf(line);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.line());
     assertEquals(409, target.error().getHttpStatus());
@@ -291,7 +291,8 @@ class ReconciliationLineTargetSupportTest {
     processed();
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT + ": " + LINE_ID);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT + ": " + LINE_ID,
+            true);
 
     assertEquals(409, target.error().getHttpStatus());
     assertEquals(CONFLICT + ": " + LINE_ID, errorMessage(target.error()));
@@ -305,7 +306,7 @@ class ReconciliationLineTargetSupportTest {
     when(handler.loadLine(REM_ID)).thenReturn(null);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertEquals(409, target.error().getHttpStatus());
     assertEquals(CONFLICT, errorMessage(target.error()));
@@ -330,7 +331,7 @@ class ReconciliationLineTargetSupportTest {
     when(statement.isProcessed()).thenReturn(Boolean.FALSE);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertEquals(409, target.error().getHttpStatus());
     assertEquals(ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT, errorMessage(target.error()));
@@ -344,7 +345,7 @@ class ReconciliationLineTargetSupportTest {
     when(handler.normalizeReactivatedMatchGroup(line)).thenReturn(line);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.error());
     assertSame(line, target.line());
@@ -362,7 +363,7 @@ class ReconciliationLineTargetSupportTest {
     when(handler.normalizeReactivatedMatchGroup(line)).thenReturn(remainder);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertSame(remainder, target.line());
   }
@@ -372,7 +373,7 @@ class ReconciliationLineTargetSupportTest {
     List<FIN_FinaccTransaction> held = onDraftHolding(trx);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.line());
     assertEquals(409, target.error().getHttpStatus());
@@ -387,7 +388,7 @@ class ReconciliationLineTargetSupportTest {
     List<FIN_FinaccTransaction> held = onDraftHolding(trx, foreignTrx);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.line());
     assertEquals(409, target.error().getHttpStatus());
@@ -413,12 +414,12 @@ class ReconciliationLineTargetSupportTest {
     try (MockedStatic<StatementLineFilter> filter =
         Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
         MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class)) {
-      filter.when(() -> StatementLineFilter.isExcluded(line, Usage.MATCH_STATEMENT_GRID))
+      filter.when(() -> StatementLineFilter.isExcluded(true, line, Usage.MATCH_STATEMENT_GRID))
           .thenReturn(true);
       messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
           .thenReturn(DISCARDED_TEXT);
 
-      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
     }
 
     assertNotNull(target.error());
@@ -432,7 +433,8 @@ class ReconciliationLineTargetSupportTest {
 
   /**
    * Resolves {@link #line}, a stuck line, with the REAL {@link StatementLineFilter}: one deployed
-   * hook, a database that answers "excluded" for it, and {@code bank-bounce-suggestions} as given.
+   * hook, a database that answers "excluded" for it, and {@code bank-bounce-suggestions} as the
+   * action entry would have evaluated it.
    */
   @SuppressWarnings("unchecked")
   private ReconciliationLineTargetSupport.Target resolveStuckLineWithARealHook(boolean flagOn)
@@ -448,16 +450,13 @@ class ReconciliationLineTargetSupportTest {
         .thenReturn(excluded);
     try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
         Mockito.mockStatic(org.openbravo.base.weld.WeldUtils.class);
-        MockedStatic<BankBounceSuggestionsFlag> flag =
-            Mockito.mockStatic(BankBounceSuggestionsFlag.class);
         MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class)) {
       weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
           org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
           .thenReturn(Collections.singletonList(hook));
-      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
       messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
           .thenReturn(DISCARDED_TEXT);
-      return ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+      return ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, flagOn);
     }
   }
 
@@ -506,7 +505,7 @@ class ReconciliationLineTargetSupportTest {
     ReconciliationLineTargetSupport.Target target;
     try (MockedStatic<StatementLineFilter> filter =
         Mockito.mockStatic(StatementLineFilter.class)) {
-      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
       filter.verifyNoInteractions();
     }
 
@@ -525,7 +524,7 @@ class ReconciliationLineTargetSupportTest {
     ReconciliationLineTargetSupport.Target target;
     try (MockedStatic<StatementLineFilter> filter =
         Mockito.mockStatic(StatementLineFilter.class)) {
-      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
       filter.verifyNoInteractions();
     }
 

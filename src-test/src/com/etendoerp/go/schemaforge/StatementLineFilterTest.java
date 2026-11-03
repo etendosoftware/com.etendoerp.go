@@ -84,16 +84,18 @@ class StatementLineFilterTest {
   private OBDal obDal;
   private final List<BankStatementLineFilterContext> hookContexts = new ArrayList<>();
 
+  /** Mocks the hook lookup, the DAL and the flag evaluator (only to prove it is never called). */
   @BeforeEach
   void mockStatics() {
     weld = mockStatic(WeldUtils.class);
     obDal = mock(OBDal.class);
     obDalStatic = mockStatic(OBDal.class);
     obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+    // Mocked only to prove it is never called: the callers hand the flag in.
     flag = mockStatic(BankBounceSuggestionsFlag.class);
-    flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
   }
 
+  /** Closes the static mocks. */
   @AfterEach
   void closeStatics() {
     flag.close();
@@ -101,6 +103,7 @@ class StatementLineFilterTest {
     weld.close();
   }
 
+  /** Deploys no {@code BankStatementLineFilterHook}. */
   private void deployNoHook() {
     weld.when(() -> WeldUtils.getInstances(BankStatementLineFilterHook.class))
         .thenReturn(List.of());
@@ -117,12 +120,24 @@ class StatementLineFilterTest {
         .thenReturn(List.of(hook));
   }
 
+  /**
+   * The financial account of the fixtures.
+   *
+   * @return the account mock
+   */
   private static FIN_FinancialAccount account() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getId()).thenReturn(ACCOUNT_ID);
     return account;
   }
 
+  /**
+   * A line of a statement of {@code account}.
+   *
+   * @param id      the line id
+   * @param account the account
+   * @return the line mock
+   */
   private static FIN_BankStatementLine lineOf(String id, FIN_FinancialAccount account) {
     FIN_BankStatement statement = mock(FIN_BankStatement.class);
     when(statement.getAccount()).thenReturn(account);
@@ -138,16 +153,19 @@ class StatementLineFilterTest {
   @DisplayName("with no hook installed nothing is excluded and nothing is queried")
   class NoHook {
 
+    /** Hql answers the empty condition and adds no parameter. */
     @Test
     @DisplayName("hql answers the empty condition and adds no parameter")
     void emptyCondition() {
       deployNoHook();
       Map<String, Object> params = new HashMap<>();
 
-      assertEquals("", StatementLineFilter.hql("bsl", account(), Usage.MATCH_STATEMENT_GRID, params));
+      assertEquals("",
+          StatementLineFilter.hql(true, "bsl", account(), Usage.MATCH_STATEMENT_GRID, params));
       assertTrue(params.isEmpty());
     }
 
+    /** {@code excludedLineIds} is the empty set and runs no query. */
     @Test
     @DisplayName("excludedLineIds is the empty set and runs no query")
     void emptySet() {
@@ -158,17 +176,19 @@ class StatementLineFilterTest {
       verify(obDal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
     }
 
+    /** {@code isExcluded} is false and discardedLineError null, with no query. */
     @Test
     @DisplayName("isExcluded is false and discardedLineError null, with no query")
     void nothingExcluded() {
       deployNoHook();
       FIN_BankStatementLine line = lineOf("L1", account());
 
-      assertFalse(StatementLineFilter.isExcluded(line, Usage.MATCH_STATEMENT_GRID));
-      assertNull(StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID));
+      assertFalse(StatementLineFilter.isExcluded(true, line, Usage.MATCH_STATEMENT_GRID));
+      assertNull(StatementLineFilter.discardedLineError(true, line, Usage.MATCH_STATEMENT_GRID));
       verify(obDal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
     }
 
+    /** No account, no line or no statement is never excluded, even with a hook. */
     @Test
     @DisplayName("no account, no line or no statement is never excluded, even with a hook")
     void missingAccountIsNeverExcluded() {
@@ -176,8 +196,8 @@ class StatementLineFilterTest {
       FIN_BankStatementLine orphan = mock(FIN_BankStatementLine.class);
 
       assertTrue(StatementLineFilter.excludedLineIds(null, Usage.AUTO_MATCH_CANDIDATES).isEmpty());
-      assertFalse(StatementLineFilter.isExcluded(null, Usage.MATCH_STATEMENT_GRID));
-      assertFalse(StatementLineFilter.isExcluded(orphan, Usage.MATCH_STATEMENT_GRID));
+      assertFalse(StatementLineFilter.isExcluded(true, null, Usage.MATCH_STATEMENT_GRID));
+      assertFalse(StatementLineFilter.isExcluded(true, orphan, Usage.MATCH_STATEMENT_GRID));
       assertTrue(hookContexts.isEmpty(), "no hook is asked without an account");
     }
   }
@@ -188,6 +208,7 @@ class StatementLineFilterTest {
   @DisplayName("with a hook its condition decides the excluded lines")
   class WithHook {
 
+    /** Hql appends the hook's condition, its parameters and passes account and usage. */
     @Test
     @DisplayName("hql appends the hook's condition, its parameters and passes account and usage")
     void hookConditionAndParameters() {
@@ -195,7 +216,8 @@ class StatementLineFilterTest {
       FIN_FinancialAccount account = account();
       Map<String, Object> params = new HashMap<>();
 
-      String condition = StatementLineFilter.hql("x", account, Usage.AUTO_MATCH_CANDIDATES, params);
+      String condition =
+          StatementLineFilter.hql(true, "x", account, Usage.AUTO_MATCH_CANDIDATES, params);
 
       assertEquals(" and (x.etgoTestDiscarded = :hookFlag)", condition);
       assertEquals(Map.of("hookFlag", Boolean.TRUE), params);
@@ -204,6 +226,10 @@ class StatementLineFilterTest {
       assertNull(hookContexts.get(0).getReconciliation());
     }
 
+    /**
+     * {@code excludedLineIds} answers the ids of the account's unmatched lines NOT passing the
+     * hook.
+     */
     @Test
     @DisplayName("excludedLineIds answers the ids of the account's unmatched lines NOT passing the hook")
     @SuppressWarnings("unchecked")
@@ -231,6 +257,7 @@ class StatementLineFilterTest {
       verify(query).setSelectClause("bsl.id");
     }
 
+    /** An excluded line answers the coded 409 LINE_DISCARDED. */
     @Test
     @DisplayName("an excluded line answers the coded 409 LINE_DISCARDED")
     @SuppressWarnings("unchecked")
@@ -246,9 +273,9 @@ class StatementLineFilterTest {
         messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
             .thenReturn("La línea está descartada");
 
-        assertTrue(StatementLineFilter.isExcluded(line, Usage.MATCH_STATEMENT_GRID));
+        assertTrue(StatementLineFilter.isExcluded(true, line, Usage.MATCH_STATEMENT_GRID));
         NeoResponse refusal =
-            StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID);
+            StatementLineFilter.discardedLineError(true, line, Usage.MATCH_STATEMENT_GRID);
 
         assertEquals(409, refusal.getHttpStatus());
         assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, refusal.getBody().getString("code"));
@@ -259,6 +286,7 @@ class StatementLineFilterTest {
       verify(query, org.mockito.Mockito.atLeastOnce()).setFilterOnActive(false);
     }
 
+    /** A line the hook does not exclude may be reconciled. */
     @Test
     @DisplayName("a line the hook does not exclude may be reconciled")
     @SuppressWarnings("unchecked")
@@ -269,10 +297,11 @@ class StatementLineFilterTest {
       when(query.count()).thenReturn(0);
       FIN_BankStatementLine line = lineOf("L1", account());
 
-      assertFalse(StatementLineFilter.isExcluded(line, Usage.MATCH_STATEMENT_GRID));
-      assertNull(StatementLineFilter.discardedLineError(line, Usage.MATCH_STATEMENT_GRID));
+      assertFalse(StatementLineFilter.isExcluded(true, line, Usage.MATCH_STATEMENT_GRID));
+      assertNull(StatementLineFilter.discardedLineError(true, line, Usage.MATCH_STATEMENT_GRID));
     }
 
+    /** {@code markDiscarded} reads each account once and marks every listed row. */
     @Test
     @DisplayName("markDiscarded reads each account once and marks every listed row")
     @SuppressWarnings("unchecked")
@@ -292,7 +321,7 @@ class StatementLineFilterTest {
       when(ids.list()).thenReturn(List.of("L2"));
       JSONArray rows = rows("L1", "L2");
 
-      StatementLineFilter.markDiscarded(rows, List.of("S1", "S2"));
+      StatementLineFilter.markDiscarded(true, rows, List.of("S1", "S2"));
 
       assertFalse(rows.getJSONObject(0).getBoolean(StatementLineDiscard.KEY_DISCARDED));
       assertTrue(rows.getJSONObject(1).getBoolean(StatementLineDiscard.KEY_DISCARDED));
@@ -300,6 +329,7 @@ class StatementLineFilterTest {
       assertEquals(Usage.MATCH_STATEMENT_GRID, hookContexts.get(0).getUsage());
     }
 
+    /** {@code markDiscarded} never fails the listing: on an error the rows stay unmarked. */
     @Test
     @DisplayName("markDiscarded never fails the listing: on an error the rows stay unmarked")
     void markDiscardedSwallowsErrors() throws Exception {
@@ -307,11 +337,12 @@ class StatementLineFilterTest {
       when(obDal.get(FIN_BankStatement.class, "S1")).thenThrow(new IllegalStateException("db"));
       JSONArray rows = rows("L1");
 
-      StatementLineFilter.markDiscarded(rows, List.of("S1"));
+      StatementLineFilter.markDiscarded(true, rows, List.of("S1"));
 
       assertFalse(rows.getJSONObject(0).has(StatementLineDiscard.KEY_DISCARDED));
     }
 
+    /** Discards splits the excluded rows off, answers status=discarded, counts them. */
     @Test
     @DisplayName("discards splits the excluded rows off, answers status=discarded, counts them")
     @SuppressWarnings("unchecked")
@@ -324,7 +355,7 @@ class StatementLineFilterTest {
       when(ids.list()).thenReturn(List.of("L2"));
 
       StatementLineFilter.Discards discards =
-          StatementLineFilter.discards(account(), Usage.MATCH_STATEMENT_GRID);
+          StatementLineFilter.discards(true, account(), Usage.MATCH_STATEMENT_GRID);
       JSONArray[] split = discards.split(rows("L1", "L2"));
       JSONObject counts = new JSONObject();
       discards.putCount(counts, split[1].length());
@@ -344,39 +375,42 @@ class StatementLineFilterTest {
   @DisplayName("with bank-bounce-suggestions off nothing is honoured, hook or not")
   class FlagOff {
 
+    /** Deploys one hook: with the flag off it must not even be asked. */
     @BeforeEach
-    void flagOff() {
-      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+    void deployTheHook() {
       deployOneHook();
     }
 
+    /** Hql answers the empty condition, adds no parameter and asks no hook. */
     @Test
     @DisplayName("hql answers the empty condition, adds no parameter and asks no hook")
     void noCondition() {
       Map<String, Object> params = new HashMap<>();
 
-      assertEquals("", StatementLineFilter.hql("bsl", account(), Usage.AUTO_MATCH_CANDIDATES,
+      assertEquals("", StatementLineFilter.hql(false, "bsl", account(), Usage.AUTO_MATCH_CANDIDATES,
           params));
       assertTrue(params.isEmpty());
       assertTrue(hookContexts.isEmpty());
     }
 
+    /** {@code isExcluded} is false and discardedLineError null, with no query. */
     @Test
     @DisplayName("isExcluded is false and discardedLineError null, with no query")
     void nothingRefused() {
       FIN_BankStatementLine line = lineOf("L1", account());
 
-      assertFalse(StatementLineFilter.isExcluded(line, Usage.MATCH_STATEMENT_GRID));
-      assertNull(StatementLineFilter.discardedLineError(line, Usage.AUTO_MATCH_CANDIDATES));
+      assertFalse(StatementLineFilter.isExcluded(false, line, Usage.MATCH_STATEMENT_GRID));
+      assertNull(StatementLineFilter.discardedLineError(false, line, Usage.AUTO_MATCH_CANDIDATES));
       verify(obDal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
     }
 
+    /** {@code markDiscarded} puts no discarded marker on any row and reads nothing. */
     @Test
     @DisplayName("markDiscarded puts no discarded marker on any row and reads nothing")
     void noMarker() throws Exception {
       JSONArray rows = rows("L1", "L2");
 
-      StatementLineFilter.markDiscarded(rows, List.of("S1"));
+      StatementLineFilter.markDiscarded(false, rows, List.of("S1"));
 
       assertFalse(rows.getJSONObject(0).has(StatementLineDiscard.KEY_DISCARDED));
       assertFalse(rows.getJSONObject(1).has(StatementLineDiscard.KEY_DISCARDED));
@@ -384,11 +418,12 @@ class StatementLineFilterTest {
       verify(obDal, never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
     }
 
+    /** Discards keeps every row, ignores status=discarded and adds no count. */
     @Test
     @DisplayName("discards keeps every row, ignores status=discarded and adds no count")
     void discardsNotHonoured() throws Exception {
       StatementLineFilter.Discards discards =
-          StatementLineFilter.discards(account(), Usage.MATCH_STATEMENT_GRID);
+          StatementLineFilter.discards(false, account(), Usage.MATCH_STATEMENT_GRID);
       JSONArray[] split = discards.split(rows("L1", "L2"));
       JSONObject counts = new JSONObject();
       discards.putCount(counts, split[1].length());
@@ -402,45 +437,42 @@ class StatementLineFilterTest {
     }
   }
 
-  // ── when the flag is evaluated ───────────────────────────────────────────────────────────────
+  // ── the flag is handed in, never read ────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("the flag is evaluated only when it can change the answer, and once")
-  class FlagEvaluation {
+  @DisplayName("the flag is never read here: the action entry evaluates it once and hands it down")
+  class FlagHandedIn {
 
+    /**
+     * {@code isExcluded} with a hook takes the flag it is handed: on, the hook's condition and one
+     * query decide; off, nothing is asked. The evaluator is never called.
+     */
     @Test
-    @DisplayName("isExcluded with no hook condition never reads the flag")
-    void isExcludedWithoutAHookDoesNotReadTheFlag() {
-      deployNoHook();
-      flag.clearInvocations();
-
-      assertFalse(StatementLineFilter.isExcluded(lineOf("L1", account()),
-          Usage.MATCH_STATEMENT_GRID));
-
-      flag.verifyNoInteractions();
-    }
-
-    @Test
-    @DisplayName("isExcluded with a hook condition reads the flag once, then one query")
+    @DisplayName("isExcluded takes the flag it is handed and never reads it")
     @SuppressWarnings("unchecked")
-    void isExcludedWithAHookReadsTheFlagOnce() {
+    void isExcludedTakesTheFlagItIsHanded() {
       deployOneHook();
       OBQuery<FIN_BankStatementLine> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(query);
       when(query.count()).thenReturn(1);
-      flag.clearInvocations();
 
-      assertTrue(StatementLineFilter.isExcluded(lineOf("L1", account()),
+      assertTrue(StatementLineFilter.isExcluded(true, lineOf("L1", account()),
+          Usage.MATCH_STATEMENT_GRID));
+      assertFalse(StatementLineFilter.isExcluded(false, lineOf("L1", account()),
           Usage.MATCH_STATEMENT_GRID));
 
-      flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
       verify(obDal, times(1)).createQuery(eq(FIN_BankStatementLine.class), anyString());
+      flag.verifyNoInteractions();
     }
 
+    /**
+     * {@code discards}, {@code hql} and {@code markDiscarded} take the flag they are handed and
+     * never call the evaluator.
+     */
     @Test
-    @DisplayName("discards reads the flag exactly once, honoured or not")
+    @DisplayName("discards, hql and markDiscarded take the flag they are handed and never read it")
     @SuppressWarnings("unchecked")
-    void discardsReadsTheFlagOnce() throws Exception {
+    void theOtherGatesTakeTheFlagTheyAreHanded() throws Exception {
       deployOneHook();
       OBQuery<FIN_BankStatementLine> query = mock(OBQuery.class);
       Query<String> ids = mock(Query.class);
@@ -448,19 +480,15 @@ class StatementLineFilterTest {
       when(query.createQuery(String.class)).thenReturn(ids);
       when(ids.list()).thenReturn(List.of("L2"));
 
-      for (boolean on : new boolean[] { true, false }) {
-        flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(on);
-        flag.clearInvocations();
+      assertTrue(StatementLineFilter.discards(true, account(), Usage.MATCH_STATEMENT_GRID)
+          .isHonoured());
+      assertFalse(StatementLineFilter.discards(false, account(), Usage.MATCH_STATEMENT_GRID)
+          .isHonoured());
+      assertEquals("", StatementLineFilter.hql(false, "bsl", account(),
+          Usage.AUTO_MATCH_CANDIDATES, new HashMap<>()));
+      StatementLineFilter.markDiscarded(false, rows("L1"), List.of("S1"));
 
-        StatementLineFilter.Discards discards =
-            StatementLineFilter.discards(account(), Usage.MATCH_STATEMENT_GRID);
-        discards.split(rows("L1", "L2"));
-        discards.listsOnlyDiscarded(StatementLineFilter.STATUS_DISCARDED);
-        discards.putCount(new JSONObject(), 1);
-
-        flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
-        assertEquals(on, discards.isHonoured());
-      }
+      flag.verifyNoInteractions();
     }
   }
 
@@ -470,6 +498,7 @@ class StatementLineFilterTest {
   @DisplayName("row helpers")
   class Rows {
 
+    /** {@code splitRows} keeps order in both halves and skips non-object rows. */
     @Test
     @DisplayName("splitRows keeps order in both halves and skips non-object rows")
     void splitRows() throws Exception {
@@ -482,6 +511,7 @@ class StatementLineFilterTest {
       assertEquals(List.of("L2", "L4"), ids(split[1]));
     }
 
+    /** {@code splitRows} with nothing excluded keeps every row. */
     @Test
     @DisplayName("splitRows with nothing excluded keeps every row")
     void splitRowsNothingExcluded() throws Exception {
@@ -491,6 +521,7 @@ class StatementLineFilterTest {
       assertEquals(0, split[1].length());
     }
 
+    /** {@code markRows} puts discarded true/false on every row by id. */
     @Test
     @DisplayName("markRows puts discarded true/false on every row by id")
     void markRows() throws Exception {
@@ -505,18 +536,28 @@ class StatementLineFilterTest {
           "a row without id is never discarded");
     }
 
+    /**
+     * The {@code status=discarded} data: every row marked discarded with nothing reconciled, the
+     * total and the lone count, and each row's {@code bounceLink}; the lines are read in ONE query
+     * for all the rows, never one read per row.
+     */
     @Test
     @DisplayName("discardedLinesData: discarded state, nothing reconciled, the total, the count and each bounceLink")
+    @SuppressWarnings("unchecked")
     void discardedLinesData() throws Exception {
       FIN_BankStatementLine linked = mock(FIN_BankStatementLine.class);
+      when(linked.getId()).thenReturn("L1");
       FIN_BankStatementLine counterpart = mock(FIN_BankStatementLine.class);
       when(counterpart.getId()).thenReturn("L9");
       when(linked.get("etgoBouncePairLine")).thenReturn(counterpart);
       when(linked.get("etgoBounceSignal")).thenReturn("return_text");
       when(linked.get("etgoBounceConfidence")).thenReturn("high");
       FIN_BankStatementLine alone = mock(FIN_BankStatementLine.class);
-      when(obDal.get(FIN_BankStatementLine.class, "L1")).thenReturn(linked);
-      when(obDal.get(FIN_BankStatementLine.class, "L2")).thenReturn(alone);
+      when(alone.getId()).thenReturn("L2");
+      OBQuery<FIN_BankStatementLine> query = mock(OBQuery.class);
+      ArgumentCaptor<String> where = ArgumentCaptor.forClass(String.class);
+      when(obDal.createQuery(eq(FIN_BankStatementLine.class), where.capture())).thenReturn(query);
+      when(query.list()).thenReturn(List.of(alone, linked));
       JSONArray rows = rows("L1", "L2");
       rows.getJSONObject(0).put(ReconciliationHandler.KEY_AMOUNT, "-50.25");
       rows.getJSONObject(1).put(ReconciliationHandler.KEY_AMOUNT, "20");
@@ -548,6 +589,10 @@ class StatementLineFilterTest {
       assertTrue(link.isNull("discardedAt"));
       assertTrue(lines.getJSONObject(1).isNull(StatementLineFilter.KEY_BOUNCE_LINK),
           "a line discarded on its own has no pair");
+      verify(obDal, times(1)).createQuery(eq(FIN_BankStatementLine.class), anyString());
+      assertTrue(where.getValue().contains("bsl.id in (:etgoLineIds)"), where.getValue());
+      verify(query).setNamedParameter("etgoLineIds", Set.of("L1", "L2"));
+      verify(obDal, never()).get(eq(FIN_BankStatementLine.class), anyString());
     }
   }
 
@@ -573,6 +618,13 @@ class StatementLineFilterTest {
     return model;
   }
 
+  /**
+   * Rows carrying only their ids.
+   *
+   * @param ids the ids
+   * @return the rows
+   * @throws Exception when a row cannot be written
+   */
   private static JSONArray rows(String... ids) throws Exception {
     JSONArray rows = new JSONArray();
     for (String id : ids) {
@@ -581,6 +633,13 @@ class StatementLineFilterTest {
     return rows;
   }
 
+  /**
+   * The ids of the rows, in order.
+   *
+   * @param rows the rows
+   * @return their ids
+   * @throws Exception when a row cannot be read
+   */
   private static List<String> ids(JSONArray rows) throws Exception {
     List<String> ids = new ArrayList<>();
     for (int i = 0; i < rows.length(); i++) {

@@ -254,6 +254,7 @@ class BankStatementAggregatesTest {
 
   // ── discarded lines are resolved, not matched ───────────────────────────────
 
+  /** Recompute writes matched discarded counts and status and keeps discarded lines in totals. */
   @Test
   void recomputeWritesMatchedDiscardedCountsAndStatusAndKeepsDiscardedLinesInTotals() {
     withDiscardFlagColumn();
@@ -277,6 +278,7 @@ class BankStatementAggregatesTest {
     verify(obDal).save(st);
   }
 
+  /** Recompute is reconciled when every line is matched or discarded. */
   @Test
   void recomputeIsReconciledWhenEveryLineIsMatchedOrDiscarded() {
     withDiscardFlagColumn();
@@ -324,6 +326,7 @@ class BankStatementAggregatesTest {
     verify(st).set("status", "RECONCILED");
   }
 
+  /** Recompute counts a line with a transaction as matched even when it is flagged discarded. */
   @Test
   void recomputeCountsALineWithATransactionAsMatchedEvenWhenItIsFlaggedDiscarded() {
     withDiscardFlagColumn();
@@ -342,6 +345,9 @@ class BankStatementAggregatesTest {
     verify(st).set("status", "PARTIAL");
   }
 
+  /**
+   * Recompute without the discarded count column writes nothing for it and ignores discarded lines.
+   */
   @Test
   void recomputeWithoutTheDiscardedCountColumnWritesNothingForItAndIgnoresDiscardedLines() {
     withDiscardFlagColumn();
@@ -364,6 +370,7 @@ class BankStatementAggregatesTest {
     verify(obDal).save(st);
   }
 
+  /** Recompute with delta discard of the in flight line turns partial into reconciled. */
   @Test
   void recomputeWithDeltaDiscardOfTheInFlightLineTurnsPartialIntoReconciled() {
     withDiscardFlagColumn();
@@ -388,6 +395,7 @@ class BankStatementAggregatesTest {
     verify(parent, times(2)).set("totalOut", new BigDecimal("60.00"));
   }
 
+  /** Recompute with delta restore of the in flight line turns reconciled back into partial. */
   @Test
   void recomputeWithDeltaRestoreOfTheInFlightLineTurnsReconciledBackIntoPartial() {
     withDiscardFlagColumn();
@@ -410,6 +418,10 @@ class BankStatementAggregatesTest {
     order.verify(parent).set("status", "PARTIAL");
   }
 
+  /**
+   * Recompute with delta counts an in flight line with a transaction as matched even when
+   * discarded.
+   */
   @Test
   void recomputeWithDeltaCountsAnInFlightLineWithATransactionAsMatchedEvenWhenDiscarded() {
     withDiscardFlagColumn();
@@ -428,6 +440,7 @@ class BankStatementAggregatesTest {
     verify(parent).set("status", "PARTIAL");
   }
 
+  /** Recompute with delta delete of a discarded line drops it from every count. */
   @Test
   void recomputeWithDeltaDeleteOfADiscardedLineDropsItFromEveryCount() {
     withDiscardFlagColumn();
@@ -454,6 +467,7 @@ class BankStatementAggregatesTest {
     verify(event, never()).getCurrentState(any());
   }
 
+  /** Is discarded in event reads the in flight flag. */
   @Test
   void isDiscardedInEventReadsTheInFlightFlag() {
     Property flag = withDiscardFlagColumn();
@@ -468,6 +482,7 @@ class BankStatementAggregatesTest {
     assertFalse(BankStatementAggregates.isDiscardedInEvent(unset));
   }
 
+  /** Is discarded in event is false when the PSD2 column is missing. */
   @Test
   void isDiscardedInEventIsFalseWhenThePsd2ColumnIsMissing() {
     Entity lineModel = mock(Entity.class);
@@ -479,6 +494,7 @@ class BankStatementAggregatesTest {
     verify(event, never()).getCurrentState(any());
   }
 
+  /** Is discarded in event is false when the line entity is missing. */
   @Test
   void isDiscardedInEventIsFalseWhenTheLineEntityIsMissing() {
     EntityPersistenceEvent event = mock(EntityPersistenceEvent.class);

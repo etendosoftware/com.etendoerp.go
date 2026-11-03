@@ -37,18 +37,21 @@ public class BankBounceLineTextTest {
 
   // ── normalize ──────────────────────────────────────────────────────────
 
+  /** Normalize upper cases strips accents and collapses punctuation. */
   @Test
   public void normalizeUpperCasesStripsAccentsAndCollapsesPunctuation() {
     assertEquals("RETROCESION TRANSFERENCIA INMEDIATA",
         BankBounceLineText.normalize("  Retrocesión, transferencia -- inmediata. "));
   }
 
+  /** Normalize transliterates german umlauts before stripping accents. */
   @Test
   public void normalizeTransliteratesGermanUmlautsBeforeStrippingAccents() {
     assertEquals("RUECKLASTSCHRIFT MUELLER STRASSE AERGER OEL",
         BankBounceLineText.normalize("Rücklastschrift Müller Straße Ärger Öl"));
   }
 
+  /** Normalize reads blank and null as empty. */
   @Test
   public void normalizeReadsBlankAndNullAsEmpty() {
     assertEquals("", BankBounceLineText.normalize(null));
@@ -64,6 +67,7 @@ public class BankBounceLineTextTest {
     assertTrue(BankBounceLineText.hasBounceWording("retrocesion transferencia inmediata"));
   }
 
+  /** Every vocabulary word is recognized as a token. */
   @Test
   public void everyVocabularyWordIsRecognizedAsAToken() {
     for (String word : BankBounceLineText.BOUNCE_VOCABULARY) {
@@ -71,6 +75,7 @@ public class BankBounceLineTextTest {
     }
   }
 
+  /** The german return is recognized from its umlaut spelling. */
   @Test
   public void theGermanReturnIsRecognizedFromItsUmlautSpelling() {
     assertTrue(BankBounceLineText.hasBounceWording("Rücklastschrift SEPA"));
@@ -97,6 +102,7 @@ public class BankBounceLineTextTest {
     assertFalse(BankBounceLineText.hasBounceWording("PRERETURN FEE"));
   }
 
+  /** An ordinary transfer is not a return. */
   @Test
   public void anOrdinaryTransferIsNotAReturn() {
     assertFalse(BankBounceLineText.hasBounceWording(
@@ -114,12 +120,14 @@ public class BankBounceLineTextTest {
         "TRANSFERENCIA INMEDIATA A FAVOR DE G. R. CONCEPTO 10000268 10000268-2"));
   }
 
+  /** Last token upper cases and drops trailing punctuation. */
   @Test
   public void lastTokenUpperCasesAndDropsTrailingPunctuation() {
     assertEquals("ABC-1", BankBounceLineText.lastToken("concepto abc-1.)"));
     assertEquals("1000073-2", BankBounceLineText.lastToken("Factura 10000268. 1000073-2;"));
   }
 
+  /** Last token of blank is empty. */
   @Test
   public void lastTokenOfBlankIsEmpty() {
     assertEquals("", BankBounceLineText.lastToken(null));
@@ -128,6 +136,7 @@ public class BankBounceLineTextTest {
 
   // ── sameCounterparty ───────────────────────────────────────────────────
 
+  /** Counterparties compare once normalized. */
   @Test
   public void counterpartiesCompareOnceNormalized() {
     assertTrue(BankBounceLineText.sameCounterparty("I. Abedul", "i abedul"));

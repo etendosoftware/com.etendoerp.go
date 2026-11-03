@@ -260,6 +260,7 @@ class NeoExtensionMigrationTest {
   @DisplayName("ETP-5581 — the bank report pairs resolve on every reader, by annotation or by qualifier")
   class BankReportPairReaders {
 
+    /** REST report route: ?action= reaches the handler with entityName = the spec name. */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.schemaforge.NeoExtensionMigrationTest#reportPairs")
     @DisplayName("REST report route: ?action= reaches the handler with entityName = the spec name")
@@ -287,6 +288,7 @@ class NeoExtensionMigrationTest {
       }
     }
 
+    /** NeoActionContract.resolve: the spec's declared actions, served by its entity. */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.schemaforge.NeoExtensionMigrationTest#reportPairs")
     @DisplayName("NeoActionContract.resolve: the spec's declared actions, served by its entity")
@@ -301,6 +303,7 @@ class NeoExtensionMigrationTest {
       }
     }
 
+    /** NeoReportCallability: report entity, customization, handler and its name. */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.schemaforge.NeoExtensionMigrationTest#reportPairs")
     @DisplayName("NeoReportCallability: report entity, customization, handler and its name")
@@ -318,6 +321,7 @@ class NeoExtensionMigrationTest {
       }
     }
 
+    /** Role gate: hasReportSpecAccess asks the resolved handler for its rule. */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.schemaforge.NeoExtensionMigrationTest#reportPairs")
     @DisplayName("role gate: hasReportSpecAccess asks the resolved handler for its rule")
@@ -345,6 +349,11 @@ class NeoExtensionMigrationTest {
   /** One migrated report pair, the qualifier its row carried and one action per channel. */
   record ReportPair(Class<? extends NeoHandler> type, String spec, String formerQualifier,
       String restAction) {
+    /**
+     * The spec name, so the parameterized case names read well.
+     *
+     * @return the spec
+     */
     @Override
     public String toString() {
       return spec;
@@ -356,6 +365,12 @@ class NeoExtensionMigrationTest {
   static final ReportPair BANK_STATEMENTS = new ReportPair(BankStatementsHandler.class,
       "bank-statements", "bank-statements", "lines");
 
+  /**
+   * The two report specs migrated to {@code @NeoExtension} by ETP-5581, each bound once by its
+   * annotation and once by its former qualifier only.
+   *
+   * @return one {@code (pair, binding)} argument set per case
+   */
   static Stream<Arguments> reportPairs() {
     return Stream.of(BANK_RECONCILIATION, BANK_STATEMENTS).flatMap(pair -> Stream.of(
         Arguments.of(pair, BoundBy.ANNOTATION_ONLY), Arguments.of(pair, BoundBy.QUALIFIER_ONLY)));
@@ -383,6 +398,13 @@ class NeoExtensionMigrationTest {
     private final MockedStatic<OBDal> obDal;
     private final MockedStatic<OBContext> obContext;
 
+    /**
+     * Builds the fixture: a spy of the real handler of the pair, its spec and entity rows, and the
+     * static mocks that resolve it by annotation or by its former qualifier only.
+     *
+     * @param pair the report spec under test
+     * @param mode how its handler is bound
+     */
     @SuppressWarnings("unchecked")
     ReportFixture(ReportPair pair, BoundBy mode) {
       this.pair = pair;
@@ -440,6 +462,14 @@ class NeoExtensionMigrationTest {
       obContext.when(OBContext::getOBContext).thenReturn(context);
     }
 
+    /**
+     * Answers a qualifier lookup: the spied handler for the pair's former qualifier when the
+     * fixture binds by qualifier only, else nothing. Every lookup is recorded with its resolver.
+     *
+     * @param resolver   the name of the resolver that asked
+     * @param invocation the lookup call
+     * @return the handler, or {@code null}
+     */
     private NeoHandler byQualifier(String resolver, InvocationOnMock invocation) {
       asked.add(resolver + ":" + invocation.getArgument(0));
       return mode == BoundBy.QUALIFIER_ONLY
@@ -472,6 +502,13 @@ class NeoExtensionMigrationTest {
       assertTrue(asked.contains(expected), "expected " + expected + ", asked: " + asked);
     }
 
+    /**
+     * Sets a private field of {@link NeoServlet} on {@code target} by reflection.
+     *
+     * @param target the servlet
+     * @param name   the field name
+     * @param value  the value to set
+     */
     private static void setField(Object target, String name, Object value) {
       try {
         java.lang.reflect.Field field = NeoServlet.class.getDeclaredField(name);
@@ -482,6 +519,7 @@ class NeoExtensionMigrationTest {
       }
     }
 
+    /** Closes every static mock the fixture opened. */
     @Override
     public void close() {
       obContext.close();

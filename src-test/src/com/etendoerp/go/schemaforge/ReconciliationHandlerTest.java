@@ -25,6 +25,7 @@ import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -1210,7 +1211,7 @@ public class ReconciliationHandlerTest {
     when(account.getId()).thenReturn(ACC_ID);
     when(account.getMatchingAlgorithm()).thenReturn(null);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(Collections.emptyList()).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<ReconciliationRemovalUtil> recUtil =
@@ -1233,6 +1234,7 @@ public class ReconciliationHandlerTest {
       flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
       detector.when(() -> BankBounceDetector.detectQuietly(any(), any(), anyInt()))
           .thenReturn(Collections.emptyList());
+      List<FIN_BankStatementLine> dalLines = new ArrayList<>();
       for (String id : Arrays.asList("l1", "l2", "l3")) {
         FIN_BankStatementLine line = lineSetup.containsKey(id) ? lineSetup.get(id)
             : mock(FIN_BankStatementLine.class);
@@ -1240,8 +1242,14 @@ public class ReconciliationHandlerTest {
         when(line.getDescription()).thenReturn("D");
         when(line.getReferenceNo()).thenReturn("");
         when(line.getBpartnername()).thenReturn("");
-        when(dal.get(FIN_BankStatementLine.class, id)).thenReturn(line);
+        dalLines.add(line);
       }
+      // status=discarded reads the listed lines in one query (StatementLineFilter.linesById).
+      @SuppressWarnings("unchecked")
+      org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> linesQuery =
+          mock(org.openbravo.dal.service.OBQuery.class);
+      when(linesQuery.list()).thenReturn(dalLines);
+      when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(linesQuery);
 
       NeoResponse response = handler.buildPendingLines(ACC_ID, CLIENT_ID,
           new HashSet<>(Arrays.asList(ORG_ID)), filters);
@@ -1249,6 +1257,8 @@ public class ReconciliationHandlerTest {
       // The exclusion stub is keyed by this account and MATCH_STATEMENT_GRID: any other argument
       // falls through to the real method, which finds no hook and excludes nothing.
       assertEquals(200, response.getHttpStatus());
+      // ETP-5581: the flag is read once for the whole request and handed down.
+      flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
       return response.getBody().getJSONObject("response").getJSONObject("data");
     }
   }
@@ -1271,6 +1281,13 @@ public class ReconciliationHandlerTest {
     }
   }
 
+  /**
+   * The ids of the rows.
+   *
+   * @param rows the rows
+   * @return their ids
+   * @throws Exception when a row cannot be read
+   */
   private static Set<String> ids(JSONArray rows) throws Exception {
     Set<String> ids = new HashSet<>();
     for (int i = 0; i < rows.length(); i++) {
@@ -1347,7 +1364,7 @@ public class ReconciliationHandlerTest {
     assertEquals(2, counts.getInt("pending"));
     assertEquals(1, counts.getInt(StatementLineDiscard.KEY_DISCARDED));
     assertEquals("no pair was detected", 0, counts.getInt(BankBounceSuggestions.STATE_BOUNCE));
-    verify(handler).loadPendingLines(ACC_ID);
+    verify(handler).loadPendingLines(eq(ACC_ID), eq(true));
   }
 
   /**
@@ -1376,7 +1393,7 @@ public class ReconciliationHandlerTest {
       assertEquals("pending", row.getString("state"));
     }
     assertEquals(0, new BigDecimal("50.00").compareTo(new BigDecimal(data.getString("total"))));
-    verify(handler, never()).loadPendingLines(any());
+    verify(handler, never()).loadPendingLines(any(), anyBoolean());
   }
 
   /**
@@ -1468,7 +1485,7 @@ public class ReconciliationHandlerTest {
     when(account.getId()).thenReturn(ACC_ID);
     when(account.getMatchingAlgorithm()).thenReturn(null);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(Collections.emptyList()).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
     org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
         (alias, context, params) -> {
           realHookContexts.add(context);
@@ -1518,6 +1535,14 @@ public class ReconciliationHandlerTest {
     }
   }
 
+  /**
+   * The row with the given id.
+   *
+   * @param rows the rows
+   * @param id   the id
+   * @return the row; fails the test when there is none
+   * @throws Exception when a row cannot be read
+   */
   private static JSONObject rowById(JSONArray rows, String id) throws Exception {
     for (int i = 0; i < rows.length(); i++) {
       if (id.equals(rows.getJSONObject(i).getString("id"))) {
@@ -1921,7 +1946,8 @@ public class ReconciliationHandlerTest {
     when(line.getDescription()).thenReturn("Transfer");
     when(line.getReferenceNo()).thenReturn("");
     when(line.getTransactionDate()).thenReturn(null);
-    doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Collections.singletonList(line)).when(handler)
+        .loadPendingLines(eq(ACC_ID), anyBoolean());
 
     doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler)
         .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt(), any());
@@ -1978,7 +2004,8 @@ public class ReconciliationHandlerTest {
     when(line.getReferenceNo()).thenReturn("");
     when(line.getBpartnername()).thenReturn("");
     when(line.getTransactionDate()).thenReturn(null);
-    doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Collections.singletonList(line)).when(handler)
+        .loadPendingLines(eq(ACC_ID), anyBoolean());
 
     // No 1:1 standard suggestion.
     doReturn(new HashSet<String>()).when(handler)
@@ -2097,7 +2124,7 @@ public class ReconciliationHandlerTest {
 
     FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
-    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
 
     FIN_FinaccTransaction t1 = autoMatchTxn("t1", "1.00");
     FIN_FinaccTransaction t2 = autoMatchTxn("t2", "1.00");
@@ -2141,7 +2168,7 @@ public class ReconciliationHandlerTest {
     FIN_BankStatementLine l1 = autoMatchLine("l1", "50.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "50.00");
     FIN_BankStatementLine l3 = autoMatchLine("l3", "50.00");
-    doReturn(Arrays.asList(l1, l2, l3)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Arrays.asList(l1, l2, l3)).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
 
     FIN_FinaccTransaction t1 = autoMatchTxn("t1", "50.00");
     FIN_FinaccTransaction t2 = autoMatchTxn("t2", "50.00");
@@ -2191,7 +2218,8 @@ public class ReconciliationHandlerTest {
     FIN_BankStatementLine lUnique = autoMatchLine("lUnique", "30.00");
     FIN_BankStatementLine lDup1 = autoMatchLine("lDup1", "10.00");
     FIN_BankStatementLine lDup2 = autoMatchLine("lDup2", "10.00");
-    doReturn(Arrays.asList(lUnique, lDup1, lDup2)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Arrays.asList(lUnique, lDup1, lDup2)).when(handler)
+        .loadPendingLines(eq(ACC_ID), anyBoolean());
 
     FIN_FinaccTransaction tUnique = autoMatchTxn("tUnique", "30.00");
     FIN_FinaccTransaction tDupA = autoMatchTxn("tDupA", "10.00");
@@ -2249,7 +2277,7 @@ public class ReconciliationHandlerTest {
 
     FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
-    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
 
     FIN_FinaccTransaction t1 = autoMatchTxn("t1", "1.00");
     doReturn(t1).when(handler).loadTransaction("t1");
@@ -2497,11 +2525,13 @@ public class ReconciliationHandlerTest {
    * returns the HQL it was built from, whitespace-collapsed. The query mock and its bound named
    * parameters are kept in {@link #pendingLinesQuery} and {@link #pendingLinesParams}.
    *
-   * @param rows what the query returns, i.e. the rows the Automatch would receive
+   * @param rows             what the query returns, i.e. the rows the Automatch would receive
+   * @param discardsHonoured {@code bank-bounce-suggestions} as the action entry evaluated it
    * @return the HQL handed to {@code OBDal.createQuery}
    */
   @SuppressWarnings("unchecked")
-  private String capturePendingLinesHql(List<FIN_BankStatementLine> rows) {
+  private String capturePendingLinesHql(List<FIN_BankStatementLine> rows,
+      boolean discardsHonoured) {
     org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> query =
         mock(org.openbravo.dal.service.OBQuery.class);
     pendingLinesQuery = query;
@@ -2512,7 +2542,7 @@ public class ReconciliationHandlerTest {
       when(query.setNamedParameters(any())).thenReturn(query);
       when(query.list()).thenReturn(rows);
 
-      List<FIN_BankStatementLine> result = handler.loadPendingLines(ACC_ID);
+      List<FIN_BankStatementLine> result = handler.loadPendingLines(ACC_ID, discardsHonoured);
       assertEquals("the query's rows must be returned verbatim", rows.size(), result.size());
 
       ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
@@ -2549,7 +2579,7 @@ public class ReconciliationHandlerTest {
   public void testLoadPendingLinesOnlyProposesLinesOfAProcessedStatement() {
     pendingLinesAccount();
 
-    String hql = capturePendingLinesHql(Arrays.asList(mock(FIN_BankStatementLine.class)));
+    String hql = capturePendingLinesHql(Arrays.asList(mock(FIN_BankStatementLine.class)), true);
 
     assertTrue("the Automatch must not propose a DRAFT statement's lines: expected "
         + HQL_PROCESSED_GATE + " in " + hql, hql.contains(HQL_PROCESSED_GATE));
@@ -2575,7 +2605,7 @@ public class ReconciliationHandlerTest {
   public void testLoadPendingLinesAddsNoAlreadyReconciledException() {
     pendingLinesAccount();
 
-    String hql = capturePendingLinesHql(Collections.emptyList());
+    String hql = capturePendingLinesHql(Collections.emptyList(), true);
 
     assertFalse("no predicate may reference a reconciliation (ETP-5121); got: " + hql,
         hql.toLowerCase(Locale.ROOT).contains("reconciliation"));
@@ -2609,14 +2639,11 @@ public class ReconciliationHandlerTest {
 
     String hql;
     try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
-        mockStatic(org.openbravo.base.weld.WeldUtils.class);
-        MockedStatic<BankBounceSuggestionsFlag> flag =
-            mockStatic(BankBounceSuggestionsFlag.class)) {
-      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+        mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
       weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
           org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
           .thenReturn(Collections.singletonList(hook));
-      hql = capturePendingLinesHql(Collections.emptyList());
+      hql = capturePendingLinesHql(Collections.emptyList(), true);
     }
 
     assertTrue("the hook's condition must be appended to the WHERE clause; got " + hql,
@@ -2651,14 +2678,11 @@ public class ReconciliationHandlerTest {
 
     String hql;
     try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
-        mockStatic(org.openbravo.base.weld.WeldUtils.class);
-        MockedStatic<BankBounceSuggestionsFlag> flag =
-            mockStatic(BankBounceSuggestionsFlag.class)) {
-      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+        mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
       weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
           org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
           .thenReturn(Collections.singletonList(hook));
-      hql = capturePendingLinesHql(Collections.emptyList());
+      hql = capturePendingLinesHql(Collections.emptyList(), false);
     }
 
     assertFalse(asked.get());
@@ -2685,7 +2709,7 @@ public class ReconciliationHandlerTest {
       weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
           org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
           .thenReturn(Collections.singletonList(hook));
-      hql = capturePendingLinesHql(Collections.emptyList());
+      hql = capturePendingLinesHql(Collections.emptyList(), true);
     }
 
     assertFalse(asked.get());

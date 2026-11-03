@@ -24,6 +24,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -280,12 +281,12 @@ public class ReconciliationDifferenceSupportTest {
         .when(handler).loadMatchGroupLines(statement, GROUP_ID);
     doReturn(TRX_ID).when(handler).createTransactionForRule(any(), any(), any());
     doReturn(NeoResponse.createdWithData(new JSONObject().put("reconciliationId", "rec-1")))
-        .when(handler).reconcileGroup(any());
+        .when(handler).reconcileGroup(any(), anyBoolean());
   }
 
   private void assertNoWrite() throws Exception {
     verify(handler, never()).createTransactionForRule(any(), any(), any());
-    verify(handler, never()).reconcileGroup(any());
+    verify(handler, never()).reconcileGroup(any(), anyBoolean());
   }
 
   private static String errorMessage(NeoResponse response) throws Exception {
@@ -684,7 +685,7 @@ public class ReconciliationDifferenceSupportTest {
     assertTrue("the message must spell out the configured percentage", message.contains("5%"));
     assertTrue("the message must spell out the resulting limit", message.contains("0.68"));
     verify(handler, never()).createTransactionForRule(any(), any(), any());
-    verify(handler, never()).reconcileGroup(any());
+    verify(handler, never()).reconcileGroup(any(), anyBoolean());
   }
 
   /**
@@ -756,7 +757,7 @@ public class ReconciliationDifferenceSupportTest {
     assertEquals(ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED, errorMessage(response));
     assertEquals(REM_ID, response.getBody().getString("remainderLineId"));
     verify(handler, never()).createTransactionForRule(any(), any(), any());
-    verify(handler, never()).reconcileGroup(any());
+    verify(handler, never()).reconcileGroup(any(), anyBoolean());
   }
 
   /**
@@ -775,8 +776,11 @@ public class ReconciliationDifferenceSupportTest {
     NeoResponse response;
     try (MockedStatic<StatementLineFilter> filter =
         mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
-        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
-      filter.when(() -> StatementLineFilter.isExcluded(remainder,
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag =
+            mockStatic(BankBounceSuggestionsFlag.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+      filter.when(() -> StatementLineFilter.isExcluded(true, remainder,
           org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage
               .MATCH_STATEMENT_GRID)).thenReturn(true);
       msgMock.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
@@ -793,7 +797,9 @@ public class ReconciliationDifferenceSupportTest {
   /**
    * ETP-5581, flag off: with {@code bank-bounce-suggestions} off a discarded remainder is a plain
    * pending line. A real hook is deployed and the database would answer "excluded", yet the
-   * difference is reconciled (201): the flag is read, no line query runs and the write is reached.
+   * difference is reconciled (201): the flag is read ONCE for the whole action (the preflight and
+   * the delegated {@code reconcileGroup} share it), no hook is asked, no line query runs and the
+   * write is reached.
    * Same fixture as {@link #testDiscardedLineReturns409LineDiscardedAndWritesNothing}.
    *
    * @throws Exception if the mocked interaction fails
@@ -826,15 +832,14 @@ public class ReconciliationDifferenceSupportTest {
         when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString()))
             .thenReturn(excludedQuery);
       });
-      flag.verify(BankBounceSuggestionsFlag::isEnabled);
+      flag.verify(BankBounceSuggestionsFlag::isEnabled, Mockito.times(1));
       verify(dalSeen[0], never()).createQuery(eq(FIN_BankStatementLine.class), anyString());
     }
 
     assertEquals(201, response.getHttpStatus());
-    assertFalse("the hook is asked: the flag is read only when a hook has a condition",
-        hookAsked.isEmpty());
+    assertTrue("with the flag off no hook is asked", hookAsked.isEmpty());
     verify(handler).createTransactionForRule(eq(account), any(), any());
-    verify(handler).reconcileGroup(any());
+    verify(handler).reconcileGroup(any(), eq(false));
   }
 
   /**
@@ -1014,7 +1019,7 @@ public class ReconciliationDifferenceSupportTest {
     assertEquals(201, response.getHttpStatus());
 
     ArgumentCaptor<JSONObject> captor = ArgumentCaptor.forClass(JSONObject.class);
-    verify(handler).reconcileGroup(captor.capture());
+    verify(handler).reconcileGroup(captor.capture(), anyBoolean());
     JSONObject sent = captor.getValue();
     assertEquals(ACC_ID, sent.getString("financialAccountId"));
     assertEquals(REM_ID, sent.getString("statementLineId"));
@@ -1064,7 +1069,7 @@ public class ReconciliationDifferenceSupportTest {
   public void testDelegatedErrorRollsBackAndPropagates() throws Exception {
     stubPartialGroup("12.00", null, "0.50", null);
     doReturn(NeoResponse.error(400, "amounts do not match"))
-        .when(handler).reconcileGroup(any());
+        .when(handler).reconcileGroup(any(), anyBoolean());
 
     NeoResponse response = runActionReachingTheWrite(body(ACC_ID, REM_ID));
 
@@ -1081,7 +1086,7 @@ public class ReconciliationDifferenceSupportTest {
   @Test
   public void testNullDelegatedResponseRollsBackAndReturns500() throws Exception {
     stubPartialGroup("12.00", null, "0.50", null);
-    doReturn(null).when(handler).reconcileGroup(any());
+    doReturn(null).when(handler).reconcileGroup(any(), anyBoolean());
 
     NeoResponse response = runActionReachingTheWrite(body(ACC_ID, REM_ID));
 

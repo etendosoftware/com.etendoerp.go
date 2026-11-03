@@ -85,6 +85,10 @@ class BankBounceSuggestionsFlagTest {
   /** The JVM's own value of the flag property (a {@code -D} override), restored after each case. */
   private String jvmOverride;
 
+  /**
+   * Isolates each case from the machine's configuration: clears a {@code -D} override of the
+   * flag (kept to restore it) and serves an empty {@code Openbravo.properties}.
+   */
   @BeforeEach
   void isolateFromOpenbravoProperties() {
     // A -D override outranks every other source, so "unset" means unset here too; it is put back
@@ -96,6 +100,10 @@ class BankBounceSuggestionsFlagTest {
     propertiesMock.when(OBPropertiesProvider::getInstance).thenReturn(provider);
   }
 
+  /**
+   * Restores the JVM's own {@code -D} override of the flag, if it had one, and closes the
+   * properties mock.
+   */
   @AfterEach
   void clearOverride() {
     if (jvmOverride != null) {
@@ -106,6 +114,7 @@ class BankBounceSuggestionsFlagTest {
     propertiesMock.close();
   }
 
+  /** The flag key is the registered one. */
   @Test
   void theFlagKeyIsTheRegisteredOne() {
     assertEquals(FLAG_KEY, GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS);
@@ -132,6 +141,7 @@ class BankBounceSuggestionsFlagTest {
         stringValue(ctx, FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE));
   }
 
+  /** An account the rule does not target reads off. */
   @Test
   void anAccountTheRuleDoesNotTargetReadsOff() {
     CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
@@ -156,6 +166,7 @@ class BankBounceSuggestionsFlagTest {
 
   // ---------------------------------------------------------------- no account means off
 
+  /** No ob context reads off with no identity. */
   @Test
   void noOBContextReadsOffWithNoIdentity() {
     CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
@@ -164,6 +175,7 @@ class BankBounceSuggestionsFlagTest {
     assertNoIdentity(provider);
   }
 
+  /** No account behind the user reads off. */
   @Test
   void noAccountBehindTheUserReadsOff() {
     CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
@@ -172,6 +184,7 @@ class BankBounceSuggestionsFlagTest {
     assertNoIdentity(provider);
   }
 
+  /** An account with a null email reads off. */
   @Test
   void anAccountWithANullEmailReadsOff() {
     CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
@@ -183,6 +196,7 @@ class BankBounceSuggestionsFlagTest {
     assertNoIdentity(provider);
   }
 
+  /** A failed account query reads off. */
   @Test
   void aFailedAccountQueryReadsOff() {
     CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
@@ -196,6 +210,7 @@ class BankBounceSuggestionsFlagTest {
     assertNoIdentity(provider);
   }
 
+  /** A failure reading the user reads off. */
   @Test
   void aFailureReadingTheUserReadsOff() {
     CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
@@ -209,6 +224,7 @@ class BankBounceSuggestionsFlagTest {
     assertNoIdentity(provider);
   }
 
+  /** No user in the context reads off. */
   @Test
   void noUserInTheContextReadsOff() {
     CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
@@ -220,6 +236,7 @@ class BankBounceSuggestionsFlagTest {
 
   // ---------------------------------------------------------------- fail closed
 
+  /** An unset flag reads off. */
   @Test
   void anUnsetFlagReadsOff() {
     try (MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class)) {
@@ -229,6 +246,7 @@ class BankBounceSuggestionsFlagTest {
     }
   }
 
+  /** A value that is not a boolean reads off. */
   @ParameterizedTest
   @ValueSource(strings = { "maybe", "on", "enabled", "2" })
   void aValueThatIsNotABooleanReadsOff(String value) {
@@ -240,6 +258,7 @@ class BankBounceSuggestionsFlagTest {
     }
   }
 
+  /** A provider that fails reads off and does not throw. */
   @Test
   void aProviderThatFailsReadsOffAndDoesNotThrow() {
     // The failing provider would have matched this very account: a failure must still read off.
@@ -280,6 +299,12 @@ class BankBounceSuggestionsFlagTest {
     }
   }
 
+  /**
+   * An {@code OBContext} mock whose user has the given username.
+   *
+   * @param username the username
+   * @return the context
+   */
   private static OBContext contextOfUser(String username) {
     User user = mock(User.class);
     when(user.getUsername()).thenReturn(username);
@@ -288,6 +313,15 @@ class BankBounceSuggestionsFlagTest {
     return context;
   }
 
+  /**
+   * Runs an evaluation with {@code provider} installed as the Etendo GO OpenFeature provider,
+   * then puts the properties provider back.
+   *
+   * @param provider   the provider to install
+   * @param evaluation what to evaluate
+   * @param <T>        the result type
+   * @return the evaluation's result
+   */
   private static <T> T withProvider(FeatureProvider provider, Supplier<T> evaluation) {
     // Initialise the OpenFeature client without resolving any account.
     GoFeatureFlags.isEnabled(FLAG_KEY, FeatureFlagContext.environment());
@@ -309,10 +343,24 @@ class BankBounceSuggestionsFlagTest {
     }
   }
 
+  /**
+   * Throws an {@link AssertionError}, typed so it can stand for any supplier's result.
+   *
+   * @param message the failure message
+   * @param <T>     the expected type
+   * @return never
+   */
   private static <T> T fail(String message) {
     throw new AssertionError(message);
   }
 
+  /**
+   * A string attribute of an evaluation context.
+   *
+   * @param ctx the context, possibly {@code null}
+   * @param key the attribute
+   * @return its value, or {@code null}
+   */
   private static String stringValue(EvaluationContext ctx, String key) {
     Value value = ctx == null ? null : ctx.getValue(key);
     return value == null ? null : value.asString();
@@ -328,16 +376,36 @@ class BankBounceSuggestionsFlagTest {
     private final String enabledForEmail;
     private final List<EvaluationContext> contexts = new ArrayList<>();
 
+    /**
+     * A capturing provider.
+     *
+     * @param fail            whether every evaluation throws
+     * @param enabledForEmail the lowercase email the flag answers {@code true} for
+     */
     CapturingProvider(boolean fail, String enabledForEmail) {
       this.fail = fail;
       this.enabledForEmail = enabledForEmail;
     }
 
+    /**
+     * The provider's name.
+     *
+     * @return its metadata
+     */
     @Override
     public Metadata getMetadata() {
       return () -> "bank-bounce-suggestions-capturing-stub";
     }
 
+    /**
+     * Records the context of a {@code bank-bounce-suggestions} evaluation and answers {@code true}
+     * only for the targeted email; throws when built to fail.
+     *
+     * @param key          the flag key
+     * @param defaultValue the caller's default
+     * @param ctx          the evaluation context
+     * @return the evaluation
+     */
     @Override
     public ProviderEvaluation<Boolean> getBooleanEvaluation(String key, Boolean defaultValue,
         EvaluationContext ctx) {
@@ -352,24 +420,56 @@ class BankBounceSuggestionsFlagTest {
       return ProviderEvaluation.<Boolean>builder().value(match).reason("TARGETING_MATCH").build();
     }
 
+    /**
+     * Not used: answers the default.
+     *
+     * @param key          the flag key
+     * @param defaultValue the default
+     * @param ctx          the evaluation context
+     * @return the default
+     */
     @Override
     public ProviderEvaluation<String> getStringEvaluation(String key, String defaultValue,
         EvaluationContext ctx) {
       return ProviderEvaluation.<String>builder().value(defaultValue).build();
     }
 
+    /**
+     * Not used: answers the default.
+     *
+     * @param key          the flag key
+     * @param defaultValue the default
+     * @param ctx          the evaluation context
+     * @return the default
+     */
     @Override
     public ProviderEvaluation<Integer> getIntegerEvaluation(String key, Integer defaultValue,
         EvaluationContext ctx) {
       return ProviderEvaluation.<Integer>builder().value(defaultValue).build();
     }
 
+    /**
+     * Not used: answers the default.
+     *
+     * @param key          the flag key
+     * @param defaultValue the default
+     * @param ctx          the evaluation context
+     * @return the default
+     */
     @Override
     public ProviderEvaluation<Double> getDoubleEvaluation(String key, Double defaultValue,
         EvaluationContext ctx) {
       return ProviderEvaluation.<Double>builder().value(defaultValue).build();
     }
 
+    /**
+     * Not used: answers the default.
+     *
+     * @param key          the flag key
+     * @param defaultValue the default
+     * @param ctx          the evaluation context
+     * @return the default
+     */
     @Override
     public ProviderEvaluation<Value> getObjectEvaluation(String key, Value defaultValue,
         EvaluationContext ctx) {

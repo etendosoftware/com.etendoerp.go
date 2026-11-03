@@ -623,12 +623,23 @@ class McpDeclaredActionsTest {
    */
   record ReportPair(Class<? extends NeoHandler> type, String spec, String formerQualifier,
       String agentActionsClass, String readAction) {
+    /**
+     * The spec name, so the parameterized case names read well.
+     *
+     * @return the spec
+     */
     @Override
     public String toString() {
       return spec;
     }
   }
 
+  /**
+   * The two report specs migrated to {@code @NeoExtension} by ETP-5581, each bound once by its
+   * annotation and once by its former qualifier only.
+   *
+   * @return one {@code (pair, binding)} argument set per case
+   */
   static Stream<Arguments> reportPairs() {
     ReportPair rec = new ReportPair(ReconciliationHandler.class, BANK_REC, "bankReconciliation",
         "com.etendoerp.go.schemaforge.ReconciliationAgentActions", "pendingLines");
@@ -651,6 +662,7 @@ class McpDeclaredActionsTest {
   @DisplayName("ETP-5581 — MCP readers resolve the bank report pairs by annotation or by qualifier")
   class BindingModes {
 
+    /** McpDeclaredActions.of: the handler's whole declaration. */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
     @DisplayName("McpDeclaredActions.of: the handler's whole declaration")
@@ -662,6 +674,14 @@ class McpDeclaredActionsTest {
       }
     }
 
+    /**
+     * {@code etendo_discover}: the spec is {@code actions_only} and names the entity whose actions
+     * it lists ({@code NeoActionContract.resolve}), however the handler is bound.
+     *
+     * @param pair the report spec under test
+     * @param mode how its handler is bound
+     * @throws Exception when the discovery fails
+     */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
     @DisplayName("etendo_discover: actions_only with the actions and their entity (NeoActionContract"
@@ -679,6 +699,7 @@ class McpDeclaredActionsTest {
       }
     }
 
+    /** {@code tools/list}: the spec is an action report spec (ToolRegistryActionSpecs). */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
     @DisplayName("tools/list: the spec is an action report spec (ToolRegistryActionSpecs)")
@@ -692,6 +713,7 @@ class McpDeclaredActionsTest {
       }
     }
 
+    /** {@code etendo_schema}: McpReportActionsSchema answers the entity's catalog. */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
     @DisplayName("etendo_schema: McpReportActionsSchema answers the entity's catalog")
@@ -709,6 +731,7 @@ class McpDeclaredActionsTest {
       }
     }
 
+    /** {@code etendo_action}: the dispatcher's ACTION surface reaches the agent-actions class. */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
     @DisplayName("etendo_action: the dispatcher's ACTION surface reaches the agent-actions class")
@@ -749,6 +772,7 @@ class McpDeclaredActionsTest {
       }
     }
 
+    /** {@code etendo_report}: resolves the handler (resolveOnly) and answers not configured. */
     @ParameterizedTest(name = "{0} / {1}")
     @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
     @DisplayName("etendo_report: resolves the handler (resolveOnly) and answers not configured")
@@ -795,6 +819,13 @@ class McpDeclaredActionsTest {
     private final MockedStatic<OBDal> obDal;
     private final MockedStatic<OBContext> obContext;
 
+    /**
+     * Builds the fixture: a spied handler of the pair's type and the static mocks that resolve it
+     * by annotation or by its former qualifier only.
+     *
+     * @param pair the report spec under test
+     * @param mode how its handler is bound
+     */
     @SuppressWarnings("unchecked")
     PairFixture(ReportPair pair, BoundBy mode) {
       this.pair = pair;
@@ -853,6 +884,13 @@ class McpDeclaredActionsTest {
       asked.clear();
     }
 
+    /**
+     * Answers the qualifier lookup: the spied handler for the pair's former qualifier when the
+     * fixture binds by qualifier only, else nothing. Every asked qualifier is recorded.
+     *
+     * @param invocation the lookup call
+     * @return the handler, or {@code null}
+     */
     private NeoHandler byQualifier(InvocationOnMock invocation) {
       String qualifier = invocation.getArgument(0);
       asked.add(qualifier);
@@ -869,6 +907,7 @@ class McpDeclaredActionsTest {
       }
     }
 
+    /** Closes every static mock and drops the caches the fixture invalidated. */
     @Override
     public void close() {
       obContext.close();

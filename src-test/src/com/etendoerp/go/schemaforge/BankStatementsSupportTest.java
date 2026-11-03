@@ -90,30 +90,35 @@ public class BankStatementsSupportTest {
 
   // ── deriveStatementStatus with discarded lines (a discarded line is resolved) ──
 
+  /** Derive statement status is reconciled when matched plus discarded cover every line. */
   @Test
   public void deriveStatementStatusIsReconciledWhenMatchedPlusDiscardedCoverEveryLine() {
     assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(3, 1, 2));
     assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(true, 3, 1, 2));
   }
 
+  /** Derive statement status is reconciled when every line is discarded. */
   @Test
   public void deriveStatementStatusIsReconciledWhenEveryLineIsDiscarded() {
     assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(2, 0, 2));
     assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(true, 2, 0, 2));
   }
 
+  /** Derive statement status is partial while some lines are still pending. */
   @Test
   public void deriveStatementStatusIsPartialWhileSomeLinesAreStillPending() {
     assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(4, 1, 1));
     assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(true, 4, 1, 1));
   }
 
+  /** Derive statement status is partial when only a discarded line is resolved. */
   @Test
   public void deriveStatementStatusIsPartialWhenOnlyADiscardedLineIsResolved() {
     assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(4, 0, 1));
     assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(true, 4, 0, 1));
   }
 
+  /** Derive statement status is pending when nothing is resolved. */
   @Test
   public void deriveStatementStatusIsPendingWhenNothingIsResolved() {
     assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(0, 0, 0));
@@ -122,6 +127,7 @@ public class BankStatementsSupportTest {
     assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(true, 3, 0, 0));
   }
 
+  /** Derive statement status reads a negative discarded count as zero. */
   @Test
   public void deriveStatementStatusReadsANegativeDiscardedCountAsZero() {
     assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(3, 0, -2));
@@ -130,6 +136,7 @@ public class BankStatementsSupportTest {
     assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(true, 3, 2, -1));
   }
 
+  /** Derive statement status is draft when unprocessed whatever the counts. */
   @Test
   public void deriveStatementStatusIsDraftWhenUnprocessedWhateverTheCounts() {
     assertEquals("DRAFT", BankStatementsSupport.deriveStatementStatus(false, 3, 1, 2));

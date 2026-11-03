@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anySet;
@@ -128,6 +129,10 @@ public class ReconciliationHandlerBounceSuggestionsTest {
   private ReconciliationHandler handler;
   private FIN_FinancialAccount account;
 
+  /**
+   * A spied handler whose rollback, tolerances, account and rules are stubbed, so each case only
+   * stubs what it composes.
+   */
   @Before
   public void setUp() {
     handler = spy(new ReconciliationHandler());
@@ -140,6 +145,7 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
   }
 
+  /** Releases the inline mocks, so a spy of one case never leaks into the next. */
   @After
   public void clearMocks() {
     Mockito.framework().clearInlineMocks();
@@ -149,6 +155,14 @@ public class ReconciliationHandlerBounceSuggestionsTest {
   // fixtures
   // ---------------------------------------------------------------------------
 
+  /**
+   * A candidate detection-model line.
+   *
+   * @param id     the line id
+   * @param amount the signed amount
+   * @param date   its day
+   * @return the line
+   */
   private static StatementLine model(String id, long amount, LocalDate date) {
     return new StatementLine(id, date, 10, "", "", BigDecimal.valueOf(amount), true);
   }
@@ -177,6 +191,13 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     return line;
   }
 
+  /**
+   * A movement of the account with its signed amount.
+   *
+   * @param id     the movement id
+   * @param amount the signed amount
+   * @return the mock
+   */
   private static FIN_FinaccTransaction trx(String id, long amount) {
     FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
     FIN_FinancialAccount acc = mock(FIN_FinancialAccount.class);
@@ -207,10 +228,23 @@ public class ReconciliationHandlerBounceSuggestionsTest {
         .put("reconcileStatus", "PENDING");
   }
 
+  /**
+   * The {@code data} of an enveloped answer.
+   *
+   * @param response the answer
+   * @return its data
+   * @throws Exception when it is not there
+   */
   private static JSONObject data(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("response").getJSONObject("data");
   }
 
+  /**
+   * The group keys of the given pairs.
+   *
+   * @param pairs the pairs
+   * @return their group keys
+   */
   private static Set<String> ids(List<Pair> pairs) {
     Set<String> out = new HashSet<>();
     for (Pair p : pairs) {
@@ -292,7 +326,7 @@ public class ReconciliationHandlerBounceSuggestionsTest {
   private List<FIN_BankStatementLine> stubAutoMatchLines() {
     List<FIN_BankStatementLine> lines = Arrays.asList(dalLine("O1", -100), dalLine("B1", 100),
         dalLine("O2", -50), dalLine("B2", 50), dalLine("T", 70));
-    doReturn(lines).when(handler).loadPendingLines(ACC_ID);
+    doReturn(lines).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
     doReturn(new HashSet<>()).when(handler)
         .suggestedTransactionIds(eq(ACC_ID), anyString(), anyInt(), any());
     doReturn(new HashSet<>(Collections.singleton("t-o2"))).when(handler)
@@ -323,7 +357,10 @@ public class ReconciliationHandlerBounceSuggestionsTest {
           .thenReturn(new int[] { 0, 0 });
       // Stubbing records an invocation; only what buildAutoMatch calls must be verifiable.
       detector.clearInvocations();
-      return handler.buildAutoMatch(ACC_ID);
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+      // ETP-5581: the flag is read once for the whole request and handed down.
+      flagMock.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
+      return response;
     }
   }
 
@@ -476,6 +513,12 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     assertEquals(offData.toString(), onData.toString());
   }
 
+  /**
+   * The keys of a JSON object.
+   *
+   * @param json the object
+   * @return its keys
+   */
   private static Set<String> keys(JSONObject json) {
     Set<String> out = new HashSet<>();
     for (Iterator<?> it = json.keys(); it.hasNext();) {
@@ -510,11 +553,24 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     return classified;
   }
 
+  /**
+   * The panel fixture: every line of the pair fixtures plus the plain line {@code T}.
+   *
+   * @return the rows
+   * @throws Exception when a row cannot be written
+   */
   private static JSONArray panelRows() throws Exception {
     return new JSONArray(Arrays.asList(row("O1", -100), row("B1", 100), row("O2", -50),
         row("B2", 50), row("B3", 30), row("C1", -30), row("C2", -30), row("T", 70)));
   }
 
+  /**
+   * The rows by id.
+   *
+   * @param rows the rows
+   * @return the rows by id
+   * @throws Exception when a row cannot be read
+   */
   private static Map<String, JSONObject> byId(JSONArray rows) throws Exception {
     Map<String, JSONObject> out = new HashMap<>();
     for (int i = 0; i < rows.length(); i++) {
@@ -889,11 +945,28 @@ public class ReconciliationHandlerBounceSuggestionsTest {
   // applySuggestions
   // ---------------------------------------------------------------------------
 
+  /**
+   * An {@code applySuggestions} bounce-pair group.
+   *
+   * @param lineId        its {@code statementLineId}
+   * @param counterpartId its {@code counterpartLineId}
+   * @return the group
+   * @throws Exception when it cannot be written
+   */
   private static JSONObject bounceGroup(String lineId, String counterpartId) throws Exception {
     return new JSONObject().put("kind", "bouncePair").put("statementLineId", lineId)
         .put("counterpartLineId", counterpartId);
   }
 
+  /**
+   * An {@code applySuggestions} transaction group.
+   *
+   * @param kind   its {@code kind}, or {@code null} for none
+   * @param lineId its {@code statementLineId}
+   * @param ops    its {@code operationIds}
+   * @return the group
+   * @throws Exception when it cannot be written
+   */
   private static JSONObject txnGroup(String kind, String lineId, String... ops) throws Exception {
     JSONObject group = new JSONObject().put("statementLineId", lineId)
         .put("operationIds", new JSONArray(Arrays.asList(ops)));
@@ -903,11 +976,25 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     return group;
   }
 
+  /**
+   * An {@code applySuggestions} body for the account.
+   *
+   * @param groups the groups
+   * @return the body
+   * @throws Exception when it cannot be written
+   */
   private static JSONObject applyBody(JSONObject... groups) throws Exception {
     return new JSONObject().put("financialAccountId", ACC_ID)
         .put("groups", new JSONArray(Arrays.asList(groups)));
   }
 
+  /**
+   * Stubs the composition seams of the handler (draft reconciliation, matching, processing) so a
+   * transaction group reconciles successfully.
+   *
+   * @return the draft reconciliation the groups are matched into
+   * @throws Exception when a seam cannot be stubbed
+   */
   private FIN_Reconciliation stubCompose() throws Exception {
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
     when(rec.getId()).thenReturn("rec-1");
@@ -928,7 +1015,7 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     for (int i = 0; i < pairs.length; i += 2) {
       String a = pairs[i];
       String b = pairs[i + 1];
-      service.when(() -> BankBouncePairService.validate(any(), any(), eq(a), eq(b)))
+      service.when(() -> BankBouncePairService.validate(any(), any(), eq(a), eq(b), any()))
           .thenReturn(new BankBouncePairService.Validated(mock(FIN_BankStatementLine.class),
               mock(FIN_BankStatementLine.class), "return_text", "high", null));
     }
@@ -1046,8 +1133,8 @@ public class ReconciliationHandlerBounceSuggestionsTest {
       response = handler.applySuggestions(applyBody(bounceGroup("O1", "B1"),
           bounceGroup("O2", "B1")));
 
-      service.verify(() -> BankBouncePairService.validate(any(), any(), eq("O2"), eq("B1")),
-          never());
+      service.verify(
+          () -> BankBouncePairService.validate(any(), any(), eq("O2"), eq("B1"), any()), never());
       telemetry.verify(
           () -> ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(0, 0, 0));
     }
@@ -1062,7 +1149,10 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     assertEquals("O2", refused.getString("statementLineId"));
   }
 
-  /** A group of an unknown kind is refused 400 without loading its line. */
+  /**
+   * A group of an unknown kind is refused 400 without loading its line; the flag is read once for
+   * the call.
+   */
   @Test
   public void applySuggestionsRefusesAnUnknownGroupKind() throws Exception {
     NeoResponse response;
@@ -1073,8 +1163,8 @@ public class ReconciliationHandlerBounceSuggestionsTest {
 
       telemetry.verify(
           () -> ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(1, 1, 0));
-      // No bounce group: the flag is not even read.
-      flag.verifyNoInteractions();
+      // Read once for the whole call, as every action entry does, bounce group or not.
+      flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
     }
 
     assertEquals(201, response.getHttpStatus());
@@ -1109,7 +1199,8 @@ public class ReconciliationHandlerBounceSuggestionsTest {
           bounceGroup("O2", "B2")));
 
       flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
-      service.verify(() -> BankBouncePairService.validate(any(), any(), anyString(), anyString()),
+      service.verify(
+          () -> BankBouncePairService.validate(any(), any(), anyString(), anyString(), any()),
           never());
       service.verify(() -> BankBouncePairService.discard(any()), never());
       discard.verify(() -> StatementLineDiscard.setDiscarded(any(), Mockito.anyBoolean()), never());

@@ -947,6 +947,7 @@ public class BankStatementsHandlerTest {
 
       assertTrue("the statements query must select the stored discarded count",
           sql.getValue().contains("bs.em_etgo_discarded_count"));
+      flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
       assertEquals(1, rows.length());
       return rows.getJSONObject(0);
     }
@@ -2061,6 +2062,12 @@ public class BankStatementsHandlerTest {
     }
   }
 
+  /**
+   * The DAL property name the mocked model maps a PSD2 or bounce column to.
+   *
+   * @param column the column name
+   * @return the property name
+   */
   private static String bankProp(String column) {
     return "p_" + column.toLowerCase(Locale.ROOT);
   }

@@ -9,7 +9,7 @@ com.etendoerp.go.schemaforge.AutoMatchSupportRuleDimensionsTest
 com.etendoerp.go.schemaforge.AutoMatchSupportTest
 com.etendoerp.go.schemaforge.BankBounceDetectorTest
 com.etendoerp.go.schemaforge.BankBounceLineTextTest
-com.etendoerp.go.schemaforge.BankBouncePairDiscardTest
+com.etendoerp.go.schemaforge.BankBouncePairServiceTest
 com.etendoerp.go.schemaforge.BankBouncePaymentGuardTest
 com.etendoerp.go.schemaforge.BankBounceSuggestionsFlagTest
 com.etendoerp.go.schemaforge.BankStatementAgentActionsContractTest
