@@ -30,6 +30,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Record ownership for actions and CRUD targets. The strict CRUD contract is documented by
@@ -73,6 +74,13 @@ public final class NeoActionRecordGuard {
   /** The AD document-action button column; its id is always a row of the entity's own table. */
   private static final String DOC_ACTION_COLUMN = "DocAction";
 
+  /**
+   * Context attribute set when {@link #updateRefusalFor} waived the target-row guard because the
+   * customization declared the update consumed (ETP-6062). Read by the default write step, which
+   * must then refuse: see {@link #refusalForUndeliveredDelegation}.
+   */
+  static final String ATTR_TARGET_WRITE_DELEGATED = "neo.targetWriteDelegated";
+
   private NeoActionRecordGuard() {
   }
 
@@ -113,6 +121,96 @@ public final class NeoActionRecordGuard {
       return NeoResponse.error(404, MSG_RECORD_NOT_FOUND);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * {@link #writeRefusalFor} for a {@code PUT}/{@code PATCH}, with the one structural exception a
+   * customization may declare (ETP-6062): an update its {@link NeoHandler#consumesTargetWrite}
+   * says is stored entirely elsewhere, in tenant-owned rows, never writes the target row, so the
+   * target only has to be READABLE by the current tenant — not writable. The canonical case is a
+   * tenant's own override of a System row shared by every client.
+   *
+   * <p>The waiver is narrow on purpose:
+   * <ul>
+   *   <li>only an update ({@code PUT}/{@code PATCH}); anything else gets the strict answer;</li>
+   *   <li>only a row that exists and that {@link TenantOwnership#isVisibleToCurrentTenant} lets
+   *       the caller read — another tenant's row and an unknown id stay the same 404;</li>
+   *   <li>only when the entity's customization, resolved as every other reader resolves it
+   *       ({@link NeoHandlerLookup#forEntityQuietly}), answers {@code true} for THIS request; a
+   *       failure to resolve or to answer counts as {@code false}.</li>
+   * </ul>
+   * When the waiver applies the context is marked ({@link #ATTR_TARGET_WRITE_DELEGATED}), so the
+   * default write step can refuse if the customization then declines after all
+   * ({@link #refusalForUndeliveredDelegation}).
+   *
+   * @param entity  the SchemaForge entity whose tab holds the targeted row
+   * @param context the update request context; its record id names the row
+   * @return a 404, or {@code null} when the update may proceed
+   */
+  public static NeoResponse updateRefusalFor(SFEntity entity, NeoContext context) {
+    String recordId = context == null ? null : context.getRecordId();
+    NeoResponse strict = writeRefusalFor(entity, recordId);
+    if (strict == null || !isUpdate(context) || !isReadableRow(entity, recordId)
+        || !customizationConsumes(entity, context)) {
+      return strict;
+    }
+    context.setAttribute(ATTR_TARGET_WRITE_DELEGATED, Boolean.TRUE);
+    log.debug("CRUD target guard waived for entity '{}', record {}: the customization consumes "
+        + "the update", entity.getName(), recordId);
+    return null;
+  }
+
+  /**
+   * The refusal for a request whose target-row guard was waived by {@link #updateRefusalFor} but
+   * which reached a step that writes the target row anyway — the customization declined after
+   * declaring the update consumed. The same 404 the guard would have given, or {@code null} when
+   * no waiver was granted.
+   *
+   * @param context the request context; may be {@code null}
+   * @return a 404, or {@code null}
+   */
+  public static NeoResponse refusalForUndeliveredDelegation(NeoContext context) {
+    if (context == null
+        || !Boolean.TRUE.equals(context.getAttribute(ATTR_TARGET_WRITE_DELEGATED))) {
+      return null;
+    }
+    log.warn("CRUD write on entity '{}', record {} refused: the customization declared the "
+        + "update consumed but did not answer it", context.getEntityName(), context.getRecordId());
+    return NeoResponse.error(404, MSG_RECORD_NOT_FOUND);
+  }
+
+  private static boolean isUpdate(NeoContext context) {
+    String method = context == null ? null : context.getHttpMethod();
+    return "PUT".equals(method) || "PATCH".equals(method);
+  }
+
+  /** Whether the row exists and the current tenant may read it; {@code false} on any failure. */
+  private static boolean isReadableRow(SFEntity entity, String recordId) {
+    if (OBContext.getOBContext() == null) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      BaseOBObject row = resolveRecord(entity, recordId);
+      return row != null && TenantOwnership.isVisibleToCurrentTenant(row);
+    } catch (RuntimeException e) {
+      log.debug("Could not tell whether record {} is readable: {}", recordId, e.getMessage());
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The customization's {@link NeoHandler#consumesTargetWrite}; {@code false} on any failure. */
+  private static boolean customizationConsumes(SFEntity entity, NeoContext context) {
+    try {
+      NeoHandler customization = NeoHandlerLookup.forEntityQuietly(entity);
+      return customization != null && customization.consumesTargetWrite(context);
+    } catch (RuntimeException e) {
+      log.warn("CRUD target guard kept for entity '{}': consumesTargetWrite failed ({})",
+          entity.getName(), e.getClass().getSimpleName());
+      return false;
     }
   }
 

@@ -111,6 +111,10 @@ dependencies {
     // Same pattern as commons-lang3 above. Version pinned to the deployed one — a compileOnly
     // that drifts ahead of the runtime jar compiles fine and fails with NoSuchMethodError.
     compileOnly 'org.apache.poi:poi-ooxml:5.4.0'
+    // ETP-6013 — the Verifactu tax QR on a server-rendered invoice (NeoPrintableCommons). The same
+    // coordinates com.etendoerp.verifactu declares, so the two never resolve different versions.
+    // Not part of the Etendo core deployment, hence implementation, not compileOnly.
+    implementation('com.google.zxing:core:3.5.3') { transitive = false }
     testImplementation 'junit:junit:4.13.2'
     compileOnly 'com.fasterxml.jackson.core:jackson-databind:2.15.3'
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'

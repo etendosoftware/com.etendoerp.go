@@ -64,6 +64,8 @@ class QuotaDefinitionTest {
     when(quota.getEnforcementMode()).thenReturn(mode);
     when(quota.getWarningThreshold()).thenReturn(90L);
     when(quota.getConsumptionSource()).thenReturn(source);
+    when(quota.getWarningAlert()).thenReturn("dismissible");
+    when(quota.getLimitAlert()).thenReturn("hidden");
     return quota;
   }
 
@@ -100,6 +102,8 @@ class QuotaDefinitionTest {
     assertEquals("block", definition.getEnforcementMode());
     assertEquals(Long.valueOf(90L), definition.getWarningThreshold());
     assertEquals(ConsumptionSource.LIVE, definition.getSource());
+    assertEquals("dismissible", definition.getWarningAlert());
+    assertEquals("hidden", definition.getLimitAlert());
   }
 
   @Test
@@ -121,6 +125,8 @@ class QuotaDefinitionTest {
     assertEquals(ConsumptionSource.AGGREGATE, definition.getSource());
     assertEquals("off", definition.getEnforcementMode());
     assertNull(definition.getIncludedQty());
+    assertNull(definition.getWarningAlert(), "empty keeps the SPA's default");
+    assertNull(definition.getLimitAlert());
   }
 
   @ParameterizedTest

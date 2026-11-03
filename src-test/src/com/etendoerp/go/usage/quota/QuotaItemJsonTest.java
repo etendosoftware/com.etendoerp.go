@@ -43,7 +43,8 @@ class QuotaItemJsonTest {
 
   private static final Set<String> CONTRACT_KEYS = new TreeSet<>(Arrays.asList("resourceKey",
       "resourceName", "unitLabel", "includedQty", "enforcementMode", "warningThreshold", "period",
-      "consumptionSource", "consumed", "verdict", "periodStart", "periodEnd"));
+      "consumptionSource", "consumed", "verdict", "periodStart", "periodEnd", "warningAlert",
+      "limitAlert"));
 
   private static QuotaPeriod period() {
     return QuotaPeriod.current(PERIOD_START, PERIOD_END, false, NOW);
@@ -59,7 +60,7 @@ class QuotaItemJsonTest {
   void aMeasuredItemCarriesEveryContractField() throws Exception {
     QuotaDefinition definition = quota("POSTED_SALES_INVOICES", "block", 100L, 80L)
         .resourceName("Posted sales invoices").unitLabel("Inv")
-        .source(ConsumptionSource.LIVE).build();
+        .source(ConsumptionSource.LIVE).warningAlert("pinned").limitAlert("hidden").build();
 
     JSONObject item = QuotaItemJson.of(
         new QuotaEvaluation(definition, "month", period(), 87L, QuotaVerdict.WARN));
@@ -77,6 +78,8 @@ class QuotaItemJsonTest {
     assertEquals("WARN", item.getString("verdict"));
     assertEquals("2026-10-17", item.getString("periodStart"));
     assertEquals("2026-11-17", item.getString("periodEnd"), "the exclusive end day");
+    assertEquals("pinned", item.getString("warningAlert"));
+    assertEquals("hidden", item.getString("limitAlert"));
   }
 
   /**
@@ -104,7 +107,7 @@ class QuotaItemJsonTest {
 
     assertEquals(CONTRACT_KEYS, keys(item));
     for (String key : new String[] { "unitLabel", "warningThreshold", "period", "consumed",
-        "verdict", "periodStart", "periodEnd" }) {
+        "verdict", "periodStart", "periodEnd", "warningAlert", "limitAlert" }) {
       assertTrue(item.isNull(key), key + " must be JSON null: " + item);
     }
     assertEquals("off", item.getString("enforcementMode"));

@@ -2,6 +2,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
@@ -15,6 +16,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
@@ -86,6 +88,13 @@ class NeoBuiltInEndpointHandler {
     return "fiscal390".equals(specName) ? fiscal390Handler : null;
   }
 
+  /** ETP-6047: {@code POST /invoice-inbox/upload}, the only verb and path this built-in serves. */
+  private static boolean isInvoiceInboxUpload(NeoServlet.NeoPathInfo pathInfo, String method) {
+    return "invoice-inbox".equals(pathInfo.specName)
+        && IMAGE_UPLOAD_SEGMENT.equals(pathInfo.entityName)
+        && METHOD_POST.equals(method);
+  }
+
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     if (pathInfo.specName == null) {
@@ -110,12 +119,23 @@ class NeoBuiltInEndpointHandler {
       handleFiltersEndpoint(pathInfo, method, request, response);
       return true;
     }
+    if ("grid-views".equals(pathInfo.specName)) {
+      handleGridViewsEndpoint(pathInfo, method, request, response);
+      return true;
+    }
     if ("certificate".equals(pathInfo.specName)) {
       handleCertificateEndpoint(method, request, response);
       return true;
     }
     if ("attachments".equals(pathInfo.specName)) {
       handleAttachmentsEndpoint(method, request, response);
+      return true;
+    }
+    // ETP-6047: the invoice inbox bulk upload. The branch only delegates; the flag, the access
+    // check and the entity work live in InvoiceInboxUploadEndpoint. Any other verb or path of this
+    // spec falls through to the regular spec router.
+    if (isInvoiceInboxUpload(pathInfo, method)) {
+      servlet.writeResponse(response, InvoiceInboxUploadEndpoint.handle(request));
       return true;
     }
     AbstractFiscalHandler fiscalHandler = fiscalHandlerFor(pathInfo.specName);
@@ -246,6 +266,78 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Filters endpoint only supports GET, PUT and DELETE");
+  }
+
+  /** Handles a personal list view at {@code /sws/neo/grid-views/{spec}/{entity}}. */
+  private void handleGridViewsEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    String specName = pathInfo.entityName;
+    String entityName = pathInfo.recordId;
+    if (StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)
+        || !isStrictGridViewPath(request.getPathInfo())) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Spec and entity required: /sws/neo/grid-views/{spec}/{entity}");
+      return;
+    }
+    SFSpec spec = NeoServletSupport.findSpec(specName);
+    if (spec == null || !"W".equals(spec.getSpecType())) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND, "Window spec not found");
+      return;
+    }
+    if (!servlet.authenticator.hasWindowAccessForSpec(spec, method)) {
+      servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN, "Access denied to spec for current role");
+      return;
+    }
+    if (servlet.findEntity(spec.getId(), entityName) == null) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND, "Entity not found");
+      return;
+    }
+    if (METHOD_GET.equals(method)) {
+      JSONObject view = NeoGridViewsService.getView(specName, entityName);
+      servlet.writeResponse(response, view == null ? null : NeoResponse.ok(view));
+      return;
+    }
+    if ("PUT".equals(method)) {
+      try {
+        JSONObject view = NeoGridViewsService.saveView(specName, entityName,
+            readGridViewBody(request));
+        OBDal.getInstance().flush();
+        servlet.writeResponse(response, NeoResponse.ok(view));
+      } catch (IllegalArgumentException e) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      }
+      return;
+    }
+    if (METHOD_DELETE.equals(method)) {
+      NeoGridViewsService.deleteView(specName, entityName);
+      OBDal.getInstance().flush();
+      servlet.writeResponse(response, null);
+      return;
+    }
+    servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+        "Grid views endpoint only supports GET, PUT and DELETE");
+  }
+
+  private String readGridViewBody(HttpServletRequest request) throws IOException {
+    final int maxBytes = 65536;
+    if (request.getContentLengthLong() > maxBytes) {
+      throw new IllegalArgumentException("Grid view body is too large");
+    }
+    byte[] body = request.getInputStream().readNBytes(maxBytes + 1);
+    if (body.length > maxBytes) {
+      throw new IllegalArgumentException("Grid view body is too large");
+    }
+    return new String(body, StandardCharsets.UTF_8);
+  }
+
+  private boolean isStrictGridViewPath(String pathInfo) {
+    if (pathInfo == null) {
+      return false;
+    }
+    String normalized = pathInfo.startsWith("/") ? pathInfo.substring(1) : pathInfo;
+    String[] parts = normalized.split("/", -1);
+    return parts.length == 3 && "grid-views".equals(parts[0])
+        && StringUtils.isNotBlank(parts[1]) && StringUtils.isNotBlank(parts[2]);
   }
 
   private void handleEmailContractsEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,

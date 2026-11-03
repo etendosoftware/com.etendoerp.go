@@ -382,6 +382,62 @@ public final class GoFeatureFlags {
   public static final String FLAG_FISCAL_MODEL_390 = "fiscal-model-390";
 
   /**
+   * ETP-6047 (epic ETP-6046, "Invoice Inbox") — gates the <b>behaviour</b> of the incoming-invoice
+   * inbox, never its schema. Positive polarity: {@code true} = the inbox is enabled. Strictly off
+   * by default: an unconfigured flag, an unreachable control plane and any evaluation error all
+   * read as {@code false}.
+   *
+   * <p><b>What it gates.</b> The upload endpoint of the inbox must refuse the request when the flag
+   * is off, <em>before</em> any OCR work is enqueued. The {@code ETGO_INCOMING_DOCUMENT} table and
+   * the {@code Invoice Inbox} window ship unconditionally: the flag gates behaviour, not schema.
+   *
+   * <p><b>One reader.</b> Only {@code InvoiceInboxFlag} reads this key. It is evaluated at
+   * <b>request entry</b>, where the request user is the account owner. The asynchronous OCR worker
+   * has no {@code OBContext} user, so it must never re-evaluate the flag: a targeted user would
+   * look "off" there. Off-request callers use {@code InvoiceInboxFlag.isEnabled(email, clientId)}
+   * with the values captured at request entry.
+   *
+   * <p><b>Targeted per account</b> on the hosted arms: the context carries the authenticated
+   * account email (targeting key, {@code Email} and lowercase {@code email}) and {@code clientId};
+   * with no resolvable account, {@code clientId} only. A Datadog rule must be written on the
+   * lowercase {@code email} attribute alone, matched against a lowercase value. The local arm is a
+   * plain per-environment boolean: {@code etendo.go.flags.invoice-inbox} /
+   * {@code ETGO_FLAG_INVOICE_INBOX}.
+   *
+   * <p><b>Backend-only for now.</b> The web client has no key for it; story ETP-6049 adds one when
+   * the inbox gets a UI. TTL 2027-01-31, provisional until confirmed with product.
+   */
+  public static final String FLAG_INVOICE_INBOX = "invoice-inbox";
+
+  /**
+   * ETP-5889 — whether the Product window's "Movements" tab (the history of stock movements of a
+   * product) is switched on for an account. Gates behaviour only: the two stored computed columns of
+   * {@code M_Transaction} ({@code EM_Etgo_Warehouse_ID}, {@code EM_Etgo_Doc_Kind}), their triggers, the
+   * AD metadata and the NEO configuration ship unconditionally, like the columns of
+   * {@link #FLAG_CONTACT_CATEGORY_TYPE}.
+   *
+   * <p>Backend-only; never add it to {@code flag-keys.js}. The frontend reads
+   * {@code capabilities.productMovements} off {@code SFWindowAccessMap}'s response and never evaluates the
+   * flag itself: the tab hides, requests nothing and emits no telemetry while it is false. Off, the
+   * {@code ProductTransactionsHandler} also skips the extra work it does for that tab (the resulting
+   * stock of each movement and the exact total), which would otherwise run on every request the side
+   * panel already makes.
+   *
+   * <p><b>Evaluated per account</b>, with the account email of the session user as targeting key (same
+   * resolution as {@link #FLAG_BP_PORTAL_LINK}, in {@code ProductMovementsPolicy}): a targeting rule on the
+   * hosted control plane (Datadog Feature Flags, ConfigCat as the fallback) names the accounts. Positive
+   * polarity: {@code true} = the tab is on; the default ({@code false}, and every failure to resolve the
+   * account) is "hidden", which is the required pre-launch state. Locally
+   * {@code etendo.go.flags.product-movements-tab} / {@code ETGO_FLAG_PRODUCT_MOVEMENTS_TAB}, a plain boolean
+   * for everyone. Must also be created as a boolean setting on the hosted control plane before an account
+   * can be targeted: an undeclared setting resolves to this class's code default.
+   *
+   * <p>Callers: {@code ProductMovementsPolicy} (the only evaluator), used by {@code SFWindowAccessMap}
+   * (capability) and {@code ProductTransactionsHandler} (data).
+   */
+  public static final String FLAG_PRODUCT_MOVEMENTS_TAB = "product-movements-tab";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

@@ -355,4 +355,82 @@ public class InvoiceCompletionServiceTest {
           eq("inv-throw-ok"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
     }
   }
+
+  // ── ETP-6060: a plan quota refuses the completion ────────────────────────────
+
+  /** What the process does when {@link InvoiceCompletionQuotaHook} refuses in its preProcess. */
+  private static ProcessInvoiceUtil processRefusedByTheQuotaHook(String invoiceId) {
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(eq(invoiceId), eq("CO"), eq(""), eq(""), eq(""), any(), any()))
+        .thenAnswer(call -> {
+          try (MockedStatic<NeoQuotaCreateCheck> check =
+              Mockito.mockStatic(NeoQuotaCreateCheck.class);
+              MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+                  Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+            check.when(() -> NeoQuotaCreateCheck.requireAllowedStatusChange(any(), any(), any()))
+                .thenThrow(new NeoQuotaCreateCheck.Refused(NeoResponse.error(403,
+                    new org.codehaus.jettison.json.JSONObject().put("error",
+                        new org.codehaus.jettison.json.JSONObject()
+                            .put("code", "QUOTA_EXCEEDED")
+                            .put("message", "Quota exceeded: Facturas (2/2 facturas)"))), null));
+            return new InvoiceCompletionQuotaHook().preProcess(
+                mock(org.openbravo.model.common.invoice.Invoice.class), "CO");
+          }
+        });
+    return processInvoiceUtil;
+  }
+
+  /**
+   * The hook's {@link OBError} would read as a 400 business rejection; the completion answers the
+   * refusal's own 403 {@code QUOTA_EXCEEDED}, so the SPA shows the quota sentence and refreshes
+   * the banner, and rolls the transaction back.
+   */
+  @Test
+  public void completeInvoice_quotaRefusal_returns403QuotaExceeded() throws Exception {
+    ProcessInvoiceUtil processInvoiceUtil = processRefusedByTheQuotaHook("inv-quota");
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class);
+        MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(new VariablesSecureApp("u", "c", "o", "r", "en_US"));
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = InvoiceCompletionService.completeInvoice("inv-quota", null);
+
+      assertEquals(403, result.getHttpStatus());
+      assertEquals("QUOTA_EXCEEDED",
+          result.getBody().getJSONObject("error").getString("code"));
+      verify(dal).rollbackAndClose();
+      assertEquals(null, InvoiceCompletionQuotaHook.takeRefusal());
+    }
+  }
+
+  /** The creation handlers catch {@link NeoQuotaCreateCheck.Refused} and answer its 403. */
+  @Test
+  public void completeInvoiceOrThrow_quotaRefusal_throwsTheRefusal() {
+    ProcessInvoiceUtil processInvoiceUtil = processRefusedByTheQuotaHook("inv-quota-throw");
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class);
+        MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(new VariablesSecureApp("u", "c", "o", "r", "en_US"));
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      dalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+      try {
+        InvoiceCompletionService.completeInvoiceOrThrow("inv-quota-throw", null);
+        fail("expected the quota refusal");
+      } catch (NeoQuotaCreateCheck.Refused refused) {
+        assertEquals(403, refused.response().getHttpStatus());
+      }
+    }
+  }
 }

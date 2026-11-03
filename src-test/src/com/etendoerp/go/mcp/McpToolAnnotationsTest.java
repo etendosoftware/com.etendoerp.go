@@ -45,13 +45,14 @@ class McpToolAnnotationsTest {
       "etendo_list_attachments", "etendo_delete_attachment", "etendo_get_document_pdf",
       "etendo_send_document_email", "etendo_request_document_extraction_upload",
       "etendo_extract_invoice_document", "etendo_generate_amortization_plan", "etendo_feedback", "docs",
-      "etendo_job_status", "etendo_job_cancel");
+      "etendo_job_status", "etendo_job_cancel", "etendo_whoami");
 
   @Test
   void readOnlySetIsPinned() {
     assertEquals(Set.of("etendo_list", "etendo_get", "etendo_schema", "etendo_discover", "etendo_selectors",
         "etendo_defaults", "docs", "etendo_widget", "etendo_vector_search", "etendo_get_image_upload",
-        "etendo_list_attachments", "etendo_get_document_pdf", "etendo_extract_invoice_document", "etendo_job_status"),
+        "etendo_list_attachments", "etendo_get_document_pdf", "etendo_extract_invoice_document", "etendo_job_status",
+        "etendo_whoami"),
         McpToolAnnotations.READ_ONLY);
     assertEquals(Set.of("etendo_send_document_email", "etendo_extract_invoice_document"),
         McpToolAnnotations.OPEN_WORLD);
@@ -85,6 +86,8 @@ class McpToolAnnotationsTest {
     assertHints("etendo_batch", false, true, false);
     assertHints("etendo_action_batch", false, true, false);
     assertHints("etendo_job_status", true, false, true);
+    // etendo-ai#53: reads the session context and nothing else; asking twice gives the same answer.
+    assertHints("etendo_whoami", true, false, true);
     assertHints("etendo_job_cancel", false, true, false);
     assertHints("etendo_generate_amortization_plan", false, true, false);
     // ETP-5715: listing reads; the upload link is NOT additive because main:true replaces the

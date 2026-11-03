@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_TRANSACTION_DOC_KIND">
+    <function name="ETGO_TRANSACTION_DOC_KIND" type="VARCHAR" volatility="STABLE">
+      <parameter name="p_m_transaction_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_result VARCHAR(40);
+BEGIN
+  -- ETP-5889. Feeds M_Transaction.EM_Etgo_Doc_Kind (Computation_Mode = 'S', Refresh_Mode = 'S').
+  --
+  -- The kind of source document of a stock movement, as the GO window key that handles it. It is
+  -- the same rule ProductTransactionsHandler applies to inject etgoDocWindow into each row, kept
+  -- here as a stored column so the Product "Movements" tab can sort and filter by type in the
+  -- backend query. If one changes, change the other.
+  --
+  -- M_Transaction.MovementType is identical between a document and its return (C- / V+), so the
+  -- discriminator is C_DocType.IsReturn of the goods receipt/shipment header, together with
+  -- M_InOut.IsSOTrx.
+  --
+  -- TOTAL FUNCTION. Refresh_Mode = 'S' runs inside the transaction that posts the stock movement,
+  -- so an exception here would roll back the posting of the document. Every edge case resolves
+  -- to a value, never to an error: a null or unknown transaction id, a production movement (no GO
+  -- window yet) and a goods line whose header has no document type answer null.
+  -- Values: goods-shipment, return-material-receipt, goods-receipt, return-to-vendor-shipment,
+  -- goods-movements, physical-inventory, internal-consumption, or null.
+
+  IF p_m_transaction_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT CASE
+           WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'Y' AND dt.isreturn = 'N' THEN 'goods-shipment'
+           WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'Y' AND dt.isreturn = 'Y' THEN 'return-material-receipt'
+           WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'N' AND dt.isreturn = 'N' THEN 'goods-receipt'
+           WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'N' AND dt.isreturn = 'Y' THEN 'return-to-vendor-shipment'
+           WHEN t.m_movementline_id IS NOT NULL THEN 'goods-movements'
+           WHEN t.m_inventoryline_id IS NOT NULL THEN 'physical-inventory'
+           WHEN t.m_internal_consumptionline_id IS NOT NULL THEN 'internal-consumption'
+           ELSE NULL
+         END INTO v_result
+  FROM   m_transaction t
+         LEFT JOIN m_inoutline iol ON iol.m_inoutline_id = t.m_inoutline_id
+         LEFT JOIN m_inout io ON io.m_inout_id = iol.m_inout_id
+         LEFT JOIN c_doctype dt ON dt.c_doctype_id = io.c_doctype_id
+  WHERE  t.m_transaction_id = p_m_transaction_id;
+
+  RETURN v_result;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN NULL;
+END ETGO_TRANSACTION_DOC_KIND
+]]></body>
+    </function>
+  </database>

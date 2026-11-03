@@ -106,6 +106,7 @@ import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -151,6 +152,7 @@ import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.usage.IsolatedReader;
+import com.etendoerp.go.usage.TenantSeatCounter;
 import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
 import com.etendoerp.go.usage.quota.QuotaDefinition;
 import com.etendoerp.go.usage.quota.QuotaEvaluation;
@@ -970,7 +972,37 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     item.put("displayPrice", displayPrice.toPlainString());
     item.put(FIELD_CURRENCY, currency);
     item.put("billingInterval", StringUtils.defaultString(plan.getBillingInterval()));
+    item.put("includesApi", Boolean.TRUE.equals(plan.isIncludesAPI()));
+    item.put("highlight", plan.getHighlight() == null ? JSONObject.NULL : plan.getHighlight());
+    item.put("quotas", buildPlanQuotasJson(plan));
     return item;
+  }
+
+  /**
+   * What the plan includes per billing resource, for the plan chooser's feature list. Only the
+   * catalog side of a quota: nothing is evaluated, since a buyer has no consumption yet.
+   *
+   * <p>{@code kind} tells the card how to phrase the amount: {@code seats} is a headcount (the
+   * {@link TenantSeatCounter#QUALIFIER} strategy), {@code perYear} anything counted over the
+   * subscription year ({@code QuotaPeriod#yearContaining}), whatever the plan's billing interval.
+   */
+  private JSONArray buildPlanQuotasJson(Plan plan) throws JSONException {
+    JSONArray quotas = new JSONArray();
+    for (PlanQuota row : planCatalogService.listActiveQuotas(plan)) {
+      QuotaDefinition quota = QuotaDefinition.of(row);
+      if (quota.getIncludedQty() == null) {
+        continue;
+      }
+      JSONObject item = new JSONObject();
+      item.put(QuotaItemJson.RESOURCE_KEY, StringUtils.defaultString(quota.getResourceKey()));
+      item.put(QuotaItemJson.RESOURCE_NAME, StringUtils.defaultString(quota.getResourceName()));
+      item.put(QuotaItemJson.UNIT_LABEL, StringUtils.defaultString(quota.getUnitLabel()));
+      item.put(QuotaItemJson.INCLUDED_QTY, quota.getIncludedQty());
+      item.put("kind", TenantSeatCounter.QUALIFIER.equals(quota.getStrategyQualifier())
+          ? "seats" : "perYear");
+      quotas.put(item);
+    }
+    return quotas;
   }
 
   /**
@@ -1551,6 +1583,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * page shows: the entered environment's own one, else the account's newest
    * ({@link #findShownSubscription}).
    *
+   * <p>ETP-6060 — "Mis empresas" shows each owned company's subscription whatever environment the
+   * session is in, so the optional query parameter {@code clientId} names it, exactly as the
+   * portal's body does ({@link #findRequestedSubscription}). Ownership stays the query's: a client
+   * this account did not buy answers {@code hasSubscription: false}. A blank value or {@code "0"}
+   * keeps the rule above.
+   *
    * <p>Only the provider call maps an {@link IllegalStateException} to 503: that is where the
    * Stripe "not configured" condition is raised. The same exception from the stored-state lookup
    * is a real server fault and reaches {@code runWithPlatformContext}'s 500 path.
@@ -1558,7 +1596,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleBillingSubscription(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     runWithPlatformContext(request, response, "billing-subscription", authenticated -> {
-      CheckoutRequest purchase = findShownSubscription(authenticated);
+      CheckoutRequest purchase = findRequestedSubscription(authenticated,
+          requestedSubscriptionClientId(request));
       if (purchase == null) {
         JSONObject result = new JSONObject();
         result.put("hasSubscription", false);
@@ -1606,7 +1645,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *
    * <p>ETP-5051 (O-1b) — "Mis empresas" manages each row's own environment, whatever environment
    * the session is in, so the optional JSON body {@code {"clientId": "<AD_CLIENT_ID>"}} names it
-   * ({@link #findPortalSubscription}). Ownership stays the query's: a client this account did not
+   * ({@link #findRequestedSubscription}). Ownership stays the query's: a client this account did not
    * buy matches nothing and answers {@code 404 NO_SUBSCRIPTION}. No body, an empty body or no
    * {@code clientId} keeps the rule above; a body that is not a JSON object answers 400.
    */
@@ -1620,7 +1659,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
         return;
       }
-      CheckoutRequest purchase = findPortalSubscription(authenticated, requestedClientId);
+      CheckoutRequest purchase = findRequestedSubscription(authenticated, requestedClientId);
       if (purchase == null || StringUtils.isBlank(purchase.getStripeCustomer())) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "NO_SUBSCRIPTION",
             "No subscription for this account", "No subscription for this account");
@@ -1668,11 +1707,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-5051 (O-1b) — the purchase the portal opens: the named environment's own one when the
-   * caller names it (a "Mis empresas" row), else the one the account page shows
-   * ({@link #findShownSubscription}). Both lookups keep the account id and email in the query.
+   * ETP-6060 — the {@code clientId} query parameter of {@code GET /billing/subscription}, or
+   * {@code null} when it is absent, blank or {@code "0"} (the System client), all of which count
+   * as none.
    */
-  private CheckoutRequest findPortalSubscription(AuthenticatedAccount authenticated,
+  private static String requestedSubscriptionClientId(HttpServletRequest request) {
+    String clientId = StringUtils.trimToNull(request.getParameter(FIELD_CLIENT_ID));
+    return ZERO_ID.equals(clientId) ? null : clientId;
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the purchase the portal opens, and since ETP-6060 the one the subscription
+   * read answers: the named environment's own one when the caller names it (a "Mis empresas" row),
+   * else the one the account page shows ({@link #findShownSubscription}). Both lookups keep the
+   * account id and email in the query.
+   */
+  private CheckoutRequest findRequestedSubscription(AuthenticatedAccount authenticated,
       String requestedClientId) {
     if (requestedClientId == null) {
       return findShownSubscription(authenticated);

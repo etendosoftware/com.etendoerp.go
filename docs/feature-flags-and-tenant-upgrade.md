@@ -184,6 +184,8 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `usage-aggregation-schedule` | `etendo.go.flags.usage-aggregation-schedule` | `ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | `structured-address-for-sepa` | `etendo.go.flags.structured-address-for-sepa` | `ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA` | absent ⇒ **`false`** (legacy single-line address; TTL 2026-11-15 — SEPA 2025 rulebooks ban unstructured addresses in SEPA remittance files from that date, per [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24)) |
 | `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
+| `invoice-inbox` | `etendo.go.flags.invoice-inbox` | `ETGO_FLAG_INVOICE_INBOX` | absent ⇒ **`false`** (inbox upload refused; per account on a hosted arm only; TTL 2027-01-31, provisional) — see its section below |
+| `product-movements-tab` | `etendo.go.flags.product-movements-tab` | `ETGO_FLAG_PRODUCT_MOVEMENTS_TAB` | absent ⇒ **`false`** (no Movements tab on the Product window; placeholder TTL 2027-01-31) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -209,6 +211,17 @@ Datadog targeting rule (e.g. "email is one of [...]") roll the feature out to th
 first, then the rest of Etendo, then everyone, instead of flipping it for every tenant at once; with
 no targeting rule configured it is still the plain per-environment boolean default, so the TTL stays
 a hard global deadline.
+
+`product-movements-tab` (ETP-5889) decides whether an account gets the read-only Movements tab of the
+Product window. One evaluator only, the backend: `ProductMovementsPolicy` evaluates the flag with the
+`ETGO_ACCOUNT` email as targeting key and the tenant as `clientId` attribute, `SFWindowAccessMap`
+publishes the answer as `capabilities.productMovements`, and the tab reads that capability. The
+browser never evaluates the flag, so a rule on email, tenant or percentage cannot make the two ends
+disagree; a change reaches a user when the access map is next loaded. `ProductTransactionsHandler`
+asks the same policy before adding `etgoStockAfter` and `etgoTotalRows`. A request with no account is
+evaluated account-less and gets the default (off). Only behaviour is gated: the stored computed
+columns of `M_Transaction`, their triggers and the `ETGO_SF_*` configuration ship unconditionally, so
+run `update.database` and check `ad_scd_check` = 0 before targeting any account. The flag is not access control: with it off the `/transactions` rows (and the new `etgoWarehouse`, `etgoDocKind` and `etgoDocHeaderId` fields) stay readable under the role's entity and organization access; it only withholds `etgoStockAfter` and `etgoTotalRows` and hides the tab.
 
 The email reaches each call site in one of two ways, and the split is the point — resolving it
 implicitly inside the shared evaluator would be wrong for the second group:
@@ -752,6 +765,58 @@ The `etendo_schema_forge` side (the `catalogAvailability.js` toggle points, the 
 allow-list line, the registry `flag` object) is listed in the registry entry's `ttlNote`.
 `GoAccountResolver.currentAccountEmail()` stays: `bp-portal-link` and `contact-category-type` use it too.
 
+### `invoice-inbox` (ETP-6047) — backend-only, per account, off by default
+
+Gates the **behaviour** of the incoming-invoice inbox (epic ETP-6046), never its schema. Positive
+polarity: `true` = the inbox is enabled. Default and every failure = `false`.
+
+**What it gates.** The inbox upload endpoint `POST /sws/neo/invoice-inbox/upload` (ETP-6047,
+`neo-headless.md` section 4.6b) refuses the request with `403 feature_disabled` when the flag is
+off, **before** the multipart is read and before any row or OCR work is created. The
+`ETGO_INCOMING_DOCUMENT` table and the `Invoice Inbox` window ship unconditionally: the flag gates
+behaviour, not schema.
+
+**The toggle point.** `InvoiceInboxUploadEndpoint` is the one class that calls
+`InvoiceInboxFlag.isEnabled()`, at request entry.
+
+**The one gate.** `InvoiceInboxFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
+`GoFeatureFlags.FLAG_INVOICE_INBOX`. Never read the key anywhere else. It has no window or entity
+identity in it.
+
+- `InvoiceInboxFlag.isEnabled()` evaluates for the request user's account
+  (`GoAccountResolver.currentAccountEmail()`) and the current tenant (`clientId`).
+- `InvoiceInboxFlag.isEnabled(accountEmail, clientId)` is the explicit overload for callers that do
+  not run as the account owner.
+
+**Evaluate at request entry, never in the OCR worker.** The asynchronous OCR worker has no
+`OBContext` user, so `currentAccountEmail()` returns `null` there and a targeted user would look
+"off" (the ETP-5791 #1454 to #1476 lesson). The upload endpoint evaluates the flag once, at request
+entry, and then enqueues; the worker must **not** re-evaluate it. If any off-request code genuinely
+needs the answer, capture the account email and `clientId` at request entry and pass them to
+`isEnabled(accountEmail, clientId)`.
+
+**Targeting.** Per account on the hosted arms: the context carries the account email (targeting
+key, `Email` and lowercase `email`) and `clientId`. Write Datadog rules on the lowercase `email`
+attribute only, against lowercase values (never on the identifier, a percentage or a tenant
+attribute: the web client and the backend use different targeting keys). With no resolvable account
+the context carries `clientId` only, so an email rule does not match and the default stays off. The
+web client has no key for this flag yet; story ETP-6049 adds it when the inbox gets a UI.
+
+**Turning it on locally:** `etendo.go.flags.invoice-inbox=true` in `Openbravo.properties` (or
+`-Detendo.go.flags.invoice-inbox=true`, or `ETGO_FLAG_INVOICE_INBOX=true` in Tomcat's environment),
+with no Datadog/ConfigCat arm selected, then restart Tomcat.
+
+**Rollout prerequisite:** before targeting anyone on a shared environment, create the
+`invoice-inbox` **boolean** setting in Datadog Experimental/Production with default `false`, then
+add rules on the lowercase `email` attribute. The local property is inert while a hosted arm is
+selected, and an undefined key resolves to `false`, so a missing setting looks exactly like "off".
+
+**Retirement (TTL 2027-01-31, provisional until confirmed with product):** the inbox then ships to
+everyone. Unwrap the toggle point (the flag check at the top of `InvoiceInboxUploadEndpoint.handle`), delete
+`InvoiceInboxFlag.java` and its test, delete `FLAG_INVOICE_INBOX` from `GoFeatureFlags`, remove this
+section and the configuration-table row, and delete the hosted setting. Keep the registry feature
+entry in `etendo_schema_forge`.
+
 ### `usage-aggregation-schedule` (ETP-5051) — backend-only, strictly off by default
 
 Whether the usage aggregation (`ETGO_UsageAggregation`, menu **Billing Resource Usage
@@ -994,7 +1059,7 @@ of the subscription (ETP-5049, additive):
 **Which subscription the page shows (ETP-5051, O-1).** An account can own several environments,
 each paid by its own Stripe subscription and customer. The page and the Customer Portal
 (`POST /sws/go/billing/subscription/portal`) resolve the purchase through the one servlet helper
-`findShownSubscription`, so the portal always acts on the subscription the page shows:
+`findShownSubscription` (or the company the caller names, below), so the portal always acts on the subscription the page shows:
 
 - **Session entered into an environment** (the cookie session's client, written by
   `POST /sws/go/session/environment`): that environment's own billable purchase,
@@ -1008,6 +1073,21 @@ each paid by its own Stripe subscription and customer. The page and the Customer
 - **No environment entered** (account-level session, or the legacy platform-token bearer, which
   carries no environment): the account's newest billable purchase
   (`CheckoutRequestStore#findSubscriptionForAccount`), as before.
+- **A company named by the caller (ETP-6060):** `GET /sws/go/billing/subscription?clientId=<id>`
+  answers that company's own purchase, whatever environment the session is in — the same rule as
+  the portal's `{"clientId": …}` body, through the shared `findRequestedSubscription`. "Mis
+  empresas" uses it to show each owned company's subscription. Ownership stays the store query's
+  (account id and email): a client this account did not buy answers `{"hasSubscription": false}`.
+  A blank value or `0` names no company and keeps the two rules above.
+
+**A scheduled cancellation reads from either field (ETP-6060).** The Customer Portal of recent
+Stripe API versions schedules "cancel at the end of the period" with a `cancel_at` date and leaves
+`cancel_at_period_end` false. Both the live detail (`cancelAtPeriodEnd` of this endpoint) and the
+stored `ETGO_SUBSCRIPTION.CANCEL_AT_PERIOD_END` (from `customer.subscription.*` events, which feeds
+the environment list's `renewalAt`) treat a non-null `cancel_at` as scheduled, whatever the flag
+says; `cancel_at: null` without the flag clears it. The HubSpot sync already read both
+(`StripeSubscriptionEvents`). Before the fix the page kept saying "renews on" after a portal
+cancellation.
 
 Ownership is the query's: both lookups filter on the account id and email, so a client id that is
 not one of the account's own purchases resolves to nothing, whoever owns that client.

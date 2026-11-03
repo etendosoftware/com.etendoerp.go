@@ -45,10 +45,12 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.ad.ui.Tab;
@@ -87,6 +89,8 @@ import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContr
  * @covers com.etendoerp.go.mcp.McpDocumentEmailContracts
  * @covers com.etendoerp.go.mcp.McpDocumentEmailToolDefinition
  * @covers com.etendoerp.go.mcp.McpDocumentPdfTool
+ * @covers com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract
+ * @covers com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract
  */
 @SuppressWarnings("java:S2187")
 class McpDocumentEmailToolTest {
@@ -164,8 +168,14 @@ class McpDocumentEmailToolTest {
 
   /** The eight real document-send contracts over one fixed purchase-order-like record, plus one that is not. */
   private static EmailContractRegistry realContracts() {
+    return realContracts(null);
+  }
+
+  /** {@link #realContracts()} with the record in {@code status} ({@code null}: no status reported). */
+  private static EmailContractRegistry realContracts(String status) {
     EmailDocumentRecordResolver resolver = id -> Optional.of(new EmailDocumentRecord(
-        "Proveedor Mayorista", BASE, RECORD, "1000008", null, "https://x.test/d", "CLIENT1"));
+        "Proveedor Mayorista", BASE, RECORD, "1000008", null, "https://x.test/d", "CLIENT1")
+        .withDocumentStatus(status));
     EmailContract notADocument = mock(EmailContract.class);
     when(notADocument.getName()).thenReturn("reset-password");
     List<EmailContract> all = Arrays.asList(
@@ -638,7 +648,8 @@ class McpDocumentEmailToolTest {
       assertNotSent(result, 409, "no_pdf");
       String hint = result.getString("hint");
       assertFalse(hint.contains("send the document by email"), hint);
-      assertTrue(hint.contains("Open the document's preview in the application"), hint);
+      assertTrue(hint.contains("open the document's preview in the application"), hint);
+      assertTrue(hint.contains("ask again in a few seconds"), hint);
       assertTrue(hint.contains("ask to send again"), hint);
       assertTrue(hint.contains("first send must be done from the application"), hint);
       assertFalse(result.getBoolean("sent"));
@@ -658,8 +669,9 @@ class McpDocumentEmailToolTest {
       pdfMock.when(() -> NeoDocumentPdf.resolve(target, header))
           .thenReturn(NeoDocumentPdf.Result.notStoredInStatus("CO"));
       String completed = McpDocumentEmailTool.run(argsTo(BASE)).getString("hint");
-      assertTrue(completed.startsWith("Open the document's preview in the application so its "
-          + "PDF is stored, then ask to send again."), completed);
+      assertTrue(completed.startsWith(McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise open "
+          + "the document's preview in the application so its PDF is stored, then ask to send "
+          + "again."), completed);
       assertFalse(completed.contains("draft"), completed);
       assertTrue(completed.contains("first send must be done from the application"), completed);
 
@@ -725,6 +737,8 @@ class McpDocumentEmailToolTest {
 
       JSONObject command = sentCommand();
       assertEquals("es_ES", command.getString("language"));
+      // ETP-6013: without a language the PDF the server renders is es_ES, like the email
+      pdfMock.verify(() -> NeoDocumentPdf.renderLanguage("es_ES"));
       assertEquals("Pedido de Compra #1000008 — Proveedor Mayorista",
           command.getJSONObject("messageEdits").getString("subject"));
     }
@@ -738,6 +752,8 @@ class McpDocumentEmailToolTest {
 
       JSONObject command = sentCommand();
       assertEquals("en_US", command.getString("language"));
+      // ETP-6013: a PDF the server renders for this email is in the email's language
+      pdfMock.verify(() -> NeoDocumentPdf.renderLanguage("en_US"));
       JSONObject edits = command.getJSONObject("messageEdits");
       assertEquals("Purchase Order #1000008 — Proveedor Mayorista", edits.getString("subject"));
       assertEquals("Hello **Proveedor Mayorista**,\n\nPlease find your Purchase Order "
@@ -974,7 +990,9 @@ class McpDocumentEmailToolTest {
       String description = McpDocumentEmailToolDefinition.DESCRIPTION;
       assertTrue(description.contains("sends a REAL email"), description);
       assertTrue(description.contains("preview"), description);
-      assertTrue(description.contains("never generates"), description);
+      // ETP-6013: the server generates a missing or stale PDF first where it can.
+      assertFalse(description.contains("never generates"), description);
+      assertTrue(description.contains("ask again in a few seconds"), description);
       assertTrue(description.contains("DUPLICATE") || description.contains("identical"),
           description);
     }
@@ -1032,6 +1050,82 @@ class McpDocumentEmailToolTest {
           args().put("to", BASE)));
       assertThrows(McpDocumentEmailRequest.Invalid.class, () -> McpDocumentEmailRequest.parse(
           args().put("to", new JSONArray(List.of(5)))));
+    }
+  }
+
+  // ── the status gate (ETP-6013) ──────────────────────────────────────────
+
+  @Nested
+  @DisplayName("the document status gate")
+  class StatusGate {
+
+    private MockedStatic<OBDal> dalMock;
+
+    @BeforeEach
+    void noDatabase() {
+      // The refusal is read from the versioned catalog: no AD_MESSAGE row, no status name.
+      OBDal dal = mock(OBDal.class);
+      when(dal.getConnection()).thenThrow(new IllegalStateException("no database in this test"));
+      dalMock = mockStatic(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // A stored, current PDF: the case of a document completed, printed, then reactivated.
+      pdfMock.when(() -> NeoDocumentPdf.resolve(target, header))
+          .thenReturn(NeoDocumentPdf.Result.found(pdfFile()));
+    }
+
+    @AfterEach
+    void closeDal() {
+      dalMock.close();
+    }
+
+    /**
+     * ETP-6013 repro — preview and send are refused by status, before the PDF is looked at, with
+     * the rule each contract declares: completed only (purchase order and the other documents), or
+     * any status but draft (sales quotation). The request language here is en_US.
+     */
+    @ParameterizedTest(name = "{0} in {1}, preview={2} -> refused={3}")
+    @CsvSource(delimiter = '|', value = {
+        "purchase-order  | DR | true  | true  | 1000008 is DR: sending by email only applies to Completed documents.",
+        "purchase-order  | DR | false | true  | 1000008 is DR: sending by email only applies to Completed documents.",
+        "purchase-order  | CL | true  | true  | 1000008 is CL: sending by email only applies to Completed documents.",
+        "purchase-order  | CO | true  | false | ''",
+        "sales-quotation | DR | true  | true  | 1000008 is DR: sending by email does not apply to Draft documents.",
+        "sales-quotation | UE | true  | false | ''",
+    })
+    @DisplayName("preview and send are refused by status, with the contract's rule, before the PDF")
+    void refusedByStatusBeforeThePdf(String specName, String status, boolean preview,
+        boolean refused, String detail) throws Exception {
+      // Built first: realContracts stubs a mock, which must not happen inside this stubbing.
+      EmailContractRegistry registry = realContracts(status);
+      contractsMock.when(McpDocumentEmailContracts::registry).thenReturn(registry);
+      JSONObject call = argsTo(BASE).put("spec", specName);
+      if (preview) {
+        call.put("preview", true);
+      }
+
+      JSONObject result = McpDocumentEmailTool.run(call);
+
+      if (refused) {
+        assertNotSent(result, 409, "conflict");
+        assertEquals(detail, result.getString("detail"));
+        assertEquals(McpDocumentEmailTool.STATUS_HINT, result.getString("hint"));
+        assertFalse(result.getBoolean("sent"));
+        pdfMock.verify(() -> NeoDocumentPdf.resolve(any(), any()), never());
+      } else {
+        assertFalse(result.has("error"), result.toString());
+        assertTrue(result.getBoolean("readyToSend"), result.toString());
+      }
+    }
+
+    @Test
+    @DisplayName("the status refusal wins over no_pdf")
+    void statusWinsOverNoPdf() throws Exception {
+      EmailContractRegistry registry = realContracts("DR");
+      contractsMock.when(McpDocumentEmailContracts::registry).thenReturn(registry);
+      pdfMock.when(() -> NeoDocumentPdf.resolve(target, header))
+          .thenReturn(NeoDocumentPdf.Result.notStored(true));
+
+      assertNotSent(McpDocumentEmailTool.run(argsTo(BASE)), 409, "conflict");
     }
   }
 

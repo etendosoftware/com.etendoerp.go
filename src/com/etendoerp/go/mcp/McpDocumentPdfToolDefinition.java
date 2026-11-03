@@ -42,10 +42,15 @@ final class McpDocumentPdfToolDefinition {
       + "purchase invoice, a goods receipt), the supplier's own document attached as its main "
       + "attachment. Returns "
       + "the file name, size, type and last update, and a short-lived signed download link (10 "
-      + "minutes) the user can open — never the file's content. This tool never generates a PDF: if "
-      + "the document has none yet, or the stored one predates the document's last change, it "
-      + "answers a clear 409 saying what to do (open the document's preview in the application, or "
-      + "send the document by email, and ask again). Pass id for one document or ids (at most " + McpDocumentPdfTool.MAX_DOCUMENTS
+      + "minutes) the user can open — never the file's content. For invoices, orders, quotations, "
+      + "shipments and returns the server generates the PDF itself when the document is completed "
+      + "through this MCP, and here when it is missing or out of date; when it cannot, it answers a clear 409 saying what to "
+      + "do (right after completing a document, ask again in a few seconds; otherwise open the "
+      + "document's preview in the application, or send the document by email, and ask again). "
+      + "A PDF the server generates is in Spanish (" + McpDocumentEmailRequest.DEFAULT_LANGUAGE
+      + ") by default, the same default as etendo_send_document_email; a current stored PDF is "
+      + "returned as it is, whatever its language. "
+      + "Pass id for one document or ids (at most " + McpDocumentPdfTool.MAX_DOCUMENTS
       + ") for several: one result per document, a failure on one does not stop the others. Not "
       + "available where the application has no Attachments tab (payments, fiscal monitors). "
       + "Requires read access to the document's window.";

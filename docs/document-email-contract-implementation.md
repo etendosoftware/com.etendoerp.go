@@ -27,6 +27,22 @@ checks it itself, after command validation and before resolving the document:
 name that resolves no active spec is denied (fail closed). Subclasses inherit it; unit tests
 override the protected `canWriteSpec()` hook instead of touching the DAL.
 
+## Authorization: document status (ETP-6013)
+
+After the write tier and the document lookup, `authorize()` refuses a document whose status the
+contract does not send, with `409` and a translated sentence (`AD_MESSAGE` resolved by
+`NeoMessageText` in the command's `language`; `{0}` the document number, `{1}` the status name).
+The rule is **declared per contract**, mirroring where the SPA offers "Enviar":
+
+- `isSendableStatus(String)` — default: only `CO` (`isCompleted` in the windows'
+  `*SecondaryActions.jsx`). `SalesQuotationSendEmailContract` overrides it: any status but `DR`.
+- `unsendableStatusMessageKey()` — default `ETGO_EmailOnlyCompleted`; the quotation answers
+  `ETGO_EmailNotForDraft`. Override both together so the sentence describes the rule.
+
+The status comes from the resolver: call `EmailDocumentRecord#withDocumentStatus(entity.getDocumentStatus())`
+in every new resolver. A resolver that reports no status applies no rule. `statusRefusal(recordId,
+language)` exposes the same check to a caller that answers before sending (the MCP preview).
+
 ## Contract Shape
 
 Document-send contracts should extend `DefaultDocumentSendEmailContract` when the default document behavior is enough.
@@ -98,7 +114,9 @@ Rules:
 3. Verify the record belongs to a readable client.
 4. Verify document-family constraints, for example sales transactions only for sales order contracts.
 5. Resolve the recipient from `C_BPartner.EM_Etgo_Email`, falling back to an active contact email.
-6. Let `DefaultDocumentSendEmailContract` generate the signed document link server-side from the
+6. Report the document's status with `.withDocumentStatus(...)` (ETP-6013), so the contract's
+   status rule applies.
+7. Let `DefaultDocumentSendEmailContract` generate the signed document link server-side from the
    resolved record metadata and the send idempotency key. Document resolvers should not construct
    browser `blob:` URLs or unaudited public links.
 
