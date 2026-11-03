@@ -349,7 +349,8 @@ class TrialBalanceReportHandlerTest {
       verify(dal).createQuery(eq(AcctSchema.class), hql.capture());
       assertEquals("as s where s.client.id = :clientId and s.active = true"
           + " and exists (from OrganizationAcctSchema oas where oas.accountingSchema = s"
-          + " and oas.organization.id = :orgId and oas.active = true)", hql.getValue());
+          + " and oas.organization.id = :orgId and oas.active = true) order by s.id",
+          hql.getValue());
       verify(schemaQuery).setNamedParameter("clientId", "sessionClientId1");
       verify(schemaQuery).setNamedParameter("orgId", "orgNoLedger");
     }

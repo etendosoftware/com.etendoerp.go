@@ -358,6 +358,9 @@ abstract class AbstractSqlReportHandler implements NeoHandler {
           hql.append(" and exists (from OrganizationAcctSchema oas where oas.accountingSchema = s"
               + " and oas.organization.id = :orgId and oas.active = true)");
         }
+        // Deterministic pick when several schemas match; same order as TaxReportHandler,
+        // AgingReportHandler and ReportSelectorsServlet so all of them agree.
+        hql.append(" order by s.id");
         org.openbravo.dal.service.OBQuery<AcctSchema> query =
             OBDal.getInstance().createQuery(AcctSchema.class, hql.toString());
         query.setNamedParameter(SQL_PARAM_CLIENT_ID, clientId);
