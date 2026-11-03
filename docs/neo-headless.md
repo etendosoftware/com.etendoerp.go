@@ -11472,7 +11472,9 @@ it is the 422 `globalDiscountConflict`. Example:
 `availableOrders` / `availableReceipts` / `availableShipments` answer
 `{data:[{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines}], hasMore, limit,
 scanLimit}`; `availableOrders` of an **invoice** adds `globalDiscount`, the order's `etgoTotalDiscount` as a % (null,
-zero or negative read as 0, same normalisation as the carry rule), the popup's *«Dto. global X %»* tag. The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
+zero or negative read as 0, same normalisation as the carry rule), the popup's *«Dto. global X %»* tag. It is rounded to 4 decimals for
+the comparisons and written without trailing zeros (`12.5`, `10`, never `12.5000`), like `globalDiscount.percent` of
+`importOrderLines` (ETP-5828). The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
 hasMore:false, limit, scanLimit}`, where the line `id` is the `sourceLineId` the import takes. **Discovery is a bounded
 scan**: it reads the `scanLimit` (200) most recent completed candidates of the target's partner, client and currency and
 returns at most `limit` (50) documents, filtered by the same pending rule the import enforces. `hasMore` is `true` when
