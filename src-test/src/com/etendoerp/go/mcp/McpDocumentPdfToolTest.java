@@ -184,6 +184,8 @@ class McpDocumentPdfToolTest {
       assertEquals(CLIENT, claims.getClientId());
       assertEquals(SPEC, claims.getSpecName());
       assertEquals(10, result.getInt("linkExpiresInMinutes"));
+      // ETP-6013: a PDF the server renders here is in the MCP default language, the email's default
+      pdfMock.verify(() -> NeoDocumentPdf.renderLanguage("es_ES"));
     }
 
     @Test
@@ -426,8 +428,10 @@ class McpDocumentPdfToolTest {
 
       assertEquals("This document is a draft and a draft never stores a PDF: complete it first, "
           + "then open its preview in the application and ask again.", draft);
-      assertTrue(completed.startsWith("Open the document's preview in the application, or send "
-          + "the document by email, and ask again."), completed);
+      // ETP-6013: a just-completed document gets its PDF from the server; the retry comes first.
+      assertTrue(completed.startsWith(McpDocumentPdfTool.JUST_COMPLETED_HINT
+          + "Otherwise open the document's preview in the application, or send the document by "
+          + "email, and ask again."), completed);
       assertFalse(completed.contains("draft"), completed);
       assertTrue(completed.contains("a return receipt's preview stores nothing"), completed);
       assertTrue(unknown.contains("(a draft never stores a PDF: complete it first)"), unknown);
@@ -525,14 +529,16 @@ class McpDocumentPdfToolTest {
   // ── the tool definition ──────────────────────────────────────────────────
 
   @Test
-  @DisplayName("the definition takes spec and id or ids, and says it never generates a PDF")
+  @DisplayName("the definition takes spec and id or ids, and says when the server generates the PDF")
   void definitionDescribesTheContract() {
     McpToolDefinition definition = McpDocumentPdfToolDefinition.definition(List.of(SPEC));
 
     assertEquals(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, definition.getName());
     String description = definition.getDescription();
     assertTrue(description.contains("PDF"), description);
-    assertTrue(description.contains("never generates"), description);
+    // ETP-6013 reverses ETP-5715's "never generates": the server renders declared printables.
+    assertFalse(description.contains("never generates"), description);
+    assertTrue(description.contains("ask again in a few seconds"), description);
     assertTrue(description.contains("supplier"), description);
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
     assertTrue(props.toString().contains("ids"), props.toString());

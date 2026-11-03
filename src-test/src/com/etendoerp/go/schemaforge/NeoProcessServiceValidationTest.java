@@ -60,6 +60,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * Additional unit tests for {@link NeoProcessService} covering validation,
  * process type resolution, OBUIAPP overloads, buildBundleParams,
  * collectColumnInfo, translateObuiappResult branches, and RequestContextScope.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoProcessService
  */
 public class NeoProcessServiceValidationTest {
 
@@ -124,6 +126,35 @@ public class NeoProcessServiceValidationTest {
       NeoResponse resp = NeoProcessService.executeProcess(process, new JSONObject());
       assertEquals(400, resp.getHttpStatus());
       assertTrue(resp.getBody().toString().contains("C_BPartner_ID"));
+    }
+  }
+
+  /** ETP-5848: a missing list parameter names the values it takes, so the caller need not guess. */
+  @Test
+  public void executeProcessMissingListParamNamesItsValues() throws Exception {
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-val-list");
+    ProcessParameter action = mock(ProcessParameter.class);
+    when(action.isActive()).thenReturn(true);
+    when(action.isMandatory()).thenReturn(true);
+    when(action.getDBColumnName()).thenReturn("action");
+    when(action.getName()).thenReturn("Action");
+    Reference list = mock(Reference.class);
+    when(list.getId()).thenReturn("REF-ACTION");
+    when(action.getReferenceSearchKey()).thenReturn(list);
+    when(process.getADProcessParameterList()).thenReturn(List.of(action));
+
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoSelectorService> labels = mockStatic(NeoSelectorService.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-val-list")).thenReturn(true);
+      labels.when(() -> NeoSelectorService.getListLabels("REF-ACTION"))
+          .thenReturn(Map.of("VO", "Void", "CO", "Complete"));
+
+      NeoResponse resp = NeoProcessService.executeProcess(process, new JSONObject());
+      assertEquals(400, resp.getHttpStatus());
+      assertTrue(resp.getBody().toString(),
+          resp.getBody().toString().contains("action (Action); one of: CO (Complete), VO (Void)"));
     }
   }
 

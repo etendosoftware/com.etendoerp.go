@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -116,5 +117,51 @@ class NeoPdfSourceConfigTest {
     assertTrue(NeoPdfSourceConfig.validate(
         body("{\"pdf\":{\"source\":\"supplier\",\"reason\":\" \"}}")).toString()
         .contains("reason"));
+  }
+
+  // ── ETP-6013: pdf.print, the printable the server renders ──────────────────
+
+  private static final String PRINTED = "{\"pdf\":{\"source\":\"rendered\","
+      + "\"print\":{\"document\":\"sales-invoice\"},\"reason\":\"server-side render\"}}";
+
+  @Test
+  @DisplayName("print: the declared key is returned, from the entity or else from its spec")
+  void printDocumentIsDeclared() {
+    assertEquals("sales-invoice", NeoPdfSourceConfig.printDocumentOf(entity(PRINTED, null)));
+    assertEquals("sales-invoice", NeoPdfSourceConfig.printDocumentOf(entity(null, PRINTED)));
+    // REPLACE: the entity's own section wins, and a rendered section without print renders nothing
+    assertNull(NeoPdfSourceConfig.printDocumentOf(entity(RENDERED, PRINTED)));
+  }
+
+  @Test
+  @DisplayName("print: absent, supplier, unreadable or a null entity is never printable")
+  void printDocumentIsAbsent() {
+    assertNull(NeoPdfSourceConfig.printDocumentOf(null));
+    assertNull(NeoPdfSourceConfig.printDocumentOf(entity(null, null)));
+    assertNull(NeoPdfSourceConfig.printDocumentOf(entity(SUPPLIER, null)));
+    assertNull(NeoPdfSourceConfig.printDocumentOf(entity("{not json", null)));
+    assertNull(NeoPdfSourceConfig.printDocumentOf(
+        entity("{\"pdf\":{\"source\":\"supplier\",\"print\":{\"document\":\"x\"}}}", null)));
+    assertNull(NeoPdfSourceConfig.printDocumentOf(
+        entity("{\"pdf\":{\"print\":{\"document\":\"  \"}}}", null)));
+  }
+
+  @Test
+  @DisplayName("validation: a well-formed print is accepted; a malformed one, extra keys or supplier are not")
+  void printValidation() throws Exception {
+    assertTrue(NeoPdfSourceConfig.validate(body(PRINTED)).isEmpty());
+    String[][] rejected = {
+        {"{\"pdf\":{\"source\":\"rendered\",\"reason\":\"x\",\"print\":\"sales-invoice\"}}",
+            "non-blank"},
+        {"{\"pdf\":{\"source\":\"rendered\",\"reason\":\"x\",\"print\":{\"document\":\"\"}}}",
+            "non-blank"},
+        {"{\"pdf\":{\"source\":\"rendered\",\"reason\":\"x\",\"print\":{\"document\":\"a\","
+            + "\"family\":\"b\"}}}", "carries only"},
+        {"{\"pdf\":{\"source\":\"supplier\",\"reason\":\"x\",\"print\":{\"document\":\"a\"}}}",
+            "never rendered"},
+    };
+    for (String[] row : rejected) {
+      assertTrue(NeoPdfSourceConfig.validate(body(row[0])).toString().contains(row[1]), row[0]);
+    }
   }
 }

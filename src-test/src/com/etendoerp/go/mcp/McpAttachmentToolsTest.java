@@ -639,6 +639,30 @@ class McpAttachmentToolsTest {
       helperMock.verify(() -> NeoAttachmentsHelper.handleList(any(), any()), never());
       helperMock.verify(() -> NeoAttachmentsHelper.handleDelete(any()), never());
     }
+
+    /**
+     * ETP-6013 — a read-only type (the tax): the writes answer the declared message with 405 and
+     * the read-only advice, never the advice of a type without an Attachments tab.
+     */
+    @Test
+    @DisplayName("a read-only refusal keeps its message and says the attachments can still be listed")
+    void readOnlyRefusalAdvisesListing() throws Exception {
+      targetMock.when(() -> NeoAttachmentTarget.resolve(any(), any(), any(), eq(true)))
+          .thenThrow(NeoAttachmentTarget.Refused.readOnly("Los impuestos no se pueden modificar."));
+
+      for (String tool : new String[] {McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+          McpConstants.TOOL_NEO_DELETE_ATTACHMENT}) {
+        JSONObject error = bodyOf(McpAttachmentTools.handle(tool,
+            args("name", "iva.pdf", "attachment_id", "F1")));
+
+        assertEquals(405, error.getInt("status"), tool);
+        assertEquals("method_not_allowed", error.getString("error"), tool);
+        assertEquals("Los impuestos no se pueden modificar.", error.getString("detail"), tool);
+        assertEquals(McpAttachmentTools.HINT_READ_ONLY, error.getString("hint"), tool);
+      }
+      assertEquals(0, tickets.size());
+      helperMock.verify(() -> NeoAttachmentsHelper.handleDelete(any()), never());
+    }
   }
 
   // ── etendo_request_attachment_upload with a staged document (ETP-5715) ──────

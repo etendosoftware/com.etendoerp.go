@@ -53,6 +53,9 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * The decision is pure ({@code decide}) and tested on its own; {@code resolve} is tested only for
  * what it gathers (the main attachment the SPA reads, the record's {@code updated}).
  *
+ * <p>ETP-6013: {@code renderOnRequest}, the fallback that renders a declared printable on the
+ * server when the stored PDF is missing or stale, is tested with the renderer injected.</p>
+ *
  * @covers com.etendoerp.go.schemaforge.NeoDocumentPdf
  */
 @DisplayName("ETP-5715 — NeoDocumentPdf")
@@ -411,4 +414,145 @@ class NeoDocumentPdfTest {
       assertEquals("Internal error resolving main attachment", result.getMessage());
     }
   }
+
+  // ── ETP-6013: the fallback render on request, isolated on the worker ──────────
+
+  private static final String PRINTED_CONFIG = "{\"pdf\":{\"source\":\"rendered\","
+      + "\"print\":{\"document\":\"sales-invoice\"},\"reason\":\"server-side render\"}}";
+
+  /** An isolated render that answers {@code outcome} and counts its calls. */
+  private static final class FakeRender implements NeoDocumentPdf.IsolatedRender {
+    private final NeoPrintableRenderer.Outcome outcome;
+    private int calls;
+    private String language;
+
+    FakeRender(NeoPrintableRenderer.Outcome outcome) {
+      this.outcome = outcome;
+    }
+
+    @Override
+    public NeoPrintableRenderer.Outcome render(SFEntity entity, String recordId, String lang) {
+      calls++;
+      language = lang;
+      return outcome;
+    }
+  }
+
+  @Test
+  @DisplayName("render on request: an entity without pdf.print, or a draft, is never rendered")
+  void renderOnRequestNeedsADeclarationAndANonDraft() {
+    NeoAttachmentTarget target = mock(NeoAttachmentTarget.class);
+    FakeRender render = new FakeRender(NeoPrintableRenderer.Outcome.STORED);
+    NeoDocumentPdf.Result missing = NeoDocumentPdf.Result.notStoredInStatus("CO");
+    NeoDocumentPdf.Result draft = NeoDocumentPdf.Result.notStoredInStatus("DR");
+
+    assertSame(missing, NeoDocumentPdf.renderOnRequest(target, entityWith(null), missing, render));
+    assertSame(missing, NeoDocumentPdf.renderOnRequest(target, entityWith(SUPPLIER_CONFIG), missing,
+        render));
+    assertSame(draft, NeoDocumentPdf.renderOnRequest(target, entityWith(PRINTED_CONFIG), draft,
+        render));
+    assertEquals(0, render.calls);
+  }
+
+  @Test
+  @DisplayName("render on request: a render that stores nothing, or does not finish in time, keeps the stored verdict")
+  void renderOnRequestFailureKeepsTheVerdict() {
+    NeoAttachmentTarget target = mock(NeoAttachmentTarget.class);
+    when(target.getRecordId()).thenReturn(RECORD);
+    SFEntity entity = entityWith(PRINTED_CONFIG);
+    NeoDocumentPdf.Result missing = NeoDocumentPdf.Result.notStoredInStatus("CO");
+    for (NeoPrintableRenderer.Outcome outcome : new NeoPrintableRenderer.Outcome[] {
+        NeoPrintableRenderer.Outcome.FAILED, NeoPrintableRenderer.Outcome.NOT_ALLOWED,
+        NeoPrintableRenderer.Outcome.NOT_CONFIGURED, NeoPrintableRenderer.Outcome.NOT_FOR_STATUS,
+        NeoPrintableRenderer.Outcome.FOREIGN_MAIN, null}) {
+      FakeRender render = new FakeRender(outcome);
+
+      assertSame(missing, NeoDocumentPdf.renderOnRequest(target, entity, missing, render),
+          String.valueOf(outcome));
+      assertEquals(1, render.calls);
+    }
+  }
+
+  @Test
+  @DisplayName("render on request: after the worker stored (or found) the PDF, the committed file is served")
+  void renderOnRequestServesTheFreshFile() throws Exception {
+    NeoAttachmentTarget target = mock(NeoAttachmentTarget.class);
+    when(target.getTableName()).thenReturn("C_Invoice");
+    when(target.getTableId()).thenReturn("TABLE1");
+    when(target.getRecordId()).thenReturn(RECORD);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider model = mock(ModelProvider.class);
+    Entity dalEntity = mock(Entity.class);
+    when(dalEntity.getName()).thenReturn("Invoice");
+    when(model.getEntityByTableId("TABLE1")).thenReturn(dalEntity);
+    BaseOBObject row = mock(BaseOBObject.class);
+    when(row.get("updated")).thenReturn(at("2026-10-02T10:00:00Z"));
+    when(dal.get("Invoice", RECORD)).thenReturn(row);
+    SFEntity entity = entityWith(PRINTED_CONFIG);
+    NeoDocumentPdf.Result missing = NeoDocumentPdf.Result.notStoredInStatus("CO");
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<NeoAttachmentsHelper> helperMock = mockStatic(NeoAttachmentsHelper.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(model);
+      contextMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+      // the worker's render overwrote the main file after the record's last change
+      helperMock.when(() -> NeoAttachmentsHelper.handleGetMain("C_Invoice", RECORD))
+          .thenReturn(NeoResponse.ok(main("sales-invoice-1000001.pdf", "2026-10-02T10:00:03Z")));
+
+      for (NeoPrintableRenderer.Outcome outcome : new NeoPrintableRenderer.Outcome[] {
+          NeoPrintableRenderer.Outcome.STORED, NeoPrintableRenderer.Outcome.ALREADY_CURRENT}) {
+        NeoDocumentPdf.Result result = NeoDocumentPdf.renderOnRequest(target, entity, missing,
+            new FakeRender(outcome));
+
+        assertEquals(NeoDocumentPdf.Status.FOUND, result.getStatus(), outcome.name());
+        assertEquals("sales-invoice-1000001.pdf", result.getFile().getString("name"));
+      }
+    }
+  }
+
+  @Test
+  @DisplayName("render on request: within a call's budget only the first renders run, the rest are queued")
+  void renderOnRequestBudget() {
+    NeoAttachmentTarget target = mock(NeoAttachmentTarget.class);
+    when(target.getRecordId()).thenReturn(RECORD);
+    SFEntity entity = entityWith(PRINTED_CONFIG);
+    FakeRender render = new FakeRender(NeoPrintableRenderer.Outcome.FAILED);
+    NeoDocumentPdf.Result missing = NeoDocumentPdf.Result.notStoredInStatus("CO");
+    try (MockedStatic<NeoPrintAfterComplete> queue = mockStatic(NeoPrintAfterComplete.class);
+        NeoDocumentPdf.RenderBudget budget = NeoDocumentPdf.syncRenderBudget()) {
+      for (int i = 0; i < NeoDocumentPdf.SYNC_RENDERS_PER_CALL + 2; i++) {
+        assertSame(missing, NeoDocumentPdf.renderOnRequest(target, entity, missing, render));
+      }
+
+      assertEquals(NeoDocumentPdf.SYNC_RENDERS_PER_CALL, render.calls);
+      queue.verify(() -> NeoPrintAfterComplete.queue(entity, RECORD, null),
+          org.mockito.Mockito.times(2));
+    }
+    assertTrue(NeoDocumentPdf.takeSyncRender(), "outside a budgeted call there is no limit");
+  }
+  @Test
+  @DisplayName("render on request: the PDF is printed in the language the calling MCP tool set")
+  void renderOnRequestUsesTheToolLanguage() {
+    NeoAttachmentTarget target = mock(NeoAttachmentTarget.class);
+    when(target.getRecordId()).thenReturn(RECORD);
+    SFEntity entity = entityWith(PRINTED_CONFIG);
+    NeoDocumentPdf.Result missing = NeoDocumentPdf.Result.notStoredInStatus("CO");
+    FakeRender render = new FakeRender(NeoPrintableRenderer.Outcome.FAILED);
+
+    try (NeoDocumentPdf.RenderLanguage scope = NeoDocumentPdf.renderLanguage("en_US")) {
+      NeoDocumentPdf.renderOnRequest(target, entity, missing, render);
+      assertEquals("en_US", render.language, "the email's language");
+      try (NeoDocumentPdf.RenderLanguage inner = NeoDocumentPdf.renderLanguage("es_ES")) {
+        NeoDocumentPdf.renderOnRequest(target, entity, missing, render);
+        assertEquals("es_ES", render.language, "the MCP default");
+      }
+      NeoDocumentPdf.renderOnRequest(target, entity, missing, render);
+      assertEquals("en_US", render.language, "the outer scope is restored");
+    }
+    NeoDocumentPdf.renderOnRequest(target, entity, missing, render);
+    assertNull(render.language, "outside an MCP tool: the worker falls back to the context's");
+  }
+
 }

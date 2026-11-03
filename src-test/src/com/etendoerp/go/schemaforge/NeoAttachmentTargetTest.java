@@ -354,6 +354,33 @@ class NeoAttachmentTargetTest {
     verify(dal, never()).get(anyString(), anyString());
   }
 
+  /**
+   * ETP-6013 repro — a tax: its record is readable but not writable by the tenant, so an upload was
+   * answered the 404 of {@code requireVisibleRecord}. A read-only declaration now answers its own
+   * message with 405 before the record is looked up, and the list keeps resolving.
+   */
+  @Test
+  @DisplayName("a read-only document type refuses writes 405 with its declared message, before the lookup; reads resolve")
+  void readOnlyEntityRefusesWritesBeforeTheRecordLookup() {
+    SFEntity entity = entityAtLevel(0L);
+    when(entity.getMCPConfig()).thenReturn("{\"attachments\":{\"readOnly\":true,"
+        + "\"reason\":\"product decision\",\"messageKey\":\"ETGO_TaxNotModifiable\"}}");
+    order(OWN_CLIENT, READ_ONLY_ORG);
+
+    NeoAttachmentTarget.Refused write = refusalOf(
+        () -> NeoAttachmentTarget.resolve(spec, entity, RECORD, true));
+    NeoAttachmentTarget.Refused staged = refusalOf(
+        () -> NeoAttachmentTarget.requireWriteAccess(spec, entity));
+
+    assertEquals(405, write.getStatus());
+    assertEquals("Taxes cannot be modified.", write.getMessage());
+    assertTrue(write.isReadOnly());
+    assertEquals(405, staged.getStatus());
+    verify(dal, never()).get(anyString(), anyString());
+    assertNotNull(NeoAttachmentTarget.resolve(spec, entity, RECORD, false),
+        "listing the attachments of a read-only type keeps working");
+  }
+
   @Test
   @DisplayName("an unflagged document type still resolves")
   void unflaggedEntityResolves() {

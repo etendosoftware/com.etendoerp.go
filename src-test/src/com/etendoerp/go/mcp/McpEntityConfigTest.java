@@ -56,6 +56,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpEntityConfig
  * @covers com.etendoerp.go.mcp.McpConfigSection
  * @covers com.etendoerp.go.mcp.McpConfigSections
+ * @covers com.etendoerp.go.mcp.McpAttachmentsSection
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -284,9 +285,14 @@ class McpEntityConfigTest {
           "{\"attachments\":{\"enabled\":false,\"reason\":\"no tab in the app\"}}"));
       McpEntityConfig.Resolved typo = McpEntityConfig.forEntity(entityWith("ATT-TYPO",
           "{\"attachments\":{\"enable\":false,\"reason\":\"x\"}}"));
+      // ETP-6013: the read-only mode (the tax's declaration) keeps the entity published.
+      McpEntityConfig.Resolved readOnly = McpEntityConfig.forEntity(entityWith("ATT-RO",
+          "{\"attachments\":{\"readOnly\":true,\"reason\":\"x\","
+              + "\"messageKey\":\"ETGO_TaxNotModifiable\"}}"));
 
       assertTrue(ok.isUsable(), ok.describeProblems());
       assertFalse(typo.isUsable());
+      assertTrue(readOnly.isUsable(), readOnly.describeProblems());
       McpConfigSections.resetForTests();
     }
   }

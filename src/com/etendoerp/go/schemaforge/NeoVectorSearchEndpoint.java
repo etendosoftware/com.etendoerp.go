@@ -31,6 +31,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import com.etendoerp.db.extended.data.VectorSource;
 import com.etendoerp.db.extended.data.VectorSearchTarget;
+import com.etendoerp.db.extended.data.VectorSourceColumn;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import org.openbravo.base.model.Entity;
@@ -325,6 +326,54 @@ public class NeoVectorSearchEndpoint {
       }
     }
     return Optional.of(allowed);
+  }
+
+  /**
+   * The fields a target indexes as content, named as the MCP names them (DAL property names), in
+   * index order: what the text fallback of {@code etendo_vector_search} matches when semantic
+   * search cannot run (ETP-5848). Read in admin mode, like the catalogue; what the caller may read
+   * is decided by the list call that uses them.
+   *
+   * @param targetKey a configured target key
+   * @return the property names, empty when the target, its source or its columns cannot be read
+   */
+  public static List<String> targetTextProperties(String targetKey) {
+    List<String> properties = new ArrayList<>();
+    OBContext.setAdminMode(true);
+    try {
+      OBCriteria<VectorSearchTarget> targets =
+          OBDal.getInstance().createCriteria(VectorSearchTarget.class);
+      targets.add(Restrictions.eq(VectorSearchTarget.PROPERTY_SEARCHKEY, targetKey));
+      targets.add(Restrictions.eq(VectorSearchTarget.PROPERTY_ACTIVE, true));
+      targets.setMaxResults(1);
+      List<VectorSearchTarget> found = targets.list();
+      VectorSource source = found.isEmpty() ? null : found.get(0).getEtarcVectorSource();
+      if (source == null || source.getTable() == null) {
+        return properties;
+      }
+      Entity entity = ModelProvider.getInstance().getEntityByTableId(source.getTable().getId());
+      OBCriteria<VectorSourceColumn> columns =
+          OBDal.getInstance().createCriteria(VectorSourceColumn.class);
+      columns.add(Restrictions.eq(VectorSourceColumn.PROPERTY_ETARCVECTORSOURCE, source));
+      columns.add(Restrictions.eq(VectorSourceColumn.PROPERTY_ACTIVE, true));
+      columns.add(Restrictions.eq(VectorSourceColumn.PROPERTY_ISCONTENT, true));
+      columns.addOrder(Order.asc(VectorSourceColumn.PROPERTY_SEQNO));
+      for (VectorSourceColumn column : columns.list()) {
+        if (entity == null || column.getColumn() == null) {
+          continue;
+        }
+        org.openbravo.base.model.Property property =
+            entity.getPropertyByColumnName(column.getColumn().getDBColumnName());
+        if (property != null) {
+          properties.add(property.getName());
+        }
+      }
+      return properties;
+    } catch (Exception e) {
+      return properties;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /** Supplies the configured target keys, so the unknown-vs-forbidden split is testable. */

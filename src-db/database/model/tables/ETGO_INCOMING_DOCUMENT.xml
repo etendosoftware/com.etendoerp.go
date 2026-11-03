@@ -1,0 +1,147 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_INCOMING_DOCUMENT">
+    <table name="ETGO_INCOMING_DOCUMENT" primaryKey="ETGO_INCOMING_DOCUMENT__PK">
+      <column name="ETGO_INCOMING_DOCUMENT_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="FILE_NAME" primaryKey="false" required="true" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SENDER" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ERROR_CODE" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="REVIEWED" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ADJUSTED" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="DISCARDED_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="C_BPARTNER_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="POREFERENCE" primaryKey="false" required="false" type="VARCHAR" size="20" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="DATEINVOICED" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="GRANDTOTAL" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EXTRACTED_NAME" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EXTRACTED_TAXID" primaryKey="false" required="false" type="VARCHAR" size="30" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="C_INVOICE_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EXTRACTED_DATA" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="CURRENT_DATA" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TARGET_TYPE" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
+        <default><![CDATA[PURCHASE_INVOICE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="SOURCE" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
+        <default><![CDATA[UPLOAD]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
+        <default><![CDATA[PROCESSING]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="DUPLICATE_INVOICE_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="C_BPARTNER" name="ETGO_INCDOC_BPARTNER_FK">
+        <reference local="C_BPARTNER_ID" foreign="C_BPARTNER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_INCDOC_CRTBY_FK">
+        <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="C_INVOICE" name="ETGO_INCDOC_DUPINV_FK">
+        <reference local="DUPLICATE_INVOICE_ID" foreign="C_INVOICE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="C_INVOICE" name="ETGO_INCDOC_INVOICE_FK">
+        <reference local="C_INVOICE_ID" foreign="C_INVOICE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_INCDOC_UPDBY_FK">
+        <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_INCOMINGDOCUMENT_ADORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_OMINGDOCUMENT_LIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <index name="ETGO_INCDOC_DUP_IX" unique="false">
+        <index-column name="AD_CLIENT_ID"/>
+        <index-column name="C_BPARTNER_ID"/>
+        <index-column name="POREFERENCE"/>
+      </index>
+      <index name="ETGO_INCDOC_STATUS_IX" unique="false">
+        <index-column name="AD_CLIENT_ID"/>
+        <index-column name="STATUS"/>
+        <index-column name="CREATED"/>
+      </index>
+      <check name="ETGO_INCDOC_ADJUSTED_CHK"><![CDATA[ADJUSTED IN ('Y', 'N')]]></check>
+      <check name="ETGO_INCDOC_REVIEWED_CHK"><![CDATA[REVIEWED IN ('Y', 'N')]]></check>
+      <check name="ETGO_OMINGDOCUMENT_CTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+    </table>
+  </database>

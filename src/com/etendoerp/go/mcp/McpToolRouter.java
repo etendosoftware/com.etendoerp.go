@@ -212,7 +212,9 @@ public class McpToolRouter {
     // handlers use admin mode for DAL metadata and therefore cannot safely host this check.
     // Dispatching before setAdminMode preserves AD_Window/entity organization isolation.
     if (McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
-      return McpVectorSearchTool.handle(arguments);
+      // ETP-5848: its text fallback lists through route(), so role, spec access and scopes apply.
+      return McpVectorSearchTool.handle(arguments,
+          listArgs -> route("etendo_list", listArgs, scopes));
     }
     try {
       OBContext.setAdminMode();
@@ -225,6 +227,7 @@ public class McpToolRouter {
         // Resolve spec name from tool name or arguments
         String specName = ToolRegistry.resolveSpecName(toolName, arguments);
         authorizeSpecAccess(specName, resolveAccessMethod(toolName));
+        McpEntityNames.defaultToPrimary(toolName, specName, arguments);
 
         switch (toolName) {
           case "etendo_discover":
@@ -261,9 +264,12 @@ public class McpToolRouter {
             return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
             // ETP-5945 (in ETP-5852): every action result also carries success + message.
-            return McpActionEnvelope.normalize(handleAction(specName, arguments));
+            // ETP-6013: a successful DocAction also queues the document's server-side PDF.
+            return McpActionEnvelope.normalize(
+                McpPrintTrigger.queueingServerPdf(this::handleAction).run(specName, arguments));
           case McpConstants.TOOL_NEO_ACTION_BATCH:
-            return McpActionBatch.handle(specName, arguments, this::handleAction);
+            return McpActionBatch.handle(specName, arguments,
+                McpPrintTrigger.queueingServerPdf(this::handleAction));
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
             return handleGenerateAmortizationPlan(arguments);
           case McpConstants.TOOL_NEO_WIDGET:
