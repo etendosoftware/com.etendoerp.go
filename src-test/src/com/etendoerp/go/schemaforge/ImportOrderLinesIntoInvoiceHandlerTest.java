@@ -1091,7 +1091,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   public void importOrderLines_aDiscountConflict_answersWhatToAskTheUser_andCreatesNothing()
       throws Exception {
     Probe probe = scenario();
-    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
+    // Stored at scale 4, as the column holds it: the answer must still read "10".
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10.0000"));
     secondOrder(probe, null);
 
     NeoResponse response = run(probe, "importOrderLines",
@@ -1111,12 +1112,36 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertEquals("o2", orders.getJSONObject(1).getString("orderId"));
     assertEquals("no % reads as 0", 0, BigDecimal.ZERO.compareTo(
         new BigDecimal(orders.getJSONObject(1).getString("globalDiscount"))));
+    // Same format as the 200 answers (ETP-5828): no trailing zeros, no exponent.
+    assertEquals("10", orders.getJSONObject(0).get("globalDiscount").toString());
+    assertEquals("0", orders.getJSONObject(1).get("globalDiscount").toString());
     JSONObject invoice = error.getJSONObject("invoice");
     assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(invoice.getString("totalDiscount"))));
+    assertEquals("0", invoice.get("totalDiscount").toString());
     assertFalse(invoice.getBoolean("hadLines"));
     assertTrue(error.getString("hint"), error.getString("hint").contains("carryGlobalDiscount:false"));
     assertTrue(probe.batches.isEmpty());
     verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+  }
+
+  /** The invoice's own % in a conflict is reported like the orders' ones: 12.5, not 12.5000. */
+  @Test
+  public void importOrderLines_aDiscountConflict_reportsTheInvoicePercentWithoutTrailingZeros()
+      throws Exception {
+    Probe probe = scenario();
+    BigDecimal orderDiscount = bd("10.0000");
+    BigDecimal invoiceDiscount = bd("12.5000");
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(orderDiscount);
+    when(probe.invoice.getEtgoTotalDiscount()).thenReturn(invoiceDiscount);
+
+    NeoResponse response = run(probe, "importOrderLines", "{\"orders\":[{\"orderId\":\"o1\"}]}");
+
+    assertEquals(422, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals(CONFLICT_B, error.getString("conflict"));
+    JSONObject order = error.getJSONArray("orders").getJSONObject(0);
+    assertEquals("10", order.get("globalDiscount").toString());
+    assertEquals("12.5", error.getJSONObject("invoice").get("totalDiscount").toString());
   }
 
   /**

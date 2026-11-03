@@ -169,7 +169,8 @@ final class InvoiceGlobalDiscountRule {
 
   /**
    * The 422 the caller turns into a question to the user: each order's %, the invoice's state
-   * before the call, the case, and how to import anyway.
+   * before the call, the case, and how to import anyway. The percents use {@link #reportedPercent}
+   * like the 200 answers ({@code 10}, {@code 12.5}, never {@code 12.5000}).
    */
   static DocumentLineImport.ImportRefusal discountConflictRefusal(String conflict,
       List<Order> selected, BigDecimal invoiceDiscount, boolean hadLines) throws JSONException {
@@ -177,12 +178,12 @@ final class InvoiceGlobalDiscountRule {
     for (Order order : selected) {
       orders.put(new JSONObject().put(OrderImportRequest.PARAM_ORDER_ID, order.getId())
           .put("documentNo", order.getDocumentNo())
-          .put("globalDiscount", orZero(order.getEtgoTotalDiscount())));
+          .put("globalDiscount", reportedPercent(order.getEtgoTotalDiscount())));
     }
     Map<String, Object> extra = new LinkedHashMap<>();
     extra.put("conflict", conflict);
     extra.put(OrderImportRequest.PARAM_ORDERS, orders);
-    extra.put("invoice", new JSONObject().put("totalDiscount", orZero(invoiceDiscount))
+    extra.put("invoice", new JSONObject().put("totalDiscount", reportedPercent(invoiceDiscount))
         .put("hadLines", hadLines));
     extra.put("hint", "Nothing was imported. Tell the user this conflict and ask whether to import "
         + "anyway. Only if they agree, resend the same call with "
