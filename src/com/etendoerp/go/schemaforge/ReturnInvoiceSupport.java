@@ -206,12 +206,41 @@ final class ReturnInvoiceSupport {
   static NeoResponse createReturnInvoice(ShipmentInOut returnDoc, String returnId,
       List<ShipmentInOutLine> lines, DocumentType docType, boolean isSales, NeoContext context,
       CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
+    return createReturnInvoice(returnDoc, returnId, lines, docType,
+        new ReturnInvoiceKind(isSales, true), context, createDraftInvoiceHandler);
+  }
+
+  /**
+   * What the calling return header says about the rectificativa it creates (ETP-6026): its
+   * direction and whether its contract accepts {@code allowDuplicate}. Structure only: each
+   * customization states its own values; nothing here names an entity.
+   *
+   * @param isSales {@code true} for the customer return (sales invoice), {@code false} for the
+   *     return to a vendor
+   * @param acceptsAllowDuplicate whether {@code allowDuplicate:true} lets a second rectificativa
+   *     through; {@code false} keeps the one-per-return rule unconditionally
+   */
+  record ReturnInvoiceKind(boolean isSales, boolean acceptsAllowDuplicate) {
+  }
+
+  /**
+   * {@link #createReturnInvoice(ShipmentInOut, String, List, DocumentType, boolean, NeoContext,
+   * CreateDraftInvoiceHandler)}, with the caller saying, through {@code kind}, whether its
+   * contract accepts {@code allowDuplicate} (ETP-6026). When it does not, a second rectificativa is
+   * always refused and the key, if sent anyway, is not read.
+   *
+   * @param kind the return's direction and duplicate policy
+   */
+  static NeoResponse createReturnInvoice(ShipmentInOut returnDoc, String returnId,
+      List<ShipmentInOutLine> lines, DocumentType docType, ReturnInvoiceKind kind,
+      NeoContext context, CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
+    boolean isSales = kind.isSales();
     JSONObject body = context.getRequestBody();
     OBContext obContext = context.getObContext();
     // ETP-5712: one rectificativa per return, like the screen (it hides the button once the
     // return has one). The check reads only, so it runs before anything else.
     JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices(returnId);
-    NeoResponse duplicate = refuseIfAlreadyInvoiced(body, previous);
+    NeoResponse duplicate = refuseIfAlreadyInvoiced(body, previous, kind.acceptsAllowDuplicate());
     if (duplicate != null) {
       return duplicate;
     }
@@ -245,20 +274,27 @@ final class ReturnInvoiceSupport {
   /**
    * ETP-5712: the one-rectificativa-per-return rule of the screen, for every channel. Refuses with
    * 409 {@code returnInvoiceAlreadyExists} (the message is the exact sentence the SPA localizes)
-   * when the return already has a non-voided rectificativa, unless the request carries the JSON
-   * boolean {@code allowDuplicate:true}. The check is strict: a string, a number or {@code null}
-   * is never read as true and never fails open, it is a 422.
+   * when the return already has a non-voided rectificativa, unless the caller accepts
+   * {@code allowDuplicate} and the request carries the JSON boolean {@code allowDuplicate:true}.
+   * That check is strict: a string, a number or {@code null} is never read as true and never
+   * fails open, it is a 422. When the caller does not accept the flag (ETP-6026, the customer
+   * return), the body is not read at all: the same 409 and message, with a hint that offers no way
+   * past it.
    *
    * @param body the request body; {@code null} reads as empty
    * @param previous the non-voided rectificativas the return already has, as
    *     {@link ReturnShipmentUtils#fetchPreviousReturnInvoices} reports them
+   * @param acceptsAllowDuplicate whether {@code allowDuplicate:true} lets a second one through
    * @return the 409 or 422, or {@code null} when the creation may go on
    */
-  static NeoResponse refuseIfAlreadyInvoiced(JSONObject body, JSONArray previous) {
-    return DuplicateCreationRefusal.refuseUnlessAllowed(body, previous,
-        ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS,
+  static NeoResponse refuseIfAlreadyInvoiced(JSONObject body, JSONArray previous,
+      boolean acceptsAllowDuplicate) {
+    return DuplicateCreationRefusal.refuseUnlessAllowed(acceptsAllowDuplicate ? body : null,
+        previous, ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS,
         ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS,
-        ReturnShipmentUtils.HINT_RETURN_INVOICE_ALREADY_EXISTS, "previousReturnInvoices");
+        acceptsAllowDuplicate ? ReturnShipmentUtils.HINT_RETURN_INVOICE_ALREADY_EXISTS
+            : ReturnShipmentUtils.HINT_RETURN_INVOICE_ONE_PER_RETURN,
+        "previousReturnInvoices");
   }
 
   /**
