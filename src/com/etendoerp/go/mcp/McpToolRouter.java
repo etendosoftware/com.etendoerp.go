@@ -345,7 +345,7 @@ public class McpToolRouter {
 
   /**
    * Handle the {@code docs} tool: fetch documentation from Context7 for the
-   * {@code etendosoftware/etendo-go-docs} library, filtered by a topic.
+   * {@code etendosoftware/etendo-docs} library, filtered by a topic.
    * <p>
    * Delegates to {@link #handleDocs(JSONObject, Context7DocsClient)} with a default
    * client. Tests should call the package-private overload with a mocked client.
