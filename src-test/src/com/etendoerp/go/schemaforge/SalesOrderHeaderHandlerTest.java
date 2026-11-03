@@ -671,6 +671,7 @@ public class SalesOrderHeaderHandlerTest {
     final String linkedDocs = OrderReactivationGuard.MSG_LINKED_DOCUMENTS;
     final String linkedDocsCheckFailed = OrderReactivationGuard.MSG_CHECK_FAILED;
     final String closeRefused = SalesOrderHeaderHandler.MSG_CLOSE_NOT_OFFERED;
+    final String notOffered = SalesOrderHeaderHandler.MSG_ACTION_NOT_OFFERED;
     final String notFound = NeoActionRecordGuard.MSG_RECORD_NOT_FOUND;
     // Columns: the label, the body sent, the stored DocAction, the property check on the requested
     // value (null when it is accepted), whether linked documents exist (null when the query
@@ -709,8 +710,9 @@ public class SalesOrderHeaderHandlerTest {
         { "root RE on a record whose entity has no DocAction fails closed",
             "{\"docAction\":\"RE\"}", NO_DOC_ACTION_PROPERTY, null, Boolean.TRUE, 500,
             linkedDocsCheckFailed },
-        { "empty body on a record with nothing stored falls through",
-            "{}", null, null, Boolean.TRUE, null, null },
+        // ETP-6026 allow-list: nothing to run is not let through.
+        { "empty body on a record with nothing stored is refused",
+            "{}", null, null, Boolean.TRUE, 400, notOffered },
         // Close: refused on every sales order, whatever the linked documents.
         { "root CL with linked docs is refused as Close, not as Reactivate",
             "{\"docAction\":\"CL\"}", "CO", null, Boolean.TRUE, 400, closeRefused },
@@ -771,6 +773,12 @@ public class SalesOrderHeaderHandlerTest {
         when(dal.get(Tab.class, tabId)).thenReturn(tab);
         when(dal.get(entityName, orderId))
             .thenReturn(RECORD_NOT_FOUND.equals(stored) ? null : order);
+        // ETP-6026: the allow-list reads the stored status; every row here is a booked order,
+        // which accepts CO (no-op) and RE.
+        org.openbravo.model.common.order.Order booked =
+            mock(org.openbravo.model.common.order.Order.class);
+        when(booked.getDocumentStatus()).thenReturn("CO");
+        when(dal.get(org.openbravo.model.common.order.Order.class, orderId)).thenReturn(booked);
       }
       Connection conn = mock(Connection.class);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -815,6 +823,122 @@ public class SalesOrderHeaderHandlerTest {
     JSONObject error = result.getBody().getJSONObject("error");
     JSONArray keys = error.optJSONArray(NeoProcessService.MESSAGE_KEYS);
     return keys != null && keys.length() > 0 ? keys.getString(0) : error.getString("message");
+  }
+
+  /**
+   * ETP-6026: the DocAction button is an allow-list on the stored {@code documentStatus} — CO on
+   * a draft or in-progress order, CO (a no-op) and RE on a booked one, nothing elsewhere —
+   * decided on the effective DocAction like Close (whose table above already covers
+   * root-vs-fieldValues resolution). Void answers {@code ETGO_SalesOrderVoidNotOffered} in every
+   * status; any other value the window does not offer ({@code PR}, {@code AP}, {@code CO} on a
+   * closed order, {@code RE} on a closed order, {@code --}) answers
+   * {@code ETGO_SalesOrderActionNotOffered}; {@code RE} on a draft is let through to the
+   * reactivation rule that answered it before; a status that cannot be read fails closed with 500.
+   */
+  @Test
+  public void testHandleDocActionAllowList_table() throws Exception {
+    final String orderId = "order-vo-1";
+    final String tabId = "tab-order";
+    final String voidRefused = SalesOrderHeaderHandler.MSG_VOID_NOT_OFFERED;
+    final String notOffered = SalesOrderHeaderHandler.MSG_ACTION_NOT_OFFERED;
+    final String checkFailed = DocActionRefusalGuard.MSG_CHECK_FAILED;
+    // Columns: label, body, stored DocAction, stored documentStatus (null: the order cannot be
+    // loaded for its status), expected status (null: falls through) and expected refusal key.
+    Object[][] cases = {
+        { "root VO on a draft is refused", "{\"docAction\":\"VO\"}", "CO", "DR", 400,
+            voidRefused },
+        { "root VO on an in-progress order is refused", "{\"docAction\":\"VO\"}", "CO", "IP", 400,
+            voidRefused },
+        { "empty body runs the stored VO of a draft and is refused", "{}", "VO", "DR", 400,
+            voidRefused },
+        { "root VO on a booked order is refused", "{\"docAction\":\"VO\"}", "CO", "CO", 400,
+            voidRefused },
+        { "root VO on a closed order is refused too", "{\"docAction\":\"VO\"}", "--", "CL", 400,
+            voidRefused },
+        { "root PR on a draft is refused (it used to take the order to IP)",
+            "{\"docAction\":\"PR\"}", "CO", "DR", 400, notOffered },
+        { "root AP on an in-progress order is refused", "{\"docAction\":\"AP\"}", "CO", "IP", 400,
+            notOffered },
+        // RE on a draft is left to the rule that answered it before (DocActionReactivationRule's
+        // 422, after this pre-hook); on any other non-booked status the allow-list refuses it.
+        { "root RE on a draft goes on to the existing reactivation rule",
+            "{\"docAction\":\"RE\"}", "CO", "DR", null, null },
+        { "root RE on a closed order is refused", "{\"docAction\":\"RE\"}", "--", "CL", 400,
+            notOffered },
+        { "root CO on a closed order is refused", "{\"docAction\":\"CO\"}", "--", "CL", 400,
+            notOffered },
+        { "empty body running the stored -- is refused", "{}", "--", "CO", 400, notOffered },
+        { "root CO on a draft runs", "{\"docAction\":\"CO\"}", "CO", "DR", null, null },
+        { "the confirm modal's body runs the stored CO of an in-progress order",
+            "{\"action\":\"CO\"}", "CO", "IP", null, null },
+        { "root CO on a booked order runs (the bulk bar's no-op)", "{\"docAction\":\"CO\"}",
+            "--", "CO", null, null },
+        { "a status that cannot be read fails closed", "{\"docAction\":\"VO\"}", "CO", null, 500,
+            checkFailed },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      String status = (String) c[3];
+      Integer expectedStatus = (Integer) c[4];
+
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      SalesOrderHeaderHandler handler = handlerWithMockClone(router);
+      Tab tab = mock(Tab.class);
+      Table table = mock(Table.class);
+      Property property = mock(Property.class);
+      Entity entity = mock(Entity.class);
+      BaseOBObject stored = mock(BaseOBObject.class);
+      when(tab.getId()).thenReturn(tabId);
+      when(tab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("Order");
+      when(entity.hasProperty("documentAction")).thenReturn(true);
+      when(entity.getProperty("documentAction")).thenReturn(property);
+      when(stored.getEntity()).thenReturn(entity);
+      when(stored.get("documentAction")).thenReturn(c[2]);
+      OBDal dal = mock(OBDal.class);
+      when(dal.get(Tab.class, tabId)).thenReturn(tab);
+      when(dal.get("Order", orderId)).thenReturn(stored);
+      // OrderReactivationGuard runs first on RE; nothing is linked.
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+      if (status != null) {
+        org.openbravo.model.common.order.Order order =
+            mock(org.openbravo.model.common.order.Order.class);
+        when(order.getDocumentStatus()).thenReturn(status);
+        when(dal.get(org.openbravo.model.common.order.Order.class, orderId)).thenReturn(order);
+      }
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-order").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("DocAction").recordId(orderId).adTab(tab)
+          .requestBody(new JSONObject((String) c[1]))
+          .build();
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        msgMock.when(() -> OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        NeoResponse result = handler.handle(ctx);
+
+        if (expectedStatus == null) {
+          assertNull(label, result);
+          verify(router).handle(ctx);
+        } else {
+          assertNotNull(label, result);
+          assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
+          assertEquals(label, c[5], refusalOf(result));
+          verify(router, never()).handle(any());
+        }
+      }
+    }
   }
 
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────

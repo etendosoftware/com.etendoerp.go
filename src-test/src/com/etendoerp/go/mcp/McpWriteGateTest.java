@@ -595,7 +595,9 @@ class McpWriteGateTest {
      * own {@code fields} argument and the pre-hook fires downstream, so every key is the caller's
      * by construction. Keeping the exemption left the gate firing on under two fifths of the
      * surface, and a live probe caught {@code etendo_update} on {@code sales-order/header} —
-     * qualifier {@code salesOrderHeaderHandler} — accepting {@code documentNo} with a 200.
+     * then bound by a qualifier — accepting {@code documentNo} with a 200. That pair moved to
+     * {@code @NeoExtension} in ETP-6026, so the fixture uses a pair still bound by qualifier,
+     * {@code purchase-order/header} ({@code purchaseOrderHeaderHandler}).
      */
     @Test
     @DisplayName("an entity with a Java_Qualifier is NOT exempt from the read-only gate")
@@ -603,7 +605,7 @@ class McpWriteGateTest {
       declareProperty("documentNo", "DocumentNo");
       curate("DocumentNo", Boolean.TRUE, Boolean.TRUE, null, null);
       SFEntity sfEntity = specEntity();
-      when(sfEntity.getJavaQualifier()).thenReturn("salesOrderHeaderHandler");
+      when(sfEntity.getJavaQualifier()).thenReturn("purchaseOrderHeaderHandler");
 
       McpRoutingException thrown = assertThrows(McpRoutingException.class,
           () -> write(fields("documentNo", "SO-9999"), sfEntity));
