@@ -734,6 +734,64 @@ public class BankStatementsHandlerTest {
     }
   }
 
+  /** Each row exposes the stored discarded count next to the matched one, and the stored status. */
+  @Test
+  public void loadStatementsReturnsTheDiscardedCount() throws Exception {
+    JSONObject row = loadOneStatementRow(3, 1, 2, "RECONCILED");
+
+    assertEquals(3, row.getInt("lineCount"));
+    assertEquals(1, row.getInt("matchedCount"));
+    assertEquals(2, row.getInt("discardedCount"));
+    assertEquals("RECONCILED", row.getString("status"));
+  }
+
+  /**
+   * A row whose {@code em_etgo_status} is blank derives its status, and a discarded line counts as
+   * resolved there: 1 matched + 2 discarded of 3 is RECONCILED, while the same row without the
+   * discarded lines is PARTIAL.
+   */
+  @Test
+  public void loadStatementsFallbackStatusCountsDiscardedLinesAsResolved() throws Exception {
+    assertEquals("RECONCILED", loadOneStatementRow(3, 1, 2, "  ").getString("status"));
+    assertEquals("PARTIAL", loadOneStatementRow(3, 1, 0, null).getString("status"));
+    assertEquals("PARTIAL", loadOneStatementRow(4, 0, 1, "").getString("status"));
+  }
+
+  /**
+   * Runs {@code loadStatements} over a single processed result-set row with the given stored counts
+   * and status, and returns that row.
+   */
+  private JSONObject loadOneStatementRow(int lineCount, int matchedCount, int discardedCount,
+      String storedStatus) throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+    when(conn.prepareStatement(sql.capture())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString("fin_bankstatement_id")).thenReturn("stmt-1");
+    when(rs.getTimestamp(anyString())).thenReturn(new Timestamp(0));
+    when(rs.getString("processed")).thenReturn("Y");
+    when(rs.getInt("em_etgo_line_count")).thenReturn(lineCount);
+    when(rs.getInt("em_etgo_matched_count")).thenReturn(matchedCount);
+    when(rs.getInt("em_etgo_discarded_count")).thenReturn(discardedCount);
+    when(rs.getString("em_etgo_status")).thenReturn(storedStatus);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      JSONArray rows = handler.loadStatements("acc-1");
+
+      assertTrue("the statements query must select the stored discarded count",
+          sql.getValue().contains("bs.em_etgo_discarded_count"));
+      assertEquals(1, rows.length());
+      return rows.getJSONObject(0);
+    }
+  }
+
   @Test
   public void loadLinesMapsResultSetIntoEnvelopeRows() throws Exception {
     Connection conn = mock(Connection.class);

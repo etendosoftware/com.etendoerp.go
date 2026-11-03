@@ -41,6 +41,12 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
  * <p>{@link ModelProvider} and {@link TriggerHandler} are mocked statically so
  * {@code isValidEvent} passes without a DB or an active import. Modelled on
  * {@code BankStatementLinePendingAmountHandlerTest}.
+ *
+ * <p>Discarded lines count as resolved: the status also reads the header's own
+ * {@code EM_ETGO_DISCARDED_COUNT} from the event, and reads it as {@code 0} when the running
+ * model has no such column.
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementHeaderStatusHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -170,6 +176,79 @@ class BankStatementHeaderStatusHandlerTest {
     handler.onUpdate(event);
 
     verify(event, never()).setCurrentState(any(), any());
+  }
+
+  // ── discarded lines count as resolved ────────────────────────────────────────
+
+  @Test
+  void onUpdateDerivesReconciledWhenMatchedPlusDiscardedCoverEveryLine() {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, true, 3, 1);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(2L);
+
+    handler.onUpdate(event);
+
+    verify(event).setCurrentState(statusProp, "RECONCILED");
+  }
+
+  @Test
+  void onNewDerivesPartialWhenOnlyADiscardedLineIsResolved() {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityNewEvent event = mock(EntityNewEvent.class);
+    wireEvent(event, true, 4, 0);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(1L);
+
+    handler.onNew(event);
+
+    verify(event).setCurrentState(statusProp, "PARTIAL");
+  }
+
+  @Test
+  void onUpdateNotProcessedStaysDraftWhateverTheDiscardedCount() {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, false, 2, 0);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(2L);
+
+    handler.onUpdate(event);
+
+    verify(event).setCurrentState(statusProp, "DRAFT");
+  }
+
+  /** A header not yet recomputed since the column was added holds NULL: it reads as 0. */
+  @Test
+  void onUpdateReadsANullDiscardedCountAsZero() {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, true, 3, 1);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(null);
+
+    handler.onUpdate(event);
+
+    verify(event).setCurrentState(statusProp, "PARTIAL");
+  }
+
+  /**
+   * Without {@code EM_ETGO_DISCARDED_COUNT} in the model the count is 0, the same fallback
+   * {@link BankStatementAggregates} applies: a statement with 2 of 3 lines matched stays PARTIAL.
+   */
+  @Test
+  void onUpdateDerivesWithZeroDiscardedWhenTheColumnIsMissing() {
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, true, 3, 2);
+
+    handler.onUpdate(event);
+
+    verify(event).setCurrentState(statusProp, "PARTIAL");
+  }
+
+  /** Maps {@code EM_ETGO_DISCARDED_COUNT} on the statement entity and returns its property. */
+  private Property withDiscardedCountColumn() {
+    Property discardedCountProp = mock(Property.class);
+    when(statementEntity.getPropertyByColumnName(BankStatementAggregates.COL_DISCARDED_COUNT,
+        false)).thenReturn(discardedCountProp);
+    return discardedCountProp;
   }
 
   /**
