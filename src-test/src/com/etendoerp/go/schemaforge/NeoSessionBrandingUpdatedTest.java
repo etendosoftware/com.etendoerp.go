@@ -53,6 +53,8 @@ import com.etendoerp.go.common.CompanyLogoResolver;
  * Unit tests for the session's {@code brandingUpdated} (ETP-5541): the latest {@code updated}
  * among the logo image, AD_OrgInfo, its address and AD_Org, serialized in whole seconds so the
  * web client's strict comparison with the attachment's own whole-second timestamp holds.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoSessionService
  */
 class NeoSessionBrandingUpdatedTest {
 
