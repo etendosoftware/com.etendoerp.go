@@ -29,10 +29,11 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Image;
+
+import com.etendoerp.go.schemaforge.TenantOwnership;
 
 /**
  * Everything the MCP write path and {@code etendo_schema} need to treat an {@code Image BLOB} column as
@@ -208,7 +209,8 @@ final class McpImageFieldSupport {
   /** Isolated so the DAL lookup is the only untestable line in {@link #rejectionReason}. */
   private static boolean imageExists(String imageId) {
     try {
-      return OBDal.getInstance().get(Image.class, imageId) != null;
+      // ETP-5819: another tenant's image reads as unknown, so the answer is no existence oracle.
+      return TenantOwnership.loadOwned(Image.class, imageId) != null;
     } catch (Exception e) {
       // A malformed id can make the DAL throw rather than return null; either way it is not a row.
       return false;

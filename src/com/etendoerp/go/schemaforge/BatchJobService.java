@@ -517,12 +517,15 @@ public final class BatchJobService {
     row.put("ids", ids);
     JSONObject envelope;
     try {
-      envelope = runner.run(rowOps);
+      // ETP-5819: the worker thread does not inherit the request's guard.
+      envelope = NeoTenantWriteGuard.call(() -> runner.run(rowOps));
     } catch (Exception e) { // NOSONAR — a row's failure is its result, never the job's death
       log.error("[BATCH-JOB] row {} threw", rowIndex, e);
       row.put(KEY_COMMITTED, false);
       row.put(KEY_SAFE_TO_RESEND, false);
-      row.put(KEY_ERROR, new JSONObject().put(KEY_STATUS, 500)
+      // A tenant refusal is permanent for this row: report it as such, not as a server failure.
+      int status = e instanceof org.openbravo.base.exception.OBSecurityException ? 403 : 500;
+      row.put(KEY_ERROR, new JSONObject().put(KEY_STATUS, status)
           .put(KEY_MESSAGE, "Batch row failed: " + e.getMessage()));
       return row;
     } finally {

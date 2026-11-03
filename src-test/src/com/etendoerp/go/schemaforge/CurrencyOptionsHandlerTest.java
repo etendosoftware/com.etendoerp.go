@@ -51,6 +51,8 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
+import org.junit.After;
+import org.junit.Before;
 
 /**
  * Pure unit tests for {@link CurrencyOptionsHandler}: the Connection-based private logic that
@@ -63,6 +65,20 @@ import org.openbravo.model.common.invoice.Invoice;
  * @covers com.etendoerp.go.schemaforge.CurrencyOptionsHandler
  */
 public class CurrencyOptionsHandlerTest {
+
+  /** ETP-5819: the handler only serves the caller's own documents; every id here is one. */
+  private MockedStatic<TenantOwnership> ownership;
+
+  @Before
+  public void ownEveryRecord() {
+    ownership = Mockito.mockStatic(TenantOwnership.class);
+    ownership.when(() -> TenantOwnership.isVisibleToCurrentTenant(Mockito.any())).thenReturn(true);
+  }
+
+  @After
+  public void closeOwnership() {
+    ownership.close();
+  }
 
   // ---------------------------------------------------------------
   // Reflection helpers

@@ -53,6 +53,8 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Location;
 
+import com.etendoerp.go.schemaforge.TenantOwnership;
+
 /**
  * ETP-5335 — unit tests for {@link McpBillToInjector}, the MCP-only compensation that derives
  * {@code C_Order.BillTo_ID} from the business partner because no other layer can.
@@ -427,6 +429,21 @@ class McpBillToInjectorTest {
       partnerBillToLocation(PARTNER_BILL_TO_ID);
 
       McpBillToInjector.injectIfMissing(body, orderTab(), orderEntity(), log);
+
+      assertEquals(PARTNER_BILL_TO_ID, body.getString(BILL_TO));
+    }
+
+    @Test
+    @DisplayName("2) a ship-to of another tenant is not reused, even when it otherwise matches")
+    void shipToOfAnotherTenant() throws Exception {
+      JSONObject body = body(PARTNER, PARTNER_ID, SHIP_TO, SHIP_TO_ID);
+      location(SHIP_TO_ID, true, true, PARTNER_ID);
+      partnerBillToLocation(PARTNER_BILL_TO_ID);
+
+      try (MockedStatic<TenantOwnership> ownership = mockStatic(TenantOwnership.class)) {
+        // ETP-5819: loadOwned answers null for a row the caller's tenant does not own.
+        McpBillToInjector.injectIfMissing(body, orderTab(), orderEntity(), log);
+      }
 
       assertEquals(PARTNER_BILL_TO_ID, body.getString(BILL_TO));
     }

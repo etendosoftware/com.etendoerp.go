@@ -282,7 +282,8 @@ public class AmortizationHeaderHandler implements NeoHandler {
     }
     try {
       BaseOBObject asset = OBDal.getInstance().get(ASSET_ENTITY_NAME, assetId);
-      if (asset == null) {
+      // ETP-5819: another tenant's asset falls back like a missing one.
+      if (asset == null || !TenantOwnership.isVisibleToCurrentTenant(asset)) {
         log.debug("Asset not found for id '{}', using fallback name", assetId);
         return NAME_FALLBACK;
       }

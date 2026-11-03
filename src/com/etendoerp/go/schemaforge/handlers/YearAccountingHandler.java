@@ -31,11 +31,13 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.financialmgmt.calendar.Year;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.TenantOwnership;
 
 /**
  * NeoHandler for the read-only {@code accounting} entity of the {@code calendar} spec's
@@ -116,7 +118,11 @@ public class YearAccountingHandler implements NeoHandler {
     try {
       OBContext.setAdminMode();
       try {
-        return NeoResponse.ok(buildResponseBody(fetchRows(yearId)));
+        // ETP-5819: the HQL has no tenant filter; another tenant's year lists like a missing one.
+        List<Object[]> rows = TenantOwnership.loadOwned(Year.class, yearId) == null
+            ? List.of()
+            : fetchRows(yearId);
+        return NeoResponse.ok(buildResponseBody(rows));
       } finally {
         OBContext.restorePreviousMode();
       }
