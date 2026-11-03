@@ -75,11 +75,35 @@ public final class NeoAttachmentPolicy {
    *
    * <p>Coupled to {@code NeoServlet}'s {@code @MultipartConfig(maxFileSize = 10 MB)}: the
    * container rejects anything larger before this class ever sees the part, so raising this
-   * number alone would only move the failure to a less descriptive one. Raise both or neither.</p>
+   * number alone would only move the failure to a less descriptive one. Raise both or neither.
+   * {@code maxRequestSize} is a separate limit (the whole request: 210 MB since ETP-6047, so the
+   * invoice inbox can take {@link #BULK_MAX_FILES} files at once); it is derived from this
+   * per-file limit in {@link #MAX_REQUEST_BYTES}, and it applies to all multipart NEO endpoints.</p>
    */
   public static final int MAX_SIZE_MB = 10;
 
   private static final long MAX_SIZE_BYTES = MAX_SIZE_MB * 1024L * 1024L;
+
+  /** The per-file limit in bytes; {@code NeoServlet}'s {@code maxFileSize} is this same value. */
+  static final long MAX_FILE_BYTES = MAX_SIZE_BYTES;
+
+  /** Most files the bulk upload of the invoice inbox (ETP-6047) takes in one request. */
+  static final int BULK_MAX_FILES = 20;
+
+  /** Room for the multipart boundaries, headers and form fields around the files. */
+  static final long MULTIPART_MARGIN_BYTES = 10L * 1024 * 1024;
+
+  /**
+   * Whole-request limit in bytes, the value of {@code NeoServlet}'s {@code maxRequestSize}:
+   * {@link #BULK_MAX_FILES} files of {@link #MAX_FILE_BYTES} plus {@link #MULTIPART_MARGIN_BYTES}
+   * (210 MB). {@code maxFileSize} stays the per-file guard.
+   *
+   * <p><b>Decided trade-off (ETP-6047):</b> this is a container-wide setting, so since the invoice
+   * inbox it applies to <em>every</em> multipart NEO endpoint, not only to the inbox: the request
+   * size each of them accepts is wider than the former 12 MB (a request above 1 MB is spooled to
+   * disk by the container). Each endpoint still enforces its own per-file and file-count rules.
+   */
+  static final long MAX_REQUEST_BYTES = BULK_MAX_FILES * MAX_FILE_BYTES + MULTIPART_MARGIN_BYTES;
 
   /** How many leading bytes are read from the uploaded file to test its signature. */
   static final int SIGNATURE_PROBE_BYTES = 64;

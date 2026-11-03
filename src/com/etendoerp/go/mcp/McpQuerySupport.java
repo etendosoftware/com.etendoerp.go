@@ -659,7 +659,10 @@ final class McpQuerySupport {
    */
   private static String containsCondition(String path, Property prop, Class<?> type, String key,
       Object text) {
-    if (!prop.isPrimitive() || !String.class.equals(type)) {
+    if (!prop.isPrimitive()) {
+      throw McpRequestRefusals.containsOnReference(key, text);
+    }
+    if (!String.class.equals(type)) {
       throw McpRequestRefusals.malformedFilterOperator(key, McpBusinessFilters.OP_CONTAINS,
           "'contains' works only on text fields; use exact match, 'in' or a range here");
     }

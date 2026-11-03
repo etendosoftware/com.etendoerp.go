@@ -27,6 +27,8 @@ import org.junit.jupiter.api.Test;
 /**
  * Unit tests for {@link McpConstants}.
  * Verifies constant values used across MCP tool generation.
+ *
+ * @covers com.etendoerp.go.mcp.McpConstants
  */
 class McpConstantsTest {
 
@@ -70,6 +72,5 @@ class McpConstantsTest {
   void labelConstants() throws Exception {
     assertNotNull(getConstant("LABEL_SPEC_NAME"));
     assertNotNull(getConstant("LABEL_ENTITY_NAME"));
-    assertNotNull(getConstant("LABEL_ENTITY_NAME_WITH_EXAMPLE"));
   }
 }

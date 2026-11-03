@@ -2054,6 +2054,81 @@ goods receipt/shipment, return-to-vendor shipment, return material receipt) uses
 legacy hook remains wired as the unselected branch in `GenericPreviewModal` only until Phase 9 of
 `docs/plans/2026-08-14-etp-4315-attachment-preview-unification-plan.md` retires it.
 
+### 4.6b Invoice Inbox bulk upload (ETP-6047)
+
+A built-in endpoint that takes up to 20 supplier documents at once and stages each one as a row of
+the Invoice Inbox (`ETGO_INCOMING_DOCUMENT`, window `81AC659E93504927B459E0CAE80CE923`). Implemented
+in `InvoiceInboxUploadEndpoint` (orchestration, the only reader of the feature flag) and
+`InvoiceInboxIntake` (one file: the row and its attachment), routed by one delegating branch in
+`NeoBuiltInEndpointHandler`. Texts come from `InvoiceInboxMessages` (`ETGO_InvoiceInbox*`
+`AD_MESSAGE` keys, English fallback in code).
+
+```
+POST /sws/neo/invoice-inbox/upload
+Authorization: Bearer {token}
+Content-Type: multipart/form-data      (repeated part name: files, 1..20)
+```
+
+**Gate and access.** The flag `invoice-inbox` (`InvoiceInboxFlag`, per account, off by default) is
+evaluated **first**, at request entry, before the multipart is read: off answers `403
+feature_disabled` and nothing is created. The OCR/extraction worker (ETP-6048) must NOT re-evaluate
+it (it has no request user). Then the role needs write access to the Invoice Inbox window
+(`NeoAccessHelper.hasWindowAccess(window, "POST")`, else `403 access_denied` with the standard
+"Access denied to spec for current role" text). The Compras and Financiero templates carry a full
+grant (`TemplateRoleWindowAccess`). The NEO built-in path runs in admin mode, so the DAL does not
+check the organization: the endpoint requires the current organization to be a real one (not `*`)
+and in the role's writable organizations, else `403 org_not_allowed`.
+
+**Limits.** At most 20 files and 10 MB per file; the whole request at most 210 MB
+(`NeoServlet` `maxRequestSize` = 20 x 10 MB + 10 MB of multipart margin, derived in
+`NeoAttachmentPolicy.MAX_REQUEST_BYTES`; `maxFileSize` is `NeoAttachmentPolicy.MAX_SIZE_MB` in
+bytes, 10 MB, and is the per-file guard). **Decided trade-off:** `maxRequestSize` is a
+container-wide setting, so the 210 MB request limit (formerly 12 MB) now applies to ALL multipart
+NEO endpoints, not only to the inbox; the accepted request size is wider everywhere (the container
+spools anything above 1 MB to disk), while each endpoint keeps its own per-file and file-count
+rules. A request whose declared `Content-Length` is already over the limit is answered `413`
+without reading the body. The container refuses an over-limit part or request: `413 request_too_large`. Accepted
+types are a local set, `pdf`, `jpg`, `jpeg`, `png` (narrower than the shared attachment policy,
+which is untouched).
+
+**Whole-request refusals** (NEO error envelope, nothing created): `403 feature_disabled`,
+`403 access_denied`, `403 org_not_allowed`, `400 not_multipart` (also an unreadable multipart
+body), `413 request_too_large`, `400 no_files`, `400 too_many_files` (message carries the maximum
+and the count).
+
+**Answer.** HTTP 200 with a per-file result; one bad file does not cost the others:
+
+```json
+{ "accepted": 1, "rejected": 1, "results": [
+  { "fileName": "a.pdf", "status": "accepted", "incomingDocumentId": "..." },
+  { "fileName": "b.exe", "status": "rejected", "code": "unsupported_type", "message": "..." } ] }
+```
+
+Per-file rejection codes: `unsupported_type`, `empty_file`, `invalid_content` (the attachment
+policy refused the bytes; its message is passed through) and `store_failed`.
+
+**Per-file transactions.** Each file runs in its own transaction: the `PROCESSING` row (`source`
+`UPLOAD`, `targetType` `PURCHASE_INVOICE`) is saved and flushed, the file is stored as the row's
+main attachment through `NeoAttachmentStore`, then the transaction commits (any failure rolls back
+that file only). Only ids cross iterations; client and organization are re-read per file because
+the session is closed between files. Creating the `PROCESSING` row is the whole "enqueue":
+extraction and matching are ETP-6048, and `C_Invoice` is never touched. There is no quota gate (a
+staging row is not an invoice).
+
+**Synchronous, long call.** The upload is synchronous and can carry up to 20 files / about 200 MB,
+so the client (ETP-6049) must call it with `timeout: 0` (`schema_forge/docs/request-policy.md`):
+the default 60 s timeout is for reads, but passing `0` explicitly means a long upload can never be
+cut off by a timeout.
+
+**File names** are user input: directory components, control characters (CR/LF included) are
+stripped, and a name over 240 UTF-8 bytes is truncated (on a code point boundary) keeping its extension. In messages the `@`
+of a name is replaced by a full-width one, so a name can never read as an `AD_MESSAGE` token.
+
+**Known risk (accepted).** The core copies the file to the attachments directory during the
+attachment store, so ANY failure after that point (the main-document marker, the lookup of the new
+attachment, or the commit) rolls the rows back but leaves that file orphaned. A WARN with the row id
+and the file name is logged in every such branch and nothing compensates.
+
 ### 4.7 Preview File Endpoint — retired for preview panels, pending removal (ETP-4315 Phase 9)
 
 **As of 2026-08-18, no window's preview panel uses this endpoint anymore** — every one of them was
@@ -2408,6 +2483,72 @@ pattern (a different extension point — request enrichment/validation hooks on 
 specs — not a replacement for this one).
 
 ---
+
+### 4.13 Document Template Configuration — `doctemplateconfig` (ETP-5988)
+
+The printable template an organization uses for each document type: variant, logo and footer.
+Persisted in `ETGO_DOC_TEMPLATE_CONFIG` (entity `ETGO_Doc_Template_Config`), one row per
+`(client, organization, document type)` — the unique index `ETGO_DOCTPLCFG_ORG_TYPE_UQ` enforces it.
+Consumed by the UI that edits it (T5) and the renderer that reads it (T6).
+
+```
+GET /sws/neo/doctemplateconfig?docType=<type>[&orgId=<org>]
+GET /sws/neo/doctemplateconfig[?orgId=<org>]
+PUT /sws/neo/doctemplateconfig      {"orgId"?, "docType", "variant"?, "logo"?, "footerText"?, "color"?, "font"?, "fontSize"?, "rowStripes"?, "showLogo"?}
+Authorization: Bearer {token}
+```
+
+**Contract.** A configuration is `{orgId, docType, variant, logo, footerText, color, font, fontSize, rowStripes, showLogo, configured}`.
+
+| Field | Values |
+|---|---|
+| `docType` | `sales-invoice`, `sales-order`, `sales-quotation`, `purchase-order`, `goods-shipment`, `payment-in`, `return-material-receipt`, `return-to-vendor-shipment` (the spec names of the `print-*` printables) and `listing` (the print of a window's list: its design is chosen apart from the documents') |
+| `variant` | `classic` (default), `compact`, `modern` — also a CHECK on the table |
+| `logo` | `null`, an absolute `https://` URL (≤ 2000 chars) or a `data:image/(png\|jpeg\|webp);base64,…` URI (≤ 512 KiB). SVG, `http:` and any other scheme are refused: the renderer embeds it in a page that can run script |
+| `footerText` | `null` or text ≤ 500 chars, no control characters except line breaks. Stored as typed; **escaping is the renderer's job** |
+| `color` | `null` (the design's own) or an exact `#RRGGBB`, stored upper-case. Nothing else is accepted (named colors, `rgb()`, a trailing `;}`): it ends up inside a stylesheet |
+| `font` | `null` or `sans`, `serif`, `mono` — also a CHECK on the table |
+| `fontSize` | `null` or `small`, `normal`, `large` — also a CHECK on the table |
+| `rowStripes` | `null` or `on`, `off` (striped table rows) — also a CHECK on the table |
+| `showLogo` | `null` (no logo) or `on`, `off` — whether the list print (`listing`) shows the company logo in its header; ignored by documents, which always print theirs — also a CHECK on the table |
+| `configured` | `true` for a saved row; `false` when the defaults are served |
+
+- `GET ?docType=` answers one configuration, or the defaults (`classic`, no logo, no footer,
+  `configured:false`) with `200` when none was saved — a consumer never branches on a 404.
+- `GET` without `docType` answers `{orgId, configs:[…]}` with the organization's saved ones only.
+- `PUT` creates or updates the row of the organization and type and answers it. A key left out keeps
+  what was saved (a new row starts from the defaults); `null` or a blank string clears the logo, the footer
+  or a style choice (back to the design's own). The style choices are common to documents and `listing`; the logo and the footer only make sense for documents.
+
+**Isolation and permissions.** `orgId` defaults to the caller's organization.
+
+| Case | Status |
+|---|---|
+| no or invalid bearer token | `401` (NEO authentication) |
+| `GET` of an organization the role does not read | `403` |
+| `PUT` by a caller who is not an administrator or client administrator | `403` |
+| `PUT` into an organization the role cannot write | `403` |
+| organization `0` (*), unknown `docType`, invalid variant, logo or footer, malformed body | `400` |
+| body over ~576 KiB | `413` |
+| any other verb | `405` |
+
+The `403` is the same whether or not the organization exists. The client always comes from the
+caller's context, never from the request. There is **no fallback to a parent organization**: an
+organization with no row gets the defaults. Not exposed over MCP.
+
+**Cached PDFs.** A saved design changes what every document prints, so the session's
+`brandingUpdated` (`GET /sws/neo/session`, also read by `NeoDocumentPdf`) is the latest `updated`
+among the organization's `ETGO_DOC_TEMPLATE_CONFIG` rows (active or not) as well as the logo and
+company-data rows: a PDF cached before the design changed reads as stale, as after a logo change.
+Reading that timestamp never fails the session (`NeoSessionService.designUpdated`).
+
+> **Why the checks are explicit.** `NeoServlet` runs every request in `OBContext.setAdminMode()`, and
+> in admin mode the DAL applies neither the readable/writable organization filters nor the entity
+> access check. Every query of `DocTemplateConfigStore` therefore names the client and the
+> organization, and `DocTemplateConfigAccess` asks the caller's own readable/writable sets.
+
+Code: `NeoDocTemplateConfigEndpoint`, `DocTemplateConfigSupport`, `DocTemplateConfigStore`,
+`DocTemplateConfigAccess`, routed by a `doctemplateconfig` case in `NeoPseudoSpecDispatcher`.
 
 ### 4.12 MCP Tool Ergonomics (Wave 3 — ETP-4601)
 
@@ -8590,6 +8731,10 @@ Ventas only the Receivables schedule; Compras only the Payables one).
 > at all (`AD_Menu.ad_window_id` is null on both "Receivables Aging Schedule" and "Payables Aging
 > Schedule"), so there was no window to proxy through either — and now hold their standalone
 > grants via the same new mechanism.
+
+**Invoice Inbox (ETP-6047):** the Invoice Inbox window (`81AC659E93504927B459E0CAE80CE923`) is
+granted FULL to Compras and Financiero (Purchasing 14 / Finance 34 grants), because the bulk upload
+(section 4.6b) is a `POST` gated by `NeoAccessHelper#hasWindowAccess`.
 
 **Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime

@@ -107,16 +107,30 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
       return;
     }
     try {
-      JSONArray history = new JSONArray();
-      for (BaseOBObject entry : findHistory(recordId,
-          StringUtils.trimToNull(parameter.get(SPEC_NAME)))) {
-        history.put(toJson(entry));
-      }
-      responseVars.put(RESULT, history.toString());
+      responseVars.put(RESULT, read(recordId,
+          StringUtils.trimToNull(parameter.get(SPEC_NAME))).toString());
     } catch (Exception e) {
       log.error("Error in SFDocumentEmailHistory for record [{}]", recordId, e);
       responseVars.put(ERROR, e.getMessage());
     }
+  }
+
+  /**
+   * One document's send history, newest first, in the row shape described in the class javadoc.
+   * Also read by the MCP's {@code etendo_send_document_email} preview (ETP-5848), which has
+   * already authorized the document itself.
+   *
+   * @param recordId the document id
+   * @param specName the spec it was sent from, or {@code null} for any
+   * @return the rows
+   * @throws JSONException if a row cannot be built
+   */
+  public static JSONArray read(String recordId, String specName) throws JSONException {
+    JSONArray history = new JSONArray();
+    for (BaseOBObject entry : findHistory(recordId, specName)) {
+      history.put(toJson(entry));
+    }
+    return history;
   }
 
   /**
@@ -125,7 +139,7 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
    * <p>No {@code setFilterOnReadableClients}/{@code setFilterOnReadableOrganization} call on
    * purpose — see the class javadoc: their defaults ARE this endpoint's access rule.</p>
    */
-  private List<BaseOBObject> findHistory(String recordId, String specName) {
+  private static List<BaseOBObject> findHistory(String recordId, String specName) {
     StringBuilder where = new StringBuilder("as h where h.recordID = :recordId");
     if (specName != null) {
       where.append(" and h." + SPEC_NAME + " = :" + SPEC_NAME);
@@ -142,7 +156,7 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
     return query.list();
   }
 
-  private JSONObject toJson(BaseOBObject entry) throws JSONException {
+  private static JSONObject toJson(BaseOBObject entry) throws JSONException {
     JSONObject row = new JSONObject();
     row.put("id", entry.getId());
     row.put("sentAt", isoInstant(entry.get("sentAt")));
@@ -165,7 +179,7 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
    * <p>Best effort: a user record that cannot be read leaves the field null rather than failing
    * the whole history. The card simply omits the "Sent by" line then.</p>
    */
-  private Object senderName(BaseOBObject entry) {
+  private static Object senderName(BaseOBObject entry) {
     try {
       Object createdBy = entry.get("createdBy");
       if (!(createdBy instanceof User)) {

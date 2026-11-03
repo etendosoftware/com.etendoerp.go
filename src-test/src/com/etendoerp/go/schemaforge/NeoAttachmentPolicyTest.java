@@ -308,4 +308,21 @@ public class NeoAttachmentPolicyTest {
     System.arraycopy(b, 0, result, a.length, b.length);
     return result;
   }
+
+  /**
+   * ETP-6047 — the whole-request limit is {@code BULK_MAX_FILES} files of the per-file limit plus
+   * a margin for the multipart framing, and the per-file byte limit is the same number of
+   * megabytes the policy advertises. {@code NeoServlet}'s multipart config reads both.
+   */
+  @Test
+  public void requestAndFileLimitsAreDerivedFromTheSameMegabyteCap() {
+    long tenMegabytes = 10L * 1024 * 1024;
+
+    assertEquals(NeoAttachmentPolicy.MAX_SIZE_MB * 1024L * 1024L,
+        NeoAttachmentPolicy.MAX_FILE_BYTES);
+    assertEquals(tenMegabytes, NeoAttachmentPolicy.MAX_FILE_BYTES);
+    assertEquals(20, NeoAttachmentPolicy.BULK_MAX_FILES);
+    assertEquals(tenMegabytes, NeoAttachmentPolicy.MULTIPART_MARGIN_BYTES);
+    assertEquals(20 * tenMegabytes + tenMegabytes, NeoAttachmentPolicy.MAX_REQUEST_BYTES);
+  }
 }

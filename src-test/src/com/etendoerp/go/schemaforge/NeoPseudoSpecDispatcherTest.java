@@ -57,6 +57,7 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  *
  * @covers com.etendoerp.go.schemaforge.NeoPseudoSpecDispatcher
  * @covers com.etendoerp.go.schemaforge.NeoOcrConfigEndpoint
+ * @covers com.etendoerp.go.schemaforge.NeoDocTemplateConfigEndpoint
  */
 public class NeoPseudoSpecDispatcherTest {
 
@@ -249,6 +250,20 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Ocrconfig endpoint only supports GET"));
+    verify(servlet, never()).writeResponse(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // doctemplateconfig (ETP-5988)
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void docTemplateConfigServesOnlyGetAndPut() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("doctemplateconfig"), "DELETE", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Doctemplateconfig endpoint supports GET and PUT"));
     verify(servlet, never()).writeResponse(any(), any());
   }
 
