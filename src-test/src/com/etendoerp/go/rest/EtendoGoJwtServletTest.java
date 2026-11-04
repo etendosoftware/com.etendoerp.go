@@ -424,6 +424,22 @@ public class EtendoGoJwtServletTest {
 
     assertEquals(201, resp.status);
     verify(emailSender).sendNewAccount(eq(account), isNull(), eq(VERIFY_LINK), any(Date.class));
+    // ETP-6081: a body without the consent to promotional mail gave none.
+    verify(account).set("marketingConsent", false);
+  }
+
+  @Test
+  public void anSsoBodyCarriesTheMarketingConsentOnlyWhenItSaysSo() {
+    // ETP-6081: the consent rides next to the provider credential; anything but an explicit true
+    // (missing, false, a body that is not JSON) records no consent.
+    assertTrue(EtendoGoJwtServlet.marketingConsentOf("{\"credential\":\"x\",\"marketingConsent\":true}"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf("{\"marketingConsent\":false}"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf("{\"credential\":\"x\"}"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf("credential=x"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf("{not json"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf(null));
+    assertEquals("2026-11",
+        EtendoGoJwtServlet.termsVersionOf("{\"termsVersion\":\" 2026-11 \",\"marketingConsent\":true}"));
   }
 
   @Test

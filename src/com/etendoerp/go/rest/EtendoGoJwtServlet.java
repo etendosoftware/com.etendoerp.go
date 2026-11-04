@@ -370,6 +370,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** ETP-6081: the terms and conditions in force, public. */
   private static final String PATH_TERMS = "/terms";
   private static final String FIELD_TERMS_VERSION = "termsVersion";
+  /** ETP-6081: consent to promotional mail, asked in the terms dialog of the register screen. */
+  private static final String FIELD_MARKETING_CONSENT = "marketingConsent";
   private static final String PATH_VERIFY_EMAIL_RESEND = "/verify-email/resend";
   private static final String FIELD_EMAIL_VERIFIED = "emailVerified";
   private static final String FIELD_EMAIL_VERIFICATION_PENDING = "emailVerificationPending";
@@ -2576,6 +2578,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (phone != null) {
         account.set(EtendoGoJwtDalHelper.PROPERTY_PHONE, phone);
       }
+      // ETP-6081: the consent to promotional mail is a choice of its own; a body without it (an
+      // older screen) gave none.
+      TermsAndConditionsService.recordMarketingConsent(account,
+          body.optBoolean(FIELD_MARKETING_CONSENT, false));
       // ETP-6081: the register screen states that creating the account accepts the terms; the
       // version it showed is recorded with the account.
       EtendoGoJwtDalHelper.recordTermsAcceptance(account, termsService.resolveAcceptedVersion(
@@ -2729,14 +2735,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** The terms version an SSO body carries besides the credential, or {@code null}. */
   static String termsVersionOf(String rawBody) {
+    return StringUtils.trimToNull(signupFieldsOf(rawBody).optString(FIELD_TERMS_VERSION, null));
+  }
+
+  /** Whether an SSO body carries the consent to promotional mail; none sent means none given. */
+  static boolean marketingConsentOf(String rawBody) {
+    return signupFieldsOf(rawBody).optBoolean(FIELD_MARKETING_CONSENT, false);
+  }
+
+  /** The JSON object of an SSO body, or an empty one when the body is not a JSON object. */
+  private static JSONObject signupFieldsOf(String rawBody) {
     if (StringUtils.isBlank(rawBody) || !rawBody.trim().startsWith("{")) {
-      return null;
+      return new JSONObject();
     }
     try {
-      return StringUtils.trimToNull(
-          BoundedJsonParser.parseObject(rawBody).optString(FIELD_TERMS_VERSION, null));
+      return BoundedJsonParser.parseObject(rawBody);
     } catch (JSONException e) {
-      return null;
+      return new JSONObject();
     }
   }
 
@@ -2762,7 +2777,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       String sessionToken = generateToken();
       Account account = resolveSsoAccount(assertion, sessionToken, termsVersionOf(rawBody),
-          response);
+          marketingConsentOf(rawBody), response);
       if (account == null) {
         return;
       }
@@ -2796,7 +2811,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * {@code null} on a linking conflict. Shared by the legacy SSO login and the cookie SSO create.
    */
   private Account resolveSsoAccount(EtendoGoSsoAssertion assertion, String sessionToken,
-      String sentTermsVersion, HttpServletResponse response) throws IOException {
+      String sentTermsVersion, boolean marketingConsent, HttpServletResponse response)
+      throws IOException {
     // ETP-5351: nobody signs in as the technical support account, whatever the provider asserts.
     if (SupportAccessGuard.isSupportEmail(assertion.getEmail())) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
@@ -2828,6 +2844,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // ETP-6081: an SSO sign-in that creates the account accepts the terms just like the form
       // does; the register screen shows the notice under both. The provider asserts no language,
       // so a missing version falls back to the one in force in English.
+      TermsAndConditionsService.recordMarketingConsent(created, marketingConsent);
       EtendoGoJwtDalHelper.recordTermsAcceptance(created,
           termsService.resolveAcceptedVersion(sentTermsVersion, null), loginAt);
       HubSpotOutbox.accountCreated(created);
@@ -2859,7 +2876,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
 
       Account account = resolveSsoAccount(assertion, generateToken(), termsVersionOf(rawBody),
-          response);
+          marketingConsentOf(rawBody), response);
       if (account == null) {
         return;
       }

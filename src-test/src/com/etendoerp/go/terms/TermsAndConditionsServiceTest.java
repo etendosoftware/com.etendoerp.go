@@ -125,6 +125,15 @@ class TermsAndConditionsServiceTest {
   }
 
   @Test
+  void stampsTheMarketingConsentOnTheAccount() {
+    BaseOBObject account = mock(BaseOBObject.class);
+
+    TermsAndConditionsService.recordMarketingConsent(account, true);
+
+    verify(account).set(TermsAndConditionsService.PROPERTY_MARKETING_CONSENT, true);
+  }
+
+  @Test
   void thePublicBodyCarriesOnlyTheTextAndItsIdentity() throws Exception {
     JSONObject json = CURRENT.toJson();
 

@@ -44,6 +44,10 @@ import org.openbravo.dal.service.OBDal;
  * {@code TERMS_ACCEPTED_AT}). The version is the one the register screen showed: a version
  * published while someone was registering does not replace what that person actually saw. A
  * version the screen could not load, or one that does not exist, is replaced by the one in force.
+ *
+ * <p>The terms dialog also asks for consent to promotional mail ({@code
+ * ETGO_ACCOUNT.MARKETING_CONSENT}). It is a choice of its own, not part of accepting the terms: it
+ * can be refused without refusing the sign-up.
  */
 public class TermsAndConditionsService {
 
@@ -54,6 +58,7 @@ public class TermsAndConditionsService {
 
   static final String PROPERTY_TERMS_VERSION = "termsVersion";
   static final String PROPERTY_TERMS_ACCEPTED_AT = "termsAcceptedAt";
+  static final String PROPERTY_MARKETING_CONSENT = "marketingConsent";
 
   /** {@code ETGO_TERMS.VERSION} is VARCHAR(60). */
   static final int VERSION_MAX_LENGTH = 60;
@@ -154,6 +159,17 @@ public class TermsAndConditionsService {
   public static void recordAcceptance(BaseOBObject account, String version, Date acceptedAt) {
     account.set(PROPERTY_TERMS_ACCEPTED_AT, acceptedAt);
     account.set(PROPERTY_TERMS_VERSION, version);
+  }
+
+  /**
+   * Stamps on an account that is being created whether it agreed to receive promotional mail; the
+   * caller saves it.
+   *
+   * @param account the new account
+   * @param consent whether the sign-up left the consent ticked
+   */
+  public static void recordMarketingConsent(BaseOBObject account, boolean consent) {
+    account.set(PROPERTY_MARKETING_CONSENT, consent);
   }
 
   static String normalizeLanguage(String requestedLanguage) {

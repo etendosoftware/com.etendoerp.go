@@ -1,8 +1,8 @@
 # Terms and conditions at sign-up (ETP-6081)
 
 Every new Etendo GO account accepts the terms and conditions, and records which version it
-accepted and when. The terms also carry the authorization to send the account holder commercial
-content, so the record is what proves that consent.
+accepted and when. The same dialog asks, separately, for consent to promotional mail (see
+[Consent to promotional mail](#consent-to-promotional-mail)).
 
 Code: `com.etendoerp.go.terms.TermsAndConditionsService`.
 
@@ -71,3 +71,22 @@ A sign-up is never refused because of the terms: if the table cannot be read, th
 created with the acceptance date and no version, and a warning is logged.
 
 Accounts created before ETP-6081 have no version and are not asked for anything.
+
+## Consent to promotional mail
+
+The terms dialog of the register screen holds a checkbox, *ticked by default*, by which the account
+holder agrees to receive promotional mail. It is a choice of its own: unticking it does not block
+the sign-up, and the choice survives closing and reopening the dialog. It is recorded in
+`ETGO_ACCOUNT.MARKETING_CONSENT` (`Y`/`N`, default `N`), on the same paths as the terms version,
+with the terms acceptance date as its date:
+
+| Path | Consent recorded |
+|---|---|
+| Register form (`/session/register`, legacy `/register`) | `marketingConsent` from the body |
+| SSO sign-in that creates the account | `marketingConsent` from the body, next to the provider credential |
+| Company invitation | not asked (the invitee joins a company, not a sign-up lead): `N` |
+| Signup API | not asked: `N` |
+
+Anything but an explicit `true` records `N`: a body without the field (an older screen, an
+invitation) gave no consent. Accounts created before the field existed are `N`.
+
