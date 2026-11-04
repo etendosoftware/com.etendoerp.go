@@ -661,7 +661,7 @@ public class NeoDefaultsCascadeHelper {
         // one) is told to stand down in favour of a value the caller may simply have echoed back
         // from etendo_defaults. Recorded so the divergence can be reported; nothing here changes what
         // gets persisted.
-        recordSupersededDefault(result, defaults, updatedField, updateObj);
+        NeoSupersededRecorder.recordIfDiverged(result, defaults, updatedField, updateObj, adTab);
         continue;
       }
       Object newValue = updateObj.get(FIELD_VALUE);
@@ -858,34 +858,6 @@ public class NeoDefaultsCascadeHelper {
       return false;
     }
     return YES_NO_REFERENCE.equals(refId) || NUMERIC_SAFE_TYPE_REFERENCES.contains(refId);
-  }
-
-  /**
-   * IMP-45: note that a protected field kept the caller's value over a callout-derived one.
-   *
-   * <p>Only a genuine divergence is recorded. A callout that re-proposes the value already on the
-   * record has superseded nothing, and an identifier companion key ({@code x$_identifier}) is the
-   * label of a field already reported under its own name.</p>
-   *
-   * @param result       the cascade result collecting the divergences
-   * @param defaults     the in-progress payload, holding the caller's value
-   * @param fieldName    the protected field
-   * @param updateObj    the callout's proposed update for that field
-   */
-  private static void recordSupersededDefault(NeoDefaultsService.CalloutCascadeResult result,
-      JSONObject defaults, String fieldName, JSONObject updateObj) {
-    if (result == null || fieldName.endsWith(IDENTIFIER_SUFFIX)) {
-      return;
-    }
-    Object kept = defaults.opt(fieldName);
-    Object proposed = updateObj.opt(FIELD_VALUE);
-    if (proposed == null || JSONObject.NULL.equals(proposed)) {
-      return;
-    }
-    if (kept != null && NeoHandlerUtils.sameTextOrNumber(kept, proposed)) {
-      return;
-    }
-    result.recordSuperseded(fieldName, kept, proposed);
   }
 
   private static boolean shouldKeepExistingValue(JSONObject defaults, String fieldName,

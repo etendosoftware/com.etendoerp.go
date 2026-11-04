@@ -228,6 +228,30 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares the DAL property names whose value on create this customization decides, so a create
+   * callout that proposes a different value for them is not reported as a superseded default
+   * (ETP-5680).
+   *
+   * <p><b>Why the customization declares it.</b> {@code etendo_create} reports, as
+   * {@code supersededDefaults}, every field where the caller's value stood and a create callout had
+   * derived another. For a field this customization decides (it injects the value, or corrects
+   * the caller's), that callout proposal is generic by construction — the customization's own rule
+   * is what applies — so listing it, and advising the caller to send the callout value, is wrong
+   * advice. Only the customization knows the rule exists, so it is the one that says so; shared
+   * code never names the entity or the field.</p>
+   *
+   * <p>Reader: the MCP create path, once, after this customization's pre-hook ran, so the answer
+   * may depend on the final body ({@link NeoContext#getRequestBody()}). It only silences the
+   * diagnostic; it changes no value. Must never throw: a failure is treated as "none".</p>
+   *
+   * @param context the create context carrying the final request body
+   * @return the property names this customization governs; empty by default
+   */
+  default Set<String> governedCreateFields(NeoContext context) {
+    return Collections.emptySet();
+  }
+
+  /**
    * Declares the DAL property names this customization resolves server-side on create, so a
    * caller does not have to send them even though AD marks the column mandatory (ETP-5535).
    *

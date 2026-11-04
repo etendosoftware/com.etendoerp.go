@@ -63,6 +63,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
@@ -862,12 +863,14 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
     assertTrue(linked.getBoolean("headerLinked"));
     assertEquals("o1", linked.getString("salesOrder"));
+    assertEquals("the direction-neutral name says the same", "o1", linked.getString("order"));
 
     probe = scenario();
     when(probe.invoice.getSalesOrder()).thenReturn(null);
     JSONObject mixed = data(run(probe, "importOrderLines", "{\"orderId\":\"o1\"}"));
     assertFalse(mixed.getBoolean("headerLinked"));
     assertFalse(mixed.has("salesOrder"));
+    assertFalse(mixed.has("order"));
   }
 
   private static final String CARRIED = "carried";
@@ -968,9 +971,34 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       } else {
         verify(probe.invoice, never()).setEtgoTotalDiscount(any());
       }
+      if (CARRIED.equals(expected) || UNTOUCHED.equals(expected)) {
+        assertGlobalDiscountReported(data(response), expected, carry, orderDiscount);
+      }
     } catch (AssertionError e) {
       throw new AssertionError(label, e);
     }
+  }
+
+  /**
+   * The answer says what the popup's toast says: the % the invoice now holds, or why nothing was
+   * carried (carryGlobalDiscount:false wins over "the orders have none").
+   */
+  private static void assertGlobalDiscountReported(JSONObject data, String expected, Boolean carry,
+      BigDecimal orderDiscount) throws Exception {
+    JSONObject outcome = data.getJSONObject(ImportOrderLinesIntoInvoiceHandler.KEY_GLOBAL_DISCOUNT);
+    if (CARRIED.equals(expected)) {
+      assertTrue(outcome.getBoolean("applied"));
+      assertEquals(0, orderDiscount.compareTo(new BigDecimal(outcome.getString("percent"))));
+      // Reported without trailing zeros nor exponent (ETP-5828): "10", "12.5", never "10.0000".
+      String reported = outcome.get("percent").toString();
+      assertFalse(reported, reported.matches(".*\\.\\d*0$") || reported.contains("E"));
+      assertTrue(outcome.isNull("reason"));
+      return;
+    }
+    assertFalse(outcome.getBoolean("applied"));
+    assertTrue(outcome.isNull("percent"));
+    assertEquals(Boolean.FALSE.equals(carry) ? InvoiceGlobalDiscountRule.REASON_NOT_REQUESTED
+        : InvoiceGlobalDiscountRule.REASON_NO_ORDER_DISCOUNT, outcome.getString("reason"));
   }
 
   /**
@@ -1066,7 +1094,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   public void importOrderLines_aDiscountConflict_answersWhatToAskTheUser_andCreatesNothing()
       throws Exception {
     Probe probe = scenario();
-    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
+    // Stored at scale 4, as the column holds it: the answer must still read "10".
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10.0000"));
     secondOrder(probe, null);
 
     NeoResponse response = run(probe, "importOrderLines",
@@ -1086,12 +1115,36 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertEquals("o2", orders.getJSONObject(1).getString("orderId"));
     assertEquals("no % reads as 0", 0, BigDecimal.ZERO.compareTo(
         new BigDecimal(orders.getJSONObject(1).getString("globalDiscount"))));
+    // Same format as the 200 answers (ETP-5828): no trailing zeros, no exponent.
+    assertEquals("10", orders.getJSONObject(0).get("globalDiscount").toString());
+    assertEquals("0", orders.getJSONObject(1).get("globalDiscount").toString());
     JSONObject invoice = error.getJSONObject("invoice");
     assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(invoice.getString("totalDiscount"))));
+    assertEquals("0", invoice.get("totalDiscount").toString());
     assertFalse(invoice.getBoolean("hadLines"));
     assertTrue(error.getString("hint"), error.getString("hint").contains("carryGlobalDiscount:false"));
     assertTrue(probe.batches.isEmpty());
     verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+  }
+
+  /** The invoice's own % in a conflict is reported like the orders' ones: 12.5, not 12.5000. */
+  @Test
+  public void importOrderLines_aDiscountConflict_reportsTheInvoicePercentWithoutTrailingZeros()
+      throws Exception {
+    Probe probe = scenario();
+    BigDecimal orderDiscount = bd("10.0000");
+    BigDecimal invoiceDiscount = bd("12.5000");
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(orderDiscount);
+    when(probe.invoice.getEtgoTotalDiscount()).thenReturn(invoiceDiscount);
+
+    NeoResponse response = run(probe, "importOrderLines", "{\"orders\":[{\"orderId\":\"o1\"}]}");
+
+    assertEquals(422, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals(CONFLICT_B, error.getString("conflict"));
+    JSONObject order = error.getJSONArray("orders").getJSONObject(0);
+    assertEquals("10", order.get("globalDiscount").toString());
+    assertEquals("12.5", error.getJSONObject("invoice").get("totalDiscount").toString());
   }
 
   /**
@@ -1196,19 +1249,87 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
     assertEquals(List.of("o1"), ids(rows));
     assertEquals(2, rows.getJSONObject(0).getInt("pendingLines"));
+    assertEquals("an order without a global discount reads 0", 0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(rows.getJSONObject(0).getString("globalDiscount"))));
   }
 
+  /**
+   * Each row carries the order's global discount %, the popup's "Dto. global X %" tag, as the
+   * API reports it: rounded at scale 4 for comparisons but serialised without trailing zeros
+   * (ETP-5828) — {@code 12.5}, {@code 10}, never {@code 12.5000} nor {@code 1E+1}.
+   */
+  @Test
+  public void availableOrders_reportsEachOrdersGlobalDiscount() throws Exception {
+    Object[][] cases = {
+        { "12.5000", "12.5" }, { "10.0000", "10" }, { "7.12345", "7.1235" }, { "0", "0" },
+        { "-3", "0" },
+    };
+    for (Object[] row : cases) {
+      Probe probe = scenario();
+      BigDecimal stored = bd((String) row[0]);
+      when(probe.order.getEtgoTotalDiscount()).thenReturn(stored);
+      probe.candidates = List.of(probe.order);
+
+      JSONObject first = run(probe, "availableOrders", null).getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+
+      assertEquals((String) row[0], row[1], first.get("globalDiscount").toString());
+    }
+  }
+
+  /** Prices the scenario's lines and gives its currency 2 decimals, as the popup sees them. */
+  private static void pricedLines(Probe probe) {
+    OrderLine agua = probe.lineById.get("ol1");
+    OrderLine pan = probe.lineById.get("ol2");
+    when(agua.getUnitPrice()).thenReturn(bd("47.50"));
+    when(agua.getDiscount()).thenReturn(bd("10.0000"));
+    when(pan.getUnitPrice()).thenReturn(bd("20"));
+    Currency currency = probe.order.getCurrency();
+    when(currency.getStandardPrecision()).thenReturn(2L);
+  }
+
+  /**
+   * Each line carries what the import popup shows for it (ETP-5828, UI/MCP parity): the net unit
+   * price, the line discount as a % without trailing zeros, and the amount, price x pending.
+   */
   @Test
   public void availableOrderLines_reportsThePendingAfterDrafts() throws Exception {
     Probe probe = scenario();
+    pricedLines(probe);
     probe.drafts.put("ol1", bd("3"));
 
     JSONArray rows = run(probe, "availableOrderLines", "{\"orderId\":\"o1\"}").getBody()
         .getJSONObject("response").getJSONArray("data");
 
     assertEquals(List.of("ol1", "ol2"), ids(rows));
-    assertEquals(5, rows.getJSONObject(0).getInt("pendingQuantity"));
+    JSONObject agua = rows.getJSONObject(0);
+    assertEquals(5, agua.getInt("pendingQuantity"));
+    assertEquals(0, bd("47.50").compareTo(new BigDecimal(agua.getString("unitPrice"))));
+    assertEquals("10", agua.get("discount").toString());
+    assertEquals("47.50 x 5", "237.50", agua.get("amount").toString());
+    JSONObject pan = rows.getJSONObject(1);
+    assertEquals("no line discount reads 0", "0", pan.get("discount").toString());
+    assertEquals("20 x 5", "100.00", pan.get("amount").toString());
     assertNull(probe.nativeSelection);
+  }
+
+  /**
+   * The order's amount is the popup row: the plain sum of its pending lines' amounts, never
+   * reduced by the order's global discount.
+   */
+  @Test
+  public void availableOrders_reportsTheOrderAmountAsThePopupRow() throws Exception {
+    Probe probe = scenario();
+    pricedLines(probe);
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
+    probe.candidates = List.of(probe.order);
+
+    JSONObject first = run(probe, "availableOrders", null).getBody().getJSONObject("response")
+        .getJSONArray("data").getJSONObject(0);
+
+    assertEquals("47.50 x 8 + 20 x 5, no global discount", "480.00",
+        first.get("amount").toString());
+    assertEquals("10", first.get("globalDiscount").toString());
   }
 
   // ── contracts ─────────────────────────────────────────────────────────────
