@@ -1158,6 +1158,14 @@ public class McpToolRouter {
     McpLinePriceInjector.applyAgentPriceOnUpdate(filteredBody, dalEntity,
         updateUserProvidedFields, OBDal.getInstance().get(dalEntityName, recordId));
 
+    // ETP-5696 (QA CP-15): a product change on an existing line re-derives uOM from the NEW product,
+    // exactly as the REST update does (NeoCrudHandler → NeoCommercialLinePolicy.applyDerivedUomOnUpdate,
+    // ETP-5286). Without it the line reaches the C_OrderLine trigger with the OLD unit and is refused
+    // with AD message 20111, and the agent cannot repair it by sending uOM (read-only). Never defers to
+    // a sent value (userProvidedUom=false): the unit has no source other than the product. A body
+    // without `product` is left alone, and this runs after FK-by-name resolution so `product` is an id.
+    injectLineUomIfApplicable(filteredBody, dalEntity, false);
+
     // ETP-5726: a required field cannot be emptied by sending null/"" (the screen cannot either).
     JSONObject clearedError = McpWriteRequestSupport.rejectClearedMandatoryFields(filteredBody,
         adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, NeoLanguage.currentCode());
@@ -1883,6 +1891,8 @@ public class McpToolRouter {
 
   /**
    * Derive a commercial line's unit of measure from its product when the body omits it (IMP-15).
+   * Also called from {@link #handleUpdate} with {@code userProvidedUom=false}, so a product change on
+   * an existing line re-derives it as the REST update does (ETP-5286 / ETP-5696).
    * <p>
    * The MCP write verbs are the second and third create path in this module, and neither reaches
    * {@code NeoCrudHandler#executePostCreate} — where the REST path runs this same injection. Without
