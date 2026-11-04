@@ -2102,19 +2102,17 @@ class BankBouncePairServiceTest {
   }
 
   /**
-   * Waits until {@code count} events were submitted, then a little more, and asserts that exactly
-   * that many were.
+   * Waits until the KPI sender ran everything handed to it so far ({@link #awaitDrained}), then
+   * asserts that exactly {@code count} events were submitted. Deterministic: every KPI event of
+   * the action is queued on the single sender thread before the action returns, so once a barrier
+   * queued after them has run, every one of them has run too — no extra event can still arrive.
    *
    * @param count the expected number of events
    * @return the events, in order
-   * @throws InterruptedException when interrupted while waiting
+   * @throws Exception when the sender cannot be read or the wait is interrupted
    */
-  private List<NeoTelemetryEvent> awaitSent(int count) throws InterruptedException {
-    long deadline = System.currentTimeMillis() + WAIT_MS;
-    while (sent.size() < count && System.currentTimeMillis() < deadline) {
-      Thread.sleep(10);
-    }
-    Thread.sleep(100);
+  private List<NeoTelemetryEvent> awaitSent(int count) throws Exception {
+    awaitDrained(sender());
     assertEquals(count, sent.size(), "submitted events: " + sent);
     return new ArrayList<>(sent);
   }
@@ -2212,17 +2210,20 @@ class BankBouncePairServiceTest {
   }
 
   /**
-   * Waits until the sender has nothing queued or running.
+   * Waits until the sender ran every task queued before this call: a barrier task is put at the
+   * tail of its FIFO queue (blocking while a full queue drains, never rejected) and awaited. The
+   * sender is single-threaded, so the barrier runs only after everything ahead of it.
    *
    * @param sender the executor
    * @throws InterruptedException when interrupted while waiting
    */
   private static void awaitDrained(ThreadPoolExecutor sender) throws InterruptedException {
-    long deadline = System.currentTimeMillis() + WAIT_MS * 5;
-    while ((!sender.getQueue().isEmpty() || sender.getActiveCount() > 0)
-        && System.currentTimeMillis() < deadline) {
-      Thread.sleep(10);
-    }
+    CountDownLatch barrier = new CountDownLatch(1);
+    assertTrue(sender.getQueue().offer(barrier::countDown, WAIT_MS * 5, TimeUnit.MILLISECONDS),
+        "the sender queue never had room for the barrier");
+    // The worker may have timed out while idle: make sure one is there to take the barrier.
+    sender.prestartCoreThread();
+    assertTrue(barrier.await(WAIT_MS * 5, TimeUnit.MILLISECONDS), "the sender never drained");
   }
 
   /**

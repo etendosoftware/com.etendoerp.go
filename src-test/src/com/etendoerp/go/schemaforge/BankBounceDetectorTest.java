@@ -69,6 +69,9 @@ import com.etendoerp.psd2.bank.integration.data.PisPayment;
  *
  * @covers com.etendoerp.go.schemaforge.BankBounceDetector
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 @DisplayName("BankBounceDetector — bounce pairs among pending statement lines")
 class BankBounceDetectorTest {
 

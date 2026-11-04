@@ -31,6 +31,7 @@ import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.RETURNS_DEFAULTS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -358,7 +359,6 @@ public class ReconciliationHandlerBounceSuggestionsTest {
 
   /** Runs autoMatch with the flag in the given state and the detector answering {@code pairs}. */
   private NeoResponse runAutoMatch(boolean flag, List<Pair> pairs,
-      MockedStatic<ReconciliationKpiTelemetry> telemetry,
       MockedStatic<BankBounceDetector> detector) throws Exception {
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<BankBounceSuggestionsFlag> flagMock = mockStatic(BankBounceSuggestionsFlag.class);
@@ -395,7 +395,7 @@ public class ReconciliationHandlerBounceSuggestionsTest {
         mockStatic(ReconciliationKpiTelemetry.class);
         MockedStatic<BankBounceDetector> detector =
             mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS)) {
-      response = runAutoMatch(true, Arrays.asList(HIGH, REVIEW), telemetry, detector);
+      response = runAutoMatch(true, Arrays.asList(HIGH, REVIEW), detector);
       telemetry.verify(() -> ReconciliationKpiTelemetry.emitBankMatchAttempted(5, 2, 2));
       detector.verify(() -> BankBounceDetector.detectQuietly(eq(account), anyList(), eq(3)));
     }
@@ -446,7 +446,7 @@ public class ReconciliationHandlerBounceSuggestionsTest {
         mockStatic(ReconciliationKpiTelemetry.class);
         MockedStatic<BankBounceDetector> detector =
             mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS)) {
-      response = runAutoMatch(true, Arrays.asList(HIGH, REVIEW), telemetry, detector);
+      response = runAutoMatch(true, Arrays.asList(HIGH, REVIEW), detector);
       telemetry.verify(() -> ReconciliationKpiTelemetry.emitBankMatchAttempted(5, 1, 1));
     }
 
@@ -500,10 +500,10 @@ public class ReconciliationHandlerBounceSuggestionsTest {
         mockStatic(ReconciliationKpiTelemetry.class);
         MockedStatic<BankBounceDetector> detector =
             mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS)) {
-      off = runAutoMatch(false, Arrays.asList(HIGH, REVIEW), telemetry, detector);
+      off = runAutoMatch(false, Arrays.asList(HIGH, REVIEW), detector);
       detector.verify(() -> BankBounceDetector.detectQuietly(any(), anyList(), anyInt()), never());
       telemetry.verify(() -> ReconciliationKpiTelemetry.emitBankMatchAttempted(5, 2, 2));
-      onWithoutPairs = runAutoMatch(true, Collections.emptyList(), telemetry, detector);
+      onWithoutPairs = runAutoMatch(true, Collections.emptyList(), detector);
     }
 
     // The high pair's lines went through transaction matching as before.
@@ -1264,16 +1264,17 @@ public class ReconciliationHandlerBounceSuggestionsTest {
    */
   private OBDal detectionAnswers(MockedStatic<OBDal> dal, MockedStatic<BankBounceDetector> detector,
       org.mockito.stubbing.Answer<List<Pair>> detected) {
-    Client client = mock(Client.class);
-    when(client.getId()).thenReturn(CLIENT_ID);
-    when(account.getClient()).thenReturn(client);
+    // A tenant answering only its id; the client and DAL mocks are handed straight to their
+    // stubs (no locals, java:S1854) and the DAL one is read back through the static mock.
+    when(account.getClient()).thenReturn(mock(Client.class, invocation ->
+        "getId".equals(invocation.getMethod().getName()) ? CLIENT_ID
+            : RETURNS_DEFAULTS.answer(invocation)));
     doReturn(Collections.emptyList()).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
-    OBDal obDal = mock(OBDal.class);
-    dal.when(OBDal::getInstance).thenReturn(obDal);
+    dal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
     detector.when(() -> BankBounceDetector.load(any(), any(), anyInt()))
         .thenReturn(mock(BankBounceDetector.AccountData.class));
     detector.when(() -> BankBounceDetector.detect(any())).thenAnswer(detected);
-    return obDal;
+    return OBDal.getInstance();
   }
 
   /**
