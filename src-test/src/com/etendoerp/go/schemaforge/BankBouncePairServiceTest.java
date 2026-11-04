@@ -1132,8 +1132,7 @@ class BankBouncePairServiceTest {
       Line a = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
       Line b = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "Y");
       discardedPair(a, b);
-      Date threeDaysAgo = Date.from(java.time.Instant.now().minus(java.time.Duration.ofDays(3))
-          .minusSeconds(60));
+      Date threeDaysAgo = Date.from(java.time.Instant.now().minus(java.time.Duration.ofDays(3)));
       a.values.put(prop(BankBouncePairService.COL_DISCARDED_AT), threeDaysAgo);
 
       BankBouncePairService.restorePair(handler, restoreBody(a.id));
@@ -1238,7 +1237,7 @@ class BankBouncePairServiceTest {
           new JSONArray().put(pairGroup(bo.id, bb.id)), new HashSet<>(), new JSONArray(), null,
           kpi);
       kpi.prime();
-      kpi.finish();
+      kpi.finish(new HashSet<>());
 
       assertSame(BankBounceKpiTelemetry.ModalDecisions.NONE, kpi);
       verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
@@ -1257,6 +1256,158 @@ class BankBouncePairServiceTest {
         NeoWriteChannel.restore(previous);
       }
       assertEquals("mcp", decided(1).get(0).get("channel"));
+    }
+
+    /**
+     * An agent that applied a bounce-pair group left out the other preselected pairs: each is an
+     * {@code unchecked} decision (surface modal, channel mcp) and counts in the summary; a review
+     * pair and a preselected pair whose line a transaction group took are not.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("MCP applySuggestions with a bounce group: left-out preselected pairs are unchecked")
+    void agentLeftOutPreselectedPairsAreUnchecked() throws Exception {
+      Line ao = pendingLine("L-AO", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line ab = pendingLine("L-AB", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      pendingLine("L-DO", "-40.00", DAY, "", "TRANSFERENCIA");
+      pendingLine("L-DB", "40.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+      Line eo = pendingLine("L-EO", "-60.00", DAY, "", "TRANSFERENCIA");
+      pendingLine("L-EB", "60.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+      pendingLine("L-BO", "-30.00", DAY, "ACME", "X");
+      pendingLine("L-BB", "30.00", DAY.plusDays(2), "ACME", "Y");
+
+      Map<String, Object> summary = agentModal(new JSONArray().put(pairGroup(ao.id, ab.id)),
+          eo.id, 2);
+
+      assertEquals(List.of("discarded", "unchecked"),
+          List.of(lastDecided.get(0).get("decision"), lastDecided.get(1).get("decision")));
+      Map<String, Object> unchecked = lastDecided.get(1);
+      assertEquals(Boolean.TRUE, unchecked.get("preselected"));
+      assertEquals(BankBounceDetector.CONFIDENCE_HIGH, unchecked.get("confidence"));
+      assertEquals(BankBounceKpiTelemetry.SURFACE_MODAL, unchecked.get("surface"));
+      assertEquals("mcp", unchecked.get("channel"));
+      assertNoRecordData(unchecked);
+      assertEquals(2, summary.get("pairs_shown"));
+      assertEquals(1, summary.get("pairs_discarded"));
+      assertEquals(1, summary.get("pairs_unchecked"));
+      assertEquals(Boolean.TRUE, summary.get("preselection_changed"));
+    }
+
+    /**
+     * An agent that applied no bounce-pair group did not look at the bounces: nothing is sent,
+     * although preselected pairs exist.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("MCP applySuggestions with no bounce group sends no bounce event")
+    void agentWithoutBounceGroupsSendsNothing() throws Exception {
+      pendingLine("L-DO", "-40.00", DAY, "", "TRANSFERENCIA");
+      pendingLine("L-DB", "40.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+      BankBouncePairService.Detection detection =
+          new BankBouncePairService.Detection(handler, account, true);
+      String previous = NeoWriteChannel.enter(NeoWriteChannel.MCP);
+      try {
+        BankBounceKpiTelemetry.ModalDecisions kpi =
+            BankBounceKpiTelemetry.ModalDecisions.of(detection, account, new JSONObject());
+        Set<String> taken = new HashSet<>();
+        BankBouncePairService.applyPairs(handler, account, new JSONArray(), taken,
+            new JSONArray(), detection, kpi);
+        kpi.prime();
+        kpi.finish(taken);
+      } finally {
+        NeoWriteChannel.restore(previous);
+      }
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+      verify(handler, never()).loadPendingLines(anyString(), Mockito.anyBoolean());
+    }
+
+    /**
+     * The SPA path is unchanged: a preselected pair it neither applied nor reported sends nothing
+     * (the SPA reports what it showed in {@code bounceDecisions}).
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("UI applySuggestions does not infer unchecked pairs")
+    void uiDoesNotInferUncheckedPairs() throws Exception {
+      Line ao = pendingLine("L-AO", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line ab = pendingLine("L-AB", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      pendingLine("L-DO", "-40.00", DAY, "", "TRANSFERENCIA");
+      pendingLine("L-DB", "40.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+
+      Map<String, Object> summary = applyWithDecisions(new JSONObject(),
+          pairGroup(ao.id, ab.id), 1);
+
+      assertEquals("discarded", lastDecided.get(0).get("decision"));
+      assertEquals(1, summary.get("pairs_shown"));
+      verify(telemetry, after(300).times(1)).emit(
+          eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED), anyMap(), any());
+    }
+
+    /** A restored pair is {@code preselected} exactly when its stored confidence is high. */
+    @Test
+    @DisplayName("restored carries preselected = stored confidence is high")
+    void restoredCarriesPreselected() throws Exception {
+      Line a = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
+      Line b = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "Y");
+      discardedPair(a, b);
+      a.values.put(prop(BankBouncePairService.COL_CONFIDENCE), "high");
+      Line c = pendingLine("L-OUT2", "-60.00", DAY, "BETA", "X");
+      Line d = pendingLine("L-IN2", "60.00", DAY.plusDays(1), "BETA", "Y");
+      discardedPair(c, d);
+
+      BankBouncePairService.restorePair(handler, restoreBody(a.id));
+      BankBouncePairService.restorePair(handler, restoreBody(c.id));
+
+      ArgumentCaptor<Map<String, Object>> captor = mapCaptor();
+      verify(telemetry, timeout(WAIT_MS).times(2)).emit(
+          eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_RESTORED), captor.capture(),
+          eq(CLIENT_ID));
+      assertEquals(Boolean.TRUE, captor.getAllValues().get(0).get("preselected"));
+      assertEquals(Boolean.FALSE, captor.getAllValues().get(1).get("preselected"));
+    }
+
+    /** {@code days_since_decided} counts UTC calendar days, whatever the time of day. */
+    @Test
+    @DisplayName("days_since_decided is UTC calendar days around midnight")
+    void daysSinceDecidedIsUtcCalendarDays() {
+      Instant justAfterMidnight = Instant.parse("2026-11-03T00:01:00Z");
+      assertEquals(1L, BankBounceKpiTelemetry.daysBetween(
+          Date.from(Instant.parse("2026-11-02T23:59:00Z")), justAfterMidnight));
+      assertEquals(0L, BankBounceKpiTelemetry.daysBetween(
+          Date.from(Instant.parse("2026-11-03T00:00:00Z")), Instant.parse("2026-11-03T23:59:59Z")));
+      assertEquals(2L, BankBounceKpiTelemetry.daysBetween(
+          Date.from(Instant.parse("2026-11-01T23:59:59Z")), justAfterMidnight));
+      assertEquals(0L, BankBounceKpiTelemetry.daysBetween(
+          Date.from(Instant.parse("2026-11-04T10:00:00Z")), justAfterMidnight),
+          "a discard time in the future never gives a negative age");
+      assertNull(BankBounceKpiTelemetry.daysBetween(null, justAfterMidnight));
+    }
+
+    /**
+     * A 409 in the panel on a pair detection does not see is {@code failed} without the proposal
+     * properties — the modal's rule.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("a panel 409 on a pair detection does not see emits failed without the proposal")
+    void panelFailureOnAnUnseenPair() throws Exception {
+      Line a = pendingLine("L-A", "-30.00", DAY, "ACME", "X");
+      Line b = pendingLine("L-B", "-30.00", DAY.plusDays(1), "ACME", "Y");
+
+      assertCoded(BankBouncePairService.discardPair(handler, body(a.id, b.id)), 409,
+          BankBounceErrors.CODE_SIGN_MISMATCH);
+
+      Map<String, Object> props = decided(1).get(0);
+      assertEquals(BankBounceKpiTelemetry.DECISION_FAILED, props.get("decision"));
+      assertEquals(BankBounceKpiTelemetry.SURFACE_PANEL, props.get("surface"));
+      assertFalse(props.containsKey("confidence"), props.toString());
+      assertFalse(props.containsKey("preselected"), props.toString());
     }
   }
 
@@ -1324,7 +1475,7 @@ class BankBouncePairServiceTest {
       Line d = pendingLine("L-IN2", "60.00", DAY.plusDays(1), "BETA", "Y");
       discardedPair(c, d);
       c.values.put(prop(BankBouncePairService.COL_DISCARDED_AT),
-          Date.from(Instant.now().minus(Duration.ofDays(2)).minus(Duration.ofHours(5))));
+          Date.from(Instant.now().minus(Duration.ofDays(2))));
 
       BankBouncePairService.restorePair(handler, restoreBody(c.id));
 
@@ -1925,10 +2076,10 @@ class BankBouncePairServiceTest {
       "flag_enabled", "decision", "surface");
   /** The properties of a restored pair. */
   private static final Set<String> RESTORED_KEYS = Set.of("account_id", "channel", "flag_enabled",
-      "detection_signal", "confidence", "days_since_decided");
+      "detection_signal", "confidence", "preselected", "days_since_decided");
   /** The properties of a restored pair whose discard time is unknown. */
   private static final Set<String> RESTORED_KEYS_WITHOUT_DAYS = Set.of("account_id", "channel",
-      "flag_enabled", "detection_signal", "confidence");
+      "flag_enabled", "detection_signal", "confidence", "preselected");
   /** The properties of the {@code applySuggestions} summary. */
   private static final Set<String> SUMMARY_KEYS = Set.of("account_id", "channel", "flag_enabled",
       "pairs_shown", "pairs_discarded", "pairs_unchecked", "pairs_sent_to_panel",
@@ -2017,10 +2168,10 @@ class BankBouncePairServiceTest {
     BankBounceKpiTelemetry.ModalDecisions kpi =
         BankBounceKpiTelemetry.ModalDecisions.of(detection, account, request);
     JSONArray results = new JSONArray();
-    BankBouncePairService.applyPairs(handler, account, groups, new HashSet<>(), results,
-        detection, kpi);
+    Set<String> taken = new HashSet<>();
+    BankBouncePairService.applyPairs(handler, account, groups, taken, results, detection, kpi);
     kpi.prime();
-    kpi.finish();
+    kpi.finish(taken);
     return results;
   }
 
@@ -2074,6 +2225,41 @@ class BankBouncePairServiceTest {
     }
   }
 
+  /**
+   * Runs the modal path as an agent's {@code applySuggestions} (MCP channel), with a transaction
+   * group that took {@code transactionLineId}.
+   *
+   * @param groups            the bounce-pair groups the agent sent
+   * @param transactionLineId a line a transaction group of the call took
+   * @param expected          how many decision events to wait for
+   * @return the summary event's properties
+   * @throws Exception when the call fails
+   */
+  private Map<String, Object> agentModal(JSONArray groups, String transactionLineId, int expected)
+      throws Exception {
+    BankBouncePairService.Detection detection =
+        new BankBouncePairService.Detection(handler, account, true);
+    String previous = NeoWriteChannel.enter(NeoWriteChannel.MCP);
+    try {
+      BankBounceKpiTelemetry.ModalDecisions kpi =
+          BankBounceKpiTelemetry.ModalDecisions.of(detection, account, new JSONObject());
+      Set<String> taken = new HashSet<>();
+      BankBouncePairService.applyPairs(handler, account, groups, taken, new JSONArray(),
+          detection, kpi);
+      kpi.prime();
+      taken.add(transactionLineId);
+      kpi.finish(taken);
+    } finally {
+      NeoWriteChannel.restore(previous);
+    }
+    lastDecided = decided(expected);
+    ArgumentCaptor<Map<String, Object>> captor = mapCaptor();
+    verify(telemetry, timeout(WAIT_MS)).emit(
+        eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_SUGGESTIONS_APPLIED), captor.capture(),
+        eq(CLIENT_ID));
+    return captor.getValue();
+  }
+
   /** The decision events captured by the last {@link #applyWithDecisions} call, in order. */
   private List<Map<String, Object>> lastDecided;
 
@@ -2095,10 +2281,11 @@ class BankBouncePairServiceTest {
         new BankBouncePairService.Detection(handler, account, true);
     BankBounceKpiTelemetry.ModalDecisions kpi =
         BankBounceKpiTelemetry.ModalDecisions.of(detection, account, request);
-    BankBouncePairService.applyPairs(handler, account, array, new HashSet<>(), new JSONArray(),
-        detection, kpi);
+    Set<String> taken = new HashSet<>();
+    BankBouncePairService.applyPairs(handler, account, array, taken, new JSONArray(), detection,
+        kpi);
     kpi.prime();
-    kpi.finish();
+    kpi.finish(taken);
     lastDecided = decided(expected);
     ArgumentCaptor<Map<String, Object>> captor = mapCaptor();
     verify(telemetry, timeout(WAIT_MS)).emit(
