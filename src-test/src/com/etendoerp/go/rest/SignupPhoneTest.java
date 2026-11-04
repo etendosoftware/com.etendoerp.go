@@ -43,7 +43,7 @@ class SignupPhoneTest {
   @ParameterizedTest
   @NullAndEmptySource
   @ValueSource(strings = { "   ", "600123456", "+34600123456", "+34 600abc", "+34 12",
-      "+12345 600123456", "+34 6001234567890123456789012345678901" })
+      "+12345 600123456", "+34 6001234567890123456789012345678901234" })
   void dropsWhatIsNotAPhone(String raw) {
     assertNull(SignupPhone.normalize(raw));
   }

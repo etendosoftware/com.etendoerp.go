@@ -18,13 +18,20 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
 import com.etendoerp.go.usage.IsolatedDalRead;
+import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
 
 /**
@@ -88,6 +95,42 @@ class NeoServletDestroyTest {
       isolated.when(IsolatedDalRead::shutdown).thenThrow(new IllegalStateException("boom"));
       NeoServlet servlet = new NeoServlet();
       assertDoesNotThrow(servlet::destroy);
+      isolated.verify(IsolatedDalRead::shutdown, times(1));
+    }
+  }
+
+  /** ETP-6057 — the public API counter flushes first, while the usage writer can still take rows. */
+  @Test
+  void destroyShutsTheApiUsageCounterDownBeforeTheUsageEventWriter() {
+    List<String> order = new ArrayList<>();
+    PublicApiUsageCounter counter = mock(PublicApiUsageCounter.class);
+    doAnswer(inv -> order.add("counter")).when(counter).shutdown();
+    try (MockedStatic<PublicApiUsageCounter> counterStatic = mockStatic(PublicApiUsageCounter.class);
+        MockedStatic<UsageEventRecorder> recorder = mockStatic(UsageEventRecorder.class);
+        MockedStatic<IsolatedDalRead> isolated = mockStatic(IsolatedDalRead.class)) {
+      counterStatic.when(PublicApiUsageCounter::getDefault).thenReturn(counter);
+      recorder.when(UsageEventRecorder::shutdown).thenAnswer(inv -> order.add("recorder"));
+
+      new NeoServlet().destroy();
+
+      assertEquals(List.of("counter", "recorder"), order);
+    }
+  }
+
+  @Test
+  void aFailingApiUsageCounterDoesNotStopTheRestOfTheTeardown() {
+    PublicApiUsageCounter counter = mock(PublicApiUsageCounter.class);
+    doAnswer(inv -> {
+      throw new IllegalStateException("boom");
+    }).when(counter).shutdown();
+    try (MockedStatic<PublicApiUsageCounter> counterStatic = mockStatic(PublicApiUsageCounter.class);
+        MockedStatic<UsageEventRecorder> recorder = mockStatic(UsageEventRecorder.class);
+        MockedStatic<IsolatedDalRead> isolated = mockStatic(IsolatedDalRead.class)) {
+      counterStatic.when(PublicApiUsageCounter::getDefault).thenReturn(counter);
+
+      assertDoesNotThrow(() -> new NeoServlet().destroy());
+
+      recorder.verify(UsageEventRecorder::shutdown, times(1));
       isolated.verify(IsolatedDalRead::shutdown, times(1));
     }
   }
