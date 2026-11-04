@@ -66,9 +66,17 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  *       caller sent — and, for a product with no list price, that standard price as its list
  *       price, as the form does.</li>
  *   <li>{@link #applyDiscount}: a discount the price does not reflect yet is turned into a price by
- *       re-firing {@code SL_Order_Amt} for {@code discount}, the only code that does that.</li>
- *   <li>{@link #applyUnitPrice}: an update that changes only the price gets the discount the price
- *       implies, re-firing {@code SL_Order_Amt} for {@code unitPrice}.</li>
+ *       re-firing {@code SL_Order_Amt} for {@code discount}, the only code that does that. An
+ *       update that sets only the list price ({@link #changesOnlyListPrice}: {@code listPrice}
+ *       without {@code unitPrice}, {@code discount} or an explicit gross price, CP-13) takes the
+ *       same re-fire with the line's stored discount, so {@code unitPrice = listPrice × (1 −
+ *       discount / 100)} and the amounts follow, as when the form changes "Precio".</li>
+ *   <li>{@link #applyUnitPrice}: an update that changes only the net price gets the discount the
+ *       price implies, re-firing {@code SL_Order_Amt} for {@code unitPrice}. Reached by REST and
+ *       batch only: on MCP, {@code McpLinePriceInjector.applyAgentPriceOnUpdate} (ETP-5852) turns
+ *       a lone {@code unitPrice} into the form's "Precio" first — {@code listPrice} = the sent
+ *       value, {@code unitPrice} = it with the line's discount — which this rule then reads as the
+ *       price the line already has.</li>
  *   <li>{@link #deriveAmountsOnUpdate(NeoContext)}: any other update of quantity, price or tax gets
  *       its {@code lineGrossAmount} refreshed.</li>
  *   <li>{@link #deriveAmountsOnCreate(NeoContext)}: every created line gets its
@@ -344,8 +352,13 @@ final class OrderLineDiscountSupport {
    * discount yet (see the class javadoc for the rule), and writes back the derived price and
    * amounts.
    *
+   * <p>An update that sets only the list price ({@link #changesOnlyListPrice}, CP-13) qualifies
+   * too: the stored line's discount is written into the body ({@link #storedDiscount}, unchanged,
+   * and so protected from the callout) and the re-fire prices the line from the new list price.
+   *
    * <p>Total: never throws. A body that does not qualify, a line that cannot be read, or a callout
-   * that fails leaves the body exactly as it was.
+   * that fails leaves the body as it was (a lone list price may keep the stored discount it was
+   * given, the value the line already has).
    *
    * @param ctx the pre-hook context; its request body is mutated in place
    * @return {@code true} when the re-fire ran to the end — on an update its amounts are then
@@ -367,9 +380,11 @@ final class OrderLineDiscountSupport {
     boolean create = METHOD_POST.equals(method);
     boolean update = isUpdate(method);
     JSONObject body = ctx.getRequestBody();
-    // Cheap pre-check before any read: without a discount, or with an explicit gross price, the
-    // full rule can never hold.
-    if ((!create && !update) || !hasValue(body, FIELD_DISCOUNT)
+    // A list price sent alone on an update (CP-13) re-prices the line with its current discount.
+    boolean listPriceOnly = update && changesOnlyListPrice(body);
+    // Cheap pre-check before any read: without a discount (or a lone list price), or with an
+    // explicit gross price, the full rule can never hold.
+    if ((!create && !update) || (!hasValue(body, FIELD_DISCOUNT) && !listPriceOnly)
         || sentExplicitGrossPrice(body)) {
       return false;
     }
@@ -385,6 +400,9 @@ final class OrderLineDiscountSupport {
         // No list price: the callout's discount branch has nothing to discount from and would
         // publish a price of 0. Abstain rather than write that over whatever comes later.
         return false;
+      }
+      if (listPriceOnly) {
+        body.put(FIELD_DISCOUNT, storedDiscount(formState));
       }
       if (!shouldApplyDiscount(body, formState.opt(FIELD_LIST_PRICE))) {
         return false;
@@ -420,9 +438,11 @@ final class OrderLineDiscountSupport {
    * <ol>
    *   <li>{@link #setStandardPriceOnCreate} — the standard price (and, for a product with no list
    *       price, the list price) of a new line;</li>
-   *   <li>{@link #applyDiscount} — a discount the price does not reflect yet;</li>
-   *   <li>{@link #applyUnitPrice} — an update that changes only the price: the discount follows
-   *       it, as {@code SL_Order_Amt} does;</li>
+   *   <li>{@link #applyDiscount} — a discount the price does not reflect yet, or an update that
+   *       sets only the list price (re-priced with the line's stored discount);</li>
+   *   <li>{@link #applyUnitPrice} — an update that changes only the net price: the discount
+   *       follows it, as {@code SL_Order_Amt} does (REST and batch; see the class javadoc for
+   *       MCP);</li>
    *   <li>{@link #deriveAmountsOnUpdate(NeoContext)} — any other update that changes an amount
    *       input, when neither re-fire above ran (they derive the amounts themselves);</li>
    *   <li>{@link #deriveAmountsOnCreate(NeoContext)} — the gross amount of a new line.</li>
@@ -488,6 +508,16 @@ final class OrderLineDiscountSupport {
    * input standard price is the new price ({@link #alignStandardPriceWithCurrentPrice}), so the
    * {@code discount} it publishes, chained back into its own {@code inpdiscount} branch, finds
    * nothing left to change. Amounts are then derived as on a discount update.
+   *
+   * <p><b>Not reached by a lone {@code unitPrice} on MCP any more.</b>
+   * {@code McpLinePriceInjector.applyAgentPriceOnUpdate} (ETP-5852, called by
+   * {@code McpToolRouter} before the pre-hook) rewrites it as the form's "Precio":
+   * {@code listPrice} = the sent value, {@code unitPrice} = it × (1 − the line's discount / 100).
+   * {@link #shouldDeriveDiscountFromPrice} then sees the price the list and discount already give
+   * and abstains, so the discount is kept and only the amounts are derived. What still reaches
+   * this rule is a REST {@code PATCH}/{@code PUT} or an {@code etendo_batch} update that sends
+   * {@code unitPrice} without {@code discount}. An update that sends only {@code listPrice} is
+   * {@link #applyDiscount}'s (CP-13).
    *
    * <p><b>The form never reaches it.</b> {@code unitPrice} is not a form input on either entity
    * (decisions: {@code grid:false, form:false}); both UI line writes send it computed as
@@ -685,6 +715,32 @@ final class OrderLineDiscountSupport {
       return true;
     }
     return !isZero(body.opt(FIELD_DISCOUNT)) && sameAmount(body.opt(FIELD_UNIT_PRICE), listPrice);
+  }
+
+  /**
+   * Whether an update patch changes the list price ("Precio") and leaves the net price to the
+   * server (CP-13 of ETP-5528): it carries a {@code listPrice}, no {@code unitPrice} key, no
+   * {@code discount} key and no explicit gross price. {@code etendo_update listPrice:300} on a line
+   * at list 200, discount 10, qty 10 kept {@code unitPrice 180} and net 1800 (expected 270 / 2700):
+   * no rule reacted to {@code listPrice}. Such a patch now takes the {@link #applyDiscount} re-fire
+   * with the line's current discount, exactly as a patch carrying {@code listPrice} and
+   * {@code discount} already did.
+   *
+   * <p>The form never matches it: both UI line writes send {@code unitPrice} computed from the list
+   * price and the discount, and the inline edit sends {@code discount} too.
+   */
+  static boolean changesOnlyListPrice(JSONObject patch) {
+    return hasValue(patch, FIELD_LIST_PRICE) && !patch.has(FIELD_UNIT_PRICE)
+        && !patch.has(FIELD_DISCOUNT) && !sentExplicitGrossPrice(patch);
+  }
+
+  /**
+   * The discount the stored line has, read from the update's form state; 0 when it has none or it
+   * is not a number, as a new line's default.
+   */
+  static BigDecimal storedDiscount(JSONObject formState) {
+    BigDecimal discount = formState == null ? null : decimal(formState.opt(FIELD_DISCOUNT));
+    return discount == null ? BigDecimal.ZERO : discount;
   }
 
   /**

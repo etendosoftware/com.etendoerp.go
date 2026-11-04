@@ -862,6 +862,115 @@ class OrderLineDiscountSupportTest {
     return Stream.of("PATCH", "PUT");
   }
 
+  // ── CP-13: an update of the list price alone re-prices the line ───────
+
+  /**
+   * Stored Monitor line: qty 10, list 200, the row's discount, 21 % VAT. The callout answer is what
+   * {@code SL_Order_Amt}'s {@code inpdiscount} branch publishes over list 300 (gross
+   * {@code grossUnitPrice × qty} = 0 on a net list).
+   */
+  static Stream<Arguments> listPriceOnlyUpdate() {
+    return Stream.of(
+        Arguments.of("CP-13: list 200 → 300 at discount 10", "PATCH", "10", "180", "270", "2700",
+            "3267.00"),
+        Arguments.of("PUT, line without discount", "PUT", "0", "200", "300", "3000", "3630.00"));
+  }
+
+  /**
+   * QA CP-13: {@code etendo_update listPrice:300} alone used to keep the old price (180 / 1800 /
+   * 2178). Pinned: it takes the discount re-fire with the STORED discount (written into the body,
+   * protected), and the price and amounts follow the new list price.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("listPriceOnlyUpdate")
+  void updateOfTheListPriceAloneRepricesWithTheStoredDiscount(String label, String method,
+      String storedDiscount, String storedPrice, String expectedPrice, String expectedNet,
+      String expectedGross) throws Exception {
+    JSONObject body = new JSONObject("{\"listPrice\":300}");
+    String stored = "{\"orderedQuantity\":10,\"listPrice\":200,\"discount\":" + storedDiscount
+        + ",\"unitPrice\":" + storedPrice + ",\"standardPrice\":200,\"tax\":\"" + TAX_ID
+        + "\",\"lineNetAmount\":" + new BigDecimal(storedPrice).multiply(BigDecimal.TEN) + "}";
+    JSONObject calloutWrites = new JSONObject();
+    calloutWrites.put(OrderLineDiscountSupport.FIELD_UNIT_PRICE, expectedPrice);
+    calloutWrites.put(OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT, expectedNet);
+    calloutWrites.put(OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT, "0");
+    calloutWrites.put(OrderLineDiscountSupport.FIELD_DISCOUNT, "33.333333");
+    OBDal dal = mock(OBDal.class);
+    Tab tab = mock(Tab.class);
+    List<Object> triggers = new ArrayList<>();
+    Set<String> protectedKeys = new HashSet<>();
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, stored);
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class);
+        MockedStatic<NeoTypeCoercionHelper> coercion = mockStatic(NeoTypeCoercionHelper.class)) {
+      cascade.when(() -> NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(any(), any(),
+          any(), any(), any(), any(), any())).thenAnswer(inv -> {
+            triggers.addAll(inv.<Collection<Object>>getArgument(4));
+            protectedKeys.addAll(inv.<Set<String>>getArgument(5));
+            JSONObject target = inv.getArgument(3);
+            Iterator<String> it = calloutWrites.keys();
+            while (it.hasNext()) {
+              String key = it.next();
+              if (!protectedKeys.contains(key)) {
+                target.put(key, calloutWrites.get(key));
+              }
+            }
+            return null;
+          });
+      coercion.when(() -> NeoTypeCoercionHelper.coerceTypes(any(JSONObject.class), anyString()))
+          .thenAnswer(inv -> {
+            JSONObject data = inv.getArgument(0);
+            Iterator<String> it = data.keys();
+            while (it.hasNext()) {
+              String key = it.next();
+              data.put(key, new BigDecimal(data.getString(key)));
+            }
+            return null;
+          });
+
+      OrderLineDiscountSupport.applyLineRules(updateCtx(method, body, tab));
+    }
+
+    assertEquals(Arrays.asList(OrderLineDiscountSupport.FIELD_DISCOUNT), triggers,
+        label + ": the re-fire is for the discount");
+    assertTrue(protectedKeys.contains(OrderLineDiscountSupport.FIELD_DISCOUNT),
+        label + ": the stored discount is protected");
+    assertFalse(protectedKeys.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE),
+        label + ": the price is re-derived");
+    assertAmount(label, storedDiscount, body, OrderLineDiscountSupport.FIELD_DISCOUNT);
+    assertAmount(label, "300", body, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+    assertAmount(label, expectedPrice, body, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, expectedNet, body, OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT);
+    assertAmount(label, expectedGross, body, OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT);
+  }
+
+  /**
+   * The form's side-panel save of "Precio" sends {@code listPrice} with the {@code unitPrice} it
+   * computed from it and the discount: the lone-list-price rule never takes it, no callout runs and
+   * no discount is added — the gross alone is derived, as before.
+   */
+  @Test
+  void listPriceWithItsComputedUnitPriceIsLeftToTheCaller() throws Exception {
+    JSONObject body = new JSONObject("{\"listPrice\":300,\"unitPrice\":270}");
+    OBDal dal = mock(OBDal.class);
+    Tab tab = mock(Tab.class);
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, "{\"orderedQuantity\":10,"
+            + "\"listPrice\":200,\"discount\":10,\"unitPrice\":180,\"tax\":\"" + TAX_ID + "\"}");
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx("PATCH", body, tab));
+
+      cascade.verifyNoInteractions();
+    }
+
+    assertFalse(body.has(OrderLineDiscountSupport.FIELD_DISCOUNT), "no discount is added");
+    assertAmount("unitPrice", "270", body, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount("lineGrossAmount", "3267.00", body,
+        OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT);
+  }
+
   /**
    * ETP-5852: a new line priced by the agent below its list price gets the discount that price
    * implies (33 → 29.70 is 10 %), with two decimals; a price on the list, a body that already says
