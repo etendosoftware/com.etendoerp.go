@@ -270,6 +270,19 @@ class McpActionsViewTest {
   @DisplayName("availability (ETP-5714)")
   class Availability {
 
+    private static final String CO_CL_RE = "{\"actions\":{\"valuesByStatus\":{\"documentAction\":"
+        + "{\"property\":\"documentStatus\",\"values\":{\"CO\":[\"CL\",\"RE\"]}}}}}";
+
+    private JSONObject documentActionWithRulings(String mcpConfig, String status,
+        Map<String, String> rulings) throws JSONException {
+      JSONObject button = buttonField(DOCUMENT_ACTION, "Process Order");
+      button.put("column", "DocAction");
+      JSONObject response = McpActionsView.buildResponse("sales-order", "header",
+          new JSONArray().put(button), Map.of(), withAvailability(mcpConfig),
+          Collections.emptySet(), subject(Map.of(DOCUMENT_STATUS, status), rulings));
+      return entry(response, DOCUMENT_ACTION);
+    }
+
     @Test
     @DisplayName("the static catalogue shows when each action applies, with no availableNow")
     void staticAvailabilityIsRendered() throws JSONException {
@@ -469,6 +482,91 @@ class McpActionsViewTest {
       assertTrue(action.getBoolean("availableNow"), "Close still applies");
       assertEquals(1, action.getJSONArray("availableValuesNow").length());
       assertEquals("CL", action.getJSONArray("availableValuesNow").getString(0));
+      assertEquals("Linked documents.", action.getJSONObject("unavailableValues").getString("RE"));
+    }
+
+    @Test
+    @DisplayName("when every value of an action is ruled out the action is not available now")
+    void allValuesRuledOutWithdrawsTheAction() throws JSONException {
+      JSONObject action = documentActionWithRulings(CO_CL_RE, "CO", Map.of(
+          NeoActionAvailability.valueKey(DOCUMENT_ACTION, "RE"), "Linked documents.",
+          NeoActionAvailability.valueKey(DOCUMENT_ACTION, "CL"), "Close is not offered."));
+
+      assertFalse(action.getBoolean("availableNow"), "no value is left to fire");
+      assertEquals(0, action.getJSONArray("availableValuesNow").length());
+      assertEquals("No value of this action applies to this record: "
+          + "CL - Close is not offered.; RE - Linked documents.",
+          action.getString("unavailableReason"));
+      assertEquals(2, action.getJSONObject("unavailableValues").length());
+    }
+
+    @Test
+    @DisplayName("an action already judged unavailable keeps its own reason when a value is ruled out")
+    void declaredVerdictSurvivesAValueRuling() throws JSONException {
+      JSONObject action = documentActionWithRulings(
+          "{\"actions\":{\"availableWhen\":{\"documentAction\":{\"documentStatus\":[\"DR\"]}},"
+              + "\"valuesByStatus\":{\"documentAction\":{\"property\":\"documentStatus\","
+              + "\"values\":{\"CO\":[\"CL\",\"RE\"]}}}}}",
+          "CO", Map.of(NeoActionAvailability.valueKey(DOCUMENT_ACTION, "RE"), "Linked documents."));
+
+      assertFalse(action.getBoolean("availableNow"));
+      assertEquals("Applies when documentStatus is DR; this record's documentStatus is CO.",
+          action.getString("unavailableReason"));
+      assertEquals("Linked documents.", action.getJSONObject("unavailableValues").getString("RE"));
+    }
+
+    @Test
+    @DisplayName("a ruling for a value the action does not offer leaves the action available")
+    void partialRulingWithAnExtraValueKeepsTheAction() throws JSONException {
+      JSONObject action = documentActionWithRulings(CO_CL_RE, "CO", Map.of(
+          NeoActionAvailability.valueKey(DOCUMENT_ACTION, "RE"), "Linked documents.",
+          NeoActionAvailability.valueKey(DOCUMENT_ACTION, "XX"), "Not listed."));
+
+      assertTrue(action.getBoolean("availableNow"));
+      assertFalse(action.has("unavailableReason"));
+      assertEquals("[\"CL\"]", action.getJSONArray("availableValuesNow").toString());
+      assertEquals(2, action.getJSONObject("unavailableValues").length());
+    }
+
+    @Test
+    @DisplayName("the withdrawal reason names only the removed values, never a ruling for a value not offered")
+    void withdrawalReasonOmitsValuesTheActionNeverOffered() throws JSONException {
+      JSONObject action = documentActionWithRulings(CO_CL_RE, "CO", Map.of(
+          NeoActionAvailability.valueKey(DOCUMENT_ACTION, "RE"), "Linked documents.",
+          NeoActionAvailability.valueKey(DOCUMENT_ACTION, "CL"), "Close is not offered.",
+          NeoActionAvailability.valueKey(DOCUMENT_ACTION, "XX"), "Not listed."));
+
+      assertFalse(action.getBoolean("availableNow"));
+      assertEquals("No value of this action applies to this record: "
+          + "CL - Close is not offered.; RE - Linked documents.",
+          action.getString("unavailableReason"));
+      assertEquals(3, action.getJSONObject("unavailableValues").length());
+    }
+
+    @Test
+    @DisplayName("an action with no value list is not withdrawn by a value ruling, which is still published")
+    void noValueListIsNeverWithdrawn() throws JSONException {
+      JSONObject action = documentActionWithRulings(
+          "{\"actions\":{\"availableWhen\":{\"documentAction\":{\"documentStatus\":[\"CO\"]}}}}",
+          "CO", Map.of(NeoActionAvailability.valueKey(DOCUMENT_ACTION, "RE"), "Linked documents."));
+
+      assertTrue(action.getBoolean("availableNow"));
+      assertFalse(action.has("availableValuesNow"));
+      assertFalse(action.has("unavailableReason"));
+      assertEquals("Linked documents.", action.getJSONObject("unavailableValues").getString("RE"));
+    }
+
+    @Test
+    @DisplayName("an intentionally empty value list plus a ruling keeps its own reason, no empty value list")
+    void emptyValueListPlusRulingIsLeftUntouched() throws JSONException {
+      JSONObject action = documentActionWithRulings(
+          "{\"actions\":{\"valuesByStatus\":{\"documentAction\":{\"property\":"
+              + "\"documentStatus\",\"values\":{\"CO\":[]}}}}}",
+          "CO", Map.of(NeoActionAvailability.valueKey(DOCUMENT_ACTION, "RE"), "Linked documents."));
+
+      assertFalse(action.getBoolean("availableNow"));
+      assertEquals("No value of this action applies when documentStatus is CO.",
+          action.getString("unavailableReason"));
       assertEquals("Linked documents.", action.getJSONObject("unavailableValues").getString("RE"));
     }
 

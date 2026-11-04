@@ -1532,7 +1532,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("etendo_list has required spec and entity fields")
+    @DisplayName("etendo_list requires spec; entity is optional (ETP-5848)")
     @SuppressWarnings("unchecked")
     void listToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1551,11 +1551,11 @@ class ToolRegistryGenerateToolsTest {
       List<String> required = (List<String>) schema.get("required");
       assertNotNull(required);
       assertTrue(required.contains("spec"));
-      assertTrue(required.contains("entity"));
+      assertFalse(required.contains("entity"), "an omitted entity is the spec's primary one (ETP-5848)");
     }
 
     @Test
-    @DisplayName("etendo_get has required spec, entity, and id fields")
+    @DisplayName("etendo_get requires spec and id; entity is optional")
     @SuppressWarnings("unchecked")
     void getToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1573,12 +1573,12 @@ class ToolRegistryGenerateToolsTest {
       Map<String, Object> schema = getTool.getInputSchema();
       List<String> required = (List<String>) schema.get("required");
       assertTrue(required.contains("spec"));
-      assertTrue(required.contains("entity"));
+      assertFalse(required.contains("entity"), "an omitted entity is the spec's primary one (ETP-5848)");
       assertTrue(required.contains("id"));
     }
 
     @Test
-    @DisplayName("etendo_create has required spec, entity, and fields")
+    @DisplayName("etendo_create requires spec and fields; entity is optional")
     @SuppressWarnings("unchecked")
     void createToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1596,12 +1596,12 @@ class ToolRegistryGenerateToolsTest {
       Map<String, Object> schema = createTool.getInputSchema();
       List<String> required = (List<String>) schema.get("required");
       assertTrue(required.contains("spec"));
-      assertTrue(required.contains("entity"));
+      assertFalse(required.contains("entity"), "an omitted entity is the spec's primary one (ETP-5848)");
       assertTrue(required.contains("fields"));
     }
 
     @Test
-    @DisplayName("etendo_delete has required spec, entity, and id fields")
+    @DisplayName("etendo_delete requires spec and id; entity is optional")
     @SuppressWarnings("unchecked")
     void deleteToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1619,12 +1619,12 @@ class ToolRegistryGenerateToolsTest {
       Map<String, Object> schema = deleteTool.getInputSchema();
       List<String> required = (List<String>) schema.get("required");
       assertTrue(required.contains("spec"));
-      assertTrue(required.contains("entity"));
+      assertFalse(required.contains("entity"), "an omitted entity is the spec's primary one (ETP-5848)");
       assertTrue(required.contains("id"));
     }
 
     @Test
-    @DisplayName("etendo_selectors has required spec, entity, and column fields")
+    @DisplayName("etendo_selectors requires spec and column; entity is optional")
     @SuppressWarnings("unchecked")
     void selectorsToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1642,7 +1642,7 @@ class ToolRegistryGenerateToolsTest {
       Map<String, Object> schema = selectorsTool.getInputSchema();
       List<String> required = (List<String>) schema.get("required");
       assertTrue(required.contains("spec"));
-      assertTrue(required.contains("entity"));
+      assertFalse(required.contains("entity"), "an omitted entity is the spec's primary one (ETP-5848)");
       assertTrue(required.contains("column"));
     }
 
@@ -1950,7 +1950,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("etendo_action tool has required fields: spec, entity, id, action")
+    @DisplayName("etendo_action requires spec, id and action; entity is optional")
     @SuppressWarnings("unchecked")
     void neoActionToolHasRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1969,7 +1969,7 @@ class ToolRegistryGenerateToolsTest {
       List<String> required = (List<String>) schema.get("required");
       assertNotNull(required);
       assertTrue(required.contains("spec"));
-      assertTrue(required.contains("entity"));
+      assertFalse(required.contains("entity"), "an omitted entity is the spec's primary one (ETP-5848)");
       assertTrue(required.contains("id"));
       assertTrue(required.contains("action"));
 

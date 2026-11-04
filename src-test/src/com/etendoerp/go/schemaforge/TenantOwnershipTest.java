@@ -334,6 +334,21 @@ public class TenantOwnershipTest {
     }
   }
 
+  /** Same rule for the org-aware check: Client is not ClientEnabled, so it is judged by its id. */
+  @Test
+  public void testIsVisibleJudgesAClientRowByItsId() {
+    Client own = mock(Client.class);
+    when(own.getId()).thenReturn(OWN_CLIENT);
+    Client other = mock(Client.class);
+    when(other.getId()).thenReturn(OTHER_CLIENT);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      stubContext(obContext, new String[] {OWN_CLIENT, SYSTEM_CLIENT}, new String[] {OWN_ORG});
+
+      assertTrue(TenantOwnership.isVisibleToCurrentTenant(own));
+      assertFalse(TenantOwnership.isVisibleToCurrentTenant(other));
+    }
+  }
+
   /** Same fail-open contract as the rest of the class when no session is on the thread. */
   @Test
   public void testBelongsToReadableClientFailsOpenWithoutASession() {

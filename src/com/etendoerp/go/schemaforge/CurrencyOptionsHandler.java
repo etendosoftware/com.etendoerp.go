@@ -183,7 +183,8 @@ public class CurrencyOptionsHandler implements NeoHandler {
     String entityName = type != null ? type.entityName() : tabEntityName(context);
     BaseOBObject doc = entityName != null
         ? (BaseOBObject) OBDal.getInstance().get(entityName, recordId) : null;
-    if (doc == null) {
+    // ETP-5819: another tenant's document is a 404, like a missing one.
+    if (doc == null || !TenantOwnership.isVisibleToCurrentTenant(doc)) {
       throw new RecordNotFoundException("Document not found: " + recordId);
     }
     LocalDate date = requested;

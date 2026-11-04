@@ -30,6 +30,9 @@ import org.codehaus.jettison.json.JSONObject;
  */
 final class McpRequestRefusals {
 
+  /** Start of every refusal that names a filter key. */
+  private static final String FILTER = "Filter '";
+
   private McpRequestRefusals() {
   }
 
@@ -43,8 +46,28 @@ final class McpRequestRefusals {
    */
   static McpRoutingException malformedFilterOperator(String key, String operator, String expected) {
     return McpRoutingException.unprocessable(
-        "Filter '" + key + "' operator '" + operator + "' has a malformed value: " + expected,
+        FILTER + key + "' operator '" + operator + "' has a malformed value: " + expected,
         key, List.of(), "Correct the operator's value and retry.");
+  }
+
+  /**
+   * {@code contains} on a field that references another record (ETP-5848). The bare "works only on
+   * text fields" left the agent to work out how to find, say, the invoices of a customer named X;
+   * this names the step: find the referenced record with the field's own selector, then filter by
+   * its id.
+   *
+   * @param key  the filter key, a reference field
+   * @param text the text the caller looked for
+   * @return the exception to throw
+   */
+  static McpRoutingException containsOnReference(String key, Object text) {
+    String query = text instanceof String ? (String) text : "<text>";
+    return McpRoutingException.unprocessable(
+        FILTER + key + "' operator 'contains' cannot match a referenced record by its name: '"
+            + key + "' holds the id of another record.",
+        key, List.of(), "Find the record first with etendo_selectors(spec: <this spec>, field: '"
+            + key + "', query: '" + query + "'), then filter by its id: {\"" + key
+            + "\": \"<id>\"}.");
   }
 
   /**
@@ -66,10 +89,28 @@ final class McpRequestRefusals {
       // a String key and a JSON value cannot fail; the refusal still carries field and detail
     }
     return McpRoutingException.unprocessable(
-        "Filter '" + key + "' expects a " + expectedType + " value"
+        FILTER + key + "' expects a " + expectedType + " value"
             + ("date".equals(expectedType) ? " (YYYY-MM-DD)" : "") + ", got '" + received + "'.",
         key, List.of(), "Correct the value and retry; nothing was read.")
         .withExtras(extras);
+  }
+
+  /**
+   * An {@code orderBy} on a field the caller may not read (ETP-6087): accounting data for a role
+   * without {@code showAccountingFields}. Worded like the filter refusal, "not available", so it
+   * neither confirms nor denies that the column exists.
+   *
+   * @param field      the sort field as sent
+   * @param entityName the entity
+   * @param available  the fields this entity does expose to the caller
+   * @return the exception to throw
+   */
+  static McpRoutingException sortFieldNotAvailable(String field, String entityName,
+      List<String> available) {
+    return McpRoutingException.unprocessable(
+        "Field '" + field + "' is not available for sorting on entity '" + entityName
+            + "'. Nothing was read.",
+        "orderBy", available, "Sort by another field, or drop orderBy.");
   }
 
   /**

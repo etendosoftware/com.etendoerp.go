@@ -1,7 +1,10 @@
 package com.etendoerp.go.schemaforge;
 
 import java.sql.SQLException;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -30,6 +33,13 @@ import org.apache.logging.log4j.Logger;
  * ({@link NeoActionRecordGuard}'s status and message) whatever value is sent. A record, tab or
  * DocAction that cannot be resolved — so the action that will run is unknown — or a record check
  * that throws answers the caller's {@code checkFailed} response (a 500), and is logged.</p>
+ *
+ * <p><b>Two shapes.</b> {@link #refuse} is a deny-list of one value; {@link #refuseUnlessAllowed}
+ * (ETP-6026) is an allow-list: the caller says which values the record accepts, and every other
+ * effective value — an unknown code, {@code --}, or nothing at all — is refused. A deny-list leaks
+ * whatever it forgot to name (ETP-6026: {@code PR} and {@code AP} ran on a draft order and a
+ * draft quotation), so a customization that knows exactly what its window offers uses the
+ * allow-list.</p>
  *
  * <p><b>Pure structure.</b> It names no entity, no spec and no table; an entity gets a refusal
  * only by calling it from its own customization with its own value and condition.</p>
@@ -61,7 +71,86 @@ final class DocActionRefusalGuard {
     boolean refuses(String recordId) throws SQLException;
   }
 
+  /**
+   * The {@code DocAction} values one record accepts (ETP-6026). May throw: the guard then fails
+   * closed.
+   */
+  @FunctionalInterface
+  interface AllowedValues {
+    /**
+     * The values the record accepts in its current state; an empty set accepts none.
+     *
+     * @param recordId the record the button runs on
+     * @return the accepted values, never {@code null}
+     * @throws SQLException when the record's state cannot be read from the database
+     */
+    Set<String> of(String recordId) throws SQLException;
+  }
+
   private DocActionRefusalGuard() {
+  }
+
+  /**
+   * {@link #refuseUnlessAllowed(NeoContext, AllowedValues, Function, Supplier)} with translated
+   * bodies ({@link NeoMessageText#error}): a {@code 400} with the key {@code refusalKeyOf} picks
+   * for the refused value, given that value as its first placeholder ({@code -} when nothing would
+   * run), and a {@code 500} with {@link #MSG_CHECK_FAILED}.
+   *
+   * @param context      the request reaching the customization's pre-hook
+   * @param allowed      the values the record accepts
+   * @param refusalKeyOf the {@code AD_MESSAGE} value of the refusal, per refused value (which may
+   *                     be {@code null})
+   * @return the error response, or {@code null} when the request may continue
+   */
+  static NeoResponse refuseUnlessAllowed(NeoContext context, AllowedValues allowed,
+      UnaryOperator<String> refusalKeyOf) {
+    return refuseUnlessAllowed(context, allowed,
+        value -> NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, refusalKeyOf.apply(value),
+            value != null ? value : "-"),
+        () -> NeoMessageText.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            MSG_CHECK_FAILED));
+  }
+
+  /**
+   * The refusal of every {@code DocAction} value the record does not accept, or {@code null} when
+   * the request may continue — it is not a POST of the DocAction button, it names no record, or
+   * the value that will actually run is one of {@code allowed}. Same resolution and fail-closed
+   * rules as {@link #refuse(NeoContext, String, RecordCheck, Supplier, Supplier)}: an unknown id
+   * answers 404, an action or a record state that cannot be read answers {@code checkFailed}. A
+   * request with nothing to run (no root value, nothing stored) is refused, not let through.
+   *
+   * @param context     the request reaching the customization's pre-hook
+   * @param allowed     the values the record accepts; evaluated after the effective value is known
+   * @param refusal     the response for a refused value (a {@code 400}); receives that value
+   * @param checkFailed the response when the value or the record's state cannot be read (a
+   *                    {@code 500})
+   * @return the error response, or {@code null}
+   */
+  static NeoResponse refuseUnlessAllowed(NeoContext context, AllowedValues allowed,
+      Function<String, NeoResponse> refusal, Supplier<NeoResponse> checkFailed) {
+    if (!DocActionRequestSupport.isDocActionButtonPost(context)) {
+      return null;
+    }
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return null;
+    }
+    String effective;
+    try {
+      effective = DocActionRequestSupport.effectiveDocAction(context);
+      if (effective != null && allowed.of(recordId).contains(effective)) {
+        return null;
+      }
+    } catch (DocActionResolution.DocActionRecordNotFoundException e) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          NeoActionRecordGuard.MSG_RECORD_NOT_FOUND);
+    } catch (Exception e) {
+      log.error("DocAction on record {} refused: whether it may run could not be read", recordId,
+          e);
+      return checkFailed.get();
+    }
+    log.info("DocAction {} on record {} refused: not allowed in its state", effective, recordId);
+    return refusal.apply(effective);
   }
 
   /**

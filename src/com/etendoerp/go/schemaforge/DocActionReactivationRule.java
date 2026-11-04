@@ -46,13 +46,13 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * {@link DocActionIdempotency}: the one place every channel that runs a DocAction procedure goes
  * through (REST action, MCP {@code etendo_action}, each document of {@code etendo_action_batch}),
  * after the entity customizations' pre-hooks, so an entity's own rule (the quotation's
- * "only a voided quotation is reactivated", ETP-5704) answers first.</p>
+ * "Reactivate is never offered", ETP-5704/ETP-6026) answers first.</p>
  *
  * <p><b>Structure only.</b> The status column is found the way {@link DocActionIdempotency} finds
  * it — the single active List column of the table whose list holds both {@code DR} and
  * {@code CO} — so no entity, table or property is named. Only the draft status is refused: it is
- * the one status no document reactivates from. "Anything but completed" is NOT structural — a
- * voided sales quotation is reactivated by design ({@code SalesQuotationHeaderHandler}). Undecidable
+ * the one status no document reactivates from. "Anything but completed" is NOT structural — each
+ * entity's pre-hook owns its own status rules and runs first. Undecidable
  * (no or several status columns, a record or tab that cannot be read) means "do not decide": the
  * procedure runs as before.</p>
  */

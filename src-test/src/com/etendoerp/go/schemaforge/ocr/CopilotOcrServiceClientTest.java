@@ -264,4 +264,84 @@ class CopilotOcrServiceClientTest {
 
     assertTrue(client(Duration.ofSeconds(10)).extract(pdf.toFile(), type).has("answer"));
   }
+
+  // ── retryable classification (the worker retries only what may pass) ───────
+
+  private OcrUnavailableException toolFailsWith(int status) {
+    toolStatus = status;
+    return assertThrows(OcrUnavailableException.class,
+        () -> client(Duration.ofSeconds(10)).extract(pdf.toFile(), type));
+  }
+
+  @Test
+  @DisplayName("a 5xx answer of the tool, a 408 and a 429 are retryable")
+  void serverSideStatusesAreRetryable() {
+    for (int status : new int[] {500, 502, 503, 504, 408, 429}) {
+      assertTrue(toolFailsWith(status).isRetryable(), "status " + status);
+    }
+  }
+
+  @Test
+  @DisplayName("any other 4xx answer of the tool is not retryable: the same request fails the same way")
+  void clientSideStatusesAreNotRetryable() {
+    for (int status : new int[] {400, 401, 403, 404, 413, 422}) {
+      assertFalse(toolFailsWith(status).isRetryable(), "status " + status);
+    }
+  }
+
+  @Test
+  @DisplayName("the upload step is classified the same way: 503 retryable, 400 not")
+  void uploadStatusesAreClassified() {
+    uploadStatus = 503;
+    assertTrue(assertThrows(OcrUnavailableException.class,
+        () -> client(Duration.ofSeconds(10)).extract(pdf.toFile(), type)).isRetryable());
+
+    uploadStatus = 400;
+    assertFalse(assertThrows(OcrUnavailableException.class,
+        () -> client(Duration.ofSeconds(10)).extract(pdf.toFile(), type)).isRetryable());
+  }
+
+  @Test
+  @DisplayName("a timeout is retryable")
+  void timeoutIsRetryable() {
+    toolDelayMillis = 3000;
+
+    OcrUnavailableException e = assertThrows(OcrUnavailableException.class,
+        () -> client(Duration.ofMillis(500)).extract(pdf.toFile(), type));
+
+    assertTrue(e.isRetryable());
+  }
+
+  @Test
+  @DisplayName("a service that is down (connection refused) is retryable")
+  void connectionFailureIsRetryable() throws IOException {
+    int port = server.getAddress().getPort();
+    server.stop(0);
+
+    OcrUnavailableException e = assertThrows(OcrUnavailableException.class,
+        () -> new CopilotOcrServiceClient("http://127.0.0.1:" + port, Duration.ofSeconds(5))
+            .extract(pdf.toFile(), type));
+
+    assertTrue(e.isRetryable());
+    server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+  }
+
+  @Test
+  @DisplayName("a 200 answer that is not JSON stays retryable, as before")
+  void unparseableAnswerIsRetryable() {
+    toolAnswer = "<html>bad gateway</html>";
+
+    assertTrue(assertThrows(OcrUnavailableException.class,
+        () -> client(Duration.ofSeconds(10)).extract(pdf.toFile(), type)).isRetryable());
+  }
+
+  @Test
+  @DisplayName("the two-argument constructor (the MCP tool's) stays retryable; the three-argument one says")
+  void constructorsSayWhetherToRetry() {
+    assertTrue(new OcrUnavailableException("down", null).isRetryable());
+    assertTrue(new OcrUnavailableException("down", new IOException("x"), true).isRetryable());
+    assertFalse(new OcrUnavailableException("bad request", new IOException("x"), false)
+        .isRetryable());
+    assertEquals("bad request", new OcrUnavailableException("bad request", null, false).getMessage());
+  }
 }

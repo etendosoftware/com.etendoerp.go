@@ -47,6 +47,10 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import org.junit.After;
+import org.junit.Before;
+import org.openbravo.model.financialmgmt.calendar.Year;
+import com.etendoerp.go.schemaforge.TenantOwnership;
 
 /**
  * Unit tests for {@link YearAccountingHandler}.
@@ -60,8 +64,25 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * SelectorAuxResolverTest}), so the real HQL never executes against the dev DB — this handler is
  * read-only with no persistence side effects, unlike Tasks 7/8's legacy-servlet concerns, but the
  * same principle of not depending on a live DB connection for a unit test still applies.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.YearAccountingHandler
  */
 public class YearAccountingHandlerTest {
+
+  /** ETP-5819: the handler only serves the caller's own years; every id here is one. */
+  private MockedStatic<TenantOwnership> ownership;
+
+  @Before
+  public void ownEveryRecord() {
+    ownership = Mockito.mockStatic(TenantOwnership.class);
+    ownership.when(() -> TenantOwnership.loadOwned(Mockito.eq(Year.class),
+        Mockito.anyString())).thenReturn(Mockito.mock(Year.class));
+  }
+
+  @After
+  public void closeOwnership() {
+    ownership.close();
+  }
 
   private NeoContext buildListContext(String yearId) {
     Map<String, String> queryParams = new HashMap<>();

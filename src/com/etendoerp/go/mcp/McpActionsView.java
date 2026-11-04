@@ -22,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -327,14 +328,42 @@ final class McpActionsView {
     JSONArray now = action.optJSONArray(NeoActionAvailability.KEY_AVAILABLE_VALUES_NOW);
     if (now != null) {
       JSONArray kept = new JSONArray();
+      Map<String, String> removed = new TreeMap<>();
       for (int i = 0; i < now.length(); i++) {
-        if (!ruledOut.containsKey(now.optString(i))) {
-          kept.put(now.optString(i));
+        String value = now.optString(i);
+        if (ruledOut.containsKey(value)) {
+          removed.put(value, ruledOut.get(value));
+        } else {
+          kept.put(value);
         }
       }
       action.put(NeoActionAvailability.KEY_AVAILABLE_VALUES_NOW, kept);
+      if (kept.length() == 0) {
+        withdrawWhenNoValueLeft(action, removed);
+      }
     }
     action.put(KEY_UNAVAILABLE_VALUES, new JSONObject(ruledOut));
+  }
+
+  /**
+   * Every value the action offered now is ruled out, so the action itself cannot be fired:
+   * {@code availableNow} turns {@code false} with a reason naming each removed value (sorted) and
+   * why. An action already judged unavailable keeps its own verdict and reason.
+   */
+  private static void withdrawWhenNoValueLeft(JSONObject action, Map<String, String> removed)
+      throws JSONException {
+    if (removed.isEmpty() || !action.optBoolean(NeoActionAvailability.KEY_AVAILABLE_NOW, true)) {
+      return;
+    }
+    StringBuilder reason = new StringBuilder("No value of this action applies to this record: ");
+    boolean first = true;
+    for (Map.Entry<String, String> entry : removed.entrySet()) {
+      reason.append(first ? "" : "; ").append(entry.getKey()).append(" - ")
+          .append(entry.getValue());
+      first = false;
+    }
+    action.put(NeoActionAvailability.KEY_AVAILABLE_NOW, false);
+    action.put(NeoActionAvailability.KEY_UNAVAILABLE_REASON, reason.toString());
   }
 
   /**
@@ -384,9 +413,9 @@ final class McpActionsView {
    */
   private static final List<String> BUTTON_KEYS = List.of("triggerValue", "action",
       McpConstants.KEY_ACTION_VALUES, McpConstants.KEY_ACTION_PARAMETER, "processType",
-      "processName", "processId", McpSchemaFieldBuilder.KEY_INVOKE_VIA,
-      McpSchemaFieldBuilder.KEY_INVOKABLE, McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON,
-      "useInstead");
+      "processName", "processId", McpSchemaActionFields.KEY_PROCESS_PARAMETERS,
+      McpSchemaFieldBuilder.KEY_INVOKE_VIA, McpSchemaFieldBuilder.KEY_INVOKABLE,
+      McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON, "useInstead");
 
   /**
    * Whether a button the configuration withholds is ALSO a value the window displays: its curated
@@ -443,6 +472,7 @@ final class McpActionsView {
       if (contract != null) {
         field.remove(McpConstants.KEY_ACTION_VALUES);
         field.remove(McpConstants.KEY_ACTION_PARAMETER);
+        field.remove(McpSchemaActionFields.KEY_PROCESS_PARAMETERS);
         JSONObject described = contract.toJson();
         field.put(McpConstants.PARAM_PARAMETERS,
             described.getJSONObject(McpConstants.PARAM_PARAMETERS));

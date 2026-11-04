@@ -177,14 +177,11 @@ public class NeoServlet extends HttpBaseServlet {
 
     try {
       OBContext.setAdminMode();
-      if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
-        return;
-      }
-
-      if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
-        return;
-      }
-      requestRouter.handleSpecRequest(pathInfo, method, request, response);
+      // ETP-5819: admin mode skips the DAL's tenant check on writes; the guard restores it.
+      NeoTenantWriteGuard.call(() -> {
+        dispatch(pathInfo, method, request, response);
+        return null;
+      });
     } catch (MalformedJsonException e) {
       // A body or JSON parameter the client sent could not be parsed: its error, not ours.
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
@@ -197,6 +194,17 @@ public class NeoServlet extends HttpBaseServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private void dispatch(NeoPathInfo pathInfo, String method, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
+      return;
+    }
+    if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
+      return;
+    }
+    requestRouter.handleSpecRequest(pathInfo, method, request, response);
   }
 
   /**

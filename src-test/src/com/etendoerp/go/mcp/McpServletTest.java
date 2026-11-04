@@ -2191,4 +2191,48 @@ public class McpServletTest {
 
     assertNull(McpUsageTelemetry.currentTenant());
   }
+
+  /** ETP-5819: a write refused at the closing flush is a permanent forbidden, not a server error. */
+  @Test
+  public void toolsCallWhoseWriteIsRefusedByTheTenantGuardAnswersForbiddenContent() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read neo:write");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 7).put("method", "tools/call")
+        .put("params", new JSONObject().put("name", "etendo_create")
+            .put("arguments", new JSONObject().put("spec", "product")))
+        .toString());
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
+      sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
+          anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenThrow(new org.openbravo.base.exception.OBSecurityException("Write access denied"));
+
+      servlet.doPost(request, response);
+    }
+
+    JSONObject answer = new JSONObject(getResponseBody());
+    assertFalse("must not be a JSON-RPC error: " + answer, answer.has("error"));
+    String text = answer.getJSONObject("result").toString();
+    assertTrue(text, text.contains("403"));
+    assertTrue(text, text.contains("Write access denied"));
+  }
+
+  /** Negative pair: any other exception from the tool is NOT mapped to forbidden. */
+  @Test
+  public void toolsCallWhoseExecutionThrowsSomethingElseIsNotForbidden() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read neo:write");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 8).put("method", "tools/call")
+        .put("params", new JSONObject().put("name", "etendo_create")
+            .put("arguments", new JSONObject().put("spec", "product")))
+        .toString());
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
+      sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
+          anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenThrow(new IllegalStateException("db down"));
+
+      servlet.doPost(request, response);
+    }
+
+    assertFalse(getResponseBody().contains("\"status\":403"));
+  }
 }
