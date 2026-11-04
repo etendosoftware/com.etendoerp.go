@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -72,8 +73,9 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * set without SII invoices (→ delete).
  *
  * <p>Also the Fiscal Configuration write rules ({@link FiscalSifGuard}) run first in
- * {@code handle}, and the SII an agent activates ({@code configureFiscalSystem}) is marked
- * {@code INSIISYSTEM = 'Y'} on its create, with a trigger refusal propagated, not swallowed.
+ * {@code handle}, and the SII created by {@code configureFiscalSystem} is marked
+ * {@code INSIISYSTEM = 'Y'} on its create on every channel (REST and MCP), with a trigger refusal
+ * propagated, not swallowed; a plain CRUD create outside the action is left alone.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler
  */
@@ -1324,20 +1326,26 @@ public class SiiConfigDeactivateHandlerTest {
     }
   }
 
-  /** The POST response envelope of a created SII config. */
-  private static NeoContext createdSiiContext() throws Exception {
+  /** The POST response envelope of a created SII config, on the given channel. */
+  private static NeoContext createdSiiContext(boolean mcpOrigin) throws Exception {
     JSONArray data = new JSONArray().put(new JSONObject().put("id", RECORD_ID));
     return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
         .httpMethod("POST")
+        .mcpOrigin(mcpOrigin)
         .previousResult(NeoResponse.ok(new JSONObject()
             .put("response", new JSONObject().put("data", data))))
         .build();
   }
 
-  @Test
-  public void afterHandleMarksTheAgentActivatedSiiAsInSiiSystem() throws Exception {
+  /**
+   * An SII created inside {@code configureFiscalSystem} is marked {@code INSIISYSTEM = 'Y'} on its
+   * create whatever the channel: the batch the action runs carries no {@code mcpOrigin}, and the
+   * SPA's Fiscal Configuration window activates through REST.
+   */
+  private static void assertActivationMarksInSiiSystem(boolean mcpOrigin) throws Exception {
     SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
-    NeoContext ctx = createdSiiContext();
+    NeoContext ctx = createdSiiContext(mcpOrigin);
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -1356,13 +1364,25 @@ public class SiiConfigDeactivateHandlerTest {
       verify(nq).setParameter("id", RECORD_ID);
       verify(nq).executeUpdate();
       verify(config).setRedeme(false);
+      assertFalse("the activation flag never outlives the action",
+          FiscalSifGuard.isFiscalSystemActivation());
     }
   }
 
   @Test
-  public void afterHandlePropagatesATriggerRefusalOfTheAgentInSiiSystemFlag() throws Exception {
+  public void afterHandleMarksTheActivatedSiiAsInSiiSystemOnRest() throws Exception {
+    assertActivationMarksInSiiSystem(false);
+  }
+
+  @Test
+  public void afterHandleMarksTheActivatedSiiAsInSiiSystemOnMcp() throws Exception {
+    assertActivationMarksInSiiSystem(true);
+  }
+
+  @Test
+  public void afterHandlePropagatesATriggerRefusalOfTheInSiiSystemFlag() throws Exception {
     SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
-    NeoContext ctx = createdSiiContext();
+    NeoContext ctx = createdSiiContext(false);
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -1381,13 +1401,16 @@ public class SiiConfigDeactivateHandlerTest {
       // The admin mode opened for the flag is restored, and nothing after it ran.
       obCtxMock.verify(OBContext::restorePreviousMode);
       verify(dal, never()).save(any());
+      assertFalse("the activation flag is cleared on failure too",
+          FiscalSifGuard.isFiscalSystemActivation());
     }
   }
 
-  @Test
-  public void afterHandleLeavesTheUiCreateOutOfTheSiiSystemFlag() throws Exception {
+  /** A create outside {@code configureFiscalSystem} — a plain CRUD POST — never sets the flag. */
+  private static void assertPlainCreateLeavesInSiiSystemAlone(boolean mcpOrigin)
+      throws Exception {
     SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
-    NeoContext ctx = createdSiiContext();
+    NeoContext ctx = createdSiiContext(mcpOrigin);
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -1401,5 +1424,15 @@ public class SiiConfigDeactivateHandlerTest {
       verify(dal, never()).getSession();
       verify(config).setRedeme(false);
     }
+  }
+
+  @Test
+  public void afterHandleLeavesAPlainRestPostOutOfTheSiiSystemFlag() throws Exception {
+    assertPlainCreateLeavesInSiiSystemAlone(false);
+  }
+
+  @Test
+  public void afterHandleLeavesAPlainMcpCreateOutOfTheSiiSystemFlag() throws Exception {
+    assertPlainCreateLeavesInSiiSystemAlone(true);
   }
 }

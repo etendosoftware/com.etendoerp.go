@@ -54,8 +54,11 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * The {@code configureFiscalSystem} action: its refusals (status and message key), the records it
- * sends through the batch seam per system and territory, "Añadir SII" on an existing TicketBAI,
- * the certificate warning, and how a batch failure is reported.
+ * sends through the batch seam per system and territory, "Añadir SII" on an existing TicketBAI
+ * (with or without a territory, and refused on a TicketBAI with no known territory), the
+ * certificate warning, and how a batch failure is reported. Also the {@code fiscalSystemCatalog}
+ * read action: its methods, its organization check and its content per territory, which must be
+ * {@link FiscalSifRules} as data.
  *
  * @covers com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction
  */
@@ -345,6 +348,122 @@ class FiscalSystemConfigureActionTest {
     assertTrue(batches.isEmpty());
   }
 
+  @Test
+  void addingSiiWithoutATerritoryTakesTheTicketBaiOne() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = "GIPUZKOA";
+
+    NeoResponse response = run(ORG, new JSONObject().put("system", "SII"));
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals("SII+TBAI", response.getBody().getString("system"));
+    assertEquals("gipuzkoa", response.getBody().getString("territory"));
+    assertEquals(1, batches.get(0).length());
+    assertEquals("SII", operation(0).getString("id"));
+    JSONObject sii = operation(0).getJSONObject("body");
+    assertEquals("Y", sii.getString("guipuzcoa"));
+    assertEquals("IVA", sii.getString("taxtype"));
+    assertEquals("Y", sii.getString("acogidaAlSII"));
+    assertEquals(List.of(Boolean.TRUE), onboardingFlags);
+  }
+
+  @Test
+  void addingSiiWithoutATerritoryToBizkaiaCarriesNoRegionalAgency() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = "BIZKAIA";
+
+    NeoResponse response = run(ORG, new JSONObject().put("system", "SII"));
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals("bizkaia", response.getBody().getString("territory"));
+    JSONObject sii = operation(0).getJSONObject("body");
+    assertFalse(sii.has("guipuzcoa"));
+    assertFalse(sii.has("navarra"));
+  }
+
+  @Test
+  void addingSiiToTicketBaiWithANonBasqueTerritoryIsNotAddingSii() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = "BIZKAIA";
+
+    NeoResponse response = run("SII", "navarra");
+
+    // Not "Añadir SII": a first activation, refused because a SIF is already active.
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_ALREADY_CONFIGURED, messageKey(response));
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void addingSiiToATicketBaiWithoutTerritoryIsAConflict() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = null;
+
+    NeoResponse withoutTerritory = run(ORG, new JSONObject().put("system", "SII"));
+    NeoResponse withTerritory = run("SII", "bizkaia");
+
+    for (NeoResponse response : List.of(withoutTerritory, withTerritory)) {
+      assertEquals(409, response.getHttpStatus());
+      assertEquals(FiscalSystemConfigureAction.MSG_TBAI_NO_TERRITORY, messageKey(response));
+    }
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void addingSiiToATicketBaiWithAnUnknownTerritoryIsAConflict() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = "MADRID";
+
+    NeoResponse response = run(ORG, new JSONObject().put("system", "SII"));
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_TBAI_NO_TERRITORY, messageKey(response));
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void addingSiiWithTheTicketBaiTerritoryNamesItOnMismatch() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = "GIPUZKOA";
+
+    NeoResponse response = run("SII", "alava");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_TERRITORY_MISMATCH, messageKey(response));
+    assertTrue(message(response).contains("Guip\u00fazcoa"), message(response));
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void aMissingTerritoryIsRequiredForEverySystemButAddingSii() throws Exception {
+    for (String system : List.of("TBAI", "SII+TBAI", "VERIFACTU")) {
+      NeoResponse response = run(ORG, new JSONObject().put("system", system));
+
+      assertEquals(400, response.getHttpStatus(), system);
+      assertEquals(FiscalSystemConfigureAction.MSG_TERRITORY_REQUIRED, messageKey(response),
+          system);
+    }
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void aMissingTerritoryIsRequiredWhenTheActiveSifIsNotTicketBaiAlone() throws Exception {
+    tables.active.put("etvfac_verifactu_config", "V");
+    NeoResponse onVerifactu = run(ORG, new JSONObject().put("system", "SII"));
+
+    tables.active.clear();
+    tables.active.put("tbai_config", "T");
+    tables.active.put("aeatsii_config", "S");
+    tables.tbaiTerritory = "BIZKAIA";
+    NeoResponse onSiiPlusTbai = run(ORG, new JSONObject().put("system", "SII"));
+
+    for (NeoResponse response : List.of(onVerifactu, onSiiPlusTbai)) {
+      assertEquals(400, response.getHttpStatus());
+      assertEquals(FiscalSystemConfigureAction.MSG_TERRITORY_REQUIRED, messageKey(response));
+    }
+    assertTrue(batches.isEmpty());
+  }
+
   // ── certificate ──────────────────────────────────────────────────────────
 
   @Test
@@ -423,6 +542,137 @@ class FiscalSystemConfigureActionTest {
         .containsKey(FiscalSystemConfigureAction.ACTION));
     assertTrue(FiscalSystemConfigureAction.serves("configureFiscalSystem"));
     assertFalse(FiscalSystemConfigureAction.serves("certificate"));
+  }
+
+  // ── fiscalSystemCatalog ─────────────────────────────────────────────────
+
+  private NeoResponse catalog(String method, String orgId) {
+    return action().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(FiscalSystemConfigureAction.CATALOG_ACTION)
+        .httpMethod(method)
+        .recordId(orgId)
+        .obContext(obContext)
+        .build());
+  }
+
+  private static JSONObject territory(JSONObject catalog, String id) throws Exception {
+    JSONArray territories = catalog.getJSONArray("territories");
+    for (int i = 0; i < territories.length(); i++) {
+      if (id.equals(territories.getJSONObject(i).getString("territory"))) {
+        return territories.getJSONObject(i);
+      }
+    }
+    throw new AssertionError("no territory " + id + " in " + catalog);
+  }
+
+  @Test
+  void theCatalogAnswersGetAndPostAlike() throws Exception {
+    NeoResponse get = catalog("GET", ORG);
+    NeoResponse post = catalog("post", ORG);
+
+    assertEquals(200, get.getHttpStatus());
+    assertEquals(200, post.getHttpStatus());
+    assertEquals(get.getBody().toString(), post.getBody().toString());
+    assertTrue(batches.isEmpty(), "a read never runs the batch");
+  }
+
+  @Test
+  void theCatalogRefusesAnyOtherMethod() {
+    for (String method : List.of("PUT", "PATCH", "DELETE")) {
+      assertEquals(405, catalog(method, ORG).getHttpStatus(), method);
+    }
+    assertEquals(405, catalog(null, ORG).getHttpStatus());
+  }
+
+  @Test
+  void theCatalogOfAnUnreadableOrganizationIsNotFound() {
+    assertEquals(404, catalog("GET", "ORG-X").getHttpStatus());
+    assertEquals(404, catalog("GET", null).getHttpStatus());
+  }
+
+  @Test
+  void theCatalogOfAnotherReadableOrganizationIsTheSame() throws Exception {
+    assertEquals(catalog("GET", ORG).getBody().toString(),
+        catalog("GET", "ORG-2").getBody().toString());
+  }
+
+  @Test
+  void theCatalogIsTheRulesAsData() throws Exception {
+    JSONObject body = catalog("GET", ORG).getBody();
+
+    JSONArray systems = body.getJSONArray("systems");
+    assertEquals(FiscalSifRules.SYSTEMS.size(), systems.length());
+    for (int i = 0; i < systems.length(); i++) {
+      assertEquals(FiscalSifRules.SYSTEMS.get(i), systems.getString(i));
+    }
+    JSONArray territories = body.getJSONArray("territories");
+    assertEquals(FiscalSifRules.TERRITORIES.size(), territories.length());
+    for (int i = 0; i < territories.length(); i++) {
+      JSONObject t = territories.getJSONObject(i);
+      String id = t.getString("territory");
+      assertEquals(FiscalSifRules.TERRITORIES.get(i), id, "presentation order");
+      List<String> allowed = new ArrayList<>();
+      JSONArray tSystems = t.getJSONArray("systems");
+      for (int j = 0; j < tSystems.length(); j++) {
+        allowed.add(tSystems.getString(j));
+      }
+      assertEquals(FiscalSifRules.allowedSystems(id), allowed, id);
+      boolean siiApplies = allowed.contains("SII") || allowed.contains("SII+TBAI");
+      assertEquals(!siiApplies, t.isNull("sii"), id + ": sii only where SII applies");
+      String tbai = FiscalSifRules.tbaiTerritory(id);
+      assertEquals(tbai == null, t.isNull("tbaiTerritory"), id);
+      if (tbai != null) {
+        assertEquals(tbai, t.getString("tbaiTerritory"), id);
+      }
+      assertEquals(!allowed.contains("VERIFACTU"), t.isNull("verifactuTaxType"), id);
+    }
+  }
+
+  @Test
+  void theCatalogCarriesTheSiiFlagsOfEachTerritory() throws Exception {
+    JSONObject body = catalog("GET", ORG).getBody();
+
+    JSONObject navarra = territory(body, "navarra").getJSONObject("sii");
+    assertTrue(navarra.getBoolean("navarra"));
+    assertFalse(navarra.getBoolean("guipuzcoa"));
+    assertEquals("IVA", navarra.getString("taxtype"));
+
+    JSONObject gipuzkoa = territory(body, "gipuzkoa").getJSONObject("sii");
+    assertFalse(gipuzkoa.getBoolean("navarra"));
+    assertTrue(gipuzkoa.getBoolean("guipuzcoa"));
+    assertEquals("IVA", gipuzkoa.getString("taxtype"));
+
+    JSONObject alava = territory(body, "alava").getJSONObject("sii");
+    assertFalse(alava.getBoolean("navarra"));
+    assertFalse(alava.getBoolean("guipuzcoa"));
+
+    assertEquals("IGIC", territory(body, "canarias").getJSONObject("sii").getString("taxtype"));
+    assertEquals("IVA", territory(body, "baleares").getJSONObject("sii").getString("taxtype"));
+    assertTrue(territory(body, "ceuta").isNull("sii"), "SII cannot represent an IPSI taxpayer");
+  }
+
+  @Test
+  void theCatalogCarriesTheTicketBaiTerritoryAndTheVerifactuTaxType() throws Exception {
+    JSONObject body = catalog("GET", ORG).getBody();
+
+    assertEquals("ARABA", territory(body, "alava").getString("tbaiTerritory"));
+    assertEquals("BIZKAIA", territory(body, "bizkaia").getString("tbaiTerritory"));
+    assertEquals("GIPUZKOA", territory(body, "gipuzkoa").getString("tbaiTerritory"));
+    assertTrue(territory(body, "navarra").isNull("tbaiTerritory"));
+
+    assertEquals("01", territory(body, "baleares").getString("verifactuTaxType"));
+    assertEquals("03", territory(body, "canarias").getString("verifactuTaxType"));
+    assertEquals("02", territory(body, "ceuta").getString("verifactuTaxType"));
+    assertTrue(territory(body, "navarra").isNull("verifactuTaxType"));
+    assertTrue(territory(body, "bizkaia").isNull("verifactuTaxType"));
+  }
+
+  @Test
+  void theCatalogIsDeclaredAsARead() {
+    assertTrue(FiscalSystemConfigureAction.serves(FiscalSystemConfigureAction.CATALOG_ACTION));
+    assertTrue(FiscalSystemConfigureAction.actionContracts()
+        .containsKey(FiscalSystemConfigureAction.CATALOG_ACTION));
   }
 
   private static JSONObject json(String text) {

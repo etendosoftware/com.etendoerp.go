@@ -54,7 +54,10 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 /**
  * The write rules of the three fiscal-configuration entities: no inactive create and none in forced
  * test mode on any channel, one active config per system and organization (REST reactivation
- * included), and no {@code active} change by an agent. The fiscal tables are answered by a fake
+ * included), and no {@code active} change by an agent. When either side of an {@code active}
+ * change is {@link FiscalSifGuard.ActiveFlag#UNKNOWN} (no readable value in the body, no record id,
+ * a record that does not exist, a system with no table) the guard lets the write through. The
+ * fiscal tables are answered by a fake
  * native-query session, so the assertions are on the refusal (status and message key) and on the
  * table each rule reads.
  *
@@ -247,6 +250,78 @@ class FiscalSifGuardTest {
 
     assertNull(FiscalSifGuard.preCheck(crud("PUT", new JSONObject().put("active", true), false),
         FiscalSifRules.SII));
+  }
+
+  // ── UNKNOWN active flag ──────────────────────────────────────────────────
+
+  @Test
+  void anActiveChangeOnARecordThatDoesNotExistPasses() throws Exception {
+    // tables.isActive has no row for RECORD: the stored flag is UNKNOWN.
+    assertNull(FiscalSifGuard.preCheck(
+        crud("PUT", new JSONObject().put("active", false), true), FiscalSifRules.SII));
+
+    assertEquals(1, tables.sqls.size(), "only the isactive read, never the organization");
+    assertTrue(tables.sqls.get(0).startsWith("SELECT isactive FROM aeatsii_config"));
+  }
+
+  @Test
+  void anActiveChangeWithoutARecordIdNeverReadsTheTable() throws Exception {
+    NeoContext noRecord = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(new JSONObject().put("active", true))
+        .obContext(obContext)
+        .mcpOrigin(true)
+        .build();
+
+    assertNull(FiscalSifGuard.preCheck(noRecord, FiscalSifRules.TBAI));
+    assertTrue(tables.sqls.isEmpty());
+  }
+
+  @ParameterizedTest(name = "active={0}")
+  @ValueSource(strings = { "maybe", "", "1" })
+  void anUnreadableRequestedActivePassesEvenForAnAgent(String value) throws Exception {
+    tables.isActive.put(RECORD, "Y");
+
+    assertNull(FiscalSifGuard.preCheck(
+        crud("PUT", new JSONObject().put("active", value), true), FiscalSifRules.SII));
+  }
+
+  @Test
+  void aNullRequestedActivePassesEvenForAnAgent() throws Exception {
+    tables.isActive.put(RECORD, "Y");
+
+    assertNull(FiscalSifGuard.preCheck(
+        crud("PUT", new JSONObject().put("active", JSONObject.NULL), true), FiscalSifRules.SII));
+  }
+
+  @Test
+  void anActiveChangeOnASystemWithoutATableIsUnknownAndPasses() throws Exception {
+    assertNull(FiscalSifGuard.preCheck(
+        crud("PUT", new JSONObject().put("active", false), true), "SII+TBAI"));
+    assertTrue(tables.sqls.isEmpty());
+  }
+
+  @Test
+  void aCreateWithAnUnreadableActiveIsNotTakenAsInactive() throws Exception {
+    assertNull(FiscalSifGuard.preCheck(
+        crud("POST", new JSONObject().put("active", "maybe"), false), FiscalSifRules.SII));
+    // It went on to the one-active check, which reads the table.
+    assertTrue(tables.sqls.get(0).contains("FROM aeatsii_config"));
+  }
+
+  @Test
+  void requestedActiveIsUnknownForAJsonNullAndTrimsTheText() throws Exception {
+    assertEquals(FiscalSifGuard.ActiveFlag.UNKNOWN,
+        FiscalSifGuard.requestedActive(new JSONObject().put("active", JSONObject.NULL)));
+    assertEquals(FiscalSifGuard.ActiveFlag.ACTIVE,
+        FiscalSifGuard.requestedActive(new JSONObject().put("active", true)));
+    assertEquals(FiscalSifGuard.ActiveFlag.ACTIVE,
+        FiscalSifGuard.requestedActive(new JSONObject().put("active", " TRUE ")));
+    assertEquals(FiscalSifGuard.ActiveFlag.INACTIVE,
+        FiscalSifGuard.requestedActive(new JSONObject().put("active", " n")));
+    assertEquals(FiscalSifGuard.ActiveFlag.UNKNOWN,
+        FiscalSifGuard.requestedActive(new JSONObject().put("active", 1)));
   }
 
   // ── other calls ──────────────────────────────────────────────────────────
