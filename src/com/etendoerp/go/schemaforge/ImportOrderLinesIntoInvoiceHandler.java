@@ -26,12 +26,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
@@ -156,7 +156,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "global discount, as the application's import popup shows it. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending counts what draft "
             + "invoices already hold." + (sales ? " Only orders with a line not fully invoiced are "
             + "looked at, newest created first." : "") + " Step 1." + flow,
-        availableOrdersParams(sales))
+        OrderImportListing.availableOrdersParams(sales))
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
@@ -167,7 +167,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "pendingQuantity (what the import popup shows), and pendingQuantity is "
             + "ordered minus invoiced minus what any draft invoice (this one included) already "
             + "holds, and the id is the sourceLineId importOrderLines takes. Step 2." + flow,
-        availableLinesParams(sales))
+        OrderImportListing.availableLinesParams(sales))
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_IMPORT, NeoActionContract.write(ACTION_IMPORT,
@@ -230,33 +230,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines are added to.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     return contracts;
-  }
-
-  /** {@code limit} on a sales invoice only (ETP-5828); a purchase invoice keeps no parameter. */
-  private static NeoActionContract.Param[] availableOrdersParams(boolean sales) {
-    if (!sales) {
-      return new NeoActionContract.Param[0];
-    }
-    return new NeoActionContract.Param[] {
-        NeoActionContract.Param.optional(PARAM_LIMIT, NeoActionContract.TYPE_NUMBER,
-            "How many orders to list at most, a whole number from 1 to " + MAX_LISTED_ORDERS
-                + "; default " + MAX_ORDERS + ". The scan looks at no fewer candidates than "
-                + "that.") };
-  }
-
-  /** {@code orderId}, plus {@code includeCovered} on a sales invoice only (ETP-5828). */
-  private static NeoActionContract.Param[] availableLinesParams(boolean sales) {
-    NeoActionContract.Param orderId = NeoActionContract.Param.required(PARAM_ORDER_ID,
-        NeoActionContract.TYPE_STRING, "Id of an order returned by availableOrders.");
-    if (!sales) {
-      return new NeoActionContract.Param[] { orderId };
-    }
-    return new NeoActionContract.Param[] { orderId,
-        NeoActionContract.Param.optional(PARAM_INCLUDE_COVERED, NeoActionContract.TYPE_BOOLEAN,
-            "Default false. true also lists the order's lines with nothing left to invoice "
-                + "(already invoiced, or held by a draft invoice, this one included) with "
-                + "pendingQuantity 0, as the import popup shows them greyed out; they cannot be "
-                + "imported.") };
   }
 
   @Override
@@ -617,49 +590,55 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     String partnerId = invoice.getBusinessPartner() == null ? null
         : invoice.getBusinessPartner().getId();
     String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
-    int rows = sales ? requestedLimit(body) : rowLimit();
+    int rows = sales ? OrderImportListing.requestedLimit(body, rowLimit()) : rowLimit();
     int scan = sales ? Math.max(scanLimit(), rows) : scanLimit();
     List<Order> candidates = findCandidateOrders(partnerId, sales, currencyId, scan);
-    // ETP-5828, sales only (like limit / scan / prefilter): the draft quantities of every
-    // candidate's lines in one pass (chunked), not one query per order; the pending of each order
-    // is the very same pendingToInvoice computes. Purchase keeps the lazy per-order read.
-    Map<String, Map<String, BigDecimal>> baseByOrder = new HashMap<>();
-    Map<String, BigDecimal> drafts = new HashMap<>();
-    if (sales) {
-      Set<String> lineIds = new java.util.LinkedHashSet<>();
-      for (Order candidate : candidates) {
-        if (!isReturn(candidate)) {
-          Map<String, BigDecimal> base = OrderInvoicePending.beforeDrafts(candidate);
-          baseByOrder.put(candidate.getId(), base);
-          lineIds.addAll(base.keySet());
-        }
-      }
-      drafts = draftQuantitiesInChunks(lineIds, true);
+    Function<Order, Map<String, BigDecimal>> pendingOf = pendingLookup(candidates, sales);
+    return discover(candidates,
+        order -> availableOrderRow(order, partnerId, pendingOf.apply(order)), rows, scan);
+  }
+
+  /**
+   * The pending of each candidate of {@link #availableOrders}: on the sales side (ETP-5828, like
+   * limit / scan / prefilter) the draft quantities of every candidate's lines are read in one pass
+   * (chunked), not one query per order, and subtracted exactly as {@link #pendingToInvoice} would;
+   * the purchase side keeps the lazy per-order {@link #pendingToInvoice}. A return order has none.
+   */
+  private Function<Order, Map<String, BigDecimal>> pendingLookup(List<Order> candidates,
+      boolean sales) {
+    if (!sales) {
+      return order -> isReturn(order) ? Map.of() : pendingToInvoice(order, false);
     }
-    Map<String, BigDecimal> heldByDrafts = drafts;
-    return discover(candidates, order -> {
-      Map<String, BigDecimal> pending;
-      if (isReturn(order)) {
-        pending = Map.of();
-      } else if (sales) {
-        pending = afterDrafts(baseByOrder.get(order.getId()), heldByDrafts);
-      } else {
-        pending = pendingToInvoice(order, false);
+    Map<String, Map<String, BigDecimal>> baseByOrder = new HashMap<>();
+    Set<String> lineIds = new java.util.LinkedHashSet<>();
+    for (Order candidate : candidates) {
+      if (!isReturn(candidate)) {
+        Map<String, BigDecimal> base = OrderInvoicePending.beforeDrafts(candidate);
+        baseByOrder.put(candidate.getId(), base);
+        lineIds.addAll(base.keySet());
       }
-      int pendingLines = pending.size();
-      if (pendingLines == 0) {
-        return null;
-      }
-      String orderCurrency = order.getCurrency() == null ? null : order.getCurrency().getId();
-      JSONObject row = documentRow(order.getId(), order.getDocumentNo(), day(order.getOrderDate()),
-          partnerId, order.getBusinessPartner().getName(), orderCurrency, pendingLines);
-      // The popup's "Dto. global X %" tag: always a %, 0 when the order has none.
-      row.put(KEY_GLOBAL_DISCOUNT,
-          InvoiceGlobalDiscountRule.reportedPercent(order.getEtgoTotalDiscount()));
-      // The popup's row amount: the plain sum of its pending lines (no global discount applied).
-      row.put(KEY_AMOUNT, pendingOrderAmount(order, pending));
-      return row;
-    }, rows, scan);
+    }
+    Map<String, BigDecimal> drafts = draftQuantitiesInChunks(lineIds, true);
+    return order -> isReturn(order) ? Map.of()
+        : afterDrafts(baseByOrder.get(order.getId()), drafts);
+  }
+
+  /** One {@code availableOrders} row, or {@code null} when the order has nothing pending. */
+  private JSONObject availableOrderRow(Order order, String partnerId,
+      Map<String, BigDecimal> pending) throws JSONException {
+    int pendingLines = pending.size();
+    if (pendingLines == 0) {
+      return null;
+    }
+    String orderCurrency = order.getCurrency() == null ? null : order.getCurrency().getId();
+    JSONObject row = documentRow(order.getId(), order.getDocumentNo(), day(order.getOrderDate()),
+        partnerId, order.getBusinessPartner().getName(), orderCurrency, pendingLines);
+    // The popup's "Dto. global X %" tag: always a %, 0 when the order has none.
+    row.put(KEY_GLOBAL_DISCOUNT,
+        InvoiceGlobalDiscountRule.reportedPercent(order.getEtgoTotalDiscount()));
+    // The popup's row amount: the plain sum of its pending lines (no global discount applied).
+    row.put(KEY_AMOUNT, pendingOrderAmount(order, pending));
+    return row;
   }
 
   /** How many order line ids one draft-quantities query binds at most. */
@@ -677,26 +656,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return held;
   }
 
-  /** {@code limit} of a sales {@code availableOrders}: absent is the default page size. */
-  private int requestedLimit(JSONObject body) {
-    Object value = body == null ? null : body.opt(PARAM_LIMIT);
-    if (value == null || JSONObject.NULL.equals(value)) {
-      return rowLimit();
-    }
-    int limit;
-    try {
-      limit = new BigDecimal(String.valueOf(value).trim()).intValueExact();
-    } catch (ArithmeticException | NumberFormatException e) {
-      limit = 0;
-    }
-    if (limit < 1 || limit > MAX_LISTED_ORDERS) {
-      throw new DocumentLineImport.ImportRefusal(javax.servlet.http.HttpServletResponse
-          .SC_BAD_REQUEST, DocumentLineImport.ERROR_INVALID_PARAMETER, PARAM_LIMIT
-          + " must be a whole number from 1 to " + MAX_LISTED_ORDERS, null);
-    }
-    return limit;
-  }
-
   /**
    * The lines of the order that can still be invoiced here. With {@code includeCovered} (a sales
    * invoice only, ETP-5828) also the lines with nothing left, at {@code pendingQuantity} 0: the
@@ -710,35 +669,14 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     JSONArray rows = new JSONArray();
     for (OrderLine ol : order.getOrderLineList()) {
       BigDecimal left = pending.get(ol.getId());
-      if (left == null && includeCovered && isListedLine(ol)) {
+      if (left == null && includeCovered && OrderImportListing.isListedLine(ol)) {
         left = BigDecimal.ZERO;
       }
       if (left != null) {
-        rows.put(availableLineRow(order, ol, left));
+        rows.put(OrderImportListing.availableLineRow(order, ol, left));
       }
     }
     return completePage(rows);
-  }
-
-  /** An active line other than the total-discount line: what the order's lines GET lists. */
-  private static boolean isListedLine(OrderLine ol) {
-    return ol.isActive() && (ol.getProduct() == null
-        || !TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(ol.getProduct().getId()));
-  }
-
-  private static JSONObject availableLineRow(Order order, OrderLine ol, BigDecimal left)
-      throws JSONException {
-    JSONObject row = DocumentLineImport.lineRow(ol.getId(), ol.getLineNo(),
-        ol.getProduct() == null ? null : ol.getProduct().getId(),
-        ol.getProduct() == null ? null : ol.getProduct().getName(),
-        ol.getUOM() == null ? null : ol.getUOM().getId(), left);
-    // What the popup shows per line (ETP-5828, UI/MCP parity): price, line discount, amount.
-    row.put(KEY_UNIT_PRICE, unitPriceOf(ol));
-    BigDecimal discount = ol.getDiscount() == null ? BigDecimal.ZERO : ol.getDiscount();
-    row.put(KEY_DISCOUNT, trimmed(discount));
-    row.put(KEY_AMOUNT, unitPriceOf(ol).multiply(left)
-        .setScale(amountPrecision(order), RoundingMode.HALF_UP));
-    return row;
   }
 
   /**
@@ -751,27 +689,10 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     for (OrderLine ol : order.getOrderLineList()) {
       BigDecimal left = pending.get(ol.getId());
       if (left != null) {
-        sum = sum.add(unitPriceOf(ol).multiply(left));
+        sum = sum.add(OrderImportListing.unitPriceOf(ol).multiply(left));
       }
     }
-    return sum.setScale(amountPrecision(order), RoundingMode.HALF_UP);
-  }
-
-  private static BigDecimal unitPriceOf(OrderLine ol) {
-    return ol.getUnitPrice() == null ? BigDecimal.ZERO : ol.getUnitPrice();
-  }
-
-  /** Standard precision of the order's currency; 2 when it is unknown. */
-  private static int amountPrecision(Order order) {
-    Currency currency = order.getCurrency();
-    return currency == null || currency.getStandardPrecision() == null ? 2
-        : currency.getStandardPrecision().intValue();
-  }
-
-  /** A % without trailing zeros nor exponent ({@code 10}, {@code 12.5}), sign kept. */
-  static BigDecimal trimmed(BigDecimal value) {
-    BigDecimal stripped = value.setScale(4, RoundingMode.HALF_UP).stripTrailingZeros();
-    return stripped.scale() < 0 ? stripped.setScale(0) : stripped;
+    return sum.setScale(OrderImportListing.amountPrecision(order), RoundingMode.HALF_UP);
   }
 
   // ---------------------------------------------------------------------------

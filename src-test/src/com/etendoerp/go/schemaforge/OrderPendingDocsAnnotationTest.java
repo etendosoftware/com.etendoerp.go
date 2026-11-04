@@ -63,7 +63,7 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
  * Unit tests for the ETP-5295 {@code needsPrimaryDoc} / {@code needsInvoiceDoc} GET annotations
- * added by {@code AbstractOrderHeaderHandler.annotatePendingDocuments()}, exercised through the
+ * added by {@code OrderPendingDocsAnnotator.annotatePendingDocuments()}, exercised through the
  * three concrete handlers that inherit them (sales order, purchase order, sales quotation).
  *
  * <p><b>What these flags are.</b> The "Gestionar envío/factura" (sales) / "Gestionar
@@ -94,6 +94,7 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
  * stub spins forever there.
  *
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.OrderPendingDocsAnnotator
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
  */

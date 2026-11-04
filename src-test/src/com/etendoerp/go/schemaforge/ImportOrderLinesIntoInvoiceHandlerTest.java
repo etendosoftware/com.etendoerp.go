@@ -82,6 +82,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * @covers com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.OrderInvoicePending
+ * @covers com.etendoerp.go.schemaforge.OrderImportListing
  * @covers com.etendoerp.go.schemaforge.AbstractLineImportHandler
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceLineImportHandler
