@@ -44,10 +44,8 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.JsonConstants;
 
-import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 import com.etendoerp.go.schemaforge.NeoErrorResponses;
-import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoMessageText;
 import com.etendoerp.go.schemaforge.NeoReferenceActiveness;
 import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
@@ -59,7 +57,6 @@ import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
-import com.etendoerp.go.schemaforge.util.NeoValueEquivalence;
 
 /**
  * Request-body preparation and DAL-response classification helpers extracted from
@@ -79,8 +76,6 @@ final class McpWriteRequestSupport {
   private static final Logger LOG = LogManager.getLogger(McpWriteRequestSupport.class);
 
   private static final String FK_ZERO = "0";
-  /** Key of the value the caller sent, in a {@code supersededDefaults}/{@code adjustedFields} entry. */
-  private static final String KEY_SENT = "sent";
   /** Target entity name → whether it holds a record with id "0". See {@link #isExistingZeroRecord}. */
   private static final Map<String, Boolean> ZERO_RECORD_BY_ENTITY = new ConcurrentHashMap<>();
 
@@ -427,162 +422,6 @@ final class McpWriteRequestSupport {
       // Reporting is an aid, never the answer. The write already succeeded; a body that cannot
       // carry the warning is still a valid result, and failing the call over it would be a worse
       // outcome than the silence IMP-18 exists to end. Nothing to recover, nothing to report.
-    }
-  }
-
-  /**
-   * Attach the callout-vs-caller divergences a create left behind (IMP-45).
-   *
-   * <p>{@code etendo_defaults} tells an agent to use its result as the starting point for
-   * {@code etendo_create}, and {@code etendo_create} repeats the advice. Follow it literally and every
-   * value handed over becomes a value the caller sent, which ETP-4784 protects from being
-   * recomputed by a callout that knows the record's real context. The measured case:
-   * {@code etendo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
-   * business partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} —
-   * an agent that echoed the default has pinned the wrong one, and the 201 says nothing.</p>
-   *
-   * <p>The value the caller sent still wins. Overriding it would be worse: on this path the server
-   * cannot tell an echoed default from a value a human deliberately chose, and silently replacing
-   * the second is a harder failure than reporting the first. So this reports, as IMP-18 does for
-   * unrecognised names — the write succeeded, and now the caller can see what its own value
-   * displaced.</p>
-   *
-   * @param body       the flattened response body handed to the agent, mutated in place
-   * @param superseded field → {sent, callout}, or {@code null}/empty when nothing diverged
-   */
-  static void reportSupersededDefaults(JSONObject body, JSONObject superseded) {
-    if (body == null || superseded == null || superseded.length() == 0) {
-      return;
-    }
-    try {
-      body.put("supersededDefaults", superseded);
-      body.put("supersededDefaultsHint", "For each field listed, the value you sent was saved as "
-          + "sent; \"callout\" is only what a callout would have set from this record's own context. "
-          + "You can ignore it when the callout value is 0 or empty, or when the field is governed "
-          + "by another rule. If you copied the value from "
-          + "etendo_defaults and it differs from a meaningful callout value, it was a generic "
-          + "default resolved before this record had its context: send the callout value instead, "
-          + "or confirm the one you sent was deliberate.");
-    } catch (JSONException ignored) {
-      // Same reasoning as reportUnknownFields: the record is written and correct as far as the
-      // caller asked; losing a diagnostic must never turn a successful create into a failure.
-    }
-  }
-
-  /**
-   * Snapshot, just before the entity's CREATE pre-hook is dispatched, of the value each field the
-   * caller sent holds in the create body (ETP-5680). Taken at that point so the later comparison
-   * isolates what the pre-hook itself rewrote from the representation changes made earlier
-   * (type coercion, the user-key restore, identifier-to-id resolution). Keys no longer in the
-   * body (the parent id, already turned into a foreign key) are not captured.
-   *
-   * <p>Caveat: values are held by reference, so a pre-hook that mutates a nested
-   * {@code JSONObject}/{@code JSONArray} in place is not detected.</p>
-   *
-   * @param body         the create body about to be handed to the pre-hook
-   * @param userProvided the caller's fields, as snapshotted before any defaults were injected
-   * @return field -> value as of now, for the caller-sent fields still in {@code body}
-   */
-  static JSONObject snapshotCallerValues(JSONObject body, JSONObject userProvided) {
-    JSONObject snapshot = new JSONObject();
-    Iterator<?> keys = userProvided.keys();
-    while (keys.hasNext()) {
-      String key = (String) keys.next();
-      if (body.has(key)) {
-        try {
-          snapshot.put(key, body.get(key));
-        } catch (JSONException ignored) {
-          // a missing diagnostic must not break the write
-        }
-      }
-    }
-    return snapshot;
-  }
-
-  /**
-   * Reports what the entity's pre-hook changed in what the caller sent, and reconciles the IMP-45
-   * {@code supersededDefaults} with it (ETP-5680).
-   *
-   * <p>{@code adjustedFields} is defined over the fields the caller sent whose value the pre-hook
-   * changed ({@code preHookValues} vs {@code finalBody}), independent of any callout: a rewrite
-   * no callout ever proposed anything for (a service's {@code returnable}) is as much a silent
-   * change of the caller's value as one that was. Fields the caller did not send are never
-   * reported. A key the pre-hook removed reports {@code persisted: null}.</p>
-   *
-   * <p>The recorded {@code superseded} entries (callout vs sent, recorded before the pre-hook
-   * ran) are then reconciled: an entry whose field was adjusted moves to {@code adjustedFields}
-   * (never listed twice); one governed by the customization
-   * ({@link NeoHandler#governedCreateFields}) and unchanged is dropped; any other stays.</p>
-   *
-   * @param body          the flattened response body, receives {@code adjustedFields}
-   * @param superseded    field -> {sent, callout}; entries removed in place; may be {@code null}
-   * @param preHookValues {@link #snapshotCallerValues} taken before the pre-hook dispatch
-   * @param finalBody     the create body after the pre-hook, what is handed to persistence
-   * @param handler       the entity's customization, or {@code null}
-   * @param hookCtx       the context that customization ran under
-   */
-  static void reconcileSupersededDefaults(JSONObject body, JSONObject superseded,
-      JSONObject preHookValues, JSONObject finalBody, NeoHandler handler, NeoContext hookCtx) {
-    if (body == null || preHookValues == null || finalBody == null) {
-      return;
-    }
-    JSONObject adjusted = new JSONObject();
-    Iterator<?> keys = preHookValues.keys();
-    while (keys.hasNext()) {
-      String field = (String) keys.next();
-      if (!NeoValueEquivalence.same(preHookValues.opt(field), finalBody.opt(field))) {
-        putAdjusted(adjusted, field, preHookValues.opt(field), finalBody.opt(field));
-      }
-    }
-    if (superseded != null && superseded.length() > 0) {
-      Set<String> governed = governedFields(handler, hookCtx);
-      List<String> recorded = new ArrayList<>();
-      Iterator<?> recordedKeys = superseded.keys();
-      while (recordedKeys.hasNext()) {
-        recorded.add((String) recordedKeys.next());
-      }
-      for (String field : recorded) {
-        if (adjusted.has(field) || governed.contains(field)) {
-          superseded.remove(field);
-        }
-      }
-    }
-    if (adjusted.length() > 0) {
-      putAdjustedReport(body, adjusted);
-    }
-  }
-
-  private static Set<String> governedFields(NeoHandler handler, NeoContext hookCtx) {
-    if (handler == null) {
-      return Set.of();
-    }
-    try {
-      Set<String> governed = handler.governedCreateFields(hookCtx);
-      return governed != null ? governed : Set.of();
-    } catch (RuntimeException e) {
-      // A diagnostic opt-out must never turn a successful create into a failure.
-      return Set.of();
-    }
-  }
-
-  private static void putAdjusted(JSONObject adjusted, String field, Object sent,
-      Object persisted) {
-    try {
-      adjusted.put(field, new JSONObject().put(KEY_SENT, sent != null ? sent : JSONObject.NULL)
-          .put("persisted", persisted != null ? persisted : JSONObject.NULL));
-    } catch (JSONException ignored) {
-      // a missing diagnostic must not break the write
-    }
-  }
-
-  private static void putAdjustedReport(JSONObject body, JSONObject adjusted) {
-    try {
-      body.put("adjustedFields", adjusted);
-      body.put("adjustedFieldsHint", "For each field listed, the server changed the value you "
-          + "sent before saving, by a rule of this record; \"persisted\" is what was "
-          + "saved. Nothing to retry: send the persisted value next time to avoid the difference.");
-    } catch (JSONException ignored) {
-      // a missing diagnostic must not break the write
     }
   }
 

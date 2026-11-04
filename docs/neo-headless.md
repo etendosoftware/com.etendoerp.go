@@ -5720,13 +5720,13 @@ sent. The pre-hook may then confirm that value or rewrite it, so the raw record 
 positive (a product sent with its own tax category: the callout proposes the generic one, the
 pre-hook agrees with the caller) or a false claim (`stocked:true` on a Service: reported as
 "kept", persisted as `false`). `etendo_create` therefore reports in two independent parts, once,
-after the pre-hook dispatch and just before the report (`McpWriteRequestSupport.reconcileSupersededDefaults`):
+after the pre-hook dispatch and just before the report (`McpSupersededReconciler.reconcileSupersededDefaults`):
 
 **`adjustedFields: { field: { sent, persisted } }`** is defined over the fields **the caller sent
 and the entity customization changed**, independent of callouts: a rewrite that no callout ever
 proposed anything for (a Service's `returnable`) is reported like one that was. The comparison is
 between the caller's values as the pre-hook receives them (snapshot taken in `handleCreate` just
-before the CREATE pre-hook dispatch, `McpWriteRequestSupport.snapshotCallerValues`) and the body it
+before the CREATE pre-hook dispatch, `McpSupersededReconciler.snapshotCallerValues`) and the body it
 leaves, so representation changes made earlier (type coercion, an identifier resolved to an id) are
 never reported. Fields the caller did not send (a placeholder the pre-hook replaced, a
 `taxCategory` it injected) are never reported. A key the pre-hook removed reports `persisted: null`.
@@ -5779,7 +5779,7 @@ the MCP update skipped every product rule. On an update:
   that does not resolve leaves the body as received.
 - A failed persisted-type read leaves the body unchanged (the type is then unknown).
 
-No channel divergence remains (REST PATCH/PUT and MCP `etendo_update` reach the same handler;
+The rules live in `ProductTypeRules` (called from `ProductDefaultsHandler`). No channel divergence remains (REST PATCH/PUT and MCP `etendo_update` reach the same handler;
 `etendo_batch` only creates and already applies the create rules); this does not mirror the form's "type becomes Item -> stocked true" watcher, so an API
 update to Item leaves `stocked` as it was.
 

@@ -34,7 +34,13 @@ public final class NeoValueEquivalence {
   private NeoValueEquivalence() {
   }
 
-  /** Equal as text, or equal as numbers ({@code 20} vs {@code "20.00"}). */
+  /**
+   * Equal as text, or equal as numbers ({@code 20} vs {@code "20.00"}).
+   *
+   * @param a the first value; {@code null} renders as {@code "null"}
+   * @param b the second value
+   * @return {@code true} when both render to the same text, or both parse to equal decimals
+   */
   public static boolean sameTextOrNumber(Object a, Object b) {
     String x = String.valueOf(a);
     String y = String.valueOf(b);
@@ -52,6 +58,10 @@ public final class NeoValueEquivalence {
    * Equal as Yes/No flags: {@code true}/{@code "true"}/{@code "Y"} are one value and
    * {@code false}/{@code "false"}/{@code "N"} the other. Both sides must be recognisable tokens;
    * anything else is not equal here.
+   *
+   * @param a the first value
+   * @param b the second value
+   * @return {@code true} when both are Yes/No tokens denoting the same flag
    */
   public static boolean sameBoolean(Object a, Object b) {
     Optional<Boolean> x = canonical(a);
@@ -61,17 +71,25 @@ public final class NeoValueEquivalence {
   /**
    * Text/number equality, or Yes/No equality. {@code same(null, null)} is {@code true}: both
    * render as "null", i.e. both sides are equally absent.
+   *
+   * @param a the first value
+   * @param b the second value
+   * @return {@code true} when {@link #sameTextOrNumber} or {@link #sameBoolean} holds
    */
   public static boolean same(Object a, Object b) {
     return sameTextOrNumber(a, b) || sameBoolean(a, b);
   }
 
   /**
-   * Like {@link #same} but decided by the property's type when it is known: a property that is
-   * not boolean never gets the Yes/No leniency, so a text field holding {@code "Y"} is not equal
-   * to {@code "true"}. With no property ({@code null}) the value-based test stands in.
+   * Like {@link #same(Object, Object)} but decided by the property's type when it is known: a
+   * property that is not boolean never gets the Yes/No leniency, so a text field holding
+   * {@code "Y"} is not equal to {@code "true"}. With no property ({@code null}) the value-based
+   * test stands in.
    *
+   * @param a    the first value
+   * @param b    the second value
    * @param prop the DAL property of the field, or {@code null} when it cannot be resolved
+   * @return {@code true} when the values are the same one for that property type
    */
   public static boolean same(Object a, Object b, Property prop) {
     if (sameTextOrNumber(a, b)) {

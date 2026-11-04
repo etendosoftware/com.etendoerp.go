@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 import javax.inject.Named;
 
@@ -76,7 +77,7 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
  * whenever a request declares {@code productType} as Service ({@code "S"}), Expense
  * ({@code "E"}, "Gasto") or Resource ({@code "R"}, "Recurso") — see
  * {@link #enforceNonStockableProductTypes}. On an update (PATCH, and PUT as the MCP channel sends
- * it) the type is the body's or, when absent, the persisted product's ({@link #enforceTypeRulesOnUpdate}),
+ * it) the type is the body's or, when absent, the persisted product's ({@link ProductTypeRules#applyOnUpdate}),
  * which also applies the type's tax category on a REAL type change with no explicit
  * {@code taxCategory}. The uOM/taxCategory defaulting of a create stays create-only: the frontend's own auto-correction
  * (`ProductAdditionalInfoPanel.jsx`) only fires while the "Additional Info" tab is mounted, so a
@@ -89,6 +90,12 @@ public class ProductDefaultsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ProductDefaultsHandler.class);
 
+  /**
+   * Reads the persisted {@code productType} of a record id on an update. A field so a test can
+   * replace the DAL read; defaults to {@link ProductTypeRules#readPersistedType}.
+   */
+  UnaryOperator<String> persistedTypeReader = ProductTypeRules::readPersistedType;
+
   private static final String SPEC = "product";
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PATCH = "PATCH";
@@ -96,16 +103,16 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_GET = "GET";
   private static final String FIELD_UOM = "uOM";
-  private static final String FIELD_TAX_CATEGORY = "taxCategory";
+  static final String FIELD_TAX_CATEGORY = "taxCategory";
   private static final String FIELD_PRODUCT_CATEGORY = "productCategory";
-  private static final String FIELD_PRODUCT_TYPE = "productType";
+  static final String FIELD_PRODUCT_TYPE = "productType";
   /** Suffix of the display-value companion key of a reference field in a payload. */
-  private static final String IDENTIFIER_SUFFIX = "$_identifier";
-  private static final String FIELD_STOCKED = "stocked";
-  private static final String FIELD_RETURNABLE = "returnable";
+  static final String IDENTIFIER_SUFFIX = "$_identifier";
+  static final String FIELD_STOCKED = "stocked";
+  static final String FIELD_RETURNABLE = "returnable";
   // ETP-4943 (Service) / ETP-5091 (Expense, Resource) — none of these product types have a
   // physical existence in inventory.
-  private static final Set<String> NON_STOCKABLE_PRODUCT_TYPES = Set.of("S", "E", "R");
+  static final Set<String> NON_STOCKABLE_PRODUCT_TYPES = Set.of("S", "E", "R");
   /**
    * ETP-5680: tax category the Product window pairs with each product type, matched by
    * {@code C_TaxCategory.Name} inside the tenant (the names the Spanish accounting package seeds).
@@ -119,7 +126,7 @@ public class ProductDefaultsHandler implements NeoHandler {
    * The product types a request may ask for. Hardcoded: it mirrors the AD list reference of
    * {@code M_Product.ProductType} and must be updated if that list gains values.
    */
-  private static final Set<String> PRODUCT_TYPES = Set.of("I", "S", "E", "R", "O");
+  static final Set<String> PRODUCT_TYPES = Set.of("I", "S", "E", "R", "O");
   /**
    * Key added to the {@code /defaults} payload when {@link #PARAM_PRODUCT_TYPE} is sent: the id
    * (plus {@code $_identifier}) of the type's tax category. Repeats {@code taxCategory} when the
@@ -182,7 +189,8 @@ public class ProductDefaultsHandler implements NeoHandler {
     }
     try {
       if (isUpdate) {
-        enforceTypeRulesOnUpdate(body, context);
+        ProductTypeRules.applyOnUpdate(body, context.getRecordId(), resolveClientId(context),
+            persistedTypeReader, this::resolveTaxCategoryIdForType);
       } else {
         enforceNonStockableProductTypes(body);
       }
@@ -285,66 +293,12 @@ public class ProductDefaultsHandler implements NeoHandler {
   }
 
   /**
-   * ETP-5680: the product-type rules on an update (REST PATCH/PUT, MCP {@code etendo_update}).
-   *
-   * <ul>
-   *   <li>The effective type is the body's {@code productType}, else the persisted product's (read
-   *       from the record id), so a request that edits only {@code weight} on a Service is
-   *       enforced too. A non-stockable effective type forces {@code stocked} and
-   *       {@code returnable} to {@code false}.</li>
-   *   <li>A REAL type change (valid body type different from the persisted one) with no
-   *       {@code taxCategory} key in the body sets the type's named category, as a create does. An
-   *       explicit {@code taxCategory} always wins; an unchanged type never touches it (saving
-   *       never recalculates); a category that does not resolve leaves the body untouched.</li>
-   * </ul>
-   * Any failure of the persisted lookup leaves the body as received.
-   */
-  private void enforceTypeRulesOnUpdate(JSONObject body, NeoContext context) throws JSONException {
-    String bodyType = StringUtils.trimToNull(body.optString(FIELD_PRODUCT_TYPE, null));
-    boolean typeIsValid = bodyType != null && PRODUCT_TYPES.contains(bodyType);
-    boolean taxNeedsComparison = typeIsValid && !body.has(FIELD_TAX_CATEGORY);
-    String persisted = (bodyType == null || taxNeedsComparison)
-        ? persistedProductType(context.getRecordId()) : null;
-    String effective = bodyType != null ? bodyType : persisted;
-    if (effective != null && NON_STOCKABLE_PRODUCT_TYPES.contains(effective)) {
-      body.put(FIELD_STOCKED, false);
-      body.put(FIELD_RETURNABLE, false);
-    }
-    if (taxNeedsComparison && persisted != null && !bodyType.equals(persisted)) {
-      String id = resolveTaxCategoryIdForType(bodyType, resolveClientId(context));
-      if (id != null) {
-        body.put(FIELD_TAX_CATEGORY, id);
-      }
-    }
-  }
-
-  /**
-   * The persisted {@code productType} of a product, or {@code null} when there is no record id, the
-   * product is not found or the read fails — the caller then treats the type as unknown.
-   */
-  String persistedProductType(String recordId) {
-    if (StringUtils.isBlank(recordId)) {
-      return null;
-    }
-    OBContext.setAdminMode(true);
-    try {
-      Product product = OBDal.getInstance().get(Product.class, recordId);
-      return product != null ? StringUtils.trimToNull(product.getProductType()) : null;
-    } catch (Exception e) {
-      log.debug("Could not read the persisted product type of {}: {}", recordId, e.getMessage());
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
    * ETP-4943 / ETP-5091: Service, Expense and Resource products have no physical existence, so
    * none of them can ever be stocked or returnable. Forces both flags to {@code false} whenever
    * the request itself declares {@code productType} as one of {@link #NON_STOCKABLE_PRODUCT_TYPES}
    * — whether or not the caller sent a value for them, so an omitted flag can't silently resolve
    * to {@code true} downstream. Body-only: it is the create-path rule. An update goes through
-   * {@link #enforceTypeRulesOnUpdate}, which falls back to the persisted type when the body does
+   * {@link ProductTypeRules#applyOnUpdate}, which falls back to the persisted type when the body does
    * not mention {@code productType}.
    */
   static void enforceNonStockableProductTypes(JSONObject body) throws JSONException {
@@ -623,7 +577,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       overwriteDefault(defaults, FIELD_UOM, UOM.class, clientId);
       overwriteDefault(defaults, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
       injectTypeTaxCategory(defaults, context, clientId);
-      injectTypeStockFlags(defaults);
+      ProductTypeRules.forceNonStockableDefaults(defaults);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("product afterHandle: failed to inject uOM/taxCategory default", e);
@@ -771,7 +725,7 @@ public class ProductDefaultsHandler implements NeoHandler {
    * ETP-5680: create-time fill of {@code taxCategory}. An explicit value always wins; otherwise the
    * category matching the body's {@code productType} by name, falling back to the IsDefault row
    * when the body has no type or the tenant lacks the named category. Create only — an update applies the
-   * type's category solely on a real type change ({@link #enforceTypeRulesOnUpdate}).
+   * type's category solely on a real type change ({@link ProductTypeRules#applyOnUpdate}).
    */
   private void injectTaxCategoryIfMissing(JSONObject body, String clientId, NeoContext context)
       throws JSONException {
@@ -825,34 +779,9 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (obj != null) {
       identifier = obj.getIdentifier();
     }
-    putCategory(defaults, FIELD_TAX_CATEGORY, id, identifier);
+    ProductTypeRules.putCategory(defaults, FIELD_TAX_CATEGORY, id, identifier);
     if (typeRequested) {
-      putCategory(defaults, DEFAULT_KEY_TYPE_TAX_CATEGORY, id, identifier);
-    }
-  }
-
-  /**
-   * ETP-5680: the {@code stocked} / {@code returnable} defaults follow the product type, as the
-   * create path already enforces ({@link #enforceNonStockableProductTypes}). The generic resolver
-   * answers the column defaults ({@code IsStocked='Y'}, {@code Returnable='Y'}, i.e. Item) whatever
-   * type is asked for, so for a {@link #NON_STOCKABLE_PRODUCT_TYPES} type both are overridden with
-   * {@code false}. Runs after {@link #injectTypeTaxCategory}, which has already set
-   * {@code defaults.productType} to the requested type when it is valid, so that value is the
-   * effective type; every other type (Item, Online, none) is left as the generic resolver answered.
-   */
-  private static void injectTypeStockFlags(JSONObject defaults) throws JSONException {
-    String type = StringUtils.trimToNull(defaults.optString(FIELD_PRODUCT_TYPE, null));
-    if (type != null && NON_STOCKABLE_PRODUCT_TYPES.contains(type)) {
-      defaults.put(FIELD_STOCKED, false);
-      defaults.put(FIELD_RETURNABLE, false);
-    }
-  }
-
-  private static void putCategory(JSONObject defaults, String key, String id, String identifier)
-      throws JSONException {
-    defaults.put(key, id);
-    if (identifier != null) {
-      defaults.put(key + IDENTIFIER_SUFFIX, identifier);
+      ProductTypeRules.putCategory(defaults, DEFAULT_KEY_TYPE_TAX_CATEGORY, id, identifier);
     }
   }
 

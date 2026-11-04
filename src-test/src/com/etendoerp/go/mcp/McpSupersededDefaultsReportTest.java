@@ -46,7 +46,7 @@ import com.etendoerp.go.schemaforge.NeoHandler;
  * pre-hook runs, so the report is checked against the final body (and the customization's
  * declared {@code governedCreateFields}) before it is handed to the agent.</p>
  *
- * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
+ * @covers com.etendoerp.go.mcp.McpSupersededReconciler
  */
 @DisplayName("IMP-45 — supersededDefaults on the create response")
 class McpSupersededDefaultsReportTest {
@@ -61,7 +61,7 @@ class McpSupersededDefaultsReportTest {
   void theReportIsAttached() throws Exception {
     JSONObject body = new JSONObject().put("id", "ord-1");
 
-    McpWriteRequestSupport.reportSupersededDefaults(body, divergence());
+    McpSupersededReconciler.reportSupersededDefaults(body, divergence());
 
     JSONObject reported = body.getJSONObject("supersededDefaults");
     assertEquals("30-dias-id", reported.getJSONObject("paymentTerms").getString("sent"));
@@ -77,7 +77,7 @@ class McpSupersededDefaultsReportTest {
   @DisplayName("the hint says the caller's value was kept and names the remedy")
   void theHintIsActionable() throws Exception {
     JSONObject body = new JSONObject();
-    McpWriteRequestSupport.reportSupersededDefaults(body, divergence());
+    McpSupersededReconciler.reportSupersededDefaults(body, divergence());
 
     String hint = body.getString("supersededDefaultsHint").toLowerCase(Locale.ROOT);
     assertTrue(hint.contains("saved as sent"), "the write succeeded — an agent must not read this "
@@ -101,8 +101,8 @@ class McpSupersededDefaultsReportTest {
   void nothingIsReportedWhenNothingDiverged() throws Exception {
     JSONObject body = new JSONObject().put("id", "ord-1");
 
-    McpWriteRequestSupport.reportSupersededDefaults(body, null);
-    McpWriteRequestSupport.reportSupersededDefaults(body, new JSONObject());
+    McpSupersededReconciler.reportSupersededDefaults(body, null);
+    McpSupersededReconciler.reportSupersededDefaults(body, new JSONObject());
 
     assertFalse(body.has("supersededDefaults"));
     assertFalse(body.has("supersededDefaultsHint"));
@@ -112,7 +112,7 @@ class McpSupersededDefaultsReportTest {
   @Test
   @DisplayName("a null body is a no-op, not a failure")
   void aNullBodyIsSurvivable() throws Exception {
-    McpWriteRequestSupport.reportSupersededDefaults(null, divergence());
+    McpSupersededReconciler.reportSupersededDefaults(null, divergence());
   }
 
   private static JSONObject entry(Object sent, Object callout) throws Exception {
@@ -128,7 +128,7 @@ class McpSupersededDefaultsReportTest {
   private static JSONObject recon(JSONObject superseded, JSONObject pre, JSONObject fin,
       NeoHandler handler) {
     JSONObject body = new JSONObject();
-    McpWriteRequestSupport.reconcileSupersededDefaults(body, superseded, pre, fin, handler,
+    McpSupersededReconciler.reconcileSupersededDefaults(body, superseded, pre, fin, handler,
         mock(NeoContext.class));
     return body;
   }
@@ -178,7 +178,7 @@ class McpSupersededDefaultsReportTest {
     JSONObject userProvided = new JSONObject().put("uOM", "Unidad").put("parentId", "p1");
     JSONObject bodyAtDispatch = new JSONObject().put("uOM", "uom-id");
 
-    JSONObject pre = McpWriteRequestSupport.snapshotCallerValues(bodyAtDispatch, userProvided);
+    JSONObject pre = McpSupersededReconciler.snapshotCallerValues(bodyAtDispatch, userProvided);
 
     assertEquals(1, pre.length(), "parentId is no longer in the body; uOM is captured as resolved");
     assertEquals("uom-id", pre.getString("uOM"));
@@ -265,9 +265,9 @@ class McpSupersededDefaultsReportTest {
   @DisplayName("reconcile: nothing to report, no key; a throwing customization never breaks the create")
   void reconcileIsSafe() throws Exception {
     JSONObject body = new JSONObject();
-    McpWriteRequestSupport.reconcileSupersededDefaults(body, null, new JSONObject(),
+    McpSupersededReconciler.reconcileSupersededDefaults(body, null, new JSONObject(),
         new JSONObject(), null, null);
-    McpWriteRequestSupport.reconcileSupersededDefaults(body, new JSONObject(), new JSONObject(),
+    McpSupersededReconciler.reconcileSupersededDefaults(body, new JSONObject(), new JSONObject(),
         new JSONObject(), null, null);
     assertEquals(0, body.length());
 
@@ -276,7 +276,7 @@ class McpSupersededDefaultsReportTest {
         .thenThrow(new IllegalStateException("boom"));
     JSONObject superseded = new JSONObject().put("paymentTerms", entry("30-id", "inmediato-id"));
     JSONObject values = new JSONObject().put("paymentTerms", "30-id");
-    McpWriteRequestSupport.reconcileSupersededDefaults(body, superseded, values,
+    McpSupersededReconciler.reconcileSupersededDefaults(body, superseded, values,
         new JSONObject(values.toString()), failing, null);
     assertTrue(superseded.has("paymentTerms"));
   }

@@ -965,7 +965,7 @@ public class McpToolRouter {
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
     // ETP-5680: the caller's values as the pre-hook receives them, to report what it rewrites.
-    JSONObject preHookValues = McpWriteRequestSupport.snapshotCallerValues(filteredBody, userProvided);
+    JSONObject preHookValues = McpSupersededReconciler.snapshotCallerValues(filteredBody, userProvided);
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
     // ETP-5791: injectMandatoryDefaults ran above, so key presence in filteredBody no longer says
     // what the agent chose. Hand the pre-hook the pre-defaults key set, which REST gets for free
@@ -1036,9 +1036,9 @@ public class McpToolRouter {
     // IMP-45: `ctx` is the context the callout cascade ran under, so it carries any field where the
     // caller's value stood and a callout had derived a different one. Create only — an update
     // carries no defaults invitation, and there is no cascade of this shape behind it.
-    McpWriteRequestSupport.reconcileSupersededDefaults(flat, ctx.getSupersededDefaults(),
+    McpSupersededReconciler.reconcileSupersededDefaults(flat, ctx.getSupersededDefaults(),
         preHookValues, filteredBody, handler, hookCtx);
-    McpWriteRequestSupport.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
+    McpSupersededReconciler.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
     McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
     // ETP-5945 (in ETP-5852): one record answers {data:{…}}, as etendo_get does.
     return wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));

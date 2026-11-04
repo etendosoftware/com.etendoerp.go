@@ -71,6 +71,7 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
  * construction itself.
  *
  * @covers com.etendoerp.go.schemaforge.ProductDefaultsHandler
+ * @covers com.etendoerp.go.schemaforge.ProductTypeRules
  */
 public class ProductDefaultsHandlerTest {
 
@@ -1892,7 +1893,7 @@ public class ProductDefaultsHandlerTest {
 
   private static ProductDefaultsHandler handlerWithPersistedType(String persistedType) {
     ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
-    doReturn(persistedType).when(handler).persistedProductType("rec-1");
+    handler.persistedTypeReader = id -> "rec-1".equals(id) ? persistedType : null;
     return handler;
   }
 
@@ -1963,7 +1964,7 @@ public class ProductDefaultsHandlerTest {
   @Test
   public void testUnresolvableTypeCategoryLeavesTheBodyUntouched() throws Exception {
     ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, null);
-    doReturn("I").when(handler).persistedProductType("rec-1");
+    handler.persistedTypeReader = id -> "I";
     JSONObject body = new JSONObject().put("productType", "S");
 
     handler.handle(updateCtx("PATCH", "rec-1", body));
@@ -1982,7 +1983,7 @@ public class ProductDefaultsHandlerTest {
     }
 
     assertEquals(1, body.length());
-    assertNull(new ProductDefaultsHandler().persistedProductType(null));
+    assertNull(ProductTypeRules.readPersistedType(null));
   }
 
   @Test
@@ -1995,8 +1996,8 @@ public class ProductDefaultsHandlerTest {
       when(product.getProductType()).thenReturn("S");
       when(dal.get(Product.class, "rec-1")).thenReturn(product);
 
-      assertEquals("S", new ProductDefaultsHandler().persistedProductType("rec-1"));
-      assertNull(new ProductDefaultsHandler().persistedProductType("missing"));
+      assertEquals("S", ProductTypeRules.readPersistedType("rec-1"));
+      assertNull(ProductTypeRules.readPersistedType("missing"));
     }
   }
 
