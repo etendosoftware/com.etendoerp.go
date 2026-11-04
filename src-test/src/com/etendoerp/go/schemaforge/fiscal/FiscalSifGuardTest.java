@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.fiscal;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -400,6 +401,8 @@ class FiscalSifGuardTest {
     final Map<String, String> orgOf = new HashMap<>();
     String tbaiTerritory;
     final List<String> sqls = new ArrayList<>();
+    /** The parameters each statement in {@link #sqls} was bound with, by position. */
+    final List<Map<String, Object>> sqlParams = new ArrayList<>();
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
     Session session() {
@@ -408,6 +411,7 @@ class FiscalSifGuardTest {
         String sql = inv.getArgument(0);
         sqls.add(sql);
         Map<String, Object> params = new HashMap<>();
+        sqlParams.add(params);
         NativeQuery query = mock(NativeQuery.class);
         when(query.setParameter(anyString(), any())).thenAnswer(a -> {
           params.put(a.getArgument(0), a.getArgument(1));
@@ -438,6 +442,33 @@ class FiscalSifGuardTest {
       }
       throw new AssertionError("unexpected SQL: " + sql);
     }
+  }
+
+  // ── lockOrganization ─────────────────────────────────────────────────────
+
+  @Test
+  void lockOrganizationLocksTheOrgInfoRowForUpdate() {
+    FiscalSifGuard.lockOrganization(ORG);
+
+    assertEquals(1, tables.sqls.size());
+    String sql = tables.sqls.get(0);
+    assertTrue(sql.contains("FROM ad_orginfo"), sql);
+    assertTrue(sql.endsWith("FOR UPDATE"), sql);
+    assertEquals(ORG, tables.sqlParams.get(0).get("orgId"));
+  }
+
+  @Test
+  void lockOrganizationToleratesAnOrganizationWithoutOrgInfo() {
+    // The fake answers null: no AD_OrgInfo row, nothing to lock, and no failure.
+    assertDoesNotThrow(() -> FiscalSifGuard.lockOrganization("ORG-WITHOUT-INFO"));
+    assertEquals(1, tables.sqls.size());
+  }
+
+  @Test
+  void lockOrganizationOfNoOrganizationIsANoOp() {
+    FiscalSifGuard.lockOrganization(null);
+
+    assertTrue(tables.sqls.isEmpty(), "no organization, no statement");
   }
 
   @Test

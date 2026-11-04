@@ -52,6 +52,7 @@ import com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler;
 import com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -83,6 +84,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsConfig
  * @covers com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction
+ * @covers com.etendoerp.go.mcp.McpFieldsSection
+ * @covers com.etendoerp.go.mcp.McpFieldView
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {
@@ -1181,6 +1184,106 @@ class McpConfigSourcedataTest {
       assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD)
           .contains("action:'configureFiscalSystem'"), id);
       assertResolvesCleanly(id);
+    }
+  }
+
+  /**
+   * The fiscal-config fields only {@code configureFiscalSystem} sets and the Fiscal Configuration
+   * window never edits: {@code ETGO_SF_FIELD} id → (owning entity, the DAL property it is).
+   */
+  private static final Map<String, String[]> AGENT_LOCKED_FISCAL_FIELDS = Map.of(
+      // sii-config
+      "0986492D5E984AB6870671B29CDFDD52", new String[] { FISCAL_CONFIGS.get(0), "acogidaAlSII" },
+      "259CC6FF5340410198E0D251554F3EAB",
+      new String[] { FISCAL_CONFIGS.get(0), "entornoDeProduccin" },
+      "056CC8F31ED6444CAD0C3F559B9F24F4",
+      new String[] { FISCAL_CONFIGS.get(0), "adjuntarArchivosXML" },
+      // tbai-config
+      "F46562111AA646BC8DF6480E83AA2257", new String[] { FISCAL_CONFIGS.get(1), "productionEnv" },
+      "D1C39CF70B2D4E1DB968C910D9F4CE79",
+      new String[] { FISCAL_CONFIGS.get(1), "uSEAsproductDesc" },
+      "B00641DC7E12479FAE95EDE6A57F24EF",
+      new String[] { FISCAL_CONFIGS.get(1), "validatePreviousInvoice" },
+      // verifactu-config
+      "C259E25D10D84B7C952D3FF677870F33", new String[] { FISCAL_CONFIGS.get(2), "tAXType" });
+
+  /** {@code <!--fieldId-->  <ETGO_SF_ENTITY_ID><![CDATA[ … ]]>}: the row's owning entity. */
+  private static String owningEntityOf(String fieldId) throws IOException {
+    Matcher m = Pattern.compile("<!--" + fieldId
+        + "-->\\s*<ETGO_SF_ENTITY_ID><!\\[CDATA\\[([0-9A-Fa-f]{32})]]>").matcher(
+            new String(Files.readAllBytes(sourcedataDir().resolve("ETGO_SF_FIELD.xml")),
+                StandardCharsets.UTF_8));
+    assertTrue(m.find(), "no ETGO_SF_FIELD row " + fieldId);
+    return m.group(1);
+  }
+
+  /**
+   * The {@code MCP_CONFIG} authored on one {@code ETGO_SF_FIELD} row.
+   *
+   * @param fieldId the row id
+   * @return the parsed payload; fails the test when the row carries none
+   */
+  static JSONObject fieldPayloadOf(String fieldId) throws IOException, JSONException {
+    for (String[] row : authoredPayloads()) {
+      if (row[0].equals("ETGO_SF_FIELD.xml#" + fieldId)) {
+        return new JSONObject(row[1]);
+      }
+    }
+    fail("no MCP_CONFIG authored for ETGO_SF_FIELD " + fieldId);
+    return null;
+  }
+
+  @Test
+  @DisplayName("the agent-only fiscal fields are MCP read-only, with a reason, and resolve cleanly")
+  void agentOnlyFiscalFieldsAreReadOnly() throws IOException, JSONException {
+    for (Map.Entry<String, String[]> e : AGENT_LOCKED_FISCAL_FIELDS.entrySet()) {
+      String fieldId = e.getKey();
+      String where = e.getValue()[1] + " (" + fieldId + ")";
+      assertEquals(e.getValue()[0], owningEntityOf(fieldId), where + " belongs to its config");
+
+      JSONObject payload = fieldPayloadOf(fieldId);
+      assertEquals(Set.of(McpFieldsSection.NAME), keysOf(payload),
+          where + ": only a fields section");
+      JSONObject fields = payload.getJSONObject(McpFieldsSection.NAME);
+      assertEquals(Boolean.TRUE, McpFieldsSection.readOnly(fields).orElse(null), where);
+      assertNotNull(McpFieldsSection.reason(fields), where + ": a lock without a reason");
+      assertTrue(McpFieldsSection.validate(fields).isEmpty(),
+          where + ": " + McpFieldsSection.validate(fields));
+      assertFieldResolvesReadOnly(fieldId, e.getValue()[0]);
+    }
+  }
+
+  /**
+   * The field read exactly as the MCP reads it: spec, then the real entity row, then the field row
+   * — through {@link McpFieldView}, from an {@code ETGO_SF_FIELD} row that is itself editable.
+   */
+  private static void assertFieldResolvesReadOnly(String fieldId, String entityId)
+      throws IOException, JSONException {
+    McpConfigSections.resetForTests();
+    McpConfigCache.invalidateAll();
+    try {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("spec-of-" + entityId);
+      SFEntity entity = mock(SFEntity.class);
+      when(entity.getId()).thenReturn(entityId);
+      when(entity.getETGOSFSpec()).thenReturn(spec);
+      when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG))
+          .thenReturn(payloadOf(entityId).toString());
+      SFField field = mock(SFField.class);
+      when(field.getId()).thenReturn(fieldId);
+      when(field.getETGOSFEntity()).thenReturn(entity);
+      when(field.isReadOnly()).thenReturn(Boolean.FALSE);
+      when(field.isIncluded()).thenReturn(Boolean.TRUE);
+      when(field.get(McpEntityConfig.PROPERTY_MCP_CONFIG))
+          .thenReturn(fieldPayloadOf(fieldId).toString());
+
+      McpEntityConfig.Resolved resolved = McpEntityConfig.forField(field);
+      assertTrue(resolved.isUsable(), fieldId + ": " + resolved.describeProblems());
+      McpFieldView view = McpFieldView.of(field);
+      assertTrue(view.isReadOnly(), fieldId + " is read-only on the MCP");
+      assertTrue(view.isIncluded(), fieldId + " stays visible, only its writes are refused");
+    } finally {
+      McpConfigCache.invalidateAll();
     }
   }
 

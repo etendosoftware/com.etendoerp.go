@@ -65,7 +65,9 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * {@code ETGO_FiscalSifNoWindowAccess} naming that system, in the request language, before
  * anything reaches the batch (SII + TicketBAI needs both windows). Also the {@code fiscalSystemCatalog}
  * read action: its methods, its organization check and its content per territory, which must be
- * {@link FiscalSifRules} as data.
+ * {@link FiscalSifRules} as data, and GET only. The {@code *} organization is refused (400
+ * {@code ETGO_FiscalSifOrgStar}) before any statement; an activation that passes the request-level
+ * checks locks the organization's {@code AD_OrgInfo} row first, before reading its active configs.
  *
  * @covers com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction
  */
@@ -181,6 +183,61 @@ class FiscalSystemConfigureActionTest {
 
     assertEquals(400, response.getHttpStatus());
     assertEquals(FiscalSystemConfigureAction.MSG_ORG_MISMATCH, messageKey(response));
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void theStarOrganizationIsRefusedBeforeAnyLockOrRead() throws Exception {
+    when(OBDal.getInstance().get(Organization.class, "0")).thenReturn(mock(Organization.class));
+
+    NeoResponse response = run("0",
+        new JSONObject().put("system", "SII").put("territory", "navarra"));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_ORG_STAR, messageKey(response));
+    assertTrue(tables.sqls.isEmpty(), "no lock and no read: " + tables.sqls);
+    assertTrue(batches.isEmpty());
+  }
+
+  /** The lock is the first statement, on the requested organization, before the active reads. */
+  @Test
+  void anActivationLocksTheOrganizationBeforeReadingItsConfigs() throws Exception {
+    NeoResponse response = run("SII", "navarra");
+
+    assertEquals(200, response.getHttpStatus(), "no AD_OrgInfo row is tolerated");
+    assertFalse(tables.sqls.isEmpty());
+    String first = tables.sqls.get(0);
+    assertTrue(first.contains("FROM ad_orginfo") && first.contains("FOR UPDATE"), first);
+    assertEquals(ORG, tables.sqlParams.get(0).get("orgId"));
+    assertTrue(tables.sqls.size() > 1, "activeRecords runs after the lock: " + tables.sqls);
+    for (String later : tables.sqls.subList(1, tables.sqls.size())) {
+      assertFalse(later.contains("FOR UPDATE"), "locked once: " + later);
+    }
+    assertEquals(1, batches.size());
+  }
+
+  @Test
+  void aRefusalFoundUnderTheLockStillComesAfterIt() throws Exception {
+    tables.active.put("etvfac_verifactu_config", "V");
+
+    NeoResponse response = run("SII", "baleares");
+
+    assertEquals(409, response.getHttpStatus());
+    assertTrue(tables.sqls.get(0).contains("FROM ad_orginfo"), tables.sqls.toString());
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void aRequestLevelRefusalTakesNoLock() throws Exception {
+    NeoResponse mismatch = run("ORG-2",
+        new JSONObject().put("system", "SII").put("territory", "navarra"));
+    testModeStatic.when(() -> FiscalTestModeResolver.isForceTestModeActive(any()))
+        .thenReturn(true);
+    NeoResponse testMode = run("SII", "navarra");
+
+    assertEquals(FiscalSystemConfigureAction.MSG_ORG_MISMATCH, messageKey(mismatch));
+    assertEquals("ETGO_FiscalSifTestMode", messageKey(testMode));
+    assertTrue(tables.sqls.isEmpty(), "no lock and no read: " + tables.sqls);
     assertTrue(batches.isEmpty());
   }
 
@@ -722,10 +779,12 @@ class FiscalSystemConfigureActionTest {
 
   @Test
   void theCatalogRefusesAnyOtherMethod() {
-    for (String method : List.of("PUT", "PATCH", "DELETE")) {
+    for (String method : List.of("POST", "post", "PUT", "PATCH", "DELETE")) {
       assertEquals(405, catalog(method, ORG).getHttpStatus(), method);
     }
     assertEquals(405, catalog(null, ORG).getHttpStatus());
+    assertEquals(200, catalog("get", ORG).getHttpStatus(), "GET in any case");
+    assertTrue(batches.isEmpty(), "a refused read never runs the batch");
   }
 
   @Test

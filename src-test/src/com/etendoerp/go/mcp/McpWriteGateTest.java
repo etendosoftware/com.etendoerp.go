@@ -472,6 +472,29 @@ class McpWriteGateTest {
     }
 
     /**
+     * A field row that is editable for the SPA but locked for agents by its own {@code MCP_CONFIG}
+     * — the shipped sii-config {@code acogidaAlSII} payload — is refused on {@code etendo_update}.
+     */
+    @Test
+    @DisplayName("a field locked by its shipped MCP_CONFIG answers 422 read_only_field")
+    void aFieldLockedByItsOwnMcpConfigIsRefused() throws Exception {
+      declareProperty("acogidaAlSII", "Insiisystem");
+      curate("Insiisystem", Boolean.TRUE, Boolean.FALSE, null, null);
+      SFField row = curatedRows.get(curatedRows.size() - 1);
+      when(row.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(McpConfigSourcedataTest
+          .fieldPayloadOf("0986492D5E984AB6870671B29CDFDD52").toString());
+
+      McpRoutingException thrown = assertThrows(McpRoutingException.class,
+          () -> write(fields("acogidaAlSII", "N"), specEntity()));
+
+      JSONObject envelope = thrown.toEnvelope();
+      assertEquals(422, envelope.getInt(McpConstants.KEY_STATUS));
+      assertEquals(McpConstants.ERROR_READ_ONLY_FIELD,
+          envelope.getString(McpConstants.KEY_ERROR));
+      assertEquals("acogidaAlSII", envelope.getString(McpConstants.PARAM_FIELD));
+    }
+
+    /**
      * Naming the reason costs nothing here and is the whole difference from
      * {@code field_not_allowed}: {@code etendo_schema} already published this field with
      * {@code readOnly: true}, so the refusal repeats what the caller was told.
