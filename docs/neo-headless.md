@@ -3712,23 +3712,39 @@ first create without it was refused. The handler now declares
 `serverDefaulted`. `etendo_defaults` still answers the suggested country — a form may prefill it —
 but the schema no longer claims the server fills it.
 
-##### 4.12.1.10 Fiscal Configuration — `fiscalSystemCatalog` and `configureFiscalSystem` on `organization` (ETP-6053)
+##### 4.12.1.10 Fiscal Configuration — `fiscalSystemCatalog` and `configureFiscalSystem` on `sii-config` (ETP-6053)
 
-A billing system (SIF) is activated through one declared write action of `organization`, by the
+A billing system (SIF) is activated through one declared write action of `sii-config/siiConfiguration`, by the
 SPA's Fiscal Configuration window (REST) and by agents (MCP) alike — never through a create on the
 fiscal-configuration specs. The rules live only in `com.etendoerp.go`
 (`schemaforge/fiscal/FiscalSifRules`); the window keeps no copy of them.
 
 ```
-GET  /sws/neo/organization/organization/{orgId}/action/fiscalSystemCatalog
-POST /sws/neo/organization/organization/{orgId}/action/configureFiscalSystem  {system, territory}
+GET  /sws/neo/sii-config/siiConfiguration/{orgId}/action/fiscalSystemCatalog
+POST /sws/neo/sii-config/siiConfiguration/{orgId}/action/configureFiscalSystem  {system, territory}
 
-etendo_action(spec:'organization', entity:'organization', id:'<organizationId>',
+etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>',
               action:'configureFiscalSystem', parameters:{system:'TBAI', territory:'bizkaia'})
 ```
 
-Both are served by `FiscalSystemConfigureAction`, delegated from `OrganizationCertificateAction`
-(the pair's single `@NeoExtension`; the annotation is not repeatable).
+`id` is the organization, not an `AEATSII_CONFIG` row: the action record guard
+(`NeoActionRecordGuard`) lets an id that is not a row of the entity's table through, and the
+action checks the organization itself. Both actions are served by `FiscalSystemConfigureAction`,
+delegated from `SiiConfigDeactivateHandler` (the pair's single `@NeoExtension`; the annotation is
+not repeatable). The SII Configuration's own AD buttons are unaffected.
+
+**Which access gates them.** Every request on `sii-config` is gated by
+`NeoRequestRouter.handleWindowSpecRequest` on the role's access to the **SII Configuration window**
+(`C1D3A2A017AC4B82B9FEE6F4D2A0C55A`) — read for `fiscalSystemCatalog`, read-write for
+`configureFiscalSystem`; MCP gates `etendo_action` on the same spec access. That window is the one
+the Fiscal Configuration page itself is gated on (`useWindowAccess`, ETP-5395), so the actions need
+exactly the access the page has, and nothing on Organization. `configureFiscalSystem` then requires
+read-write on the window of **every system it creates** — TicketBAI and VERI*FACTU have their own —
+and refuses a role without it before writing anything, in the request language (403
+`ETGO_FiscalSifNoWindowAccess`, *"Tu rol no tiene permiso para configurar VERI*FACTU: no puede
+modificar su ventana."*); the batch re-checks each window anyway. (They lived on
+`organization/organization` for a while during ETP-6053, which wrongly required write access to
+the Organization window.)
 
 **`fiscalSystemCatalog`** (read, `GET`): the rules as data —
 `{systems:[...], territories:[{territory, systems, sii:{navarra, guipuzcoa, taxtype}|null,
@@ -3737,8 +3753,10 @@ keys are the values a config record of that territory carries. The window render
 system choice and the SII veto from `systems`, and identifies the territory of a stored
 configuration (its "Estado" panel) from the record values. It was chosen over the action contract
 because a contract can list the allowed values of each parameter but not which pairs are valid,
-and over a new endpoint because it lives in the same customization that applies the rules, is
-discoverable by agents too, and needs no data change.
+and over a new endpoint because it lives with the action that applies the rules, under the same
+access gate, is discoverable by agents too, and needs no data change. It is pinned byte for byte by
+`fiscal/fiscalSystemCatalog.golden.json` in this module's tests and by the same file in the SPA's
+tests; both suites assert its SHA-256, so the two copies cannot drift unnoticed.
 
 **`configureFiscalSystem`** (write, `POST`):
 

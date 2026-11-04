@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.Date;
+import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -35,12 +36,15 @@ import org.openbravo.module.sii.data.AEATSIIFacturas;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
-import com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard;
-import com.etendoerp.go.schemaforge.fiscal.FiscalSifRules;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoExtension;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifRules;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler for the {@code sii-config} spec ({@code siiConfiguration} entity, table
@@ -111,6 +115,14 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * <p>Without this, the schedule would keep firing the SII sending process twice a day for an
  * organization whose fiscal config no longer exists or is no longer active.
  *
+ * <h3>Fiscal system actions (ETP-6053)</h3>
+ * <p>This pair also serves {@code fiscalSystemCatalog} and {@code configureFiscalSystem} — the
+ * single way to activate a billing system, for the Fiscal Configuration window and for agents —
+ * by delegating to {@link FiscalSystemConfigureAction}. They live here because the SII
+ * Configuration window is the window the Fiscal Configuration page itself is gated on, so the
+ * actions keep exactly the access the page has; the action then checks the window of each system
+ * it creates. {@code id} is the organization, not an {@code AEATSII_CONFIG} row.</p>
+ *
  * <p>Bound by {@code @NeoExtension} (ETP-6053, migrated from the {@code Java_Qualifier}
  * binding). Never give it a normal CDI scope.
  */
@@ -126,15 +138,32 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
 
   private final SiiTbaiAutoSendScheduleService scheduleService = new SiiTbaiAutoSendScheduleService();
 
+  private final FiscalSystemConfigureAction fiscalSystemActions = new FiscalSystemConfigureAction();
+
   /**
-   * ETP-6053: the Fiscal Configuration write rules ({@link FiscalSifGuard}) run before the smart
-   * deactivation and the default CRUD — no inactive create, none in forced test mode, one active
-   * config per organization, and no {@code active} change by an agent.
+   * ETP-6053: the fiscal system actions are answered first; otherwise the Fiscal Configuration
+   * write rules ({@link FiscalSifGuard}) run before the smart deactivation and the default CRUD —
+   * no inactive create, none in forced test mode, one active config per organization, and no
+   * {@code active} change by an agent.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (isFiscalSystemAction(context)) {
+      return fiscalSystemActions.handle(context);
+    }
     NeoResponse refusal = FiscalSifGuard.preCheck(context, FiscalSifRules.SII);
     return refusal != null ? refusal : super.handle(context);
+  }
+
+  /** @return the fiscal system actions this pair publishes (ETP-6053) */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return FiscalSystemConfigureAction.actionContracts();
+  }
+
+  private static boolean isFiscalSystemAction(NeoContext context) {
+    return context != null && NeoEndpointType.ACTION.equals(context.getEndpointType())
+        && FiscalSystemConfigureAction.serves(context.getFieldName());
   }
 
   /**
@@ -216,6 +245,10 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    if (isFiscalSystemAction(context)) {
+      // The records were created (and post-processed) by their own CRUD writes inside the action.
+      return null;
+    }
     String httpMethod = context.getHttpMethod();
     boolean isPost = METHOD_POST.equalsIgnoreCase(httpMethod);
     boolean isPut = METHOD_PUT.equalsIgnoreCase(httpMethod);

@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import javax.servlet.http.HttpServletResponse;
@@ -36,7 +37,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -47,13 +50,24 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoMessageText;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
 
 /**
- * The fiscal-system actions of {@code organization/organization} (ETP-6053); {@code id} is the
- * organization. The single way to activate a billing system (SIF), for the SPA's Fiscal
- * Configuration window (REST) and for agents (MCP) alike:
+ * The fiscal-system actions of {@code sii-config/siiConfiguration} (ETP-6053), served by that
+ * pair's customization ({@code SiiConfigDeactivateHandler}); {@code id} is the organization, not a
+ * config row. The single way to activate a billing system (SIF), for the SPA's Fiscal
+ * Configuration window (REST) and for agents (MCP) alike.
+ *
+ * <p><b>Access.</b> The route is gated, like every request of that spec, on the role's access to
+ * the SII Configuration window — the window the Fiscal Configuration page itself is gated on —
+ * read for the catalog, read-write for the activation. The activation then requires read-write on
+ * the window of every system it creates (TicketBAI and VERI*FACTU have their own) and refuses, in
+ * the request language, a role without it ({@code ETGO_FiscalSifNoWindowAccess}), before writing
+ * anything; the batch re-checks each window anyway.</p>
+ *
  * <ul>
  *   <li>{@code fiscalSystemCatalog} (read, GET) — the territory x system rules
  *       ({@link FiscalSifRules#catalog()}), which the window renders its choices from;</li>
@@ -100,6 +114,7 @@ public class FiscalSystemConfigureAction {
   static final String MSG_NO_CERTIFICATE = "ETGO_FiscalSifNoCertificate";
   static final String MSG_TERRITORY_REQUIRED = "ETGO_FiscalSifTerritoryRequired";
   static final String MSG_TBAI_NO_TERRITORY = "ETGO_FiscalSifTbaiNoTerritory";
+  static final String MSG_NO_WINDOW_ACCESS = "ETGO_FiscalSifNoWindowAccess";
 
   private static final String METHOD_POST = "POST";
   private static final String METHOD_GET = "GET";
@@ -119,18 +134,27 @@ public class FiscalSystemConfigureAction {
   private final Supplier<LocalDate> today;
   /** The organization's certificate expiry, {@code null} without one. A seam for unit tests. */
   private final Function<String, Date> certificateExpiry;
+  /** Whether the role may create records of a spec (POST access to its window). A seam. */
+  private final Predicate<String> canCreate;
 
   /** Production wiring. */
   public FiscalSystemConfigureAction() {
     this(FiscalSystemConfigureAction::runBatch, LocalDate::now,
-        NeoCertificateHelper::activeCertificateExpiry);
+        NeoCertificateHelper::activeCertificateExpiry, FiscalSystemConfigureAction::canCreateIn);
+  }
+
+  /** Test wiring with every fiscal window writable. */
+  FiscalSystemConfigureAction(Function<JSONArray, JSONObject> batch, Supplier<LocalDate> today,
+      Function<String, Date> certificateExpiry) {
+    this(batch, today, certificateExpiry, spec -> true);
   }
 
   FiscalSystemConfigureAction(Function<JSONArray, JSONObject> batch, Supplier<LocalDate> today,
-      Function<String, Date> certificateExpiry) {
+      Function<String, Date> certificateExpiry, Predicate<String> canCreate) {
     this.batch = batch;
     this.today = today;
     this.certificateExpiry = certificateExpiry;
+    this.canCreate = canCreate;
   }
 
   private static Map<String, NeoActionContract> contracts() {
@@ -254,6 +278,15 @@ public class FiscalSystemConfigureAction {
         ? Collections.singletonMap(FiscalSifRules.SII,
             FiscalSifRules.recordPayload(FiscalSifRules.SII, effectiveTerritory, day))
         : FiscalSifRules.onboardingPayloads(system, effectiveTerritory, day);
+
+    // Each system has its own window: a role allowed to configure one system but not another gets
+    // a refusal in its language here, not the batch's generic "Access denied to spec".
+    for (String recordSystem : payloads.keySet()) {
+      if (!canCreate.test(ENDPOINTS.get(recordSystem)[0])) {
+        return FiscalSifGuard.refusal(HttpServletResponse.SC_FORBIDDEN, MSG_NO_WINDOW_ACCESS,
+            FiscalSifGuard.displayName(recordSystem));
+      }
+    }
 
     JSONArray operations = new JSONArray();
     for (Map.Entry<String, JSONObject> e : payloads.entrySet()) {
@@ -380,6 +413,21 @@ public class FiscalSystemConfigureAction {
   private static boolean isReadable(String orgId) {
     String[] readable = OBContext.getOBContext().getReadableOrganizations();
     return readable != null && Arrays.asList(readable).contains(orgId);
+  }
+
+  /** Whether the current role may POST to the spec, i.e. write its window. */
+  private static boolean canCreateIn(String specName) {
+    OBContext.setAdminMode(true);
+    try {
+      OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
+      criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
+      criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+      criteria.setMaxResults(1);
+      SFSpec spec = (SFSpec) criteria.uniqueResult();
+      return spec != null && NeoAccessHelper.hasWindowAccessForSpec(spec, METHOD_POST);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   private static JSONObject runBatch(JSONArray operations) {

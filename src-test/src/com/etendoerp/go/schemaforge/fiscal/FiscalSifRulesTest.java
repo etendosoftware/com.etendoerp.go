@@ -22,10 +22,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -59,6 +68,70 @@ class FiscalSifRulesTest {
       assertEquals(allowed.contains(system), FiscalSifRules.isAllowed(system, territory),
           system + " in " + territory);
     }
+  }
+
+  // ── the catalog golden file (ETP-6053) ──────────────────────────────────────
+
+  /**
+   * The {@code fiscalSystemCatalog} answer, byte for byte, as the SPA's tests also pin it.
+   * The same file lives in etendo_schema_forge
+   * ({@code tools/app-shell/src/windows/custom/fiscal-config/__tests__/fiscalSystemCatalog.golden.json});
+   * the two repositories are checked out and tested separately, so neither can read the other's
+   * copy. Both suites therefore pin the SHA-256 of the file: changing the rules means changing
+   * the golden file and this hash in BOTH repositories, which a reviewer sees in each diff.
+   */
+  static final String GOLDEN_SHA256 =
+      "176abb4fdbba906c8f6831ff6a9a58dbbdab86d88432bfac86ac4a33121079df";
+  private static final String GOLDEN =
+      "modules/com.etendoerp.go/src-test/src/com/etendoerp/go/schemaforge/fiscal/"
+          + "fiscalSystemCatalog.golden.json";
+
+  @Test
+  void theCatalogIsTheGoldenFile() throws Exception {
+    byte[] golden = Files.readAllBytes(goldenFile());
+
+    assertEquals(GOLDEN_SHA256,
+        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(golden)),
+        "the golden file changed: update it and this hash in both repositories");
+    assertEquals(plain(new JSONObject(new String(golden, StandardCharsets.UTF_8))),
+        plain(FiscalSifRules.catalog()));
+  }
+
+  /** Walk up from the working directory (module or Etendo root) to the golden file. */
+  private static Path goldenFile() {
+    Path dir = Paths.get("").toAbsolutePath();
+    while (dir != null) {
+      for (Path candidate : List.of(dir.resolve(GOLDEN),
+          dir.resolve(GOLDEN.substring("modules/com.etendoerp.go/".length())))) {
+        if (Files.isRegularFile(candidate)) {
+          return candidate;
+        }
+      }
+      dir = dir.getParent();
+    }
+    throw new IllegalStateException("golden file not found: " + GOLDEN);
+  }
+
+  /** Jettison JSON as plain maps and lists, so two documents compare regardless of key order. */
+  private static Object plain(Object value) throws Exception {
+    if (value instanceof JSONObject) {
+      JSONObject object = (JSONObject) value;
+      Map<String, Object> map = new LinkedHashMap<>();
+      for (Iterator<?> keys = object.keys(); keys.hasNext();) {
+        String key = String.valueOf(keys.next());
+        map.put(key, plain(object.get(key)));
+      }
+      return new java.util.TreeMap<>(map);
+    }
+    if (value instanceof JSONArray) {
+      JSONArray array = (JSONArray) value;
+      List<Object> list = new ArrayList<>();
+      for (int i = 0; i < array.length(); i++) {
+        list.add(plain(array.get(i)));
+      }
+      return list;
+    }
+    return JSONObject.NULL.equals(value) ? null : value;
   }
 
   @Test

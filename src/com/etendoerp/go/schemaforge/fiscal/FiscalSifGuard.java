@@ -42,7 +42,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * server (ETP-6053). Called
  * from each entity's own customization ({@code SiiConfigDeactivateHandler},
  * {@code TbaiConfigSequenceHandler}, {@code VerifactuConfigReadyHandler}) and from the
- * {@code configureFiscalSystem} action of {@code organization}.
+ * {@code configureFiscalSystem} action of {@code sii-config/siiConfiguration}.
  *
  * <h2>Every channel (REST single, REST batch, MCP)</h2>
  * <ul>
