@@ -34,6 +34,14 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * as {@code availableNow:false}; the call now agrees with both. Same pattern as
  * {@link ReturnInvoiceSupport#refuseIfAlreadyInvoiced} (ETP-5712).
  *
+ * <p>ETP-5828: the SALES order no longer goes through this guard. Its {@code createDraftInvoice}
+ * invoices what is pending net of the draft invoices ({@link OrderInvoicePending}), so a draft
+ * holding part of the order is not a reason to refuse, and one holding everything left is answered
+ * with {@link OrderDocumentAvailability#draftCoversInvoiceReason} (no {@code allowDuplicate} way
+ * past it: duplicating what a draft holds is exactly what the net rule prevents). The purchase
+ * order's {@code createPurchaseInvoice} keeps this guard unchanged; {@link #draftsOf} still serves
+ * both.</p>
+ *
  * <p>Kept out of the two invoice handlers on purpose: they are far past the size Sonar accepts.
  * They call it explicitly from their order route; nothing here selects an entity. The drafts come
  * from {@link OrderDocumentAvailability#draftInvoiceNumbers}, the very query behind the advice.</p>
@@ -60,7 +68,7 @@ final class OrderInvoiceDuplicateGuard {
   }
 
   /**
-   * The {@code allowDuplicate} parameter both order invoice contracts declare.
+   * The {@code allowDuplicate} parameter the purchase order invoice contract declares.
    *
    * @return the optional boolean parameter
    */

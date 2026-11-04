@@ -162,6 +162,15 @@ abstract class AbstractLineImportHandler implements NeoHandler {
    */
   protected <T> NeoResponse discover(java.util.List<T> candidates, RowBuilder<T> rowOf)
       throws JSONException {
+    return discover(candidates, rowOf, rowLimit(), scanLimit());
+  }
+
+  /**
+   * {@link #discover(java.util.List, RowBuilder)} with the limits of this one call instead of the
+   * delegate's defaults (ETP-5828: a caller that asked for a longer list).
+   */
+  protected <T> NeoResponse discover(java.util.List<T> candidates, RowBuilder<T> rowOf,
+      int rowLimit, int scanLimit) throws JSONException {
     org.codehaus.jettison.json.JSONArray rows = new org.codehaus.jettison.json.JSONArray();
     boolean stoppedAtRowLimit = false;
     boolean full = false;
@@ -169,13 +178,13 @@ abstract class AbstractLineImportHandler implements NeoHandler {
       JSONObject row = rowOf.build(candidates.get(i));
       if (row != null) {
         rows.put(row);
-        full = rows.length() >= rowLimit();
+        full = rows.length() >= rowLimit;
         stoppedAtRowLimit = full && i + 1 < candidates.size();
       }
     }
-    boolean scanReachedItsLimit = candidates.size() >= scanLimit();
-    return DocumentLineImport.wrapPage(rows, stoppedAtRowLimit || scanReachedItsLimit, rowLimit(),
-        scanLimit());
+    boolean scanReachedItsLimit = candidates.size() >= scanLimit;
+    return DocumentLineImport.wrapPage(rows, stoppedAtRowLimit || scanReachedItsLimit, rowLimit,
+        scanLimit);
   }
 
   /** A page that is complete by construction (the lines of one document). */
