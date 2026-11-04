@@ -49917,6 +49917,7 @@
 <!--7B78C6E9D74540758120B0E4AFC7CE64-->  <JAVA_QUALIFIER><![CDATA[etgoTotalDiscount]]></JAVA_QUALIFIER>
 <!--7B78C6E9D74540758120B0E4AFC7CE64-->  <SEQNO><![CDATA[1510]]></SEQNO>
 <!--7B78C6E9D74540758120B0E4AFC7CE64-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--7B78C6E9D74540758120B0E4AFC7CE64-->  <AGENT_PROMPT><![CDATA[The invoice's total discount: always a percentage (0 to 100), never an amount. It applies to the subtotal of the lines after their own line discounts (each line keeps its line discount). Importing from orders (importOrderLines) and invoicing an order in one step carry the orders' global discount here as the same %. On a draft it can be changed with etendo_update; the totals are recomputed.]]></AGENT_PROMPT>
 <!--7B78C6E9D74540758120B0E4AFC7CE64-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--7B78C6E9D74540758120B0E4AFC7CE64--></ETGO_SF_FIELD>
 
@@ -73229,6 +73230,7 @@
 <!--B7F83A17369945AD8CFCD82D76A6C098-->  <JAVA_QUALIFIER><![CDATA[etgoTotalDiscount]]></JAVA_QUALIFIER>
 <!--B7F83A17369945AD8CFCD82D76A6C098-->  <SEQNO><![CDATA[1510]]></SEQNO>
 <!--B7F83A17369945AD8CFCD82D76A6C098-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--B7F83A17369945AD8CFCD82D76A6C098-->  <AGENT_PROMPT><![CDATA[The invoice's total discount: always a percentage (0 to 100), never an amount. It applies to the subtotal of the lines after their own line discounts (each line keeps its line discount). Importing from orders (importOrderLines) and invoicing an order in one step carry the orders' global discount here as the same %. On a draft it can be changed with etendo_update; the totals are recomputed.]]></AGENT_PROMPT>
 <!--B7F83A17369945AD8CFCD82D76A6C098-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--B7F83A17369945AD8CFCD82D76A6C098--></ETGO_SF_FIELD>
 

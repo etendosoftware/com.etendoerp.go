@@ -426,45 +426,6 @@ final class McpWriteRequestSupport {
   }
 
   /**
-   * Attach the callout-vs-caller divergences a create left behind (IMP-45).
-   *
-   * <p>{@code etendo_defaults} tells an agent to use its result as the starting point for
-   * {@code etendo_create}, and {@code etendo_create} repeats the advice. Follow it literally and every
-   * value handed over becomes a value the caller sent, which ETP-4784 protects from being
-   * recomputed by a callout that knows the record's real context. The measured case:
-   * {@code etendo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
-   * business partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} —
-   * an agent that echoed the default has pinned the wrong one, and the 201 says nothing.</p>
-   *
-   * <p>The value the caller sent still wins. Overriding it would be worse: on this path the server
-   * cannot tell an echoed default from a value a human deliberately chose, and silently replacing
-   * the second is a harder failure than reporting the first. So this reports, as IMP-18 does for
-   * unrecognised names — the write succeeded, and now the caller can see what its own value
-   * displaced.</p>
-   *
-   * @param body       the flattened response body handed to the agent, mutated in place
-   * @param superseded field → {sent, callout}, or {@code null}/empty when nothing diverged
-   */
-  static void reportSupersededDefaults(JSONObject body, JSONObject superseded) {
-    if (body == null || superseded == null || superseded.length() == 0) {
-      return;
-    }
-    try {
-      body.put("supersededDefaults", superseded);
-      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept; "
-          + "\"callout\" is only what a callout would have set from this record's own context. "
-          + "You can ignore it when the callout value is 0 or empty, or when the field is governed "
-          + "by another rule. If you copied the value from "
-          + "etendo_defaults and it differs from a meaningful callout value, it was a generic "
-          + "default resolved before this record had its context: send the callout value instead, "
-          + "or confirm the one you sent was deliberate.");
-    } catch (JSONException ignored) {
-      // Same reasoning as reportUnknownFields: the record is written and correct as far as the
-      // caller asked; losing a diagnostic must never turn a successful create into a failure.
-    }
-  }
-
-  /**
    * Reports the server-owned fields this write discarded, when the value differed from the
    * session's own.
    *

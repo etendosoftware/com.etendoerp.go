@@ -44,6 +44,7 @@ import com.etendoerp.go.schemaforge.DefaultTaxResolver.Determination;
 import com.etendoerp.go.schemaforge.DefaultTaxResolver.Result;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.ocr.OcrLookups;
+import com.etendoerp.go.schemaforge.ocr.TaxIdNormalizer;
 
 /**
  * The lookups of the purchase-invoice OCR review (ETP-5715): what the application's review steps ask
@@ -97,6 +98,44 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
       parties.add(new Party(item.optString(KEY_ID), labelOf(item)));
     }
     return parties;
+  }
+
+  @Override
+  public List<Party> vendorsByTaxId(String cleanTaxId, int limit) {
+    java.util.Set<String> spellings = TaxIdNormalizer.variants(cleanTaxId);
+    if (spellings.isEmpty()) {
+      return List.of();
+    }
+    try {
+      OBQuery<BusinessPartner> query = OBDal.getInstance().createQuery(BusinessPartner.class,
+          "as bp where bp.vendor = true and bp.active = true and bp.client.id = :clientId"
+              + " and upper(replace(replace(replace(replace(bp.taxID, '-', ''), ' ', ''),"
+              + " '.', ''), '/', '')) in (:spellings) order by bp.name");
+      query.setNamedParameter("clientId", OBContext.getOBContext().getCurrentClient().getId());
+      query.setNamedParameter("spellings", spellings);
+      query.setMaxResult(limit);
+      List<Party> parties = new ArrayList<>();
+      for (BusinessPartner partner : query.list()) {
+        if (TenantOwnership.isVisibleToCurrentTenant(partner)) {
+          parties.add(new Party(partner.getId(), partner.getName()));
+        }
+      }
+      return parties;
+    } catch (RuntimeException e) {
+      log.warn("OCR vendor lookup by tax id failed: {}", e.getClass().getSimpleName());
+      return List.of();
+    }
+  }
+
+  @Override
+  public String vendorTaxId(String vendorId) {
+    try {
+      BusinessPartner partner = TenantOwnership.loadOwned(BusinessPartner.class, vendorId);
+      return partner == null ? "" : StringUtils.trimToEmpty(partner.getTaxID());
+    } catch (RuntimeException e) {
+      log.warn("OCR vendor tax id read failed: {}", e.getClass().getSimpleName());
+      return "";
+    }
   }
 
   @Override
@@ -244,7 +283,7 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
   public String organizationTaxId() {
     try {
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-      OrganizationInformation info = OBDal.getReadOnlyInstance().get(OrganizationInformation.class,
+      OrganizationInformation info = OBDal.getInstance().get(OrganizationInformation.class,
           orgId);
       return info == null ? null : info.getTaxID();
     } catch (RuntimeException e) {
@@ -268,19 +307,28 @@ public final class PurchaseInvoiceOcrLookups implements OcrLookups {
     return out;
   }
 
-  /** The invoice header's own selector, or {@code null} when it cannot be asked or answers a failure. */
+  /**
+   * The invoice header's own selector, or {@code null} when it cannot be asked or answers a failure.
+   * Every failure is logged with its kind only (spec missing, HTTP status, exception class): never
+   * document text, names or ids.
+   */
   private static NeoResponse selector(String column, String search, int limit,
       Map<String, String> context) {
     try {
       SFSpec spec = NeoServletSupport.findSpec(SPEC);
       if (spec == null) {
+        log.warn("OCR selector {} not asked: spec {} not found", column, SPEC);
         return null;
       }
       NeoResponse response = NeoSelectorService.querySelector(spec.getId(), HEADER, column, search,
           limit, 0, context);
-      return response.getHttpStatus() >= 400 ? null : response;
+      if (response.getHttpStatus() >= 400) {
+        log.warn("OCR selector {} answered HTTP {}", column, response.getHttpStatus());
+        return null;
+      }
+      return response;
     } catch (RuntimeException e) {
-      log.warn("OCR selector lookup failed: {}", e.getClass().getSimpleName());
+      log.warn("OCR selector {} lookup failed: {}", column, e.getClass().getSimpleName());
       return null;
     }
   }

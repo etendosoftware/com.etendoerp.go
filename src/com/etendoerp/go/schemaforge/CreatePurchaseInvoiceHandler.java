@@ -113,7 +113,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           + "order that already has a DRAFT invoice is refused with 409 draftInvoiceExists, "
           + "creating nothing (one draft per order, as on the screen, which hides the button): "
           + "the refusal lists the draft numbers in existingDraftInvoices, and "
-          + "allowDuplicate:true creates the invoice anyway and lists the drafts the order had.",
+          + "allowDuplicate:true creates the invoice anyway and lists the drafts the order had. "
+          + "The order's global discount (etgoTotalDiscount, always a %) "
+          + "is carried to the new invoice's total discount as the same %, never as an amount.",
       OrderInvoiceDuplicateGuard.allowDuplicateParam())
       .withIdDescription("the id of the purchase order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);

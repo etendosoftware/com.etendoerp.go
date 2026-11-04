@@ -345,7 +345,7 @@ public class McpToolRouter {
 
   /**
    * Handle the {@code docs} tool: fetch documentation from Context7 for the
-   * {@code etendosoftware/etendo-go-docs} library, filtered by a topic.
+   * {@code etendosoftware/etendo-docs} library, filtered by a topic.
    * <p>
    * Delegates to {@link #handleDocs(JSONObject, Context7DocsClient)} with a default
    * client. Tests should call the package-private overload with a mocked client.
@@ -455,6 +455,9 @@ public class McpToolRouter {
     String allParentsWhere = allParents
         ? McpAllParents.scopeWhere(specName, entityName, sfEntity, parentId) : null;
     filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters, allParents);
+    // ETP-6087: a role that cannot see `posted` cannot filter or sort by it either. Before the read
+    // provider, which receives the same filters and order.
+    McpQuerySupport.refuseHiddenAccountingFields(filters, orderBy, sfEntity, entityName);
 
     // ETP-5405 + ETP-5415 (D13): the read's PRE phase, which must run before the tab is demanded.
     // A customization that answers here is serving the whole list itself — over REST that has
@@ -961,6 +964,8 @@ public class McpToolRouter {
     // is NOT the resolver the REST paths use — and so is the pre-hook contract: a NeoResponse
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
+    // ETP-5680: the caller's values as the pre-hook receives them, to report what it rewrites.
+    JSONObject preHookValues = McpSupersededReconciler.snapshotCallerValues(filteredBody, userProvided);
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
     // ETP-5791: injectMandatoryDefaults ran above, so key presence in filteredBody no longer says
     // what the agent chose. Hand the pre-hook the pre-defaults key set, which REST gets for free
@@ -1031,7 +1036,9 @@ public class McpToolRouter {
     // IMP-45: `ctx` is the context the callout cascade ran under, so it carries any field where the
     // caller's value stood and a callout had derived a different one. Create only — an update
     // carries no defaults invitation, and there is no cascade of this shape behind it.
-    McpWriteRequestSupport.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
+    McpSupersededReconciler.reconcileSupersededDefaults(flat, ctx.getSupersededDefaults(),
+        preHookValues, filteredBody, handler, hookCtx);
+    McpSupersededReconciler.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
     McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
     // ETP-5945 (in ETP-5852): one record answers {data:{…}}, as etendo_get does.
     return wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));
@@ -1154,6 +1161,14 @@ public class McpToolRouter {
     // ETP-5852 (M-103): a line price sent alone is the form's Precio, as on create.
     McpLinePriceInjector.applyAgentPriceOnUpdate(filteredBody, dalEntity,
         updateUserProvidedFields, OBDal.getInstance().get(dalEntityName, recordId));
+
+    // ETP-5696 (QA CP-15): a product change on an existing line re-derives uOM from the NEW product,
+    // exactly as the REST update does (NeoCrudHandler → NeoCommercialLinePolicy.applyDerivedUomOnUpdate,
+    // ETP-5286). Without it the line reaches the C_OrderLine trigger with the OLD unit and is refused
+    // with AD message 20111, and the agent cannot repair it by sending uOM (read-only). Never defers to
+    // a sent value (userProvidedUom=false): the unit has no source other than the product. A body
+    // without `product` is left alone, and this runs after FK-by-name resolution so `product` is an id.
+    injectLineUomIfApplicable(filteredBody, dalEntity, false);
 
     // ETP-5726: a required field cannot be emptied by sending null/"" (the screen cannot either).
     JSONObject clearedError = McpWriteRequestSupport.rejectClearedMandatoryFields(filteredBody,
@@ -1880,6 +1895,8 @@ public class McpToolRouter {
 
   /**
    * Derive a commercial line's unit of measure from its product when the body omits it (IMP-15).
+   * Also called from {@link #handleUpdate} with {@code userProvidedUom=false}, so a product change on
+   * an existing line re-derives it as the REST update does (ETP-5286 / ETP-5696).
    * <p>
    * The MCP write verbs are the second and third create path in this module, and neither reaches
    * {@code NeoCrudHandler#executePostCreate} — where the REST path runs this same injection. Without

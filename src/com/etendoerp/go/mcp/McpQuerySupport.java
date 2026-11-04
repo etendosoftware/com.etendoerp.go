@@ -34,6 +34,7 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * etendo_list query-shaping helpers extracted from {@link McpToolRouterSupport} (ETP-4254): builds the
@@ -103,6 +104,91 @@ final class McpQuerySupport {
       }
     }
     return orderBy + ",id";
+  }
+
+  /**
+   * ETP-6087: refuses a filter or a sort on accounting data ({@code posted} and the other columns
+   * of {@link NeoAccountingAccessPolicy#isAccountingFieldName}) for a role without
+   * {@code showAccountingFields}. The projection hides those fields from such a role (ETP-5684),
+   * but {@code filters:{"posted":"Y"}} or {@code orderBy:"posted"} still split the rows by it, so
+   * the status was readable all the same.
+   *
+   * <p>Checked before anything is read, so it also covers a customization that serves the list
+   * itself (the read provider gets the same filters and order). The refusal is the one a field
+   * the spec excludes gets, so the answer neither confirms nor denies that the column exists. The
+   * role flag is read only when an accounting name is present.</p>
+   *
+   * @param filters    the caller's filters, or {@code null}
+   * @param orderBy    the caller's {@code orderBy}, or {@code null}
+   * @param sfEntity   the entity listed
+   * @param entityName the entity name as the caller sent it, for the refusal
+   * @throws McpRoutingException 422 when a filter or sort names accounting data the role may not
+   *     see
+   */
+  static void refuseHiddenAccountingFields(JSONObject filters, String orderBy, SFEntity sfEntity,
+      String entityName) {
+    String filterKey = firstAccountingFilterKey(filters);
+    String sortKey = filterKey == null ? firstAccountingSortField(orderBy) : null;
+    if ((filterKey == null && sortKey == null)
+        || NeoAccountingAccessPolicy.currentRoleSeesAccounting()) {
+      return;
+    }
+    Entity dalEntity = dalEntityOf(sfEntity);
+    java.util.List<String> available = dalEntity == null ? java.util.List.of()
+        : availableFilterNames(sfEntity, dalEntity);
+    String name = sfEntity == null ? entityName : sfEntity.getName();
+    throw filterKey != null ? McpRoutingException.unknownFilterField(filterKey, name, available)
+        : McpRequestRefusals.sortFieldNotAvailable(sortKey, name, available);
+  }
+
+  private static String firstAccountingFilterKey(JSONObject filters) {
+    if (filters == null) {
+      return null;
+    }
+    java.util.Iterator<String> keys = filters.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (NeoAccountingAccessPolicy.isAccountingFieldName(key)) {
+        return key;
+      }
+    }
+    return null;
+  }
+
+  private static String firstAccountingSortField(String orderBy) {
+    if (StringUtils.isBlank(orderBy)) {
+      return null;
+    }
+    for (String part : orderBy.split(",")) {
+      String name = StringUtils.substringBefore(StringUtils.removeStart(part.trim(), "-"), " ");
+      if (NeoAccountingAccessPolicy.isAccountingFieldName(name)) {
+        return name;
+      }
+    }
+    return null;
+  }
+
+  private static Entity dalEntityOf(SFEntity sfEntity) {
+    Tab tab = sfEntity == null ? null : sfEntity.getADTab();
+    return tab == null || tab.getTable() == null ? null
+        : org.openbravo.base.model.ModelProvider.getInstance()
+            .getEntityByTableName(tab.getTable().getDBTableName());
+  }
+
+  /**
+   * {@link #filterablePropertyNames} as a refusal advertises them to the current role: without
+   * accounting data when the role may not see it (ETP-6087), so the {@code available} list does
+   * not name the very field the refusal hides.
+   */
+  private static java.util.List<String> availableFilterNames(SFEntity sfEntity,
+      Entity dalEntity) {
+    java.util.List<String> names = filterablePropertyNames(sfEntity, dalEntity);
+    if (names.stream().noneMatch(NeoAccountingAccessPolicy::isAccountingFieldName)
+        || NeoAccountingAccessPolicy.currentRoleSeesAccounting()) {
+      return names;
+    }
+    return names.stream().filter(n -> !NeoAccountingAccessPolicy.isAccountingFieldName(n))
+        .collect(java.util.stream.Collectors.toList());
   }
 
   /**
@@ -218,7 +304,7 @@ final class McpQuerySupport {
       SFEntity sfEntity) {
     return McpRoutingException.unknownFilterField(key,
         sfEntity == null ? dalEntity.getName() : sfEntity.getName(),
-        filterablePropertyNames(sfEntity, dalEntity));
+        availableFilterNames(sfEntity, dalEntity));
   }
 
   /**

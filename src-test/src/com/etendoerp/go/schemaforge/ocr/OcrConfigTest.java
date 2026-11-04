@@ -36,6 +36,7 @@ import org.junit.jupiter.api.Test;
  *
  * @covers com.etendoerp.go.schemaforge.ocr.OcrConfig
  * @covers com.etendoerp.go.schemaforge.ocr.OcrDocType
+ * @covers com.etendoerp.go.schemaforge.ocr.OcrExtractionParser
  */
 class OcrConfigTest {
 
@@ -204,5 +205,37 @@ class OcrConfigTest {
     for (String key : List.of("quantity", "unit_price", "tax_rate")) {
       assertTrue(line.getJSONObject(key).getJSONArray("type").toString().contains("number"), key);
     }
+  }
+
+  @Test
+  @DisplayName("total_amount is a nullable number, a property and required, but not a data key")
+  void totalAmountIsDeclaredButIsNotData() throws JSONException {
+    OcrDocType type = purchaseInvoice();
+    JSONObject schema = type.getSchema();
+    JSONObject total = schema.getJSONObject("properties").getJSONObject("total_amount");
+
+    assertEquals(List.of("number", "null"), List.of(total.getJSONArray("type").getString(0),
+        total.getJSONArray("type").getString(1)));
+    boolean required = false;
+    for (int i = 0; i < schema.getJSONArray("required").length(); i++) {
+      required = required || "total_amount".equals(schema.getJSONArray("required").getString(i));
+    }
+    assertTrue(required, "total_amount must be required by the strict schema");
+    assertFalse(type.getDataKeys().contains("total_amount"));
+  }
+
+  @Test
+  @DisplayName("a document that only carries a total has no data: the total alone is not a reading")
+  void aTotalAloneIsNotData() throws JSONException {
+    assertFalse(OcrExtractionParser.hasData(purchaseInvoice(),
+        new JSONObject().put("total_amount", 121.0)));
+    assertTrue(OcrExtractionParser.hasData(purchaseInvoice(),
+        new JSONObject().put("total_amount", 121.0).put("document_no", "F-1")));
+  }
+
+  @Test
+  @DisplayName("the question asks for the total with taxes, so the model fills the field")
+  void questionAsksForTheTotal() {
+    assertTrue(purchaseInvoice().getQuestion().contains("total amount with taxes"));
   }
 }
