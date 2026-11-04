@@ -54,7 +54,12 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
  * Unit tests for the ETP-5295 {@code needsPrimaryDoc} / {@code needsInvoiceDoc} GET annotations
@@ -613,6 +618,71 @@ public class OrderPendingDocsAnnotationTest {
       NeoResponse result = handler.afterHandle(ctx);
 
       assertTrue(dataOf(result).getJSONObject(0).getBoolean(NEEDS_INVOICE));
+    }
+  }
+
+  /**
+   * ETP-5828 — the single-record GET of a COMPLETED sales order carries {@code pendingInvoiceAmount},
+   * what "Generar factura" would invoice now: the action's own quantities (the order import's
+   * {@code shipmentScopedPending}, here 2 units of a 10.00 line at 21 % with a 10 % global
+   * discount) priced like the invoice: 20.00 − 2.00 = 18.00 + 3.78 tax = 21.78. A draft sales
+   * order, a completed one with nothing to invoice ({@code needsInvoiceDoc} false: its total 0 is
+   * fully "invoiced") and a completed purchase order do not get the key, and nothing is computed.
+   */
+  @Test
+  public void testPendingInvoiceAmountOnTheCompletedSalesOrderOnly() throws Exception {
+    TaxRate tax = mock(TaxRate.class);
+    when(tax.getId()).thenReturn("tax-21");
+    when(tax.getRate()).thenReturn(new BigDecimal("21"));
+    OrderLine line = mock(OrderLine.class);
+    when(line.getId()).thenReturn("l1");
+    when(line.getUnitPrice()).thenReturn(new BigDecimal("10.00"));
+    when(line.getTax()).thenReturn(tax);
+    Currency currency = mock(Currency.class);
+    when(currency.getStandardPrecision()).thenReturn(2L);
+    Order order = mock(Order.class);
+    when(order.getCurrency()).thenReturn(currency);
+    when(order.getEtgoTotalDiscount()).thenReturn(new BigDecimal("10"));
+    when(order.getOrderLineList()).thenReturn(List.of(line));
+    ImportOrderLinesIntoInvoiceHandler orderImport = mock(ImportOrderLinesIntoInvoiceHandler.class);
+    when(orderImport.shipmentScopedPending(order)).thenReturn(Map.of("l1", new BigDecimal("2")));
+    SalesOrderHeaderHandler sales = new SalesOrderHeaderHandler();
+    Field field = SalesOrderHeaderHandler.class.getDeclaredField("orderLineImport");
+    field.setAccessible(true);
+    field.set(sales, orderImport);
+    // declared as an enriched key (MCP projections), on the sales order only
+    assertTrue(sales.responseEnrichedFields().contains("pendingInvoiceAmount"));
+    assertFalse(new PurchaseOrderHeaderHandler().responseEnrichedFields()
+        .contains("pendingInvoiceAmount"));
+
+    for (Object[] c : new Object[][] {
+        // name, handler, documentStatus, order total, expected amount (null = no key)
+        { "completed sales order", sales, STATUS_COMPLETED, 100.0, "21.78" },
+        { "completed sales order with nothing to invoice", sales, STATUS_COMPLETED, 0.0, null },
+        { "draft sales order", sales, STATUS_DRAFT, 100.0, null },
+        { "completed purchase order", new PurchaseOrderHeaderHandler(), STATUS_COMPLETED, 100.0,
+            null },
+    }) {
+      Mockito.clearInvocations(orderImport);
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+        stubDb(obDalMock);
+        OBDal dal = OBDal.getInstance();
+        when(dal.get(Order.class, "order-1")).thenReturn(order);
+
+        JSONObject rec = orderRecord("order-1", (Double) c[3]).put("documentStatus", c[2]);
+        NeoResponse result = ((AbstractOrderHeaderHandler) c[1])
+            .afterHandle(getCtx("order-1", rec));
+
+        JSONObject annotated = dataOf(result).getJSONObject(0);
+        if (c[4] == null) {
+          assertFalse((String) c[0], annotated.has("pendingInvoiceAmount"));
+          verify(orderImport, never()).shipmentScopedPending(order);
+        } else {
+          assertEquals((String) c[0], 0, new BigDecimal((String) c[4])
+              .compareTo(new BigDecimal(annotated.get("pendingInvoiceAmount").toString())));
+        }
+      }
     }
   }
 

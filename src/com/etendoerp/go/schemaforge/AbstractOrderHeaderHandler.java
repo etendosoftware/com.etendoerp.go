@@ -453,6 +453,46 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     return false;
   }
 
+  /** The single-record GET key of {@link #pendingInvoiceAmount} (ETP-5828). */
+  static final String FIELD_PENDING_INVOICE_AMOUNT = "pendingInvoiceAmount";
+
+  /**
+   * The amount this header's invoice action would invoice now, for the manage-documents modal
+   * (ETP-5828), or {@code null} when the header does not compute one. Defaults to {@code null}:
+   * only the customization whose action follows the net-of-drafts rule overrides it. Annotated on
+   * the SINGLE-record GET only (one order, a few queries), never on a list page.
+   *
+   * @param orderId the completed order
+   * @return the gross amount, or {@code null}
+   */
+  protected BigDecimal pendingInvoiceAmount(String orderId) {
+    return null;
+  }
+
+  /**
+   * Puts {@link #FIELD_PENDING_INVOICE_AMOUNT} on a completed order's single-record GET when this
+   * header computes it and {@code needsInvoiceDoc} (annotated just before) is {@code true}: with
+   * nothing to invoice the modal shows no invoice card, so nothing is computed. Advisory: a
+   * failure leaves the key out (the modal then derives its own figure, as before) and never fails
+   * the GET. It is the last read of the GET: {@code DocumentListTotals.injectInto}, which runs
+   * after it, is a no-op on a single-record GET, so a DB failure here cannot spoil a later query.
+   */
+  private void annotatePendingInvoiceAmount(JSONObject rec, String orderId) {
+    if (!DOC_STATUS_COMPLETED.equals(rec.optString("documentStatus", null))
+        || !rec.optBoolean(FIELD_NEEDS_INVOICE_DOC, false)) {
+      return;
+    }
+    try {
+      BigDecimal amount = pendingInvoiceAmount(orderId);
+      if (amount != null) {
+        rec.put(FIELD_PENDING_INVOICE_AMOUNT, amount);
+      }
+    } catch (Exception e) {
+      log.warn("Could not compute {} for order {}: {}", FIELD_PENDING_INVOICE_AMOUNT, orderId,
+          e.getMessage());
+    }
+  }
+
   /**
    * Redirects a list filter on each status percentage {@link #applyCorrectedStatusPercentages}
    * rewrites to its stored computed twin (ETP-5705).
@@ -515,6 +555,10 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
         }
         annotatePendingDocuments(dataArr);
         applyCorrectedStatusPercentages(dataArr);
+        if (context.getRecordId() != null) {
+          // ETP-5828: after the batch reads, so a failure here cannot spoil them
+          annotatePendingInvoiceAmount(dataArr.getJSONObject(0), context.getRecordId());
+        }
         changed = true;
       }
       // ETP-5757: whole-set footer totals, also for an empty page. Last on purpose: a failed
