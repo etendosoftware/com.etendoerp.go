@@ -442,6 +442,18 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
   }
 
   /**
+   * Whether this header's invoice action invoices what is pending NET of the draft invoices
+   * (ETP-5828, {@link OrderInvoicePending}): then {@code needsInvoiceDoc} stays {@code true} while
+   * a draft leaves something to invoice, instead of turning {@code false} at the first draft.
+   *
+   * <p>Defaults to {@code false}, the ETP-5295 rule. The customization whose invoice action
+   * follows the net rule overrides it.
+   */
+  protected boolean invoicePendingNetOfDrafts() {
+    return false;
+  }
+
+  /**
    * Redirects a list filter on each status percentage {@link #applyCorrectedStatusPercentages}
    * rewrites to its stored computed twin (ETP-5705).
    *
@@ -768,6 +780,10 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    *
    *   totalPending    = order GrandTotal - SUM(GrandTotal of LINKED invoices in DocStatus 'CO')
    *   needsInvoiceDoc = totalPending != 0 AND no LINKED invoice in DocStatus 'DR'
+   *
+   *   with {@link #invoicePendingNetOfDrafts()} (the sales order, ETP-5828):
+   *   needsInvoiceDoc = totalPending != 0 AND (no LINKED draft invoice
+   *                     OR some line is still pending net of the draft invoices)
    * </pre>
    *
    * <p><b>Both flags are annotated unconditionally, for every document status.</b> The form only
@@ -788,6 +804,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     Map<String, OrderQuantities> quantities;
     Set<String> withDraftPrimaryDoc;
     Map<String, LinkedInvoiceTotals> invoiceTotals;
+    Set<String> pendingPastDrafts;
     try {
       // Sales ('Y') vs purchase ('N') comes from the SAME switch the price-list fallback uses,
       // so a subclass never has to know about this annotation to be classified correctly.
@@ -795,6 +812,9 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       quantities = batchFetchOrderedVsDelivered(ids);
       withDraftPrimaryDoc = batchFindOrdersWithDraftPrimaryDoc(ids, soTrx);
       invoiceTotals = batchFetchLinkedInvoiceTotals(ids, soTrx);
+      pendingPastDrafts = invoicePendingNetOfDrafts()
+          ? batchFindOrdersPendingPastDrafts(ordersWithDraftInvoice(invoiceTotals), soTrx)
+          : null;
     } catch (Exception e) {
       log.error("DB error computing needsPrimaryDoc/needsInvoiceDoc for {} order(s)", ids.size(), e);
       denyPendingDocumentFlags(dataArr);
@@ -802,8 +822,65 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
     for (int i = 0; i < dataArr.length(); i++) {
       annotatePendingDocumentsOnRecord(
-          dataArr.getJSONObject(i), quantities, withDraftPrimaryDoc, invoiceTotals);
+          dataArr.getJSONObject(i), quantities, withDraftPrimaryDoc, invoiceTotals,
+          pendingPastDrafts);
     }
+  }
+
+  /** The orders of the page that have a linked DRAFT invoice. */
+  private static List<String> ordersWithDraftInvoice(Map<String, LinkedInvoiceTotals> totals) {
+    List<String> withDraft = new ArrayList<>();
+    for (Map.Entry<String, LinkedInvoiceTotals> entry : totals.entrySet()) {
+      if (entry.getValue().hasDraft()) {
+        withDraft.add(entry.getKey());
+      }
+    }
+    return withDraft;
+  }
+
+  /**
+   * One query, the orders with a draft invoice only (ETP-5828): which of them still have a line
+   * with something to invoice NET of the draft invoices — the {@link OrderInvoicePending} rule in
+   * SQL, line by line: an active line with a product other than the total-discount line, whose
+   * ordered minus invoiced is non-zero with the ordered sign, and still so once the quantity the
+   * active lines of DRAFT invoices of the direction hold against it is taken away.
+   */
+  // placeholders contains only "?" literals — all values are bound via setString(); no injection risk.
+  @SuppressWarnings("java:S2077")
+  private Set<String> batchFindOrdersPendingPastDrafts(List<String> ids, String soTrx)
+      throws SQLException {
+    Set<String> result = new HashSet<>();
+    if (ids.isEmpty()) {
+      return result;
+    }
+    String sql =
+        "SELECT DISTINCT p.order_id FROM ( " +
+        "SELECT ol.C_Order_ID AS order_id, ol.QtyOrdered AS ordered, " +
+        "       ol.QtyOrdered - ol.QtyInvoiced AS base, " +
+        "       ol.QtyOrdered - ol.QtyInvoiced - COALESCE((SELECT SUM(il.QtyInvoiced) " +
+        "         FROM C_InvoiceLine il JOIN C_Invoice i ON i.C_Invoice_ID = il.C_Invoice_ID " +
+        "        WHERE il.C_OrderLine_ID = ol.C_OrderLine_ID AND il.IsActive = 'Y' " +
+        "          AND i.DocStatus = ? AND i.IsSOTrx = ?), 0) AS net " +
+        "  FROM C_OrderLine ol " +
+        " WHERE ol.C_Order_ID IN (" + placeholders(ids) + ") AND ol.IsActive = 'Y' " +
+        "   AND ol.M_Product_ID IS NOT NULL AND ol.M_Product_ID <> ? " +
+        ") p WHERE p.base <> 0 AND SIGN(p.base) = SIGN(p.ordered) AND SIGN(p.net) = SIGN(p.base)";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      int idx = 1;
+      ps.setString(idx++, DOC_STATUS_DRAFT);
+      ps.setString(idx++, soTrx);
+      for (String id : ids) {
+        ps.setString(idx++, id);
+      }
+      ps.setString(idx, TotalDiscountService.DISCOUNT_PRODUCT_ID);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          result.add(rs.getString(1));
+        }
+      }
+    }
+    return result;
   }
 
   /**
@@ -842,7 +919,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    */
   private void annotatePendingDocumentsOnRecord(JSONObject rec,
       Map<String, OrderQuantities> quantities, Set<String> withDraftPrimaryDoc,
-      Map<String, LinkedInvoiceTotals> invoiceTotals) throws JSONException {
+      Map<String, LinkedInvoiceTotals> invoiceTotals, Set<String> pendingPastDrafts)
+      throws JSONException {
     String id = rec.optString(FIELD_ID, null);
     if (id == null || id.isEmpty()) {
       rec.put(FIELD_NEEDS_PRIMARY_DOC, false);
@@ -862,7 +940,11 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     // the form sees: OrderDraftTotalDiscount.applyToRecord() has already run over this array and may have
     // adjusted grandTotalAmount for a draft carrying a not-yet-materialized total discount.
     BigDecimal totalOrder = BigDecimal.valueOf(rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0));
-    rec.put(FIELD_NEEDS_INVOICE_DOC, totalOrder.compareTo(invoiced) != 0 && !hasDraftInvoice);
+    // ETP-5828: under the net rule (pendingPastDrafts non-null) a draft only blocks when, net of
+    // what the drafts hold, no line is left to invoice; without a draft nothing changes.
+    boolean draftBlocks = hasDraftInvoice
+        && (pendingPastDrafts == null || !pendingPastDrafts.contains(id));
+    rec.put(FIELD_NEEDS_INVOICE_DOC, totalOrder.compareTo(invoiced) != 0 && !draftBlocks);
   }
 
   /**

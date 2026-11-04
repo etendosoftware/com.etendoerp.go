@@ -189,10 +189,20 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
     return OrderDocumentAvailability.RESPONSE_ENRICHED_FIELDS;
   }
 
-  /** The order's creation actions, for {@link OrderDocumentAvailability} (ETP-5714). */
+  /**
+   * The order's creation actions, for {@link OrderDocumentAvailability} (ETP-5714). ETP-5828: a
+   * sales order invoices what is pending net of its draft invoices, so a draft only hides
+   * "Generar factura" when it covers everything left.
+   */
   private static final OrderDocumentAvailability.Flow AVAILABILITY_FLOW =
       new OrderDocumentAvailability.Flow(true, CreateShipmentHandler.CONTRACT.getName(),
-          CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(), true);
+          CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(), true, true);
+
+  /** {@inheritDoc} ETP-5828: the same net-of-drafts rule as {@link #AVAILABILITY_FLOW}. */
+  @Override
+  protected boolean invoicePendingNetOfDrafts() {
+    return AVAILABILITY_FLOW.invoiceNetOfDrafts();
+  }
 
   /**
    * {@inheritDoc} Reactivate is ruled out for an order that has linked documents, and each

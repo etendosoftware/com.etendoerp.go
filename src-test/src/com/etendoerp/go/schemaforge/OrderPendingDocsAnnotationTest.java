@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -86,6 +87,10 @@ import org.openbravo.dal.service.OBDal;
  * Each {@code ResultSet} is a real cursor over fixture rows rather than a single sticky
  * {@code thenReturn(true)}: queries 2–4 read with {@code while (rs.next())}, and an always-true
  * stub spins forever there.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
  */
 public class OrderPendingDocsAnnotationTest {
 
@@ -410,6 +415,61 @@ public class OrderPendingDocsAnnotationTest {
       NeoResponse result = new SalesOrderHeaderHandler().afterHandle(ctx);
 
       assertFalse(dataOf(result).getJSONObject(0).getBoolean(NEEDS_INVOICE));
+    }
+  }
+
+  /**
+   * ETP-5828 — a sales order invoices what is pending net of its draft invoices, so a draft that
+   * holds only part of it leaves the flag on: the one extra query (issued only for the orders of
+   * the page that have a draft) finds a line still pending past the drafts — also for a draft
+   * linked to the order only by its header, which holds none of its lines — and when it finds
+   * none the flag goes off on that query's answer. The purchase order
+   * keeps the rule above — any draft turns it off — and never issues that query.
+   */
+  @Test
+  public void testNeedsInvoiceDocFollowsTheNetOfDraftsRuleOnSalesOnly() throws Exception {
+    Object[][] salesCases = {
+        // name, draft invoice total, a line still pending past the drafts, expected flag
+        { "a draft holds part of the order", "20", true, true },
+        // linked by C_Invoice.C_Order_ID only: no line, so a zero total, and every line still
+        // pending past it — the ETP-5295 rule turned the flag off at the mere presence of a draft
+        { "a header-only draft holds no line of it", "0", true, true },
+        { "the drafts hold everything left", "40", false, false },
+    };
+    for (Object[] c : salesCases) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        Db db = stubDb(obDalMock,
+            noRows(),
+            noRows(),
+            noRows(),
+            resultSet(
+                invoiceRow("order-1", STATUS_COMPLETED, "60"),
+                invoiceRow("order-1", STATUS_DRAFT, (String) c[1])),
+            Boolean.TRUE.equals(c[2]) ? resultSet(inOutRow("order-1")) : noRows());
+
+        NeoResponse result = new SalesOrderHeaderHandler()
+            .afterHandle(getCtx("order-1", orderRecord("order-1", 100.0)));
+
+        assertEquals((String) c[0], c[3],
+            dataOf(result).getJSONObject(0).getBoolean(NEEDS_INVOICE));
+        // the answer comes from the net-of-drafts query, not from the mere presence of a draft
+        verify(db.conn()).prepareStatement(argThat(sql -> sql != null && sql.contains(" AS net ")));
+      }
+    }
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      Db db = stubDb(obDalMock,
+          noRows(),
+          noRows(),
+          noRows(),
+          resultSet(
+              invoiceRow("po-1", STATUS_COMPLETED, "60"),
+              invoiceRow("po-1", STATUS_DRAFT, "20")));
+
+      NeoResponse result = new PurchaseOrderHeaderHandler()
+          .afterHandle(getCtx("po-1", orderRecord("po-1", 100.0)));
+
+      assertFalse(dataOf(result).getJSONObject(0).getBoolean(NEEDS_INVOICE));
+      verify(db.conn(), times(5)).prepareStatement(anyString());
     }
   }
 
