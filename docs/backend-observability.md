@@ -269,10 +269,20 @@ When it is emitted:
   (`unchecked` / `sent_to_panel`): the SPA's report of the pairs it SHOWED and did not apply.
   `groupKey` is the `autoMatch` group's; it is resolved through the call's detection, read before
   the transaction groups take their lines. An unknown key, an unknown decision, a repeated key or
-  the key of a pair applied in the same call is ignored, never an error. MCP calls cannot send
-  `bounceDecisions` (it is not in the agent contract), so they report the applied pairs only.
-- **`discardPair` (surface `panel`, UI or MCP)**: `discarded` after the discard; `failed` on a 409
-  for a pair the detection proposes (a pair it does not see emits nothing).
+  the key of a pair applied in the same call is ignored, never an error. An agent (MCP) cannot
+  send `bounceDecisions` (it is not in the agent contract). Instead, **when its call applied at
+  least one `bouncePair` group**, every detected **preselected** pair (`high`, never ambiguous) it
+  left out — not among its groups, and with no line taken by any group of the same call, transaction
+  groups included — is an `unchecked` decision (surface `modal`, channel `mcp`), counted in the
+  summary (`pairs_shown`, `pairs_unchecked`, `preselection_changed`). An MCP call that applied no
+  bounce-pair group did not look at the bounces and sends no bounce event at all. The SPA path does
+  not infer anything: it reports what it showed in `bounceDecisions`.
+- **`discardPair` (surface `panel`, UI or MCP)**: `discarded` after the discard; `failed` on a 409.
+- **One rule for `failed`, modal and panel:** every 409 refusal of a pair is `failed`; it carries
+  the proposal properties (`detection_signal` … `chosen_among_alternatives`) when the action's
+  detection sees the pair, and only `account_id`, `channel`, `flag_enabled`, `decision`, `surface`
+  when it does not (e.g. a line reconciled meanwhile). A malformed request (400 / 404) emits
+  nothing. `failed` never counts in the KPI.
 - **`dismissPair` (surface `panel`, UI only)**: `unchecked` — the panel's *No es un rebote*. Nothing
   is written, so the pair is proposed again next time and each dismissal counts.
 
@@ -289,7 +299,8 @@ A pair discarded that detection did not propose (sent through the API or the MCP
 | `account_id` | tenant `AD_Client_ID` |
 | `detection_signal` | stored `EM_ETGO_Bounce_Signal` (absent when null) |
 | `confidence` | stored `EM_ETGO_Bounce_Confidence` (`high` only for a pair detection proposed exactly as high) |
-| `days_since_decided` | whole days since `EM_ETGO_Bounce_Discarded`, computed in the backend |
+| `preselected` | `confidence == "high"`: the pair came preselected, so the KPI can subtract it from the preselected discards |
+| `days_since_decided` | **UTC calendar days** between `EM_ETGO_Bounce_Discarded` and the restore (a discard at 23:59 UTC restored at 00:01 UTC is 1), computed in the backend; the collector subtracts it from the restore's UTC day to get the decision's UTC day. Never negative |
 | `channel`, `flag_enabled` | as above |
 
 `backend_bank_bounce_suggestions_applied` — once per `applySuggestions` that decided at least one
@@ -301,6 +312,13 @@ bounce pair (applied or reported in `bounceDecisions`).
 | `pairs_discarded`, `pairs_unchecked`, `pairs_sent_to_panel` | per decision (`failed` = shown − the three) |
 | `preselection_changed` | a preselected pair was unchecked or sent to the panel, or a non-preselected pair was applied |
 | `account_id`, `channel`, `flag_enabled` | as above |
+
+**Known gap — a discard saved before a later failure of the same call.** `applySuggestions`
+discards its bounce pairs first, then matches the transaction groups; Core's matching services
+commit mid-flow. If the final `processReconciliation` then fails, the call answers an error and
+`finish` is never reached, so the bounce discards already committed get **no** `decided` event
+(and no summary). Rare; a later `restorePair` of such a pair then sends a `restored` with no
+matching decision, which can only lower the KPI's `P_discarded − P_restored` for that day.
 
 Example (`backend_bank_bounce_pair_decided` as submitted to Mixpanel):
 

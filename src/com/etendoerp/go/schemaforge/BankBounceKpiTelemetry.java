@@ -17,9 +17,12 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
@@ -339,9 +342,15 @@ final class BankBounceKpiTelemetry {
   /**
    * The properties of {@code backend_bank_bounce_pair_restored}.
    *
+   * {@code preselected} is {@code true} exactly when the stored confidence is {@code high}: the
+   * stored confidence is {@code high} only for a pair detection proposed exactly as high, i.e. a
+   * pair that came preselected, so the KPI can subtract restorations from the preselected
+   * discards.
+   *
    * @param signal            the stored {@code EM_ETGO_Bounce_Signal}, or {@code null}
    * @param confidence        the stored {@code EM_ETGO_Bounce_Confidence}, or {@code null}
-   * @param daysSinceDecided  whole days since {@code EM_ETGO_Bounce_Discarded}, or {@code null}
+   * @param daysSinceDecided  UTC calendar days since {@code EM_ETGO_Bounce_Discarded}, or
+   *                          {@code null}
    * @param accountId         the tenant, or {@code null}
    * @param channel           {@code ui} or {@code mcp}
    * @return the properties, in a stable order
@@ -351,12 +360,15 @@ final class BankBounceKpiTelemetry {
     Map<String, Object> properties = base(accountId, channel);
     properties.put(PROP_DETECTION_SIGNAL, signal);
     properties.put(PROP_CONFIDENCE, confidence);
+    properties.put(PROP_PRESELECTED, BankBounceDetector.CONFIDENCE_HIGH.equals(confidence));
     properties.put(PROP_DAYS_SINCE_DECIDED, daysSinceDecided);
     return properties;
   }
 
   /**
-   * Whole days between the discard and {@code now}, never negative.
+   * UTC calendar days between the discard and {@code now}, never negative: the KPI collector
+   * subtracts them from the restore's UTC day to find the decision's UTC day, so a discard at
+   * 23:59 UTC restored at 00:01 UTC the next day is 1, not 0.
    *
    * @param discardedAt when the pair was discarded, or {@code null}
    * @param now         the restore instant
@@ -366,7 +378,9 @@ final class BankBounceKpiTelemetry {
     if (discardedAt == null || now == null) {
       return null;
     }
-    return Math.max(0L, Duration.between(discardedAt.toInstant(), now).toDays());
+    LocalDate decided = LocalDate.ofInstant(discardedAt.toInstant(), ZoneOffset.UTC);
+    LocalDate restored = LocalDate.ofInstant(now, ZoneOffset.UTC);
+    return Math.max(0L, ChronoUnit.DAYS.between(decided, restored));
   }
 
   /**
@@ -439,10 +453,11 @@ final class BankBounceKpiTelemetry {
   }
 
   /**
-   * A panel discard was refused. Only a business refusal (409: a line already reconciled,
-   * discarded or taken, a payment...) of a pair detection proposed is a {@code failed} decision;
-   * malformed requests (400 / 404) and pairs detection does not see emit nothing. Sent at once:
-   * the refusal rolls the action back. Never throws.
+   * A panel discard was refused. Every business refusal (409: a line already reconciled,
+   * discarded or taken, a payment...) is a {@code failed} decision, with the proposal properties
+   * when the action's detection sees the pair and without them otherwise — the same rule as the
+   * modal ({@link ModalDecisions#accept}). Malformed requests (400 / 404) emit nothing. Sent at
+   * once: the refusal rolls the action back. Never throws.
    *
    * @param detection     the action's detection
    * @param account       the account of the action
@@ -457,11 +472,8 @@ final class BankBounceKpiTelemetry {
     }
     try {
       Match match = find(detection.pairs(), lineId, counterpartId);
-      if (match == null) {
-        return;
-      }
       sendNow(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED,
-          decidedProperties(match.proposal(), DECISION_FAILED, SURFACE_PANEL,
+          decidedProperties(match != null ? match.proposal() : null, DECISION_FAILED, SURFACE_PANEL,
               accountId(account), channel()), accountId(account));
     } catch (Exception e) {
       log.debug("Bounce KPI: could not build the panel failure event: {}", e.getMessage());
@@ -562,11 +574,16 @@ final class BankBounceKpiTelemetry {
 
   /**
    * The bounce-pair decisions of one {@code applySuggestions} call: every pair applied
-   * ({@code discarded}, or {@code failed} on a 409) as it is processed, then the pairs the SPA
-   * reports in {@code bounceDecisions} ({@code unchecked} / {@code sent_to_panel}), resolved by
-   * {@code groupKey} through the call's detection; an unknown key, an unknown decision or a pair
-   * already applied in the call is ignored, never an error. {@link #finish()} sends one decision
-   * per pair plus the summary event. {@link #NONE} (flag off) does nothing.
+   * ({@code discarded}, or {@code failed} on a 409) as it is processed, then the pairs not applied.
+   * From the SPA ({@code channel ui}) those are the ones it reports in {@code bounceDecisions}
+   * ({@code unchecked} / {@code sent_to_panel}), resolved by {@code groupKey} through the call's
+   * detection; an unknown key, an unknown decision or a pair already applied in the call is
+   * ignored, never an error. An agent ({@code channel mcp}) cannot send {@code bounceDecisions}:
+   * when it applied at least one bounce-pair group, every preselected pair of the call's
+   * detection it left out — not applied, and with no line taken by a group of the call — is an
+   * {@code unchecked} decision; when it applied none, it did not look at the bounces and nothing
+   * is sent. {@link #finish} sends one decision per pair plus the summary event. {@link #NONE}
+   * (flag off) does nothing.
    */
   static final class ModalDecisions implements BankBouncePairService.PairOutcomes {
 
@@ -579,6 +596,7 @@ final class BankBounceKpiTelemetry {
     private final String channel;
     private final List<Map<String, Object>> decided = new ArrayList<>();
     private final Set<String> decidedKeys = new HashSet<>();
+    private int appliedGroups;
     private int discarded;
     private int unchecked;
     private int sentToPanel;
@@ -616,12 +634,15 @@ final class BankBounceKpiTelemetry {
     }
 
     /**
-     * Reads the call's detection now when the SPA reported decisions, so it sees the lines as the
-     * modal showed them: called after the bounce groups and BEFORE the transaction groups are
-     * matched (they would take their lines out of the detection). A no-op otherwise. Never throws.
+     * Reads the call's detection now when it will be needed to resolve the pairs not applied —
+     * the SPA reported decisions, or an agent applied at least one bounce-pair group — so it sees
+     * the lines as they were offered: called after the bounce groups and BEFORE the transaction
+     * groups are matched (they would take their lines out of the detection). A no-op otherwise.
+     * Never throws.
      */
     void prime() {
-      if (detection == null || reported == null || reported.length() == 0) {
+      boolean reportedAny = reported != null && reported.length() > 0;
+      if (detection == null || !(reportedAny || agentReviewed())) {
         return;
       }
       try {
@@ -643,6 +664,7 @@ final class BankBounceKpiTelemetry {
       if (detection == null || outcome == null) {
         return;
       }
+      appliedGroups++;
       try {
         if (outcome.error() == null) {
           record(discardedMatch(detection, outcome), DECISION_DISCARDED);
@@ -656,15 +678,30 @@ final class BankBounceKpiTelemetry {
     }
 
     /**
-     * Resolves the reported decisions, then sends one decision event per pair and, when any pair
-     * was decided, the summary. Called once the call succeeded. Never throws.
+     * Whether an agent submitted at least one bounce-pair group: only then are the preselected
+     * pairs it left out its {@code unchecked} decisions.
+     *
+     * @return {@code true} for an MCP call with at least one bounce-pair group
      */
-    void finish() {
+    private boolean agentReviewed() {
+      return CHANNEL_MCP.equals(channel) && appliedGroups > 0;
+    }
+
+    /**
+     * Resolves the pairs not applied (the SPA's reported decisions, or an agent's left-out
+     * preselected pairs), then sends one decision event per pair and, when any pair was decided,
+     * the summary. Called once the call succeeded. Never throws.
+     *
+     * @param takenLineIds every line a group of the call took (bounce pairs and transaction
+     *                     groups), or {@code null}
+     */
+    void finish(Collection<String> takenLineIds) {
       if (detection == null) {
         return;
       }
       try {
         recordReported();
+        recordAgentOmissions(takenLineIds);
         if (decided.isEmpty()) {
           return;
         }
@@ -700,6 +737,32 @@ final class BankBounceKpiTelemetry {
         Pair pair = byGroupKey(detection.pairs(), key);
         if (pair != null) {
           record(new Match(pair, Proposal.of(pair)), decision);
+        }
+      }
+    }
+
+    /**
+     * An agent's {@code applySuggestions} that submitted at least one bounce-pair group: every
+     * preselected (high, never ambiguous) pair of the call's detection that was not applied and
+     * none of whose lines a group of the call took is an {@code unchecked} decision. A no-op for
+     * the SPA and for an agent call with no bounce-pair group.
+     *
+     * @param takenLineIds every line a group of the call took, or {@code null}
+     * @throws Exception when the detection cannot be read
+     */
+    private void recordAgentOmissions(Collection<String> takenLineIds) throws Exception {
+      if (!agentReviewed()) {
+        return;
+      }
+      Collection<String> taken = takenLineIds != null ? takenLineIds : Collections.emptySet();
+      List<Pair> detected = detection.pairs();
+      if (detected == null) {
+        return;
+      }
+      for (Pair pair : detected) {
+        if (pair.high() && !pair.ambiguous() && !decidedKeys.contains(pair.groupKey())
+            && Collections.disjoint(pair.lineIds(), taken)) {
+          record(new Match(pair, Proposal.of(pair)), DECISION_UNCHECKED);
         }
       }
     }

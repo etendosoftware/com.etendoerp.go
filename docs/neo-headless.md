@@ -3043,6 +3043,12 @@ share 140.
   confidence and `days_since_decided`) and `backend_bank_bounce_suggestions_applied` (one summary per
   `applySuggestions` that decided a pair). What the pair was proposed as is read from the action's
   own detection, never from the client; no line id, amount, counterparty or text leaves the server.
+  An agent's `applySuggestions` (MCP, no `bounceDecisions`) that applied at least one `bouncePair`
+  group also sends `unchecked` for every detected preselected pair it left out (no line taken by a
+  group of the call); with no `bouncePair` group it sends no bounce event. A 409 is `failed` on
+  both surfaces, without the proposal properties when the detection does not see the pair.
+  `backend_bank_bounce_pair_restored` also carries `preselected` (stored confidence `high`), and
+  `days_since_decided` counts UTC calendar days.
   A telemetry failure never fails or rolls back the action. Full contract:
   `docs/backend-observability.md` → *Bank Bounce-Pair KPIs (ETP-5581)*.
 
@@ -5031,7 +5037,10 @@ filtered per request.
 Also declared (any flag value): `dismissPair` and the `applySuggestions` key `bounceDecisions` are
 **REST-only**. They feed the bounce-pair KPI from the SPA's modal and panel, which an agent does
 not have; the MCP refuses them with the contract's 422 (unknown action / undeclared key). An agent's
-`applySuggestions` and `discardPair` still emit their decision events, with `channel: "mcp"`.
+`applySuggestions` and `discardPair` still emit their decision events, with `channel: "mcp"`; in
+place of `bounceDecisions`, an agent's `applySuggestions` that applied at least one `bouncePair`
+group reports the preselected pairs it left out as `unchecked` (inferred by the backend), and one
+with no `bouncePair` group reports nothing for bounces.
 
 ##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, aligned)
 

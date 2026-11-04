@@ -1280,7 +1280,7 @@ public class ReconciliationHandler implements NeoHandler {
         groupsJson.length() - bounceGroups, results.length() - bounceResults,
         successfulGroups[0]);
     // ETP-5581: one decision per bounce pair applied or reported, plus the summary. Best effort.
-    bounceKpi.finish();
+    bounceKpi.finish(takenLineIds);
     return NeoResponse.createdWithData(data);
   }
 
