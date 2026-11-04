@@ -27,6 +27,8 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
@@ -151,11 +153,22 @@ public final class SelectorOrgFilter {
    */
   static void appendCustomSearchFilter(StringBuilder hql,
       List<String> searchableProps, String alias, String search, boolean hasWhere) {
+    appendCustomSearchFilter(hql, searchableProps, alias, search, hasWhere, null);
+  }
+
+  /**
+   * Same as above; with the queried {@code entityName}, a fragment that is a plain string property
+   * of that entity is searched as {@code upper(col)} (usable by a trigram index on
+   * {@code upper(col)}) instead of through a cast.
+   */
+  static void appendCustomSearchFilter(StringBuilder hql,
+      List<String> searchableProps, String alias, String search, boolean hasWhere,
+      String entityName) {
     List<String> expressions = new ArrayList<>();
     for (String fragment : searchableProps) {
       expressions.add(resolveSearchableExpression(alias, fragment));
     }
-    appendSearchPredicate(hql, expressions, search, hasWhere);
+    appendSearchPredicate(hql, expressions, search, hasWhere, entityName, alias);
   }
 
   /**
@@ -168,15 +181,29 @@ public final class SelectorOrgFilter {
    */
   static void appendRichSearchFilter(StringBuilder hql,
       List<SearchableFragment> searchableProps, String alias, String search, boolean hasWhere) {
+    appendRichSearchFilter(hql, searchableProps, alias, search, hasWhere, null);
+  }
+
+  /** Same as above, typing the fragments against {@code entityName} (see appendCustomSearchFilter). */
+  static void appendRichSearchFilter(StringBuilder hql,
+      List<SearchableFragment> searchableProps, String alias, String search, boolean hasWhere,
+      String entityName) {
     List<String> expressions = new ArrayList<>();
     for (SearchableFragment fragment : searchableProps) {
       expressions.add(resolveRichSearchableExpression(alias, fragment));
     }
-    appendSearchPredicate(hql, expressions, search, hasWhere);
+    appendSearchPredicate(hql, expressions, search, hasWhere, entityName, alias);
   }
 
+  /**
+   * One OR-ed {@code upper(...) LIKE upper(:search)} per expression. The term is upper-cased by the
+   * database with the same function as the column, so the match cannot differ by Java/PostgreSQL
+   * case rules, and a string column stays a bare {@code upper(col)} that a trigram index on
+   * {@code upper(col)} can serve. Other types (and fragments whose type is unknown) keep the cast.
+   * A NULL column never matches (before it was '' and matched only a term of wildcards).
+   */
   private static void appendSearchPredicate(StringBuilder hql, List<String> expressions,
-      String search, boolean hasWhere) {
+      String search, boolean hasWhere, String entityName, String alias) {
     if (StringUtils.isBlank(search) || expressions.isEmpty()) {
       return;
     }
@@ -185,9 +212,33 @@ public final class SelectorOrgFilter {
       if (i > 0) {
         hql.append(" OR ");
       }
-      hql.append("lower(COALESCE(cast(").append(expressions.get(i)).append(" as string), '')) LIKE :search");
+      String expression = expressions.get(i);
+      if (isStringProperty(entityName, alias, expression)) {
+        hql.append("upper(").append(expression).append(") LIKE upper(:search)");
+      } else {
+        hql.append("upper(COALESCE(cast(").append(expression).append(" as string), '')) LIKE upper(:search)");
+      }
     }
     hql.append(")");
+  }
+
+  /**
+   * Whether {@code expression} is {@code alias.<path>} resolving, on {@code entityName}, to a plain
+   * String property. False when unknown (another alias, an HQL function, no entity given).
+   */
+  static boolean isStringProperty(String entityName, String alias, String expression) {
+    if (entityName == null || alias == null || expression == null
+        || !expression.startsWith(alias + ".")) {
+      return false;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance().getEntity(entityName);
+      Property property = DalUtil.getPropertyFromPath(entity, expression.substring(alias.length() + 1));
+      return property != null && property.isPrimitive() && !property.isOneToMany()
+          && String.class.equals(property.getPrimitiveObjectType());
+    } catch (RuntimeException e) {
+      return false;
+    }
   }
 
   /**

@@ -1494,7 +1494,7 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * The search text is bound (lower-cased, wrapped in %) on the count, the page and the rows query,
+   * The search text is bound as typed (wrapped in %; the predicate upper-cases it in the database) on the count, the page and the rows query,
    * and every property the search touches belongs to the one alias {@code e}: the old copy into a
    * sub-alias is gone, so there is nothing for a bare {@code product.} to bind to.
    */
@@ -1506,9 +1506,9 @@ public class SelectorQueryExecutorTest {
     PagedRun run = runPaged(meta, "Ab", 20, 0, "e.active = true", 1L,
         Arrays.asList((Object) "P1"), Arrays.asList(valueRow("idA", "P1", "A")));
 
-    verify(run.countQuery).setParameter("search", "%ab%");
-    verify(run.pageQuery).setParameter("search", "%ab%");
-    verify(run.rowsQuery).setParameter("search", "%ab%");
+    verify(run.countQuery).setParameter("search", "%Ab%");
+    verify(run.pageQuery).setParameter("search", "%Ab%");
+    verify(run.rowsQuery).setParameter("search", "%Ab%");
     String where = run.where.get(0);
     assertTrue(where, where.contains("cast(e.product.name as string)"));
     assertTrue(where, where.contains("cast(e.product.searchKey as string)"));
@@ -1897,8 +1897,8 @@ public class SelectorQueryExecutorTest {
     List<String> where = captureRichWhere(meta, "es", "e.active = true");
 
     assertEquals("as e where e.active = true AND ("
-        + "lower(COALESCE(cast(e.name as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(e.iSOCountryCode as string), '')) LIKE :search)", where.get(0));
+        + "upper(COALESCE(cast(e.name as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(e.iSOCountryCode as string), '')) LIKE upper(:search))", where.get(0));
   }
 
   /**
@@ -1917,8 +1917,8 @@ public class SelectorQueryExecutorTest {
     List<String> where = captureRichWhere(meta, "p", "e.active = true");
 
     assertEquals("as e where e.active = true AND ("
-        + "lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(e.product.searchKey as string), '')) LIKE :search)", where.get(0));
+        + "upper(COALESCE(cast(e.product.name as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(e.product.searchKey as string), '')) LIKE upper(:search))", where.get(0));
     assertFalse("stock-breakdown selector must not be de-duplicated", where.get(0).contains("not null"));
   }
 }

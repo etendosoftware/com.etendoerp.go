@@ -79,7 +79,7 @@ class NeoSelectorExecutionHelper {
       return;
     }
     appendAndIfNeeded(hql);
-    hql.append("lower(e.").append(displayProperty).append(") LIKE :search");
+    hql.append("upper(e.").append(displayProperty).append(") LIKE upper(:search)");
   }
 
   /**
@@ -94,10 +94,10 @@ class NeoSelectorExecutionHelper {
       return;
     }
     appendAndIfNeeded(hql);
-    hql.append("(lower(e.").append(displayProperty).append(") LIKE :search OR exists (from ")
+    hql.append("(upper(e.").append(displayProperty).append(") LIKE upper(:search) OR exists (from ")
         .append(trl.trlEntityName).append(" t2 where t2.").append(trl.backRefProperty)
-        .append(" = e and t2.language.language = :searchLang and lower(t2.")
-        .append(trl.nameProperty).append(") LIKE :search))");
+        .append(" = e and t2.language.language = :searchLang and upper(t2.")
+        .append(trl.nameProperty).append(") LIKE upper(:search)))");
   }
 
   /**

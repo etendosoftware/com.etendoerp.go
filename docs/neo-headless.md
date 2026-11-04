@@ -1475,8 +1475,8 @@ Query parameters:
 
 | Param | Default | Max | Description |
 |-------|---------|-----|-------------|
-| `q` | (none) | -- | Search text. Filters on display property (simple) or all searchable fields (rich). Case-insensitive partial match. |
-| `limit` | 20 | 100 | Page size. |
+| `q` | (none) | -- | Search text. Filters on display property (simple) or all searchable fields (rich). Case-insensitive partial match. Matched as `upper(col) LIKE upper(:search)` (ETP-6103): a plain string column is a bare `upper(col)`, so a trigram index on `upper(col)` (`c_bpartner_name_trgm`) can serve it; other types keep a `cast(... as string)`. Every searchable field is OR-ed, so an unindexed one (e.g. `C_BPartner.description`) keeps the plan sequential. |
+| `limit` | 20 | 1000 | Page size. Raised from 100 (ETP-6103) so the SPA can walk to a committed value in few requests; MCP, FK-by-name and defaults lookups pass their own small limits and are unaffected. |
 | `offset` | 0 | -- | Page offset. |
 
 Response (simple selector):

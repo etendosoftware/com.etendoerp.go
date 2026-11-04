@@ -139,7 +139,7 @@ final class SelectorQueryExecutor {
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance().createQuery(meta.entityName, whereStr);
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
-      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
     }
     int totalCount = countQuery.count();
 
@@ -148,7 +148,7 @@ final class SelectorQueryExecutor {
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
-      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
     }
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
@@ -215,7 +215,7 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, extraFilterParams);
     if (hasSearch) {
-      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
     }
     int totalCount = countQuery.count();
 
@@ -226,7 +226,7 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
     if (hasSearch) {
-      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
     }
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
@@ -339,7 +339,7 @@ final class SelectorQueryExecutor {
     if (extraFilterParams != null) {
       fromParams.putAll(extraFilterParams);
     }
-    String searchParam = hasSearch ? "%" + search.toLowerCase() + "%" : null;
+    String searchParam = hasSearch ? "%" + search + "%" : null;
 
     String displayOrder = alias + "." + meta.displayProperty;
     // Decided up front, with no query: no fallback on failure. A failing Hibernate query marks the
