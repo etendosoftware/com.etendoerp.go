@@ -40,6 +40,8 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.NeoTenantWriteGuard;
+
 /**
  * DAL-backed transactional email safety store.
  */
@@ -176,16 +178,19 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
       }
     }
 
-    // Writing client-0 throttle records from a user request requires admin mode.
+    // Writing client-0 throttle records from a user request requires admin mode, and the NEO
+    // write guard the same exemption, for System rows only (ETP-6114).
     OBContext.setAdminMode();
     try {
-      for (EmailThrottleRule rule : rules) {
-        String key = StringUtils.trimToNull(rule.resolveKey(context));
-        if (key != null) {
-          incrementThrottle(rule, key, context, now);
+      NeoTenantWriteGuard.allowingSystemRows(() -> {
+        for (EmailThrottleRule rule : rules) {
+          String key = StringUtils.trimToNull(rule.resolveKey(context));
+          if (key != null) {
+            incrementThrottle(rule, key, context, now);
+          }
         }
-      }
-      OBDal.getInstance().flush();
+        OBDal.getInstance().flush();
+      });
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -221,8 +226,11 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
       auditEntry.set(PROP_STATUS, auditRecord.getStatus());
       auditEntry.set(PROP_AUDIT_TIME, new Date(auditRecord.getCreatedAtMillis()));
       auditEntry.set(PROP_PAYLOAD, auditPayload(auditRecord).toString());
-      OBDal.getInstance().save(auditEntry);
-      OBDal.getInstance().flush();
+      // ETP-6114: the NEO write guard admits this System row only inside its explicit scope.
+      NeoTenantWriteGuard.allowingSystemRows(() -> {
+        OBDal.getInstance().save(auditEntry);
+        OBDal.getInstance().flush();
+      });
       if (TransactionalEmailService.STATUS_SENT.equals(auditRecord.getStatus())
           && StringUtils.isNotBlank(auditRecord.getIdempotencyKey())) {
         SessionHandler.getInstance().commitAndStart();
