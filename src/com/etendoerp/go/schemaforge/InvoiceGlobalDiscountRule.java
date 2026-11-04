@@ -48,6 +48,10 @@ final class InvoiceGlobalDiscountRule {
   static final String CONFLICT_INVOICE_OTHER_DISCOUNT = "invoiceHasOtherDiscount";
   /** Conflict (c): the invoice already has lines and no total discount. */
   static final String CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT = "invoiceHasLinesWithoutDiscount";
+  /** Not carried: the call sent {@code carryGlobalDiscount:false}. */
+  static final String REASON_NOT_REQUESTED = "carryGlobalDiscountFalse";
+  /** Not carried: the selected orders have no global discount, nothing to carry. */
+  static final String REASON_NO_ORDER_DISCOUNT = "ordersWithoutDiscount";
 
   private InvoiceGlobalDiscountRule() {
   }
@@ -112,6 +116,16 @@ final class InvoiceGlobalDiscountRule {
         : value.setScale(4, RoundingMode.HALF_UP);
   }
 
+  /**
+   * The % as the API reports it: {@link #normalizedPercent} (comparisons stay at scale 4) without
+   * trailing zeros, so a caller reads {@code 12.5} or {@code 10}, never {@code 12.5000} — and
+   * never the exponent form {@code 1E+1} that a bare {@code stripTrailingZeros} gives for 10.
+   */
+  static BigDecimal reportedPercent(BigDecimal value) {
+    BigDecimal stripped = normalizedPercent(value).stripTrailingZeros();
+    return stripped.scale() < 0 ? stripped.setScale(0) : stripped;
+  }
+
   /** Whether the invoice holds an active line other than the total-discount line. */
   static boolean hasProductLines(Invoice invoice) {
     for (InvoiceLine line : invoice.getInvoiceLineList()) {
@@ -134,8 +148,29 @@ final class InvoiceGlobalDiscountRule {
   }
 
   /**
+   * What a successful import did with the global discount, as the popup's toast says it
+   * ("descuento global del X % aplicado a la factura"): {@code {applied:true, percent, reason:null}}
+   * when the invoice's total discount holds the orders' % after the call (set now or already
+   * there), else {@code {applied:false, percent:null, reason}} with {@value #REASON_NOT_REQUESTED}
+   * or {@value #REASON_NO_ORDER_DISCOUNT}. A conflict never gets here: it is the 422.
+   *
+   * @param carryRequested {@code carryGlobalDiscount} of the call
+   * @param carried        what {@link #toCarry} returned, {@code null} when nothing was carried
+   */
+  static JSONObject outcome(boolean carryRequested, BigDecimal carried) throws JSONException {
+    JSONObject outcome = new JSONObject();
+    boolean applied = carryRequested && carried != null;
+    outcome.put("applied", applied);
+    outcome.put("percent", applied ? reportedPercent(carried) : JSONObject.NULL);
+    String reason = carryRequested ? REASON_NO_ORDER_DISCOUNT : REASON_NOT_REQUESTED;
+    outcome.put("reason", applied ? JSONObject.NULL : reason);
+    return outcome;
+  }
+
+  /**
    * The 422 the caller turns into a question to the user: each order's %, the invoice's state
-   * before the call, the case, and how to import anyway.
+   * before the call, the case, and how to import anyway. The percents use {@link #reportedPercent}
+   * like the 200 answers ({@code 10}, {@code 12.5}, never {@code 12.5000}).
    */
   static DocumentLineImport.ImportRefusal discountConflictRefusal(String conflict,
       List<Order> selected, BigDecimal invoiceDiscount, boolean hadLines) throws JSONException {
@@ -143,12 +178,12 @@ final class InvoiceGlobalDiscountRule {
     for (Order order : selected) {
       orders.put(new JSONObject().put(OrderImportRequest.PARAM_ORDER_ID, order.getId())
           .put("documentNo", order.getDocumentNo())
-          .put("globalDiscount", orZero(order.getEtgoTotalDiscount())));
+          .put("globalDiscount", reportedPercent(order.getEtgoTotalDiscount())));
     }
     Map<String, Object> extra = new LinkedHashMap<>();
     extra.put("conflict", conflict);
     extra.put(OrderImportRequest.PARAM_ORDERS, orders);
-    extra.put("invoice", new JSONObject().put("totalDiscount", orZero(invoiceDiscount))
+    extra.put("invoice", new JSONObject().put("totalDiscount", reportedPercent(invoiceDiscount))
         .put("hadLines", hadLines));
     extra.put("hint", "Nothing was imported. Tell the user this conflict and ask whether to import "
         + "anyway. Only if they agree, resend the same call with "
