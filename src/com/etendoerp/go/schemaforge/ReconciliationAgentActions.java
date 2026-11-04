@@ -190,11 +190,11 @@ final class ReconciliationAgentActions {
             optional(P_DATE_FROM, NeoActionContract.TYPE_DATE, "Earliest line date (yyyy-MM-dd)."),
             optional(P_DATE_TO, NeoActionContract.TYPE_DATE, "Latest line date (yyyy-MM-dd)."),
             optional("q", S, "Free-text search on the line description."),
-            options(ReconciliationHandler.KEY_STATUS, "With bounce suggestions enabled for the "
-                + "account, discarded lists ONLY the discarded lines (left out of every other "
-                + "answer and never reconcilable; counts.discarded says how many there are). Omit "
-                + "it to list the rest. With bounce suggestions disabled the value is ignored and "
-                + "discarded lines are ordinary pending lines.",
+            options(ReconciliationHandler.KEY_STATUS, "With bank rejection suggestions enabled "
+                + "for the account, discarded lists ONLY the discarded lines (left out of every "
+                + "other answer and never reconcilable; counts.discarded says how many there are). "
+                + "Omit it to list the rest. With bank rejection suggestions disabled the value is "
+                + "ignored and discarded lines are ordinary pending lines.",
                 List.of(StatementLineFilter.STATUS_DISCARDED))),
         NeoActionContract.read(CANDIDATES,
             "Lists what a statement line can be reconciled against: existing movements "
@@ -293,9 +293,9 @@ final class ReconciliationAgentActions {
                 + "autoMatch returned; accept some = send only those; to reject a group simply do "
                 + "not send it (nothing is persisted for it). Invalid groups are reported per "
                 + "group in results[] without blocking the others — including a second group that "
-                + "lands on a line an earlier group of the same call already took. A bounce pair "
-                + "(autoMatch group with kind bouncePair) is accepted the same way and discards "
-                + "both of its lines instead of reconciling them.",
+                + "lands on a line an earlier group of the same call already took. A bank "
+                + "rejection pair (autoMatch group with kind bouncePair) is accepted the same way "
+                + "and discards both of its lines instead of reconciling them.",
             array("groups", NeoActionContract.TYPE_OBJECT, true, "One entry per accepted autoMatch "
                 + "group: {statementLineId: group.statementLine.id, operationIds: ids of the "
                 + "group's operations whose isNew is false, createPayment: group.createPayment "
@@ -304,13 +304,13 @@ final class ReconciliationAgentActions {
                 + "group.statementLine is null), counterpartLineId: "
                 + "group.counterpartLine.id}.")),
         NeoActionContract.write(DISCARD_PAIR,
-            "Discards a bounce pair: an outgoing (or incoming) bank line and the line that "
+            "Discards a bank rejection pair: an outgoing (or incoming) bank line and the line that "
                 + "reverses it, same amount and opposite sign. Both lines are marked discarded "
                 + "(they leave the pending list and can no longer be reconciled) and linked to "
                 + "each other; nothing is paid or posted. Only bank-imported (PSD2) lines that are "
                 + "unreconciled, within 60 days of each other and without a payment in the ERP. "
-                + "Only available when bounce suggestions are enabled for the account (403 "
-                + "BOUNCE_SUGGESTIONS_OFF otherwise). Undo with restorePair.",
+                + "Only available when bank rejection suggestions are enabled for the account "
+                + "(403 BOUNCE_SUGGESTIONS_OFF otherwise). Undo with restorePair.",
             required(P_LINE, S, "Id of the original line: group.statementLine.id of an autoMatch "
                 + "bouncePair group, or the chosen one of its candidates."),
             required(BankBouncePairService.KEY_COUNTERPART_LINE_ID, S, "Id of the line that "
@@ -318,8 +318,8 @@ final class ReconciliationAgentActions {
         NeoActionContract.write(RESTORE_PAIR,
             "Restores a discarded line and the line it was discarded with as a pair, and removes "
                 + "the link between them: both return to the pending list. A line discarded on "
-                + "its own is restored alone. Only available when bounce suggestions are enabled "
-                + "for the account (403 BOUNCE_SUGGESTIONS_OFF otherwise).",
+                + "its own is restored alone. Only available when bank rejection suggestions are "
+                + "enabled for the account (403 BOUNCE_SUGGESTIONS_OFF otherwise).",
             required(BankBouncePairService.KEY_LINE_ID, S, "Id of either discarded line "
                 + "(pendingLines with status discarded).")));
   }

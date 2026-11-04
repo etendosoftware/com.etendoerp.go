@@ -3264,7 +3264,10 @@ account's detection once and shares it (`BankBouncePairService.Detection`).
 
 **Validation and coded refusals** (shared by `discardPair` and the `applySuggestions` groups, in
 this order; every refusal has the top-level `code`, `message`, and `error.messageKeys` with the
-`AD_MESSAGE`):
+`AD_MESSAGE`). The texts a user or agent reads (the `AD_MESSAGE` texts and the MCP action
+descriptions) call the feature a **bank rejection** ("rechazo bancario" in the SPA); the
+identifiers keep `bounce` (message keys, codes such as `BOUNCE_SUGGESTIONS_OFF`, `kind:"bouncePair"`,
+`bounceDecisions`, `counts.bounce`, the flag key and the telemetry event names):
 
 | Code | Status | `AD_MESSAGE` | When |
 |---|---|---|---|
@@ -5216,7 +5219,7 @@ filtered per request.
 
 | what | REST / SPA, flag off | MCP, flag off |
 |---|---|---|
-| `discardPair`, `restorePair` | 403 `BOUNCE_SUGGESTIONS_OFF`; the SPA never offers them (it renders what the backend sends) | listed, and answer the same 403 (their descriptions say "only available when bounce suggestions are enabled") |
+| `discardPair`, `restorePair` | 403 `BOUNCE_SUGGESTIONS_OFF`; the SPA never offers them (it renders what the backend sends) | listed, and answer the same 403 (their descriptions say "only available when bank rejection suggestions are enabled") |
 | `pendingLines` `status=discarded` | ignored like any status the panel filters client-side | `discarded` listed as the option's only value; ignored the same way (the description says so) |
 
 Also declared (any flag value): `dismissPair` and the `applySuggestions` key `bounceDecisions` are
