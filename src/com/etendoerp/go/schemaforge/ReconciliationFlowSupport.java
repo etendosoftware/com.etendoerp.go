@@ -497,39 +497,26 @@ final class ReconciliationFlowSupport {
     // ETP-5121: same rule the manual path applies. Reached only by a client applying a STALE
     // preview - the statement was reactivated between autoMatch and applySuggestions - or by a
     // direct API call, since loadPendingLines no longer proposes a draft statement's lines at all.
-    // It MUST stay above createTransactionForRule below: that call persists a transaction, and a
-    // NeoResponse.error returned afterwards still commits it, leaving an orphan movement per
-    // rejected group. prepareAllGroups stamps statementLineId onto the failure, so the message
-    // does not repeat it.
+    // It MUST stay above withRuleTransaction below: its createTransactionForRule persists a
+    // transaction, and a NeoResponse.error returned afterwards still commits it, leaving an orphan
+    // movement per rejected group. prepareAllGroups stamps statementLineId onto the failure, so the
+    // message does not repeat it.
     if (ReconciliationSupport.isOnDraftStatement(line)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT);
     }
     // ETP-5581 toggle point: with bank-bounce-suggestions on, a line excluded by a
     // BankStatementLineFilterHook (PSD2's discarded lines) is never reconciled; off, it answers
-    // null. Above createTransactionForRule for the same reason as the draft guard.
+    // null. Above withRuleTransaction for the same reason as the draft guard.
     NeoResponse discarded = StatementLineFilter.discardedLineError(discardsHonoured, line,
         Usage.AUTO_MATCH_CANDIDATES);
     if (discarded != null) {
       return discarded;
     }
 
-    List<String> operationIds = readOperationIds(groupEntry);
-
     // When a rule group requires creating a new transaction, do that first.
-    JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
-    if (createPaymentSpec != null && StringUtils.isNotBlank(createPaymentSpec.optString("glItemId", null))) {
-      String newTxnId = handler.createTransactionForRule(account, line, createPaymentSpec);
-      if (StringUtils.isNotBlank(newTxnId)) {
-        operationIds = new ArrayList<>(operationIds);
-        operationIds.add(newTxnId);
-        // Increment the rule's matchCount.
-        String ruleId = createPaymentSpec.optString("ruleId", null);
-        if (StringUtils.isNotBlank(ruleId)) {
-          AutoMatchSupport.incrementMatchCount(ruleId);
-        }
-      }
-    }
+    List<String> operationIds =
+        withRuleTransaction(handler, account, line, groupEntry, readOperationIds(groupEntry));
 
     if (operationIds.isEmpty()) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -561,6 +548,44 @@ final class ReconciliationFlowSupport {
     out.add(new ReconciliationHandler.PreparedGroup(line, operationIds));
     takenLineIds.add(line.getId());
     return null;
+  }
+
+  /**
+   * Creates the transaction a rule group asks for and appends it to the group's operations. A group
+   * asks for one with a {@code createPayment} spec carrying a {@code glItemId}; when the handler
+   * creates it, its id is appended to a copy of {@code operationIds} and the rule's
+   * {@code matchCount} is incremented (when the spec names a {@code ruleId}). Split out of
+   * {@link #prepareGroup} to keep it under Sonar java:S3776.
+   *
+   * @param handler      the reconciliation handler
+   * @param account      the account of the call
+   * @param line         the effective statement line of the group
+   * @param groupEntry   the submitted group
+   * @param operationIds the operations the group submitted
+   * @return {@code operationIds} plus the new transaction id when one was created, otherwise
+   *         {@code operationIds} itself
+   * @throws Exception when the rule transaction cannot be created
+   */
+  private static List<String> withRuleTransaction(ReconciliationHandler handler,
+      FIN_FinancialAccount account, FIN_BankStatementLine line, JSONObject groupEntry,
+      List<String> operationIds) throws Exception {
+    JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
+    if (createPaymentSpec == null
+        || StringUtils.isBlank(createPaymentSpec.optString("glItemId", null))) {
+      return operationIds;
+    }
+    String newTxnId = handler.createTransactionForRule(account, line, createPaymentSpec);
+    if (StringUtils.isBlank(newTxnId)) {
+      return operationIds;
+    }
+    List<String> withNewTxn = new ArrayList<>(operationIds);
+    withNewTxn.add(newTxnId);
+    // Increment the rule's matchCount.
+    String ruleId = createPaymentSpec.optString("ruleId", null);
+    if (StringUtils.isNotBlank(ruleId)) {
+      AutoMatchSupport.incrementMatchCount(ruleId);
+    }
+    return withNewTxn;
   }
 
   /**

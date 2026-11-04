@@ -1295,7 +1295,8 @@ public class ReconciliationHandler implements NeoHandler {
    *
    * <p>A shared-header batch (see {@link #applySuggestions}) can hold transactions from OTHER
    * statement lines too, so this is scoped to just {@code line}'s own transactions — itself plus any
-   * ETGO match-group siblings ({@link #transactionsOfLineIn}) — never the whole reconciliation.
+   * ETGO match-group siblings ({@link ReactivationSupport#transactionsOfLineIn}) — never the whole
+   * reconciliation.
    *
    * <p>Sequence:
    * <ol>
@@ -1370,7 +1371,8 @@ public class ReconciliationHandler implements NeoHandler {
     rec = OBDal.getInstance().get(FIN_Reconciliation.class, rec.getId());
     line = loadLine(statementLineId);
 
-    List<FIN_FinaccTransaction> matched = transactionsOfLineIn(line, rec);
+    List<FIN_FinaccTransaction> matched =
+        ReactivationSupport.transactionsOfLineIn(this, line, rec);
     if (ReconciliationHandlerSupport.coversReconciliation(rec, matched)) {
       // Unlike the two batch endpoints, this one lets the failure propagate: runPostAction turns it
       // into an error response, so the caller already learns something went wrong.
@@ -1392,26 +1394,6 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
     data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
-  }
-
-  /**
-   * Every transaction currently backing {@code line} — itself plus any ETGO match-group siblings —
-   * that belongs to {@code rec}. A shared-header batch (see {@link #applySuggestions}) can hold
-   * transactions from OTHER statement lines too, so this scopes a whole-line undo/reactivate to just
-   * the ones the clicked line owns, never the reconciliation's full transaction list.
-   */
-  List<FIN_FinaccTransaction> transactionsOfLineIn(FIN_BankStatementLine line,
-      FIN_Reconciliation rec) {
-    List<FIN_FinaccTransaction> result = new ArrayList<>();
-    Set<String> seenIds = new HashSet<>();
-    ReconciliationHandlerSupport.addTransactionOwnedByRec(line, rec, result, seenIds);
-    String groupId = ReactivationSupport.readMatchGroupId(line);
-    if (StringUtils.isNotBlank(groupId) && line.getBankStatement() != null) {
-      for (FIN_BankStatementLine sibling : loadMatchGroupLines(line.getBankStatement(), groupId)) {
-        ReconciliationHandlerSupport.addTransactionOwnedByRec(sibling, rec, result, seenIds);
-      }
-    }
-    return result;
   }
 
   /**

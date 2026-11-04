@@ -149,6 +149,7 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  *
  * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
  * @covers com.etendoerp.go.schemaforge.StatementLineFilter
+ * @covers com.etendoerp.go.schemaforge.ReactivationSupport
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationHandlerTest {
@@ -3960,7 +3961,8 @@ public class ReconciliationHandlerTest {
     when(trx.getReconciliation()).thenReturn(rec);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, trx);
 
-    List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(line, rec);
+    List<FIN_FinaccTransaction> result =
+        ReactivationSupport.transactionsOfLineIn(handler, line, rec);
 
     assertEquals(1, result.size());
     assertEquals(trx, result.get(0));
@@ -3997,7 +3999,8 @@ public class ReconciliationHandlerTest {
         .when(handler).loadMatchGroupLines(statement, "GRP-1");
 
     try (MockedStatic<ModelProvider> mp = mockMatchGroupProperty()) {
-      List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(anchor, rec);
+      List<FIN_FinaccTransaction> result =
+          ReactivationSupport.transactionsOfLineIn(handler, anchor, rec);
 
       assertEquals(2, result.size());
       assertTrue(result.contains(ownTrx));
@@ -4017,7 +4020,8 @@ public class ReconciliationHandlerTest {
     when(trx.getReconciliation()).thenReturn(otherRec);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, trx);
 
-    List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(line, rec);
+    List<FIN_FinaccTransaction> result =
+        ReactivationSupport.transactionsOfLineIn(handler, line, rec);
 
     assertTrue(result.isEmpty());
   }

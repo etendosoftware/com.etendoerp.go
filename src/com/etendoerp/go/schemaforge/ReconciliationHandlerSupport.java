@@ -899,7 +899,7 @@ final class ReconciliationHandlerSupport {
   /**
    * True when {@code candidateLine}'s own transaction belongs to {@code rec}; when so, it is added
    * to {@code out} (de-duplicated via {@code seenIds}). Extracted from {@code
-   * ReconciliationHandler.transactionsOfLineIn}, which calls this once for the line itself and once
+   * ReactivationSupport.transactionsOfLineIn}, which calls this once for the line itself and once
    * per ETGO match-group sibling.
    */
   static void addTransactionOwnedByRec(FIN_BankStatementLine candidateLine,
