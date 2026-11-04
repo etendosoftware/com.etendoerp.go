@@ -3712,63 +3712,88 @@ first create without it was refused. The handler now declares
 `serverDefaulted`. `etendo_defaults` still answers the suggested country — a form may prefill it —
 but the schema no longer claims the server fills it.
 
-##### 4.12.1.10 Fiscal Configuration for agents — `configureFiscalSystem` on `organization` (ETP-6053)
+##### 4.12.1.10 Fiscal Configuration — `fiscalSystemCatalog` and `configureFiscalSystem` on `organization` (ETP-6053)
 
-Agents activate a billing system (SIF) through one declared write action, never through
-`etendo_create` on the fiscal-configuration specs:
+A billing system (SIF) is activated through one declared write action of `organization`, by the
+SPA's Fiscal Configuration window (REST) and by agents (MCP) alike — never through a create on the
+fiscal-configuration specs. The rules live only in `com.etendoerp.go`
+(`schemaforge/fiscal/FiscalSifRules`); the window keeps no copy of them.
 
 ```
+GET  /sws/neo/organization/organization/{orgId}/action/fiscalSystemCatalog
+POST /sws/neo/organization/organization/{orgId}/action/configureFiscalSystem  {system, territory}
+
 etendo_action(spec:'organization', entity:'organization', id:'<organizationId>',
-              action:'configureFiscalSystem',
-              parameters:{system:'TBAI', territory:'bizkaia'})
+              action:'configureFiscalSystem', parameters:{system:'TBAI', territory:'bizkaia'})
 ```
+
+Both are served by `FiscalSystemConfigureAction`, delegated from `OrganizationCertificateAction`
+(the pair's single `@NeoExtension`; the annotation is not repeatable).
+
+**`fiscalSystemCatalog`** (read, `GET`): the rules as data —
+`{systems:[...], territories:[{territory, systems, sii:{navarra, guipuzcoa, taxtype}|null,
+tbaiTerritory|null, verifactuTaxType|null}]}`. `systems` is what the territory allows; the other
+keys are the values a config record of that territory carries. The window renders its manual
+system choice and the SII veto from `systems`, and identifies the territory of a stored
+configuration (its "Estado" panel) from the record values. It was chosen over the action contract
+because a contract can list the allowed values of each parameter but not which pairs are valid,
+and over a new endpoint because it lives in the same customization that applies the rules, is
+discoverable by agents too, and needs no data change.
+
+**`configureFiscalSystem`** (write, `POST`):
 
 | Parameter | Values |
 |---|---|
 | `system` (required) | `SII`, `TBAI`, `SII+TBAI`, `VERIFACTU` |
-| `territory` (required) | `navarra`, `alava`, `bizkaia`, `gipuzkoa`, `baleares` (common territory and Balearic Islands), `canarias`, `ceuta` (Ceuta and Melilla) |
+| `territory` | `navarra`, `alava`, `bizkaia`, `gipuzkoa`, `baleares` (common territory and Balearic Islands), `canarias`, `ceuta` (Ceuta and Melilla). Required, except when SII is added to an existing TicketBAI: then it is TicketBAI's own and may be left out |
 
-The action applies the rules of the SPA's onboarding wizard (`OnboardingWizard.jsx`), in this
-order, refusing in the request language (`NeoMessageText`, keys in `error.messageKeys`):
+Refusals, in this order, in the request language (`NeoMessageText`, keys in `error.messageKeys`):
 
 | Rule | Refusal |
 |---|---|
 | `id` must be the session's organization (the records land there, `organization` is server-owned, §4.12.17) | 400 `ETGO_FiscalSifOrgMismatch` |
-| no activation while `ETSG_ForceTestMode` is on for the client (`FiscalTestModeResolver`) | 409 `ETGO_FiscalSifTestMode` — *"Solo podrá activar un sistema fiscal en un entorno productivo."* (the SPA's `fiscal.testModeLock.warning`) |
-| the territory must allow the system (`FiscalSifRules`, the Java twin of the SPA's `TERRITORY_ALLOWED_SYSTEMS`): Navarra → SII; Álava/Bizkaia/Gipuzkoa → TBAI, SII+TBAI; Baleares/Canarias → SII, VERIFACTU; Ceuta/Melilla → VERIFACTU | 400 `ETGO_FiscalSifNotAllowed` |
+| no activation while `ETSG_ForceTestMode` is on for the client (`FiscalTestModeResolver`) | 409 `ETGO_FiscalSifTestMode` — *"Solo podrá activar un sistema fiscal en un entorno productivo."* (the window's `fiscal.testModeLock.warning`) |
+| "Añadir SII" — `system:'SII'` on an organization whose only active SIF is TicketBAI, with no territory or a Basque one: TicketBAI must have a territory | 409 `ETGO_FiscalSifTbaiNoTerritory` (a legacy row) |
+| … and the territory, when sent, must be TicketBAI's | 400 `ETGO_FiscalSifTerritoryMismatch` |
+| otherwise the territory is required | 400 `ETGO_FiscalSifTerritoryRequired` |
+| the territory must allow the system: Navarra → SII; Álava/Bizkaia/Gipuzkoa → TBAI, SII+TBAI; Baleares/Canarias → SII, VERIFACTU; Ceuta/Melilla → VERIFACTU | 400 `ETGO_FiscalSifNotAllowed` |
 | no other active SIF in the organization | 409 `ETGO_FiscalSifAlreadyConfigured` |
-| exception, the SPA's "Añadir SII": `system:'SII'` on an organization whose only active SIF is TicketBAI, in a Basque territory, adds SII — the territory must be TicketBAI's own | 400 `ETGO_FiscalSifTerritoryMismatch` |
 
-Every value the wizard derives from the territory is derived here as well and is not a parameter:
-SII `navarra`, `guipuzcoa` and `taxtype`, TicketBAI `etsgSifTerritory`, VERI*FACTU `tAXType`
-(*Impuesto de aplicación*), plus the wizard's defaults (adoption dates = today, production flags,
-`nextSendWaitTime`, `defaultQR`). `FiscalSifRules.onboardingPayloads` mirrors
-`buildOnboardingPayloads` field for field; the two copies must change together.
+Territories are named in refusals as the window names them (`ETGO_FiscalSifTerritory_<id>` catalog
+keys, e.g. *Ceuta / Melilla (IPSI)*, *España / Baleares*), never by their parameter value. The
+window shows the message as it is, below its confirm button or the "Añadir SII" button.
 
-One deliberate difference: the SII an agent activates is **acogido al SII** from the start
-(`AEATSII_CONFIG.INSIISYSTEM = 'Y'`, with `fechaAcogidaSII` = today). The wizard posts it with
-`acogidaAlSII: 'N'` and turns it on with its detail save (`SiiConfigDeactivateHandler.afterHandle`
-on PUT); an agent has no second step. The action sends `acogidaAlSII: 'Y'` and, so the result does
-not depend on how the create converts that value, marks its batch
-(`FiscalSifGuard.asAgentOnboarding`) so the SII customization's `afterHandle` also sets
-`INSIISYSTEM = 'Y'` by native SQL on that POST, inside the batch — the same statement its PUT runs: `AEATSII_CHECK_SIFS_CONFIGS_TRG` then runs as it does
-for the wizard, and if it refuses, the whole activation rolls back. Territories are named in
-refusals as the SPA names them (`ETGO_FiscalSifTerritory_<id>` catalog keys, e.g. *Ceuta / Melilla
-(IPSI)*, *España / Baleares*), never by their parameter value.
+Every value derived from the territory is built here and is not a parameter: SII `navarra`,
+`guipuzcoa` and `taxtype`, TicketBAI `etsgSifTerritory`, VERI*FACTU `tAXType` (*Impuesto de
+aplicación*), plus the defaults (adoption dates = today, production flags, `nextSendWaitTime`,
+`defaultQR`). "Añadir SII" gets the SII part of SII+TBAI for TicketBAI's territory (`taxtype`
+IVA, and `guipuzcoa` for Gipuzkoa).
+
+**The SII is acogido al SII from creation, on every channel** (`INSIISYSTEM = 'Y'`, with
+`fechaAcogidaSII` = today). Until ETP-6053 the wizard posted it with `acogidaAlSII: 'N'` and turned
+it on with its detail save (`SiiConfigDeactivateHandler.afterHandle` on PUT), so a user who left
+the detail step without saving kept a configuration that was active but not acogido. One behaviour
+for both channels removes that state; the detail step is unaffected (its save sets the same `'Y'`).
+The consequence is that `AEATSII_CHECK_SIFS_CONFIGS_TRG` runs at the activation instead of at the
+detail save: `em_etsg_has_sii_config` is set, and a VERI*FACTU conflict refused, at that moment —
+the action has already refused any other active SIF, so the trigger only backs it up. The action
+sends `acogidaAlSII: 'Y'` and runs its batch inside `FiscalSifGuard.asFiscalSystemActivation`, so
+the SII customization's `afterHandle` also sets `INSIISYSTEM = 'Y'` by native SQL on that POST,
+inside the batch; if the trigger refuses, the whole activation rolls back.
 
 The records are created through `BatchService.executeBatch` — the `/sws/neo/batch` pipeline —
-so the role's access to each fiscal window is checked, each entity's customization runs as it
-does for the wizard (TicketBAI sequences, auto-send schedules, VERI*FACTU adoption date), and
+so the role's access to each fiscal window is checked, each entity's customization runs
+(TicketBAI sequences, auto-send schedules, VERI*FACTU adoption date, SII acogida), and
 SII + TicketBAI commit or roll back together. A refusal raised inside (a trigger, the entity
 rules below) comes back with its status, message and `messageKeys`.
 
 Answer: `{system, territory, created:[{system, spec, entity, id}], certificate:{exists}}`. When
 the organization has no active signing certificate, a `warning` message
-(`ETGO_FiscalSifNoCertificate`) says it must be uploaded from Configuración fiscal: the
-certificate cannot be written by an agent (see §4.12.9, *Fiscal Configuration*). Afterwards an
-agent reads and edits the created records with `etendo_get` / `etendo_update` on
-`sii-config/siiConfiguration`, `tbai-config/header` and
-`verifactu-config/cabeceraDeConfiguraciónVerifactu`.
+(`ETGO_FiscalSifNoCertificate`) says it must be uploaded from Configuración fiscal (agents cannot
+write the certificate, see §4.12.9, *Fiscal Configuration*). The records are then read and edited
+on `sii-config/siiConfiguration`, `tbai-config/header` and
+`verifactu-config/cabeceraDeConfiguraciónVerifactu` — the window's detail step, or
+`etendo_get` / `etendo_update`.
 
 **Entity rules on every channel** (`FiscalSifGuard`, run first in the `handle()` of
 `SiiConfigDeactivateHandler`, `TbaiConfigSequenceHandler` and `VerifactuConfigReadyHandler`,
@@ -5439,7 +5464,7 @@ REST and the SPA are unchanged.
 
 | Operation | REST (the SPA) | MCP |
 |---|---|---|
-| Create a config | `POST` per entity (the onboarding wizard, "Añadir SII") | `etendo_create` and `etendo_batch` hidden (`MCP_CONFIG.verbs.create:false`, 405); only `configureFiscalSystem` (§4.12.1.10) |
+| Create a config | `configureFiscalSystem` (§4.12.1.10) — the onboarding wizard and "Añadir SII" call it; a direct `POST` per entity is still accepted for other REST callers | `etendo_create` and `etendo_batch` hidden (`MCP_CONFIG.verbs.create:false`, 405); only `configureFiscalSystem` |
 | Deactivate ("Cambiar SIF") | `PUT {active:false}` → smart deactivation | refused: any change of `active` on `etendo_update` is 400 `ETGO_FiscalSifActiveByAgent` (an echo of the current value passes) |
 | Reactivate | `PUT {active:true}`, subject to one active per system | refused, as above |
 | Delete | `DELETE` (unused by the SPA, kept) | `etendo_delete` hidden (`MCP_CONFIG.verbs.delete:false`, 405) |

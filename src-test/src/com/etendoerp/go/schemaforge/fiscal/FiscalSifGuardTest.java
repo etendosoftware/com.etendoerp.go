@@ -15,7 +15,7 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.fiscal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,6 +47,9 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.FiscalTestModeResolver;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * The write rules of the three fiscal-configuration entities: no inactive create and none in forced
@@ -55,7 +58,7 @@ import com.etendoerp.go.common.FiscalTestModeResolver;
  * native-query session, so the assertions are on the refusal (status and message key) and on the
  * table each rule reads.
  *
- * @covers com.etendoerp.go.schemaforge.FiscalSifGuard
+ * @covers com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard
  */
 class FiscalSifGuardTest {
 
@@ -273,12 +276,15 @@ class FiscalSifGuardTest {
 
   @Test
   void requestedActiveReadsBooleansAndTheEtendoSpelling() throws Exception {
-    assertEquals(Boolean.TRUE, FiscalSifGuard.requestedActive(new JSONObject().put("active", "Y")));
-    assertEquals(Boolean.FALSE,
+    assertEquals(FiscalSifGuard.ActiveFlag.ACTIVE,
+        FiscalSifGuard.requestedActive(new JSONObject().put("active", "Y")));
+    assertEquals(FiscalSifGuard.ActiveFlag.INACTIVE,
         FiscalSifGuard.requestedActive(new JSONObject().put("active", "false")));
-    assertNull(FiscalSifGuard.requestedActive(new JSONObject().put("active", "maybe")));
-    assertNull(FiscalSifGuard.requestedActive(new JSONObject()));
-    assertNull(FiscalSifGuard.requestedActive(null));
+    assertEquals(FiscalSifGuard.ActiveFlag.UNKNOWN,
+        FiscalSifGuard.requestedActive(new JSONObject().put("active", "maybe")));
+    assertEquals(FiscalSifGuard.ActiveFlag.UNKNOWN,
+        FiscalSifGuard.requestedActive(new JSONObject()));
+    assertEquals(FiscalSifGuard.ActiveFlag.UNKNOWN, FiscalSifGuard.requestedActive(null));
   }
 
   @Test
@@ -303,9 +309,9 @@ class FiscalSifGuardTest {
 
   @Test
   void theAgentOnboardingFlagHoldsOnlyInsideItsScope() throws Exception {
-    assertFalse(FiscalSifGuard.isAgentOnboarding());
-    assertTrue(FiscalSifGuard.asAgentOnboarding(FiscalSifGuard::isAgentOnboarding));
-    assertFalse(FiscalSifGuard.isAgentOnboarding());
+    assertFalse(FiscalSifGuard.isFiscalSystemActivation());
+    assertTrue(FiscalSifGuard.asFiscalSystemActivation(FiscalSifGuard::isFiscalSystemActivation));
+    assertFalse(FiscalSifGuard.isFiscalSystemActivation());
   }
 
   /**

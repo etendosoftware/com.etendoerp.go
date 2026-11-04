@@ -15,13 +15,14 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.fiscal;
 
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -39,40 +40,56 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.NeoCertificateHelper;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoMessageText;
+import com.etendoerp.go.schemaforge.NeoProcessService;
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
 
 /**
- * The {@code configureFiscalSystem} action of {@code organization/organization} (ETP-6053): the
- * Fiscal Configuration onboarding wizard of the SPA, for agents. {@code id} is the organization.
- *
- * <p>It activates a billing system (SIF) — SII, TicketBAI, SII + TicketBAI or VERI*FACTU — with
- * the rules the wizard applies:</p>
+ * The fiscal-system actions of {@code organization/organization} (ETP-6053); {@code id} is the
+ * organization. The single way to activate a billing system (SIF), for the SPA's Fiscal
+ * Configuration window (REST) and for agents (MCP) alike:
  * <ul>
- *   <li>the territory is mandatory and must allow the system ({@link FiscalSifRules});</li>
+ *   <li>{@code fiscalSystemCatalog} (read, GET) — the territory x system rules
+ *       ({@link FiscalSifRules#catalog()}), which the window renders its choices from;</li>
+ *   <li>{@code configureFiscalSystem} (write, POST) — activates a system.</li>
+ * </ul>
+ *
+ * <p>{@code configureFiscalSystem} activates SII, TicketBAI, SII + TicketBAI or VERI*FACTU with
+ * these rules:</p>
+ * <ul>
+ *   <li>the territory is mandatory and must allow the system ({@link FiscalSifRules}) — when SII
+ *       is added to an existing TicketBAI it is TicketBAI's own, and may be left out;</li>
  *   <li>never in forced fiscal test mode ({@code ETSG_ForceTestMode});</li>
  *   <li>only when the organization has no active SIF — except adding SII to an existing TicketBAI
- *       in the same Basque territory, the SPA's "Añadir SII";</li>
- *   <li>every value the wizard derives from the territory (SII {@code navarra}/{@code guipuzcoa}/
- *       {@code taxtype}, TicketBAI territory, VERI*FACTU tax type) is derived here too and cannot
- *       be supplied.</li>
+ *       in the same Basque territory ("Añadir SII"); a legacy TicketBAI without territory is
+ *       refused;</li>
+ *   <li>every value derived from the territory (SII {@code navarra}/{@code guipuzcoa}/
+ *       {@code taxtype}, TicketBAI territory, VERI*FACTU tax type) is built here and cannot be
+ *       supplied; the SII is "acogido" ({@code INSIISYSTEM = 'Y'}) from creation.</li>
  * </ul>
  *
  * <p>The records are created through the normal CRUD path — {@link BatchService}, the same
- * pipeline as {@code POST /sws/neo/batch} — so each entity's customization runs as it does for
- * the wizard (TicketBAI sequences, auto-send schedules, VERI*FACTU adoption date), the role's
+ * pipeline as {@code POST /sws/neo/batch} — so each entity's customization runs (TicketBAI
+ * sequences, auto-send schedules, VERI*FACTU adoption date, SII acogida), the role's
  * access to each fiscal window is checked, and SII + TicketBAI are created atomically.</p>
  *
  * <p>When the organization has no active signing certificate the answer carries a warning saying
- * it must be uploaded from Configuración fiscal: the certificate cannot be uploaded through the
- * API for agents.</p>
+ * it must be uploaded from Configuración fiscal: agents cannot write the certificate.</p>
  */
 public class FiscalSystemConfigureAction {
 
   private static final Logger log = LogManager.getLogger(FiscalSystemConfigureAction.class);
 
-  /** The action name. */
+  /** The write action. */
   public static final String ACTION = "configureFiscalSystem";
+  /** The read action with the territory x system rules. */
+  public static final String CATALOG_ACTION = "fiscalSystemCatalog";
   static final String P_SYSTEM = "system";
   static final String P_TERRITORY = "territory";
 
@@ -81,8 +98,11 @@ public class FiscalSystemConfigureAction {
   static final String MSG_TERRITORY_MISMATCH = "ETGO_FiscalSifTerritoryMismatch";
   static final String MSG_ORG_MISMATCH = "ETGO_FiscalSifOrgMismatch";
   static final String MSG_NO_CERTIFICATE = "ETGO_FiscalSifNoCertificate";
+  static final String MSG_TERRITORY_REQUIRED = "ETGO_FiscalSifTerritoryRequired";
+  static final String MSG_TBAI_NO_TERRITORY = "ETGO_FiscalSifTbaiNoTerritory";
 
   private static final String METHOD_POST = "POST";
+  private static final String METHOD_GET = "GET";
 
   /** spec / entity of each record system. */
   private static final Map<String, String[]> ENDPOINTS = Map.of(
@@ -91,30 +111,11 @@ public class FiscalSystemConfigureAction {
       FiscalSifRules.VERIFACTU, new String[] { "verifactu-config",
           "cabeceraDeConfiguraciónVerifactu" });
 
-  private static final Map<String, NeoActionContract> CONTRACTS = Collections.singletonMap(ACTION,
-      NeoActionContract.write(ACTION,
-          "Activates the organization's billing system (SIF), as the Fiscal Configuration "
-              + "onboarding does: creates the SII, TicketBAI or VERI*FACTU configuration (two "
-              + "records for SII+TBAI) with every value the territory implies. Refused when the "
-              + "territory does not allow the system, when fiscal test mode is forced, and when "
-              + "the organization already has an active SIF — except system SII on an "
-              + "organization with TicketBAI, which adds SII to it (same Basque territory). "
-              + "Changing or switching off a SIF, and uploading the digital certificate, are only "
-              + "done in the app (Configuración fiscal). Returns the created records and, when "
-              + "the organization has no certificate, a warning to upload it in the app.",
-          Param.requiredOptions(P_SYSTEM,
-              "The billing system: SII, TBAI (TicketBAI), SII+TBAI (both, Basque Country with "
-                  + "national operations) or VERIFACTU.", FiscalSifRules.SYSTEMS),
-          Param.requiredOptions(P_TERRITORY,
-              "The fiscal territory: navarra (SII), alava / bizkaia / gipuzkoa (TBAI or SII+TBAI), "
-                  + "baleares = Spain common territory and Balearic Islands, canarias (SII or "
-                  + "VERIFACTU), ceuta = Ceuta and Melilla (VERIFACTU only).",
-              FiscalSifRules.TERRITORIES))
-          .withIdDescription("the organization id"));
+  private static final Map<String, NeoActionContract> CONTRACTS = contracts();
 
   /** The CRUD pipeline the records go through. A seam for unit tests. */
   private final Function<JSONArray, JSONObject> batch;
-  /** "Today", as the wizard's {@code todayIsoDate}. A seam for unit tests. */
+  /** "Today", the adoption day of the records. A seam for unit tests. */
   private final Supplier<LocalDate> today;
   /** The organization's certificate expiry, {@code null} without one. A seam for unit tests. */
   private final Function<String, Date> certificateExpiry;
@@ -132,7 +133,39 @@ public class FiscalSystemConfigureAction {
     this.certificateExpiry = certificateExpiry;
   }
 
-  /** @return the declared action */
+  private static Map<String, NeoActionContract> contracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(CATALOG_ACTION, NeoActionContract.read(CATALOG_ACTION,
+        "The rules configureFiscalSystem applies, as data: every billing system and, per "
+            + "territory, the systems it allows and the values its configuration records carry "
+            + "(SII navarra/guipuzcoa/taxtype, TicketBAI territory, VERI*FACTU tax type). Read it "
+            + "to choose a valid system/territory pair before activating one.")
+        .withIdDescription("the organization id")
+        .withHttpMethod(METHOD_GET));
+    contracts.put(ACTION, NeoActionContract.write(ACTION,
+          "Activates the organization's billing system (SIF), as the Fiscal Configuration "
+              + "onboarding does: creates the SII, TicketBAI or VERI*FACTU configuration (two "
+              + "records for SII+TBAI) with every value the territory implies. Refused when the "
+              + "territory does not allow the system, when fiscal test mode is forced, and when "
+              + "the organization already has an active SIF — except system SII on an "
+              + "organization with TicketBAI, which adds SII to it (same Basque territory). "
+              + "Changing or switching off a SIF, and uploading the digital certificate, are only "
+              + "done in the app (Configuración fiscal). Returns the created records and, when "
+              + "the organization has no certificate, a warning to upload it in the app.",
+          Param.requiredOptions(P_SYSTEM,
+              "The billing system: SII, TBAI (TicketBAI), SII+TBAI (both, Basque Country with "
+                  + "national operations) or VERIFACTU.", FiscalSifRules.SYSTEMS),
+          Param.options(P_TERRITORY,
+              "The fiscal territory, required: navarra (SII), alava / bizkaia / gipuzkoa (TBAI or "
+                  + "SII+TBAI), baleares = Spain common territory and Balearic Islands, canarias "
+                  + "(SII or VERIFACTU), ceuta = Ceuta and Melilla (VERIFACTU only). It may only be "
+                  + "left out when adding SII to an existing TicketBAI, whose territory it takes.",
+              FiscalSifRules.TERRITORIES))
+          .withIdDescription("the organization id"));
+    return Collections.unmodifiableMap(contracts);
+  }
+
+  /** @return the declared actions */
   public static Map<String, NeoActionContract> actionContracts() {
     return CONTRACTS;
   }
@@ -142,19 +175,22 @@ public class FiscalSystemConfigureAction {
    * @return whether this class serves it
    */
   public static boolean serves(String action) {
-    return ACTION.equals(action);
+    return ACTION.equals(action) || CATALOG_ACTION.equals(action);
   }
 
   /**
-   * Runs the action.
+   * Runs one of the actions.
    *
    * @param context the ACTION context; {@code recordId} is the organization
-   * @return the answer, or {@code null} when {@code context} is not this action
+   * @return the answer, or {@code null} when {@code context} is not one of these actions
    */
   public NeoResponse handle(NeoContext context) {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
         || !serves(context.getFieldName())) {
       return null;
+    }
+    if (CATALOG_ACTION.equals(context.getFieldName())) {
+      return catalog(context);
     }
     if (!METHOD_POST.equalsIgnoreCase(context.getHttpMethod())) {
       return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED, "Method not allowed.");
@@ -171,8 +207,9 @@ public class FiscalSystemConfigureAction {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Organization not found");
     }
     try {
-      return configure(context, orgId, params.getString(P_SYSTEM),
-          params.getString(P_TERRITORY));
+      String territory = params.isNull(P_TERRITORY) ? null
+          : StringUtils.trimToNull(params.optString(P_TERRITORY, null));
+      return configure(context, orgId, params.getString(P_SYSTEM), territory);
     } catch (JSONException e) {
       log.error("configureFiscalSystem failed on organization {}", orgId, e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -191,39 +228,33 @@ public class FiscalSystemConfigureAction {
       return FiscalSifGuard.refusal(HttpServletResponse.SC_CONFLICT, FiscalSifGuard.MSG_TEST_MODE);
     }
     Map<String, String> active = FiscalSifGuard.activeRecords(orgId);
+    String effectiveTerritory = territory;
     boolean addingSii = isAddingSiiToTbai(system, territory, active);
-    if (!addingSii && !FiscalSifRules.isAllowed(system, territory)) {
-      return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_NOT_ALLOWED,
-          FiscalSifGuard.displayName(system), FiscalSifGuard.territoryName(territory),
-          String.join(", ", displayNames(FiscalSifRules.allowedSystems(territory))));
-    }
     if (addingSii) {
       String tbaiTerritory = FiscalSifGuard.tbaiTerritoryOf(active.get(FiscalSifRules.TBAI));
-      if (tbaiTerritory != null
-          && !tbaiTerritory.equals(FiscalSifRules.tbaiTerritory(territory))) {
-        return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_TERRITORY_MISMATCH,
-            FiscalSifGuard.territoryName(FiscalSifRules.territoryOfTbai(tbaiTerritory)));
+      String tbaiTerritoryId = FiscalSifRules.territoryOfTbai(tbaiTerritory);
+      if (tbaiTerritoryId == null) {
+        // A legacy TicketBAI with no (or an unknown) territory: the SII flags cannot be derived.
+        return FiscalSifGuard.refusal(HttpServletResponse.SC_CONFLICT, MSG_TBAI_NO_TERRITORY);
       }
-    } else if (!active.isEmpty()) {
-      return FiscalSifGuard.refusal(HttpServletResponse.SC_CONFLICT, MSG_ALREADY_CONFIGURED,
-          String.join(" + ", displayNames(new ArrayList<>(active.keySet()))));
+      if (territory != null && !territory.equals(tbaiTerritoryId)) {
+        return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_TERRITORY_MISMATCH,
+            FiscalSifGuard.territoryName(tbaiTerritoryId));
+      }
+      effectiveTerritory = tbaiTerritoryId;
+    } else {
+      NeoResponse refusal = activationRefusal(system, territory, active);
+      if (refusal != null) {
+        return refusal;
+      }
     }
 
     String day = today.get().toString();
     Map<String, JSONObject> payloads = addingSii
         ? Collections.singletonMap(FiscalSifRules.SII,
-            FiscalSifRules.recordPayload(FiscalSifRules.SII, territory, day))
-        : FiscalSifRules.onboardingPayloads(system, territory, day);
+            FiscalSifRules.recordPayload(FiscalSifRules.SII, effectiveTerritory, day))
+        : FiscalSifRules.onboardingPayloads(system, effectiveTerritory, day);
 
-    // Unlike the wizard, which posts SII with acogidaAlSII 'N' and leaves it acogido on its detail
-    // save, the agent has no second step: the SII it activates is acogido from the start.
-    // SiiConfigDeactivateHandler also sets INSIISYSTEM = 'Y' by native SQL after the create,
-    // inside this batch, when it sees FiscalSifGuard#isAgentOnboarding — the same statement its
-    // PUT runs, so the outcome does not depend on how the create converts this value.
-    JSONObject sii = payloads.get(FiscalSifRules.SII);
-    if (sii != null) {
-      sii.put("acogidaAlSII", "Y");
-    }
     JSONArray operations = new JSONArray();
     for (Map.Entry<String, JSONObject> e : payloads.entrySet()) {
       String[] endpoint = ENDPOINTS.get(e.getKey());
@@ -233,19 +264,60 @@ public class FiscalSystemConfigureAction {
           .put("entity", endpoint[1])
           .put("body", e.getValue()));
     }
-    JSONObject outcome = FiscalSifGuard.asAgentOnboarding(() -> batch.apply(operations));
+    JSONObject outcome = FiscalSifGuard.asFiscalSystemActivation(() -> batch.apply(operations));
     if (outcome == null || !outcome.optBoolean(BatchService.FIELD_COMMITTED, false)) {
       return batchFailure(outcome);
     }
-    return success(context, orgId, addingSii ? FiscalSifRules.SII_TBAI : system, territory,
-        outcome);
+    return success(context, orgId, addingSii ? FiscalSifRules.SII_TBAI : system,
+        effectiveTerritory, outcome);
   }
 
+  /** The refusal of a first activation, or {@code null}: territory, compatibility, one SIF. */
+  private static NeoResponse activationRefusal(String system, String territory,
+      Map<String, String> active) {
+    if (territory == null) {
+      return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_TERRITORY_REQUIRED);
+    }
+    if (!FiscalSifRules.isAllowed(system, territory)) {
+      return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_NOT_ALLOWED,
+          FiscalSifGuard.displayName(system), FiscalSifGuard.territoryName(territory),
+          String.join(", ", displayNames(FiscalSifRules.allowedSystems(territory))));
+    }
+    if (!active.isEmpty()) {
+      return FiscalSifGuard.refusal(HttpServletResponse.SC_CONFLICT, MSG_ALREADY_CONFIGURED,
+          String.join(" + ", displayNames(new ArrayList<>(active.keySet()))));
+    }
+    return null;
+  }
+
+  /**
+   * "Añadir SII": SII asked for an organization whose only active SIF is TicketBAI, either
+   * without a territory (it takes TicketBAI's) or with a Basque one (checked against TicketBAI's).
+   */
   private static boolean isAddingSiiToTbai(String system, String territory,
       Map<String, String> active) {
     return FiscalSifRules.SII.equals(system)
-        && FiscalSifRules.BASQUE_TERRITORIES.contains(territory)
+        && (territory == null || FiscalSifRules.BASQUE_TERRITORIES.contains(territory))
         && active.size() == 1 && active.containsKey(FiscalSifRules.TBAI);
+  }
+
+  /** The {@code fiscalSystemCatalog} answer: read only, the same for every organization. */
+  private static NeoResponse catalog(NeoContext context) {
+    String method = context.getHttpMethod();
+    if (!METHOD_GET.equalsIgnoreCase(method) && !METHOD_POST.equalsIgnoreCase(method)) {
+      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED, "Method not allowed.");
+    }
+    String orgId = context.getRecordId();
+    if (orgId == null || !isReadable(orgId)) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Organization not found");
+    }
+    try {
+      return NeoResponse.ok(FiscalSifRules.catalog());
+    } catch (JSONException e) {
+      log.error("fiscalSystemCatalog could not be built", e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Could not read the fiscal system catalog.");
+    }
   }
 
   private NeoResponse success(NeoContext context, String orgId, String resultingSystem,
@@ -269,8 +341,7 @@ public class FiscalSystemConfigureAction {
         .put("created", created)
         .put("certificate", new JSONObject().put("exists", hasCertificate));
     if (!hasCertificate) {
-      NeoHints.addMessage(body, context.isMcpOrigin(), NeoHints.TYPE_WARNING,
-          FiscalSifGuard.text(MSG_NO_CERTIFICATE));
+      NeoMessageText.addWarning(body, context.isMcpOrigin(), MSG_NO_CERTIFICATE);
     }
     return NeoResponse.ok(body);
   }

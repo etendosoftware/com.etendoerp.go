@@ -15,10 +15,10 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.fiscal;
 
-import static com.etendoerp.go.schemaforge.FiscalSifGuardTest.message;
-import static com.etendoerp.go.schemaforge.FiscalSifGuardTest.messageKey;
+import static com.etendoerp.go.schemaforge.fiscal.FiscalSifGuardTest.message;
+import static com.etendoerp.go.schemaforge.fiscal.FiscalSifGuardTest.messageKey;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -47,13 +47,17 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.FiscalTestModeResolver;
+import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * The {@code configureFiscalSystem} action: its refusals (status and message key), the records it
  * sends through the batch seam per system and territory, "Añadir SII" on an existing TicketBAI,
  * the certificate warning, and how a batch failure is reported.
  *
- * @covers com.etendoerp.go.schemaforge.FiscalSystemConfigureAction
+ * @covers com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction
  */
 class FiscalSystemConfigureActionTest {
 
@@ -107,7 +111,7 @@ class FiscalSystemConfigureActionTest {
   private FiscalSystemConfigureAction action() {
     return new FiscalSystemConfigureAction(ops -> {
       batches.add(ops);
-      onboardingFlags.add(FiscalSifGuard.isAgentOnboarding());
+      onboardingFlags.add(FiscalSifGuard.isFiscalSystemActivation());
       return batchAnswer.apply(ops);
     }, () -> TODAY, orgId -> certificate);
   }
@@ -203,14 +207,11 @@ class FiscalSystemConfigureActionTest {
   }
 
   @Test
-  void aMissingParameterIsRefusedBeforeAnyLookup() throws Exception {
+  void aMissingTerritoryIsRefusedOutsideAddingSii() throws Exception {
     NeoResponse response = run(ORG, new JSONObject().put("system", "SII"));
 
-    assertEquals(422, response.getHttpStatus());
-    JSONArray missing = response.getBody().getJSONObject("error")
-        .getJSONArray("missingParameters");
-    assertEquals("territory", missing.getString(0));
-    assertTrue(tables.sqls.isEmpty());
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_TERRITORY_REQUIRED, messageKey(response));
     assertTrue(batches.isEmpty());
   }
 
@@ -296,7 +297,7 @@ class FiscalSystemConfigureActionTest {
     assertEquals("IVA", sii.getString("taxtype"));
     assertEquals("2026-11-03", sii.getString("fechaAcogidaSII"));
     assertEquals(List.of(Boolean.TRUE), onboardingFlags);
-    assertFalse(FiscalSifGuard.isAgentOnboarding(), "the flag never outlives the batch");
+    assertFalse(FiscalSifGuard.isFiscalSystemActivation(), "the flag never outlives the batch");
   }
 
   @Test

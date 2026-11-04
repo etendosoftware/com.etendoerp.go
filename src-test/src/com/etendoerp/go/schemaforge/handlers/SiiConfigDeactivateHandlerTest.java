@@ -56,7 +56,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.data.AEATSIIFacturas;
 
-import com.etendoerp.go.schemaforge.FiscalSifGuard;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -1348,7 +1348,7 @@ public class SiiConfigDeactivateHandlerTest {
       @SuppressWarnings("rawtypes")
       NativeQuery nq = stubInSiiSystemNativeQuery(dal);
 
-      assertNull(FiscalSifGuard.asAgentOnboarding(() -> handler.afterHandle(ctx)));
+      assertNull(FiscalSifGuard.asFiscalSystemActivation(() -> handler.afterHandle(ctx)));
 
       ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
       verify(dal.getSession()).createNativeQuery(sql.capture());
@@ -1373,7 +1373,7 @@ public class SiiConfigDeactivateHandlerTest {
       when(nq.executeUpdate()).thenThrow(new IllegalStateException("AEATSII_CHECK_SIFS refused"));
 
       try {
-        FiscalSifGuard.asAgentOnboarding(() -> handler.afterHandle(ctx));
+        FiscalSifGuard.asFiscalSystemActivation(() -> handler.afterHandle(ctx));
         fail("the trigger refusal must roll the activation back, not be swallowed");
       } catch (IllegalStateException thrown) {
         assertEquals("AEATSII_CHECK_SIFS refused", thrown.getMessage());

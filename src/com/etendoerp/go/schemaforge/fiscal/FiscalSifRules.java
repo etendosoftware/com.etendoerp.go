@@ -15,7 +15,7 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.fiscal;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
@@ -31,11 +32,9 @@ import org.codehaus.jettison.json.JSONObject;
  * The fiscal-territory x fiscal-system (SIF) rules of the Fiscal Configuration onboarding, on the
  * server (ETP-6053). Pure: no database, no session, so it is unit-testable on its own.
  *
- * <p>It is the Java twin of the SPA's onboarding tables in {@code etendo_schema_forge}
- * ({@code tools/app-shell/src/windows/custom/fiscal-config/fiscalConfig.utils.js}:
- * {@code TERRITORY_ALLOWED_SYSTEMS} and {@code buildOnboardingPayloads}). The two copies must
- * change together — the duplication is recorded as feature debt; the SPA can drop its copy once
- * it calls {@code configureFiscalSystem} itself.</p>
+ * <p>The single source of these rules: the SPA's Fiscal Configuration window reads them through the
+ * {@code fiscalSystemCatalog} action ({@link #catalog()}) and activates a system through
+ * {@code configureFiscalSystem}, exactly as an agent does; it keeps no copy of its own.</p>
  *
  * <p>Everything here belongs to the three fiscal-configuration windows ({@code sii-config},
  * {@code tbai-config}, {@code verifactu-config}); it is called only from their customizations and
@@ -71,7 +70,7 @@ public final class FiscalSifRules {
   public static final Set<String> BASQUE_TERRITORIES = Set.of(ALAVA, BIZKAIA, GIPUZKOA);
 
   /**
-   * {@code TERRITORY_ALLOWED_SYSTEMS} of the SPA. Ceuta/Melilla is VERI*FACTU only: SII cannot
+   * Which systems each territory allows. Ceuta/Melilla is VERI*FACTU only: SII cannot
    * represent an IPSI taxpayer ({@code AEATSII_CONFIG.TAXTYPE} only lists IVA/IGIC).
    */
   private static final Map<String, List<String>> ALLOWED;
@@ -158,7 +157,7 @@ public final class FiscalSifRules {
 
   /**
    * The body of each record the onboarding creates for {@code system} in {@code territory}, by
-   * record system — {@code buildOnboardingPayloads} of the SPA, field for field. Derived values
+   * record system (formerly {@code buildOnboardingPayloads} of the SPA). Derived values
    * (SII {@code navarra}/{@code guipuzcoa}/{@code taxtype}, TicketBAI {@code etsgSifTerritory},
    * VERI*FACTU {@code tAXType}) come from the territory and nowhere else.
    *
@@ -201,7 +200,9 @@ public final class FiscalSifRules {
         body.put("guipuzcoa", "Y");
       }
       body.put("taxtype", CANARIAS.equals(territory) ? "IGIC" : "IVA");
-      body.put("acogidaAlSII", "N");
+      // Acogido from creation, on every channel: the activation is the act of joining SII. The
+      // wizard used to post 'N' and turn it on with its detail save (ETP-6053).
+      body.put("acogidaAlSII", "Y");
       body.put("entornoDeProduccin", "Y");
       body.put("adjuntarArchivosXML", "Y");
       body.put("fechaAcogidaSII", today);
@@ -218,6 +219,41 @@ public final class FiscalSifRules {
       body.put("defaultQR", "Y");
     }
     return body;
+  }
+
+  /**
+   * The rules as data, for the {@code fiscalSystemCatalog} action: every system, and per territory
+   * the systems it allows plus the values a config record of that territory carries — the SII flags
+   * and tax type, the TicketBAI territory, the VERI*FACTU tax type ({@code null} when that system
+   * never applies there). A reader identifies the territory of a stored configuration with them.
+   *
+   * @return {@code {systems:[...], territories:[{territory, systems, sii, tbaiTerritory,
+   *         verifactuTaxType}]}}
+   * @throws JSONException never in practice
+   */
+  public static JSONObject catalog() throws JSONException {
+    JSONArray territories = new JSONArray();
+    for (String territory : TERRITORIES) {
+      List<String> systems = allowedSystems(territory);
+      boolean siiApplies = systems.contains(SII) || systems.contains(SII_TBAI);
+      Object sii = JSONObject.NULL;
+      if (siiApplies) {
+        JSONObject payload = recordPayload(SII, territory, null);
+        sii = new JSONObject()
+            .put("navarra", "Y".equals(payload.optString("navarra")))
+            .put("guipuzcoa", "Y".equals(payload.optString("guipuzcoa")))
+            .put("taxtype", payload.getString("taxtype"));
+      }
+      String tbai = tbaiTerritory(territory);
+      String verifactu = systems.contains(VERIFACTU) ? VERIFACTU_TAX_TYPE.get(territory) : null;
+      territories.put(new JSONObject()
+          .put("territory", territory)
+          .put("systems", new JSONArray(systems))
+          .put("sii", sii)
+          .put("tbaiTerritory", tbai != null ? tbai : JSONObject.NULL)
+          .put("verifactuTaxType", verifactu != null ? verifactu : JSONObject.NULL));
+    }
+    return new JSONObject().put("systems", new JSONArray(SYSTEMS)).put("territories", territories);
   }
 
   /**

@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -33,6 +32,9 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.invoice.Invoice;
+
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifRules;
 
 /**
  * NeoHandler for {@code etvfac_verifactu_config} that owns two behaviors:
@@ -62,17 +64,6 @@ import org.openbravo.model.common.invoice.Invoice;
 public class VerifactuConfigReadyHandler extends AbstractSmartDeactivationHandler {
 
   private static final Logger log = LogManager.getLogger(VerifactuConfigReadyHandler.class);
-
-  /**
-   * ETP-6053: the Fiscal Configuration write rules ({@link FiscalSifGuard}) run before the smart
-   * deactivation and the default CRUD — no inactive create, none in forced test mode, one active
-   * config per organization, and no {@code active} change by an agent.
-   */
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    NeoResponse refusal = FiscalSifGuard.preCheck(context, FiscalSifRules.VERIFACTU);
-    return refusal != null ? refusal : super.handle(context);
-  }
 
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PATCH = "PATCH";
@@ -106,6 +97,17 @@ public class VerifactuConfigReadyHandler extends AbstractSmartDeactivationHandle
           + "   AND ci.created >= :adoptionDate";
 
   private static final String ETVFAC_CFG_BLOCK_MSG = "ETVFAC_cfg_verifactu_block";
+
+  /**
+   * ETP-6053: the Fiscal Configuration write rules ({@link FiscalSifGuard}) run before the smart
+   * deactivation and the default CRUD — no inactive create, none in forced test mode, one active
+   * config per organization, and no {@code active} change by an agent.
+   */
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    NeoResponse refusal = FiscalSifGuard.preCheck(context, FiscalSifRules.VERIFACTU);
+    return refusal != null ? refusal : super.handle(context);
+  }
 
   /**
    * Decides between deleting the config record (no invoices sent through it) and letting the

@@ -34,7 +34,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.etendoerp.go.schemaforge.FiscalSystemConfigureAction;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction;
 import com.etendoerp.go.schemaforge.NeoCertificateHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;

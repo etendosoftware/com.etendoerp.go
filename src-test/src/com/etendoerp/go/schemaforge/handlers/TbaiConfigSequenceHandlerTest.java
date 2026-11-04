@@ -90,7 +90,7 @@ import com.smf.ticketbai.data.TbaiConfig;
  * separately; all the interesting behavior lives in {@code afterHandle}.
  *
  * <p>Also that the Fiscal Configuration write rules ({@link
- * com.etendoerp.go.schemaforge.FiscalSifGuard}) run first in {@code handle}, on this entity's
+ * com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard}) run first in {@code handle}, on this entity's
  * own table.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler

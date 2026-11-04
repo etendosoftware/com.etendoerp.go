@@ -15,12 +15,13 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.fiscal;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -31,20 +32,24 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.common.FiscalTestModeResolver;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoMessageText;
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
- * The write rules of the three fiscal-configuration entities (SII, TicketBAI, VERI*FACTU) that the
- * Fiscal Configuration window enforces in the SPA, enforced on the server too (ETP-6053). Called
+ * The write rules of the three fiscal-configuration entities (SII, TicketBAI, VERI*FACTU), on the
+ * server (ETP-6053). Called
  * from each entity's own customization ({@code SiiConfigDeactivateHandler},
  * {@code TbaiConfigSequenceHandler}, {@code VerifactuConfigReadyHandler}) and from the
  * {@code configureFiscalSystem} action of {@code organization}.
  *
  * <h2>Every channel (REST single, REST batch, MCP)</h2>
  * <ul>
- *   <li>A config is never created inactive — the SPA never does it, and an inactive create would
- *       slip past every "one active" rule.</li>
+ *   <li>A config is never created inactive — an inactive create would slip past every "one
+ *       active" rule.</li>
  *   <li>No config is created while the client is in forced fiscal test mode
- *       ({@code ETSG_ForceTestMode}, {@link FiscalTestModeResolver}) — the SPA's
+ *       ({@code ETSG_ForceTestMode}, {@link FiscalTestModeResolver}) — the same sentence as the SPA's
  *       {@code fiscal.testModeLock.warning}.</li>
  *   <li>One active config per system and organization. TicketBAI has no database trigger for it;
  *       SII and VERI*FACTU do, but their trigger messages are not translated, so the refusal is
@@ -76,12 +81,24 @@ public final class FiscalSifGuard {
   static final String TERRITORY_NAME_PREFIX = "ETGO_FiscalSifTerritory_";
 
   /**
-   * Set while {@code configureFiscalSystem} creates its records: the SII created then is
-   * "acogido al SII" ({@code INSIISYSTEM = 'Y'}) from the start, as the wizard leaves it after
-   * its detail save. A thread flag because the records go through {@link BatchService}, whose
-   * hook context carries nothing from the caller.
+   * The value of a config's {@code active} flag — requested by a body or stored in a record — or
+   * {@link #UNKNOWN} when the body does not carry a readable one or the record does not exist.
    */
-  private static final ThreadLocal<Boolean> AGENT_ONBOARDING = new ThreadLocal<>();
+  public enum ActiveFlag {
+    /** {@code active} is true / {@code 'Y'}. */
+    ACTIVE,
+    /** {@code active} is false / {@code 'N'}. */
+    INACTIVE,
+    /** Absent, unreadable or not found. */
+    UNKNOWN
+  }
+
+  /**
+   * Set while {@code configureFiscalSystem} creates its records, on every channel: the SII created
+   * then is "acogido al SII" ({@code INSIISYSTEM = 'Y'}) from the start. A thread flag because the
+   * records go through {@code BatchService}, whose hook context carries nothing from the caller.
+   */
+  private static final ThreadLocal<Boolean> FISCAL_SYSTEM_ACTIVATION = new ThreadLocal<>();
 
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";
@@ -131,7 +148,7 @@ public final class FiscalSifGuard {
 
   private static NeoResponse createRefusal(NeoContext context, String recordSystem,
       JSONObject body) {
-    if (Boolean.FALSE.equals(requestedActive(body))) {
+    if (requestedActive(body) == ActiveFlag.INACTIVE) {
       return refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_INACTIVE_CREATE);
     }
     if (isForceTestMode(context.getObContext())) {
@@ -146,16 +163,16 @@ public final class FiscalSifGuard {
 
   private static NeoResponse activeChangeRefusal(NeoContext context, String recordSystem,
       JSONObject body) {
-    Boolean requested = requestedActive(body);
+    ActiveFlag requested = requestedActive(body);
     String recordId = context.getRecordId();
-    Boolean current = recordId == null ? null : isActive(recordSystem, recordId);
-    if (requested == null || current == null || requested.equals(current)) {
+    ActiveFlag current = recordId == null ? ActiveFlag.UNKNOWN : isActive(recordSystem, recordId);
+    if (requested == ActiveFlag.UNKNOWN || current == ActiveFlag.UNKNOWN || requested == current) {
       return null;
     }
     if (context.isMcpOrigin()) {
       return refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_ACTIVE_BY_AGENT);
     }
-    if (Boolean.TRUE.equals(requested)) {
+    if (requested == ActiveFlag.ACTIVE) {
       String orgId = organizationOf(recordSystem, recordId);
       if (orgId != null && activeRecordId(recordSystem, orgId, recordId) != null) {
         return oneActiveRefusal(recordSystem);
@@ -169,25 +186,25 @@ public final class FiscalSifGuard {
   }
 
   /**
-   * The value of {@code active} in a request body, or {@code null} when absent or unreadable.
-   * Accepts a JSON boolean and the Etendo {@code "Y"}/{@code "N"} spelling.
+   * The value of {@code active} in a request body; {@link ActiveFlag#UNKNOWN} when absent or
+   * unreadable. Accepts a JSON boolean and the Etendo {@code "Y"}/{@code "N"} spelling.
    */
-  static Boolean requestedActive(JSONObject body) {
+  static ActiveFlag requestedActive(JSONObject body) {
     if (body == null || !body.has(FIELD_ACTIVE) || body.isNull(FIELD_ACTIVE)) {
-      return null;
+      return ActiveFlag.UNKNOWN;
     }
     Object value = body.opt(FIELD_ACTIVE);
     if (value instanceof Boolean) {
-      return (Boolean) value;
+      return Boolean.TRUE.equals(value) ? ActiveFlag.ACTIVE : ActiveFlag.INACTIVE;
     }
     String text = StringUtils.trimToEmpty(String.valueOf(value));
     if ("Y".equalsIgnoreCase(text) || "true".equalsIgnoreCase(text)) {
-      return Boolean.TRUE;
+      return ActiveFlag.ACTIVE;
     }
     if ("N".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
-      return Boolean.FALSE;
+      return ActiveFlag.INACTIVE;
     }
-    return null;
+    return ActiveFlag.UNKNOWN;
   }
 
   /**
@@ -271,27 +288,27 @@ public final class FiscalSifGuard {
   }
 
   /**
-   * Runs {@code action} as the agent onboarding ({@link #isAgentOnboarding()} is {@code true}
-   * inside it).
+   * Runs {@code action} as a fiscal system activation ({@link #isFiscalSystemActivation()} is
+   * {@code true} inside it).
    *
    * @param action the work
    * @param <T>    its result
    * @return what {@code action} returns
    */
-  public static <T> T asAgentOnboarding(java.util.function.Supplier<T> action) {
-    AGENT_ONBOARDING.set(Boolean.TRUE);
+  public static <T> T asFiscalSystemActivation(Supplier<T> action) {
+    FISCAL_SYSTEM_ACTIVATION.set(Boolean.TRUE);
     try {
       return action.get();
     } finally {
-      AGENT_ONBOARDING.remove();
+      FISCAL_SYSTEM_ACTIVATION.remove();
     }
   }
 
   /**
    * @return whether the current thread is creating the records of {@code configureFiscalSystem}
    */
-  public static boolean isAgentOnboarding() {
-    return Boolean.TRUE.equals(AGENT_ONBOARDING.get());
+  public static boolean isFiscalSystemActivation() {
+    return Boolean.TRUE.equals(FISCAL_SYSTEM_ACTIVATION.get());
   }
 
   /**
@@ -332,16 +349,19 @@ public final class FiscalSifGuard {
     return id == null ? null : id.toString();
   }
 
-  private static Boolean isActive(String recordSystem, String recordId) {
+  private static ActiveFlag isActive(String recordSystem, String recordId) {
     String[] table = TABLES.get(recordSystem);
     if (table == null) {
-      return null;
+      return ActiveFlag.UNKNOWN;
     }
     Object value = OBDal.getInstance().getSession()
         .createNativeQuery("SELECT isactive FROM " + table[0] + " WHERE " + table[1] + " = :id")
         .setParameter("id", recordId)
         .uniqueResult();
-    return value == null ? null : "Y".equals(value.toString());
+    if (value == null) {
+      return ActiveFlag.UNKNOWN;
+    }
+    return "Y".equals(value.toString()) ? ActiveFlag.ACTIVE : ActiveFlag.INACTIVE;
   }
 
   private static String organizationOf(String recordSystem, String recordId) {

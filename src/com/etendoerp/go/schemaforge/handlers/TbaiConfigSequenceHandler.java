@@ -22,7 +22,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -43,8 +42,8 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
-import com.etendoerp.go.schemaforge.FiscalSifGuard;
-import com.etendoerp.go.schemaforge.FiscalSifRules;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifRules;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoExtension;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -137,6 +136,13 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
 
   private static final Logger log = LogManager.getLogger(TbaiConfigSequenceHandler.class);
 
+  private static final String METHOD_POST = "POST";
+
+  private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
+      "Automatic TicketBAI invoice sending (Etendo)";
+
+  private final SiiTbaiAutoSendScheduleService scheduleService = new SiiTbaiAutoSendScheduleService();
+
   /**
    * ETP-6053: the Fiscal Configuration write rules ({@link FiscalSifGuard}) run before the smart
    * deactivation and the default CRUD — no inactive create, none in forced test mode, one active
@@ -147,13 +153,6 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
     NeoResponse refusal = FiscalSifGuard.preCheck(context, FiscalSifRules.TBAI);
     return refusal != null ? refusal : super.handle(context);
   }
-
-  private static final String METHOD_POST = "POST";
-
-  private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
-      "Automatic TicketBAI invoice sending (Etendo)";
-
-  private final SiiTbaiAutoSendScheduleService scheduleService = new SiiTbaiAutoSendScheduleService();
 
   /**
    * DB table name that identifies invoice {@link DocumentType}s. All invoice-category doc types

@@ -15,7 +15,7 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.fiscal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,7 +36,7 @@ import org.junit.jupiter.params.provider.CsvSource;
  * derives from the territory. The expected table is written out here on purpose, independently of
  * the production map, so a change to either side shows up.
  *
- * @covers com.etendoerp.go.schemaforge.FiscalSifRules
+ * @covers com.etendoerp.go.schemaforge.fiscal.FiscalSifRules
  */
 class FiscalSifRulesTest {
 
@@ -128,7 +128,7 @@ class FiscalSifRulesTest {
     assertEquals("Y", sii.getString("navarra"));
     assertFalse(sii.has("guipuzcoa"));
     assertEquals("IVA", sii.getString("taxtype"));
-    assertEquals("N", sii.getString("acogidaAlSII"), "the wizard posts it not acogido");
+    assertEquals("Y", sii.getString("acogidaAlSII"), "acogido from creation, on every channel");
     assertEquals("Y", sii.getString("entornoDeProduccin"));
     assertEquals("Y", sii.getString("adjuntarArchivosXML"));
     assertEquals(TODAY, sii.getString("fechaAcogidaSII"));

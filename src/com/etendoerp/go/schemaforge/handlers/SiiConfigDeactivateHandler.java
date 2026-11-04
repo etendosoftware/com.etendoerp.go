@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.Date;
 
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -36,8 +35,8 @@ import org.openbravo.module.sii.data.AEATSIIFacturas;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
-import com.etendoerp.go.schemaforge.FiscalSifGuard;
-import com.etendoerp.go.schemaforge.FiscalSifRules;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSifRules;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoExtension;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -120,6 +119,13 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
 
   private static final Logger log = LogManager.getLogger(SiiConfigDeactivateHandler.class);
 
+  private static final String METHOD_POST = "POST";
+
+  private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
+      "Automatic SII invoice sending (Etendo)";
+
+  private final SiiTbaiAutoSendScheduleService scheduleService = new SiiTbaiAutoSendScheduleService();
+
   /**
    * ETP-6053: the Fiscal Configuration write rules ({@link FiscalSifGuard}) run before the smart
    * deactivation and the default CRUD — no inactive create, none in forced test mode, one active
@@ -130,13 +136,6 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
     NeoResponse refusal = FiscalSifGuard.preCheck(context, FiscalSifRules.SII);
     return refusal != null ? refusal : super.handle(context);
   }
-
-  private static final String METHOD_POST = "POST";
-
-  private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
-      "Automatic SII invoice sending (Etendo)";
-
-  private final SiiTbaiAutoSendScheduleService scheduleService = new SiiTbaiAutoSendScheduleService();
 
   /**
    * Decides between deleting the config record (no invoices sent through it) and letting the
@@ -233,10 +232,10 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
     if (StringUtils.isBlank(recordId)) {
       return null;
     }
-    if (isPost && FiscalSifGuard.isAgentOnboarding()) {
-      // ETP-6053: an SII activated by an agent (configureFiscalSystem) is acogido from the start —
-      // it has no detail save to do it later, as the wizard's has. Outside the non-fatal block on
-      // purpose: if AEATSII_CHECK_SIFS_CONFIGS_TRG refuses it, the whole activation rolls back.
+    if (isPost && FiscalSifGuard.isFiscalSystemActivation()) {
+      // ETP-6053: an SII activated through configureFiscalSystem — by the Fiscal Configuration
+      // window or by an agent — is acogido from creation. Outside the non-fatal block on purpose:
+      // if AEATSII_CHECK_SIFS_CONFIGS_TRG refuses it, the whole activation rolls back.
       OBContext.setAdminMode(true);
       try {
         setInSiiSystemY(recordId);

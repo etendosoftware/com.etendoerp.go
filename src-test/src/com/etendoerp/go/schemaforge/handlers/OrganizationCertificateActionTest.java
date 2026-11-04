@@ -35,7 +35,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
-import com.etendoerp.go.schemaforge.FiscalSystemConfigureAction;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction;
 import com.etendoerp.go.schemaforge.NeoCertificateHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -107,7 +107,7 @@ class OrganizationCertificateActionTest {
         .keySet());
 
     assertEquals(List.of(OrganizationCertificateAction.ACTION,
-        FiscalSystemConfigureAction.ACTION), actions);
+        FiscalSystemConfigureAction.CATALOG_ACTION, FiscalSystemConfigureAction.ACTION), actions);
   }
 
   @Test
@@ -122,12 +122,11 @@ class OrganizationCertificateActionTest {
 
       NeoResponse response = new OrganizationCertificateAction().handle(ctx);
 
-      // The configureFiscalSystem contract answers: both of its parameters are missing.
+      // The configureFiscalSystem contract answers: its required parameter is missing.
       assertEquals(422, response.getHttpStatus());
       JSONArray missing = response.getBody().getJSONObject("error")
           .getJSONArray("missingParameters");
       assertEquals("system", missing.getString(0));
-      assertEquals("territory", missing.getString(1));
       helperMock.verifyNoInteractions();
     }
   }

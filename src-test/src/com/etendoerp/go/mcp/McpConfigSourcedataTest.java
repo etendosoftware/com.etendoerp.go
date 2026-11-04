@@ -82,7 +82,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsConfig
- * @covers com.etendoerp.go.schemaforge.FiscalSystemConfigureAction
+ * @covers com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {
