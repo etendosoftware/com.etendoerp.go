@@ -716,4 +716,75 @@ public class BatchServiceTest {
       assertEquals(404, written.getAllValues().get(2).getHttpStatus());
     }
   }
+
+  // ── ETP-6057: a public API batch is counted before the async/sync branch ─
+
+  @Test
+  public void handleNotesTheOperationsBeforeTheSyncBranch() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    BatchService service = spy(new BatchService(servlet));
+    List<String> order = new ArrayList<>();
+    org.mockito.Mockito.doAnswer(inv -> {
+      order.add("execute");
+      return new JSONObject().put("committed", true);
+    }).when(service).executeBatch(any(), isNull(), anyBoolean(), anyBoolean());
+    HttpServletRequest request = mock(HttpServletRequest.class);
+
+    try (MockedStatic<NeoRequestBodyParser> parser = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<NeoPublicApiUsage> usage = mockStatic(NeoPublicApiUsage.class)) {
+      parser.when(() -> NeoRequestBodyParser.readRequestBody(any()))
+          .thenReturn("{\"operations\":[{\"id\":\"a\"}]}");
+      usage.when(() -> NeoPublicApiUsage.noteBatchOperations(any(), any()))
+          .thenAnswer(inv -> order.add("note"));
+
+      service.handle(request, mock(HttpServletResponse.class));
+
+      usage.verify(() -> NeoPublicApiUsage.noteBatchOperations(eq(request), any(JSONArray.class)));
+    }
+    assertEquals(List.of("note", "execute"), order);
+  }
+
+  @Test
+  public void handleNotesTheOperationsBeforeTheAsyncBranch() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    BatchService service = new BatchService(servlet);
+    BatchJobService jobs = mock(BatchJobService.class);
+    List<String> order = new ArrayList<>();
+    when(jobs.submit(any(), any(), any(), any())).thenAnswer(inv -> {
+      order.add("submit");
+      return new JSONObject().put("jobId", "J1");
+    });
+
+    try (MockedStatic<NeoRequestBodyParser> parser = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<BatchJobService> jobStatic = mockStatic(BatchJobService.class);
+         MockedStatic<BatchJobService.Owner> ownerStatic = mockStatic(BatchJobService.Owner.class);
+         MockedStatic<NeoPublicApiUsage> usage = mockStatic(NeoPublicApiUsage.class)) {
+      parser.when(() -> NeoRequestBodyParser.readRequestBody(any()))
+          .thenReturn("{\"async\":true,\"operations\":[{\"id\":\"a\"}]}");
+      jobStatic.when(BatchJobService::getInstance).thenReturn(jobs);
+      ownerStatic.when(BatchJobService.Owner::current).thenReturn(owner());
+      usage.when(() -> NeoPublicApiUsage.noteBatchOperations(any(), any()))
+          .thenAnswer(inv -> order.add("note"));
+
+      service.handle(mock(HttpServletRequest.class), mock(HttpServletResponse.class));
+    }
+    assertEquals(List.of("note", "submit"), order);
+  }
+
+  @Test
+  public void handleDoesNotNoteAnEmptyOrMalformedBatch() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    BatchService service = new BatchService(servlet);
+
+    try (MockedStatic<NeoRequestBodyParser> parser = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<NeoPublicApiUsage> usage = mockStatic(NeoPublicApiUsage.class)) {
+      parser.when(() -> NeoRequestBodyParser.readRequestBody(any())).thenReturn("{}");
+
+      service.handle(mock(HttpServletRequest.class), mock(HttpServletResponse.class));
+
+      verify(servlet).sendError(any(), eq(HttpServletResponse.SC_BAD_REQUEST),
+          eq("Missing or empty 'operations' array"));
+      usage.verifyNoInteractions();
+    }
+  }
 }

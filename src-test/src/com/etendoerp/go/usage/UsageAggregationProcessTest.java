@@ -1083,4 +1083,66 @@ class UsageAggregationProcessTest {
       }
     }
   }
+
+  /**
+   * ETP-6057 — the settling-window run ends by purging expired raw public API rows; a backfill never
+   * does. {@link PublicApiUsageRetention} is replaced so only the decision to call it is asserted.
+   */
+  @Nested
+  @DisplayName("public API usage retention")
+  class PublicApiRetention {
+
+    @Test
+    void aSettlingWindowRunPurgesOnceWithTheMomentOfTheRun() throws Exception {
+      Date before = new Date();
+      try (MockedStatic<PublicApiUsageRetention> purge =
+          mockStatic(PublicApiUsageRetention.class)) {
+        Outcome outcome = execute(new LinkedHashMap<>());
+
+        outcome.assertSucceeded();
+        ArgumentCaptor<Date> now = ArgumentCaptor.forClass(Date.class);
+        purge.verify(() -> PublicApiUsageRetention.purge(now.capture()));
+        assertTrue(!now.getValue().before(before) && !now.getValue().after(new Date()));
+      }
+    }
+
+    @Test
+    void aBackfillRunNeverPurges() throws Exception {
+      try (MockedStatic<PublicApiUsageRetention> purge =
+          mockStatic(PublicApiUsageRetention.class)) {
+        Outcome outcome = execute(params("datefrom", "2026-03-01", "dateto", "2026-03-31"));
+
+        outcome.assertSucceeded();
+        verify(outcome.service).run(midnight(2026, 3, 1), midnight(2026, 3, 31));
+        purge.verifyNoInteractions();
+      }
+    }
+
+    @Test
+    void aPartialRunStillPurgesAndStillFailsLoudly() throws Exception {
+      UsageAggregationResult withFailure = new UsageAggregationResult();
+      withFailure.addDay();
+      withFailure.addResource();
+      withFailure.addFailure("BROKEN_RESOURCE", "boom");
+      try (MockedStatic<PublicApiUsageRetention> purge =
+          mockStatic(PublicApiUsageRetention.class)) {
+        Outcome outcome = executeSettlingWindowReporting(withFailure);
+
+        outcome.assertFailedWith("BROKEN_RESOURCE");
+        purge.verify(() -> PublicApiUsageRetention.purge(any(Date.class)));
+        verify(outcome.obDal, never()).rollbackAndClose();
+      }
+    }
+
+    @Test
+    void aFailedPurgeDoesNotFailTheRun() throws Exception {
+      // purge() answers 0 when it could not delete (its own contract); the run reports success.
+      try (MockedStatic<PublicApiUsageRetention> purge =
+          mockStatic(PublicApiUsageRetention.class)) {
+        purge.when(() -> PublicApiUsageRetention.purge(any(Date.class))).thenReturn(0);
+
+        executeSettlingWindowReporting(new UsageAggregationResult()).assertSucceeded();
+      }
+    }
+  }
 }

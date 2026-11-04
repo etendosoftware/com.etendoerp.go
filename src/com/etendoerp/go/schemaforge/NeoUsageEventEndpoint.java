@@ -65,7 +65,9 @@ import com.etendoerp.go.usageevents.UsageEventTypes;
  * property drops that property, and an unexpected failure after parsing answers {@code 202} with the
  * rest counted as dropped — never a {@code 500}, so an older or newer UI degrades to "not recorded".
  * An unknown {@code eventType} is still forwarded to the recorder, which drops it and logs it at
- * ERROR (D4); it is counted as dropped here and not logged a second time.</p>
+ * ERROR (D4); it is counted as dropped here and not logged a second time. A server-only type
+ * ({@link UsageEventTypes#isServerOnly}, ETP-6057) is dropped and counted here without reaching the
+ * recorder or the rate limiters.</p>
  */
 class NeoUsageEventEndpoint {
 
@@ -192,6 +194,11 @@ class NeoUsageEventEndpoint {
     }
     JSONObject json = (JSONObject) candidate;
     UsageEvent event = toEvent(json, now);
+    if (UsageEventTypes.isServerOnly(event.eventType())) {
+      // ETP-6057: a type only the backend records (a login, billed public API requests) is never
+      // taken from a client; dropped and counted, like any other refused event, never a 4xx.
+      return false;
+    }
     if (!withinRateLimits(event)) {
       return false;
     }

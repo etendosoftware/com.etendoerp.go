@@ -33,6 +33,7 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.oauth2.PublicApiKeyAttribution;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
@@ -322,10 +323,17 @@ public class EnvironmentRequestAuthenticator {
   }
 
   private static Resolution fromOAuth2(HttpServletRequest request, String token) {
-    Map<String, String> validated = OAuth2Filter.validateToken(token);
+    // ETP-6057 — one lookup answers both whether the token is usable and, when it is refused
+    // (expired, revoked, inactive key), whose it was, for usage attribution only.
+    OAuth2Filter.TokenCheck check = OAuth2Filter.checkToken(token);
+    Map<String, String> validated = check == null ? null : check.identity();
     if (validated == null) {
+      PublicApiKeyAttribution.attach(request,
+          check == null ? null : PublicApiKeyAttribution.fromIdentity(check.refusedIdentity()));
       return Resolution.refused(Status.UNAUTHENTICATED, MSG_INVALID_TOKEN, AuthScheme.OAUTH2);
     }
+    // ETP-6057 — before any refusal below, so a refused public API request is attributed too.
+    PublicApiKeyAttribution.attach(request, PublicApiKeyAttribution.fromIdentity(validated));
     Identity identity = new Identity(AuthScheme.OAUTH2, validated.get(OAuth2Filter.ATTR_USER_ID),
         validated.get(OAuth2Filter.ATTR_ROLE_ID), validated.get(OAuth2Filter.ATTR_ORG_ID), null,
         validated.get(OAuth2Filter.ATTR_CLIENT_ID));
