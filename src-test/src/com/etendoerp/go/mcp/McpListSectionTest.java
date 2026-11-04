@@ -18,7 +18,6 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -155,8 +154,8 @@ class McpListSectionTest {
     @Test
     @DisplayName("no section, or an unusable configuration, is read as not configured")
     void absentOrUnusable() {
-      assertNull(McpListSection.configuredFields(entity(null)));
-      assertNull(McpListSection.configuredFields(entity("{\"list\":{\"fields\":[]}}")));
+      assertTrue(McpListSection.configuredFields(entity(null)).isEmpty());
+      assertTrue(McpListSection.configuredFields(entity("{\"list\":{\"fields\":[]}}")).isEmpty());
     }
   }
 

@@ -84,7 +84,7 @@ final class McpReportActionsSchema {
     }
     return McpToolRouter.wrapAsTextContent(McpActionsCompact.shape(
         McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts,
-            McpActionsSection.forEntity(target)), McpToolRouter.onlyAction(args)));
+            McpActionsSection.forEntity(target)), McpActionsCompact.requestedAction(args)));
   }
 
   /**

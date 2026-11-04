@@ -52,6 +52,11 @@ final class McpActionsCompact {
 
   /** Argument: answer one action only. */
   static final String PARAM_ACTION = "action";
+
+  /** The one action {@code etendo_schema(view:"actions")} was asked for, or null. */
+  static String requestedAction(JSONObject args) {
+    return args == null ? null : McpArgumentUtils.optionalString(args, PARAM_ACTION);
+  }
   static final String KEY_NOT_OFFERED = "notOffered";
   private static final String KEY_ACTION = "action";
   private static final String KEY_ACTIONS_IN_GROUP = "actions";

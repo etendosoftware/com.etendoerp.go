@@ -1560,12 +1560,6 @@ public class McpToolRouter {
         : new String[] { McpConstants.PARAM_ENTITY };
   }
 
-  /** ETP-5848: the one action {@code etendo_schema(view:"actions")} was asked for, or null. */
-  static String onlyAction(JSONObject args) {
-    return args == null ? null
-        : McpArgumentUtils.optionalString(args, McpActionsCompact.PARAM_ACTION);
-  }
-
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
     // ETP-5468: a report spec whose handler declares named actions (bank-reconciliation) is
     // answered with its action catalog BEFORE the generic path, which rejects every SPEC_TYPE=R
@@ -1596,7 +1590,7 @@ public class McpToolRouter {
     if (McpReportActionsSchema.isActionOnlyEntity(sfEntity, declaredActions)) {
       return wrapAsTextContent(McpActionsCompact.shape(
           McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions,
-              McpActionsSection.forEntity(sfEntity)), onlyAction(args)));
+              McpActionsSection.forEntity(sfEntity)), McpActionsCompact.requestedAction(args)));
     }
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
@@ -1661,7 +1655,7 @@ public class McpToolRouter {
       McpActionAvailabilityContext asked = availabilityContextOf(args, spec, sfEntity, dalEntity);
       return wrapAsTextContent(McpActionsCompact.shape(McpActionsView.buildResponse(specName,
           entityName, fieldsArray, declaredActions, actionsConfig, excludedActions, asked),
-          onlyAction(args)));
+          McpActionsCompact.requestedAction(args)));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that

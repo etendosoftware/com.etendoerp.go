@@ -17,6 +17,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -109,21 +110,22 @@ final class McpListSection {
    * already ask for.</p>
    *
    * @param entity the SchemaForge entity
-   * @return the configured names in order, or {@code null} when the entity declares none
+   * @return the configured names in order; empty when the entity declares none (a declared
+   *     list is never empty: {@link #validate} refuses it)
    */
   static Set<String> configuredFields(SFEntity entity) {
     if (entity == null) {
-      return null;
+      return Collections.emptySet();
     }
     McpEntityConfig.Resolved resolved = McpEntityConfig.forEntity(entity);
     if (!resolved.isUsable()) {
       log.warn("MCP list default of entity '{}' ({}) ignored: its MCP_CONFIG is unusable — {}",
           entity.getName(), entity.getId(), resolved.describeProblems());
-      return null;
+      return Collections.emptySet();
     }
     JSONArray fields = resolved.section(NAME).map(b -> b.optJSONArray(KEY_FIELDS)).orElse(null);
     if (fields == null) {
-      return null;
+      return Collections.emptySet();
     }
     Set<String> names = new LinkedHashSet<>();
     for (int i = 0; i < fields.length(); i++) {

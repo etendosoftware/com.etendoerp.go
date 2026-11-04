@@ -936,7 +936,7 @@ final class McpQuerySupport {
       requested = summaryFields(sfEntity, adTab);
     } else if (listDefault && !McpFieldProjection.isFullView(view)) {
       requested = McpListSection.configuredFields(sfEntity);
-      if (requested == null) {
+      if (requested.isEmpty()) {
         requested = gridFields(sfEntity, adTab);
       }
       McpFieldProjection.reportOmittedFields(responseJson, requested);
