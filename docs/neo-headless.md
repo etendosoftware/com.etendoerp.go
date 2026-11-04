@@ -4687,6 +4687,14 @@ this fix.
 > hides the value itself. Stripping it from REST would make posted documents editable in the UI.
 > Posting and un-posting are refused on both channels alike (§ access control, 4b).
 
+> **Public API usage is counted on REST only (ETP-6057).** A request made with a public API key's
+> token is counted (`publicapi.request`, [`public-api-usage.md`](public-api-usage.md)) on
+> `/sws/neo/*`, the batch route included (one request per operation), because that is the public API
+> path the gateway calls. The MCP channel **refuses** a public API key's token with 403
+> (`insufficient_scope`, `OAuth2Filter` and `McpServlet`): a public key is for the public API only,
+> and an MCP agent connects with its own OAuth client. Otherwise the MCP would be an uncounted way
+> around public API billing and limits.
+
 > **Scope parity for actions (ETP-5783).** Running a document action or a process needs
 > `etendo:process` on every channel: the REST action route (by path), `POST` on a process spec (by
 > spec type) and MCP `etendo_action` (`McpAuthorizationService.requiredScopeFor`; the tool is
@@ -5394,6 +5402,38 @@ inherited it". GitHub issue
 [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24) tracks
 Classic's own, separate SEPA-compliance work, which may eventually change Classic's behavior here —
 that work is out of scope for this flag and this divergence note.
+
+> **Update path: a product change on an existing line (ETP-5696, QA CP-15).** REST `PATCH`/`PUT`
+> (`NeoCrudHandler`) and MCP `etendo_update` (`McpToolRouter.handleUpdate`) are two implementations
+> of "update", as `etendo_create` and `etendo_batch` are of "create". Until ETP-5696 only the REST
+> one re-derived `uOM` from the new product (`NeoCommercialLinePolicy.applyDerivedUomOnUpdate`,
+> ETP-5286); through the MCP the line reached the `C_OrderLine` trigger with the old unit and was
+> refused `422 business_rule` (AD message 20111, "the product's unit and the operation's unit are
+> different") — and the agent could not repair it, because `uOM` is a read-only field. `handleUpdate`
+> now calls the same derivation (`injectLineUomIfApplicable(..., false)`) right after
+> `McpLinePriceInjector.applyAgentPriceOnUpdate`: only on a transactional document line, only when the
+> body carries `product`, and never deferring to a sent value.
+>
+> **Still divergent on update, declared and not fixed here.** The REST update block also runs
+> `DocTypeResolver.syncDocumentTypeToSubmittedTarget` and
+> `DocumentNoRepreviewHelper.regenerateDocumentNoOnDocTypeChange` (headers: a document-type change
+> re-points the effective type and re-previews the draft's number) and
+> `NeoCommercialLinePolicy.injectCommercialAmounts` (line amounts). `etendo_update` runs none of them.
+> Sales and purchase invoice lines recompute their amounts in their own customization on every
+> channel, an update included (`InvoiceLineAmountSupport`, ETP-5710); whether the other line entities
+> do on an MCP update, and the header document-type/number case, have not been checked through the
+> MCP.
+>
+> **Known issue, handled separately (not part of ETP-5696): the price is not re-derived when the
+> product of an existing line changes.** Measured 2026-11-04 on a local environment (sales-order line,
+> sales price list: Agua 12, Fernet 44): creating the line directly with Fernet prices it at 44, and
+> changing it from Agua to Fernet in the SPA also ends at 44, but the same change through MCP
+> `etendo_update` or a plain REST `PATCH` (no callout) leaves `unitPrice` and `listPrice` at the
+> previous product's 12, so the line reads "Fernet at 12". The SPA gets 44 because its product callout
+> returns the new price and the client sends it; no server-side update path derives it. Only `uOM` is
+> re-derived on update (ETP-5286 on REST, ETP-5696 on MCP). An agent or integration that changes the
+> product must send the price itself. Whether the server should re-price on a product change changes
+> REST and MCP alike, so it needs its own decision; the tax of the new product was not tested.
 
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
@@ -6110,7 +6150,7 @@ counted server-side, not reported to the caller).
 |--------|------|
 | Who | Client, organization, user and role come from the token's `OBContext`. The body cannot set them; any such key is ignored. |
 | `source` | `ui` or `ai-bff`; anything else (including `backend`/`mcp`) or missing → `ui`. A label, not a trust boundary: the AI BFF uses the user's own token. |
-| `eventType` | Must be in `UsageEventTypes`. Unknown → dropped and counted; the recorder logs it at ERROR (throttled). Never an HTTP error. |
+| `eventType` | Must be in `UsageEventTypes`. Unknown → dropped and counted; the recorder logs it at ERROR (throttled). A **server-only** type (`UsageEventTypes.isServerOnly`: `session.login`, `publicapi.request` — ETP-6057) → dropped and counted here, before the rate limits and without reaching the recorder: a client cannot record a login or billed public API requests. Never an HTTP error. |
 | Batch size | At most 50 events per request; the rest are dropped and counted. |
 | `occurredAt` | ISO-8601 with `Z` or an offset, clamped to `[now − 24h, now + 5min]`. Missing or unparseable → now. |
 | `durationMs` | A non-negative number; anything else → null. |
@@ -6137,6 +6177,7 @@ this endpoint — some are recorded by the backend itself through `UsageEventRec
 | `ai.support.message` | Backend (defined; no caller yet) | One completed support chat (ValerIA) turn | `properties`: model, token counts |
 | `ai.tool.execute` | Backend (`CopilotToolUsageRecorder`, a `CopilotToolUsageHook` of `com.etendoerp.copilot`) | One `/sws/copilot/executeTool` call whose tool reported model usage — today the document OCR (`SimpleOcrTool`). Never on a non-2xx answer. | client/org/user/role from `OBContext`; `target` = tool name, `action = execute`, `outcome = ok`, `durationMs` = Copilot's answer time; `COST_USD` (when the LiteLLM proxy priced it); `properties`: `model`, `inputTokens`, `outputTokens` |
 | `session.login` | Backend (`SessionLoginUsage`) | One successful entry into an environment, after the credential is issued: `GET /sws/go/login?userId=` (`action = login`) and `POST /sws/go/session/environment` (`action = cookie-login`, the path the SPA uses). Never on a 4xx/5xx. | client/org/user/role of the environment entered — set explicitly, not from `OBContext`, which is the system context on both paths; `target = environment`, `outcome = ok`, `durationMs` = login handling; `properties.authMethod` = `password`/`sso` on the cookie path only |
+| `publicapi.request` | Backend (`PublicApiUsageCounter`, fed by `NeoPublicApiUsage` and the OAuth2 token exchange) — ETP-6057 | Every request a public API key's token makes to NEO, answered with any status (refusals included), plus the wrong-secret 401 of a public key at `/oauth2/token`; never per request: one row per tenant, key, spec, entity, method, status and minute. The re-read the gateway makes after an action is not counted | tenant/org/user/role of the key; `target` = spec (`/oauth2/token` for the exchange), `action` = HTTP method, `outcome`/`errorCode` from the status; `properties`: `count` (requests in the row), `status`, `keyId` (public `client_identifier`), `entity`, `actionName`, `kind` (`request`, `batchOperation` — each operation of a batch counts as one request — or `tokenExchange`, recorded but not billed). Written synchronously by the counter's own thread, kept and retried on a failed insert. Full reference: [`public-api-usage.md`](public-api-usage.md) |
 
 `COST_USD` (`NUMERIC`, nullable) is the money the LiteLLM proxy (`llm.etendo.software`) charged
 for the call, in USD, as it reports it (`usage.cost` when streaming, header
