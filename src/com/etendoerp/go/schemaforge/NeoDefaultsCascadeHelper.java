@@ -661,7 +661,7 @@ public class NeoDefaultsCascadeHelper {
         // one) is told to stand down in favour of a value the caller may simply have echoed back
         // from etendo_defaults. Recorded so the divergence can be reported; nothing here changes what
         // gets persisted.
-        NeoSupersededRecorder.record(result, defaults, updatedField, updateObj, adTab);
+        NeoSupersededRecorder.recordIfDiverged(result, defaults, updatedField, updateObj, adTab);
         continue;
       }
       Object newValue = updateObj.get(FIELD_VALUE);

@@ -17,7 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.function.BiFunction;
+import java.util.function.BinaryOperator;
 import java.util.function.UnaryOperator;
 
 import org.apache.commons.lang3.StringUtils;
@@ -66,7 +66,7 @@ final class ProductTypeRules {
    */
   static void applyOnUpdate(JSONObject body, String recordId, String clientId,
       UnaryOperator<String> persistedTypeReader,
-      BiFunction<String, String, String> taxCategoryResolver) throws JSONException {
+      BinaryOperator<String> taxCategoryResolver) throws JSONException {
     String bodyType = StringUtils.trimToNull(body.optString(ProductDefaultsHandler.FIELD_PRODUCT_TYPE, null));
     boolean typeIsValid = bodyType != null && ProductDefaultsHandler.PRODUCT_TYPES.contains(bodyType);
     boolean taxNeedsComparison = typeIsValid && !body.has(ProductDefaultsHandler.FIELD_TAX_CATEGORY);

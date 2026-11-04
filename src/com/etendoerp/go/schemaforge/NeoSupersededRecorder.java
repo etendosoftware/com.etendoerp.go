@@ -36,7 +36,7 @@ final class NeoSupersededRecorder {
    * @param updateObj    the callout's proposed update for that field
    * @param adTab        the tab, to tell a Yes/No field from a text one; may be {@code null}
    */
-  static void record(NeoDefaultsService.CalloutCascadeResult result, JSONObject defaults,
+  static void recordIfDiverged(NeoDefaultsService.CalloutCascadeResult result, JSONObject defaults,
       String fieldName, JSONObject updateObj, Tab adTab) {
     if (result == null || fieldName.endsWith(IDENTIFIER_SUFFIX)) {
       return;
