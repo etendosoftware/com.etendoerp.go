@@ -327,7 +327,7 @@ class McpFieldProjectionTest {
         dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(customization);
         models.when(ModelProvider::getInstance).thenReturn(provider);
 
-        McpQuerySupport.applyProjection(root, args, sfEntity, adTab, fieldFilter);
+        McpQuerySupport.applyProjection(root, args, sfEntity, adTab, fieldFilter, false);
       }
 
       JSONObject response = root.getJSONObject("response");
