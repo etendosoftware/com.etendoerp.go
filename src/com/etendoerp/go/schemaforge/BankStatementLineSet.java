@@ -227,26 +227,38 @@ final class BankStatementLineSet {
       Map<String, FIN_BankStatementLine> rebuiltByOldId) {
     for (Map.Entry<String, FIN_BankStatementLine> rebuilt : rebuiltByOldId.entrySet()) {
       BankIdentity identity = identities.get(rebuilt.getKey());
-      if (identity == null || identity.pairLineId() == null) {
-        continue;
+      if (identity != null && identity.pairLineId() != null) {
+        relinkOne(rebuilt.getValue(), identity.pairLineId(), rebuiltByOldId);
       }
-      FIN_BankStatementLine counterpart = rebuiltByOldId.get(identity.pairLineId());
-      boolean counterpartKept = counterpart == null;
-      if (counterpartKept) {
-        // tenant-ok: the id was read off a line of the caller's own, tenant-resolved statement
-        counterpart = OBDal.getInstance().get(FIN_BankStatementLine.class, identity.pairLineId());
-      }
-      if (counterpart == null) {
-        continue;
-      }
-      StatementLineDiscard.set(rebuilt.getValue(), BankBouncePairService.COL_PAIR_LINE,
-          counterpart);
-      OBDal.getInstance().save(rebuilt.getValue());
-      if (counterpartKept) {
-        StatementLineDiscard.set(counterpart, BankBouncePairService.COL_PAIR_LINE,
-            rebuilt.getValue());
-        OBDal.getInstance().save(counterpart);
-      }
+    }
+  }
+
+  /**
+   * Links one rebuilt line to its counterpart: the rebuilt line its old counterpart became, or —
+   * when the counterpart was not rebuilt (it lives in another statement) — that line again, in
+   * both directions. A counterpart that no longer exists leaves the line unlinked. Saved, not
+   * flushed.
+   *
+   * @param rebuilt        the rebuilt line
+   * @param pairLineId     the old id of its counterpart
+   * @param rebuiltByOldId the rebuilt lines, by the old id their body line carried
+   */
+  private static void relinkOne(FIN_BankStatementLine rebuilt, String pairLineId,
+      Map<String, FIN_BankStatementLine> rebuiltByOldId) {
+    FIN_BankStatementLine counterpart = rebuiltByOldId.get(pairLineId);
+    boolean counterpartKept = counterpart == null;
+    if (counterpartKept) {
+      // tenant-ok: the id was read off a line of the caller's own, tenant-resolved statement
+      counterpart = OBDal.getInstance().get(FIN_BankStatementLine.class, pairLineId);
+    }
+    if (counterpart == null) {
+      return;
+    }
+    StatementLineDiscard.set(rebuilt, BankBouncePairService.COL_PAIR_LINE, counterpart);
+    OBDal.getInstance().save(rebuilt);
+    if (counterpartKept) {
+      StatementLineDiscard.set(counterpart, BankBouncePairService.COL_PAIR_LINE, rebuilt);
+      OBDal.getInstance().save(counterpart);
     }
   }
 

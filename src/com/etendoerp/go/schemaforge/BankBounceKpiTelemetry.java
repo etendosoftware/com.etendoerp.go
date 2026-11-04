@@ -667,10 +667,10 @@ final class BankBounceKpiTelemetry {
       appliedGroups++;
       try {
         if (outcome.error() == null) {
-          record(discardedMatch(detection, outcome), DECISION_DISCARDED);
+          addDecision(discardedMatch(detection, outcome), DECISION_DISCARDED);
         } else if (isBusinessRefusal(outcome.error())) {
           Match match = find(detection.pairs(), lineId, counterpartId);
-          record(match != null ? match : new Match(null, null), DECISION_FAILED);
+          addDecision(match != null ? match : new Match(null, null), DECISION_FAILED);
         }
       } catch (Exception e) {
         log.debug("Bounce KPI: could not record an applied pair: {}", e.getMessage());
@@ -736,7 +736,7 @@ final class BankBounceKpiTelemetry {
         }
         Pair pair = byGroupKey(detection.pairs(), key);
         if (pair != null) {
-          record(new Match(pair, Proposal.of(pair)), decision);
+          addDecision(new Match(pair, Proposal.of(pair)), decision);
         }
       }
     }
@@ -762,7 +762,7 @@ final class BankBounceKpiTelemetry {
       for (Pair pair : detected) {
         if (pair.high() && !pair.ambiguous() && !decidedKeys.contains(pair.groupKey())
             && Collections.disjoint(pair.lineIds(), taken)) {
-          record(new Match(pair, Proposal.of(pair)), DECISION_UNCHECKED);
+          addDecision(new Match(pair, Proposal.of(pair)), DECISION_UNCHECKED);
         }
       }
     }
@@ -773,7 +773,7 @@ final class BankBounceKpiTelemetry {
      * @param match    the pair and its proposal ({@code proposal} {@code null} when unknown)
      * @param decision the decision
      */
-    private void record(Match match, String decision) {
+    private void addDecision(Match match, String decision) {
       if (match.pair() != null) {
         decidedKeys.add(match.pair().groupKey());
       }

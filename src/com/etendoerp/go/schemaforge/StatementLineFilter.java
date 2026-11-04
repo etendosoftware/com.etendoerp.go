@@ -95,6 +95,9 @@ final class StatementLineFilter {
   /** Named parameter of a set of lines, prefixed like {@link #PARAM_ACCOUNT_ID}. */
   private static final String PARAM_LINE_IDS = "etgoLineIds";
 
+  /** Start of every HQL of this class over the statement lines: {@code as bsl where }. */
+  private static final String FROM_ALIAS_WHERE = "as " + ALIAS + " where ";
+
   /** {@code pendingLines?status=discarded}: list only the excluded lines. */
   static final String STATUS_DISCARDED = StatementLineDiscard.KEY_DISCARDED;
 
@@ -247,7 +250,7 @@ final class StatementLineFilter {
     params.put(PARAM_ACCOUNT_ID, account.getId());
     OBQuery<FIN_BankStatementLine> query = OBDal.getInstance().createQuery(
         FIN_BankStatementLine.class,
-        "as " + ALIAS + " where " + ALIAS + "." + FIN_BankStatementLine.PROPERTY_BANKSTATEMENT + "."
+        FROM_ALIAS_WHERE + ALIAS + "." + FIN_BankStatementLine.PROPERTY_BANKSTATEMENT + "."
             + FIN_BankStatement.PROPERTY_ACCOUNT + ".id = :" + PARAM_ACCOUNT_ID
             + " and " + ALIAS + "." + FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION
             + " is null and not (1 = 1" + condition + ")");
@@ -281,7 +284,7 @@ final class StatementLineFilter {
     params.put(PARAM_LINE_ID, line.getId());
     OBQuery<FIN_BankStatementLine> query = OBDal.getInstance().createQuery(
         FIN_BankStatementLine.class,
-        "as " + ALIAS + " where " + ALIAS + ".id = :" + PARAM_LINE_ID
+        FROM_ALIAS_WHERE + ALIAS + ".id = :" + PARAM_LINE_ID
             + " and not (1 = 1" + condition + ")");
     query.setNamedParameters(params);
     // The line was already resolved by its caller; activity is not what this asks.
@@ -443,7 +446,7 @@ final class StatementLineFilter {
     }
     OBQuery<FIN_BankStatementLine> query = OBDal.getInstance().createQuery(
         FIN_BankStatementLine.class,
-        "as " + ALIAS + " where " + ALIAS + ".id in (:" + PARAM_LINE_IDS + ")");
+        FROM_ALIAS_WHERE + ALIAS + ".id in (:" + PARAM_LINE_IDS + ")");
     query.setNamedParameter(PARAM_LINE_IDS, ids);
     query.setFilterOnActive(false);
     for (FIN_BankStatementLine line : query.list()) {

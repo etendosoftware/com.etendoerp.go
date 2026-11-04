@@ -74,6 +74,8 @@ final class BankBounceSuggestions {
 
   /** State of a pending line that belongs to an offered pair, and its count key. */
   static final String STATE_BOUNCE = "bounce";
+  /** {@code origin} of a {@code bouncePair} group: the same word as the line state. */
+  private static final String ORIGIN_BOUNCE = STATE_BOUNCE;
   /** Row annotation of {@code pendingLines}. */
   static final String KEY_BOUNCE_PAIR = "bouncePair";
   /** KPI of {@code autoMatch}. */
@@ -335,7 +337,7 @@ final class BankBounceSuggestions {
     JSONObject group = new JSONObject();
     group.put(KEY_KIND, KIND_BOUNCE_PAIR);
     group.put(KEY_GROUP_KEY, p.groupKey());
-    group.put("origin", "bounce");
+    group.put("origin", ORIGIN_BOUNCE);
     group.put(KEY_STATEMENT_LINE,
         p.original() != null ? lineJson(plan, p.original().id()) : JSONObject.NULL);
     group.put(KEY_COUNTERPART_LINE, lineJson(plan, p.bounce().id()));
@@ -425,21 +427,86 @@ final class BankBounceSuggestions {
         }
       }
       for (Pair p : plan.offered(taken)) {
-        for (Map.Entry<String, JSONObject> marked : markers(plan, p).entrySet()) {
-          JSONObject row = rowsById.get(marked.getKey());
-          if (row == null || row.has(KEY_BOUNCE_PAIR)) {
-            continue;
-          }
-          String previous = row.optString(KEY_STATE, "");
-          if (!STATE_BOUNCE.equals(previous)) {
-            counts.put(previous, Math.max(0, counts.getOrDefault(previous, 0) - 1));
-            row.put(KEY_STATE, STATE_BOUNCE);
-          }
-          row.put(KEY_BOUNCE_PAIR, marked.getValue());
-        }
+        markPair(p, rowsById, counts);
       }
       // Counted from the rows rather than incrementally, so the count always matches the states.
       counts.put(STATE_BOUNCE, countBounceRows(lines));
+    }
+
+    /**
+     * Annotates the visible rows of one offered pair: each gets its {@code bouncePair} marker and
+     * the {@code bounce} state, leaving the count of its previous state. A row already annotated
+     * by an earlier pair (a candidate shared by several ambiguous pairs) is left as it is.
+     *
+     * @param p        the offered pair
+     * @param rowsById the rows of this answer, by line id
+     * @param counts   the per-state counts, updated
+     * @throws JSONException when a row cannot be written
+     */
+    private void markPair(Pair p, Map<String, JSONObject> rowsById, Map<String, Integer> counts)
+        throws JSONException {
+      for (Map.Entry<String, JSONObject> marked : markers(plan, p).entrySet()) {
+        JSONObject row = rowsById.get(marked.getKey());
+        if (row == null || row.has(KEY_BOUNCE_PAIR)) {
+          continue;
+        }
+        String previous = row.optString(KEY_STATE, "");
+        if (!STATE_BOUNCE.equals(previous)) {
+          counts.put(previous, Math.max(0, counts.getOrDefault(previous, 0) - 1));
+          row.put(KEY_STATE, STATE_BOUNCE);
+        }
+        row.put(KEY_BOUNCE_PAIR, marked.getValue());
+      }
+    }
+
+    /**
+     * The {@code bouncePair} annotation of every line of a pair, by line id: the original and each
+     * candidate point at the bounce line; the bounce line points at its original, or lists the
+     * candidates when the pair is ambiguous.
+     *
+     * @param plan the plan, for the DAL lines
+     * @param p    the pair
+     * @return the annotation by line id
+     * @throws JSONException when it cannot be written
+     */
+    private static Map<String, JSONObject> markers(Plan plan, Pair p) throws JSONException {
+      Map<String, JSONObject> out = new HashMap<>();
+      JSONObject bounce = marker(p, ROLE_BOUNCE);
+      bounce.put(KEY_COUNTERPART_LINE,
+          p.original() != null ? lineJson(plan, p.original().id()) : JSONObject.NULL);
+      bounce.put(KEY_CANDIDATES, candidatesJson(plan, p));
+      out.put(p.bounce().id(), bounce);
+      if (p.original() != null) {
+        JSONObject original = marker(p, ROLE_ORIGINAL);
+        original.put(KEY_COUNTERPART_LINE, lineJson(plan, p.bounce().id()));
+        out.put(p.original().id(), original);
+      }
+      for (Candidate c : p.candidates()) {
+        JSONObject candidate = marker(p, ROLE_CANDIDATE);
+        candidate.put(KEY_COUNTERPART_LINE, lineJson(plan, p.bounce().id()));
+        candidate.put(KEY_SIGNALS, new JSONArray(c.signals()));
+        candidate.put(KEY_SIGNAL, nullable(BankBounceDetector.primarySignalOf(c.signals())));
+        out.put(c.line().id(), candidate);
+      }
+      return out;
+    }
+
+    /**
+     * The fields every annotation of a pair shares.
+     *
+     * @param p    the pair
+     * @param role the role of the annotated line
+     * @return the annotation
+     * @throws JSONException when it cannot be written
+     */
+    private static JSONObject marker(Pair p, String role) throws JSONException {
+      JSONObject json = new JSONObject();
+      json.put(KEY_GROUP_KEY, p.groupKey());
+      json.put("role", role);
+      json.put(KEY_AMBIGUOUS, p.ambiguous());
+      json.put(KEY_ADJACENT, p.adjacent());
+      putSignals(json, p);
+      return json;
     }
 
     /**
@@ -458,56 +525,6 @@ final class BankBounceSuggestions {
       }
       return n;
     }
-  }
-
-  /**
-   * The {@code bouncePair} annotation of every line of a pair, by line id: the original and each
-   * candidate point at the bounce line; the bounce line points at its original, or lists the
-   * candidates when the pair is ambiguous.
-   *
-   * @param plan the plan, for the DAL lines
-   * @param p    the pair
-   * @return the annotation by line id
-   * @throws JSONException when it cannot be written
-   */
-  private static Map<String, JSONObject> markers(Plan plan, Pair p) throws JSONException {
-    Map<String, JSONObject> out = new HashMap<>();
-    JSONObject bounce = marker(p, ROLE_BOUNCE);
-    bounce.put(KEY_COUNTERPART_LINE,
-        p.original() != null ? lineJson(plan, p.original().id()) : JSONObject.NULL);
-    bounce.put(KEY_CANDIDATES, candidatesJson(plan, p));
-    out.put(p.bounce().id(), bounce);
-    if (p.original() != null) {
-      JSONObject original = marker(p, ROLE_ORIGINAL);
-      original.put(KEY_COUNTERPART_LINE, lineJson(plan, p.bounce().id()));
-      out.put(p.original().id(), original);
-    }
-    for (Candidate c : p.candidates()) {
-      JSONObject candidate = marker(p, ROLE_CANDIDATE);
-      candidate.put(KEY_COUNTERPART_LINE, lineJson(plan, p.bounce().id()));
-      candidate.put(KEY_SIGNALS, new JSONArray(c.signals()));
-      candidate.put(KEY_SIGNAL, nullable(BankBounceDetector.primarySignalOf(c.signals())));
-      out.put(c.line().id(), candidate);
-    }
-    return out;
-  }
-
-  /**
-   * The fields every annotation of a pair shares.
-   *
-   * @param p    the pair
-   * @param role the role of the annotated line
-   * @return the annotation
-   * @throws JSONException when it cannot be written
-   */
-  private static JSONObject marker(Pair p, String role) throws JSONException {
-    JSONObject json = new JSONObject();
-    json.put(KEY_GROUP_KEY, p.groupKey());
-    json.put("role", role);
-    json.put(KEY_AMBIGUOUS, p.ambiguous());
-    json.put(KEY_ADJACENT, p.adjacent());
-    putSignals(json, p);
-    return json;
   }
 
   // ---------------------------------------------------------------------------
