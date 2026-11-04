@@ -278,7 +278,7 @@ SELECT cast(properties AS jsonb) ->> 'keyId'  AS key_id,
 | `oauth2/OAuth2Filter.java` | Token lookup selects the key (`client_identifier`), its role's client and whether it is a public key; `checkToken` answers, in one query, the identity of a usable token or the owner of a refused one |
 | `oauth2/PublicApiKeyPolicy.java` (`isPublicApiKey`, `carriesPublicApiMarker`) | The scope marker tests; the CRUD refusal of marker scopes |
 | `mcp/McpServlet.java` (`authenticate`), `oauth2/OAuth2Filter.java` (`doFilter`) | Refuse a public API key's token on the MCP (403) |
-| `oauth2/OAuth2Servlet.java` (`countRefusedKeyExchange`, `SQL_FIND_CLIENT`) | The wrong-secret 401 at the token exchange; the key row query also reads its tenant |
+| `oauth2/OAuth2Servlet.java` (`SQL_FIND_CLIENT`), `oauth2/PublicApiKeyAttribution.java` (`countRefusedKeyExchange`) | The wrong-secret 401 at the token exchange; the key row query also reads its tenant |
 | `auth/EnvironmentRequestAuthenticator.java` (`fromOAuth2`) | Attaches the caller before any refusal |
 | `schemaforge/NeoPublicApiUsage.java` | Counts the answered NEO request; one request per batch operation; the action re-read credit |
 | `schemaforge/BatchService.java` (`handle`) | Hands a public API batch's operations to the counter |

@@ -20,10 +20,15 @@ package com.etendoerp.go.oauth2;
 import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
+import com.etendoerp.go.usageevents.PublicApiCall;
 import com.etendoerp.go.usageevents.PublicApiCaller;
+import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 
 /**
  * ETP-6057 — tells which public API key (and tenant) a request belongs to, for usage counting only.
@@ -43,6 +48,8 @@ import com.etendoerp.go.usageevents.PublicApiCaller;
  * key's role, as {@code EffectiveClientResolver} resolves it for the request itself.</p>
  */
 public final class PublicApiKeyAttribution {
+
+  private static final Logger LOG = LogManager.getLogger();
 
   /** Request attribute holding the {@link PublicApiCaller} of a public API request. */
   public static final String REQUEST_ATTRIBUTE = "com.etendoerp.go.publicapi.caller";
@@ -115,6 +122,27 @@ public final class PublicApiKeyAttribution {
     }
     return new PublicApiCaller(tenant(ownerOrgClientId, roleClientId), ownerOrgId, userId, roleId,
         keyId);
+  }
+
+  /**
+   * Count a token request refused for a wrong secret on a public API key row as one
+   * {@code tokenExchange} (never billed). A plain OAuth2 client is not counted. The key row is the
+   * only place this refusal can be attributed: no token exists. Never throws and does no I/O: the
+   * tenant came with the key row ({@code OAuth2Servlet.findClient}), so a brute force on a secret
+   * costs no extra query.
+   */
+  static void countRefusedKeyExchange(String keyId, String scopes, String ownerOrgId,
+      String ownerOrgClientId, String roleClientId, String userId, String roleId) {
+    try {
+      PublicApiCaller caller = ofKeyRow(keyId, scopes, ownerOrgId, ownerOrgClientId, roleClientId,
+          userId, roleId);
+      if (caller != null) {
+        PublicApiUsageCounter.getDefault().count(caller,
+            PublicApiCall.tokenExchange(HttpServletResponse.SC_UNAUTHORIZED));
+      }
+    } catch (RuntimeException e) {
+      LOG.debug("Could not count a refused public API key exchange", e);
+    }
   }
 
   /**

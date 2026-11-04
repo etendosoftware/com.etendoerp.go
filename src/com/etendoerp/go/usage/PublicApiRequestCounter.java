@@ -74,12 +74,15 @@ public class PublicApiRequestCounter implements UsageResourceCounter {
       + " and coalesce(cast(e.properties as jsonb) ->> 'actor', '') <> 'support'";
   static final String ONE_CLIENT = " and e.ad_client_id = :" + PARAM_CLIENT;
   static final String GROUP_BY = " group by e.ad_client_id, date_trunc('day', e.occurred_at)";
+  // Both variants are complete constants so no SQL is assembled at run time.
+  static final String ALL_TENANTS_SQL = REQUESTS_SQL + GROUP_BY;
+  static final String ONE_TENANT_SQL = REQUESTS_SQL + ONE_CLIENT + GROUP_BY;
 
   @Override
   public List<DailyCount> count(UsageCountRequest request) {
-    String sql = REQUESTS_SQL + (request.isAllTenants() ? "" : ONE_CLIENT) + GROUP_BY;
     @SuppressWarnings("unchecked")
-    NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    NativeQuery<Object[]> query = OBDal.getInstance().getSession()
+        .createNativeQuery(request.isAllTenants() ? ALL_TENANTS_SQL : ONE_TENANT_SQL);
     query.setParameter(PARAM_TYPE, UsageEventTypes.PUBLIC_API_REQUEST);
     query.setParameter(PARAM_SOURCE, UsageEvent.SOURCE_BACKEND);
     query.setParameter(PARAM_UNBILLED_KIND, PublicApiCall.KIND_TOKEN_EXCHANGE);

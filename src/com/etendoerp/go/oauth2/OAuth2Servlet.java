@@ -63,9 +63,6 @@ import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.supportaccess.SupportAccessGuard;
-import com.etendoerp.go.usageevents.PublicApiCall;
-import com.etendoerp.go.usageevents.PublicApiCaller;
-import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 
 /**
  * OAuth2 servlet handling token issuance, client CRUD, revocation, and introspection.
@@ -514,7 +511,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       log.warn("OAuth2 token request with invalid secret for client_id: {}", clientId);
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
           "Client authentication failed");
-      countRefusedKeyExchange(clientId, client);
+      PublicApiKeyAttribution.countRefusedKeyExchange(clientId, client.scopes, client.ownerOrgId,
+          client.ownerOrgClientId, client.roleClientId, client.adUserId, client.adRoleId);
       return;
     }
 
@@ -548,28 +546,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     writeJsonResponse(response, HttpServletResponse.SC_OK, result);
     log.info("OAuth2 token issued for client: {}", clientId);
-  }
-
-
-  /**
-   * ETP-6057 — count a token exchange refused for a wrong secret against the public API key it
-   * named, when it is one. The key row is the only place this refusal can be attributed: no token
-   * exists. After the answer is written, never throws, and does no I/O: the tenant came with the
-   * key row ({@code SQL_FIND_CLIENT}), so a brute force on a secret costs no extra query.
-   */
-  private static void countRefusedKeyExchange(String clientIdentifier, ClientRecord client) {
-    try {
-      PublicApiCaller caller = PublicApiKeyAttribution.ofKeyRow(clientIdentifier, client.scopes,
-          client.ownerOrgId, client.ownerOrgClientId, client.roleClientId, client.adUserId,
-          client.adRoleId);
-      if (caller == null) {
-        return;
-      }
-      PublicApiUsageCounter.getDefault().count(caller,
-          PublicApiCall.tokenExchange(HttpServletResponse.SC_UNAUTHORIZED));
-    } catch (RuntimeException e) {
-      log.debug("Could not count a refused public API key exchange", e);
-    }
   }
 
   // --- Client CRUD (B3) ---
