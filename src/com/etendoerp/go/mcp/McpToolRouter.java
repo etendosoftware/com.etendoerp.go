@@ -559,10 +559,11 @@ public class McpToolRouter {
     }
     responseJson = readHook.body();
 
-    // IMP-2: optional projection — explicit `fields:[...]` or view:"summary". No-op when neither
-    // is present, so the default returns every column.
+    // IMP-2: projection — explicit `fields:[...]` or view:"summary"; ETP-5848: with neither, the
+    // entity's default list columns (MCP_CONFIG list.fields, else the window's list), unless
+    // view:"full".
     // IMP-18: the filter is passed in so an unknown requested name is reported, not dropped.
-    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter, true);
 
     // IMP-5 clause (iii): flatten last, so projection and field filtering keep operating on the
     // wrapped shape core produced and only the body handed to the agent changes.
@@ -658,7 +659,7 @@ public class McpToolRouter {
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
     // IMP-18: unknown requested names are reported as unknownFields — lifted to the top level by
     // the flatten below, along with the rest of the wrapper's contents.
-    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter, false);
 
     // IMP-5 clause (iii): see handleList — flatten last, after every stage that reads the wrapper.
     JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);
@@ -1595,9 +1596,9 @@ public class McpToolRouter {
     // below; every other view is unchanged.
     Map<String, NeoActionContract> declaredActions = McpDeclaredActions.of(sfEntity);
     if (McpReportActionsSchema.isActionOnlyEntity(sfEntity, declaredActions)) {
-      return wrapAsTextContent(
+      return wrapAsTextContent(McpActionsCompact.shape(
           McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions,
-              McpActionsSection.forEntity(sfEntity)));
+              McpActionsSection.forEntity(sfEntity)), McpActionsCompact.requestedAction(args)));
     }
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
@@ -1660,8 +1661,9 @@ public class McpToolRouter {
     if (McpActionsView.isActionsView(view)) {
       // ETP-5714: with an id, each action is also judged against that record (advisory only).
       McpActionAvailabilityContext asked = availabilityContextOf(args, spec, sfEntity, dalEntity);
-      return wrapAsTextContent(McpActionsView.buildResponse(specName, entityName, fieldsArray,
-          declaredActions, actionsConfig, excludedActions, asked));
+      return wrapAsTextContent(McpActionsCompact.shape(McpActionsView.buildResponse(specName,
+          entityName, fieldsArray, declaredActions, actionsConfig, excludedActions, asked),
+          McpActionsCompact.requestedAction(args)));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
