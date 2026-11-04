@@ -234,4 +234,38 @@ class OcrSanitizerTest {
 
     assertEquals("1000", out.getString("label"));
   }
+
+  // ── total_amount of the packaged schema (ETP-6048) ──────────────────────────
+
+  private static Object totalOf(Object raw) throws JSONException {
+    JSONObject schema = OcrConfig.get().forSpec("purchase-invoice").orElseThrow().getSchema();
+    JSONObject out = OcrSanitizer.sanitize(new JSONObject().put("document_no", "F-1")
+        .put("total_amount", raw), schema);
+    return out.isNull("total_amount") ? null : out.get("total_amount");
+  }
+
+  @Test
+  @DisplayName("the packaged schema keeps a printed total, as a number or a plain numeric string")
+  void packagedSchemaKeepsTheTotal() throws JSONException {
+    assertEquals(121.5, ((Number) totalOf(121.5)).doubleValue(), 0.0);
+    assertEquals(121.5, ((Number) totalOf("121.50")).doubleValue(), 0.0);
+  }
+
+  @Test
+  @DisplayName("the packaged schema reads a missing total as null, so the lines can stand in for it")
+  void packagedSchemaAcceptsANullTotal() throws JSONException {
+    assertNull(totalOf(JSONObject.NULL));
+    JSONObject schema = OcrConfig.get().forSpec("purchase-invoice").orElseThrow().getSchema();
+    assertTrue(OcrSanitizer.sanitize(new JSONObject().put("document_no", "F-1"), schema)
+        .isNull("total_amount"));
+  }
+
+  @Test
+  @DisplayName("a hostile total (word, exponent, percent, object, huge number) is null, never a number")
+  void packagedSchemaRejectsGarbageTotals() throws JSONException {
+    for (Object hostile : new Object[] {"abc", "1e5", "Infinity", "121,50", "21%", "9".repeat(10_000),
+        1.0e20, new JSONObject().put("a", 1), new JSONArray().put(1)}) {
+      assertNull(totalOf(hostile), String.valueOf(hostile).length() > 40 ? "long" : hostile.toString());
+    }
+  }
 }

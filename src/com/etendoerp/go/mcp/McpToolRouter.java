@@ -455,6 +455,9 @@ public class McpToolRouter {
     String allParentsWhere = allParents
         ? McpAllParents.scopeWhere(specName, entityName, sfEntity, parentId) : null;
     filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters, allParents);
+    // ETP-6087: a role that cannot see `posted` cannot filter or sort by it either. Before the read
+    // provider, which receives the same filters and order.
+    McpQuerySupport.refuseHiddenAccountingFields(filters, orderBy, sfEntity, entityName);
 
     // ETP-5405 + ETP-5415 (D13): the read's PRE phase, which must run before the tab is demanded.
     // A customization that answers here is serving the whole list itself — over REST that has
@@ -962,6 +965,8 @@ public class McpToolRouter {
     // is NOT the resolver the REST paths use — and so is the pre-hook contract: a NeoResponse
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
+    // ETP-5680: the caller's values as the pre-hook receives them, to report what it rewrites.
+    JSONObject preHookValues = McpSupersededReconciler.snapshotCallerValues(filteredBody, userProvided);
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
     // ETP-5791: injectMandatoryDefaults ran above, so key presence in filteredBody no longer says
     // what the agent chose. Hand the pre-hook the pre-defaults key set, which REST gets for free
@@ -1032,7 +1037,9 @@ public class McpToolRouter {
     // IMP-45: `ctx` is the context the callout cascade ran under, so it carries any field where the
     // caller's value stood and a callout had derived a different one. Create only — an update
     // carries no defaults invitation, and there is no cascade of this shape behind it.
-    McpWriteRequestSupport.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
+    McpSupersededReconciler.reconcileSupersededDefaults(flat, ctx.getSupersededDefaults(),
+        preHookValues, filteredBody, handler, hookCtx);
+    McpSupersededReconciler.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
     McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
     // ETP-5945 (in ETP-5852): one record answers {data:{…}}, as etendo_get does.
     return wrapAsTextContent(McpRecordUrls.unwrapSingleRecord(flat));

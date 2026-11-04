@@ -326,6 +326,31 @@ public interface OcrLookups {
   List<Party> searchVendors(String name, int limit);
 
   /**
+   * Vendors whose tax id is the given one, with or without a VAT country prefix (ETP-6048).
+   *
+   * <p>Default: no tax id search, so an implementation that does not support it never matches.</p>
+   *
+   * @param cleanTaxId the id as {@link TaxIdNormalizer#clean} leaves it
+   * @param limit      the most rows to return
+   * @return the vendors, empty when none or the search failed
+   */
+  default List<Party> vendorsByTaxId(String cleanTaxId, int limit) {
+    return List.of();
+  }
+
+  /**
+   * The tax id stored for a vendor (ETP-6048), to tell two vendors of the same name apart.
+   *
+   * <p>Default: unknown, which reads as "no tax id on file".</p>
+   *
+   * @param vendorId the partner id
+   * @return the id as stored, empty when it has none or cannot be read
+   */
+  default String vendorTaxId(String vendorId) {
+    return "";
+  }
+
+  /**
    * A vendor the session can use, by id.
    *
    * @param id the partner id

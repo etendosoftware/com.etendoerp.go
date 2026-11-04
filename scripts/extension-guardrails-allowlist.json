@@ -42,7 +42,6 @@
     "GoodsShipmentLineHandler",
     "ImportInOutLinesIntoInvoiceHandler",
     "ImportOrderLinesIntoInOutHandler",
-    "ImportOrderLinesIntoInvoiceHandler",
     "InternalConsumptionHeaderHandler",
     "InternalConsumptionLineHandler",
     "InventoryHandler",
