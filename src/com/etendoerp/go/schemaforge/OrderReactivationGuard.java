@@ -59,7 +59,7 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  *
  * <p>The resolution, the 404 and the fail-closed handling are {@link DocActionRefusalGuard}'s,
  * shared with the other "the app does not offer it" refusals (ETP-5704 QA: Close on a sales order,
- * Reactivate on a quotation that is not voided); this class keeps its own messages.</p>
+ * Reactivate on a quotation); this class keeps its own messages.</p>
  */
 final class OrderReactivationGuard {
 

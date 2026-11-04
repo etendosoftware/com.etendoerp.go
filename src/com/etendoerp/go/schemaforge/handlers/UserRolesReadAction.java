@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +38,7 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 
+import com.etendoerp.go.roles.SystemRoleTemplates;
 import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -45,11 +47,12 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * ETP-5852 (M-201): the read-only {@code roles} action of {@code user/user} — the roles the Users
- * window shows for one user, for an agent. Read only on purpose: assigning roles changes what a
- * person may do, so it stays in the app. Same answer as the window's role chips: the template roles
+ * ETP-5852 (M-201): the {@code roles} action of {@code user/user} — the roles the Users window
+ * shows for one user, for an agent. Same answer as the window's role chips: the template roles
  * applied to the user ({@link UserRoleCompositionService}) and whether the user is a client
- * administrator. Same gate as the window's own role services: administrators only.
+ * administrator; since ETP-5848 also every template that can be assigned ({@code available}),
+ * which {@link UserRolesAssignAction} takes. Same gate as the window's own role services:
+ * administrators only.
  */
 final class UserRolesReadAction {
 
@@ -61,9 +64,10 @@ final class UserRolesReadAction {
 
   private static final NeoActionContract CONTRACT = NeoActionContract.read(ACTION,
       "Returns the roles this user has, as the Users window shows them: {userId, administrator, "
-          + "roles:[{id, name}]} where roles are the template roles applied (Finance, Sales, ...) "
-          + "and administrator says whether the user holds the client's admin role. Read only: "
-          + "roles are assigned in the app's Users window. Only administrators may read it.")
+          + "roles:[{id, name}], available:[{id, name}]} where roles are the template roles "
+          + "applied (Finance, Sales, ...), available every template that can be assigned, and "
+          + "administrator says whether the user holds the client's admin role. Change them with "
+          + "the action 'assignRoles'. Only administrators may read it.")
       .withIdDescription("the user id");
 
   static final Map<String, NeoActionContract> CONTRACTS =
@@ -93,15 +97,11 @@ final class UserRolesReadAction {
       }
       List<String> templateIds =
           new UserRoleCompositionService().getAppliedTemplateRoleIds(userId, caller);
-      JSONArray roles = new JSONArray();
-      for (String id : templateIds) {
-        Role role = OBDal.getInstance().get(Role.class, id);
-        roles.put(new JSONObject().put("id", id).put("name", role == null ? id : role.getName()));
-      }
       JSONObject body = new JSONObject();
       body.put("userId", userId);
       body.put("administrator", holdsClientAdminRole(user));
-      body.put(KEY_ROLES, roles);
+      body.put(KEY_ROLES, named(templateIds));
+      body.put("available", named(new ArrayList<>(SystemRoleTemplates.byName().values())));
       return NeoResponse.ok(body);
     } catch (OBException e) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "User not found");
@@ -112,6 +112,19 @@ final class UserRolesReadAction {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The roles as {@code [{id, name}]}, in the given order; a role that no longer resolves keeps its
+   * id as its name. Reads in the caller's admin mode: template roles are system-level.
+   */
+  static JSONArray named(List<String> roleIds) throws JSONException {
+    JSONArray roles = new JSONArray();
+    for (String id : roleIds) {
+      Role role = OBDal.getInstance().get(Role.class, id);
+      roles.put(new JSONObject().put("id", id).put("name", role == null ? id : role.getName()));
+    }
+    return roles;
   }
 
   private static boolean holdsClientAdminRole(User user) {

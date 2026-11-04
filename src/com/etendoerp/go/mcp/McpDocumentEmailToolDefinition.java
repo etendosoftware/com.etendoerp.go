@@ -49,7 +49,8 @@ final class McpDocumentEmailToolDefinition {
       + "**Proveedor**: Le enviamos su Pedido de Compra **1000008**.\"), and **double asterisks** "
       + "make a word bold in the message. ALWAYS call it first with preview:true to show the user "
       + "the recipient, subject, message and the PDF, and send only after they agree: preview "
-      + "sends nothing. When the document's PDF is missing or older than the document, the server "
+      + "sends nothing and also lists the document's past sends (history). When the document's "
+      + "PDF is missing or older than the document, the server "
       + "generates it first where it can (invoices, orders, quotations, shipments, returns), in "
       + "the email's language ('language', " + McpDocumentEmailRequest.DEFAULT_LANGUAGE
       + " by default), so the email and its PDF match; a current stored PDF is sent as it is, "

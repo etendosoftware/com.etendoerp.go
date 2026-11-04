@@ -31,6 +31,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
 import org.openbravo.model.pricing.pricelist.ProductPrice;
@@ -193,6 +194,11 @@ public class ProductPriceHandler implements NeoHandler {
     try {
       OBContext.setAdminMode();
       try {
+        // ETP-5819: the SQL has no tenant filter; another tenant's product lists like one with no
+        // prices.
+        if (TenantOwnership.loadOwned(Product.class, parentId) == null) {
+          return ProductHandlerUtils.buildListResponse(new JSONArray());
+        }
         NativeQuery<?> query = OBDal.getInstance().getSession().createNativeQuery(PRICE_LIST_SQL);
         query.setParameter("productId", parentId);
 

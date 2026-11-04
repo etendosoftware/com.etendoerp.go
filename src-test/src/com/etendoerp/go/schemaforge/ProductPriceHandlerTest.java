@@ -68,6 +68,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
 import org.openbravo.model.pricing.pricelist.ProductPrice;
@@ -84,6 +85,8 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
  * for product, priceLimit, priceListVersion), afterHandle() guards (null context,
  * non-SELECTOR, wrong fieldName), and afterHandle enrichment of selector items
  * with salesPriceList flag.
+ *
+ * @covers com.etendoerp.go.schemaforge.ProductPriceHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -143,6 +146,13 @@ class ProductPriceHandlerTest {
     when(client.getId()).thenReturn("test-client-id");
     when(organization.getId()).thenReturn("test-org-id");
     when(obDal.getSession()).thenReturn(session);
+    // ETP-5819: every product a test lists is the caller's own unless the test says otherwise.
+    when(obContext.getReadableClients()).thenReturn(new String[] { "test-client-id" });
+    when(obContext.getReadableOrganizations()).thenReturn(new String[] { "test-org-id" });
+    Product ownProduct = mock(Product.class);
+    when(ownProduct.getClient()).thenReturn(client);
+    when(ownProduct.getOrganization()).thenReturn(organization);
+    when(obDal.get(eq(Product.class), anyString())).thenReturn(ownProduct);
   }
 
   @AfterEach
@@ -329,6 +339,28 @@ class ProductPriceHandlerTest {
     // offsetless value is silently re-read as UTC and every edit on this tab came back stale by
     // exactly the server's UTC offset. See NeoDateFormat.toAuditToken's javadoc.
     assertIsAuditTokenFor(SAMPLE_UPDATED_WALL_CLOCK, item.getString("updated"));
+  }
+
+  /** ETP-5819: another tenant's product lists like one with no prices, and the SQL never runs. */
+  @Test
+  void testHandleGetListOfAnotherTenantsProductIsEmpty() throws Exception {
+    Client otherClient = mock(Client.class);
+    when(otherClient.getId()).thenReturn("other-client-id");
+    Product foreign = mock(Product.class);
+    when(foreign.getClient()).thenReturn(otherClient);
+    when(obDal.get(Product.class, "foreign-product")).thenReturn(foreign);
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "foreign-product");
+
+    NeoResponse response = handler.handle(NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(params)
+        .build());
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(0, response.getBody().getJSONObject("response").getJSONArray("data").length());
+    verify(session, never()).createNativeQuery(anyString());
   }
 
   /**
