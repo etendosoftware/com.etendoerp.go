@@ -37,9 +37,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -50,7 +48,6 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoMessageText;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
-import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
@@ -140,7 +137,7 @@ public class FiscalSystemConfigureAction {
   /** Production wiring. */
   public FiscalSystemConfigureAction() {
     this(FiscalSystemConfigureAction::runBatch, LocalDate::now,
-        NeoCertificateHelper::activeCertificateExpiry, FiscalSystemConfigureAction::canCreateIn);
+        NeoCertificateHelper::activeCertificateExpiry, NeoAccessHelper::canWriteSpec);
   }
 
   /** Test wiring with every fiscal window writable. */
@@ -413,21 +410,6 @@ public class FiscalSystemConfigureAction {
   private static boolean isReadable(String orgId) {
     String[] readable = OBContext.getOBContext().getReadableOrganizations();
     return readable != null && Arrays.asList(readable).contains(orgId);
-  }
-
-  /** Whether the current role may POST to the spec, i.e. write its window. */
-  private static boolean canCreateIn(String specName) {
-    OBContext.setAdminMode(true);
-    try {
-      OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-      criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
-      criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-      criteria.setMaxResults(1);
-      SFSpec spec = (SFSpec) criteria.uniqueResult();
-      return spec != null && NeoAccessHelper.hasWindowAccessForSpec(spec, METHOD_POST);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
   }
 
   private static JSONObject runBatch(JSONArray operations) {
