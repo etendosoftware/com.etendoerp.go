@@ -5364,6 +5364,38 @@ inherited it". GitHub issue
 Classic's own, separate SEPA-compliance work, which may eventually change Classic's behavior here —
 that work is out of scope for this flag and this divergence note.
 
+> **Update path: a product change on an existing line (ETP-5696, QA CP-15).** REST `PATCH`/`PUT`
+> (`NeoCrudHandler`) and MCP `etendo_update` (`McpToolRouter.handleUpdate`) are two implementations
+> of "update", as `etendo_create` and `etendo_batch` are of "create". Until ETP-5696 only the REST
+> one re-derived `uOM` from the new product (`NeoCommercialLinePolicy.applyDerivedUomOnUpdate`,
+> ETP-5286); through the MCP the line reached the `C_OrderLine` trigger with the old unit and was
+> refused `422 business_rule` (AD message 20111, "the product's unit and the operation's unit are
+> different") — and the agent could not repair it, because `uOM` is a read-only field. `handleUpdate`
+> now calls the same derivation (`injectLineUomIfApplicable(..., false)`) right after
+> `McpLinePriceInjector.applyAgentPriceOnUpdate`: only on a transactional document line, only when the
+> body carries `product`, and never deferring to a sent value.
+>
+> **Still divergent on update, declared and not fixed here.** The REST update block also runs
+> `DocTypeResolver.syncDocumentTypeToSubmittedTarget` and
+> `DocumentNoRepreviewHelper.regenerateDocumentNoOnDocTypeChange` (headers: a document-type change
+> re-points the effective type and re-previews the draft's number) and
+> `NeoCommercialLinePolicy.injectCommercialAmounts` (line amounts). `etendo_update` runs none of them.
+> Sales and purchase invoice lines recompute their amounts in their own customization on every
+> channel, an update included (`InvoiceLineAmountSupport`, ETP-5710); whether the other line entities
+> do on an MCP update, and the header document-type/number case, have not been checked through the
+> MCP.
+>
+> **Known issue, handled separately (not part of ETP-5696): the price is not re-derived when the
+> product of an existing line changes.** Measured 2026-11-04 on a local environment (sales-order line,
+> sales price list: Agua 12, Fernet 44): creating the line directly with Fernet prices it at 44, and
+> changing it from Agua to Fernet in the SPA also ends at 44, but the same change through MCP
+> `etendo_update` or a plain REST `PATCH` (no callout) leaves `unitPrice` and `listPrice` at the
+> previous product's 12, so the line reads "Fernet at 12". The SPA gets 44 because its product callout
+> returns the new price and the client sends it; no server-side update path derives it. Only `uOM` is
+> re-derived on update (ETP-5286 on REST, ETP-5696 on MCP). An agent or integration that changes the
+> product must send the price itself. Whether the server should re-price on a product change changes
+> REST and MCP alike, so it needs its own decision; the tax of the new product was not tested.
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and

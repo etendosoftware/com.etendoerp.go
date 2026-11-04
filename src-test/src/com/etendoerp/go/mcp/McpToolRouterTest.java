@@ -1736,4 +1736,141 @@ public class McpToolRouterTest {
           org.mockito.Mockito.never());
     }
   }
+
+  // ── handleUpdate: product change re-derives uOM (QA CP-15, AD message 20111) ──
+
+  /**
+   * {@code etendo_update} on a line that changes {@code product} must re-derive {@code uOM} from
+   * the NEW product, as the REST update does. The agent cannot send uOM (read-only), so without
+   * this the line hits the C_OrderLine trigger with the old unit and is refused (20111).
+   *
+   * <p>Wiring is asserted on the source, as the neighbouring {@code handleCreate} guards are:
+   * reaching it needs {@code DefaultJsonDataService}, {@code ModelProvider} and an AD_Tab. The
+   * derivation itself is specified in {@code NeoCommercialLinePolicyTest}.</p>
+   */
+  @Test
+  public void testUpdateRederivesUomRightAfterTheAgentPriceAndNeverDefersToAClientValue() {
+    String body = McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleUpdate")
+        .replaceAll("\\s+", "");
+
+    int price = indexOrFail(body, "McpLinePriceInjector.applyAgentPriceOnUpdate(");
+    int uom = indexOrFail(body, "injectLineUomIfApplicable(filteredBody,dalEntity,false);");
+    int mandatory = indexOrFail(body, "McpWriteRequestSupport.rejectClearedMandatoryFields(");
+    int write = indexOrFail(body, "NeoExtensionDispatcher.dispatch(");
+
+    assertTrue("uOM is re-derived after the agent price and before the write is dispatched",
+        price < uom && uom < mandatory && mandatory < write);
+    assertEquals("handleUpdate derives uOM exactly once, never deferring to a sent value", 1,
+        body.split("injectLineUomIfApplicable\\(", -1).length - 1);
+  }
+
+  private static void invokeInjectLineUom(JSONObject body,
+      org.openbravo.base.model.Entity entity) throws Exception {
+    java.lang.reflect.Method m = McpToolRouter.class.getDeclaredMethod(
+        "injectLineUomIfApplicable", JSONObject.class, org.openbravo.base.model.Entity.class,
+        boolean.class);
+    m.setAccessible(true);
+    m.invoke(new McpToolRouter(), body, entity, false);
+  }
+
+  private static org.openbravo.base.model.Entity lineEntity(boolean declaresUom,
+      boolean transactional) {
+    org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+    when(entity.hasProperty("uOM")).thenReturn(declaresUom);
+    when(entity.hasProperty("orderedQuantity")).thenReturn(transactional);
+    return entity;
+  }
+
+  private static org.openbravo.model.common.plm.Product productWithUom(String uomId) {
+    org.openbravo.model.common.uom.UOM uom = mock(org.openbravo.model.common.uom.UOM.class);
+    when(uom.getId()).thenReturn(uomId);
+    org.openbravo.model.common.plm.Product product =
+        mock(org.openbravo.model.common.plm.Product.class);
+    when(product.getUOM()).thenReturn(uom);
+    return product;
+  }
+
+  /** A changed product writes the NEW product's uOM, replacing whatever the body held. */
+  @Test
+  public void testUpdateLineUomIsTheNewProductsAndReplacesAnyClientValue() throws Exception {
+    JSONObject body = new JSONObject().put("product", "P-NEW").put("uOM", "STALE-UOM");
+    org.openbravo.model.common.plm.Product product = productWithUom("UOM-NEW");
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-NEW")).thenReturn(product);
+
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertEquals("UOM-NEW", body.getString("uOM"));
+    }
+  }
+
+  /** A price- or quantity-only update (no product key) is left untouched and never reads the DAL. */
+  @Test
+  public void testUpdateWithoutProductAddsNoUom() throws Exception {
+    JSONObject body = new JSONObject().put("unitPrice", 12);
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertFalse(body.has("uOM"));
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** Entities that do not declare uOM, or are not transactional lines, are untouched. */
+  @Test
+  public void testUpdateOnEntityWithoutUomOrNotATransactionalLineIsUntouched() throws Exception {
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      JSONObject noUom = new JSONObject().put("product", "P-NEW");
+      invokeInjectLineUom(noUom, lineEntity(false, true));
+      assertFalse(noUom.has("uOM"));
+
+      JSONObject notALine = new JSONObject().put("product", "P-NEW");
+      invokeInjectLineUom(notALine, lineEntity(true, false));
+      assertFalse(notALine.has("uOM"));
+
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** A {@code $ref:} product is a batch placeholder, not an id: nothing is resolved or written. */
+  @Test
+  public void testUpdateWithRefPrefixedProductAddsNoUom() throws Exception {
+    JSONObject body = new JSONObject().put("product", "$ref:line1.product");
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertFalse(body.has("uOM"));
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** Unknown product, or one without a UOM: no uOM injected and no exception (the trigger decides). */
+  @Test
+  public void testUpdateWithUnresolvableProductOrUomInjectsNothingAndDoesNotThrow()
+      throws Exception {
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.plm.Product noUom =
+          mock(org.openbravo.model.common.plm.Product.class);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-MISSING")).thenReturn(null);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-NOUOM")).thenReturn(noUom);
+
+      JSONObject missing = new JSONObject().put("product", "P-MISSING");
+      invokeInjectLineUom(missing, lineEntity(true, true));
+      assertFalse(missing.has("uOM"));
+
+      JSONObject withoutUom = new JSONObject().put("product", "P-NOUOM");
+      invokeInjectLineUom(withoutUom, lineEntity(true, true));
+      assertFalse(withoutUom.has("uOM"));
+    }
+  }
 }
