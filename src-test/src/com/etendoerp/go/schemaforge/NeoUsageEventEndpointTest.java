@@ -77,6 +77,8 @@ import com.etendoerp.go.usageevents.UsageEventTypes;
  * <p>The contract under test is "drop, don't fail": only a body that is not an object with an
  * {@code events} array is a 400 (and an oversized one a 413); every per-event or per-property
  * problem drops just that event or property and the answer is still {@code 202}.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoUsageEventEndpoint
  */
 @SuppressWarnings("java:S2187") // test methods live in the @Nested classes
 class NeoUsageEventEndpointTest {
@@ -741,6 +743,88 @@ class NeoUsageEventEndpointTest {
         postWithRotatingSessionKeys(perRequest, "other" + r + "-", perRequest);
       }
       postWithRotatingSessionKeys(1, "last-", 0);
+      assertEquals(NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS, sunk.size());
+    }
+  }
+
+  // ── server-only types (ETP-6057) ──────────────────────────────────────
+
+  @Nested
+  @DisplayName("server-only types")
+  class ServerOnlyTypes {
+
+    private static final String BILLED = UsageEventTypes.PUBLIC_API_REQUEST;
+
+    @Test
+    void aServerOnlyEventIsDroppedNotAcceptedAndNeverSunk() throws Exception {
+      assertAccepted(postEvents(event(BILLED)), 0, 1);
+      assertAccepted(postEvents(event(UsageEventTypes.SESSION_LOGIN)), 0, 1);
+
+      assertTrue(sunk.isEmpty(), "the recorder must never see a server-only type from a client");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "backend", "ui", "ai-bff", "mcp", "garbage", "" })
+    void whateverSourceTheBodyClaimsItIsDropped(String source) throws Exception {
+      assertAccepted(postEvents(event(BILLED).put("source", source)), 0, 1);
+
+      assertTrue(sunk.isEmpty());
+    }
+
+    @Test
+    void aPaddedTypeIsTrimmedBeforeTheCheck() throws Exception {
+      assertAccepted(postEvents(event("  " + BILLED + " ")), 0, 1);
+
+      assertTrue(sunk.isEmpty());
+    }
+
+    @Test
+    void otherEventsInTheSameBatchAreStillAccepted() throws Exception {
+      JSONArray batch = new JSONArray()
+          .put(known())
+          .put(event(BILLED).put("source", "backend").put("properties",
+              new JSONObject().put("count", 1_000_000)))
+          .put(known())
+          .put(event(UsageEventTypes.SESSION_LOGIN));
+
+      assertAccepted(postEvents(batch), 2, 2);
+
+      assertEquals(2, sunk.size());
+      assertTrue(sunk.stream().allMatch(e -> KNOWN.equals(e.eventType())));
+    }
+
+    @Test
+    void aServerOnlyEventConsumesNoRateLimitBudget() throws Exception {
+      int perRequest = NeoUsageEventEndpoint.MAX_EVENTS_PER_REQUEST;
+      JSONArray flood = new JSONArray();
+      for (int i = 0; i < perRequest; i++) {
+        flood.put(event(BILLED).put("sessionKey", "s1"));
+      }
+      // Well past both limits (600 per session, 1200 per user): all of it is dropped.
+      int requests = 2 * NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS / perRequest;
+      for (int r = 0; r < requests; r++) {
+        assertAccepted(postEvents(flood), 0, perRequest);
+      }
+      assertTrue(sunk.isEmpty());
+
+      // The user's full budget is still there: 600 for one session, 1200 for the user.
+      int sessionBatches = NeoUsageEventEndpoint.RATE_LIMIT_EVENTS / perRequest;
+      JSONArray sameSession = new JSONArray();
+      for (int i = 0; i < perRequest; i++) {
+        sameSession.put(known().put("sessionKey", "s1"));
+      }
+      for (int r = 0; r < sessionBatches; r++) {
+        assertAccepted(postEvents(sameSession), perRequest, 0);
+      }
+      int userBatchesLeft = (NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS
+          - NeoUsageEventEndpoint.RATE_LIMIT_EVENTS) / perRequest;
+      for (int r = 0; r < userBatchesLeft; r++) {
+        JSONArray rotating = new JSONArray();
+        for (int i = 0; i < perRequest; i++) {
+          rotating.put(known().put("sessionKey", "o" + r + "-" + i));
+        }
+        assertAccepted(postEvents(rotating), perRequest, 0);
+      }
       assertEquals(NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS, sunk.size());
     }
   }
