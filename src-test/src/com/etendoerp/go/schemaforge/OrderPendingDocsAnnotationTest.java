@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -53,11 +54,16 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
  * Unit tests for the ETP-5295 {@code needsPrimaryDoc} / {@code needsInvoiceDoc} GET annotations
- * added by {@code AbstractOrderHeaderHandler.annotatePendingDocuments()}, exercised through the
+ * added by {@code OrderPendingDocsAnnotator.annotatePendingDocuments()}, exercised through the
  * three concrete handlers that inherit them (sales order, purchase order, sales quotation).
  *
  * <p><b>What these flags are.</b> The "Gestionar envío/factura" (sales) / "Gestionar
@@ -86,6 +92,11 @@ import org.openbravo.dal.service.OBDal;
  * Each {@code ResultSet} is a real cursor over fixture rows rather than a single sticky
  * {@code thenReturn(true)}: queries 2–4 read with {@code while (rs.next())}, and an always-true
  * stub spins forever there.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.OrderPendingDocsAnnotator
+ * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
  */
 public class OrderPendingDocsAnnotationTest {
 
@@ -413,6 +424,61 @@ public class OrderPendingDocsAnnotationTest {
     }
   }
 
+  /**
+   * ETP-5828 — a sales order invoices what is pending net of its draft invoices, so a draft that
+   * holds only part of it leaves the flag on: the one extra query (issued only for the orders of
+   * the page that have a draft) finds a line still pending past the drafts — also for a draft
+   * linked to the order only by its header, which holds none of its lines — and when it finds
+   * none the flag goes off on that query's answer. The purchase order
+   * keeps the rule above — any draft turns it off — and never issues that query.
+   */
+  @Test
+  public void testNeedsInvoiceDocFollowsTheNetOfDraftsRuleOnSalesOnly() throws Exception {
+    Object[][] salesCases = {
+        // name, draft invoice total, a line still pending past the drafts, expected flag
+        { "a draft holds part of the order", "20", true, true },
+        // linked by C_Invoice.C_Order_ID only: no line, so a zero total, and every line still
+        // pending past it — the ETP-5295 rule turned the flag off at the mere presence of a draft
+        { "a header-only draft holds no line of it", "0", true, true },
+        { "the drafts hold everything left", "40", false, false },
+    };
+    for (Object[] c : salesCases) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        Db db = stubDb(obDalMock,
+            noRows(),
+            noRows(),
+            noRows(),
+            resultSet(
+                invoiceRow("order-1", STATUS_COMPLETED, "60"),
+                invoiceRow("order-1", STATUS_DRAFT, (String) c[1])),
+            Boolean.TRUE.equals(c[2]) ? resultSet(inOutRow("order-1")) : noRows());
+
+        NeoResponse result = new SalesOrderHeaderHandler()
+            .afterHandle(getCtx("order-1", orderRecord("order-1", 100.0)));
+
+        assertEquals((String) c[0], c[3],
+            dataOf(result).getJSONObject(0).getBoolean(NEEDS_INVOICE));
+        // the answer comes from the net-of-drafts query, not from the mere presence of a draft
+        verify(db.conn()).prepareStatement(argThat(sql -> sql != null && sql.contains(" AS net ")));
+      }
+    }
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      Db db = stubDb(obDalMock,
+          noRows(),
+          noRows(),
+          noRows(),
+          resultSet(
+              invoiceRow("po-1", STATUS_COMPLETED, "60"),
+              invoiceRow("po-1", STATUS_DRAFT, "20")));
+
+      NeoResponse result = new PurchaseOrderHeaderHandler()
+          .afterHandle(getCtx("po-1", orderRecord("po-1", 100.0)));
+
+      assertFalse(dataOf(result).getJSONObject(0).getBoolean(NEEDS_INVOICE));
+      verify(db.conn(), times(5)).prepareStatement(anyString());
+    }
+  }
+
   /** Case 9 — completed invoices sum exactly to the order total: nothing left to invoice. */
   @Test
   public void testNeedsInvoiceDocFalseWhenFullyInvoiced() throws Exception {
@@ -553,6 +619,71 @@ public class OrderPendingDocsAnnotationTest {
       NeoResponse result = handler.afterHandle(ctx);
 
       assertTrue(dataOf(result).getJSONObject(0).getBoolean(NEEDS_INVOICE));
+    }
+  }
+
+  /**
+   * ETP-5828 — the single-record GET of a COMPLETED sales order carries {@code pendingInvoiceAmount},
+   * what "Generar factura" would invoice now: the action's own quantities (the order import's
+   * {@code shipmentScopedPending}, here 2 units of a 10.00 line at 21 % with a 10 % global
+   * discount) priced like the invoice: 20.00 − 2.00 = 18.00 + 3.78 tax = 21.78. A draft sales
+   * order, a completed one with nothing to invoice ({@code needsInvoiceDoc} false: its total 0 is
+   * fully "invoiced") and a completed purchase order do not get the key, and nothing is computed.
+   */
+  @Test
+  public void testPendingInvoiceAmountOnTheCompletedSalesOrderOnly() throws Exception {
+    TaxRate tax = mock(TaxRate.class);
+    when(tax.getId()).thenReturn("tax-21");
+    when(tax.getRate()).thenReturn(new BigDecimal("21"));
+    OrderLine line = mock(OrderLine.class);
+    when(line.getId()).thenReturn("l1");
+    when(line.getUnitPrice()).thenReturn(new BigDecimal("10.00"));
+    when(line.getTax()).thenReturn(tax);
+    Currency currency = mock(Currency.class);
+    when(currency.getStandardPrecision()).thenReturn(2L);
+    Order order = mock(Order.class);
+    when(order.getCurrency()).thenReturn(currency);
+    when(order.getEtgoTotalDiscount()).thenReturn(new BigDecimal("10"));
+    when(order.getOrderLineList()).thenReturn(List.of(line));
+    ImportOrderLinesIntoInvoiceHandler orderImport = mock(ImportOrderLinesIntoInvoiceHandler.class);
+    when(orderImport.shipmentScopedPending(order)).thenReturn(Map.of("l1", new BigDecimal("2")));
+    SalesOrderHeaderHandler sales = new SalesOrderHeaderHandler();
+    Field field = SalesOrderHeaderHandler.class.getDeclaredField("orderLineImport");
+    field.setAccessible(true);
+    field.set(sales, orderImport);
+    // declared as an enriched key (MCP projections), on the sales order only
+    assertTrue(sales.responseEnrichedFields().contains("pendingInvoiceAmount"));
+    assertFalse(new PurchaseOrderHeaderHandler().responseEnrichedFields()
+        .contains("pendingInvoiceAmount"));
+
+    for (Object[] c : new Object[][] {
+        // name, handler, documentStatus, order total, expected amount (null = no key)
+        { "completed sales order", sales, STATUS_COMPLETED, 100.0, "21.78" },
+        { "completed sales order with nothing to invoice", sales, STATUS_COMPLETED, 0.0, null },
+        { "draft sales order", sales, STATUS_DRAFT, 100.0, null },
+        { "completed purchase order", new PurchaseOrderHeaderHandler(), STATUS_COMPLETED, 100.0,
+            null },
+    }) {
+      Mockito.clearInvocations(orderImport);
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+        stubDb(obDalMock);
+        OBDal dal = OBDal.getInstance();
+        when(dal.get(Order.class, "order-1")).thenReturn(order);
+
+        JSONObject rec = orderRecord("order-1", (Double) c[3]).put("documentStatus", c[2]);
+        NeoResponse result = ((AbstractOrderHeaderHandler) c[1])
+            .afterHandle(getCtx("order-1", rec));
+
+        JSONObject annotated = dataOf(result).getJSONObject(0);
+        if (c[4] == null) {
+          assertFalse((String) c[0], annotated.has("pendingInvoiceAmount"));
+          verify(orderImport, never()).shipmentScopedPending(order);
+        } else {
+          assertEquals((String) c[0], 0, new BigDecimal((String) c[4])
+              .compareTo(new BigDecimal(annotated.get("pendingInvoiceAmount").toString())));
+        }
+      }
     }
   }
 

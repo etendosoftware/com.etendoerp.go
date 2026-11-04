@@ -81,6 +81,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * replaced here by a recording double that creates one invoice line per entry it is handed.
  *
  * @covers com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.OrderInvoicePending
+ * @covers com.etendoerp.go.schemaforge.OrderImportListing
  * @covers com.etendoerp.go.schemaforge.AbstractLineImportHandler
  * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceLineImportHandler
@@ -165,10 +167,14 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       calls.add("lock");
     }
 
+    /** How many times the draft quantities were read (ETP-5828: batched on sales only). */
+    int draftReads;
+
     @Override
     protected Map<String, BigDecimal> draftInvoicedQuantities(Collection<String> ids,
         boolean sales) {
       calls.add("drafts");
+      draftReads++;
       return drafts;
     }
 
@@ -251,8 +257,13 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       }
     }
 
+    /** How many candidates the last {@code availableOrders} asked the scan for. */
+    Integer lastScan;
+
     @Override
-    protected List<Order> findCandidateOrders(String partnerId, boolean sales, String cur) {
+    protected List<Order> findCandidateOrders(String partnerId, boolean sales, String cur,
+        int scan) {
+      lastScan = scan;
       return candidates;
     }
   }
@@ -264,6 +275,19 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     OrderLine agua = orderLine("ol1", 10, product("p1", "Agua", true), "10", "0", "2");
     OrderLine pan = orderLine("ol2", 20, product("p2", "Pan", false), "5", "0", "0");
     probe.order = order("o1", false, agua, pan);
+    probe.lineById.put("ol1", agua);
+    probe.lineById.put("ol2", pan);
+    probe.invoiceFromOrderSupport = mock(InvoiceFromOrderSupport.class);
+    return probe;
+  }
+
+  /** The same order and lines on the sales side: a draft sales invoice and a sales order. */
+  private Probe salesScenario() {
+    Probe probe = new Probe();
+    probe.invoice = draftInvoice("i1", true);
+    OrderLine agua = orderLine("ol1", 10, product("p1", "Agua", true), "10", "0", "2");
+    OrderLine pan = orderLine("ol2", 20, product("p2", "Pan", false), "5", "0", "0");
+    probe.order = order("o1", true, agua, pan);
     probe.lineById.put("ol1", agua);
     probe.lineById.put("ol2", pan);
     probe.invoiceFromOrderSupport = mock(InvoiceFromOrderSupport.class);
@@ -1357,6 +1381,18 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       assertEquals(422, NeoActionContract.validate(contracts, "availableOrderLines",
           new JSONObject()).getHttpStatus());
       assertNull(NeoActionContract.validate(contracts, "availableOrders", new JSONObject()));
+      // ETP-5828: limit / includeCovered are declared on the sales invoice only
+      NeoResponse limit = NeoActionContract.validate(contracts, "availableOrders",
+          new JSONObject().put("limit", 500));
+      NeoResponse covered = NeoActionContract.validate(contracts, "availableOrderLines",
+          new JSONObject().put("orderId", "o1").put("includeCovered", true));
+      if (sales) {
+        assertNull(limit);
+        assertNull(covered);
+      } else {
+        assertEquals(422, limit.getHttpStatus());
+        assertEquals(422, covered.getHttpStatus());
+      }
     }
   }
 
@@ -1442,6 +1478,146 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
             .getBoolean("hasMore"));
     assertFalse(run(probe, "availableOrderLines", "{\"orderId\":\"o1\"}").getBody()
         .getJSONObject("response").getBoolean("hasMore"));
+  }
+
+  /**
+   * ETP-5828: the sales invoice's popup lists through availableOrders, so on a sales invoice the
+   * caller may ask for a longer page ({@code limit}, 1-1000) and the scan reads at least that many
+   * candidates; anything else is a 400. A purchase invoice ignores it and keeps 50 rows / 200.
+   */
+  @Test
+  public void availableOrders_aSalesInvoiceHonoursLimit_aPurchaseOneKeepsItsLimits()
+      throws Exception {
+    Probe sales = salesScenario();
+    OrderLine extra = orderLine("olx", 10, product("px", "Extra", false), "3", "0", "0");
+    sales.candidates = List.of(sales.order, order("o2", true, extra));
+
+    JSONObject one = run(sales, "availableOrders", "{\"limit\":1}").getBody()
+        .getJSONObject("response");
+    assertEquals(1, one.getJSONArray("data").length());
+    assertTrue(one.getBoolean("hasMore"));
+    assertEquals(1, one.getInt("limit"));
+    assertEquals("never fewer candidates than the default scan", 200, one.getInt("scanLimit"));
+
+    JSONObject wide = run(sales, "availableOrders", "{\"limit\":1000}").getBody()
+        .getJSONObject("response");
+    assertEquals(2, wide.getJSONArray("data").length());
+    assertEquals(1000, wide.getInt("limit"));
+    assertEquals(Integer.valueOf(1000), sales.lastScan);
+    assertEquals("absent keeps the default page", 50, run(sales, "availableOrders", null)
+        .getBody().getJSONObject("response").getInt("limit"));
+    for (String bad : new String[] { "0", "1001", "2.5", "\"many\"" }) {
+      assertEquals(bad, 400, run(sales, "availableOrders", "{\"limit\":" + bad + "}")
+          .getHttpStatus());
+    }
+
+    Probe purchase = scenario();
+    purchase.candidates = List.of(purchase.order);
+    JSONObject unchanged = run(purchase, "availableOrders", "{\"limit\":1000}").getBody()
+        .getJSONObject("response");
+    assertEquals(50, unchanged.getInt("limit"));
+    assertEquals(200, unchanged.getInt("scanLimit"));
+    assertEquals(Integer.valueOf(200), purchase.lastScan);
+  }
+
+  /**
+   * ETP-5828: the batched draft read of availableOrders is sales-only. Three candidates with
+   * something pending and a page of 2: purchase reads the drafts once per order it scans until the
+   * page fills (2, as before), sales once for all of them.
+   */
+  @Test
+  public void availableOrders_readsTheDraftsOnceOnSales_perScannedOrderOnPurchase()
+      throws Exception {
+    Probe purchase = scenario();
+    purchase.rowLimit = 2;
+    purchase.candidates = List.of(purchase.order,
+        order("o2", false, orderLine("ol5", 10, product("p5", "Uno", false), "3", "0", "0")),
+        order("o3", false, orderLine("ol6", 10, product("p6", "Dos", false), "3", "0", "0")));
+    assertEquals(2, run(purchase, "availableOrders", null).getBody().getJSONObject("response")
+        .getJSONArray("data").length());
+    assertEquals("purchase: lazily, one read per scanned order", 2, purchase.draftReads);
+
+    Probe sales = salesScenario();
+    sales.candidates = List.of(sales.order,
+        order("o2", true, orderLine("ol5", 10, product("p5", "Uno", false), "3", "0", "0")),
+        order("o3", true, orderLine("ol6", 10, product("p6", "Dos", false), "3", "0", "0")));
+    assertEquals(3, run(sales, "availableOrders", null).getBody().getJSONObject("response")
+        .getJSONArray("data").length());
+    assertEquals("sales: one batched read for every candidate", 1, sales.draftReads);
+  }
+
+  /**
+   * ETP-5828: with includeCovered a sales invoice also gets the lines with nothing left, at 0 —
+   * the popup greys them out and so reads every line from this one call. A purchase invoice
+   * ignores the flag.
+   */
+  @Test
+  public void availableOrderLines_includeCovered_addsTheCoveredLinesAtZero_onSalesOnly()
+      throws Exception {
+    String withFlag = "{\"orderId\":\"o1\",\"includeCovered\":true}";
+    Probe sales = salesScenario();
+    sales.drafts.put("ol2", bd("5"));
+
+    JSONArray rows = run(sales, "availableOrderLines", withFlag).getBody()
+        .getJSONObject("response").getJSONArray("data");
+    assertEquals(List.of("ol1", "ol2"), ids(rows));
+    assertEquals(0, rows.getJSONObject(1).getInt("pendingQuantity"));
+    assertEquals("Pan", rows.getJSONObject(1).getString("product$_identifier"));
+    assertEquals(List.of("ol1"), ids(run(sales, "availableOrderLines", "{\"orderId\":\"o1\"}")
+        .getBody().getJSONObject("response").getJSONArray("data")));
+
+    Probe purchase = scenario();
+    purchase.drafts.put("ol2", bd("5"));
+    assertEquals(List.of("ol1"), ids(run(purchase, "availableOrderLines", withFlag).getBody()
+        .getJSONObject("response").getJSONArray("data")));
+  }
+
+  /**
+   * ETP-5828: importOrderInto, what the sales order's "Generar factura" reuses when drafts hold
+   * part of the order, plans net of the drafts on the invoice it is handed and decides no global
+   * discount (the caller carries the order's %).
+   */
+  @Test
+  public void importOrderInto_createsWhatIsLeftNetOfDrafts_withoutTheDiscountDecision()
+      throws Exception {
+    Probe probe = salesScenario();
+    probe.drafts.put("ol1", bd("3"));
+
+    List<DocumentLineImport.ImportedLine> created =
+        probe.importOrderInto(probe.invoice, probe.order, Map.of());
+
+    assertEquals(2, created.size());
+    assertEquals(0, bd("5").compareTo(
+        new BigDecimal(probe.nativeSelection.getJSONObject(0).getString("orderedQuantity"))));
+    assertEquals(0, bd("5").compareTo(
+        new BigDecimal(probe.nativeSelection.getJSONObject(1).getString("orderedQuantity"))));
+    verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+  }
+
+  /**
+   * ETP-5828: "Generar factura" on an order partly held by drafts uses the no-draft quantity rule.
+   * Agua: ordered 10, invoiced 2, a draft holds 2 (net 6), shipped 6 of which the draft already
+   * holds 2 (shipment pending 4): only the 4 shipped, never the 4 unshipped. Pan has no shipments:
+   * its net pending, 5. With the shipped part all held by drafts, Agua has no shipment left to
+   * take, so it is invoiced for its net pending (6, the unshipped rest) like a line without
+   * shipments.
+   */
+  @Test
+  public void shipmentScopedPending_invoicesOnlyTheShippedPartOfAShippedLine() {
+    Probe probe = salesScenario();
+    probe.drafts.put("ol1", bd("2"));
+    movement(probe, "m1", "6", "4", "6");
+
+    Map<String, BigDecimal> scoped = probe.shipmentScopedPending(probe.order);
+    assertEquals(List.of("ol1", "ol2"), List.copyOf(scoped.keySet()));
+    assertEquals(0, bd("4").compareTo(scoped.get("ol1")));
+    assertEquals(0, bd("5").compareTo(scoped.get("ol2")));
+
+    probe.movementPending.put("m1", bd("0"));
+    Map<String, BigDecimal> allHeld = probe.shipmentScopedPending(probe.order);
+    assertEquals(List.of("ol1", "ol2"), List.copyOf(allHeld.keySet()));
+    assertEquals(0, bd("6").compareTo(allHeld.get("ol1")));
+    assertEquals(0, bd("5").compareTo(allHeld.get("ol2")));
   }
 
   /** N2: never claim a link to an order none of the imported lines belongs to. */
