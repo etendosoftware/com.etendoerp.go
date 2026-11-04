@@ -10410,6 +10410,10 @@ steps below in this order — both customizations call the single entry point
    .applyAgentPriceOnUpdate` (ETP-5852) bails when `listPrice` is sent, so it does not interfere.
    Over MCP this also covers `purchase-order/lines` (`PurchaseOrderLineHandler` runs every rule on
    MCP only; on REST it keeps its own rules, see "The rules live in three customizations").
+   **Declared limit — tax-included price lists:** a lone `listPrice` update does not reprice there.
+   `SL_Order_Amt` works on the gross side (`grossPriceList`, `baseGrossUnitPrice`), and the callout
+   input is aligned to the stored gross values, so the line keeps its stored price (on such a list
+   the net `listPrice` is usually 0 anyway, and the rule abstains).
 
 What the re-fire may write:
 

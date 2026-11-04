@@ -865,15 +865,19 @@ class OrderLineDiscountSupportTest {
   // ── CP-13: an update of the list price alone re-prices the line ───────
 
   /**
-   * Stored Monitor line: qty 10, list 200, the row's discount, 21 % VAT. The callout answer is what
+   * Stored Monitor line: qty 10, list 200, the row's stored discount (JSON literal, {@code null}
+   * included) and the discount expected in the body and in the callout's input, 21 % VAT. The
+   * callout answer is what
    * {@code SL_Order_Amt}'s {@code inpdiscount} branch publishes over list 300 (gross
    * {@code grossUnitPrice × qty} = 0 on a net list).
    */
   static Stream<Arguments> listPriceOnlyUpdate() {
     return Stream.of(
-        Arguments.of("CP-13: list 200 → 300 at discount 10", "PATCH", "10", "180", "270", "2700",
-            "3267.00"),
-        Arguments.of("PUT, line without discount", "PUT", "0", "200", "300", "3000", "3630.00"));
+        Arguments.of("CP-13: list 200 → 300 at discount 10", "PATCH", "10", "10", "180", "270",
+            "2700", "3267.00"),
+        Arguments.of("PUT, line at discount 0", "PUT", "0", "0", "200", "300", "3000", "3630.00"),
+        Arguments.of("stored NULL discount → 0, also in the callout's input", "PATCH", "null",
+            "0", "200", "300", "3000", "3630.00"));
   }
 
   /**
@@ -884,8 +888,8 @@ class OrderLineDiscountSupportTest {
   @ParameterizedTest(name = "{0}")
   @MethodSource("listPriceOnlyUpdate")
   void updateOfTheListPriceAloneRepricesWithTheStoredDiscount(String label, String method,
-      String storedDiscount, String storedPrice, String expectedPrice, String expectedNet,
-      String expectedGross) throws Exception {
+      String storedDiscount, String expectedDiscount, String storedPrice, String expectedPrice,
+      String expectedNet, String expectedGross) throws Exception {
     JSONObject body = new JSONObject("{\"listPrice\":300}");
     String stored = "{\"orderedQuantity\":10,\"listPrice\":200,\"discount\":" + storedDiscount
         + ",\"unitPrice\":" + storedPrice + ",\"standardPrice\":200,\"tax\":\"" + TAX_ID
@@ -899,6 +903,8 @@ class OrderLineDiscountSupportTest {
     Tab tab = mock(Tab.class);
     List<Object> triggers = new ArrayList<>();
     Set<String> protectedKeys = new HashSet<>();
+    List<Object> inputStandardPrice = new ArrayList<>();
+    List<Object> inputDiscount = new ArrayList<>();
 
     try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
         MockedStatic<OBProvider> provider = storedLine(dal, stored);
@@ -906,6 +912,9 @@ class OrderLineDiscountSupportTest {
         MockedStatic<NeoTypeCoercionHelper> coercion = mockStatic(NeoTypeCoercionHelper.class)) {
       cascade.when(() -> NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(any(), any(),
           any(), any(), any(), any(), any())).thenAnswer(inv -> {
+            JSONObject formState = inv.getArgument(2);
+            inputStandardPrice.add(formState.opt(OrderLineDiscountSupport.FIELD_STANDARD_PRICE));
+            inputDiscount.add(formState.opt(OrderLineDiscountSupport.FIELD_DISCOUNT));
             triggers.addAll(inv.<Collection<Object>>getArgument(4));
             protectedKeys.addAll(inv.<Set<String>>getArgument(5));
             JSONObject target = inv.getArgument(3);
@@ -934,11 +943,17 @@ class OrderLineDiscountSupportTest {
 
     assertEquals(Arrays.asList(OrderLineDiscountSupport.FIELD_DISCOUNT), triggers,
         label + ": the re-fire is for the discount");
+    assertEquals(0, new BigDecimal(storedPrice).compareTo(
+        new BigDecimal(String.valueOf(inputStandardPrice.get(0)))),
+        label + ": the callout reads the stored price as its standard price");
+    assertEquals(0, new BigDecimal(expectedDiscount).compareTo(
+        new BigDecimal(String.valueOf(inputDiscount.get(0)))),
+        label + ": the callout reads the stored discount, a NULL one as 0");
     assertTrue(protectedKeys.contains(OrderLineDiscountSupport.FIELD_DISCOUNT),
         label + ": the stored discount is protected");
     assertFalse(protectedKeys.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE),
         label + ": the price is re-derived");
-    assertAmount(label, storedDiscount, body, OrderLineDiscountSupport.FIELD_DISCOUNT);
+    assertAmount(label, expectedDiscount, body, OrderLineDiscountSupport.FIELD_DISCOUNT);
     assertAmount(label, "300", body, OrderLineDiscountSupport.FIELD_LIST_PRICE);
     assertAmount(label, expectedPrice, body, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
     assertAmount(label, expectedNet, body, OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT);

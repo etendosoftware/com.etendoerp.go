@@ -373,27 +373,15 @@ final class OrderLineDiscountSupport {
    * steps of one request share a single read ({@link #applyLineRules}).
    */
   static boolean applyDiscount(NeoContext ctx, StoredLine storedLine) {
-    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())) {
+    if (!qualifiesForDiscountRefire(ctx)) {
       return false;
     }
-    String method = ctx.getHttpMethod();
-    boolean create = METHOD_POST.equals(method);
-    boolean update = isUpdate(method);
+    boolean create = METHOD_POST.equals(ctx.getHttpMethod());
+    boolean update = !create;
     JSONObject body = ctx.getRequestBody();
     // A list price sent alone on an update (CP-13) re-prices the line with its current discount.
     boolean listPriceOnly = update && changesOnlyListPrice(body);
-    // Cheap pre-check before any read: without a discount (or a lone list price), or with an
-    // explicit gross price, the full rule can never hold.
-    if ((!create && !update) || (!hasValue(body, FIELD_DISCOUNT) && !listPriceOnly)
-        || sentExplicitGrossPrice(body)) {
-      return false;
-    }
-    // Every write channel builds its hook context with the tab, and NeoCalloutService reads it off
-    // the context rather than off the argument, so a context without one cannot run the callout.
     Tab adTab = ctx.getAdTab();
-    if (adTab == null) {
-      return false;
-    }
     try {
       JSONObject formState = create ? createFormState(body) : storedLine.get();
       if (formState == null || isZero(formState.opt(FIELD_LIST_PRICE))) {
@@ -402,7 +390,11 @@ final class OrderLineDiscountSupport {
         return false;
       }
       if (listPriceOnly) {
-        body.put(FIELD_DISCOUNT, storedDiscount(formState));
+        // Into the callout's input too: a stored NULL discount stays JSONObject.NULL in the form
+        // state, and the cascade skips a NULL trigger, so no callout would run.
+        BigDecimal discount = storedDiscount(formState);
+        body.put(FIELD_DISCOUNT, discount);
+        formState.put(FIELD_DISCOUNT, discount);
       }
       if (!shouldApplyDiscount(body, formState.opt(FIELD_LIST_PRICE))) {
         return false;
@@ -429,6 +421,30 @@ final class OrderLineDiscountSupport {
           ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
       return false;
     }
+  }
+
+  /**
+   * The cheap entry guard of {@link #applyDiscount(NeoContext, StoredLine)}, checked before any
+   * read: a CRUD create or update whose body carries a discount (or, on an update, a lone list
+   * price — {@link #changesOnlyListPrice}), no explicit gross price, and a context with its tab.
+   * Every write channel builds its hook context with the tab, and {@code NeoCalloutService} reads
+   * it off the context rather than off the argument, so a context without one cannot run the
+   * callout.
+   */
+  static boolean qualifiesForDiscountRefire(NeoContext ctx) {
+    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || ctx.getAdTab() == null) {
+      return false;
+    }
+    String method = ctx.getHttpMethod();
+    boolean update = isUpdate(method);
+    if (!METHOD_POST.equals(method) && !update) {
+      return false;
+    }
+    JSONObject body = ctx.getRequestBody();
+    boolean requestsDiscount = hasValue(body, FIELD_DISCOUNT)
+        || (update && changesOnlyListPrice(body));
+    return requestsDiscount && !sentExplicitGrossPrice(body);
   }
 
   /**
