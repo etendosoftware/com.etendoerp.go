@@ -224,8 +224,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       // (else of the row's organization), and the client of the key's role.
       // Anchored on a whole scope ((?:^| ) is non-capturing, so substring() answers the org id):
       // "xneo:public-api-owner-org:…" inside another scope is not an owner marker.
+      // The prefix is PublicApiKeyPolicy.OWNER_ORG_SCOPE_PREFIX, kept literal so the SQL is a
+      // plain constant (Sonar S2077).
       + "(SELECT o.ad_client_id FROM ad_org o WHERE o.ad_org_id = COALESCE(substring(c.scopes "
-      + "from '(?:^| )" + PublicApiKeyPolicy.OWNER_ORG_SCOPE_PREFIX + "([^ ]+)'), c.ad_org_id)) "
+      + "from '(?:^| )neo:public-api-owner-org:([^ ]+)'), c.ad_org_id)) "
       + "AS owner_org_client_id, "
       + "(SELECT r.ad_client_id FROM ad_role r WHERE r.ad_role_id = c.ad_role_id) "
       + "AS role_client_id "
