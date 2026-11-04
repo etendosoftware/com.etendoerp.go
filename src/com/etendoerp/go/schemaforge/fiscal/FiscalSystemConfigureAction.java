@@ -112,6 +112,10 @@ public class FiscalSystemConfigureAction {
   static final String MSG_TERRITORY_REQUIRED = "ETGO_FiscalSifTerritoryRequired";
   static final String MSG_TBAI_NO_TERRITORY = "ETGO_FiscalSifTbaiNoTerritory";
   static final String MSG_NO_WINDOW_ACCESS = "ETGO_FiscalSifNoWindowAccess";
+  static final String MSG_ORG_STAR = "ETGO_FiscalSifOrgStar";
+  /** The {@code *} organization: shared by every organization, it holds no fiscal system. */
+  private static final String ORG_STAR = "0";
+  private static final String KEY_ERROR = "error";
 
   private static final String METHOD_POST = "POST";
   private static final String METHOD_GET = "GET";
@@ -192,6 +196,9 @@ public class FiscalSystemConfigureAction {
   }
 
   /**
+   * Whether this class serves an action: {@code configureFiscalSystem} or
+   * {@code fiscalSystemCatalog}.
+   *
    * @param action an action name
    * @return whether this class serves it
    */
@@ -240,6 +247,43 @@ public class FiscalSystemConfigureAction {
 
   private NeoResponse configure(NeoContext context, String orgId, String system,
       String territory) throws JSONException {
+    NeoResponse refusal = requestRefusal(context, orgId);
+    if (refusal != null) {
+      return refusal;
+    }
+    // Serializes concurrent activations of the same organization: the "one active SIF" checks
+    // below and the creates of the batch run in this transaction, under this row lock.
+    FiscalSifGuard.lockOrganization(orgId);
+    Map<String, String> active = FiscalSifGuard.activeRecords(orgId);
+    boolean addingSii = isAddingSiiToTbai(system, territory, active);
+    Activation activation = addingSii ? siiOnTbai(territory, active)
+        : firstActivation(system, territory, active);
+    if (activation.refusal != null) {
+      return activation.refusal;
+    }
+
+    Map<String, JSONObject> payloads = payloadsFor(addingSii, system, activation.territory);
+    refusal = windowAccessRefusal(payloads);
+    if (refusal != null) {
+      return refusal;
+    }
+    JSONArray operations = operationsOf(payloads);
+    JSONObject outcome = FiscalSifGuard.asFiscalSystemActivation(() -> batch.apply(operations));
+    if (outcome == null || !outcome.optBoolean(BatchService.FIELD_COMMITTED, false)) {
+      return batchFailure(outcome);
+    }
+    return success(context, orgId, addingSii ? FiscalSifRules.SII_TBAI : system,
+        activation.territory, outcome);
+  }
+
+  /**
+   * The refusals that do not depend on the organization's configuration: the {@code *}
+   * organization, an organization other than the session's, forced test mode.
+   */
+  private static NeoResponse requestRefusal(NeoContext context, String orgId) {
+    if (ORG_STAR.equals(orgId)) {
+      return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_ORG_STAR);
+    }
     // The records land in the session's organization (organization is server-owned), so a
     // different id would create them somewhere the caller did not ask for.
     if (!orgId.equals(FiscalSifGuard.currentOrganizationId(context.getObContext()))) {
@@ -248,43 +292,58 @@ public class FiscalSystemConfigureAction {
     if (FiscalSifGuard.isForceTestMode(context.getObContext())) {
       return FiscalSifGuard.refusal(HttpServletResponse.SC_CONFLICT, FiscalSifGuard.MSG_TEST_MODE);
     }
-    Map<String, String> active = FiscalSifGuard.activeRecords(orgId);
-    String effectiveTerritory = territory;
-    boolean addingSii = isAddingSiiToTbai(system, territory, active);
-    if (addingSii) {
-      String tbaiTerritory = FiscalSifGuard.tbaiTerritoryOf(active.get(FiscalSifRules.TBAI));
-      String tbaiTerritoryId = FiscalSifRules.territoryOfTbai(tbaiTerritory);
-      if (tbaiTerritoryId == null) {
-        // A legacy TicketBAI with no (or an unknown) territory: the SII flags cannot be derived.
-        return FiscalSifGuard.refusal(HttpServletResponse.SC_CONFLICT, MSG_TBAI_NO_TERRITORY);
-      }
-      if (territory != null && !territory.equals(tbaiTerritoryId)) {
-        return FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST, MSG_TERRITORY_MISMATCH,
-            FiscalSifGuard.territoryName(tbaiTerritoryId));
-      }
-      effectiveTerritory = tbaiTerritoryId;
-    } else {
-      NeoResponse refusal = activationRefusal(system, territory, active);
-      if (refusal != null) {
-        return refusal;
-      }
+    return null;
+  }
+
+  /** "Añadir SII": TicketBAI's territory, or the refusal when it is missing or contradicted. */
+  private static Activation siiOnTbai(String territory, Map<String, String> active) {
+    String tbaiTerritory = FiscalSifGuard.tbaiTerritoryOf(active.get(FiscalSifRules.TBAI));
+    String tbaiTerritoryId = FiscalSifRules.territoryOfTbai(tbaiTerritory);
+    if (tbaiTerritoryId == null) {
+      // A legacy TicketBAI with no (or an unknown) territory: the SII flags cannot be derived.
+      return Activation.refused(
+          FiscalSifGuard.refusal(HttpServletResponse.SC_CONFLICT, MSG_TBAI_NO_TERRITORY));
     }
+    if (territory != null && !territory.equals(tbaiTerritoryId)) {
+      return Activation.refused(FiscalSifGuard.refusal(HttpServletResponse.SC_BAD_REQUEST,
+          MSG_TERRITORY_MISMATCH, FiscalSifGuard.territoryName(tbaiTerritoryId)));
+    }
+    return Activation.in(tbaiTerritoryId);
+  }
 
+  /** A first activation: the requested territory, or the refusal of the pair or of the org. */
+  private static Activation firstActivation(String system, String territory,
+      Map<String, String> active) {
+    NeoResponse refusal = activationRefusal(system, territory, active);
+    return refusal != null ? Activation.refused(refusal) : Activation.in(territory);
+  }
+
+  /** The body of every record to create, by record system. */
+  private Map<String, JSONObject> payloadsFor(boolean addingSii, String system, String territory)
+      throws JSONException {
     String day = today.get().toString();
-    Map<String, JSONObject> payloads = addingSii
+    return addingSii
         ? Collections.singletonMap(FiscalSifRules.SII,
-            FiscalSifRules.recordPayload(FiscalSifRules.SII, effectiveTerritory, day))
-        : FiscalSifRules.onboardingPayloads(system, effectiveTerritory, day);
+            FiscalSifRules.recordPayload(FiscalSifRules.SII, territory, day))
+        : FiscalSifRules.onboardingPayloads(system, territory, day);
+  }
 
-    // Each system has its own window: a role allowed to configure one system but not another gets
-    // a refusal in its language here, not the batch's generic "Access denied to spec".
+  /**
+   * Each system has its own window: a role allowed to configure one system but not another gets
+   * a refusal in its language here, not the batch's generic "Access denied to spec".
+   */
+  private NeoResponse windowAccessRefusal(Map<String, JSONObject> payloads) {
     for (String recordSystem : payloads.keySet()) {
       if (!canCreate.test(ENDPOINTS.get(recordSystem)[0])) {
         return FiscalSifGuard.refusal(HttpServletResponse.SC_FORBIDDEN, MSG_NO_WINDOW_ACCESS,
             FiscalSifGuard.displayName(recordSystem));
       }
     }
+    return null;
+  }
 
+  /** The batch operations that create the records, one per record system. */
+  private static JSONArray operationsOf(Map<String, JSONObject> payloads) throws JSONException {
     JSONArray operations = new JSONArray();
     for (Map.Entry<String, JSONObject> e : payloads.entrySet()) {
       String[] endpoint = ENDPOINTS.get(e.getKey());
@@ -294,12 +353,26 @@ public class FiscalSystemConfigureAction {
           .put("entity", endpoint[1])
           .put("body", e.getValue()));
     }
-    JSONObject outcome = FiscalSifGuard.asFiscalSystemActivation(() -> batch.apply(operations));
-    if (outcome == null || !outcome.optBoolean(BatchService.FIELD_COMMITTED, false)) {
-      return batchFailure(outcome);
+    return operations;
+  }
+
+  /** What an activation resolved to: the territory to build the records for, or a refusal. */
+  private static final class Activation {
+    private final NeoResponse refusal;
+    private final String territory;
+
+    private Activation(NeoResponse refusal, String territory) {
+      this.refusal = refusal;
+      this.territory = territory;
     }
-    return success(context, orgId, addingSii ? FiscalSifRules.SII_TBAI : system,
-        effectiveTerritory, outcome);
+
+    static Activation refused(NeoResponse refusal) {
+      return new Activation(refusal, null);
+    }
+
+    static Activation in(String territory) {
+      return new Activation(null, territory);
+    }
   }
 
   /** The refusal of a first activation, or {@code null}: territory, compatibility, one SIF. */
@@ -333,8 +406,8 @@ public class FiscalSystemConfigureAction {
 
   /** The {@code fiscalSystemCatalog} answer: read only, the same for every organization. */
   private static NeoResponse catalog(NeoContext context) {
-    String method = context.getHttpMethod();
-    if (!METHOD_GET.equalsIgnoreCase(method) && !METHOD_POST.equalsIgnoreCase(method)) {
+    // Read only, as its contract declares (GET): a POST is not a way to read it.
+    if (!METHOD_GET.equalsIgnoreCase(context.getHttpMethod())) {
       return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED, "Method not allowed.");
     }
     String orgId = context.getRecordId();
@@ -378,7 +451,7 @@ public class FiscalSystemConfigureAction {
 
   /** The batch refusal as this action's own error: status, message and message keys kept. */
   private static NeoResponse batchFailure(JSONObject outcome) throws JSONException {
-    JSONObject error = outcome != null ? outcome.optJSONObject("error") : null;
+    JSONObject error = outcome != null ? outcome.optJSONObject(KEY_ERROR) : null;
     int status = error != null ? error.optInt("status", HttpServletResponse.SC_BAD_REQUEST)
         : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
     String message = error != null ? error.optString("message", null) : null;
@@ -386,7 +459,7 @@ public class FiscalSystemConfigureAction {
         StringUtils.defaultIfBlank(message, "Could not configure the fiscal system."));
     JSONArray keys = error != null ? findMessageKeys(error) : null;
     if (keys != null && response.getBody() != null) {
-      response.getBody().getJSONObject("error").put(NeoProcessService.MESSAGE_KEYS, keys);
+      response.getBody().getJSONObject(KEY_ERROR).put(NeoProcessService.MESSAGE_KEYS, keys);
     }
     return response;
   }
@@ -397,7 +470,7 @@ public class FiscalSystemConfigureAction {
       return keys;
     }
     JSONObject detail = error.optJSONObject("detail");
-    JSONObject nested = detail != null ? detail.optJSONObject("error") : null;
+    JSONObject nested = detail != null ? detail.optJSONObject(KEY_ERROR) : null;
     return nested != null ? nested.optJSONArray(NeoProcessService.MESSAGE_KEYS) : null;
   }
 

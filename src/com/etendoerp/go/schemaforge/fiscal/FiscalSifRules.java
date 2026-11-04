@@ -59,6 +59,14 @@ public final class FiscalSifRules {
   public static final String CANARIAS = "canarias";
   public static final String CEUTA = "ceuta";
 
+  /** SII record field: the Navarra agency flag. */
+  static final String FIELD_NAVARRA = "navarra";
+  /** SII record field: the Gipuzkoa agency flag. */
+  static final String FIELD_GUIPUZCOA = "guipuzcoa";
+  /** SII record field: the tax type (IVA / IGIC). */
+  static final String FIELD_TAXTYPE = "taxtype";
+  private static final String YES = "Y";
+
   /** Every system a caller may ask for, in the SPA's presentation order. */
   public static final List<String> SYSTEMS = List.of(SII, TBAI, SII_TBAI, VERIFACTU);
 
@@ -99,6 +107,8 @@ public final class FiscalSifRules {
   }
 
   /**
+   * The systems a territory allows, in presentation order.
+   *
    * @param territory a territory id
    * @return the systems the territory allows, empty for an unknown territory
    */
@@ -108,6 +118,8 @@ public final class FiscalSifRules {
   }
 
   /**
+   * Whether a system/territory pair is valid.
+   *
    * @param system    a system
    * @param territory a territory id
    * @return whether the onboarding offers {@code system} for {@code territory}
@@ -194,29 +206,29 @@ public final class FiscalSifRules {
     JSONObject body = new JSONObject();
     if (SII.equals(recordSystem)) {
       if (NAVARRA.equals(territory)) {
-        body.put("navarra", "Y");
+        body.put(FIELD_NAVARRA, YES);
       }
       if (GIPUZKOA.equals(territory)) {
-        body.put("guipuzcoa", "Y");
+        body.put(FIELD_GUIPUZCOA, YES);
       }
-      body.put("taxtype", CANARIAS.equals(territory) ? "IGIC" : "IVA");
+      body.put(FIELD_TAXTYPE, CANARIAS.equals(territory) ? "IGIC" : "IVA");
       // Acogido from creation, on every channel: the activation is the act of joining SII. The
       // wizard used to post 'N' and turn it on with its detail save (ETP-6053).
-      body.put("acogidaAlSII", "Y");
-      body.put("entornoDeProduccin", "Y");
-      body.put("adjuntarArchivosXML", "Y");
+      body.put("acogidaAlSII", YES);
+      body.put("entornoDeProduccin", YES);
+      body.put("adjuntarArchivosXML", YES);
       body.put("fechaAcogidaSII", today);
       body.put("monitordate", today);
     } else if (TBAI.equals(recordSystem)) {
       body.put("etsgSifTerritory", tbaiTerritory(territory));
       body.put("tbaisystemdate", today);
-      body.put("productionEnv", "Y");
+      body.put("productionEnv", YES);
       body.put("uSEAsproductDesc", "N");
       body.put("validatePreviousInvoice", "N");
     } else if (VERIFACTU.equals(recordSystem)) {
       body.put("tAXType", VERIFACTU_TAX_TYPE.get(territory));
       body.put("nextSendWaitTime", "60");
-      body.put("defaultQR", "Y");
+      body.put("defaultQR", YES);
     }
     return body;
   }
@@ -240,9 +252,9 @@ public final class FiscalSifRules {
       if (siiApplies) {
         JSONObject payload = recordPayload(SII, territory, null);
         sii = new JSONObject()
-            .put("navarra", "Y".equals(payload.optString("navarra")))
-            .put("guipuzcoa", "Y".equals(payload.optString("guipuzcoa")))
-            .put("taxtype", payload.getString("taxtype"));
+            .put(FIELD_NAVARRA, YES.equals(payload.optString(FIELD_NAVARRA)))
+            .put(FIELD_GUIPUZCOA, YES.equals(payload.optString(FIELD_GUIPUZCOA)))
+            .put(FIELD_TAXTYPE, payload.getString(FIELD_TAXTYPE));
       }
       String tbai = tbaiTerritory(territory);
       String verifactu = systems.contains(VERIFACTU) ? VERIFACTU_TAX_TYPE.get(territory) : null;

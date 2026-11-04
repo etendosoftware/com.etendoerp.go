@@ -208,6 +208,8 @@ public final class FiscalSifGuard {
   }
 
   /**
+   * Whether the request's client is in forced fiscal test mode.
+   *
    * @param obContext the request context, may be {@code null}
    * @return whether the client is in forced fiscal test mode ({@code ETSG_ForceTestMode})
    */
@@ -251,6 +253,27 @@ public final class FiscalSifGuard {
   }
 
   /**
+   * Locks the organization's {@code AD_OrgInfo} row ({@code SELECT … FOR UPDATE}) until the
+   * current transaction ends, so two activations of the same organization run one after the other:
+   * the second one only reads the active configurations once the first has committed (or rolled
+   * back), and its "one active SIF" checks see the first one's records. {@code configureFiscalSystem}
+   * runs its checks and its batch in the request's single transaction ({@code BatchService} defers
+   * every write to its final {@code commitAndClose}), so the lock covers both. Total: an organization
+   * without an {@code AD_OrgInfo} row simply locks nothing.
+   *
+   * @param orgId the organization
+   */
+  public static void lockOrganization(String orgId) {
+    if (orgId == null) {
+      return;
+    }
+    OBDal.getInstance().getSession()
+        .createNativeQuery("SELECT ad_org_id FROM ad_orginfo WHERE ad_org_id = :orgId FOR UPDATE")
+        .setParameter("orgId", orgId)
+        .uniqueResult();
+  }
+
+  /**
    * The TicketBAI territory ({@code ARABA}/{@code BIZKAIA}/{@code GIPUZKOA}) of a config.
    *
    * @param recordId the {@code TBAI_CONFIG} id
@@ -265,6 +288,8 @@ public final class FiscalSifGuard {
   }
 
   /**
+   * The name of a system as the Fiscal Configuration window writes it.
+   *
    * @param system a system or record system
    * @return the name a person reads
    */

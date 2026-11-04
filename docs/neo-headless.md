@@ -3746,7 +3746,7 @@ modificar su ventana."*); the batch re-checks each window anyway. (They lived on
 `organization/organization` for a while during ETP-6053, which wrongly required write access to
 the Organization window.)
 
-**`fiscalSystemCatalog`** (read, `GET`): the rules as data —
+**`fiscalSystemCatalog`** (read, `GET` only — any other method is 405): the rules as data —
 `{systems:[...], territories:[{territory, systems, sii:{navarra, guipuzcoa, taxtype}|null,
 tbaiTerritory|null, verifactuTaxType|null}]}`. `systems` is what the territory allows; the other
 keys are the values a config record of that territory carries. The window renders its manual
@@ -3769,6 +3769,7 @@ Refusals, in this order, in the request language (`NeoMessageText`, keys in `err
 
 | Rule | Refusal |
 |---|---|
+| `id` must not be the `*` organization (`0`) | 400 `ETGO_FiscalSifOrgStar` — *"No se puede activar un sistema de facturación en la organización «*». Usa la organización de tu empresa."* |
 | `id` must be the session's organization (the records land there, `organization` is server-owned, §4.12.17) | 400 `ETGO_FiscalSifOrgMismatch` |
 | no activation while `ETSG_ForceTestMode` is on for the client (`FiscalTestModeResolver`) | 409 `ETGO_FiscalSifTestMode` — *"Solo podrá activar un sistema fiscal en un entorno productivo."* (the window's `fiscal.testModeLock.warning`) |
 | "Añadir SII" — `system:'SII'` on an organization whose only active SIF is TicketBAI, with no territory or a Basque one: TicketBAI must have a territory | 409 `ETGO_FiscalSifTbaiNoTerritory` (a legacy row) |
@@ -3803,7 +3804,17 @@ The records are created through `BatchService.executeBatch` — the `/sws/neo/ba
 so the role's access to each fiscal window is checked, each entity's customization runs
 (TicketBAI sequences, auto-send schedules, VERI*FACTU adoption date, SII acogida), and
 SII + TicketBAI commit or roll back together. A refusal raised inside (a trigger, the entity
-rules below) comes back with its status, message and `messageKeys`.
+rules below) comes back with its status, message and `messageKeys`. The action calls the batch
+with no MCP preprocessor, so the MCP field gates (`MCP_CONFIG.fields.readOnly`, below) never
+apply to the values it derives — they are the agent's restrictions, not the action's.
+
+**Concurrent activations are serialized per organization.** Before reading the active
+configurations, the action locks the organization's `AD_OrgInfo` row
+(`FiscalSifGuard.lockOrganization`, `SELECT … FOR UPDATE`). The checks and the batch run in the
+request's single transaction (`BatchService` defers every write to its final `commitAndClose`; a
+refusal rolls back), so the lock is held until the records are committed: a second activation of
+the same organization waits, then sees the first one's records and is refused by the "one active
+SIF" rule. An organization without an `AD_OrgInfo` row locks nothing (total; no error).
 
 Answer: `{system, territory, created:[{system, spec, entity, id}], certificate:{exists}}`. When
 the organization has no active signing certificate, a `warning` message
@@ -5487,6 +5498,7 @@ REST and the SPA are unchanged.
 | Reactivate | `PUT {active:true}`, subject to one active per system | refused, as above |
 | Delete | `DELETE` (unused by the SPA, kept) | `etendo_delete` hidden (`MCP_CONFIG.verbs.delete:false`, 405) |
 | VERI*FACTU `tAXType` (*Impuesto de aplicación*) | editable until `isReady` | read-only: field-level `MCP_CONFIG.fields.readOnly:true`, 422 `read_only_field` on create and update |
+| Values the window never edits and the activation sets: SII `acogidaAlSII` (`INSIISYSTEM`), `entornoDeProduccin` (`PRODUCCION`), `adjuntarArchivosXML` (`ADJUNTOS`); TicketBAI `productionEnv`, `uSEAsproductDesc`, `validatePreviousInvoice` | written by `configureFiscalSystem`; the detail step PUTs them back unchanged (`SiiSection` / `TbaiSection` preserve the record's values) | read-only: field-level `MCP_CONFIG.fields.readOnly:true` (ETP-6053 QA), 422 `read_only_field`. The window edits only the SII authorization number and TicketBAI auto-send, which stay writable |
 | Other territory-derived fields (SII `navarra`/`guipuzcoa`/`taxtype`, TicketBAI `etsgSifTerritory`) | sent by the wizard on create (customization exemption of `NeoFieldFilter`) | read-only already (curation), 422 `read_only_field` |
 | Certificate (`organization/certificadoDigital`, `ETSG_Certificate`) | uploaded, replaced and deleted through `/sws/neo/certificate` (not a spec) | `etendo_create` / `etendo_update` / `etendo_delete` hidden (`MCP_CONFIG.verbs`), status readable with the `certificate` action |
 

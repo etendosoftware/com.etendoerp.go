@@ -712,13 +712,11 @@ class FiscalSystemConfigureActionTest {
   }
 
   @Test
-  void theCatalogAnswersGetAndPostAlike() throws Exception {
+  void theCatalogAnswersGetOnly() throws Exception {
     NeoResponse get = catalog("GET", ORG);
-    NeoResponse post = catalog("post", ORG);
 
     assertEquals(200, get.getHttpStatus());
-    assertEquals(200, post.getHttpStatus());
-    assertEquals(get.getBody().toString(), post.getBody().toString());
+    assertEquals(405, catalog("post", ORG).getHttpStatus(), "read only, as its contract (GET)");
     assertTrue(batches.isEmpty(), "a read never runs the batch");
   }
 
