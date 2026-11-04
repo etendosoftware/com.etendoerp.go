@@ -281,11 +281,11 @@ class CompanyInvitationServiceTest {
   @DisplayName("registerAndAccept rejects weak password and missing name")
   void testRegisterAndAcceptValidation() throws Exception {
     CompanyInvitationService service = new CompanyInvitationService();
-    JSONObject response1 = service.registerAndAccept("token", "", "StrongPass1!");
+    JSONObject response1 = service.registerAndAccept("token", "", "StrongPass1!", null);
     assertTrue(response1.optBoolean("error"));
     assertEquals("MISSING_NAME", response1.optString("code"));
 
-    JSONObject response2 = service.registerAndAccept("token", "Name", "weak");
+    JSONObject response2 = service.registerAndAccept("token", "Name", "weak", null);
     assertTrue(response2.optBoolean("error"));
     assertEquals("WEAK_PASSWORD", response2.optString("code"));
   }
@@ -333,7 +333,7 @@ class CompanyInvitationServiceTest {
           .thenReturn(invitation);
 
       CompanyInvitationService service = new CompanyInvitationService();
-      JSONObject response = service.registerAndAccept("token", "Jane Doe", "StrongPass1!");
+      JSONObject response = service.registerAndAccept("token", "Jane Doe", "StrongPass1!", null);
 
       assertTrue(response.optBoolean("error"));
       assertEquals("INVITATION_USER_CONFIGURATION_INVALID", response.optString("code"));
@@ -393,7 +393,7 @@ class CompanyInvitationServiceTest {
           anyString(), eq("Jane Doe"), anyString())).thenReturn(createdAccount);
 
       CompanyInvitationService service = new CompanyInvitationService();
-      JSONObject response = service.registerAndAccept("token", "Jane Doe", "StrongPass1!");
+      JSONObject response = service.registerAndAccept("token", "Jane Doe", "StrongPass1!", null);
 
       assertFalse(response.optBoolean("error"));
       assertEquals("account-1", response.getJSONObject("account").getString("id"));

@@ -80,7 +80,7 @@ class SignupAccountDalHelperTest {
     Date accepted = new Date();
 
     Account created = SignupAccountDalHelper.createSignupAccount("ana@x.es", "Ana", "{draft}",
-        new SignupAccountDalHelper.SignupData("crm", false, "{\"utm\":1}", accepted));
+        new SignupAccountDalHelper.SignupData("crm", false, "{\"utm\":1}", accepted, "2026-11"));
 
     assertEquals(account, created);
     Account fresh = mock(Account.class);
@@ -89,6 +89,7 @@ class SignupAccountDalHelperTest {
     verify(fresh).set(SignupAccountDalHelper.PROPERTY_SIGNUP_SEND_EMAILS, false);
     verify(fresh).set(SignupAccountDalHelper.PROPERTY_SIGNUP_SOURCE, "{\"utm\":1}");
     verify(fresh).set(SignupAccountDalHelper.PROPERTY_TERMS_ACCEPTED_AT, accepted);
+    verify(fresh).set(SignupAccountDalHelper.PROPERTY_TERMS_VERSION, "2026-11");
     verify(fresh).set(SignupAccountDalHelper.PROPERTY_SIGNUP_STATUS,
         SignupAccountDalHelper.STATUS_PROVISIONING);
   }

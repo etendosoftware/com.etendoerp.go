@@ -269,6 +269,14 @@ interface HubSpotOutboxStore {
    */
   record PendingEvent(String id, String accountId, String eventType, String environmentId,
       String payload, int attemptCount, Instant nextAttemptAt, String email, String name,
-      Instant occurredAt) {
+      Instant occurredAt, String phone) {
+
+    /** An event of an account with no phone (ETP-6081: the phone is optional). */
+    PendingEvent(String id, String accountId, String eventType, String environmentId,
+        String payload, int attemptCount, Instant nextAttemptAt, String email, String name,
+        Instant occurredAt) {
+      this(id, accountId, eventType, environmentId, payload, attemptCount, nextAttemptAt, email,
+          name, occurredAt, null);
+    }
   }
 }
