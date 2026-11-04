@@ -204,6 +204,24 @@ class BpLocationHandlerTest {
     }
 
     /**
+     * ETP-5806 — a whitespace-only streetName/buildingNumber is visually empty to whoever typed
+     * it and must be treated as missing: 400, same as an omitted field.
+     */
+    @Test
+    void whitespaceOnlyStreetNameIsTreatedAsMissingReturns400() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("streetName", "   ");
+      body.put("buildingNumber", "45");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      NeoResponse r = handler.handle(buildCrudContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+    }
+
+    /**
      * ETP-5806 follow-up — the ON path reads the same sections the OFF path strips. A
      * {@code {"data": {...}}} envelope is what {@code NeoFieldFilter#filterBody} unwraps and
      * persists, so a create sent that way must be validated and composed from the INNER values,
@@ -221,6 +239,40 @@ class BpLocationHandlerTest {
       body.put("data", inner);
 
       assertNull(handler.handle(buildCrudContext("POST", null, body)));
+    }
+
+    /**
+     * ETP-5806 follow-up (QA finding): a create whose body never carries the
+     * {@code buildingNumber} key at all (not {@code ""} — the key itself is absent) is not
+     * rejected as missing mandatory; the pre-hook lets generic CRUD continue, and the fallback is
+     * persisted in {@link PersistAfterHandle}.
+     */
+    @Test
+    void omittedBuildingNumberKeyLetsGenericCrudContinue() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("streetName", "Gran Via");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+      // buildingNumber key intentionally never put on the body at all.
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+    }
+
+    /**
+     * Same omission, but {@code streetName} is ALSO absent: streetName remains strictly mandatory,
+     * so this is still a 400 — the fallback never masks the real missing-field error.
+     */
+    @Test
+    void omittedBuildingNumberWithStreetNameAlsoMissingStillReturns400() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+      // streetName and buildingNumber both intentionally never put on the body.
+
+      NeoResponse r = handler.handle(buildCrudContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
     }
 
     /** And an invalid inner value is caught rather than hidden by the envelope. */
@@ -463,6 +515,75 @@ class BpLocationHandlerTest {
       assertEquals("45", recordJson.getString("buildingNumber"));
       assertEquals("Torre A", recordJson.getString("buildingName"));
       assertEquals("Gran Via, 45 - Torre A", recordJson.getString("addressLine1"));
+    }
+
+    /**
+     * ETP-5806 follow-up (QA finding): a create whose body never carries {@code buildingNumber}
+     * at all persists {@code "s/n"} — the same convention the frontend already applies — instead
+     * of the request having been rejected as missing a mandatory field.
+     */
+    @Test
+    void createWithOmittedBuildingNumberPersistsSlashN() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("streetName", "Gran Via");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+      // buildingNumber key intentionally never put on the body at all.
+
+      NeoContext preCtx = buildCrudContext("POST", null, body);
+      assertNull(handler.handle(preCtx));
+
+      Location saved = mock(Location.class);
+      when(obDal.get(Location.class, "new-loc-id-no-bn")).thenReturn(saved);
+
+      NeoContext postCtx = buildCrudContext("POST", null, body);
+      postCtx.setPreviousResult(wrapRecord("new-loc-id-no-bn"));
+
+      NeoResponse result = handler.afterHandle(postCtx);
+
+      assertNotNull(result);
+      verify(saved).setOBSEPAStreetName("Gran Via");
+      verify(saved).setOBSEPABuildingNumber("s/n");
+      verify(saved).setAddressLine1("Gran Via, s/n");
+
+      JSONObject recordJson = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("s/n", recordJson.getString("buildingNumber"));
+    }
+
+    /**
+     * ETP-5806 — a padded streetName/buildingNumber/buildingName is persisted and composed
+     * trimmed, never the raw padded string.
+     */
+    @Test
+    void createPersistsTrimmedStructuredFieldsNotThePaddedRawOnes() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("streetName", "  Gran Via  ");
+      body.put("buildingNumber", " 45 ");
+      body.put("buildingName", " Torre A ");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      NeoContext preCtx = buildCrudContext("POST", null, body);
+      assertNull(handler.handle(preCtx));
+
+      Location saved = mock(Location.class);
+      when(obDal.get(Location.class, "new-loc-id-trim")).thenReturn(saved);
+
+      NeoContext postCtx = buildCrudContext("POST", null, body);
+      postCtx.setPreviousResult(wrapRecord("new-loc-id-trim"));
+
+      NeoResponse result = handler.afterHandle(postCtx);
+
+      assertNotNull(result);
+      verify(saved).setOBSEPAStreetName("Gran Via");
+      verify(saved).setOBSEPABuildingNumber("45");
+      verify(saved).setOBSEPABuildingName("Torre A");
+      verify(saved).setAddressLine1("Gran Via, 45 - Torre A");
+
+      JSONObject recordJson = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Gran Via", recordJson.getString("streetName"));
+      assertEquals("45", recordJson.getString("buildingNumber"));
+      assertEquals("Torre A", recordJson.getString("buildingName"));
     }
 
     /**
@@ -1024,11 +1145,26 @@ class BpLocationHandlerTest {
       assertNull(handler.handle(buildCrudContext("POST", null, body)));
     }
 
-    /** And the mandatory rule still fires when a curated-key body genuinely omits a field. */
+    /**
+     * ETP-5806 follow-up (QA finding): a curated-key body that omits {@code oBSEPABuildingNumber}
+     * entirely is NOT rejected as missing mandatory — it falls back to {@code "s/n"}, same as the
+     * published spelling. (Previously this omission was a 400; see git history for the dropped
+     * assertion this replaces.)
+     */
     @Test
-    void restCreateWithTheCuratedApiKeysStillRejectsAMissingNumber() throws Exception {
+    void restCreateWithTheCuratedApiKeysAndOmittedNumberFallsBackToSlashN() throws Exception {
       JSONObject body = new JSONObject();
       body.put("oBSEPAStreetName", "Gran Via");
+      body.put("cityName", "Madrid");
+      body.put("country", "ES");
+
+      assertNull(handler.handle(buildCrudContext("POST", null, body)));
+    }
+
+    /** And the mandatory rule still fires when streetName itself is genuinely omitted. */
+    @Test
+    void restCreateWithTheCuratedApiKeysStillRejectsAMissingStreetName() throws Exception {
+      JSONObject body = new JSONObject();
       body.put("cityName", "Madrid");
       body.put("country", "ES");
 
@@ -1036,7 +1172,7 @@ class BpLocationHandlerTest {
 
       assertNotNull(r);
       assertEquals(400, r.getHttpStatus());
-      assertTrue(r.getBody().toString().contains("buildingNumber"));
+      assertTrue(r.getBody().toString().contains("streetName"));
     }
 
     /** A curated-key body is length-checked like any other spelling. */
