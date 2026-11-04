@@ -36,7 +36,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -58,6 +60,7 @@ import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.data.AEATSIIFacturas;
 
 import com.etendoerp.go.schemaforge.fiscal.FiscalSifGuard;
+import com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -76,6 +79,11 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * {@code handle}, and the SII created by {@code configureFiscalSystem} is marked
  * {@code INSIISYSTEM = 'Y'} on its create on every channel (REST and MCP), with a trigger refusal
  * propagated, not swallowed; a plain CRUD create outside the action is left alone.
+ *
+ * <p>The pair publishes and serves the fiscal system actions ({@code fiscalSystemCatalog},
+ * {@code configureFiscalSystem}) by delegating to {@link FiscalSystemConfigureAction} with the
+ * organization as {@code id}; {@code afterHandle} leaves them alone, and any other action of the
+ * window still falls through to the default behaviour.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler
  */
@@ -1434,5 +1442,150 @@ public class SiiConfigDeactivateHandlerTest {
   @Test
   public void afterHandleLeavesAPlainMcpCreateOutOfTheSiiSystemFlag() throws Exception {
     assertPlainCreateLeavesInSiiSystemAlone(true);
+  }
+
+  // ─── fiscal system actions (delegated to FiscalSystemConfigureAction) ─────────
+
+  private static final String OTHER_ACTION = "aeatsiiOtherButton";
+
+  private static NeoContext actionContext(String action, String method, String recordId) {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(action)
+        .httpMethod(method)
+        .recordId(recordId)
+        .build();
+  }
+
+  private static SiiConfigDeactivateHandler handlerWithFiscalSystemAction(
+      FiscalSystemConfigureAction action) throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+    Field field = SiiConfigDeactivateHandler.class.getDeclaredField("fiscalSystemActions");
+    field.setAccessible(true);
+    field.set(handler, action);
+    return handler;
+  }
+
+  @Test
+  public void actionContractsPublishBothFiscalSystemActions() {
+    List<String> actions = new ArrayList<>(new SiiConfigDeactivateHandler().actionContracts()
+        .keySet());
+
+    assertEquals(List.of(FiscalSystemConfigureAction.CATALOG_ACTION,
+        FiscalSystemConfigureAction.ACTION), actions);
+    assertEquals(FiscalSystemConfigureAction.actionContracts(),
+        new SiiConfigDeactivateHandler().actionContracts());
+  }
+
+  @Test
+  public void handleDelegatesBothFiscalSystemActionsToTheFiscalSystemAction() throws Exception {
+    FiscalSystemConfigureAction action = mock(FiscalSystemConfigureAction.class);
+    SiiConfigDeactivateHandler handler = handlerWithFiscalSystemAction(action);
+    NeoContext catalog = actionContext(FiscalSystemConfigureAction.CATALOG_ACTION, "GET", ORG_ID);
+    NeoContext configure = actionContext(FiscalSystemConfigureAction.ACTION, "POST", ORG_ID);
+    NeoResponse catalogAnswer = NeoResponse.ok(new JSONObject().put("catalog", true));
+    NeoResponse configureAnswer = NeoResponse.ok(new JSONObject().put("configured", true));
+    when(action.handle(catalog)).thenReturn(catalogAnswer);
+    when(action.handle(configure)).thenReturn(configureAnswer);
+
+    assertEquals(catalogAnswer, handler.handle(catalog));
+    assertEquals(configureAnswer, handler.handle(configure));
+    verify(action).handle(catalog);
+    verify(action).handle(configure);
+  }
+
+  @Test
+  public void fiscalSystemCatalogReadsTheIdAsAnOrganizationNotAConfigRow() {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBContext obContext = mock(OBContext.class);
+      when(obContext.getReadableOrganizations()).thenReturn(new String[] { "0", ORG_ID });
+      obCtxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      NeoResponse forOrg = handler.handle(
+          actionContext(FiscalSystemConfigureAction.CATALOG_ACTION, "GET", ORG_ID));
+      NeoResponse forConfigRow = handler.handle(
+          actionContext(FiscalSystemConfigureAction.CATALOG_ACTION, "GET", RECORD_ID));
+
+      assertEquals(200, forOrg.getHttpStatus());
+      assertTrue(forOrg.getBody().has("territories"));
+      assertEquals("a config row id is not a readable organization", 404,
+          forConfigRow.getHttpStatus());
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void configureFiscalSystemIsAnsweredByItsContractNotTheSmartDeactivation()
+      throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(FiscalSystemConfigureAction.ACTION)
+        .httpMethod("POST")
+        .recordId(ORG_ID)
+        .requestBody(new JSONObject())
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(422, response.getHttpStatus());
+      JSONArray missing = response.getBody().getJSONObject("error")
+          .getJSONArray("missingParameters");
+      assertEquals("system", missing.getString(0));
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void afterHandleReturnsNullForBothFiscalSystemActionsWithoutTouchingTheConfig()
+      throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+    // A POST whose previous result carries a created id: a CRUD create would post-process it.
+    NeoResponse created = NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", RECORD_ID)))));
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      for (String action : List.of(FiscalSystemConfigureAction.CATALOG_ACTION,
+          FiscalSystemConfigureAction.ACTION)) {
+        NeoContext ctx = actionContext(action, "POST", ORG_ID);
+        ctx.setPreviousResult(created);
+
+        assertNull(action, handler.afterHandle(ctx));
+      }
+      obDalMock.verifyNoInteractions();
+      obCtxMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void anotherActionOfTheWindowFallsThroughToTheDefaultBehaviour() throws Exception {
+    FiscalSystemConfigureAction action = mock(FiscalSystemConfigureAction.class);
+    SiiConfigDeactivateHandler handler = handlerWithFiscalSystemAction(action);
+    NeoContext ctx = actionContext(OTHER_ACTION, "POST", RECORD_ID);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      assertNull(handler.handle(ctx));
+      assertNull(handler.afterHandle(ctx));
+      verifyNoInteractions(action);
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void aCrudRequestNamedLikeAFiscalActionIsNotDelegated() throws Exception {
+    FiscalSystemConfigureAction action = mock(FiscalSystemConfigureAction.class);
+    SiiConfigDeactivateHandler handler = handlerWithFiscalSystemAction(action);
+
+    assertNull(handler.handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .fieldName(FiscalSystemConfigureAction.ACTION)
+        .httpMethod("GET")
+        .build()));
+    verifyNoInteractions(action);
   }
 }

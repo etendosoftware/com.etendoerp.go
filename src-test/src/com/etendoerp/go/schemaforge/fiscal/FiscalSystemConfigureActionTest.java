@@ -33,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -40,6 +41,8 @@ import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -51,12 +54,16 @@ import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 
 /**
  * The {@code configureFiscalSystem} action: its refusals (status and message key), the records it
  * sends through the batch seam per system and territory, "Añadir SII" on an existing TicketBAI
  * (with or without a territory, and refused on a TicketBAI with no known territory), the
- * certificate warning, and how a batch failure is reported. Also the {@code fiscalSystemCatalog}
+ * certificate warning, and how a batch failure is reported. The per-system window check: a role
+ * without write access to the window of a system it would create gets 403
+ * {@code ETGO_FiscalSifNoWindowAccess} naming that system, in the request language, before
+ * anything reaches the batch (SII + TicketBAI needs both windows). Also the {@code fiscalSystemCatalog}
  * read action: its methods, its organization check and its content per territory, which must be
  * {@link FiscalSifRules} as data.
  *
@@ -119,8 +126,20 @@ class FiscalSystemConfigureActionTest {
     }, () -> TODAY, orgId -> certificate);
   }
 
+  /** The action wired through the 4-argument constructor, with the window-write predicate. */
+  private FiscalSystemConfigureAction action(Predicate<String> canCreate) {
+    return new FiscalSystemConfigureAction(ops -> {
+      batches.add(ops);
+      return batchAnswer.apply(ops);
+    }, () -> TODAY, orgId -> certificate, canCreate);
+  }
+
   private NeoResponse run(String orgId, JSONObject params) {
-    return action().handle(NeoContext.builder()
+    return run(action(), orgId, params);
+  }
+
+  private NeoResponse run(FiscalSystemConfigureAction action, String orgId, JSONObject params) {
+    return action.handle(NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
         .fieldName(FiscalSystemConfigureAction.ACTION)
         .httpMethod("POST")
@@ -462,6 +481,132 @@ class FiscalSystemConfigureActionTest {
       assertEquals(FiscalSystemConfigureAction.MSG_TERRITORY_REQUIRED, messageKey(response));
     }
     assertTrue(batches.isEmpty());
+  }
+
+  // ── per-system window access ─────────────────────────────────────────────
+
+  /** A role that may write only the windows of {@code writable}; records every spec asked. */
+  private static Predicate<String> writableOnly(List<String> asked, String... writable) {
+    List<String> allowed = List.of(writable);
+    return spec -> {
+      asked.add(spec);
+      return allowed.contains(spec);
+    };
+  }
+
+  private NeoResponse runWith(Predicate<String> canCreate, String system, String territory)
+      throws Exception {
+    return run(action(canCreate), ORG,
+        new JSONObject().put("system", system).put("territory", territory));
+  }
+
+  @ParameterizedTest(name = "{0} in {1} needs {2}")
+  @CsvSource({
+      "SII, navarra, sii-config, SII",
+      "TBAI, bizkaia, tbai-config, TicketBAI",
+      "VERIFACTU, ceuta, verifactu-config, VERI*FACTU" })
+  void aSystemWhoseWindowTheRoleCannotWriteIsForbidden(String system, String territory,
+      String spec, String displayName) throws Exception {
+    List<String> asked = new ArrayList<>();
+
+    NeoResponse response = runWith(writableOnly(asked), system, territory);
+
+    assertEquals(403, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_NO_WINDOW_ACCESS, messageKey(response));
+    assertTrue(message(response).contains(displayName), message(response));
+    assertEquals(List.of(spec), asked, "the predicate is asked for the system's own window");
+    assertTrue(batches.isEmpty(), "nothing is sent to the batch");
+  }
+
+  @ParameterizedTest(name = "{0} in {1}")
+  @CsvSource({ "SII, navarra, sii-config", "TBAI, bizkaia, tbai-config",
+      "VERIFACTU, ceuta, verifactu-config" })
+  void aSystemWhoseWindowTheRoleCanWriteIsActivated(String system, String territory,
+      String spec) throws Exception {
+    List<String> asked = new ArrayList<>();
+
+    NeoResponse response = runWith(writableOnly(asked, spec), system, territory);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(List.of(spec), asked);
+    assertEquals(1, batches.size());
+  }
+
+  @Test
+  void siiPlusTbaiWithWriteAccessOnlyToTicketBaiIsRefusedNamingSii() throws Exception {
+    List<String> asked = new ArrayList<>();
+
+    NeoResponse response = runWith(writableOnly(asked, "tbai-config"), "SII+TBAI", "bizkaia");
+
+    assertEquals(403, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_NO_WINDOW_ACCESS, messageKey(response));
+    assertTrue(message(response).contains("SII"), message(response));
+    assertFalse(message(response).contains("TicketBAI"), message(response));
+    assertTrue(batches.isEmpty(), "no half activation: TicketBAI is not created alone");
+  }
+
+  @Test
+  void siiPlusTbaiWithWriteAccessOnlyToSiiIsRefusedNamingTicketBai() throws Exception {
+    List<String> asked = new ArrayList<>();
+
+    NeoResponse response = runWith(writableOnly(asked, "sii-config"), "SII+TBAI", "gipuzkoa");
+
+    assertEquals(403, response.getHttpStatus());
+    assertTrue(message(response).contains("TicketBAI"), message(response));
+    assertEquals(List.of("sii-config", "tbai-config"), asked,
+        "every window is checked before anything is written");
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void siiPlusTbaiWithWriteAccessToBothWindowsIsActivated() throws Exception {
+    List<String> asked = new ArrayList<>();
+
+    NeoResponse response = runWith(writableOnly(asked, "sii-config", "tbai-config"), "SII+TBAI",
+        "alava");
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(2, batches.get(0).length());
+  }
+
+  @Test
+  void addingSiiToTicketBaiChecksOnlyTheSiiWindow() throws Exception {
+    tables.active.put("tbai_config", "T");
+    tables.tbaiTerritory = "GIPUZKOA";
+    List<String> asked = new ArrayList<>();
+
+    NeoResponse response = runWith(writableOnly(asked, "tbai-config"), "SII", "gipuzkoa");
+
+    assertEquals(403, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_NO_WINDOW_ACCESS, messageKey(response));
+    assertEquals(List.of("sii-config"), asked);
+    assertTrue(batches.isEmpty());
+  }
+
+  @Test
+  void theWindowRefusalIsInSpanishAndNamesTheSystem() throws Exception {
+    try (MockedStatic<NeoLanguage> language = mockStatic(NeoLanguage.class)) {
+      language.when(NeoLanguage::currentCode).thenReturn("es_ES");
+
+      NeoResponse response = runWith(writableOnly(new ArrayList<>(), "sii-config"), "SII+TBAI",
+          "bizkaia");
+
+      assertEquals(403, response.getHttpStatus());
+      assertEquals("Tu rol no tiene permiso para configurar TicketBAI: no puede modificar su "
+          + "ventana.", message(response));
+      assertTrue(batches.isEmpty());
+    }
+  }
+
+  @Test
+  void theWindowCheckRunsAfterTheActivationRules() throws Exception {
+    List<String> asked = new ArrayList<>();
+
+    NeoResponse response = runWith(writableOnly(asked), "SII", "ceuta");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FiscalSystemConfigureAction.MSG_NOT_ALLOWED, messageKey(response));
+    assertTrue(asked.isEmpty(), "an invalid request is refused for what it is, not for access");
   }
 
   // ── certificate ──────────────────────────────────────────────────────────
