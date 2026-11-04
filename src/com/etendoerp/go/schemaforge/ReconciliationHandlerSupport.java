@@ -86,6 +86,7 @@ final class ReconciliationHandlerSupport {
   private static final String ACTION_RECONCILE_DIFFERENCE = "reconcileDifference";
   private static final String ACTION_DISCARD_PAIR = BankBouncePairService.ACTION_DISCARD_PAIR;
   private static final String ACTION_RESTORE_PAIR = BankBouncePairService.ACTION_RESTORE_PAIR;
+  private static final String ACTION_DISMISS_PAIR = BankBouncePairService.ACTION_DISMISS_PAIR;
 
   // ---------------------------------------------------------------------------
   // POST action dispatch wrappers (OBContext admin mode + rollback boilerplate)
@@ -313,6 +314,8 @@ final class ReconciliationHandlerSupport {
           return BankBouncePairService.discardPair(handler, body);
         case ACTION_RESTORE_PAIR:
           return BankBouncePairService.restorePair(handler, body);
+        case ACTION_DISMISS_PAIR:
+          return BankBouncePairService.dismissPair(handler, body);
         default:
           throw new ReconciliationActionException(
               new IllegalArgumentException("Unknown reconciliation action: " + action));

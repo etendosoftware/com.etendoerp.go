@@ -90,6 +90,8 @@ final class BankBouncePairService {
 
   static final String ACTION_DISCARD_PAIR = "discardPair";
   static final String ACTION_RESTORE_PAIR = "restorePair";
+  /** "No es un rebote" from the panel: KPI telemetry only, nothing is written (UI-only). */
+  static final String ACTION_DISMISS_PAIR = "dismissPair";
 
   static final String KEY_COUNTERPART_LINE_ID = "counterpartLineId";
   static final String KEY_LINE_ID = "lineId";
@@ -134,6 +136,23 @@ final class BankBouncePairService {
     }
   }
 
+  /**
+   * Receives the outcome of every {@code bouncePair} group of an {@code applySuggestions} call, as
+   * it is processed (the bounce-pair KPI, {@link BankBounceKpiTelemetry.ModalDecisions}).
+   */
+  @FunctionalInterface
+  interface PairOutcomes {
+
+    /**
+     * One group was processed.
+     *
+     * @param lineId        the group's {@code statementLineId}
+     * @param counterpartId the group's {@code counterpartLineId}
+     * @param outcome       the discarded pair, or the refusal
+     */
+    void accept(String lineId, String counterpartId, Validated outcome);
+  }
+
   // ---------------------------------------------------------------------------
   // Routes
   // ---------------------------------------------------------------------------
@@ -162,6 +181,18 @@ final class BankBouncePairService {
    */
   static NeoResponse handleRestorePair(ReconciliationHandler handler, NeoContext context) {
     return ReconciliationHandlerSupport.runPostAction(handler, context, ACTION_RESTORE_PAIR);
+  }
+
+  /**
+   * {@code POST dismissPair}: the same envelope around
+   * {@link #dismissPair(ReconciliationHandler, JSONObject)}. Gated by the flag, like the discard.
+   *
+   * @param handler the reconciliation handler
+   * @param context the request
+   * @return the action's answer
+   */
+  static NeoResponse handleDismissPair(ReconciliationHandler handler, NeoContext context) {
+    return ReconciliationHandlerSupport.runPostAction(handler, context, ACTION_DISMISS_PAIR);
   }
 
   // ---------------------------------------------------------------------------
@@ -196,13 +227,95 @@ final class BankBouncePairService {
     if (missing != null) {
       return missing;
     }
-    Validated pair = validate(handler, account, lineId, counterpartId,
-        new Detection(handler, account, true));
+    Detection detection = new Detection(handler, account, true);
+    Validated pair = validate(handler, account, lineId, counterpartId, detection);
     if (pair.error() != null) {
+      // ETP-5581 KPI: a 409 on a pair detection proposed is a failed decision. Best effort.
+      BankBounceKpiTelemetry.panelFailed(detection, account, lineId, counterpartId, pair.error());
       return pair.error();
     }
     discard(pair);
+    BankBounceKpiTelemetry.panelDiscarded(detection, account, pair);
     return ReconciliationSupport.envelope(discardedJson(lineId, counterpartId, pair));
+  }
+
+  // ---------------------------------------------------------------------------
+  // dismissPair
+  // ---------------------------------------------------------------------------
+
+  /**
+   * {@code POST dismissPair {financialAccountId, statementLineId, counterpartLineId?}}: the panel's
+   * "No es un rebote". <b>Writes nothing</b> — the rejection is not stored, so detection proposes
+   * the pair again next time — and exists only to record the decision for the bounce-pair KPI
+   * ({@link BankBounceKpiTelemetry#panelDismissed}). {@code statementLineId} is the line selected
+   * in the panel, in any role (bounce, original or candidate); {@code counterpartLineId} is the
+   * other line as the card shows it, omitted while no original of an ambiguous pair is chosen.
+   * Requires the flag (403 {@code BOUNCE_SUGGESTIONS_OFF}); the lines must belong to the account
+   * (400 / 404). A pair detection does not propose answers 200 too and records nothing. UI-only:
+   * not declared to agents ({@link ReconciliationAgentActions}), so the MCP refuses it.
+   *
+   * @param handler the reconciliation handler, for its DAL seams
+   * @param body    the request body
+   * @return 200 with {@code {ok:true}}, or the refusal
+   * @throws Exception when the answer cannot be written
+   */
+  static NeoResponse dismissPair(ReconciliationHandler handler, JSONObject body) throws Exception {
+    if (!BankBounceSuggestionsFlag.isEnabled()) {
+      return BankBounceErrors.suggestionsOff();
+    }
+    FIN_FinancialAccount account = requireAccount(handler, body);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          ReconciliationHandler.MSG_ACCOUNT_NOT_FOUND
+              + body.optString(ReconciliationHandler.KEY_FINANCIAL_ACCOUNT_ID, ""));
+    }
+    String lineId = optId(body, ReconciliationHandler.KEY_STATEMENT_LINE_ID);
+    String counterpartId = optId(body, KEY_COUNTERPART_LINE_ID);
+    NeoResponse invalid = dismissalError(handler, account, lineId, counterpartId);
+    if (invalid != null) {
+      return invalid;
+    }
+    BankBounceKpiTelemetry.panelDismissed(new Detection(handler, account, true), account, lineId,
+        counterpartId);
+    return ReconciliationSupport.envelope(new JSONObject().put("ok", true));
+  }
+
+  /**
+   * The refusal of a {@code dismissPair} request, or {@code null}: a missing
+   * {@code statementLineId}, the same line twice, or a line not found or of another account.
+   *
+   * @param handler       the reconciliation handler
+   * @param account       the account, already resolved
+   * @param lineId        the selected line, or {@code null}
+   * @param counterpartId the other line, or {@code null}
+   * @return the refusal, or {@code null}
+   */
+  private static NeoResponse dismissalError(ReconciliationHandler handler,
+      FIN_FinancialAccount account, String lineId, String counterpartId) {
+    if (lineId == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          ReconciliationHandler.MSG_MISSING_PARAM + ReconciliationHandler.KEY_STATEMENT_LINE_ID);
+    }
+    if (lineId.equals(counterpartId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "statementLineId and counterpartLineId must be two different lines");
+    }
+    NeoResponse owned = ownedLineError(handler.loadLine(lineId), lineId, account);
+    if (owned != null || counterpartId == null) {
+      return owned;
+    }
+    return ownedLineError(handler.loadLine(counterpartId), counterpartId, account);
+  }
+
+  /**
+   * A line id of the body: {@code null} when absent, JSON {@code null} or blank.
+   *
+   * @param body the request body
+   * @param key  the key
+   * @return the trimmed id, or {@code null}
+   */
+  private static String optId(JSONObject body, String key) {
+    return body.isNull(key) ? null : StringUtils.trimToNull(body.optString(key, null));
   }
 
   // ---------------------------------------------------------------------------
@@ -244,7 +357,31 @@ final class BankBouncePairService {
   static int applyPairs(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONArray groups, Set<String> takenLineIds, JSONArray results, boolean enabled)
       throws Exception {
-    Detection detection = enabled ? new Detection(handler, account, true) : null;
+    return applyPairs(handler, account, groups, takenLineIds, results,
+        enabled ? new Detection(handler, account, true) : null, null);
+  }
+
+  /**
+   * {@link #applyPairs(ReconciliationHandler, FIN_FinancialAccount, JSONArray, Set, JSONArray,
+   * boolean)} with the call's detection made by the caller, so it can share it (the bounce-pair
+   * KPI resolves the SPA's {@code bounceDecisions} through it), and a listener told the outcome of
+   * every group.
+   *
+   * @param handler      the reconciliation handler, for its DAL seams
+   * @param account      the account of the call, already resolved
+   * @param groups       every submitted group
+   * @param takenLineIds the lines already taken in this call, updated
+   * @param results      the per-group results, appended to
+   * @param detection    the call's detection, or {@code null} when {@code bank-bounce-suggestions}
+   *                     is off (every bounce group is then refused with the 403)
+   * @param outcomes     told the outcome of every group processed with the flag on, or
+   *                     {@code null}
+   * @return how many bounce-pair groups were submitted
+   * @throws Exception when the account data cannot be read or a result cannot be written
+   */
+  static int applyPairs(ReconciliationHandler handler, FIN_FinancialAccount account,
+      JSONArray groups, Set<String> takenLineIds, JSONArray results, Detection detection,
+      PairOutcomes outcomes) throws Exception {
     int submitted = 0;
     for (int i = 0; i < groups.length(); i++) {
       JSONObject group = groups.optJSONObject(i);
@@ -254,10 +391,13 @@ final class BankBouncePairService {
       submitted++;
       String lineId = group.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, null);
       String counterpartId = group.optString(KEY_COUNTERPART_LINE_ID, null);
-      NeoResponse refusal = enabled
+      Validated outcome = detection != null
           ? applyOne(handler, account, lineId, counterpartId, takenLineIds, detection)
-          : BankBounceErrors.suggestionsOff();
-      results.put(refusal != null ? tagged(refusal.getBody(), lineId, counterpartId)
+          : Validated.failed(BankBounceErrors.suggestionsOff());
+      if (detection != null && outcomes != null) {
+        outcomes.accept(lineId, counterpartId, outcome);
+      }
+      results.put(outcome.error() != null ? tagged(outcome.error().getBody(), lineId, counterpartId)
           : tagged(new JSONObject().put(KEY_DISCARDED, true), lineId, counterpartId));
     }
     return submitted;
@@ -272,27 +412,27 @@ final class BankBouncePairService {
    * @param counterpartId the group's {@code counterpartLineId}
    * @param takenLineIds  the lines already taken in this call, updated on success
    * @param detection     the detection of the call, read once and shared by its pairs
-   * @return the refusal, or {@code null} when the pair was discarded
+   * @return the discarded pair, or the refusal ({@link Validated#error()})
    * @throws Exception when the account data cannot be read
    */
-  private static NeoResponse applyOne(ReconciliationHandler handler, FIN_FinancialAccount account,
+  private static Validated applyOne(ReconciliationHandler handler, FIN_FinancialAccount account,
       String lineId, String counterpartId, Set<String> takenLineIds, Detection detection)
       throws Exception {
     NeoResponse missing = missingIds(lineId, counterpartId);
     if (missing != null) {
-      return missing;
+      return Validated.failed(missing);
     }
     if (takenLineIds.contains(lineId) || takenLineIds.contains(counterpartId)) {
-      return BankBounceErrors.conflict(BankBounceErrors.CODE_LINE_NOT_PENDING);
+      return Validated.failed(BankBounceErrors.conflict(BankBounceErrors.CODE_LINE_NOT_PENDING));
     }
     Validated pair = validate(handler, account, lineId, counterpartId, detection);
     if (pair.error() != null) {
-      return pair.error();
+      return pair;
     }
     discard(pair);
     takenLineIds.add(lineId);
     takenLineIds.add(counterpartId);
-    return null;
+    return pair;
   }
 
   /**
@@ -372,12 +512,19 @@ final class BankBouncePairService {
       lockLines(counterpart);
       counterpart = linkedCounterpart(line, account);
     }
+    // ETP-5581 KPI: the link is read before restoreOne clears it; only a linked pair counts.
+    BankBounceKpiTelemetry.RestoredPair link = counterpart != null
+        ? BankBounceKpiTelemetry.RestoredPair.of(line)
+        : null;
     List<String> restored = new ArrayList<>();
     restoreOne(line, restored);
     if (counterpart != null) {
       restoreOne(counterpart, restored);
     }
     OBDal.getInstance().flush();
+    if (link != null && !restored.isEmpty()) {
+      BankBounceKpiTelemetry.pairRestored(account, link);
+    }
     JSONObject data = new JSONObject();
     data.put(KEY_RESTORED, new JSONArray(restored));
     data.put(KEY_LINE_ID, lineId);

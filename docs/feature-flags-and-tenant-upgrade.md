@@ -825,8 +825,10 @@ entry in `etendo_schema_forge`.
 > entry `bank-bounce-suggestions` in `etendo_schema_forge` `flags-registry.json`). The only evaluator
 > is `BankBounceSuggestionsFlag` (`GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS`). Toggle points:
 > `ReconciliationHandler.buildAutoMatch` and `buildPendingLines` (bounce pairs, the `bounce` state),
-> `ReconciliationHandler.applySuggestions` (`bouncePair` groups),
-> `BankBouncePairService.discardPair` and `restorePair`, every caller of `StatementLineFilter`
+> `ReconciliationHandler.applySuggestions` (`bouncePair` groups, and the KPI events through the
+> detection it hands to `BankBounceKpiTelemetry.ModalDecisions`),
+> `BankBouncePairService.discardPair`, `restorePair` and `dismissPair` (KPI-only, writes nothing),
+> every caller of `StatementLineFilter`
 > (whether discarded lines are honoured at all) and `BankStatementsHandler.loadStatements`.
 > Contract: `docs/neo-headless.md` §4.12.1.1, *Discarded lines and bounce pairs*.
 

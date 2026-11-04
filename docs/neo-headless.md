@@ -2730,6 +2730,11 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
 | `discardPair` | write | **`statementLineId`**, **`counterpartLineId`** | `POST ?action=discardPair` (ETP-5581, flag `bank-bounce-suggestions`) |
 | `restorePair` | write | **`lineId`** | `POST ?action=restorePair` (ETP-5581, flag `bank-bounce-suggestions`) |
 
+Not declared to agents on purpose (UI-only, ETP-5581): `dismissPair` (the panel's *No es un rebote*,
+KPI telemetry only) and the `applySuggestions` body key `bounceDecisions` (the modal's report of the
+pairs it showed and did not apply). An agent calling either gets the contract's 422 (unknown action
+/ undeclared key); see *Discarded lines and bounce pairs* and the declared exception below.
+
 Notes: 1:1, 1:N and partial matches are all `reconcileGroup` (a shortfall beyond tolerance leaves
 a pending remainder, exactly as in the UI). `glItemId` is optional on `reconcileDifference`
 because the account's difference GL item is the default — declaring it required would refuse calls
@@ -2999,11 +3004,29 @@ share 140.
   counterpartLineId, discarded:true}` or the coded refusal). A group of an unknown `kind` is refused
   (400); a group with no `kind` and no operations is refused as before. With the flag off every
   bounce group answers 403 `BOUNCE_SUGGESTIONS_OFF`. The `reconciliation_match_evaluated`
-  telemetry counts transaction groups only.
+  telemetry counts transaction groups only. **Optional `bounceDecisions: [{groupKey, decision}]`**
+  (flag on only; read for the KPI, never validated, never an error): the SPA sends it whenever the
+  modal showed at least one bounce pair (possibly `[]`), one entry per shown pair it did NOT check —
+  `decision` `unchecked`, or `sent_to_panel` for *Revisar en el panel* — ambiguous pairs included.
+  `groupKey` is the `autoMatch` group's, as received; checked pairs go in `groups` as before. It is
+  resolved through the call's detection (read before the transaction groups take their lines); an
+  unknown key or decision, a repeated key and the key of a pair applied in the same call are
+  ignored. It changes nothing in the answer and writes nothing. A call still needs at least one
+  group (400 otherwise, as before).
 - **`discardPair {financialAccountId, statementLineId, counterpartLineId}`** (flag required, 403
   `BOUNCE_SUGGESTIONS_OFF` otherwise): the panel's discard, also for an ambiguous pair once its
   original is chosen. Same validation as the `applySuggestions` groups. Answers 200
   `{discarded:true, statementLineId, counterpartLineId, signal, confidence}`.
+- **`dismissPair {financialAccountId, statementLineId, counterpartLineId?}`** (flag required, 403
+  `BOUNCE_SUGGESTIONS_OFF` otherwise): the panel's *No es un rebote*. **Writes nothing**: the
+  rejection is not stored, so detection proposes the pair again on the next `autoMatch` /
+  `pendingLines`. It exists only to record the decision for the KPI. `statementLineId` is the line
+  selected in the panel, in any role (bounce, original or candidate); `counterpartLineId` is the
+  other line the card shows (the chosen original of an ambiguous pair), omitted while none is
+  chosen — the pair is resolved from either line, in either order, through the action's detection.
+  400 without `statementLineId` or with the same line twice; 404 / 400 for a line not found or of
+  another account. Answers 200 `{ok:true}` (in the usual `response.data` envelope), also for lines
+  detection does not pair (nothing is recorded then). UI-only: not in the MCP contracts.
 - **`restorePair {financialAccountId, lineId}`** (flag required, 403 `BOUNCE_SUGGESTIONS_OFF`
   otherwise, like `discardPair`: with the flag off Etendo does not honour discarded lines, so there
   is nothing to undo here; Classic's PSD2 Restore button still works): restores the line AND the
@@ -3012,6 +3035,16 @@ share 140.
   left as it is. Answers 200 `{restored:[ids], lineId, counterpartLineId}`.
 - **Always by pair.** Etendo GO has no single-line discard; Classic keeps PSD2's per-line Discard /
   Restore button.
+- **KPI events (Mixpanel, flag on only, best effort).** `BankBounceKpiTelemetry` emits
+  `backend_bank_bounce_pair_decided` (one per pair decided: `applySuggestions` applied groups →
+  `discarded` / `failed` on a 409, `bounceDecisions` → `unchecked` / `sent_to_panel`, surface
+  `modal`; `discardPair` → `discarded` / `failed`, `dismissPair` → `unchecked`, surface `panel`),
+  `backend_bank_bounce_pair_restored` (a `restorePair` of a linked pair, with the stored signal and
+  confidence and `days_since_decided`) and `backend_bank_bounce_suggestions_applied` (one summary per
+  `applySuggestions` that decided a pair). What the pair was proposed as is read from the action's
+  own detection, never from the client; no line id, amount, counterparty or text leaves the server.
+  A telemetry failure never fails or rolls back the action. Full contract:
+  `docs/backend-observability.md` → *Bank Bounce-Pair KPIs (ETP-5581)*.
 
 **What a discard writes, on both lines.** PSD2's flag and button together
 (`EM_PSD2_Is_Discarded = Y`, `EM_PSD2_Discard_Line = Y`), exactly as PSD2's own
@@ -4994,6 +5027,11 @@ filtered per request.
 |---|---|---|
 | `discardPair`, `restorePair` | 403 `BOUNCE_SUGGESTIONS_OFF`; the SPA never offers them (it renders what the backend sends) | listed, and answer the same 403 (their descriptions say "only available when bounce suggestions are enabled") |
 | `pendingLines` `status=discarded` | ignored like any status the panel filters client-side | `discarded` listed as the option's only value; ignored the same way (the description says so) |
+
+Also declared (any flag value): `dismissPair` and the `applySuggestions` key `bounceDecisions` are
+**REST-only**. They feed the bounce-pair KPI from the SPA's modal and panel, which an agent does
+not have; the MCP refuses them with the contract's 422 (unknown action / undeclared key). An agent's
+`applySuggestions` and `discardPair` still emit their decision events, with `channel: "mcp"`.
 
 ##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, aligned)
 

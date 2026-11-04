@@ -191,6 +191,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String ACTION_RECONCILE_DIFFERENCE = "reconcileDifference";
   private static final String ACTION_DISCARD_PAIR = BankBouncePairService.ACTION_DISCARD_PAIR;
   private static final String ACTION_RESTORE_PAIR = BankBouncePairService.ACTION_RESTORE_PAIR;
+  private static final String ACTION_DISMISS_PAIR = BankBouncePairService.ACTION_DISMISS_PAIR;
 
   /** One route of the {@code ?action=} dispatcher. */
   @FunctionalInterface
@@ -229,7 +230,9 @@ public class ReconciliationHandler implements NeoHandler {
       // bank-bounce-suggestions inside the service (403 otherwise); with the flag off the undo path
       // is Classic's PSD2 Restore button.
       Map.entry(METHOD_POST + " " + ACTION_DISCARD_PAIR, BankBouncePairService::handleDiscardPair),
-      Map.entry(METHOD_POST + " " + ACTION_RESTORE_PAIR, BankBouncePairService::handleRestorePair));
+      Map.entry(METHOD_POST + " " + ACTION_RESTORE_PAIR, BankBouncePairService::handleRestorePair),
+      // ETP-5581: "No es un rebote" — KPI telemetry only, UI-only (not declared to agents).
+      Map.entry(METHOD_POST + " " + ACTION_DISMISS_PAIR, BankBouncePairService::handleDismissPair));
 
   /** Match level recorded on the reconciliation lines produced by this handler. */
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
@@ -1242,8 +1245,16 @@ public class ReconciliationHandler implements NeoHandler {
     // bank-bounce-suggestions is evaluated once for the whole call and handed to both steps.
     boolean bounceSuggestions = BankBounceSuggestionsFlag.isEnabled();
     Set<String> takenLineIds = new HashSet<>();
+    // The call's detection is shared with the bounce-pair KPI, which records every applied pair and
+    // resolves the SPA's bounceDecisions through it (ModalDecisions.NONE with the flag off).
+    BankBouncePairService.Detection bounceDetection =
+        bounceSuggestions ? new BankBouncePairService.Detection(this, account, true) : null;
+    BankBounceKpiTelemetry.ModalDecisions bounceKpi =
+        BankBounceKpiTelemetry.ModalDecisions.of(bounceDetection, account, body);
     int bounceGroups = BankBouncePairService.applyPairs(this, account, groupsJson, takenLineIds,
-        results, bounceSuggestions);
+        results, bounceDetection, bounceKpi);
+    // Before the transaction groups take their lines out of the detection.
+    bounceKpi.prime();
     int bounceResults = results.length();
     List<PreparedGroup> prepared = new ArrayList<>();
     ReconciliationFlowSupport.prepareAllGroups(this, account, groupsJson, prepared, results,
@@ -1268,6 +1279,8 @@ public class ReconciliationHandler implements NeoHandler {
     ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(
         groupsJson.length() - bounceGroups, results.length() - bounceResults,
         successfulGroups[0]);
+    // ETP-5581: one decision per bounce pair applied or reported, plus the summary. Best effort.
+    bounceKpi.finish();
     return NeoResponse.createdWithData(data);
   }
 
