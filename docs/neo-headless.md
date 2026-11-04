@@ -3765,6 +3765,10 @@ tests; both suites assert its SHA-256, so the two copies cannot drift unnoticed.
 | `system` (required) | `SII`, `TBAI`, `SII+TBAI`, `VERIFACTU` |
 | `territory` | `navarra`, `alava`, `bizkaia`, `gipuzkoa`, `baleares` (common territory and Balearic Islands), `canarias`, `ceuta` (Ceuta and Melilla). Required, except when SII is added to an existing TicketBAI: then it is TicketBAI's own and may be left out |
 
+Before the rules, the parameters are checked against the action contract (`NeoActionContract`,
+422 on a missing `system` or a value outside the listed options), and an `id` that is not an organization the role can
+read answers 404 *Organization not found* (both in English, like every shared refusal).
+
 Refusals, in this order, in the request language (`NeoMessageText`, keys in `error.messageKeys`):
 
 | Rule | Refusal |
@@ -3777,6 +3781,7 @@ Refusals, in this order, in the request language (`NeoMessageText`, keys in `err
 | otherwise the territory is required | 400 `ETGO_FiscalSifTerritoryRequired` |
 | the territory must allow the system: Navarra → SII; Álava/Bizkaia/Gipuzkoa → TBAI, SII+TBAI; Baleares/Canarias → SII, VERIFACTU; Ceuta/Melilla → VERIFACTU | 400 `ETGO_FiscalSifNotAllowed` |
 | no other active SIF in the organization | 409 `ETGO_FiscalSifAlreadyConfigured` |
+| read-write access to the window of every system it creates | 403 `ETGO_FiscalSifNoWindowAccess` |
 
 Territories are named in refusals as the window names them (`ETGO_FiscalSifTerritory_<id>` catalog
 keys, e.g. *Ceuta / Melilla (IPSI)*, *España / Baleares*), never by their parameter value. The
@@ -3814,9 +3819,13 @@ configurations, the action locks the organization's `AD_OrgInfo` row
 request's single transaction (`BatchService` defers every write to its final `commitAndClose`; a
 refusal rolls back), so the lock is held until the records are committed: a second activation of
 the same organization waits, then sees the first one's records and is refused by the "one active
-SIF" rule. An organization without an `AD_OrgInfo` row locks nothing (total; no error).
+SIF" rule. An organization without an `AD_OrgInfo` row locks nothing (total; no error). The lock
+is per requested organization, while the SIF triggers keep their flags per legal entity: moot in GO,
+where a client has one organization, and relevant only if multi-org is ever supported.
 
-Answer: `{system, territory, created:[{system, spec, entity, id}], certificate:{exists}}`. When
+Answer: `{system, territory, created:[{system, spec, entity, id}], certificate:{exists}}`.
+`system` is the resulting SIF — `SII+TBAI` after "Añadir SII", whose `created` holds only the
+SII record — and `territory` the one the records were built for. When
 the organization has no active signing certificate, a `warning` message
 (`ETGO_FiscalSifNoCertificate`) says it must be uploaded from Configuración fiscal (agents cannot
 write the certificate, see §4.12.9, *Fiscal Configuration*). The records are then read and edited
@@ -5498,8 +5507,8 @@ REST and the SPA are unchanged.
 | Reactivate | `PUT {active:true}`, subject to one active per system | refused, as above |
 | Delete | `DELETE` (unused by the SPA, kept) | `etendo_delete` hidden (`MCP_CONFIG.verbs.delete:false`, 405) |
 | VERI*FACTU `tAXType` (*Impuesto de aplicación*) | editable until `isReady` | read-only: field-level `MCP_CONFIG.fields.readOnly:true`, 422 `read_only_field` on create and update |
-| Values the window never edits and the activation sets: SII `acogidaAlSII` (`INSIISYSTEM`), `entornoDeProduccin` (`PRODUCCION`), `adjuntarArchivosXML` (`ADJUNTOS`); TicketBAI `productionEnv`, `uSEAsproductDesc`, `validatePreviousInvoice` | written by `configureFiscalSystem`; the detail step PUTs them back unchanged (`SiiSection` / `TbaiSection` preserve the record's values) | read-only: field-level `MCP_CONFIG.fields.readOnly:true` (ETP-6053 QA), 422 `read_only_field`. The window edits only the SII authorization number and TicketBAI auto-send, which stay writable |
-| Other territory-derived fields (SII `navarra`/`guipuzcoa`/`taxtype`, TicketBAI `etsgSifTerritory`) | sent by the wizard on create (customization exemption of `NeoFieldFilter`) | read-only already (curation), 422 `read_only_field` |
+| Values the window never edits and the activation sets: SII `acogidaAlSII` (`INSIISYSTEM`), `entornoDeProduccin` (`PRODUCCION`), `adjuntarArchivosXML` (`ADJUNTOS`); TicketBAI `productionEnv`, `uSEAsproductDesc`, `validatePreviousInvoice` | written by `configureFiscalSystem`; the detail step never changes them (`SiiSection` PUTs the SII ones back with the record's values, `TbaiSection` leaves the TicketBAI ones out of its PUT) | read-only: field-level `MCP_CONFIG.fields.readOnly:true` (ETP-6053 QA), 422 `read_only_field`. The window edits only the SII authorization number and TicketBAI auto-send, which stay writable |
+| Other territory-derived fields (SII `navarra`/`guipuzcoa`/`taxtype`, TicketBAI `etsgSifTerritory`) | derived by `configureFiscalSystem` and created through its batch (customization exemption of `NeoFieldFilter`); the window no longer sends them | read-only already (curation), 422 `read_only_field` |
 | Certificate (`organization/certificadoDigital`, `ETSG_Certificate`) | uploaded, replaced and deleted through `/sws/neo/certificate` (not a spec) | `etendo_create` / `etendo_update` / `etendo_delete` hidden (`MCP_CONFIG.verbs`), status readable with the `certificate` action |
 
 The shared refusal of `read_only_field` (§4.12.11) stays in English, like every shared refusal;

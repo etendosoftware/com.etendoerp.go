@@ -258,7 +258,8 @@ public final class FiscalSifGuard {
    * the second one only reads the active configurations once the first has committed (or rolled
    * back), and its "one active SIF" checks see the first one's records. {@code configureFiscalSystem}
    * runs its checks and its batch in the request's single transaction ({@code BatchService} defers
-   * every write to its final {@code commitAndClose}), so the lock covers both. Total: an organization
+   * every write to its final {@code commitAndClose}), so the lock covers both. The serialization
+   * holds only while no handler run by that batch commits mid-flight. Total: an organization
    * without an {@code AD_OrgInfo} row simply locks nothing.
    *
    * @param orgId the organization
