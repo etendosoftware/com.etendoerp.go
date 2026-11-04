@@ -195,6 +195,18 @@ class DocumentAvailabilityTest {
     }
 
     @Test
+    @DisplayName("the order reactivation reason names the linked documents, with no trailing sentence")
+    void orderReactivationReasonHasNoTrailingSentence() throws Exception {
+      try (MockedStatic<OBDal> ignored = linkedDocuments(true)) {
+        String reason = OrderDocumentAvailability.unavailable(order("CO")).get("documentAction:RE");
+
+        assertEquals(OrderDocumentAvailability.REASON_LINKED_DOCUMENTS, reason);
+        assertTrue(reason.contains("linked shipments, receipts or invoices"), reason);
+        assertFalse(reason.contains("The other documentAction values still apply"), reason);
+      }
+    }
+
+    @Test
     @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing "
         + "out — except, on a sales order, every documentAction value but CO on a draft or "
         + "in-progress order")
@@ -543,6 +555,22 @@ class DocumentAvailabilityTest {
         assertTrue(unavailable.get("documentAction:RE").contains("R-1, R-2"));
         assertEquals(unavailable, new PurchaseInvoiceHeaderHandler()
             .unavailableActions(invoice("CO")));
+      }
+    }
+
+    @Test
+    @DisplayName("the reactivation reason is self-contained: it ends at the rectificativas, no trailing sentence")
+    void reactivationReasonHasNoTrailingSentence() {
+      try (MockedStatic<InvoiceReactivationGuard> guard = mockStatic(InvoiceReactivationGuard.class)) {
+        guard.when(() -> InvoiceReactivationGuard.computeBlock("I1")).thenReturn(
+            new InvoiceReactivationGuard.Block(List.of("SII"), List.of("R-1", "R-2")));
+
+        String reason = InvoiceDocumentAvailability.unavailable(invoice("CO"))
+            .get("documentAction:RE");
+
+        assertTrue(reason.startsWith("This invoice cannot be reactivated: it was accepted by "));
+        assertTrue(reason.endsWith("is already rectified by R-1, R-2."), reason);
+        assertFalse(reason.contains("The other documentAction values still apply"), reason);
       }
     }
 

@@ -87,7 +87,7 @@ final class InvoiceDocumentAvailability {
       return Map.of(NeoActionAvailability.valueKey(ACTION_DOCUMENT_ACTION, VALUE_REACTIVATE),
           "This invoice cannot be reactivated: it was accepted by " + block.fiscalSystem
               + " and is already rectified by " + docNos.stream().collect(Collectors.joining(", "))
-              + ". The other documentAction values still apply.");
+              + ".");
     } catch (RuntimeException e) {
       log.debug("Could not evaluate the reactivation of invoice {}: {}", invoice.getId(),
           e.getMessage());
