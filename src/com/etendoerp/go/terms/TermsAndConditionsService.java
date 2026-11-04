@@ -81,6 +81,8 @@ public class TermsAndConditionsService {
   /** Where the versions are read from. */
   interface Store {
     /**
+     * Finds the terms version currently in force for a language.
+     *
      * @param language     the requested language, e.g. {@code es_ES}
      * @param baseLanguage its first two letters, e.g. {@code es}
      * @return the version in force, preferring the requested language, then a variant of it,
@@ -88,7 +90,12 @@ public class TermsAndConditionsService {
      */
     Optional<Terms> findCurrent(String language, String baseLanguage);
 
-    /** @return whether an active row holds this version, in any language */
+    /**
+     * Tells whether a terms version exists.
+     *
+     * @param version the version to look up
+     * @return whether an active row holds this version, in any language
+     */
     boolean exists(String version);
   }
 

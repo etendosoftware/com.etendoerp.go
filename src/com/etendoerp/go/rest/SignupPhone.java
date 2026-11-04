@@ -31,7 +31,7 @@ final class SignupPhone {
   /** {@code ETGO_ACCOUNT.PHONE} is VARCHAR(40). */
   static final int MAX_LENGTH = 40;
 
-  private static final Pattern PHONE = Pattern.compile("\\+[0-9]{1,4} [0-9 ().\\-]+");
+  private static final Pattern PHONE = Pattern.compile("\\+\\d{1,4} [\\d ().\\-]+");
   private static final int MIN_DIGITS = 5;
 
   private SignupPhone() {
