@@ -24,28 +24,40 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -58,6 +70,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
@@ -66,15 +79,23 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
+import com.etendoerp.go.schemaforge.BankBounceDetector.Candidate;
+import com.etendoerp.go.schemaforge.BankBounceDetector.Pair;
+import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvent;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
 
 /**
@@ -92,6 +113,9 @@ import com.etendoerp.psd2.bank.integration.data.PisPayment;
  * @covers com.etendoerp.go.schemaforge.BankBouncePairService
  * @covers com.etendoerp.go.schemaforge.StatementLineDiscard
  * @covers com.etendoerp.go.schemaforge.BankBounceErrors
+ * @covers com.etendoerp.go.schemaforge.BankBounceKpiTelemetry
+ * @covers com.etendoerp.go.schemaforge.ReconciliationHandlerSupport
+ * @covers com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService
  */
 @DisplayName("Bounce pairs — discardPair / restorePair")
 class BankBouncePairServiceTest {
@@ -100,6 +124,8 @@ class BankBouncePairServiceTest {
   private static final String OTHER_ACCOUNT_ID = "ACC-2";
   private static final LocalDate DAY = LocalDate.of(2026, 10, 1);
   private static final int DATE_TOL_DAYS = 3;
+  private static final String CLIENT_ID = "CLIENT-1";
+  private static final long WAIT_MS = 2000;
 
   /** Column name (upper case) → DAL property name: what the running model maps. */
   private final Map<String, String> mappedColumns = new HashMap<>();
@@ -120,6 +146,7 @@ class BankBouncePairServiceTest {
   private final List<Object[]> openMovementRows = new ArrayList<>();
   private final List<String> scheduleDetailPaymentIds = new ArrayList<>();
   private final Set<FIN_BankStatementLine> saved = new HashSet<>();
+  private NeoTelemetryService telemetry;
 
   /**
    * Simulates the running model column by column, the DAL with the detection queries and a
@@ -175,11 +202,18 @@ class BankBouncePairServiceTest {
     when(handler.loadTolerances(ACCOUNT_ID)).thenReturn(
         new BigDecimal[] { BigDecimal.valueOf(DATE_TOL_DAYS), BigDecimal.ZERO });
     when(handler.loadPendingLines(ACCOUNT_ID, true)).thenReturn(pending);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    when(account.getClient()).thenReturn(client);
+    // The bounce-pair KPI events of every test go to this mock, never to a runtime sink.
+    telemetry = mock(NeoTelemetryService.class);
+    BankBounceKpiTelemetry.setTelemetryService(telemetry);
   }
 
-  /** Closes every static mock. */
+  /** Closes every static mock and restores the runtime telemetry service. */
   @AfterEach
   void tearDown() {
+    BankBounceKpiTelemetry.setTelemetryService(null);
     filter.close();
     flag.close();
     messages.close();
@@ -974,6 +1008,1150 @@ class BankBouncePairServiceTest {
           elsewhere.value(BankBouncePairService.COL_CONFIDENCE));
       assertEquals(BankBounceDetector.SIGNAL_RETURN_TEXT,
           elsewhere.value(BankBouncePairService.COL_SIGNAL));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bounce-pair KPI telemetry (ETP-5581, issue #15)
+  // ---------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("bounce-pair KPI events — what was proposed and what the user decided, no ids")
+  class KpiEvents {
+
+    /** A pair proposed as high and discarded in the panel is a preselected discarded decision. */
+    @Test
+    @DisplayName("discardPair of a proposed high pair emits discarded, preselected, surface panel")
+    void panelDiscardOfAHighPair() throws Exception {
+      Line original = pendingLine("L-OUT", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line bounce = pendingLine("L-IN", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+
+      assertEquals(200, BankBouncePairService.discardPair(handler,
+          body(bounce.id, original.id)).getHttpStatus());
+
+      Map<String, Object> props = decided(1).get(0);
+      assertEquals(BankBounceKpiTelemetry.DECISION_DISCARDED, props.get("decision"));
+      assertEquals(BankBounceKpiTelemetry.SURFACE_PANEL, props.get("surface"));
+      assertEquals(BankBounceDetector.SIGNAL_PIS_LINK, props.get("detection_signal"));
+      assertEquals(BankBounceDetector.CONFIDENCE_HIGH, props.get("confidence"));
+      assertEquals(Boolean.TRUE, props.get("preselected"));
+      assertEquals(Boolean.FALSE, props.get("ambiguous"));
+      assertEquals(Boolean.FALSE, props.get("chosen_among_alternatives"));
+      assertEquals("ui", props.get("channel"));
+      assertEquals(Boolean.TRUE, props.get("flag_enabled"));
+      assertEquals(CLIENT_ID, props.get("account_id"));
+      assertTrue((Integer) props.get("signals_count") >= 1);
+      assertNoRecordData(props);
+    }
+
+    /** Choosing one candidate of an ambiguous pair is a review decision among alternatives. */
+    @Test
+    @DisplayName("discarding a chosen candidate of an ambiguous pair is chosen_among_alternatives")
+    void panelDiscardOfAChosenCandidate() throws Exception {
+      pendingLine("L-O1", "-50.00", DAY, "", "TRANSFERENCIA");
+      Line o2 = pendingLine("L-O2", "-50.00", DAY, "", "TRANSFERENCIA");
+      Line bounce = pendingLine("L-IN", "50.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+
+      assertEquals(200, BankBouncePairService.discardPair(handler,
+          body(o2.id, bounce.id)).getHttpStatus());
+
+      Map<String, Object> props = decided(1).get(0);
+      assertEquals(Boolean.TRUE, props.get("ambiguous"));
+      assertEquals(Boolean.TRUE, props.get("chosen_among_alternatives"));
+      assertEquals(Boolean.FALSE, props.get("preselected"));
+      assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, props.get("confidence"));
+      assertEquals(BankBounceDetector.SIGNAL_RETURN_TEXT, props.get("detection_signal"));
+    }
+
+    /** A 409 on a proposed pair is a failed decision; a 400 emits nothing. */
+    @Test
+    @DisplayName("a 409 on a proposed pair emits failed; a malformed request emits nothing")
+    void panelRefusals() throws Exception {
+      Line original = pendingLine("L-OUT", "-30.00", DAY, "ACME", "X");
+      Line bounce = pendingLine("L-IN", "30.00", DAY.plusDays(2), "ACME", "Y");
+      when(bounce.mock.isActive()).thenReturn(false);
+
+      assertCoded(BankBouncePairService.discardPair(handler, body(original.id, bounce.id)), 409,
+          BankBounceErrors.CODE_LINE_NOT_PENDING);
+      Map<String, Object> props = decided(1).get(0);
+      assertEquals(BankBounceKpiTelemetry.DECISION_FAILED, props.get("decision"));
+      assertEquals(BankBounceDetector.SIGNAL_COUNTERPARTY, props.get("detection_signal"));
+
+      Mockito.clearInvocations(telemetry);
+      assertEquals(400, BankBouncePairService.discardPair(handler,
+          body(original.id, original.id)).getHttpStatus());
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+    }
+
+    /** "No es un rebote" writes nothing and emits unchecked; flag off and unknown pairs emit none. */
+    @Test
+    @DisplayName("dismissPair writes nothing, emits unchecked from any role, 403 with the flag off")
+    void dismissPair() throws Exception {
+      pendingLine("L-O1", "-50.00", DAY, "", "TRANSFERENCIA");
+      Line o2 = pendingLine("L-O2", "-50.00", DAY, "", "TRANSFERENCIA");
+      Line bounce = pendingLine("L-IN", "50.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+      Line stranger = pendingLine("L-X", "-7.00", DAY, "ZETA", "OTHER");
+
+      // The bounce line alone: the ambiguous pair, no candidate chosen.
+      NeoResponse response = BankBouncePairService.dismissPair(handler,
+          new JSONObject().put("financialAccountId", ACCOUNT_ID).put("statementLineId", bounce.id));
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(data(response).getBoolean("ok"));
+      Map<String, Object> props = decided(1).get(0);
+      assertEquals(BankBounceKpiTelemetry.DECISION_UNCHECKED, props.get("decision"));
+      assertEquals(BankBounceKpiTelemetry.SURFACE_PANEL, props.get("surface"));
+      assertEquals(Boolean.TRUE, props.get("ambiguous"));
+      assertEquals(Boolean.FALSE, props.get("chosen_among_alternatives"));
+      assertNothingWritten(o2, bounce);
+
+      // A candidate selected, the bounce as counterpart: the candidate was chosen.
+      Mockito.clearInvocations(telemetry);
+      BankBouncePairService.dismissPair(handler, body(o2.id, bounce.id));
+      assertEquals(Boolean.TRUE, decided(1).get(0).get("chosen_among_alternatives"));
+
+      // A line detection pairs with nothing: 200, no event.
+      Mockito.clearInvocations(telemetry);
+      assertEquals(200, BankBouncePairService.dismissPair(handler,
+          new JSONObject().put("financialAccountId", ACCOUNT_ID)
+              .put("statementLineId", stranger.id)).getHttpStatus());
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+
+      assertEquals(400, BankBouncePairService.dismissPair(handler,
+          new JSONObject().put("financialAccountId", ACCOUNT_ID)).getHttpStatus());
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+      assertCoded(BankBouncePairService.dismissPair(handler, body(o2.id, bounce.id)), 403,
+          BankBounceErrors.CODE_SUGGESTIONS_OFF);
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+    }
+
+    /** Restoring a linked pair emits the stored signal, confidence and whole days; a lone line none. */
+    @Test
+    @DisplayName("restorePair of a linked pair emits restored with days_since_decided; alone, nothing")
+    void restoreEvents() throws Exception {
+      Line a = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
+      Line b = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "Y");
+      discardedPair(a, b);
+      Date threeDaysAgo = Date.from(java.time.Instant.now().minus(java.time.Duration.ofDays(3))
+          .minusSeconds(60));
+      a.values.put(prop(BankBouncePairService.COL_DISCARDED_AT), threeDaysAgo);
+
+      BankBouncePairService.restorePair(handler, restoreBody(a.id));
+
+      ArgumentCaptor<Map<String, Object>> captor = mapCaptor();
+      verify(telemetry, timeout(WAIT_MS)).emit(
+          eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_RESTORED), captor.capture(),
+          eq(CLIENT_ID));
+      Map<String, Object> props = captor.getValue();
+      assertEquals("counterparty", props.get("detection_signal"));
+      assertEquals("review", props.get("confidence"));
+      assertEquals(3L, props.get("days_since_decided"));
+      assertEquals("ui", props.get("channel"));
+      assertNoRecordData(props);
+
+      Mockito.clearInvocations(telemetry);
+      Line lone = pendingLine("L-LONE", "-9.00", DAY, "ACME", "X");
+      lone.values.put(prop(StatementLineDiscard.COL_IS_DISCARDED), true);
+      BankBouncePairService.restorePair(handler, restoreBody(lone.id));
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+    }
+
+    /**
+     * The modal: an applied high pair, a review pair reported unchecked, an ambiguous pair sent
+     * to the panel; an unknown key, an unknown decision and a repeat of the applied pair are
+     * ignored. One decision per pair and the summary, preselection unchanged.
+     */
+    @Test
+    @DisplayName("applySuggestions: applied + bounceDecisions give one decision per pair and a summary")
+    void modalDecisions() throws Exception {
+      Line ao = pendingLine("L-AO", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line ab = pendingLine("L-AB", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      pendingLine("L-BO", "-30.00", DAY, "ACME", "X");
+      pendingLine("L-BB", "30.00", DAY.plusDays(2), "ACME", "Y");
+      pendingLine("L-C1", "-50.00", DAY, "", "TRANSFERENCIA");
+      pendingLine("L-C2", "-50.00", DAY, "", "TRANSFERENCIA");
+      pendingLine("L-CB", "50.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+      JSONObject request = new JSONObject().put("bounceDecisions", new JSONArray()
+          .put(decision("bounce-L-BO-L-BB", "unchecked"))
+          .put(decision("bounce-L-CB", "sent_to_panel"))
+          .put(decision("bounce-UNKNOWN", "unchecked"))
+          .put(decision("bounce-L-BO-L-BB", "maybe"))
+          .put(decision("bounce-L-AO-L-AB", "unchecked")));
+
+      Map<String, Object> summary = applyWithDecisions(request, pairGroup(ao.id, ab.id), 3);
+
+      List<Map<String, Object>> decisions = lastDecided;
+      assertEquals(List.of("discarded", "unchecked", "sent_to_panel"),
+          List.of(decisions.get(0).get("decision"), decisions.get(1).get("decision"),
+              decisions.get(2).get("decision")));
+      assertEquals(Boolean.TRUE, decisions.get(0).get("preselected"));
+      assertEquals(Boolean.FALSE, decisions.get(1).get("preselected"));
+      assertEquals(Boolean.TRUE, decisions.get(2).get("ambiguous"));
+      for (Map<String, Object> props : decisions) {
+        assertEquals(BankBounceKpiTelemetry.SURFACE_MODAL, props.get("surface"));
+        assertNoRecordData(props);
+      }
+      assertEquals(3, summary.get("pairs_shown"));
+      assertEquals(1, summary.get("pairs_discarded"));
+      assertEquals(1, summary.get("pairs_unchecked"));
+      assertEquals(1, summary.get("pairs_sent_to_panel"));
+      assertEquals(Boolean.FALSE, summary.get("preselection_changed"));
+    }
+
+    /** Unchecking a preselected pair changes the preselection; the same pair twice fails once. */
+    @Test
+    @DisplayName("applySuggestions: an unchecked high pair changes the preselection; a repeat fails")
+    void modalPreselectionChangedAndFailure() throws Exception {
+      Line ao = pendingLine("L-AO", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line ab = pendingLine("L-AB", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      Line bo = pendingLine("L-BO", "-30.00", DAY, "ACME", "X");
+      Line bb = pendingLine("L-BB", "30.00", DAY.plusDays(2), "ACME", "Y");
+      JSONObject request = new JSONObject().put("bounceDecisions", new JSONArray()
+          .put(decision("bounce-L-AO-L-AB", "unchecked")));
+
+      Map<String, Object> summary = applyWithDecisions(request,
+          new JSONArray().put(pairGroup(bo.id, bb.id)).put(pairGroup(bb.id, bo.id)), 3);
+
+      assertEquals(List.of("discarded", "failed", "unchecked"),
+          List.of(lastDecided.get(0).get("decision"), lastDecided.get(1).get("decision"),
+              lastDecided.get(2).get("decision")));
+      assertEquals(Boolean.TRUE, summary.get("preselection_changed"));
+      assertEquals(3, summary.get("pairs_shown"));
+      assertEquals(1, summary.get("pairs_discarded"));
+      assertNull(ao.value(StatementLineDiscard.COL_IS_DISCARDED));
+      assertNull(ab.value(StatementLineDiscard.COL_IS_DISCARDED));
+    }
+
+    /** With the flag off the modal records and sends nothing. */
+    @Test
+    @DisplayName("applySuggestions with the flag off sends no bounce event")
+    void modalFlagOff() throws Exception {
+      Line bo = pendingLine("L-BO", "-30.00", DAY, "ACME", "X");
+      Line bb = pendingLine("L-BB", "30.00", DAY.plusDays(2), "ACME", "Y");
+      BankBounceKpiTelemetry.ModalDecisions kpi = BankBounceKpiTelemetry.ModalDecisions.of(null,
+          account, new JSONObject().put("bounceDecisions", new JSONArray()
+              .put(decision("bounce-L-BO-L-BB", "unchecked"))));
+
+      BankBouncePairService.applyPairs(handler, account,
+          new JSONArray().put(pairGroup(bo.id, bb.id)), new HashSet<>(), new JSONArray(), null,
+          kpi);
+      kpi.prime();
+      kpi.finish();
+
+      assertSame(BankBounceKpiTelemetry.ModalDecisions.NONE, kpi);
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+    }
+
+    /** An MCP tool call is reported as channel mcp. */
+    @Test
+    @DisplayName("a discard through the MCP is channel mcp")
+    void mcpChannel() throws Exception {
+      Line original = pendingLine("L-OUT", "-30.00", DAY, "ACME", "X");
+      Line bounce = pendingLine("L-IN", "30.00", DAY.plusDays(2), "ACME", "Y");
+      String previous = NeoWriteChannel.enter(NeoWriteChannel.MCP);
+      try {
+        BankBouncePairService.discardPair(handler, body(original.id, bounce.id));
+      } finally {
+        NeoWriteChannel.restore(previous);
+      }
+      assertEquals("mcp", decided(1).get(0).get("channel"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bounce-pair KPI: restore, flag off, pair resolution
+  // ---------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("bounce-pair KPI — restore edges, the flag off, which detected pair a decision is")
+  class KpiEdges {
+
+    /**
+     * A one-sided link is not a pair: restoring {@code L1}, whose counterpart now points at another
+     * line, restores it alone and sends no restored event.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("restorePair of a one-sided link restores the line and sends nothing")
+    void restoreOfAOneSidedLinkSendsNothing() throws Exception {
+      Line l1 = pendingLine("L1", "-50.00", DAY, "ACME", "X");
+      Line l2 = pendingLine("L2", "50.00", DAY.plusDays(1), "ACME", "Y");
+      Line l3 = pendingLine("L3", "-50.00", DAY, "ACME", "Z");
+      discardedPair(l2, l3);
+      l1.values.put(prop(StatementLineDiscard.COL_IS_DISCARDED), true);
+      l1.values.put(prop(StatementLineDiscard.COL_DISCARD_LINE), "Y");
+      l1.values.put(prop(BankBouncePairService.COL_PAIR_LINE), l2.mock);
+      l1.values.put(prop(BankBouncePairService.COL_DISCARDED_AT), new Date());
+
+      NeoResponse response = BankBouncePairService.restorePair(handler, restoreBody(l1.id));
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(List.of("L1"), strings(data(response).getJSONArray("restored")));
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+    }
+
+    /**
+     * {@code days_since_decided} is left out of the submitted event when
+     * {@code EM_ETGO_Bounce_Discarded} is null (the sanitizer drops the null), and is a whole
+     * number of days, as a {@code Long}, when it is set.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("restored: days_since_decided absent without a discard time, whole days with one")
+    void restoredDaysAreOmittedWithoutADiscardTime() throws Exception {
+      NeoTelemetryService service = realTelemetry();
+      Line a = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
+      Line b = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "Y");
+      discardedPair(a, b);
+      a.values.remove(prop(BankBouncePairService.COL_DISCARDED_AT));
+
+      assertEquals(200, BankBouncePairService.restorePair(handler, restoreBody(a.id))
+          .getHttpStatus());
+
+      NeoTelemetryEvent unknownAge = awaitSent(1).get(0);
+      assertEquals(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_RESTORED, unknownAge.getName());
+      assertFalse(unknownAge.getProperties().containsKey("days_since_decided"),
+          unknownAge.getProperties().toString());
+      assertEquals(RESTORED_KEYS_WITHOUT_DAYS, unknownAge.getProperties().keySet());
+      assertTrue(rawProperties(service).get(0).containsKey("days_since_decided"),
+          "the builder states the unknown age as null; the sanitizer leaves it out");
+
+      Line c = pendingLine("L-OUT2", "-60.00", DAY, "BETA", "X");
+      Line d = pendingLine("L-IN2", "60.00", DAY.plusDays(1), "BETA", "Y");
+      discardedPair(c, d);
+      c.values.put(prop(BankBouncePairService.COL_DISCARDED_AT),
+          Date.from(Instant.now().minus(Duration.ofDays(2)).minus(Duration.ofHours(5))));
+
+      BankBouncePairService.restorePair(handler, restoreBody(c.id));
+
+      NeoTelemetryEvent known = awaitSent(2).get(1);
+      assertEquals(2L, known.getProperties().get("days_since_decided"));
+      assertEquals(RESTORED_KEYS, known.getProperties().keySet());
+    }
+
+    /**
+     * With {@code bank-bounce-suggestions} off every panel path answers its 403 and no KPI event
+     * is sent from any of them.
+     *
+     * @throws Exception when a call fails
+     */
+    @Test
+    @DisplayName("flag off: discardPair, restorePair and dismissPair send no KPI event")
+    void flagOffSendsNothingFromAnyPanelPath() throws Exception {
+      Line original = pendingLine("L-OUT", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line bounce = pendingLine("L-IN", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      Line a = pendingLine("L-A", "-50.00", DAY, "ACME", "X");
+      Line b = pendingLine("L-B", "50.00", DAY.plusDays(1), "ACME", "Y");
+      discardedPair(a, b);
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+
+      assertCoded(BankBouncePairService.discardPair(handler, body(original.id, bounce.id)), 403,
+          BankBounceErrors.CODE_SUGGESTIONS_OFF);
+      assertCoded(BankBouncePairService.restorePair(handler, restoreBody(a.id)), 403,
+          BankBounceErrors.CODE_SUGGESTIONS_OFF);
+      assertCoded(BankBouncePairService.dismissPair(handler, body(original.id, bounce.id)), 403,
+          BankBounceErrors.CODE_SUGGESTIONS_OFF);
+
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+      assertNothingWritten(original, bounce, a, b);
+    }
+
+    /**
+     * A candidate shared by two ambiguous pairs (two adjacent returns that may share a neighbour)
+     * dismissed alone resolves to the FIRST detected pair that touches it: the event carries that
+     * pair's proposal, not the second's.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("dismissPair of a candidate shared by two ambiguous pairs is the first pair")
+    void dismissOfASharedCandidateIsTheFirstPair() throws Exception {
+      pendingLine("L-C1", "-30.00", DAY, "", "X");
+      Line shared = pendingLine("L-C2", "-30.00", DAY, "", "X");
+      pendingLine("L-C5", "-30.00", DAY, "", "X");
+      pendingLine("L-B3", "30.00", DAY, "", "Y");
+      pendingLine("L-B4", "30.00", DAY, "", "Y");
+      StatementLine c1 = model("L-C1", -30);
+      StatementLine c2 = model("L-C2", -30);
+      StatementLine c5 = model("L-C5", -30);
+      Pair first = new Pair(null, model("L-B3", 30),
+          List.of(new Candidate(c1, List.of(BankBounceDetector.SIGNAL_COUNTERPARTY)),
+              new Candidate(c2, List.of(BankBounceDetector.SIGNAL_COUNTERPARTY))),
+          List.of(BankBounceDetector.SIGNAL_COUNTERPARTY), BankBounceDetector.CONFIDENCE_REVIEW,
+          true);
+      Pair second = new Pair(null, model("L-B4", 30),
+          List.of(new Candidate(c2, List.of(BankBounceDetector.SIGNAL_RETURN_TEXT,
+              BankBounceDetector.SIGNAL_COUNTERPARTY)), new Candidate(c5, List.of())),
+          List.of(BankBounceDetector.SIGNAL_RETURN_TEXT, BankBounceDetector.SIGNAL_COUNTERPARTY),
+          BankBounceDetector.CONFIDENCE_REVIEW, false);
+
+      try (MockedStatic<BankBounceDetector> detector =
+          mockStatic(BankBounceDetector.class, Mockito.CALLS_REAL_METHODS)) {
+        detector.when(() -> BankBounceDetector.detect(any())).thenReturn(List.of(first, second));
+
+        assertEquals(200, BankBouncePairService.dismissPair(handler,
+            new JSONObject().put("financialAccountId", ACCOUNT_ID)
+                .put("statementLineId", shared.id)).getHttpStatus());
+
+        Map<String, Object> props = decided(1).get(0);
+        assertEquals(BankBounceKpiTelemetry.DECISION_UNCHECKED, props.get("decision"));
+        assertEquals(BankBounceDetector.SIGNAL_COUNTERPARTY, props.get("detection_signal"));
+        assertEquals(1, props.get("signals_count"));
+        assertEquals(Boolean.TRUE, props.get("adjacent"), "the first pair is the adjacent one");
+        assertEquals(Boolean.TRUE, props.get("ambiguous"));
+        assertEquals(Boolean.FALSE, props.get("chosen_among_alternatives"));
+      }
+    }
+
+    /**
+     * "No es un rebote" on the original of a proposed high pair, with no counterpart: the pair is
+     * found from the original alone and the event is that pair's own proposal (preselected, not
+     * ambiguous, nothing chosen).
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("dismissPair with only the original line is the pair it belongs to")
+    void dismissWithOnlyTheOriginal() throws Exception {
+      Line original = pendingLine("L-OUT", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line bounce = pendingLine("L-IN", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+
+      NeoResponse response = BankBouncePairService.dismissPair(handler,
+          new JSONObject().put("financialAccountId", ACCOUNT_ID)
+              .put("statementLineId", original.id));
+
+      assertEquals(200, response.getHttpStatus());
+      Map<String, Object> props = decided(1).get(0);
+      assertEquals(BankBounceKpiTelemetry.DECISION_UNCHECKED, props.get("decision"));
+      assertEquals(BankBounceKpiTelemetry.SURFACE_PANEL, props.get("surface"));
+      assertEquals(BankBounceDetector.SIGNAL_PIS_LINK, props.get("detection_signal"));
+      assertEquals(BankBounceDetector.CONFIDENCE_HIGH, props.get("confidence"));
+      assertEquals(Boolean.TRUE, props.get("preselected"));
+      assertEquals(Boolean.FALSE, props.get("ambiguous"));
+      assertEquals(Boolean.FALSE, props.get("chosen_among_alternatives"));
+      assertNothingWritten(original, bounce);
+    }
+
+    /**
+     * Two lines of the account that detection does not pair: 200 {@code ok:true}, no event, and
+     * nothing written.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("dismissPair with two lines detection does not pair → 200, no event")
+    void dismissOfTwoUnpairedLinesSendsNothing() throws Exception {
+      Line original = pendingLine("L-OUT", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line bounce = pendingLine("L-IN", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      Line stranger = pendingLine("L-X", "-7.00", DAY, "ZETA", "OTHER");
+
+      NeoResponse response = BankBouncePairService.dismissPair(handler,
+          body(stranger.id, bounce.id));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(data(response).getBoolean("ok"));
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+      assertNothingWritten(original, bounce, stranger);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bounce-pair KPI: the shape of every event, through the real sanitizer
+  // ---------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("bounce-pair KPI — exact property sets, nothing dropped by the allowlist")
+  class KpiEventShape {
+
+    /**
+     * The panel decisions — discarded, failed (a 409 on a proposed pair) and unchecked — each
+     * carry exactly the decided properties, all of them kept by the real allowlist, channel
+     * {@code ui}, and no record data.
+     *
+     * @throws Exception when a call fails
+     */
+    @Test
+    @DisplayName("panel discarded / failed / unchecked: exact keys, channel ui, nothing dropped")
+    void panelDecisionsHaveExactlyTheirProperties() throws Exception {
+      NeoTelemetryService service = realTelemetry();
+      Line original = pendingLine("L-OUT", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line bounce = pendingLine("L-IN", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      Line refusedOriginal = pendingLine("L-RO", "-30.00", DAY, "ACME", "X");
+      Line refusedBounce = pendingLine("L-RB", "30.00", DAY.plusDays(2), "ACME", "Y");
+      when(refusedBounce.mock.isActive()).thenReturn(false);
+      Line dismissedOriginal = pendingLine("L-DO", "-50.00", DAY, "", "TRANSFERENCIA");
+      Line dismissedBounce = pendingLine("L-DB", "50.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+
+      assertEquals(200, BankBouncePairService.discardPair(handler,
+          body(original.id, bounce.id)).getHttpStatus());
+      awaitSent(1);
+      assertEquals(409, BankBouncePairService.discardPair(handler,
+          body(refusedOriginal.id, refusedBounce.id)).getHttpStatus());
+      awaitSent(2);
+      assertEquals(200, BankBouncePairService.dismissPair(handler,
+          body(dismissedOriginal.id, dismissedBounce.id)).getHttpStatus());
+
+      List<NeoTelemetryEvent> events = awaitSent(3);
+      List<Map<String, Object>> raw = rawProperties(service);
+      String[] decisions = { "discarded", "failed", "unchecked" };
+      for (int i = 0; i < decisions.length; i++) {
+        NeoTelemetryEvent event = events.get(i);
+        assertEquals(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED, event.getName());
+        assertShape(event, raw.get(i), DECIDED_KEYS);
+        assertEquals(decisions[i], event.getProperties().get("decision"));
+        assertEquals("panel", event.getProperties().get("surface"));
+        assertEquals("ui", event.getProperties().get("channel"));
+        assertEquals(CLIENT_ID, event.getClientId());
+      }
+    }
+
+    /**
+     * The restored event carries exactly its properties; inside an MCP tool call its channel is
+     * {@code mcp}.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("restored: exact keys, nothing dropped, channel mcp through the MCP")
+    void restoredHasExactlyItsProperties() throws Exception {
+      NeoTelemetryService service = realTelemetry();
+      Line a = pendingLine("L-OUT", "-50.00", DAY, "ACME", "X");
+      Line b = pendingLine("L-IN", "50.00", DAY.plusDays(1), "ACME", "Y");
+      discardedPair(a, b);
+
+      String previous = NeoWriteChannel.enter(NeoWriteChannel.MCP);
+      try {
+        assertEquals(200, BankBouncePairService.restorePair(handler, restoreBody(a.id))
+            .getHttpStatus());
+      } finally {
+        NeoWriteChannel.restore(previous);
+      }
+
+      NeoTelemetryEvent event = awaitSent(1).get(0);
+      assertEquals(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_RESTORED, event.getName());
+      assertShape(event, rawProperties(service).get(0), RESTORED_KEYS);
+      assertEquals("mcp", event.getProperties().get("channel"));
+    }
+
+    /**
+     * The modal through an agent's {@code applySuggestions} (MCP): an applied pair, a group
+     * refused 409 on a line an earlier group took (no detected pair, so only the decision and the
+     * surface), a pair reported unchecked, and the summary — each with exactly its properties,
+     * channel {@code mcp}, nothing dropped.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("modal decided + summary: exact keys, nothing dropped, channel mcp")
+    void modalEventsHaveExactlyTheirProperties() throws Exception {
+      NeoTelemetryService service = realTelemetry();
+      Line ao = pendingLine("L-AO", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line ab = pendingLine("L-AB", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      pendingLine("L-BO", "-30.00", DAY, "ACME", "X");
+      pendingLine("L-BB", "30.00", DAY.plusDays(2), "ACME", "Y");
+      Line stranger = pendingLine("L-X", "-7.00", DAY, "ZETA", "OTHER");
+      JSONObject request = new JSONObject().put("bounceDecisions", new JSONArray()
+          .put(decision("bounce-L-BO-L-BB", "unchecked")));
+
+      String previous = NeoWriteChannel.enter(NeoWriteChannel.MCP);
+      try {
+        runModal(request, new JSONArray().put(pairGroup(ao.id, ab.id))
+            .put(pairGroup(ao.id, stranger.id)));
+      } finally {
+        NeoWriteChannel.restore(previous);
+      }
+
+      List<NeoTelemetryEvent> events = awaitSent(4);
+      List<Map<String, Object>> raw = rawProperties(service);
+      assertShape(events.get(0), raw.get(0), DECIDED_KEYS);
+      assertEquals("discarded", events.get(0).getProperties().get("decision"));
+      assertShape(events.get(1), raw.get(1), DECIDED_UNKNOWN_PROPOSAL_KEYS);
+      assertEquals("failed", events.get(1).getProperties().get("decision"));
+      assertShape(events.get(2), raw.get(2), DECIDED_KEYS);
+      assertEquals("unchecked", events.get(2).getProperties().get("decision"));
+      for (int i = 0; i < 3; i++) {
+        assertEquals("modal", events.get(i).getProperties().get("surface"));
+      }
+      NeoTelemetryEvent summary = events.get(3);
+      assertEquals(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_SUGGESTIONS_APPLIED, summary.getName());
+      assertShape(summary, raw.get(3), SUMMARY_KEYS);
+      assertEquals(3, summary.getProperties().get("pairs_shown"));
+      assertEquals(1, summary.getProperties().get("pairs_discarded"));
+      assertEquals(1, summary.getProperties().get("pairs_unchecked"));
+      assertEquals(0, summary.getProperties().get("pairs_sent_to_panel"));
+      for (NeoTelemetryEvent event : events) {
+        assertEquals("mcp", event.getProperties().get("channel"));
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bounce-pair KPI: delivery — batches, failures, a full queue
+  // ---------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("bounce-pair KPI — after commit in a batch, best effort, never fails the action")
+  class KpiDelivery {
+
+    /**
+     * Inside a batch the {@code discarded} and {@code restored} events wait for the commit; an MCP
+     * batch reports channel {@code mcp}.
+     *
+     * @throws Exception when a call fails
+     */
+    @Test
+    @DisplayName("in a batch, discarded and restored are sent only after the commit")
+    void successfulDecisionsWaitForTheBatchCommit() throws Exception {
+      Line original = pendingLine("L-OUT", "-30.00", DAY, "ACME", "X");
+      Line bounce = pendingLine("L-IN", "30.00", DAY.plusDays(2), "ACME", "Y");
+      Line a = pendingLine("L-A", "-50.00", DAY, "BETA", "X");
+      Line b = pendingLine("L-B", "50.00", DAY.plusDays(1), "BETA", "Y");
+      discardedPair(a, b);
+
+      String channel = NeoWriteChannel.enter(NeoWriteChannel.MCP);
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        assertEquals(200, BankBouncePairService.discardPair(handler,
+            body(original.id, bounce.id)).getHttpStatus());
+        assertEquals(200, BankBouncePairService.restorePair(handler, restoreBody(a.id))
+            .getHttpStatus());
+        verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+
+        NeoBatchScope.runAfterCommitActions();
+      } finally {
+        NeoBatchScope.close(previous);
+        NeoWriteChannel.restore(channel);
+      }
+
+      Map<String, Object> props = decided(1).get(0);
+      assertEquals("discarded", props.get("decision"));
+      assertEquals("mcp", props.get("channel"), "an MCP batch is channel mcp");
+      verify(telemetry, timeout(WAIT_MS)).emit(
+          eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_RESTORED), anyMap(), eq(CLIENT_ID));
+    }
+
+    /**
+     * A batch that rolls back never sends the {@code discarded} event it queued, not even when a
+     * later batch on the same thread commits.
+     *
+     * @throws Exception when a call fails
+     */
+    @Test
+    @DisplayName("in a batch that rolls back, the queued discarded event is dropped")
+    void aRolledBackBatchSendsNoDiscardedEvent() throws Exception {
+      Line original = pendingLine("L-OUT", "-30.00", DAY, "ACME", "X");
+      Line bounce = pendingLine("L-IN", "30.00", DAY.plusDays(2), "ACME", "Y");
+
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        assertEquals(200, BankBouncePairService.discardPair(handler,
+            body(original.id, bounce.id)).getHttpStatus());
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+      NeoBatchScope next = NeoBatchScope.open(false);
+      try {
+        NeoBatchScope.runAfterCommitActions();
+      } finally {
+        NeoBatchScope.close(next);
+      }
+
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+    }
+
+    /**
+     * {@code failed} and the dismissal describe no write, so inside a batch they are sent at once,
+     * before any commit, and survive the batch's rollback.
+     *
+     * @throws Exception when a call fails
+     */
+    @Test
+    @DisplayName("in a batch, failed and dismissPair events are sent at once")
+    void failedAndDismissedAreSentAtOnceInABatch() throws Exception {
+      Line original = pendingLine("L-OUT", "-30.00", DAY, "ACME", "X");
+      Line bounce = pendingLine("L-IN", "30.00", DAY.plusDays(2), "ACME", "Y");
+      when(bounce.mock.isActive()).thenReturn(false);
+      Line dismissed = pendingLine("L-DO", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      pendingLine("L-DB", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        assertEquals(409, BankBouncePairService.discardPair(handler,
+            body(original.id, bounce.id)).getHttpStatus());
+        assertEquals(200, BankBouncePairService.dismissPair(handler,
+            new JSONObject().put("financialAccountId", ACCOUNT_ID)
+                .put("statementLineId", dismissed.id)).getHttpStatus());
+
+        List<Map<String, Object>> before = decided(2);
+        assertEquals(List.of("failed", "unchecked"),
+            List.of(before.get(0).get("decision"), before.get(1).get("decision")));
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+      verify(telemetry, after(300).times(2)).emit(anyString(), anyMap(), any());
+    }
+
+    /**
+     * A telemetry service that throws on every event never fails nor undoes the action: the
+     * discard, the restore, the dismissal and the modal all complete and write what they write,
+     * the events were attempted, and the sender keeps delivering afterwards.
+     *
+     * @throws Exception when a call fails
+     */
+    @Test
+    @DisplayName("a throwing telemetry service never fails discard / restore / dismiss / modal")
+    void aThrowingTelemetryNeverFailsTheAction() throws Exception {
+      doThrow(new IllegalStateException("mixpanel down")).when(telemetry)
+          .emit(anyString(), anyMap(), any());
+      Line original = pendingLine("L-OUT", "-30.00", DAY, "ACME", "X");
+      Line bounce = pendingLine("L-IN", "30.00", DAY.plusDays(2), "ACME", "Y");
+      Line a = pendingLine("L-A", "-50.00", DAY, "BETA", "X");
+      Line b = pendingLine("L-B", "50.00", DAY.plusDays(1), "BETA", "Y");
+      discardedPair(a, b);
+      Line mo = pendingLine("L-MO", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line mb = pendingLine("L-MB", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+
+      assertEquals(200, BankBouncePairService.discardPair(handler,
+          body(original.id, bounce.id)).getHttpStatus());
+      assertEquals(200, BankBouncePairService.restorePair(handler, restoreBody(a.id))
+          .getHttpStatus());
+      assertEquals(200, BankBouncePairService.dismissPair(handler, body(mo.id, mb.id))
+          .getHttpStatus());
+      JSONArray results = runModal(new JSONObject(), new JSONArray().put(pairGroup(mo.id, mb.id)));
+
+      assertEquals(Boolean.TRUE, original.value(StatementLineDiscard.COL_IS_DISCARDED));
+      assertEquals(Boolean.FALSE, a.value(StatementLineDiscard.COL_IS_DISCARDED));
+      assertTrue(results.getJSONObject(0).getBoolean("discarded"), results.toString());
+      assertEquals(Boolean.TRUE, mb.value(StatementLineDiscard.COL_IS_DISCARDED));
+      // discarded + restored + unchecked + modal discarded + summary: all attempted.
+      verify(telemetry, timeout(WAIT_MS).times(5)).emit(anyString(), anyMap(), any());
+
+      Mockito.doNothing().when(telemetry).emit(anyString(), anyMap(), any());
+      Line late = pendingLine("L-LO", "-90.00", DAY, "", "TRANSFERENCIA");
+      pendingLine("L-LB", "90.00", DAY, "", "DEVOLUCION TRANSFERENCIA");
+      BankBouncePairService.dismissPair(handler, new JSONObject()
+          .put("financialAccountId", ACCOUNT_ID).put("statementLineId", late.id));
+      verify(telemetry, timeout(WAIT_MS).times(6)).emit(anyString(), anyMap(), any());
+    }
+
+    /**
+     * The background sender's queue is full (a slow Mixpanel): every event is rejected and
+     * dropped, and still the discard, the refused discard, the restore, the dismissal and the
+     * modal answer exactly as without telemetry.
+     *
+     * @throws Exception when a call fails
+     */
+    @Test
+    @DisplayName("a full sender queue drops the events and never fails any action")
+    void aFullSenderQueueNeverFailsTheAction() throws Exception {
+      Line original = pendingLine("L-OUT", "-30.00", DAY, "ACME", "X");
+      Line bounce = pendingLine("L-IN", "30.00", DAY.plusDays(2), "ACME", "Y");
+      Line refusedOriginal = pendingLine("L-RO", "-40.00", DAY, "GAMMA", "X");
+      Line refusedBounce = pendingLine("L-RB", "40.00", DAY.plusDays(2), "GAMMA", "Y");
+      when(refusedBounce.mock.isActive()).thenReturn(false);
+      Line a = pendingLine("L-A", "-50.00", DAY, "BETA", "X");
+      Line b = pendingLine("L-B", "50.00", DAY.plusDays(1), "BETA", "Y");
+      discardedPair(a, b);
+      Line mo = pendingLine("L-MO", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line mb = pendingLine("L-MB", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+
+      ThreadPoolExecutor sender = sender();
+      CountDownLatch release = new CountDownLatch(1);
+      CountDownLatch started = new CountDownLatch(1);
+      try {
+        sender.execute(() -> {
+          started.countDown();
+          awaitQuietly(release);
+        });
+        assertTrue(started.await(WAIT_MS, TimeUnit.MILLISECONDS), "the sender thread is busy");
+        while (sender.getQueue().remainingCapacity() > 0) {
+          sender.execute(() -> { });
+        }
+
+        assertEquals(200, BankBouncePairService.discardPair(handler,
+            body(original.id, bounce.id)).getHttpStatus());
+        assertCoded(BankBouncePairService.discardPair(handler,
+            body(refusedOriginal.id, refusedBounce.id)), 409,
+            BankBounceErrors.CODE_LINE_NOT_PENDING);
+        assertEquals(200, BankBouncePairService.restorePair(handler, restoreBody(a.id))
+            .getHttpStatus());
+        assertEquals(200, BankBouncePairService.dismissPair(handler, body(mo.id, mb.id))
+            .getHttpStatus());
+        JSONArray results = runModal(new JSONObject(),
+            new JSONArray().put(pairGroup(mo.id, mb.id)));
+
+        assertEquals(Boolean.TRUE, original.value(StatementLineDiscard.COL_IS_DISCARDED));
+        assertEquals(Boolean.FALSE, a.value(StatementLineDiscard.COL_IS_DISCARDED));
+        assertTrue(results.getJSONObject(0).getBoolean("discarded"), results.toString());
+      } finally {
+        release.countDown();
+      }
+      awaitDrained(sender);
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // dismissPair through its POST route envelope
+  // ---------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("POST ?action=dismissPair — runPostAction envelope, refusals roll back, no write")
+  class DismissPairRoute {
+
+    private MockedStatic<OBContext> obContext;
+
+    /** {@code runPostAction} enters and leaves admin mode: the OBContext is mocked statically. */
+    @BeforeEach
+    void mockContext() {
+      obContext = mockStatic(OBContext.class);
+    }
+
+    /** Closes the OBContext mock. */
+    @AfterEach
+    void closeContext() {
+      obContext.close();
+    }
+
+    /**
+     * The route runs {@code dismissPair} inside {@code runPostAction} (admin mode on and off),
+     * answers 200 {@code {ok:true}}, does not roll back, records the {@code unchecked} decision
+     * and writes nothing on any line.
+     *
+     * @throws Exception when the call fails
+     */
+    @Test
+    @DisplayName("200 {ok:true} through runPostAction, no rollback, one unchecked event, no write")
+    void dismissesThroughTheEnvelope() throws Exception {
+      Line original = pendingLine("L-OUT", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line bounce = pendingLine("L-IN", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      NeoContext context = routeContext(body(bounce.id, original.id));
+
+      NeoResponse response;
+      try (MockedStatic<ReconciliationHandlerSupport> support =
+          mockStatic(ReconciliationHandlerSupport.class, Mockito.CALLS_REAL_METHODS)) {
+        response = BankBouncePairService.handleDismissPair(handler, context);
+        support.verify(() -> ReconciliationHandlerSupport.runPostAction(handler, context,
+            BankBouncePairService.ACTION_DISMISS_PAIR));
+      }
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(data(response).getBoolean("ok"));
+      obContext.verify(() -> OBContext.setAdminMode(true));
+      obContext.verify(OBContext::restorePreviousMode);
+      verify(handler, never()).doRollbackAndClose();
+      assertEquals(BankBounceKpiTelemetry.DECISION_UNCHECKED, decided(1).get(0).get("decision"));
+      assertNothingWritten(original, bounce);
+      verify(dal, never()).remove(any());
+    }
+
+    /**
+     * Every refusal goes back through the envelope's rollback, sends nothing and writes nothing:
+     * 403 with the flag off, 400 without {@code statementLineId}, 400 for the same line twice, 404
+     * for a line that does not exist, 400 for a line or a counterpart of another account.
+     *
+     * @throws Exception when a call fails
+     */
+    @Test
+    @DisplayName("403 flag off, 400 missing / same line, 404 missing, 400 foreign: rolled back")
+    void refusalsRollBackAndSendNothing() throws Exception {
+      Line original = pendingLine("L-OUT", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      Line bounce = pendingLine("L-IN", "80.00", DAY.plusDays(1), "", "ABONO");
+      pisRows.add(new Object[] { "E2E777", "PAY-PIS" });
+      Line foreign = pendingLine("L-FOREIGN", "-80.00", DAY, "", "SEPA TRANSFER E2E777");
+      when(foreign.mock.getBankStatement().getAccount()).thenReturn(otherAccount);
+      pending.remove(foreign.mock);
+
+      assertEquals(400, route(new JSONObject().put("financialAccountId", ACCOUNT_ID)
+          .put("counterpartLineId", bounce.id)).getHttpStatus());
+      assertEquals(400, route(body(bounce.id, bounce.id)).getHttpStatus());
+      assertEquals(404, route(body("L-NOPE", bounce.id)).getHttpStatus());
+      assertEquals(404, route(body(bounce.id, "L-NOPE")).getHttpStatus());
+      assertEquals(400, route(body(foreign.id, bounce.id)).getHttpStatus());
+      assertEquals(400, route(body(bounce.id, foreign.id)).getHttpStatus());
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+      assertCoded(route(body(bounce.id, original.id)), 403, BankBounceErrors.CODE_SUGGESTIONS_OFF);
+
+      verify(handler, Mockito.times(7)).doRollbackAndClose();
+      verify(telemetry, after(300).never()).emit(anyString(), anyMap(), any());
+      assertNothingWritten(original, bounce, foreign);
+    }
+
+    /**
+     * Runs {@code dismissPair} through its POST route.
+     *
+     * @param body the request body
+     * @return the answer
+     */
+    private NeoResponse route(JSONObject body) {
+      return BankBouncePairService.handleDismissPair(handler, routeContext(body));
+    }
+
+    /**
+     * The context of a {@code POST ?action=dismissPair} from the SPA.
+     *
+     * @param body the request body
+     * @return the context
+     */
+    private NeoContext routeContext(JSONObject body) {
+      return NeoContext.builder().httpMethod("POST").requestBody(body)
+          .queryParams(Map.of("action", BankBouncePairService.ACTION_DISMISS_PAIR)).build();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // KPI helpers
+  // ---------------------------------------------------------------------------
+
+  /** The properties of a decision whose proposal detection gave. */
+  private static final Set<String> DECIDED_KEYS = Set.of("account_id", "channel", "flag_enabled",
+      "detection_signal", "signals_count", "confidence", "ambiguous", "adjacent", "preselected",
+      "chosen_among_alternatives", "decision", "surface");
+  /** The properties of a {@code failed} decision on a group detection does not see. */
+  private static final Set<String> DECIDED_UNKNOWN_PROPOSAL_KEYS = Set.of("account_id", "channel",
+      "flag_enabled", "decision", "surface");
+  /** The properties of a restored pair. */
+  private static final Set<String> RESTORED_KEYS = Set.of("account_id", "channel", "flag_enabled",
+      "detection_signal", "confidence", "days_since_decided");
+  /** The properties of a restored pair whose discard time is unknown. */
+  private static final Set<String> RESTORED_KEYS_WITHOUT_DAYS = Set.of("account_id", "channel",
+      "flag_enabled", "detection_signal", "confidence");
+  /** The properties of the {@code applySuggestions} summary. */
+  private static final Set<String> SUMMARY_KEYS = Set.of("account_id", "channel", "flag_enabled",
+      "pairs_shown", "pairs_discarded", "pairs_unchecked", "pairs_sent_to_panel",
+      "preselection_changed");
+
+  /** The sanitized events the real telemetry service of {@link #realTelemetry} submitted. */
+  private final List<NeoTelemetryEvent> sent = new CopyOnWriteArrayList<>();
+
+  /**
+   * Routes the KPI events through a REAL {@link NeoTelemetryService} — its allowlist, bounds and
+   * null filtering — into {@link #sent}; spied, so the raw properties can be compared with what
+   * survived.
+   *
+   * @return the spied service
+   */
+  private NeoTelemetryService realTelemetry() {
+    NeoTelemetryService service = Mockito.spy(new NeoTelemetryService(sent::add, System::nanoTime));
+    BankBounceKpiTelemetry.setTelemetryService(service);
+    return service;
+  }
+
+  /**
+   * Waits until {@code count} events were submitted, then a little more, and asserts that exactly
+   * that many were.
+   *
+   * @param count the expected number of events
+   * @return the events, in order
+   * @throws InterruptedException when interrupted while waiting
+   */
+  private List<NeoTelemetryEvent> awaitSent(int count) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + WAIT_MS;
+    while (sent.size() < count && System.currentTimeMillis() < deadline) {
+      Thread.sleep(10);
+    }
+    Thread.sleep(100);
+    assertEquals(count, sent.size(), "submitted events: " + sent);
+    return new ArrayList<>(sent);
+  }
+
+  /**
+   * The raw properties every KPI event was emitted with, in order.
+   *
+   * @param service the spied service
+   * @return the properties handed to {@code emit}
+   */
+  private static List<Map<String, Object>> rawProperties(NeoTelemetryService service) {
+    ArgumentCaptor<Map<String, Object>> captor = mapCaptor();
+    verify(service, Mockito.atLeastOnce()).emit(anyString(), captor.capture(), any());
+    return captor.getAllValues();
+  }
+
+  /**
+   * One submitted event: exactly {@code keys}, every non-null raw property kept unchanged by the
+   * allowlist, {@code flag_enabled: true}, and no record data.
+   *
+   * @param event the submitted event
+   * @param raw   the properties it was emitted with
+   * @param keys  the exact property names
+   */
+  private static void assertShape(NeoTelemetryEvent event, Map<String, Object> raw,
+      Set<String> keys) {
+    Map<String, Object> kept = new LinkedHashMap<>();
+    raw.forEach((key, value) -> {
+      if (value != null) {
+        kept.put(key, value);
+      }
+    });
+    assertEquals(kept, event.getProperties(), "the allowlist dropped or changed a property");
+    assertEquals(keys, event.getProperties().keySet());
+    assertEquals(Boolean.TRUE, event.getProperties().get("flag_enabled"));
+    assertNoRecordData(event.getProperties());
+  }
+
+  /**
+   * Runs the modal path of {@code applySuggestions} over bounce groups, as the handler does:
+   * applyPairs with the call's detection and recorder, then prime and finish.
+   *
+   * @param request the body (may carry {@code bounceDecisions})
+   * @param groups  the groups
+   * @return the per-group results
+   * @throws Exception when the call fails
+   */
+  private JSONArray runModal(JSONObject request, JSONArray groups) throws Exception {
+    BankBouncePairService.Detection detection =
+        new BankBouncePairService.Detection(handler, account, true);
+    BankBounceKpiTelemetry.ModalDecisions kpi =
+        BankBounceKpiTelemetry.ModalDecisions.of(detection, account, request);
+    JSONArray results = new JSONArray();
+    BankBouncePairService.applyPairs(handler, account, groups, new HashSet<>(), results,
+        detection, kpi);
+    kpi.prime();
+    kpi.finish();
+    return results;
+  }
+
+  /**
+   * A detection-model line with no statement.
+   *
+   * @param id     the line id
+   * @param amount the signed amount
+   * @return the line
+   */
+  private static StatementLine model(String id, long amount) {
+    return new StatementLine(id, DAY, 10, "", "", BigDecimal.valueOf(amount), true);
+  }
+
+  /**
+   * The KPI's background sender.
+   *
+   * @return the executor
+   * @throws Exception when it cannot be read
+   */
+  private static ThreadPoolExecutor sender() throws Exception {
+    Field field = BankBounceKpiTelemetry.class.getDeclaredField("SENDER");
+    field.setAccessible(true);
+    return (ThreadPoolExecutor) field.get(null);
+  }
+
+  /**
+   * Waits on a latch, giving up after the test timeout.
+   *
+   * @param latch the latch
+   */
+  private static void awaitQuietly(CountDownLatch latch) {
+    try {
+      latch.await(WAIT_MS * 5, TimeUnit.MILLISECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  /**
+   * Waits until the sender has nothing queued or running.
+   *
+   * @param sender the executor
+   * @throws InterruptedException when interrupted while waiting
+   */
+  private static void awaitDrained(ThreadPoolExecutor sender) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + WAIT_MS * 5;
+    while ((!sender.getQueue().isEmpty() || sender.getActiveCount() > 0)
+        && System.currentTimeMillis() < deadline) {
+      Thread.sleep(10);
+    }
+  }
+
+  /** The decision events captured by the last {@link #applyWithDecisions} call, in order. */
+  private List<Map<String, Object>> lastDecided;
+
+  /**
+   * Runs the modal path of {@code applySuggestions} over the bounce groups: applyPairs with the
+   * call's detection and recorder, then prime and finish, as the handler does.
+   *
+   * @param request  the body carrying {@code bounceDecisions}
+   * @param groups   one group or a JSONArray of groups
+   * @param expected how many decision events to wait for
+   * @return the summary event's properties
+   * @throws Exception when the call fails
+   */
+  private Map<String, Object> applyWithDecisions(JSONObject request, Object groups, int expected)
+      throws Exception {
+    JSONArray array = groups instanceof JSONArray ? (JSONArray) groups
+        : new JSONArray().put(groups);
+    BankBouncePairService.Detection detection =
+        new BankBouncePairService.Detection(handler, account, true);
+    BankBounceKpiTelemetry.ModalDecisions kpi =
+        BankBounceKpiTelemetry.ModalDecisions.of(detection, account, request);
+    BankBouncePairService.applyPairs(handler, account, array, new HashSet<>(), new JSONArray(),
+        detection, kpi);
+    kpi.prime();
+    kpi.finish();
+    lastDecided = decided(expected);
+    ArgumentCaptor<Map<String, Object>> captor = mapCaptor();
+    verify(telemetry, timeout(WAIT_MS)).emit(
+        eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_SUGGESTIONS_APPLIED), captor.capture(),
+        eq(CLIENT_ID));
+    return captor.getValue();
+  }
+
+  /**
+   * Waits for exactly {@code count} decision events and returns their properties, in order.
+   *
+   * @param count the expected number of events
+   * @return their properties
+   */
+  private List<Map<String, Object>> decided(int count) {
+    ArgumentCaptor<Map<String, Object>> captor = mapCaptor();
+    verify(telemetry, timeout(WAIT_MS).times(count)).emit(
+        eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED), captor.capture(), any());
+    return captor.getAllValues();
+  }
+
+  /**
+   * A typed captor for event properties.
+   *
+   * @return the captor
+   */
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static ArgumentCaptor<Map<String, Object>> mapCaptor() {
+    return (ArgumentCaptor) ArgumentCaptor.forClass(Map.class);
+  }
+
+  /**
+   * One {@code bounceDecisions} entry.
+   *
+   * @param groupKey the autoMatch groupKey
+   * @param decision the decision
+   * @return the entry
+   * @throws Exception when it cannot be written
+   */
+  private static JSONObject decision(String groupKey, String decision) throws Exception {
+    return new JSONObject().put("groupKey", groupKey).put("decision", decision);
+  }
+
+  /**
+   * Legal rule: no line id, account id, amount or statement text in an event.
+   *
+   * @param props the event properties
+   */
+  private static void assertNoRecordData(Map<String, Object> props) {
+    for (Object value : props.values()) {
+      String text = String.valueOf(value);
+      assertFalse(text.startsWith("L-") || text.contains(ACCOUNT_ID) || text.contains("ACME")
+          || text.contains("TRANSFER") || text.contains(".00"), "record data leaked: " + props);
     }
   }
 

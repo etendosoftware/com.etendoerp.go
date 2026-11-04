@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -33,10 +34,12 @@ import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -59,12 +62,14 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -74,6 +79,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import com.etendoerp.go.schemaforge.BankBounceDetector.Candidate;
 import com.etendoerp.go.schemaforge.BankBounceDetector.Pair;
 import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryEvents;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 
 /**
  * The bounce-pair suggestions of the reconciliation ({@code bank-bounce-suggestions}, ETP-5581):
@@ -98,6 +105,7 @@ import com.etendoerp.go.schemaforge.BankBounceDetector.StatementLine;
  * @covers com.etendoerp.go.schemaforge.ReconciliationHandlerSupport
  * @covers com.etendoerp.go.schemaforge.BankBouncePairService
  * @covers com.etendoerp.go.schemaforge.ReconciliationFlowSupport
+ * @covers com.etendoerp.go.schemaforge.BankBounceKpiTelemetry
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationHandlerBounceSuggestionsTest {
@@ -128,6 +136,8 @@ public class ReconciliationHandlerBounceSuggestionsTest {
 
   private ReconciliationHandler handler;
   private FIN_FinancialAccount account;
+  /** Receives every bounce-pair KPI event of a case, never a runtime sink. */
+  private NeoTelemetryService kpiTelemetry;
 
   /**
    * A spied handler whose rollback, tolerances, account and rules are stubbed, so each case only
@@ -143,11 +153,17 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     when(account.getId()).thenReturn(ACC_ID);
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
+    kpiTelemetry = mock(NeoTelemetryService.class);
+    BankBounceKpiTelemetry.setTelemetryService(kpiTelemetry);
   }
 
-  /** Releases the inline mocks, so a spy of one case never leaks into the next. */
+  /**
+   * Restores the runtime KPI telemetry service and releases the inline mocks, so a spy of one case
+   * never leaks into the next.
+   */
   @After
   public void clearMocks() {
+    BankBounceKpiTelemetry.setTelemetryService(null);
     Mockito.framework().clearInlineMocks();
   }
 
@@ -1225,5 +1241,369 @@ public class ReconciliationHandlerBounceSuggestionsTest {
     verify(handler, never()).getOrCreateDraftReconciliation(any());
     verify(handler, never()).matchBankStatementLine(any(), any(), any());
     verify(handler, never()).processReconciliation(any());
+  }
+
+  // ---------------------------------------------------------------------------
+  // applySuggestions: the bounce-pair KPI events (ETP-5581)
+  // ---------------------------------------------------------------------------
+
+  /** The tenant every KPI event of these cases carries. */
+  private static final String CLIENT_ID = "client-1";
+  /** How long a case waits for the KPI's background sender. */
+  private static final long KPI_WAIT_MS = 2000;
+
+  /**
+   * Gives the account a tenant and makes the call's detection readable without a database: the
+   * pending lines are empty, the DAL flush is a no-op, and the detection answers what the case
+   * passes in.
+   *
+   * @param dal      the DAL static mock of the case
+   * @param detector the detector static mock of the case
+   * @param detected the pairs the detection answers, read on each detection run
+   * @return the mock DAL
+   */
+  private OBDal detectionAnswers(MockedStatic<OBDal> dal, MockedStatic<BankBounceDetector> detector,
+      org.mockito.stubbing.Answer<List<Pair>> detected) {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    when(account.getClient()).thenReturn(client);
+    doReturn(Collections.emptyList()).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
+    OBDal obDal = mock(OBDal.class);
+    dal.when(OBDal::getInstance).thenReturn(obDal);
+    detector.when(() -> BankBounceDetector.load(any(), any(), anyInt()))
+        .thenReturn(mock(BankBounceDetector.AccountData.class));
+    detector.when(() -> BankBounceDetector.detect(any())).thenAnswer(detected);
+    return obDal;
+  }
+
+  /**
+   * Stubs the pair validation of {@code originalId}/{@code bounceId} as passing, with DAL lines
+   * that carry those ids (the KPI resolves the discarded pair through them), and records each
+   * discard.
+   *
+   * @param service    the service static mock
+   * @param events     where each discard is recorded
+   * @param originalId the original line
+   * @param bounceId   the bounce line
+   */
+  private static void discardsAsProposed(MockedStatic<BankBouncePairService> service,
+      List<String> events, String originalId, String bounceId) {
+    FIN_BankStatementLine original = mock(FIN_BankStatementLine.class);
+    when(original.getId()).thenReturn(originalId);
+    FIN_BankStatementLine bounce = mock(FIN_BankStatementLine.class);
+    when(bounce.getId()).thenReturn(bounceId);
+    service.when(() -> BankBouncePairService.validate(any(), any(), eq(originalId), eq(bounceId),
+        any())).thenReturn(new BankBouncePairService.Validated(original, bounce,
+            BankBounceDetector.SIGNAL_RETURN_TEXT, BankBounceDetector.CONFIDENCE_HIGH, null));
+    service.when(() -> BankBouncePairService.discard(any())).thenAnswer(inv -> {
+      events.add("discard");
+      return null;
+    });
+  }
+
+  /**
+   * One {@code bounceDecisions} entry.
+   *
+   * @param groupKey the autoMatch groupKey
+   * @param decision the reported decision
+   * @return the entry
+   * @throws Exception when it cannot be written
+   */
+  private static JSONObject reported(String groupKey, String decision) throws Exception {
+    return new JSONObject().put("groupKey", groupKey).put("decision", decision);
+  }
+
+  /**
+   * Waits for exactly {@code count} decision events and returns their properties, in order.
+   *
+   * @param count the expected number
+   * @return the properties
+   */
+  private List<Map<String, Object>> decidedEvents(int count) {
+    ArgumentCaptor<Map<String, Object>> captor = propertiesCaptor();
+    verify(kpiTelemetry, timeout(KPI_WAIT_MS).times(count)).emit(
+        eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED), captor.capture(), eq(CLIENT_ID));
+    return captor.getAllValues();
+  }
+
+  /**
+   * Waits for the one summary event and returns its properties.
+   *
+   * @return the properties
+   */
+  private Map<String, Object> summaryEvent() {
+    ArgumentCaptor<Map<String, Object>> captor = propertiesCaptor();
+    verify(kpiTelemetry, timeout(KPI_WAIT_MS).times(1)).emit(
+        eq(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_SUGGESTIONS_APPLIED), captor.capture(),
+        eq(CLIENT_ID));
+    return captor.getValue();
+  }
+
+  /**
+   * A typed captor for event properties.
+   *
+   * @return the captor
+   */
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static ArgumentCaptor<Map<String, Object>> propertiesCaptor() {
+    return (ArgumentCaptor) ArgumentCaptor.forClass(Map.class);
+  }
+
+  /**
+   * The modal reports a pair it showed and did not apply, whose original a transaction group of
+   * the same call reconciles. The call's detection is read once, BEFORE that group is matched —
+   * after it the line would no longer be pending and the pair would be gone — so the reported
+   * {@code unchecked} decision still resolves to the pair, and the summary counts it.
+   *
+   * @throws Exception when the call fails
+   */
+  @Test
+  public void applySuggestionsReadsTheDetectionBeforeTransactionGroupsTakeTheirLines()
+      throws Exception {
+    List<String> events = new ArrayList<>();
+    boolean[] matched = { false };
+    FIN_BankStatementLine lineT = ownedLine("T", -50);
+    doReturn(lineT).when(handler).loadLine("T");
+    doReturn(trx("t-t", -50)).when(handler).loadTransaction("t-t");
+    stubCompose();
+    doAnswer(inv -> {
+      events.add("match:T");
+      matched[0] = true;
+      return null;
+    }).when(handler).matchBankStatementLine(any(), any(), any());
+    Pair onT = new Pair(model("T", -50, DAY), model("BT", 50, DAY.plusDays(2)),
+        Collections.emptyList(), List.of(BankBounceDetector.SIGNAL_COUNTERPARTY),
+        BankBounceDetector.CONFIDENCE_REVIEW);
+    JSONObject body = applyBody(txnGroup("transaction", "T", "t-t")).put("bounceDecisions",
+        new JSONArray().put(reported(onT.groupKey(), "unchecked")));
+
+    NeoResponse response;
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<BankBounceDetector> detector =
+            mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS);
+        MockedStatic<StatementLineFilter> filter = mockStatic(StatementLineFilter.class);
+        MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+      detectionAnswers(dal, detector, inv -> {
+        events.add("detect");
+        return matched[0] ? Collections.emptyList() : List.of(onT);
+      });
+
+      response = handler.applySuggestions(body);
+    }
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(Arrays.asList("detect", "match:T"), events);
+    Map<String, Object> decided = decidedEvents(1).get(0);
+    assertEquals("unchecked", decided.get("decision"));
+    assertEquals("modal", decided.get("surface"));
+    assertEquals(BankBounceDetector.SIGNAL_COUNTERPARTY, decided.get("detection_signal"));
+    assertEquals(Boolean.FALSE, decided.get("preselected"));
+    Map<String, Object> summary = summaryEvent();
+    assertEquals(1, summary.get("pairs_shown"));
+    assertEquals(1, summary.get("pairs_unchecked"));
+    assertEquals(0, summary.get("pairs_discarded"));
+  }
+
+  /**
+   * The decisions and the summary are only sent once the call answered its 201: when processing
+   * the batch reconciliation fails (400), no bounce-pair event leaves — neither the applied pair's
+   * {@code discarded} nor the reported {@code unchecked} — although the pair was discarded in the
+   * call.
+   *
+   * @throws Exception when the call fails
+   */
+  @Test
+  public void applySuggestionsSendsNoBounceEventWhenTheBatchReconciliationFails()
+      throws Exception {
+    List<String> events = new ArrayList<>();
+    doReturn(ownedLine("T", 70)).when(handler).loadLine("T");
+    doReturn(trx("t-t", 70)).when(handler).loadTransaction("t-t");
+    FIN_Reconciliation rec = stubCompose();
+    OBError failure = mock(OBError.class);
+    when(failure.getType()).thenReturn("Error");
+    when(failure.getMessage()).thenReturn("cannot process");
+    doReturn(failure).when(handler).processReconciliation(rec);
+    JSONObject body = applyBody(bounceGroup("O1", "B1"), txnGroup("transaction", "T", "t-t"))
+        .put("bounceDecisions", new JSONArray().put(reported(REVIEW.groupKey(), "unchecked")));
+
+    NeoResponse response;
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<BankBounceDetector> detector =
+            mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS);
+        MockedStatic<BankBouncePairService> service =
+            mockStatic(BankBouncePairService.class, CALLS_REAL_METHODS);
+        MockedStatic<StatementLineFilter> filter = mockStatic(StatementLineFilter.class);
+        MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+      detectionAnswers(dal, detector, inv -> List.of(HIGH, REVIEW));
+      discardsAsProposed(service, events, "O1", "B1");
+
+      response = handler.applySuggestions(body);
+    }
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(Collections.singletonList("discard"), events);
+    verify(kpiTelemetry, Mockito.after(300).never()).emit(anyString(), anyMap(), any());
+  }
+
+  /**
+   * At handler level the SPA's {@code bounceDecisions} are resolved through the call's detection:
+   * the key of the pair applied in the call, an unknown key, an unknown decision, a repeated key,
+   * an entry with no key and an entry that is not an object are ignored — never an error — and
+   * one decision per pair plus the summary are sent; the results only report the applied group.
+   *
+   * @throws Exception when the call fails
+   */
+  @Test
+  public void applySuggestionsIgnoresUnknownInvalidRepeatedAndAppliedDecisionKeys()
+      throws Exception {
+    List<String> events = new ArrayList<>();
+    JSONObject body = applyBody(bounceGroup("O1", "B1")).put("bounceDecisions", new JSONArray()
+        .put(reported(HIGH.groupKey(), "unchecked"))
+        .put(reported("bounce-NOPE", "unchecked"))
+        .put(reported(REVIEW.groupKey(), "maybe"))
+        .put(reported(REVIEW.groupKey(), "unchecked"))
+        .put(reported(REVIEW.groupKey(), "sent_to_panel"))
+        .put(new JSONObject().put("decision", "unchecked"))
+        .put("not-an-object")
+        .put(reported(AMBIGUOUS.groupKey(), "sent_to_panel")));
+
+    NeoResponse response;
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<BankBounceDetector> detector =
+            mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS);
+        MockedStatic<BankBouncePairService> service =
+            mockStatic(BankBouncePairService.class, CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+      detectionAnswers(dal, detector, inv -> List.of(HIGH, REVIEW, AMBIGUOUS));
+      discardsAsProposed(service, events, "O1", "B1");
+
+      response = handler.applySuggestions(body);
+    }
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(1, data(response).getJSONArray("results").length());
+    List<Map<String, Object>> decided = decidedEvents(3);
+    assertEquals(Arrays.asList("discarded", "unchecked", "sent_to_panel"),
+        Arrays.asList(decided.get(0).get("decision"), decided.get(1).get("decision"),
+            decided.get(2).get("decision")));
+    assertEquals(Boolean.TRUE, decided.get(0).get("preselected"));
+    assertEquals(BankBounceDetector.CONFIDENCE_REVIEW, decided.get(1).get("confidence"));
+    assertEquals(Boolean.TRUE, decided.get(2).get("ambiguous"));
+    Map<String, Object> summary = summaryEvent();
+    assertEquals(3, summary.get("pairs_shown"));
+    assertEquals(1, summary.get("pairs_discarded"));
+    assertEquals(1, summary.get("pairs_unchecked"));
+    assertEquals(1, summary.get("pairs_sent_to_panel"));
+    assertEquals(Boolean.FALSE, summary.get("preselection_changed"));
+  }
+
+  /**
+   * A telemetry service that throws on every event never fails the call: 201, the pair is
+   * discarded and its result reported, and both events were attempted.
+   *
+   * @throws Exception when the call fails
+   */
+  @Test
+  public void applySuggestionsSucceedsWhenTheTelemetryThrows() throws Exception {
+    doThrow(new IllegalStateException("mixpanel down")).when(kpiTelemetry)
+        .emit(anyString(), anyMap(), any());
+    List<String> events = new ArrayList<>();
+
+    NeoResponse response;
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<BankBounceDetector> detector =
+            mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS);
+        MockedStatic<BankBouncePairService> service =
+            mockStatic(BankBouncePairService.class, CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+      detectionAnswers(dal, detector, inv -> List.of(HIGH));
+      discardsAsProposed(service, events, "O1", "B1");
+
+      response = handler.applySuggestions(applyBody(bounceGroup("O1", "B1")));
+    }
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(Collections.singletonList("discard"), events);
+    assertTrue(data(response).getJSONArray("results").getJSONObject(0).getBoolean("discarded"));
+    verify(kpiTelemetry, timeout(KPI_WAIT_MS).times(2)).emit(anyString(), anyMap(), any());
+  }
+
+  /**
+   * A detection the KPI cannot read (the pending lines fail to load) never fails the call: the
+   * pair, validated on its own, is still discarded, the call answers 201, and no event is sent.
+   *
+   * @throws Exception when the call fails
+   */
+  @Test
+  public void applySuggestionsSucceedsWhenTheKpiCannotReadTheDetection() throws Exception {
+    List<String> events = new ArrayList<>();
+
+    NeoResponse response;
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class);
+        MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<BankBounceDetector> detector =
+            mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS);
+        MockedStatic<BankBouncePairService> service =
+            mockStatic(BankBouncePairService.class, CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(true);
+      detectionAnswers(dal, detector, inv -> List.of(HIGH));
+      detector.when(() -> BankBounceDetector.load(any(), any(), anyInt()))
+          .thenThrow(new IllegalStateException("pending lines unavailable"));
+      discardsAsProposed(service, events, "O1", "B1");
+
+      response = handler.applySuggestions(applyBody(bounceGroup("O1", "B1")).put(
+          "bounceDecisions", new JSONArray().put(reported(REVIEW.groupKey(), "unchecked"))));
+    }
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(Collections.singletonList("discard"), events);
+    verify(kpiTelemetry, Mockito.after(300).never()).emit(anyString(), anyMap(), any());
+  }
+
+  /**
+   * Flag off: the bounce group is refused with its 403, the reported decisions are not even
+   * resolved (the detection is never read) and no bounce-pair event is sent.
+   *
+   * @throws Exception when the call fails
+   */
+  @Test
+  public void applySuggestionsWithTheFlagOffSendsNoBounceEvent() throws Exception {
+    NeoResponse response;
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class);
+        MockedStatic<BankBounceDetector> detector = mockStatic(BankBounceDetector.class);
+        MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
+
+      response = handler.applySuggestions(applyBody(bounceGroup("O1", "B1")).put(
+          "bounceDecisions", new JSONArray().put(reported(REVIEW.groupKey(), "unchecked"))));
+
+      detector.verifyNoInteractions();
+    }
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(BankBounceErrors.CODE_SUGGESTIONS_OFF,
+        data(response).getJSONArray("results").getJSONObject(0).getString("code"));
+    verify(kpiTelemetry, Mockito.after(300).never()).emit(anyString(), anyMap(), any());
   }
 }
