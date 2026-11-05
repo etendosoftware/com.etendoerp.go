@@ -661,24 +661,23 @@ class McpDocumentEmailToolTest {
       pdfMock.when(() -> NeoDocumentPdf.resolve(target, header))
           .thenReturn(NeoDocumentPdf.Result.notStoredInStatus("DR"));
       String draft = McpDocumentEmailTool.run(argsTo(BASE)).getString("hint");
-      assertEquals("This document is a draft and a draft never stores a PDF: "
-          + "complete it first, then open its preview in the application and ask to send again.",
-          draft);
+      assertEquals("This document is a draft and a draft never has a PDF: "
+          + "complete it first, then ask to send again.", draft);
       assertFalse(draft.contains("so its PDF is stored"), draft);
 
       pdfMock.when(() -> NeoDocumentPdf.resolve(target, header))
           .thenReturn(NeoDocumentPdf.Result.notStoredInStatus("CO"));
       String completed = McpDocumentEmailTool.run(argsTo(BASE)).getString("hint");
-      assertTrue(completed.startsWith(McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise open "
-          + "the document's preview in the application so its PDF is stored, then ask to send "
-          + "again."), completed);
+      assertTrue(completed.startsWith(McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise the "
+          + "server could not generate it: ask the user to open the document's preview in the "
+          + "application so its PDF is stored, then ask to send again."), completed);
       assertFalse(completed.contains("draft"), completed);
       assertTrue(completed.contains("first send must be done from the application"), completed);
 
       pdfMock.when(() -> NeoDocumentPdf.resolve(target, header))
           .thenReturn(NeoDocumentPdf.Result.notStored(false));
       assertTrue(McpDocumentEmailTool.run(argsTo(BASE)).getString("hint")
-          .contains("a draft never stores a PDF: complete it first"));
+          .startsWith(McpDocumentPdfTool.UNKNOWN_STATUS_DRAFT_REMARK));
     }
 
     @Test
