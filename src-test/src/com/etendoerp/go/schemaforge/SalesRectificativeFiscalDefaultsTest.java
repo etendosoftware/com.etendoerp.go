@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -255,6 +256,114 @@ public class SalesRectificativeFiscalDefaultsTest {
       assertTrue(SalesRectificativeFiscalDefaults.apply("boom").isEmpty());
       assertTrue(SalesRectificativeFiscalDefaults.apply(null).isEmpty());
       verify(dal, Mockito.times(1)).save(any());
+    }
+  }
+
+  /** The TicketBAI reverse flag is ENFORCED: N with type and code chosen → only the flag moves. */
+  @Test
+  public void tbaiReverseFlagIsEnforcedEvenWhenTypeAndCodeAreChosen() throws Exception {
+    configActive(tbaiStatement, true);
+    Invoice invoice = draftInvoice(docType(true, null, null));
+    when(invoice.getTbaiReverseinvoicetype()).thenReturn("S");
+    when(invoice.getTbaiReverseinvoicecode()).thenReturn("R1");
+
+    Map<String, Object> applied = SalesRectificativeFiscalDefaults.computeAndSet(invoice);
+
+    verify(invoice).setTbaiIsreverseinvoice(true);
+    verify(invoice, never()).setTbaiReverseinvoicetype(anyString());
+    verify(invoice, never()).setTbaiReverseinvoicecode(anyString());
+    assertEquals(1, applied.size());
+    assertEquals(Boolean.TRUE, applied.get("tbaiIsreverseinvoice"));
+  }
+
+  /** A blank VERI*FACTU type (not only the AD default F1) takes the doc type's R code. */
+  @Test
+  public void verifactuNullInvoiceTypeTakesTheDocTypeCode() throws Exception {
+    configActive(verifactuStatement, true);
+    Invoice invoice = draftInvoice(docType(true, "R1", null));
+    when(invoice.getEtvfacInvType()).thenReturn(null);
+
+    Map<String, Object> applied = SalesRectificativeFiscalDefaults.computeAndSet(invoice);
+
+    verify(invoice).setEtvfacInvType("R1");
+    assertEquals("R1", applied.get("etvfacInvType"));
+    assertEquals("I", applied.get("etvfacReverseinvtype"));
+  }
+
+  /** A user-picked R4 with a blank reverse type: R4 is kept, the reverse type is filled. */
+  @Test
+  public void verifactuChosenRectificativeCodeGetsItsMissingReverseType() throws Exception {
+    configActive(verifactuStatement, true);
+    Invoice fromDocType = draftInvoice(docType(true, "R1", "S"));
+    when(fromDocType.getEtvfacInvType()).thenReturn("R4");
+
+    Map<String, Object> applied = SalesRectificativeFiscalDefaults.computeAndSet(fromDocType);
+
+    verify(fromDocType, never()).setEtvfacInvType(anyString());
+    verify(fromDocType).setEtvfacReverseinvtype("S");
+    assertEquals(1, applied.size());
+    assertEquals("S", applied.get("etvfacReverseinvtype"));
+
+    Invoice fallback = draftInvoice(docType(true, "R1", null));
+    when(fallback.getEtvfacInvType()).thenReturn("R4");
+    when(fallback.getEtvfacReverseinvtype()).thenReturn("  ");
+
+    SalesRectificativeFiscalDefaults.computeAndSet(fallback);
+
+    verify(fallback, never()).setEtvfacInvType(anyString());
+    verify(fallback).setEtvfacReverseinvtype("I");
+  }
+
+  /** A draft status alone is not enough: a processed invoice is never touched. */
+  @Test
+  public void processedDraftIsUntouched() throws Exception {
+    configActive(tbaiStatement, true);
+    configActive(verifactuStatement, true);
+    Invoice invoice = draftInvoice(docType(true, "R1", null));
+    when(invoice.isProcessed()).thenReturn(true);
+
+    assertTrue(SalesRectificativeFiscalDefaults.computeAndSet(invoice).isEmpty());
+    verify(invoice, never()).setTbaiIsreverseinvoice(anyBoolean());
+    verify(invoice, never()).setEtvfacInvType(anyString());
+  }
+
+  /** A failing config lookup answers "not configured", and that system gets no default. */
+  @Test
+  public void failingConfigLookupAppliesNothingForThatSystem() throws Exception {
+    when(tbaiStatement.executeQuery()).thenThrow(new SQLException("tbai down"));
+    configActive(verifactuStatement, true);
+    assertFalse(SalesRectificativeFiscalDefaults.tbaiConfigActive(ORG_ID));
+    Invoice invoice = draftInvoice(docType(true, "R1", null));
+
+    Map<String, Object> applied = SalesRectificativeFiscalDefaults.computeAndSet(invoice);
+
+    verify(invoice, never()).setTbaiIsreverseinvoice(anyBoolean());
+    assertEquals("R1", applied.get("etvfacInvType"));
+
+    when(verifactuStatement.executeQuery()).thenThrow(new SQLException("vf down"));
+    assertFalse(SalesRectificativeFiscalDefaults.configExists(
+        SalesRectificativeFiscalDefaults.VERIFACTU_ACTIVE_SQL, ORG_ID));
+    Invoice second = draftInvoice(docType(true, "R1", null));
+    assertTrue(SalesRectificativeFiscalDefaults.computeAndSet(second).isEmpty());
+  }
+
+  /** No organization, or no invoice found: nothing applied, nothing flushed. */
+  @Test
+  public void missingOrganizationOrInvoiceAppliesNothing() throws Exception {
+    configActive(tbaiStatement, true);
+    configActive(verifactuStatement, true);
+    Invoice orphan = draftInvoice(docType(true, "R1", null));
+    when(orphan.getOrganization()).thenReturn(null);
+    assertTrue(SalesRectificativeFiscalDefaults.computeAndSet(orphan).isEmpty());
+    verify(orphan, never()).setTbaiIsreverseinvoice(anyBoolean());
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      when(dal.get(Invoice.class, "missing")).thenReturn(null);
+
+      assertTrue(SalesRectificativeFiscalDefaults.apply("missing").isEmpty());
+      verify(dal, never()).flush();
     }
   }
 }
