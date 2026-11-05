@@ -1,0 +1,283 @@
+name: Full Pipeline Pilot
+
+# ETP-6149: the go full pipeline (Jenkins etendo-go-tests) as parallel GitHub Actions jobs, run in
+# shadow next to Jenkins on the PRs into main. Jenkins runs it almost all in series: a successful
+# run takes a median 103 min, and a failure re-runs all of it. Here each block is its own job, so
+# a failed block re-runs alone. This is not a required check: the pilot compares duration and
+# failures per block with Jenkins before anything is replaced.
+#
+# This first job is block 3, the integration suite: the environment built the way Jenkins builds
+# it (etendo-localenv: its own PostgreSQL, install, the GOClient seeds of schema_forge's local-env
+# plugin, smartbuild), Tomcat, jsreport, and E2E_SUITE=integration against it. It also prints the
+# disk use at each step: whether all of this fits on a hosted runner is what the pilot measures
+# first.
+#
+# Secrets: ETENDOBOT_TOKEN reads etendo_core, schema_forge, etendo-localenv, the GitHub modules
+# and the npm packages; NEXUS_USER/NEXUS_PASSWORD resolve dependencies; BITBUCKET_SSH_KEY clones
+# the Bitbucket modules listed in jenkinsExtraModules.txt.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+  push:
+    branches: [feature/ETP-6149]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-pipeline-pilot-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: Integration (Tomcat + Playwright)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    # schema_forge's run-e2e-full.sh reuses a jsreport already listening on 5488, as with the
+    # Jenkins sidecar: the printable specs render through it.
+    services:
+      jsreport:
+        image: etendo/jsreport:develop
+        ports:
+          - 5488:5488
+    env:
+      CORE_BRANCH: epic/ETP-3504
+      MODULE_BRANCH: ${{ github.head_ref || github.ref_name }}
+      LE: ${{ github.workspace }}/etendo-localenv/bin/local-env.sh
+    steps:
+      - name: Disk before the build
+        run: df -h / | tee -a "$RUNNER_TEMP/disk.txt"
+
+      # The image ships SDKs this job never uses; the build, the database, Tomcat and the browsers
+      # need the room.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h / | tee -a "$RUNNER_TEMP/disk.txt"
+
+      - name: Checkout etendo_core
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo_core
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: ${{ env.CORE_BRANCH }}
+          path: etendo_core
+
+      - name: Checkout com.etendoerp.go
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: etendo_core/modules/com.etendoerp.go
+
+      # Same branch choice as the mini pipeline (moduleBranchUtils.groovy): the PR's branch when
+      # the module has it (never for develop, main, hotfix/* or mergeblock/*), otherwise the core's.
+      - name: Clone the extra modules
+        env:
+          BITBUCKET_SSH_KEY: ${{ secrets.BITBUCKET_SSH_KEY }}
+          ETENDOBOT_TOKEN: ${{ secrets.ETENDOBOT_TOKEN }}
+        run: |
+          if [ -z "$BITBUCKET_SSH_KEY" ]; then
+            echo "::error::BITBUCKET_SSH_KEY is not set: the modules on bitbucket.org/koodu_software cannot be cloned."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BITBUCKET_SSH_KEY" | tr -d '\r' > ~/.ssh/bitbucket
+          chmod 600 ~/.ssh/bitbucket
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/bitbucket -o StrictHostKeyChecking=no"
+          case "$MODULE_BRANCH" in
+            develop|main|hotfix/*|mergeblock/*) try_branch="" ;;
+            *) try_branch="$MODULE_BRANCH" ;;
+          esac
+          cd etendo_core/modules
+          for url in $(tr ',' ' ' < com.etendoerp.go/jenkinsExtraModules.txt); do
+            name="$(basename "$url" .git)"
+            case "$url" in
+              git@github.com:*) url="https://x-access-token:${ETENDOBOT_TOKEN}@github.com/${url#git@github.com:}" ;;
+            esac
+            if [ -n "$try_branch" ] && git clone -q --depth 1 --branch "$try_branch" "$url" "$name" 2>/dev/null; then
+              echo "$name: $try_branch"
+            else
+              git clone -q --depth 1 --branch "$CORE_BRANCH" "$url" "$name"
+              echo "$name: $CORE_BRANCH"
+            fi
+          done
+
+      # Same order as cloneModules.groovy for a sibling repo: this branch when schema_forge has it,
+      # otherwise main for a PR into main (or a hotfix), develop for anything else. The Jira epic
+      # step Jenkins adds for feature branches is left out: a cut into main never needs it.
+      - name: Pick the schema_forge branch
+        id: sf
+        env:
+          ETENDOBOT_TOKEN: ${{ secrets.ETENDOBOT_TOKEN }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          repo="https://x-access-token:${ETENDOBOT_TOKEN}@github.com/etendosoftware/etendo_schema_forge.git"
+          case "$BASE_REF:$MODULE_BRANCH" in
+            main:*|*:main|*:hotfix/*) fallback=main ;;
+            *) fallback=develop ;;
+          esac
+          branch="$fallback"
+          if git ls-remote --exit-code --heads "$repo" "$MODULE_BRANCH" >/dev/null 2>&1; then
+            branch="$MODULE_BRANCH"
+          fi
+          echo "schema_forge: $branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      # local-env loads the GO sample client through schema_forge's plugin
+      # (local-env.d/plugins/etendo-go), which it finds at etendo_core/schema_forge.
+      - name: Checkout etendo_schema_forge
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo_schema_forge
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: ${{ steps.sf.outputs.branch }}
+          path: etendo_core/schema_forge
+
+      - name: Checkout etendo-localenv
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo-localenv
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: main
+          path: etendo-localenv
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: etendo_core/schema_forge/package-lock.json
+          registry-url: https://npm.pkg.github.com
+
+      # The same properties as the Jenkins Building Environment stage. local-env points bbdd.* at
+      # its own PostgreSQL (backing this file up). The email provider goes to the sink the
+      # integration specs start (E2E_EMAIL_SINK=1); its key is the fixed e2e value Jenkins uses.
+      - name: Configure gradle.properties
+        working-directory: etendo_core
+        run: |
+          cat > gradle.properties <<EOF
+          context.name=etendo
+          bbdd.sid=etendo
+          bbdd.port=5432
+          bbdd.systemUser=postgres
+          bbdd.systemPassword=syspass
+          bbdd.user=tad
+          bbdd.password=tad
+          nexusUser=${{ secrets.NEXUS_USER }}
+          nexusPassword=${{ secrets.NEXUS_PASSWORD }}
+          githubUser=etendobot
+          githubToken=${{ secrets.ETENDOBOT_TOKEN }}
+          ETENDO_HOST=http://localhost:8080/etendo
+          docker_com.etendoerp.go=true
+          JSREPORT_PORT=5488
+          SCHEMA_FORGE_DIR=${{ github.workspace }}/etendo_core/schema_forge
+          etendo.go.email.provider.enabled=true
+          etendo.go.email.provider.baseUrl=http://127.0.0.1:8025/send
+          etendo.go.email.provider.apiKey=e2e-only-secret
+          etendo.go.app.baseUrl=http://localhost:4173
+          etendo.go.runtime.environment=local
+          allow.root=true
+          org.gradle.daemon=false
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          EOF
+
+      # `up` brings PostgreSQL (zonky binaries) and Tomcat 9 itself, installs the DB, runs the
+      # plugin seeds (GOClient sample data, onboarding sampledata) and smartbuild. No shared
+      # snapshot cache yet: Jenkins reads it with bucket keys this repo does not have, so every
+      # run installs from scratch. ETENDO_GO_SPA=0: the specs serve their own E2E bundle.
+      - name: Build the environment
+        working-directory: etendo_core
+        env:
+          LOCALENV_CACHE: ${{ runner.temp }}/localenv-cache
+          LOCALENV_UPDATE_CHECK_SECS: '0'
+          LOCALENV_NEAREST_FALLBACK: install
+          LOCALENV_PUSH: '0'
+          ETENDO_GO_SPA: '0'
+        run: |
+          ./gradlew prepareConfig
+          "$LE" up --fresh --no-tomcat
+          df -h / | tee -a "$RUNNER_TEMP/disk.txt"
+
+      # Jenkins copies these into the deployed webapp too: onboarding reads them from the classpath.
+      - name: Copy the onboarding sampledata into the webapp
+        working-directory: etendo_core
+        run: |
+          dest=build/local-env/catalina/webapps/etendo/WEB-INF/classes/com/etendoerp/go/onboarding
+          mkdir -p "$dest"
+          cp -r WebContent/WEB-INF/classes/com/etendoerp/go/onboarding/sampledata "$dest/"
+          test -f "$dest/sampledata/index.txt"
+          echo "sampledata: $(wc -l < "$dest/sampledata/index.txt") entries"
+
+      - name: Start Tomcat
+        working-directory: etendo_core
+        env:
+          LOCALENV_CACHE: ${{ runner.temp }}/localenv-cache
+          LOCALENV_UPDATE_CHECK_SECS: '0'
+        run: |
+          "$LE" start --tomcat
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8080/etendo >/dev/null && exit 0
+            sleep 5
+          done
+          echo "::error::Etendo did not answer on http://localhost:8080/etendo"
+          tail -100 build/local-env/tomcat.log
+          exit 1
+
+      - name: Install schema_forge
+        working-directory: etendo_core/schema_forge
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.ETENDOBOT_TOKEN }}
+        run: |
+          cp .env.example .env
+          make install
+
+      - name: Install Chromium
+        working-directory: etendo_core/schema_forge
+        run: npx playwright install --with-deps chromium
+
+      - name: Integration E2E
+        working-directory: etendo_core/schema_forge
+        env:
+          E2E_SUITE: integration
+          E2E_EMAIL_SINK: '1'
+          E2E_PROVISIONING_FAILURE: '1'
+          PLAYWRIGHT_HTML_REPORT: ${{ github.workspace }}/etendo_core/schema_forge/e2e/playwright-report-integration
+        run: make test-e2e-headless
+
+      - name: Disk and memory at the end
+        if: always()
+        run: |
+          df -h / | tee -a "$RUNNER_TEMP/disk.txt"
+          free -m
+          du -sh etendo_core etendo_core/build "$RUNNER_TEMP/localenv-cache" ~/.gradle ~/.cache/ms-playwright 2>/dev/null || true
+          echo "## Disk use" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/disk.txt" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-integration
+          path: etendo_core/schema_forge/e2e/playwright-report-integration
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload the environment logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-env-logs
+          path: |
+            etendo_core/build/local-env/*.log
+          retention-days: 7
+          if-no-files-found: ignore
