@@ -297,27 +297,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return rateRefusal;
     }
     autoCreateOrUpdateConversionRateDocument(context);
-    // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
-    // Mirrors PurchaseInvoiceHeaderHandler#afterHandle (ETP-4737) — the manual
-    // "Import from Source Invoice" flow links a rectificativa back to its source via
-    // C_Invoice_Reverse, same mechanism shared through AbstractInvoiceHeaderHandler.
-    boolean crudWrite = NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod());
-    Map<String, Object> fiscalDefaults = Collections.emptyMap();
-    if (crudWrite) {
-      rectificationLinks.persistOriginInvoice(context);
-      persistSiiAuthorizationno(context);
-      // ETP-5747: TicketBAI / VERI*FACTU rectificative fields, whatever channel created the invoice.
-      fiscalDefaults = SalesRectificativeFiscalDefaults.apply(
-          InvoiceCalloutHelper.resolveInvoiceIdFromContext(context));
-    }
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      // ETP-4783: the main CRUD write captures its response before afterHandle() runs, so
-      // aeatsiiAuthorizationno (written by persistSiiAuthorizationno()) is absent from the
-      // PATCH response. Inject it so the frontend sees the correct value without a re-fetch.
-      NeoResponse authorizationResponse = injectAuthorizationnoIntoSaveResponse(context);
-      return crudWrite ? completeWriteResponse(context, authorizationResponse, fiscalDefaults)
-          : authorizationResponse;
+      return afterNonRead(context);
     }
     NeoResponse prev = context.getPreviousResult();
     if (prev == null || prev.getBody() == null) {
@@ -360,6 +341,35 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       log.error("Error enriching sales invoice response", e);
       return null;
     }
+  }
+
+  /**
+   * The {@link #afterHandle} branch for everything that is not a CRUD read: CRUD writes and the
+   * other endpoint types (ACTION, ...).
+   *
+   * <p>On a CRUD write (POST/PUT/PATCH) it persists the origin-invoice relationship — mirrors
+   * {@code PurchaseInvoiceHeaderHandler#afterHandle} (ETP-4737): the manual "Import from Source
+   * Invoice" flow links a rectificativa back to its source via C_Invoice_Reverse — the SII
+   * authorization number, and the TicketBAI / VERI*FACTU rectificative defaults (ETP-5747), then
+   * completes the write response ({@link #completeWriteResponse}).
+   *
+   * <p>ETP-4783: the main CRUD write captures its response before afterHandle() runs, so
+   * aeatsiiAuthorizationno (written by persistSiiAuthorizationno()) is absent from the PATCH
+   * response; it is injected so the frontend sees the correct value without a re-fetch.
+   */
+  private NeoResponse afterNonRead(NeoContext context) {
+    boolean crudWrite = NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod());
+    Map<String, Object> fiscalDefaults = Collections.emptyMap();
+    if (crudWrite) {
+      rectificationLinks.persistOriginInvoice(context);
+      persistSiiAuthorizationno(context);
+      fiscalDefaults = SalesRectificativeFiscalDefaults.apply(
+          InvoiceCalloutHelper.resolveInvoiceIdFromContext(context));
+    }
+    NeoResponse authorizationResponse = injectAuthorizationnoIntoSaveResponse(context);
+    return crudWrite ? completeWriteResponse(context, authorizationResponse, fiscalDefaults)
+        : authorizationResponse;
   }
 
   // ---------------------------------------------------------------------------
