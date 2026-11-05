@@ -113,11 +113,12 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * line's current price as its standard price ({@link #alignStandardPriceWithCurrentPrice}), or it
  * would misread the line's current discount.
  *
- * <p><b>Not reachable from here:</b> the IMP-45 {@code supersededDefaults} entry {@code etendo_create}
- * attaches for {@code discount} (the defaults cascade proposed 0, the caller's 5 was kept). It is
- * recorded on the router's own cascade context, not on the hook context this class receives, so it
- * is still reported although the discount is applied — declared in {@code neo-headless.md}
- * §4.12.20.
+ * <p><b>The {@code discount} superseded default.</b> The IMP-45 {@code supersededDefaults} entry
+ * {@code etendo_create} attaches for {@code discount} is recorded on the router's own cascade
+ * context, not on the hook context this class receives. It is dropped by the customization
+ * declaring {@code discount} governed on an MCP create that sends it or whose cascade discount was
+ * reset ({@code OrderLineCustomization#governedCreateFields},
+ * {@link OrderLineCreateDiscount#governsDiscountOnCreate}) — see {@code neo-headless.md} §4.12.20.
  */
 final class OrderLineDiscountSupport {
 

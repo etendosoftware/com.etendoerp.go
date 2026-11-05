@@ -5047,9 +5047,10 @@ End to end through the UI, a quotation with a 10 % total discount → order (sta
 
 Known gaps, still open after the measurement (details in §4.12.20):
 
-- `etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
-  although the discount is applied. (ETP-5680 added the opt-out that can close this,
-  `NeoHandler.governedCreateFields`, §4.12.14; the order-line customization does not declare it yet.)
+- ~~`etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
+  although the discount is applied.~~ **Closed (ETP-5528):** the order-line customization now
+  declares `discount` governed on an MCP create (`NeoHandler.governedCreateFields`, §4.12.14; see
+  §4.12.20).
 - ~~With an explicit `unitPrice` other than the product's standard price, `listPrice` persisted as the defaults cascade
   left it (usually 0).~~ **Closed (ETP-5714 follow-up):** an invoice line with a price, no discount and no list price now gets
   `listPrice = unitPrice` (absent or 0 counts as no list price; `InvoiceLineAmountSupport.alignListPriceWithPrice`), so the grid's "Precio" (`listPrice`) is no longer
@@ -10466,11 +10467,19 @@ steps below in this order — both customizations call the single entry point
    fires on REST, REST batch, `etendo_batch` or the form, and abstains when the agent sent
    `discount` (an explicit 100 % stays 100), a price (ETP-5852 still derives its discount), a zero
    list price, or when the body already holds a non-zero `unitPrice`
-   (`qualifiesForCascadeDiscountReset`). Over MCP it also covers `purchase-order/lines`. When the
-   reset applied, the customization declares `discount` governed (`OrderLineCustomization
-   .governedCreateFields`, ETP-5680 contract), so a `supersededDefaults.discount` entry carrying the
-   cascade's 100 is dropped instead of advising the agent to send it back; every other entry —
-   `listPrice: {sent: 100, callout: 0}` included — is reported as before.
+   (`qualifiesForCascadeDiscountReset`). Over MCP it also covers `purchase-order/lines`.
+
+   **`discount` is governed on an MCP create** (`OrderLineCustomization.governedCreateFields` →
+   `OrderLineCreateDiscount.governsDiscountOnCreate`, ETP-5680 contract) whenever the agent sent
+   `discount` or the reset above applied. The create cascade's proposal for it is `SL_Order_Amt` run
+   on the protected list price against the selector's `unitPrice` 0, never a meaningful value, and
+   the `supersededDefaultsHint` told the agent to "send the callout value instead". Observed before
+   (live pre-QA, build 6f93aad2e, values saved correctly): `listPrice` + `discount 10` →
+   `discount: {sent: 10, callout: 100}`; `discount 20` → `{sent: 20, callout: 100}`; `discount 100` →
+   `{sent: 100, callout: 67}`. Those entries are now dropped. `listPrice` is never governed: its
+   `{sent: 100, callout: 0}` entry is still reported (the hint already calls a callout of 0
+   ignorable). REST, REST batch and `etendo_batch` never report superseded defaults, so nothing
+   changes there.
 
 What the re-fire may write:
 
@@ -10608,13 +10617,21 @@ QA reopen data (quotation 1000008, Monitor, list 300, 21 % VAT): discount 5 → 
 1350, gross 1633.50 (REST / batch; see step 3 for MCP). CP-13 (Monitor × 10, list 200, discount
 10): `listPrice 300` alone gives `unitPrice` 270, net 2700, gross 3267, discount 10.
 
-Create-side lone list price (live pre-QA, `etendo_create` on `sales-quotation/quotationLine`,
-Fernet, catalog 44): `{product, orderedQuantity 2, listPrice 100}` persisted discount 100,
-`unitPrice` 0, net 0, gross 0, answering `supersededDefaults: {listPrice: {callout: 0}, discount:
-{callout: 100}}` (as relayed). Expected with the reset: discount 0, `unitPrice` 100, net 200, the
-gross at the line's tax rate, and no `supersededDefaults.discount` entry (to be confirmed on the
-next live run, with the raw response captured). Controls unchanged: no price at all → 44 / 44,
-discount 0; `listPrice` + `discount` → priced at that discount.
+Create-side lone list price (`etendo_create`, Fernet, catalog 44, qty 2, 21 % VAT). Before the
+reset, `{product, orderedQuantity 2, listPrice 100}` persisted discount 100, `unitPrice` 0, net 0,
+gross 0. Live QA after it (local build 6f93aad2e; quotation 1000021, lines 60–100; order
+PV1000071, lines 20–40), `unitPrice` / discount / net / gross:
+
+| case | result |
+|---|---|
+| C-1 `sales-quotation/quotationLine`, C-2 `sales-order/lines`: `listPrice 100` alone | 100 / 0 / 200 / 242, `supersededDefaults` verbatim `{"listPrice":{"sent":100,"callout":0}}` (no `discount` entry) |
+| `listPrice 100` + `discount 10` | 90 / 10 / 180 / 217.80 |
+| `unitPrice 29.70` on list 33 | discount 10 derived (ETP-5852), net 59.40, gross 71.87 |
+| `listPrice 100` + `discount 100` | 0 / 100 / 0 / 0 |
+| no price at all | 44 / 0 / 88 / 106.48 |
+| CP-13 update, `listPrice 300` alone | 270 / 2700 / 3267 |
+| CP-9 update | list 270, discount 20, `unitPrice` 216, net 1296, gross 1568.16 |
+| `orderedQuantity 12` update | net 3240, gross 3920.40 |
 
 `etendo_create` of a product whose price list entry has list price 0 and standard price 50 (QA
 quotations 1000009 by the form, 1000010 by MCP): `listPrice` 50, `unitPrice` 50, `standardPrice` 50
@@ -10674,13 +10691,10 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
   derives it only from what the patch itself carries.
 - A tax-included price list: `standardPrice` is not filled, and `etendo_create` gets no price from
   `McpLinePriceInjector` either, so the rule usually abstains (no list price).
-- `etendo_create` with a discount still answers `supersededDefaults: {discount: {sent: 5, callout: 0}}`
-  and its hint, although the discount is now applied. The entry is recorded by the defaults cascade
-  on the router's own context (`McpToolRouter.handleCreate`, reported with
-  `ctx.getSupersededDefaults()`); the customization only receives the hook context, which does not
-  share it, and reaching it would be ETP-5415 plumbing. Declared, not fixed. Update (ETP-5680): the report is now
-  reconciled after the pre-hook and honours `NeoHandler.governedCreateFields` (§4.12.14), so the line customization
-  can silence this entry by declaring `discount`; it has not been wired there.
+- ~~`etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
+  although the discount is applied.~~ **Closed (ETP-5528):** the order-line customization declares
+  `discount` governed on every MCP create that sends it (or whose cascade discount it reset), so the
+  entry is dropped; see "discount is governed on an MCP create" in step 2.
 - **Closed for invoice lines (ETP-5714 follow-up): the price is the list price.** The grid column "Precio" of
   `purchase-invoice/lines` and `sales-invoice/lines` is `listPrice` (`unitPrice` is `grid:false, form:false`); the form edits
   `listPrice` and derives `unitPrice = listPrice × (1 − discount/100)`, so a form line at 50 stores `listPrice 50`. With an explicit

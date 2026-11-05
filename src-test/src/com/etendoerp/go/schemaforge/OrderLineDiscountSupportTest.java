@@ -1054,7 +1054,8 @@ class OrderLineDiscountSupportTest {
    * agent sent ({@code null}: no attribute, as on REST and {@code etendo_batch}); the first two
    * create-side line rules then run in their {@code applyLineRules} order. No product in the body,
    * so the price-list lookup abstains and no DAL is needed. The governed set the customization
-   * then declares is {@code discount} exactly when the reset applied, so only that
+   * then declares is {@code discount} exactly when the reset applied or the agent sent a discount
+   * over MCP (the cascade's {@code callout:100} / {@code 67} seen live), so only that
    * {@code supersededDefaults} entry is dropped.
    */
   @ParameterizedTest(name = "{0}")
@@ -1085,10 +1086,10 @@ class OrderLineDiscountSupportTest {
             cascaded, "listPrice,orderedQuantity,product", true, "100", "0", "discount"),
         Arguments.of("listPrice + discount sent: priced at that discount",
             "{\"listPrice\":100,\"unitPrice\":0,\"discount\":10}", "listPrice,discount", true,
-            "90", "10", ""),
+            "90", "10", "discount"),
         Arguments.of("explicit 100 % discount sent: kept, priced at 0",
             "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100}", "listPrice,discount", true,
-            "0", "100", ""),
+            "0", "100", "discount"),
         Arguments.of("genuine unitPrice below list: its discount is still derived (ETP-5852)",
             "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":0}", "listPrice,unitPrice", true,
             "29.7", "10", ""),
@@ -1100,8 +1101,8 @@ class OrderLineDiscountSupportTest {
         Arguments.of("body already priced (non-zero unitPrice): no reset",
             "{\"listPrice\":100,\"unitPrice\":44,\"discount\":56}", "listPrice", true, "44",
             "56", ""),
-        Arguments.of("non-MCP context with the attribute: no reset",
-            cascaded, "listPrice", false, "0", "100", ""),
+        Arguments.of("non-MCP context with the attribute: no reset, nothing governed",
+            cascaded, "listPrice,discount", false, "0", "100", ""),
         Arguments.of("no client-provided attribute (REST, batch): the body is the caller's",
             cascaded, null, true, "0", "100", ""));
   }

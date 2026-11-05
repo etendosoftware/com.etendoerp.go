@@ -86,15 +86,16 @@ abstract class OrderLineCustomization extends OrderLineHandler {
   }
 
   /**
-   * {@code discount} is this customization's on a create whose cascade discount it reset
-   * ({@link OrderLineCreateDiscount#resetCascadeDiscount}, ETP-5528 "lone listPrice"): the 100 %
-   * {@code SL_Order_Amt} proposed from a price of 0 is not a value the agent should send back, so
-   * {@code etendo_create} must not list it under {@code supersededDefaults}. Every other create,
-   * and every other field (the {@code listPrice} entry included), is reported as before.
+   * {@code discount} is this customization's on an {@code etendo_create} that sent it or whose
+   * cascade discount it reset ({@link OrderLineCreateDiscount#governsDiscountOnCreate}, ETP-5528):
+   * the create cascade's proposal for it comes from the selector's {@code unitPrice} 0 and is never
+   * a value the agent should send back, so {@code etendo_create} does not list it under
+   * {@code supersededDefaults}. Every other create, and every other field (the {@code listPrice}
+   * entry included), is reported as before.
    */
   @Override
   public Set<String> governedCreateFields(NeoContext context) {
-    return OrderLineCreateDiscount.cascadeDiscountWasReset(context)
+    return OrderLineCreateDiscount.governsDiscountOnCreate(context)
         ? Set.of(OrderLineDiscountSupport.FIELD_DISCOUNT)
         : Set.of();
   }

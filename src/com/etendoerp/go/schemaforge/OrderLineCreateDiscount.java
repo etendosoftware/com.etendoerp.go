@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Collection;
+import java.util.Collections;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -99,26 +100,58 @@ final class OrderLineCreateDiscount {
    * {@link #cascadeDiscountWasReset} instead of re-evaluating this.
    */
   static boolean qualifiesForCascadeDiscountReset(NeoContext ctx) {
-    if (ctx == null || !ctx.isMcpOrigin() || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
-        || !METHOD_POST.equals(ctx.getHttpMethod())) {
+    JSONObject body = ctx == null ? null : ctx.getRequestBody();
+    if (body == null) {
       return false;
     }
-    Object provided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
-    JSONObject body = ctx.getRequestBody();
-    if (!(provided instanceof Collection) || body == null) {
-      return false;
-    }
-    return sentOnlyListPrice((Collection<?>) provided)
+    return sentOnlyListPrice(agentSentKeys(ctx))
         && !LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_LIST_PRICE))
         && LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_UNIT_PRICE));
   }
 
   /**
-   * @return {@code true} when {@link #resetCascadeDiscount} reset this request's discount — the
-   *         answer {@code OrderLineCustomization#governedCreateFields} reads after the pre-hook
+   * @return {@code true} when {@link #resetCascadeDiscount} reset this request's discount
    */
   static boolean cascadeDiscountWasReset(NeoContext ctx) {
     return ctx != null && Boolean.TRUE.equals(ctx.getAttribute(ATTR_CASCADE_DISCOUNT_RESET));
+  }
+
+  /**
+   * Whether this customization decides the {@code discount} of an {@code etendo_create}, so the
+   * create cascade's proposal for it is not a {@code supersededDefaults} entry — the answer
+   * {@code OrderLineCustomization#governedCreateFields} gives after the pre-hook. True when:
+   * <ul>
+   *   <li>the agent sent {@code discount}: the line rules price the line from it, and the cascade's
+   *       proposal is {@code SL_Order_Amt} run on the protected list price against the selector's
+   *       {@code unitPrice} 0 — never a meaningful value. Live pre-QA (build 6f93aad2e) reported
+   *       {@code {sent:10, callout:100}}, {@code {sent:20, callout:100}} and
+   *       {@code {sent:100, callout:67}}, and the hint told the agent to send the callout value
+   *       instead, which would have applied 100 % or 67 %;</li>
+   *   <li>or {@link #resetCascadeDiscount} reset the cascade's discount.</li>
+   * </ul>
+   * MCP {@code etendo_create} only (it is the one that sets
+   * {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}); {@code listPrice} is never governed here.
+   */
+  static boolean governsDiscountOnCreate(NeoContext ctx) {
+    if (cascadeDiscountWasReset(ctx)) {
+      return true;
+    }
+    return agentSentKeys(ctx).contains(OrderLineDiscountSupport.FIELD_DISCOUNT);
+  }
+
+  /**
+   * The keys the agent itself sent on an MCP CRUD create
+   * ({@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}, set only by {@code etendo_create}), or the
+   * empty set on any other request — where the body is what the caller sent (REST single and
+   * batch, {@code etendo_batch}, and so the form).
+   */
+  private static Collection<?> agentSentKeys(NeoContext ctx) {
+    if (ctx == null || !ctx.isMcpOrigin() || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod())) {
+      return Collections.emptySet();
+    }
+    Object provided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
+    return provided instanceof Collection ? (Collection<?>) provided : Collections.emptySet();
   }
 
   /** The agent priced the line by its list price alone: no discount, net or gross price sent. */
