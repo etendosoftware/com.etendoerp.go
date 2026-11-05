@@ -12510,8 +12510,8 @@ needs no draft but also cannot take lines from several documents or choose quant
 
 | Spec / entity | Actions added (in flow order) | Delegate |
 |---|---|---|
-| `goods-receipt/goodsReceipt` | `availableOrders`, `availableOrderLines`, `importOrderLines` | `ImportOrderLinesIntoInOutHandler` |
-| `goods-shipment/goodsShipment` | `availableOrders`, `availableOrderLines`, `importOrderLines` | `ImportOrderLinesIntoInOutHandler` |
+| `goods-receipt/goodsReceipt` | `availableOrders`, `availableOrderLines`, `importOrderLines`; `availableInvoices`, `availableInvoiceLines` (ETP-6099, read-only) | `ImportOrderLinesIntoInOutHandler`, `ImportInvoiceLinesIntoInOutHandler` |
+| `goods-shipment/goodsShipment` | `availableOrders`, `availableOrderLines`, `importOrderLines`; `availableInvoices`, `availableInvoiceLines` (ETP-6099, read-only) | `ImportOrderLinesIntoInOutHandler`, `ImportInvoiceLinesIntoInOutHandler` |
 | `purchase-invoice/header` | `availableOrders`, `availableOrderLines`, `importOrderLines`; `availableReceipts`, `availableReceiptLines`, `importReceiptLines` | `ImportOrderLinesIntoInvoiceHandler`, `ImportInOutLinesIntoInvoiceHandler` |
 | `sales-invoice/header` | `availableOrders`, `availableOrderLines`, `importOrderLines`; `availableShipments`, `availableShipmentLines`, `importShipmentLines` | same two delegates |
 
@@ -12735,6 +12735,90 @@ contracts only judge the MCP call, and `etendo_batch` has no ACTION surface. No 
 that matters (the lines CRUD is uncapped, the actions are) is declared in the §4.12.9 table.
 
 *Not done here (follow-up):* the sales shipment modal should link the header like the receipt one.
+
+##### Listing for the import popups: paging, covered rows, `detail` (ETP-6099)
+
+The SPA's import popups (invoice from order / shipment / receipt / return / source invoice, goods shipment and goods
+receipt from order / invoice) used to read up to 500 documents of the WHOLE company and then one or more requests per
+document and per line; a partner's older documents vanished past 500. They now list through these actions: one call
+for the documents, one per expanded document for the lines. Everything below is **optional and additive**: a call that
+sends none of the new parameters gets exactly the answer it got before (same limits, same rows, same keys), so an agent
+sees no change unless it asks. The parameters are parsed by `ImportListing`, the paging by
+`AbstractLineImportHandler.discover(…, ListRequest)`; each delegate decides what "covered" and `detail` mean for its
+documents. The URL is the target's header entity: `/{spec}/header/{id}/action/<name>` on the invoices,
+`/goods-shipment/goodsShipment/{id}/action/<name>` and `/goods-receipt/goodsReceipt/{id}/action/<name>` on the
+movements.
+
+**List actions** (`availableOrders` on all four specs, `availableShipments`, `availableReceipts`, `availableReturns`,
+`availableOriginInvoices`, `availableInvoices`):
+
+| Param | Default | Meaning |
+|---|---|---|
+| `limit` | 50 | documents per page, a whole number from 1 to 1000; the scan reads `max(200, limit)` candidates |
+| `offset` | 0 | where in the candidate scan (newest first) the page starts |
+| `includeCovered` | `false` | also the candidates with nothing left to import, at `pendingLines: 0` |
+| `detail` | `false` | the extra document keys below; on every list action at least `creationDate` (ISO-8601 instant, UTC), so a popup that sorted by creation date can re-sort a list the server orders by document date (the server order is unchanged) |
+
+A value out of range, or a flag that is not a boolean, is a **400 `importInvalidParameter`**. With `limit` or `offset`
+sent the page also answers `offset` and `nextOffset` (the scan position after the last candidate examined, `null` when
+`hasMore` is false). **Completeness:** calling again with `offset = nextOffset` while `hasMore` is true examines every
+candidate of the partner, so nothing is left out however many there are — a single page cannot guarantee it, because
+candidates with nothing pending are read but not listed. Before ETP-6099 only the sales invoice's `availableOrders` took
+`limit` (ETP-5828); the purchase invoice's now takes the same set.
+
+**Line actions** (`availableOrderLines`, `availableShipmentLines`, `availableReceiptLines`, `availableReturnLines`,
+`availableOriginInvoiceLines`, `availableInvoiceLines`): `includeCovered` (also the lines with nothing left, at
+`pendingQuantity: 0`, which the popups grey out; before, only the sales invoice's `availableOrderLines` took it) and
+`detail`. The pending quantity is always the server's rule (drafts deducted, ETP-5709), also where a popup used to
+compute it in the browser without drafts.
+
+| Action (target) | "Covered" candidate / line | `detail` adds |
+|---|---|---|
+| `availableOrders` (invoice) | an order whose pending before drafts (ordered − invoiced) is all held by draft invoices; `amount` 0 | `creationDate` (`globalDiscount`, `amount` as before, always) |
+| `availableOrderLines` (invoice) | any listed line with nothing left (unchanged rule of ETP-5828) | `listPrice`, `grossUnitPrice`, `tax`, `description`, `orderedQuantity`, `invoicedQuantity` of the order line — what the purchase popup's client-side import posts |
+| `availableShipments` / `availableReceipts` | a movement with something pending before drafts | `creationDate`, `order`, `orderDocumentNo` (the popup's `#order`). No `amount` (product decision): the popup computes the total from the lines once expanded, never an approximated price |
+| `availableShipmentLines` / `availableReceiptLines` | any line with a quantity | `movementQuantity`, `orderLine`, `orderLineDiscount` (%), `importedHere` (this invoice has a line linked to the movement line or to its order line), `invoicedElsewhere` (an active line of another invoice, any status, is linked to the movement line) |
+| `availableReturns` | not invoiced in full (`invoiceStatus` < 100) and, on sales, in the invoice's currency — what the popups list | `creationDate`, `order`, `sourceDocumentNo` (the shipments / receipts it returns, comma separated). No `amount`: the popup shows the source number instead |
+| `availableReturnLines` | any line with a quantity | `movementQuantity` (positive), `orderLine`, `orderLineDiscount`, `blockedReason`: `null` when offered, else `orderLineInvoiced` / `creditedInFull` (sales) or `importedHere` (purchase) |
+| `availableOriginInvoices` | an invoice whose lines are all imported here | `creationDate`, `amount`: Σ over EVERY listed line of the invoice, imported ones included, of `unitPrice` × \|quantity\|, unsigned, at its currency's precision (the popup's row total; the popup negates it) |
+| `availableOriginInvoiceLines` | a line already imported here (`importedHere: true`, pending 0) instead of being dropped | `invoicedQuantity` (signed), `unitPrice`, `amount`, `lineNetAmount`, `listPrice`, `grossUnitPrice`, `discount` (etgoDiscount %), `tax`, `importedHere` |
+| `availableOrders` (goods shipment / receipt) | an order with ordered − delivered left (same sign) all held by drafts | `creationDate`, `amount`: Σ unit price × pending over the lines with a positive pending, at the order currency's precision |
+| `availableOrderLines` (goods shipment / receipt) | every other active product line (not the total-discount line), in the order's line order | `orderedQuantity`, `deliveredQuantity`, `unitPrice`, `description`, `inDraftDocuments` (document numbers of the OTHER draft documents holding the line — the popup's *«En albarán borrador: …»*) |
+
+The filters themselves are unchanged and equal to the popups' (purchase origin invoices: not rectificative, no currency
+filter; sales: not rectificative, same currency). Known differences with what the popups computed in the browser, all
+on the server's side by decision: pending deducts drafts everywhere; a shipment / receipt is matched by its own
+`etgoCurrency`, not by its order's; the candidates come newest **movement / invoice / order date** first where the popup
+sorted by creation date (the client re-sorts if it must).
+
+**New: `availableInvoices` / `availableInvoiceLines` on `goods-shipment/goodsShipment` and `goods-receipt/goodsReceipt`**
+(`ImportInvoiceLinesIntoInOutHandler`, injected by both header NeoExtensions; read-only — the popup keeps creating the
+movement lines itself with `invoiceLineId`, no import action is added). Candidates: completed invoices of the target's
+partner and direction, in the target's currency when it has one, newest created first, accepted by the header's policy
+(`ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE`: the goods shipment leaves out rectificatives —
+`SalesInvoiceHeaderHandler.isRectificativeDocType`; the goods receipt an invoice with a negative grand total). Row:
+`{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines, order}`, listed when a line
+has something pending (`includeCovered`: also the others, so the popup can say "all already imported"). Lines: active,
+not the total-discount line, line order; `{id, lineNo, product, product$_identifier, uOM, pendingQuantity,
+invoicedQuantity, orderLine, linked, inDraftDocuments}`, where `orderLine` is the line's order line or else the
+header order's line of the same product (the last one wins, as the popup). `pendingQuantity` follows the header's
+`SourcePolicy` (per direction, set by the header NeoExtension, never by the delegate):
+- **goods shipment**: `max(0, invoiced − delivered(order line) − drafts)` for a line with an order line (drafts: every
+  DRAFT shipment on that order line, the target included); for one without, its quantity, or 0 when `linked` (already
+  pointing at a movement line);
+- **goods receipt** (product decision: the popup's rule is kept, delivered is NOT deducted): 0 when `linked`, otherwise
+  `max(0, invoiced − what the OTHER draft receipts hold of its order line)`.
+
+Only lines with something pending unless `includeCovered`. The line keys are always present (new actions, nothing to
+keep compatible); `availableInvoices` takes `detail` only for `creationDate`. The popup shows no row total for them (no
+price), so there is no `amount`.
+
+**Binding (ETP-6099).** `GoodsReceiptHeaderHandler` moved from `@Named("goodsReceiptHeaderHandler")` + the row's
+`JAVA_QUALIFIER` to `@NeoExtension(spec = "goods-receipt", entity = "goodsReceipt")` (touch-means-migrate, §5.3.a):
+qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING` 80 → 79, the class removed from `legacyHandlers` in
+`scripts/extension-guardrails-allowlist.json`.
+
+**Channels.** REST and MCP reach the same delegates; no divergence is introduced.
 
 #### 4.12.35 Discoverability: which actions apply to a document now, and what its values mean (ETP-5714)
 
@@ -13975,6 +14059,10 @@ return.
 |---|---|---|
 | `sales-invoice/header`, `purchase-invoice/header` | `availableReturns`, `availableReturnLines`, `importReturnLines` (param `returnId`) | `ImportInOutLinesIntoInvoiceHandler` (the ETP-5713 receipt / shipment delegate, with a return mode) |
 | same | `availableOriginInvoices`, `availableOriginInvoiceLines`, `importOriginInvoiceLines` (param `invoiceId`) | `ImportOriginInvoiceLinesHandler` |
+
+The four listing actions of this section take the optional `limit`, `offset`, `includeCovered` and `detail` of ETP-6099
+(§4.12.34, *Listing for the import popups*): covered returns / lines come with a `blockedReason`, covered origin lines
+with `importedHere: true`, instead of being left out.
 
 They take the same body and answer in the same envelope as §4.12.34 (`{data:{importedCount, lines:[…], headerLinked, salesOrder?, order?}}`; the origin import adds `originInvoices:[{id, documentNo}]`), the same `error.code`s, and the `id` of
 `etendo_action` is the **draft rectificative**. The quantity a caller sends is always a **positive** number ("Return Qty",

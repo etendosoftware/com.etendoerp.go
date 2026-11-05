@@ -36,7 +36,6 @@
     "GlJournalHeaderHandler",
     "GoodsMovementLineHandler",
     "GoodsMovementsHeaderHandler",
-    "GoodsReceiptHeaderHandler",
     "GoodsReceiptLineHandler",
     "GoodsShipmentLineHandler",
     "ImportInOutLinesIntoInvoiceHandler",

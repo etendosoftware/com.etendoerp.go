@@ -39,6 +39,8 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
@@ -129,6 +131,32 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   private static final int MAX_CANDIDATES = 200;
   private static final int MAX_DOCUMENTS = 50;
 
+  /** A sales return line whose order line is already invoiced through a movement line or here. */
+  static final String REASON_ORDER_LINE_INVOICED = "orderLineInvoiced";
+  /** A sales return line the invoice lines linked to it already credit in full. */
+  static final String REASON_CREDITED_IN_FULL = "creditedInFull";
+  /** A purchase return line this invoice already holds. */
+  static final String REASON_IMPORTED_HERE = "importedHere";
+  /** The paging sentence of every list contract of this delegate (ETP-6099). */
+  static final String LISTING_NOTE = "limit (1 to " + ImportListing.MAX_LIMIT + "), offset, "
+      + "includeCovered and detail are optional; with limit or offset the answer adds offset and "
+      + "nextOffset (page on while hasMore).";
+  static final String STANDARD_DOC_DETAIL = "creationDate, order (the header's order id or "
+      + "null) and orderDocumentNo";
+  static final String STANDARD_LINE_DETAIL = "movementQuantity, orderLine (its order line id or "
+      + "null), orderLineDiscount (that order line's discount %), importedHere (this invoice has a "
+      + "line linked to this movement line or to its order line) and invoicedElsewhere (an active "
+      + "line of another invoice, any status, is linked to this movement line)";
+  static final String RETURN_DOC_DETAIL = "creationDate, order (the header's order id or null) "
+      + "and "
+      + "sourceDocumentNo (the shipments / receipts the return comes from, comma separated)";
+  static final String RETURN_LINE_DETAIL = "movementQuantity (positive), orderLine, "
+      + "orderLineDiscount and blockedReason (null when offered, else " + REASON_ORDER_LINE_INVOICED
+      + ", " + REASON_CREDITED_IN_FULL + " or " + REASON_IMPORTED_HERE + ")";
+  private static final String KEY_ORDER = "order";
+  private static final String KEY_ORDER_LINE = "orderLine";
+  private static final String KEY_MOVEMENT_QUANTITY = "movementQuantity";
+
   /**
    * The three contracts of the invoice this delegate is injected in, in flow order.
    *
@@ -156,16 +184,21 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         "Lists the completed " + inout + "s of this " + doc + "'s business partner and currency "
             + "that still have quantity to invoice: {data:[{id, documentNo, date, businessPartner, "
             + "businessPartner$_identifier, currency, pendingLines}], hasMore, limit, scanLimit}. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending is what completed "
-            + "AND draft invoices have not covered. Step 1." + flow)
+            + "AND draft invoices have not covered. " + LISTING_NOTE + " includeCovered also lists "
+            + "the " + inout + "s whose pending lines are all held by draft invoices; detail adds "
+            + STANDARD_DOC_DETAIL + ". Step 1." + flow,
+        ImportListing.listParams(MAX_DOCUMENTS, STANDARD_DOC_DETAIL))
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(listLines, NeoActionContract.read(listLines,
         "Lists the lines of a " + inout + " that can still be invoiced here: {data:[{id, lineNo, "
             + "product, product$_identifier, uOM, pendingQuantity}], hasMore:false}, where pendingQuantity is "
             + "what no completed or draft invoice (this one included) covers, and the id is the "
-            + "sourceLineId " + imp + " takes. Step 2." + flow,
-        NeoActionContract.Param.required(param, NeoActionContract.TYPE_STRING,
-            "Id of a document returned by " + list + "."))
+            + "sourceLineId " + imp + " takes. includeCovered also lists the lines with nothing "
+            + "left at pendingQuantity 0; detail adds " + STANDARD_LINE_DETAIL + ". Step 2." + flow,
+        ImportListing.linesParams(STANDARD_LINE_DETAIL,
+            NeoActionContract.Param.required(param, NeoActionContract.TYPE_STRING,
+                "Id of a document returned by " + list + ".")))
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(imp, NeoActionContract.write(imp,
@@ -227,16 +260,22 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "hasMore true means the list may be incomplete: it looks at the scanLimit most recent "
             + "candidates and returns at most limit documents, so a return it does not list may "
             + "still be importable when you know its id. A return already invoiced in full is not "
-            + "listed. Step 1." + flow)
+            + "listed. " + LISTING_NOTE + " includeCovered also lists the returns not invoiced in "
+            + "full that have no line left to credit; detail adds " + RETURN_DOC_DETAIL
+            + ". Step 1." + flow,
+        ImportListing.listParams(MAX_DOCUMENTS, RETURN_DOC_DETAIL))
         .withIdDescription(on).availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_RETURN_LINES, NeoActionContract.read(
         ACTION_AVAILABLE_RETURN_LINES, "Lists the lines of a " + ret + " that can still be credited "
             + "here: {data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}], "
             + "hasMore:false}, where pendingQuantity is a positive number: " + credited
             + ", and the id is the sourceLineId "
-            + ACTION_IMPORT_RETURN_LINES + " takes. Step 2." + flow,
-        NeoActionContract.Param.required(PARAM_RETURN_ID, NeoActionContract.TYPE_STRING,
-            "Id of a return returned by " + ACTION_AVAILABLE_RETURNS + "."))
+            + ACTION_IMPORT_RETURN_LINES + " takes. includeCovered also lists the lines that "
+            + "cannot be credited at pendingQuantity 0; detail adds " + RETURN_LINE_DETAIL
+            + ". Step 2." + flow,
+        ImportListing.linesParams(RETURN_LINE_DETAIL,
+            NeoActionContract.Param.required(PARAM_RETURN_ID, NeoActionContract.TYPE_STRING,
+                "Id of a return returned by " + ACTION_AVAILABLE_RETURNS + ".")))
         .withIdDescription(on).availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_IMPORT_RETURN_LINES, NeoActionContract.write(ACTION_IMPORT_RETURN_LINES,
         "Adds lines of a completed " + ret + " to this DRAFT rectificative " + doc + " invoice, in "
@@ -300,12 +339,13 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     RectificativeImportPolicy policy = RectificativeImportPolicy.from(context);
     if (LIST_ACTIONS.contains(action)) {
       Invoice invoice = requireInvoiceOfDirection(context.getRecordId(), sales, false);
-      return availableDocuments(invoice, isSales(invoice), returns, policy);
+      return availableDocuments(invoice, isSales(invoice), returns, policy, listRequest(body));
     }
     if (LINES_ACTIONS.contains(action)) {
       Invoice invoice = requireInvoiceOfDirection(context.getRecordId(), sales, false);
-      return availableLines(invoice,
-          requireSource(invoice, requireParam(body, idParam), returns, policy), returns, policy);
+      ShipmentInOut source = requireSource(invoice, requireParam(body, idParam), returns, policy);
+      return availableLines(invoice, source, returns, policy,
+          new LineListing(ImportListing.includeCovered(body), ImportListing.detail(body)));
     }
     return importLines(requireInvoiceOfDirection(context.getRecordId(), sales, true), body,
         idParam, returns, policy);
@@ -452,23 +492,67 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   // ---------------------------------------------------------------------------
 
   private NeoResponse availableDocuments(Invoice invoice, boolean sales, boolean returns,
-      RectificativeImportPolicy policy) throws JSONException {
+      RectificativeImportPolicy policy, ImportListing.ListRequest request) throws JSONException {
     String partnerId = invoice.getBusinessPartner() == null ? null
         : invoice.getBusinessPartner().getId();
     String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
-    List<ShipmentInOut> candidates = returns
-        ? findCandidateReturns(partnerId, sales)
-        : findCandidateDocuments(partnerId, sales, currencyId);
+    List<ShipmentInOut> candidates = candidates(partnerId, sales, currencyId, returns, request);
     return discover(candidates, doc -> {
       int pendingLines = isReturn(doc) == returns
           ? offeredLineCount(invoice, doc, returns, policy) : 0;
-      if (pendingLines == 0) {
+      if (pendingLines == 0 && !(request.includeCovered && isReturn(doc) == returns
+          && isCovered(invoice, doc, returns, policy))) {
         return null;
       }
       String docCurrency = doc.getEtgoCurrency() == null ? null : doc.getEtgoCurrency().getId();
-      return documentRow(doc.getId(), doc.getDocumentNo(), day(doc.getMovementDate()),
+      JSONObject row = documentRow(doc.getId(), doc.getDocumentNo(), day(doc.getMovementDate()),
           partnerId, doc.getBusinessPartner().getName(), docCurrency, pendingLines);
-    });
+      if (request.detail) {
+        putDocumentDetail(row, doc, returns);
+      }
+      return row;
+    }, request);
+  }
+
+  /**
+   * The candidates of one list call: the delegate's own seams on a first page that asked for no
+   * longer scan (what the unit tests override), the paged reads otherwise (ETP-6099).
+   */
+  private List<ShipmentInOut> candidates(String partnerId, boolean sales, String currencyId,
+      boolean returns, ImportListing.ListRequest request) {
+    if (request.isDefault(scanLimit())) {
+      return returns ? findCandidateReturns(partnerId, sales)
+          : findCandidateDocuments(partnerId, sales, currencyId);
+    }
+    return returns ? findCandidateReturns(partnerId, sales, request.offset, request.scan)
+        : findCandidateDocuments(partnerId, sales, currencyId, request.offset, request.scan);
+  }
+
+  /**
+   * {@code includeCovered} (ETP-6099): a document with no line left that the window's popup still
+   * lists. A shipment / receipt with something pending before drafts (drafts hold all of it); a
+   * return not invoiced in full and, where the side compares it, in the invoice's currency.
+   */
+  private boolean isCovered(Invoice invoice, ShipmentInOut doc, boolean returns,
+      RectificativeImportPolicy policy) {
+    if (!returns) {
+      return !pendingBeforeDrafts(doc.getId()).isEmpty();
+    }
+    return !isInvoicedInFull(doc) && !returnCurrencyMismatch(invoice, doc, policy);
+  }
+
+  /** The {@code detail} keys of a document row (ETP-6099). */
+  private void putDocumentDetail(JSONObject row, ShipmentInOut doc, boolean returns)
+      throws JSONException {
+    ImportListing.putCreationDate(row, doc.getCreationDate());
+    Order order = doc.getSalesOrder();
+    ImportListing.putNullable(row, KEY_ORDER, order == null ? null : order.getId());
+    if (returns) {
+      ImportListing.putNullable(row, "sourceDocumentNo", sourceDocumentNos(doc.getId()));
+    } else {
+      ImportListing.putNullable(row, "orderDocumentNo",
+          order == null ? null : order.getDocumentNo());
+    }
   }
 
   /**
@@ -516,23 +600,109 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return !doc.getSalesOrder().getCurrency().getId().equals(invoice.getCurrency().getId());
   }
 
+  /** What a lines call asked for (ETP-6099). */
+  static final class LineListing {
+    final boolean includeCovered;
+    final boolean detail;
+
+    LineListing(boolean includeCovered, boolean detail) {
+      this.includeCovered = includeCovered;
+      this.detail = detail;
+    }
+  }
+
   private NeoResponse availableLines(Invoice invoice, ShipmentInOut source, boolean returns,
-      RectificativeImportPolicy policy) throws JSONException {
+      RectificativeImportPolicy policy, LineListing listing) throws JSONException {
     Map<String, ShipmentInOutLine> linesById = activeLines(source);
     Map<String, BigDecimal> pending = returns
         ? returnPending(invoice, source, linesById, policy)
         : signedPending(linesById, pendingQuantities(source.getId()));
+    LineDetail detail = listing.detail ? lineDetail(invoice, source, returns, policy) : null;
     JSONArray rows = new JSONArray();
     for (ShipmentInOutLine line : linesById.values()) {
       BigDecimal left = pending.get(line.getId());
+      if (left == null && listing.includeCovered && hasQuantity(line)) {
+        left = BigDecimal.ZERO;
+      }
       if (left != null) {
-        rows.put(DocumentLineImport.lineRow(line.getId(), line.getLineNo(),
+        JSONObject row = DocumentLineImport.lineRow(line.getId(), line.getLineNo(),
             line.getProduct() == null ? null : line.getProduct().getId(),
             line.getProduct() == null ? null : line.getProduct().getName(),
-            line.getUOM() == null ? null : line.getUOM().getId(), left));
+            line.getUOM() == null ? null : line.getUOM().getId(), left);
+        if (listing.detail) {
+          putLineDetail(row, line, left, returns, detail);
+        }
+        rows.put(row);
       }
     }
     return completePage(rows);
+  }
+
+  private static boolean hasQuantity(ShipmentInOutLine line) {
+    return line.getMovementQuantity() != null && line.getMovementQuantity().signum() != 0;
+  }
+
+  /** What the {@code detail} keys of the lines of one document are read from. */
+  static final class LineDetail {
+    /** Standard: per movement line, {@code [importedHere, invoicedElsewhere]}. */
+    final Map<String, boolean[]> links;
+    /** Returns: the movement lines this invoice holds. */
+    final Set<String> inTarget;
+    /** Returns (sales): the order lines already invoiced through a movement line or here. */
+    final Set<String> blocked;
+    final boolean presenceOnly;
+
+    LineDetail(Map<String, boolean[]> links, Set<String> inTarget, Set<String> blocked,
+        boolean presenceOnly) {
+      this.links = links;
+      this.inTarget = inTarget;
+      this.blocked = blocked;
+      this.presenceOnly = presenceOnly;
+    }
+  }
+
+  private LineDetail lineDetail(Invoice invoice, ShipmentInOut source, boolean returns,
+      RectificativeImportPolicy policy) {
+    if (!returns) {
+      return new LineDetail(invoiceLinkStates(source.getId(), invoice.getId()), Set.of(),
+          Set.of(), false);
+    }
+    boolean presenceOnly = policy.capsReturnsByPresence();
+    return new LineDetail(Map.of(), ReturnLineCredit.movementLineIdsOf(invoice),
+        presenceOnly ? Set.of() : blockedOrderLines(source.getId(), invoice.getId()),
+        presenceOnly);
+  }
+
+  /** The {@code detail} keys of one line row (ETP-6099). */
+  private static void putLineDetail(JSONObject row, ShipmentInOutLine line, BigDecimal left,
+      boolean returns, LineDetail detail) throws JSONException {
+    OrderLine orderLine = line.getSalesOrderLine();
+    BigDecimal movement = line.getMovementQuantity();
+    ImportListing.putNullable(row, KEY_MOVEMENT_QUANTITY,
+        returns && movement != null ? movement.abs() : movement);
+    ImportListing.putNullable(row, KEY_ORDER_LINE, orderLine == null ? null : orderLine.getId());
+    row.put("orderLineDiscount", ImportListing.trimmed(orderLine == null ? null
+        : orderLine.getDiscount()));
+    if (!returns) {
+      boolean[] state = detail.links.getOrDefault(line.getId(), new boolean[2]);
+      row.put("importedHere", state[0]);
+      row.put("invoicedElsewhere", state[1]);
+      return;
+    }
+    ImportListing.putNullable(row, "blockedReason",
+        left.signum() != 0 ? null : blockedReason(line, orderLine, detail));
+  }
+
+  /** Why a return line is not offered, as the window's modal of the side would judge it. */
+  private static String blockedReason(ShipmentInOutLine line, OrderLine orderLine,
+      LineDetail detail) {
+    if (detail.presenceOnly) {
+      return detail.inTarget.contains(line.getId()) ? REASON_IMPORTED_HERE : null;
+    }
+    if (orderLine != null && detail.blocked.contains(orderLine.getId())) {
+      return REASON_ORDER_LINE_INVOICED;
+    }
+    return REASON_CREDITED_IN_FULL;
   }
 
   // ---------------------------------------------------------------------------
@@ -648,6 +818,12 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    */
   protected List<ShipmentInOut> findCandidateDocuments(String partnerId, boolean sales,
       String currencyId) {
+    return findCandidateDocuments(partnerId, sales, currencyId, 0, scanLimit());
+  }
+
+  /** {@link #findCandidateDocuments(String, boolean, String)} paged (ETP-6099). */
+  protected List<ShipmentInOut> findCandidateDocuments(String partnerId, boolean sales,
+      String currencyId, int offset, int scan) {
     StringBuilder hql = new StringBuilder("from MaterialMgmtShipmentInOut io "
         + "where io.documentStatus = 'CO' and io.salesTransaction = :sot "
         + "and io.businessPartner.id = :bp and io.active = true and io.client.id = :client");
@@ -658,7 +834,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     org.hibernate.query.Query<ShipmentInOut> query = OBDal.getInstance().getSession()
         .createQuery(hql.toString(), ShipmentInOut.class).setParameter("sot", sales)
         .setParameter("bp", partnerId).setParameter("client", sessionClientId())
-        .setMaxResults(scanLimit());
+        .setFirstResult(offset).setMaxResults(scan);
     if (currencyId != null) {
       query.setParameter("cur", currencyId);
     }
@@ -682,12 +858,65 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
 
   /** Completed returns of the partner, newest first; a bounded scan (see {@link #scanLimit()}). */
   protected List<ShipmentInOut> findCandidateReturns(String partnerId, boolean sales) {
+    return findCandidateReturns(partnerId, sales, 0, scanLimit());
+  }
+
+  /** {@link #findCandidateReturns(String, boolean)} paged (ETP-6099). */
+  protected List<ShipmentInOut> findCandidateReturns(String partnerId, boolean sales, int offset,
+      int scan) {
     return new ArrayList<>(OBDal.getInstance().getSession()
         .createQuery(candidateReturnsHql(), ShipmentInOut.class)
         .setParameter("sot", sales).setParameter("bp", partnerId)
         .setParameter("client", sessionClientId())
         .setParameterList("orgs", Arrays.asList(OBContext.getOBContext().getReadableOrganizations()))
-        .setMaxResults(scanLimit()).list());
+        .setFirstResult(offset).setMaxResults(scan).list());
+  }
+
+  /** Pending MAGNITUDE per movement line BEFORE drafts (ETP-6099, {@code includeCovered}). */
+  protected Map<String, BigDecimal> pendingBeforeDrafts(String inOutId) {
+    return NeoInvoiceSupport.computePendingQtyPerLineOrThrow(inOutId, false);
+  }
+
+  /** The numbers of the shipments / receipts a return comes from, comma separated, or null. */
+  protected String sourceDocumentNos(String returnId) {
+    List<JSONObject> sources = ReturnShipmentUtils.fetchSourceDocuments(List.of(returnId))
+        .getOrDefault(returnId, List.of());
+    String joined = sources.stream().map(d -> d.optString("documentNo", ""))
+        .filter(no -> !no.isEmpty()).collect(Collectors.joining(", "));
+    return joined.isEmpty() ? null : joined;
+  }
+
+  /**
+   * Per movement line of the document, {@code [importedHere, invoicedElsewhere]} (ETP-6099): this
+   * invoice has an active line linked to the movement line or to its order line; an active line of
+   * ANOTHER invoice, whatever its status, is linked to the movement line. The two sets the window's
+   * modals greyed lines out with.
+   */
+  @SuppressWarnings("java:S2077")
+  protected Map<String, boolean[]> invoiceLinkStates(String inOutId, String invoiceId) {
+    String sql = "SELECT ml.m_inoutline_id, "
+        + "MAX(CASE WHEN il.c_invoice_id = ? THEN 1 ELSE 0 END), "
+        + "MAX(CASE WHEN il.c_invoice_id <> ? AND il.m_inoutline_id = ml.m_inoutline_id "
+        + "THEN 1 ELSE 0 END) "
+        + "FROM m_inoutline ml JOIN c_invoiceline il ON il.isactive = 'Y' "
+        + "AND (il.m_inoutline_id = ml.m_inoutline_id OR (il.c_invoice_id = ? "
+        + "AND ml.c_orderline_id IS NOT NULL AND il.c_orderline_id = ml.c_orderline_id)) "
+        + "WHERE ml.m_inout_id = ? GROUP BY ml.m_inoutline_id";
+    Map<String, boolean[]> states = new LinkedHashMap<>();
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      ps.setString(2, invoiceId);
+      ps.setString(3, invoiceId);
+      ps.setString(4, inOutId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          states.put(rs.getString(1), new boolean[] { rs.getInt(2) == 1, rs.getInt(3) == 1 });
+        }
+      }
+    } catch (SQLException e) {
+      throw new OBException("Could not determine the invoice lines linked to the document", e);
+    }
+    return states;
   }
 
   /**

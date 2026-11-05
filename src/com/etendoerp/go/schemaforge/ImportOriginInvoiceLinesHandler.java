@@ -95,6 +95,15 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
   private static final int MAX_INVOICES = 50;
   private static final int DEFAULT_PRECISION = 2;
   private static final long LINE_STEP = 10L;
+  /** What {@code detail} adds to an {@code availableOriginInvoices} row (ETP-6099). */
+  static final String DOC_DETAIL_KEYS = "creationDate (ISO instant, UTC) and amount (the sum over EVERY line of the invoice the "
+      + "popup lists, already imported ones included, of unitPrice x the absolute quantity, "
+      + "unsigned, at the invoice currency's precision: the total the import popup shows)";
+  /** What {@code detail} adds to an {@code availableOriginInvoiceLines} row (ETP-6099). */
+  static final String LINE_DETAIL_KEYS = "invoicedQuantity (signed, as on the source line), "
+      + "unitPrice, amount (unitPrice x the quantity, at the invoice currency's precision), "
+      + "lineNetAmount, listPrice, grossUnitPrice, discount (the line's discount %), tax and "
+      + "importedHere (this rectificative already holds a copy of the line)";
 
   /**
    * The three contracts of the invoice this delegate is injected in, in flow order. Declared for a
@@ -120,17 +129,23 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
             + "an invoice whose lines are all already imported here. pendingLines counts the lines "
             + "still offered. hasMore true means the list may be incomplete: it looks at the "
             + "scanLimit most recent candidates and returns at most limit documents, so an "
-            + "invoice it does not list may still be importable when you know its id. Step 1."
-            + flow)
+            + "invoice it does not list may still be importable when you know its id. "
+            + ImportInOutLinesIntoInvoiceHandler.LISTING_NOTE + " includeCovered also lists the "
+            + "invoices whose lines are all already imported here, with pendingLines 0; detail "
+            + "adds " + DOC_DETAIL_KEYS + ". Step 1." + flow,
+        ImportListing.listParams(MAX_INVOICES, DOC_DETAIL_KEYS))
         .withIdDescription(on).availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of an invoice that can be imported here: {data:[{id, lineNo, product, "
             + "product$_identifier, uOM, pendingQuantity}], hasMore:false}, where pendingQuantity "
             + "is the quantity of the source line (a positive number) and the id is the "
             + "sourceLineId " + ACTION_IMPORT + " takes. A line already imported into this "
-            + "invoice is not listed again, even when only part of it came in. Step 2." + flow,
-        NeoActionContract.Param.required(PARAM_INVOICE_ID, NeoActionContract.TYPE_STRING,
-            "Id of an invoice returned by " + ACTION_AVAILABLE_INVOICES + "."))
+            + "invoice is not listed again, even when only part of it came in; includeCovered "
+            + "lists it too, at pendingQuantity 0. detail adds " + LINE_DETAIL_KEYS + ". Step 2."
+            + flow,
+        ImportListing.linesParams(LINE_DETAIL_KEYS,
+            NeoActionContract.Param.required(PARAM_INVOICE_ID, NeoActionContract.TYPE_STRING,
+                "Id of an invoice returned by " + ACTION_AVAILABLE_INVOICES + ".")))
         .withIdDescription(on).availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_IMPORT, NeoActionContract.write(ACTION_IMPORT,
         "Adds lines of a completed " + doc + " invoice (the one this rectificative corrects) to this "
@@ -188,12 +203,14 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
     RectificativeImportPolicy policy = RectificativeImportPolicy.from(context);
     JSONObject body = context.getRequestBody();
     if (ACTION_AVAILABLE_INVOICES.equals(action)) {
-      return availableInvoices(requireExistingInvoice(context.getRecordId()), policy);
+      return availableInvoices(requireExistingInvoice(context.getRecordId()), policy,
+          listRequest(body));
     }
     if (ACTION_AVAILABLE_LINES.equals(action)) {
       Invoice target = requireExistingInvoice(context.getRecordId());
       Invoice source = requireSource(target, requireParam(body, PARAM_INVOICE_ID), policy);
-      return availableLines(target, source);
+      return availableLines(target, source, ImportListing.includeCovered(body),
+          ImportListing.detail(body));
     }
     return importLines(requireDraftInvoice(context.getRecordId()), body, policy);
   }
@@ -333,35 +350,86 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
   // available invoices / lines
   // ---------------------------------------------------------------------------
 
-  private NeoResponse availableInvoices(Invoice target, RectificativeImportPolicy policy)
-      throws JSONException {
+  private NeoResponse availableInvoices(Invoice target, RectificativeImportPolicy policy,
+      ImportListing.ListRequest request) throws JSONException {
     String partnerId = target.getBusinessPartner() == null ? null
         : target.getBusinessPartner().getId();
     String currencyId = target.getCurrency() == null ? null : target.getCurrency().getId();
     Set<String> imported = importedSourceLineIds(target);
     // Only the sales modal filters the candidates by currency; the purchase one does not.
     String compared = policy.comparesCurrency() ? currencyId : null;
-    return discover(findCandidateInvoices(partnerId, isSales(target), compared, target.getId()),
-        invoice -> {
-          int pendingLines = policy.isRectificative(invoice) ? 0
-              : offeredLines(invoice, imported).size();
-          if (pendingLines == 0) {
-            return null;
-          }
-          return documentRow(invoice.getId(), invoice.getDocumentNo(), day(invoice.getInvoiceDate()),
-              partnerId, invoice.getBusinessPartner().getName(), currencyId(invoice), pendingLines);
-        });
+    List<Invoice> candidates = request.isDefault(scanLimit())
+        ? findCandidateInvoices(partnerId, isSales(target), compared, target.getId())
+        : findCandidateInvoices(partnerId, isSales(target), compared, target.getId(),
+            request.offset, request.scan);
+    return discover(candidates, invoice -> {
+      if (policy.isRectificative(invoice)) {
+        return null;
+      }
+      int pendingLines = offeredLines(invoice, imported).size();
+      // ETP-6099 includeCovered: the popup lists an invoice whose lines are all imported here too.
+      if (pendingLines == 0 && !(request.includeCovered
+          && !offeredLines(invoice, Set.of()).isEmpty())) {
+        return null;
+      }
+      JSONObject row = documentRow(invoice.getId(), invoice.getDocumentNo(),
+          day(invoice.getInvoiceDate()), partnerId, invoice.getBusinessPartner().getName(),
+          currencyId(invoice), pendingLines);
+      if (request.detail) {
+        ImportListing.putCreationDate(row, invoice.getCreationDate());
+        row.put("amount", listedAmount(invoice));
+      }
+      return row;
+    }, request);
   }
 
-  private NeoResponse availableLines(Invoice target, Invoice source) throws JSONException {
+  /** unitPrice x |quantity| over every listed line of the source, at its currency's precision. */
+  private BigDecimal listedAmount(Invoice source) {
+    BigDecimal sum = BigDecimal.ZERO;
+    for (InvoiceLine line : offeredLines(source, Set.of())) {
+      sum = sum.add(orZero(line.getUnitPrice()).multiply(line.getInvoicedQuantity().abs()));
+    }
+    return sum.setScale(precisionOf(source), RoundingMode.HALF_UP);
+  }
+
+  private static int precisionOf(Invoice invoice) {
+    return invoice.getCurrency() == null || invoice.getCurrency().getStandardPrecision() == null
+        ? DEFAULT_PRECISION : invoice.getCurrency().getStandardPrecision().intValue();
+  }
+
+  private NeoResponse availableLines(Invoice target, Invoice source, boolean includeCovered,
+      boolean detail) throws JSONException {
+    Set<String> imported = importedSourceLineIds(target);
+    int precision = precisionOf(target);
     JSONArray rows = new JSONArray();
-    for (InvoiceLine line : offeredLines(source, importedSourceLineIds(target))) {
-      rows.put(DocumentLineImport.lineRow(line.getId(), line.getLineNo(),
+    for (InvoiceLine line : offeredLines(source, includeCovered ? Set.of() : imported)) {
+      boolean importedHere = imported.contains(line.getId());
+      JSONObject row = DocumentLineImport.lineRow(line.getId(), line.getLineNo(),
           line.getProduct().getId(), line.getProduct().getName(),
           line.getUOM() == null ? null : line.getUOM().getId(),
-          line.getInvoicedQuantity().abs()));
+          importedHere ? BigDecimal.ZERO : line.getInvoicedQuantity().abs());
+      if (detail) {
+        putLineDetail(row, line, importedHere, precision);
+      }
+      rows.put(row);
     }
     return completePage(rows);
+  }
+
+  /** The {@code detail} keys of one line row: what the popup shows and copies (ETP-6099). */
+  private static void putLineDetail(JSONObject row, InvoiceLine line, boolean importedHere,
+      int precision) throws JSONException {
+    BigDecimal unitPrice = orZero(line.getUnitPrice());
+    row.put("invoicedQuantity", line.getInvoicedQuantity());
+    row.put("unitPrice", unitPrice);
+    row.put("amount", unitPrice.multiply(line.getInvoicedQuantity().abs())
+        .setScale(precision, RoundingMode.HALF_UP));
+    ImportListing.putNullable(row, "lineNetAmount", line.getLineNetAmount());
+    ImportListing.putNullable(row, "listPrice", line.getListPrice());
+    ImportListing.putNullable(row, "grossUnitPrice", line.getGrossUnitPrice());
+    row.put("discount", ImportListing.trimmed(line.getEtgoDiscount()));
+    ImportListing.putNullable(row, "tax", line.getTax() == null ? null : line.getTax().getId());
+    row.put("importedHere", importedHere);
   }
 
   private static String currencyId(Invoice invoice) {
@@ -478,13 +546,19 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
   /** Completed invoices of the partner, newest first; a bounded scan (see {@link #scanLimit()}). */
   protected List<Invoice> findCandidateInvoices(String partnerId, boolean sales,
       String currencyId, String targetId) {
+    return findCandidateInvoices(partnerId, sales, currencyId, targetId, 0, scanLimit());
+  }
+
+  /** {@link #findCandidateInvoices(String, boolean, String, String)} paged (ETP-6099). */
+  protected List<Invoice> findCandidateInvoices(String partnerId, boolean sales,
+      String currencyId, String targetId, int offset, int scan) {
     org.hibernate.query.Query<Invoice> query = OBDal.getInstance().getSession()
         .createQuery(candidateInvoicesHql(currencyId != null), Invoice.class)
         .setParameter("sot", sales).setParameter("bp", partnerId)
         .setParameter("client", sessionClientId())
         .setParameterList("orgs", Arrays.asList(OBContext.getOBContext().getReadableOrganizations()))
         .setParameter("target", targetId)
-        .setMaxResults(scanLimit());
+        .setFirstResult(offset).setMaxResults(scan);
     if (currencyId != null) {
       query.setParameter("cur", currencyId);
     }

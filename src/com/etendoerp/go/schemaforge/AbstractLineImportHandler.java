@@ -187,6 +187,43 @@ abstract class AbstractLineImportHandler implements NeoHandler {
         scanLimit);
   }
 
+  /**
+   * The listing parameters of a list action (ETP-6099, {@link ImportListing}): absent, the
+   * delegate's own {@link #rowLimit()} and {@link #scanLimit()}.
+   */
+  protected ImportListing.ListRequest listRequest(JSONObject body) {
+    return ImportListing.listRequest(body, rowLimit(), scanLimit());
+  }
+
+  /**
+   * {@link #discover(java.util.List, RowBuilder, int, int)} for candidates read from
+   * {@code request.offset} on (ETP-6099). When the caller paged ({@code limit} or {@code offset}
+   * sent) the answer also carries {@code offset} and {@code nextOffset}: the scan position right
+   * after the last candidate this page examined, or {@code null} when {@code hasMore} is false.
+   */
+  protected <T> NeoResponse discover(java.util.List<T> candidates, RowBuilder<T> rowOf,
+      ImportListing.ListRequest request) throws JSONException {
+    org.codehaus.jettison.json.JSONArray rows = new org.codehaus.jettison.json.JSONArray();
+    int examined = 0;
+    while (examined < candidates.size() && rows.length() < request.limit) {
+      JSONObject row = rowOf.build(candidates.get(examined));
+      examined++;
+      if (row != null) {
+        rows.put(row);
+      }
+    }
+    boolean stoppedAtRowLimit = rows.length() >= request.limit && examined < candidates.size();
+    boolean hasMore = stoppedAtRowLimit || candidates.size() >= request.scan;
+    NeoResponse page = DocumentLineImport.wrapPage(rows, hasMore, request.limit, request.scan);
+    if (request.paged) {
+      JSONObject responseData = page.getBody().getJSONObject("response");
+      responseData.put(ImportListing.PARAM_OFFSET, request.offset);
+      responseData.put("nextOffset", hasMore ? (Object) (request.offset + examined)
+          : JSONObject.NULL);
+    }
+    return page;
+  }
+
   /** A page that is complete by construction (the lines of one document). */
   protected NeoResponse completePage(org.codehaus.jettison.json.JSONArray rows)
       throws JSONException {
