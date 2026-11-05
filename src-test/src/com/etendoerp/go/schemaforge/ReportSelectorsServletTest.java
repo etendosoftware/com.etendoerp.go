@@ -791,9 +791,9 @@ class ReportSelectorsServletTest {
   class ToJsonItemsTests {
 
     private JSONArray invokeToJsonItems(List<Object[]> rows) throws Exception {
-      Method method = ReportSelectorsServlet.class.getDeclaredMethod("toJsonItems", List.class);
+      Method method = ReportSelectorsServlet.class.getDeclaredMethod("toJsonItems", List.class, String[].class);
       method.setAccessible(true);
-      return (JSONArray) method.invoke(servlet, rows);
+      return (JSONArray) method.invoke(servlet, rows, new String[0]);
     }
 
     @Test
