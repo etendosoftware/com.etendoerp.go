@@ -25,7 +25,8 @@ name: Full Pipeline Pilot
 #   cell-report                    TESTS POR CÉLULA (index.html) and its summary.json
 #   go-tests-reports               Gradle test reports and the JaCoCo XML
 #   playwright-report-integration  the Playwright report, with the traces and videos of retries
-#   local-env-logs                 the environment build and Tomcat logs
+#   local-env-logs                 the environment build and Tomcat logs, and the runner load
+#                                  (vmstat every 10 s, with the E2E suite's window)
 #   go-junit, pw-cell-results      the raw results cell-report reads
 #
 # Secrets: ETENDOBOT_TOKEN reads etendo_core, schema_forge, etendo-localenv, the GitHub modules
@@ -190,6 +191,12 @@ jobs:
       - name: Disk before the build
         run: df -h / | tee -a "$RUNNER_TEMP/disk.txt"
 
+      # CPU, run queue, I/O wait and memory every 10 s for the whole job: when a spec times out,
+      # the load summary at the end tells a saturated runner (4 vCPU, the Jenkins pod has 5.5)
+      # from an idle one. The runner stops it with the job.
+      - name: Start sampling the runner load
+        run: nohup vmstat -n -t 10 > "$RUNNER_TEMP/vmstat.log" 2>&1 &
+
       - name: Checkout etendo_core
         uses: actions/checkout@v4
         with:
@@ -285,7 +292,19 @@ jobs:
             export CELL_REPORT_PW_DIR="$RUNNER_TEMP/pw-cell"
             export CELL_REPORT_PW_SUITE=e2e-integration
           fi
-          make test-e2e-headless
+          # The suite's window, for the load summary: its start, then its end even when it fails.
+          date -u '+%Y-%m-%d %H:%M:%S' > "$RUNNER_TEMP/e2e-window"
+          rc=0
+          make test-e2e-headless || rc=$?
+          date -u '+%Y-%m-%d %H:%M:%S' >> "$RUNNER_TEMP/e2e-window"
+          exit $rc
+
+      - name: Runner load during the suite
+        if: always()
+        working-directory: etendo_core/modules/com.etendoerp.go
+        run: |
+          python3 scripts/full-pipeline-pilot-report.py load --vmstat "$RUNNER_TEMP/vmstat.log" \
+            --window "$RUNNER_TEMP/e2e-window" --cpus "$(nproc)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Disk and memory at the end
         if: always()
@@ -321,7 +340,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: local-env-logs
-          path: etendo_core/build/local-env/*.log
+          path: |
+            etendo_core/build/local-env/*.log
+            ${{ runner.temp }}/vmstat.log
+            ${{ runner.temp }}/e2e-window
           retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: ignore
 

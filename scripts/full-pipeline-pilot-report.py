@@ -10,11 +10,18 @@ built from.
            reporter writes, since summary.json only counts them).
   datadog  Posts the run as etendo.ci.pilot.* metrics. A namespace of its own: the board sums the
            etendo.qa.cell.* metrics of the Jenkins builds, and the shadow runs must not add to them.
+  load     The runner load while the E2E suite ran, from `vmstat -n -t` samples: whether a spec
+           that timed out did so on a saturated runner (run queue above the vCPUs, no idle CPU,
+           swapping) or on an idle one, where the cause is the app or the test.
 
 Usage:
   scripts/full-pipeline-pilot-report.py summary --cell-summary FILE [--pw-dir DIR] [--run-url URL]
   scripts/full-pipeline-pilot-report.py datadog --cell-summary FILE [--jobs FILE] [--tag k:v]...
                                         [--dry-run]
+  scripts/full-pipeline-pilot-report.py load --vmstat FILE [--window FILE] [--cpus N]
+
+--window holds two lines, the UTC start and end of the suite as "YYYY-mm-dd HH:MM:SS"; without it
+(or with only the start) every sample from the start on counts.
 
 datadog reads DD_API_KEY, and DD_SITE (default datadoghq.eu), from the environment. Reporting
 only: a missing or unreadable input, or a Datadog error, is printed and the exit code is still 0,
@@ -184,6 +191,66 @@ def post_series(payload, api_key, site=DEFAULT_SITE):
         return 0, str(error)
 
 
+def vmstat_samples(text):
+    """One dict per data line of `vmstat -n -t`: the numeric columns by header name, plus 'at',
+    the sample's 'YYYY-mm-dd HH:MM:SS' timestamp (its last two fields)."""
+    header, samples = None, []
+    for line in text.splitlines():
+        fields = line.split()
+        if 'us' in fields and 'id' in fields and 'r' in fields:
+            header = fields
+            continue
+        if not header or len(fields) < 3 or not fields[0].isdigit():
+            continue
+        numbers = fields[:-2]
+        try:
+            values = [int(v) for v in numbers]
+        except ValueError:
+            continue
+        sample = dict(zip(header, values))
+        sample['at'] = ' '.join(fields[-2:])
+        samples.append(sample)
+    return samples
+
+
+def _pct(values, share):
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * share))]
+
+
+def load_markdown(samples, start='', end='', cpus=4):
+    """The runner load summary of the samples inside [start, end] (see the module docstring)."""
+    window = [s for s in samples if (not start or s['at'] >= start) and (not end or s['at'] <= end)]
+    out = ['## Carga del runner durante la suite E2E', '']
+    if not window:
+        return '\n'.join(out + ['Sin muestras de vmstat para la suite.']) + '\n'
+    busy = [100 - s.get('id', 0) for s in window]
+    queue = [s.get('r', 0) for s in window]
+    wait = [s.get('wa', 0) for s in window]
+    free_mb = [(s.get('free', 0) + s.get('buff', 0) + s.get('cache', 0)) // 1024 for s in window]
+    swapped = sum(s.get('si', 0) + s.get('so', 0) for s in window)
+    saturated = sum(1 for r in queue if r > cpus)
+    out += [f'{len(window)} muestras cada 10 s, de {window[0]["at"]} a {window[-1]["at"]} UTC, {cpus} vCPU.', '',
+            '| Métrica | Promedio | p95 | Máx |', '| --- | --- | --- | --- |',
+            f'| CPU ocupada (%) | {sum(busy) // len(busy)} | {_pct(busy, 0.95)} | {max(busy)} |',
+            f'| Procesos esperando CPU (r) | {sum(queue) / len(queue):.1f} | {_pct(queue, 0.95)} | {max(queue)} |',
+            f'| Espera de disco (wa %) | {sum(wait) // len(wait)} | {_pct(wait, 0.95)} | {max(wait)} |',
+            f'| Memoria libre + cache (MB, mín.) | | | {min(free_mb)} |', '']
+    share = 100 * saturated // len(window)
+    verdict = (f'CPU saturada (más procesos esperando que vCPU) en el {share} % de las muestras.'
+               if saturated else 'La CPU nunca se saturó: nunca hubo más procesos esperando que vCPU.')
+    out.append(verdict + (f' Hubo swap ({swapped} KB/s sumados).' if swapped else ' Sin swap.'))
+    return '\n'.join(out) + '\n'
+
+
+def _read_text(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
 def _parse(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest='command', required=True)
@@ -196,12 +263,25 @@ def _parse(argv):
     datadog.add_argument('--jobs', default='')
     datadog.add_argument('--tag', action='append', default=[])
     datadog.add_argument('--dry-run', action='store_true')
+    load = sub.add_parser('load')
+    load.add_argument('--vmstat', required=True)
+    load.add_argument('--window', default='')
+    load.add_argument('--cpus', type=int, default=4)
     return parser.parse_args(argv)
 
 
 def main(argv=None, env=None):
     args = _parse(argv)
     env = os.environ if env is None else env
+    if args.command == 'load':
+        text = _read_text(args.vmstat)
+        if text is None:
+            print(f'No vmstat samples ({args.vmstat} missing): nothing to report.')
+            return 0
+        bounds = [line.strip() for line in (_read_text(args.window) or '').splitlines() if line.strip()]
+        start, end = (bounds + ['', ''])[:2]
+        sys.stdout.write(load_markdown(vmstat_samples(text), start, end, args.cpus))
+        return 0
     model = load_json(args.cell_summary)
     if model is None:
         print(f'No per-cell report ({args.cell_summary} missing or unreadable): nothing to report.')

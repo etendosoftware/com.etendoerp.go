@@ -186,6 +186,58 @@ class MainTest(unittest.TestCase):
         self.assertIn('::warning::Datadog did not take the metrics (status 403)', out)
 
 
+VMSTAT = """\
+procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu------- -----timestamp-----
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu                 UTC
+ 1  0      0 8000000 100000 2000000    0    0    5   10  100  200  5  2 93  0  0  0 2026-11-05 19:40:00
+ 2  0      0 4000000 100000 2000000    0    0    5   10  100  200 40 10 50  0  0  0 2026-11-05 19:40:10
+ 9  1      0 1000000 100000 1000000    0    0    5   10  100  200 80 18  0  2  0  0 2026-11-05 19:40:20
+ 3  0      0 3000000 100000 2000000    0    0    5   10  100  200 50 10 40  0  0  0 2026-11-05 19:40:30
+"""
+
+
+class LoadTest(unittest.TestCase):
+
+    def test_reads_every_vmstat_column_by_its_header_and_the_timestamp(self):
+        samples = report.vmstat_samples(VMSTAT)
+        self.assertEqual(len(samples), 4)
+        self.assertEqual(samples[2]['r'], 9)
+        self.assertEqual(samples[2]['id'], 0)
+        self.assertEqual(samples[2]['at'], '2026-11-05 19:40:20')
+
+    def test_summarizes_only_the_samples_inside_the_window(self):
+        md = report.load_markdown(report.vmstat_samples(VMSTAT), '2026-11-05 19:40:10', '2026-11-05 19:40:30')
+        self.assertIn('3 muestras cada 10 s, de 2026-11-05 19:40:10 a 2026-11-05 19:40:30 UTC, 4 vCPU.', md)
+        self.assertIn('| CPU ocupada (%) | 70 | 100 | 100 |', md)
+        self.assertIn('| Procesos esperando CPU (r) | 4.7 | 9 | 9 |', md)
+        self.assertIn('| Memoria libre + cache (MB, mín.) | | | 2050 |', md)
+
+    def test_says_how_often_the_cpu_was_saturated(self):
+        md = report.load_markdown(report.vmstat_samples(VMSTAT), cpus=4)
+        self.assertIn('CPU saturada (más procesos esperando que vCPU) en el 25 % de las muestras. Sin swap.', md)
+
+    def test_an_idle_runner_says_the_cpu_never_saturated(self):
+        md = report.load_markdown(report.vmstat_samples(VMSTAT), end='2026-11-05 19:40:10')
+        self.assertIn('La CPU nunca se saturó', md)
+
+    def test_no_samples_in_the_window(self):
+        md = report.load_markdown(report.vmstat_samples(VMSTAT), start='2026-11-06 00:00:00')
+        self.assertIn('Sin muestras de vmstat para la suite.', md)
+
+    def test_main_reads_the_window_file_and_tolerates_a_missing_log(self):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(out):
+            log, window = os.path.join(tmp, 'vmstat.log'), os.path.join(tmp, 'window')
+            with open(log, 'w', encoding='utf-8') as fh:
+                fh.write(VMSTAT)
+            with open(window, 'w', encoding='utf-8') as fh:
+                fh.write('2026-11-05 19:40:20\n2026-11-05 19:40:30\n')
+            self.assertEqual(report.main(['load', '--vmstat', log, '--window', window], {}), 0)
+            self.assertEqual(report.main(['load', '--vmstat', os.path.join(tmp, 'none.log')], {}), 0)
+        self.assertIn('2 muestras cada 10 s', out.getvalue())
+        self.assertIn('No vmstat samples', out.getvalue())
+
+
 class PostSeriesTest(unittest.TestCase):
 
     def test_posts_the_payload_with_the_api_key_header(self):
