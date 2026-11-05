@@ -8,9 +8,8 @@ name: Full Pipeline Pilot
 #
 # This first job is block 3, the integration suite: the environment built the way Jenkins builds
 # it (etendo-localenv: its own PostgreSQL, install, the GOClient seeds of schema_forge's local-env
-# plugin, smartbuild), Tomcat, jsreport, and E2E_SUITE=integration against it. It also prints the
-# disk use at each step: whether all of this fits on a hosted runner is what the pilot measures
-# first.
+# plugin, smartbuild), Tomcat, jsreport, and E2E_SUITE=integration against it, the same 57 specs
+# as Jenkins. It prints the disk use at each step into the run summary.
 #
 # Secrets: ETENDOBOT_TOKEN reads etendo_core, schema_forge, etendo-localenv, the GitHub modules
 # and the npm packages; NEXUS_USER/NEXUS_PASSWORD resolve dependencies; BITBUCKET_SSH_KEY clones
@@ -48,15 +47,9 @@ jobs:
       MODULE_BRANCH: ${{ github.head_ref || github.ref_name }}
       LE: ${{ github.workspace }}/etendo-localenv/bin/local-env.sh
     steps:
+      # The first run started with 85 GB free and used about 7 (no SDK cleanup needed).
       - name: Disk before the build
         run: df -h / | tee -a "$RUNNER_TEMP/disk.txt"
-
-      # The image ships SDKs this job never uses; the build, the database, Tomcat and the browsers
-      # need the room.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h / | tee -a "$RUNNER_TEMP/disk.txt"
 
       - name: Checkout etendo_core
         uses: actions/checkout@v4
