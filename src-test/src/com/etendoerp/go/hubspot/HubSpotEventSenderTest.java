@@ -329,7 +329,7 @@ class HubSpotEventSenderTest {
   }
 
   @Test
-  void aMilestoneNeverTakesADealBack() {
+  void aMilestoneNeverTakesADealBack() throws Exception {
     when(store.findDealId(ACCOUNT)).thenReturn("deal-1");
     answers = dealIn("pipe", "card");
 
@@ -337,7 +337,9 @@ class HubSpotEventSenderTest {
         "{\"milestone\":\"order\",\"at\":\"2026-10-03T09:15:00Z\"}"), NOW);
 
     assertEquals(Outcome.Kind.SENT, outcome.kind());
-    assertTrue(calls.stream().noneMatch(c -> c.method().equals("PATCH")));
+    JSONObject deal = call("PATCH", "/deals/deal-1").properties();
+    assertFalse(deal.has("dealstage"), "a deal past SQL keeps its stage");
+    assertEquals("2026-10-03T09:15:00Z", deal.getString("etendo_fecha_primer_pedido"));
   }
 
   @Test

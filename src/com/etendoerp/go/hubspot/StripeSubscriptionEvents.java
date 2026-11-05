@@ -62,6 +62,7 @@ final class StripeSubscriptionEvents {
   static final String MONTHLY = "monthly";
   static final String ANNUAL = "annual";
 
+  private static final String AMOUNT_PAID = "amount_paid";
   private static final String CANCEL_AT_PERIOD_END = "cancel_at_period_end";
   private static final String CANCEL_AT = "cancel_at";
   private static final String CANCELED_AT = "canceled_at";
@@ -175,8 +176,8 @@ final class StripeSubscriptionEvents {
     Instant paidAt = transitions == null ? null : epochSeconds(transitions, "paid_at");
     JSONObject payload = new JSONObject(payload(subscriptionId, firstOf(paidAt, created)));
     // Self-serve plans are sold in two-decimal currencies, so the minor units are cents.
-    if (invoice.has("amount_paid")) {
-      payload.put(FIELD_AMOUNT, BigDecimal.valueOf(invoice.optLong("amount_paid", 0L))
+    if (invoice.has(AMOUNT_PAID)) {
+      payload.put(FIELD_AMOUNT, BigDecimal.valueOf(invoice.optLong(AMOUNT_PAID, 0L))
           .movePointLeft(2).toPlainString());
     }
     String currency = StripeJson.text(invoice, FIELD_CURRENCY);
@@ -196,7 +197,7 @@ final class StripeSubscriptionEvents {
 
   /** An invoice that states it collected nothing. One that does not say is still a payment. */
   static boolean isZeroPayment(JSONObject invoice) {
-    return invoice.has("amount_paid") && invoice.optLong("amount_paid", 0L) <= 0L;
+    return invoice.has(AMOUNT_PAID) && invoice.optLong(AMOUNT_PAID, 0L) <= 0L;
   }
 
   /**

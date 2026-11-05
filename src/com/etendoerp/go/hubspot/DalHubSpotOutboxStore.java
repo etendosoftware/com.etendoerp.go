@@ -107,17 +107,23 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
    * {@code AD_REF_DATA_LOADED}. An import is an asynchronous batch job, which only the import
    * dialog starts. The completed and posted dates are the invoice's last update.
    */
+  private static final String FIRST_CREATED = "min(t.created)";
+  private static final String FIRST_UPDATED = "min(t.updated)";
+  private static final String INVOICE_TABLE = "c_invoice";
+  private static final String INVOICE_TABLE_ID = "318";
+
   private static final String MILESTONES_SQL = "select"
       + " (select min(j.finished) from etgo_batch_job j where j.ad_client_id = :environment"
       + "   and j.created >= :since and j.state in ('SUCCEEDED', 'PARTIAL')"
       + "   and j.processed_rows > 0) as m_import,"
-      + ownRows("min(t.created)", "c_bpartner", "291", "") + " as m_partner,"
-      + ownRows("min(t.created)", "m_product", "208", "") + " as m_product,"
-      + ownRows("min(t.created)", "c_order", "259", "") + " as m_order,"
-      + ownRows("min(t.created)", "c_invoice", "318", "") + " as m_invoice,"
-      + ownRows("min(t.updated)", "c_invoice", "318", " and t.docstatus = 'CO'")
+      + ownRows(FIRST_CREATED, "c_bpartner", "291", "") + " as m_partner,"
+      + ownRows(FIRST_CREATED, "m_product", "208", "") + " as m_product,"
+      + ownRows(FIRST_CREATED, "c_order", "259", "") + " as m_order,"
+      + ownRows(FIRST_CREATED, INVOICE_TABLE, INVOICE_TABLE_ID, "") + " as m_invoice,"
+      + ownRows(FIRST_UPDATED, INVOICE_TABLE, INVOICE_TABLE_ID, " and t.docstatus = 'CO'")
       + " as m_completed,"
-      + ownRows("min(t.updated)", "c_invoice", "318", " and t.posted = 'Y'") + " as m_posted";
+      + ownRows(FIRST_UPDATED, INVOICE_TABLE, INVOICE_TABLE_ID, " and t.posted = 'Y'")
+      + " as m_posted";
 
   private static final String PRODUCTIVE_SQL = "select case when exists (select 1"
       + "   from ad_preference p where p.ad_client_id = :environment and p.attribute = :attribute"

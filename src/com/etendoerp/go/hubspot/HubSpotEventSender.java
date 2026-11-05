@@ -17,14 +17,21 @@
 
 package com.etendoerp.go.hubspot;
 
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
+import static com.etendoerp.go.hubspot.HubSpotValues.association;
+import static com.etendoerp.go.hubspot.HubSpotValues.countryCode;
+import static com.etendoerp.go.hubspot.HubSpotValues.countryName;
+import static com.etendoerp.go.hubspot.HubSpotValues.date;
+import static com.etendoerp.go.hubspot.HubSpotValues.dateTime;
+import static com.etendoerp.go.hubspot.HubSpotValues.encode;
+import static com.etendoerp.go.hubspot.HubSpotValues.equalTo;
+import static com.etendoerp.go.hubspot.HubSpotValues.eventDate;
+import static com.etendoerp.go.hubspot.HubSpotValues.hubSpotPlan;
+import static com.etendoerp.go.hubspot.HubSpotValues.isAnnual;
+import static com.etendoerp.go.hubspot.HubSpotValues.payloadOf;
+import static com.etendoerp.go.hubspot.HubSpotValues.putIfPresent;
+
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.temporal.ChronoUnit;
-import java.time.format.DateTimeParseException;
 import java.util.HashSet;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -107,9 +114,6 @@ class HubSpotEventSender {
   private static final String EMAIL = "email";
   private static final String RESULTS = "results";
 
-  /** The values of the deal's {@code etendo_plan} enumeration; any other key would be refused. */
-  static final Set<String> HUBSPOT_PLANS = Set.of("start", "core", "pro", "scale", "enterprise");
-
   /** Contact property of the sign-up, created by marketing (ETP-6082). */
   static final String SECTOR = "sector";
   /**
@@ -119,8 +123,6 @@ class HubSpotEventSender {
   static final String COUNTRY = "country";
   /** HubSpot's standard two-letter country code of the contact. */
   static final String COUNTRY_CODE = "hs_country_region_code";
-  /** The portal's existing contacts carry the country name in Spanish ("España"). */
-  private static final Locale COUNTRY_LANGUAGE = new Locale("es");
 
   /** The deal {@code datetime} property of each milestone, created by marketing on 2026-11-05. */
   static final Map<String, String> MILESTONE_PROPERTIES = Map.of(
@@ -311,15 +313,6 @@ class HubSpotEventSender {
         configuration.cardStage(), configuration.expiredStage());
   }
 
-  private Set<String> withLost(Set<String> stages) {
-    Set<String> all = new HashSet<>(stages);
-    all.add(configuration.lostStage());
-    return all;
-  }
-
-  private static boolean isAnnual(String interval) {
-    return StripeSubscriptionEvents.ANNUAL.equals(interval);
-  }
 
   /**
    * Writes {@code properties} on the account's deal and moves it to {@code stage} when the sync
@@ -412,32 +405,7 @@ class HubSpotEventSender {
     JSONObject properties = new JSONObject();
     switch (event.eventType()) {
       case HubSpotOutboxStore.PAYMENT:
-        properties.put(SUBSCRIPTION_STATE, STATE_ACTIVE).put(LAST_PAYMENT, day);
-        putIfPresent(properties, "amount", payload.optString(StripeSubscriptionEvents.FIELD_AMOUNT,
-            null));
-        putIfPresent(properties, BILLING_INTERVAL,
-            payload.optString(StripeSubscriptionEvents.FIELD_INTERVAL, null));
-        // A payment after the environment's cancellation re-subscribes it (ETP-5742).
-        boolean reactivation = store.wasCanceledBefore(event.accountId(),
-            environment.environmentId(), eventDate(event, payload));
-        if (reactivation) {
-          properties.put(REACTIVATION, "true");
-        }
-        if (deal.owned()) {
-          putIfPresent(properties, PLAN, hubSpotPlan(environment.planKey(), event.accountId()));
-          // A monthly checkout's own invoice is the card stage's (PAID) and its first renewal is
-          // the customer's first payment; an annual invoice already is. A zero one never gets here.
-          // A re-subscription is the one way out of the lost stage, as a new purchase would be.
-          if (StripeSubscriptionEvents.REASON_RENEWAL.equals(
-              payload.optString(StripeSubscriptionEvents.FIELD_BILLING_REASON, ""))
-              || isAnnual(payload.optString(StripeSubscriptionEvents.FIELD_INTERVAL, null))) {
-            putStageIfIn(properties, deal.dealId(), configuration.firstPaymentStage(),
-                reactivation ? withLost(firstPaymentSources()) : firstPaymentSources());
-          } else if (reactivation) {
-            putStageIfIn(properties, deal.dealId(), configuration.cardStage(),
-                Set.of(configuration.lostStage()));
-          }
-        }
+        putPaymentProperties(properties, event, payload, deal, environment, day);
         break;
       case HubSpotOutboxStore.PAYMENT_FAILED:
         properties.put(SUBSCRIPTION_STATE, STATE_SUSPENDED).put(FAILED_CHARGE, day);
@@ -462,6 +430,45 @@ class HubSpotEventSender {
         break;
     }
     return properties;
+  }
+
+  /**
+   * A paid invoice: the subscription is active again, and on a deal the sync created the stage
+   * moves. A monthly checkout's own invoice is the card stage's (PAID) and its first renewal is the
+   * customer's first payment; an annual invoice already is. A zero one never gets here. A payment
+   * after the environment's cancellation re-subscribes it (ETP-5742): the one way out of the lost
+   * stage, as a new purchase would be.
+   */
+  private void putPaymentProperties(JSONObject properties, PendingEvent event, JSONObject payload,
+      EnvironmentDeal deal, SubscriptionEnvironment environment, String day)
+      throws CallFailed, JSONException {
+    properties.put(SUBSCRIPTION_STATE, STATE_ACTIVE).put(LAST_PAYMENT, day);
+    putIfPresent(properties, "amount", payload.optString(StripeSubscriptionEvents.FIELD_AMOUNT,
+        null));
+    String interval = payload.optString(StripeSubscriptionEvents.FIELD_INTERVAL, null);
+    putIfPresent(properties, BILLING_INTERVAL, interval);
+    boolean reactivation = store.wasCanceledBefore(event.accountId(),
+        environment.environmentId(), eventDate(event, payload));
+    if (reactivation) {
+      properties.put(REACTIVATION, "true");
+    }
+    if (!deal.owned()) {
+      return;
+    }
+    putIfPresent(properties, PLAN, hubSpotPlan(environment.planKey(), event.accountId()));
+    boolean firstPayment = StripeSubscriptionEvents.REASON_RENEWAL.equals(
+        payload.optString(StripeSubscriptionEvents.FIELD_BILLING_REASON, ""))
+        || isAnnual(interval);
+    if (firstPayment) {
+      Set<String> from = new HashSet<>(firstPaymentSources());
+      if (reactivation) {
+        from.add(configuration.lostStage());
+      }
+      putStageIfIn(properties, deal.dealId(), configuration.firstPaymentStage(), from);
+    } else if (reactivation) {
+      putStageIfIn(properties, deal.dealId(), configuration.cardStage(),
+          Set.of(configuration.lostStage()));
+    }
   }
 
   /**
@@ -573,37 +580,8 @@ class HubSpotEventSender {
         new JSONObject().put(PROPERTIES, properties));
   }
 
-  private static Instant eventDate(PendingEvent event, JSONObject payload) {
-    String at = payload.optString(StripeSubscriptionEvents.FIELD_AT, "");
-    if (StringUtils.isNotBlank(at)) {
-      try {
-        return Instant.parse(at);
-      } catch (DateTimeParseException e) {
-        log.warn("Billing event {} carries an unreadable date '{}'", event.id(), at);
-      }
-    }
-    return event.occurredAt() != null ? event.occurredAt() : Instant.now();
-  }
 
-  private static void putIfPresent(JSONObject object, String key, String value)
-      throws JSONException {
-    if (StringUtils.isNotBlank(value)) {
-      object.put(key, value);
-    }
-  }
 
-  private static String hubSpotPlan(String planKey, String accountId) {
-    String plan = StringUtils.trimToNull(planKey);
-    if (plan == null) {
-      return null;
-    }
-    if (!HUBSPOT_PLANS.contains(plan)) {
-      log.warn("Plan '{}' paid by account {} is not a HubSpot plan; the deal goes without it",
-          plan, accountId);
-      return null;
-    }
-    return plan;
-  }
 
   private JSONObject contactBase(PendingEvent event) throws JSONException {
     JSONObject properties = new JSONObject()
@@ -631,28 +609,7 @@ class HubSpotEventSender {
     return properties;
   }
 
-  /**
-   * The Spanish name of the country the owner entered, written to the contact's and the company's
-   * {@code country}, as the portal's existing records have it. A demo reported before the code was
-   * recorded falls back to the stored name.
-   */
-  static String countryName(JSONObject demoPayload) {
-    String code = countryCode(demoPayload);
-    if (code != null) {
-      String name = new Locale("", code).getDisplayCountry(COUNTRY_LANGUAGE);
-      if (StringUtils.isNotBlank(name) && !name.equalsIgnoreCase(code)) {
-        return name;
-      }
-    }
-    return StringUtils.trimToNull(demoPayload.optString(HubSpotOutbox.FIELD_COUNTRY, ""));
-  }
 
-  /** The ISO 3166 two-letter code of the country the owner entered, upper case, or null. */
-  static String countryCode(JSONObject demoPayload) {
-    String code = StringUtils.trimToNull(demoPayload.optString(HubSpotOutbox.FIELD_COUNTRY_CODE,
-        ""));
-    return code != null && code.length() == 2 ? code.toUpperCase(Locale.ROOT) : null;
-  }
 
   private String upsertContact(PendingEvent event, JSONObject properties)
       throws CallFailed, JSONException {
@@ -693,12 +650,6 @@ class HubSpotEventSender {
     return results == null || results.length() == 0 ? null : results.getJSONObject(0);
   }
 
-  private static JSONObject equalTo(String property, String value) throws JSONException {
-    return new JSONObject()
-        .put("propertyName", property)
-        .put("operator", "EQ")
-        .put("value", value);
-  }
 
   /**
    * Creates the company. A company is a courtesy: the deal is what links HubSpot with Etendo, so a
@@ -730,13 +681,6 @@ class HubSpotEventSender {
     return idOf(new JSONObject(response.body()));
   }
 
-  private static JSONObject association(String toId, int typeId) throws JSONException {
-    return new JSONObject()
-        .put("to", new JSONObject().put("id", toId))
-        .put("types", new JSONArray().put(new JSONObject()
-            .put("associationCategory", "HUBSPOT_DEFINED")
-            .put("associationTypeId", typeId)));
-  }
 
   private JSONObject call(String method, String path, JSONObject body)
       throws CallFailed, JSONException {
@@ -771,24 +715,9 @@ class HubSpotEventSender {
     return id;
   }
 
-  private static JSONObject payloadOf(PendingEvent event) throws JSONException {
-    return StringUtils.isBlank(event.payload()) ? new JSONObject()
-        : new JSONObject(event.payload());
-  }
 
-  /** HubSpot date properties take a {@code yyyy-MM-dd} calendar day. */
-  static String date(Instant instant) {
-    return instant.atZone(ZoneOffset.UTC).toLocalDate().toString();
-  }
 
-  /** An ISO 8601 instant, for HubSpot {@code datetime} properties. */
-  static String dateTime(Instant instant) {
-    return instant.truncatedTo(ChronoUnit.MILLIS).toString();
-  }
 
-  private static String encode(String value) {
-    return URLEncoder.encode(value, StandardCharsets.UTF_8);
-  }
 
   /** What became of one event. */
   record Outcome(Kind kind, String hubSpotObjectId, String detail) {

@@ -848,7 +848,7 @@ public class EtendoGoJwtServletTest {
   }
 
   @Test
-  void theOnboardingKeepsTheSectorOfAnAccountThatHadNone() {
+  public void theOnboardingKeepsTheSectorOfAnAccountThatHadNone() {
     Account account = mock(Account.class);
 
     try (MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class)) {
@@ -860,7 +860,7 @@ public class EtendoGoJwtServletTest {
   }
 
   @Test
-  void theOnboardingNeverOverwritesTheSectorChosenAtSignUp() {
+  public void theOnboardingNeverOverwritesTheSectorChosenAtSignUp() {
     Account account = mock(Account.class);
     when(account.get(EtendoGoJwtDalHelper.PROPERTY_SECTOR)).thenReturn("servicios");
 
