@@ -73,7 +73,7 @@ public class SalesRectificativeFiscalDefaultsTest {
     when(dal.getConnection()).thenReturn(conn);
     tbaiStatement = mock(PreparedStatement.class);
     verifactuStatement = mock(PreparedStatement.class);
-    when(conn.prepareStatement(SalesRectificativeFiscalDefaults.TBAI_ACTIVE_SQL))
+    when(conn.prepareStatement(InvoiceCalloutHelper.TBAI_ACTIVE_SQL))
         .thenReturn(tbaiStatement);
     when(conn.prepareStatement(SalesRectificativeFiscalDefaults.VERIFACTU_ACTIVE_SQL))
         .thenReturn(verifactuStatement);

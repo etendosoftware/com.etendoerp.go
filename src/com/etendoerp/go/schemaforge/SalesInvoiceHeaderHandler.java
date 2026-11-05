@@ -424,23 +424,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
-   * Injects {@code linkedShipments} into the invoice detail record: every sales goods movement
-   * (M_InOut) linked to one of the invoice's lines.
-   *
-   * <p>"Linked" is {@link InOutInvoiceLinks#linkedInOutLineIdsSql}: the
-   * {@code C_InvoiceLine.M_InOutLine_ID} column and the {@code M_MatchSI} match table — never
-   * the order line (ETP-6002 dropped that fallback on the sales side: it made an invoice show
-   * every shipment of its order, including ones another invoice billed). Before ETP-5576
-   * the match table was not read, so the second and later partial shipments of an invoice line —
-   * which the column cannot hold — never showed up.
-   *
-   * <p>Joins C_DocType to expose {@code isReturn}, the actual discriminator between a
-   * regular delivery and a customer return: M_InOut.MovementType is NOT usable for this
-   * (see M_INOUT_TRG_PROV.xml) — it only ever takes 'C-' for every sales-side movement
-   * (shipments AND returns alike) or 'V+' for purchase-side, never branching on
-   * C_DocType.IsReturn. ETP-4534.</p>
-   */
-  /**
    * Completes the record a CRUD write (POST/PUT/PATCH) echoes back (ETP-5747).
    *
    * <p>The write response used to carry none of the virtual fields the detail GET injects, so a
@@ -527,6 +510,23 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     return wrapper.optJSONObject("data");
   }
 
+  /**
+   * Injects {@code linkedShipments} into the invoice detail record: every sales goods movement
+   * (M_InOut) linked to one of the invoice's lines.
+   *
+   * <p>"Linked" is {@link InOutInvoiceLinks#linkedInOutLineIdsSql}: the
+   * {@code C_InvoiceLine.M_InOutLine_ID} column and the {@code M_MatchSI} match table — never
+   * the order line (ETP-6002 dropped that fallback on the sales side: it made an invoice show
+   * every shipment of its order, including ones another invoice billed). Before ETP-5576
+   * the match table was not read, so the second and later partial shipments of an invoice line —
+   * which the column cannot hold — never showed up.
+   *
+   * <p>Joins C_DocType to expose {@code isReturn}, the actual discriminator between a
+   * regular delivery and a customer return: M_InOut.MovementType is NOT usable for this
+   * (see M_INOUT_TRG_PROV.xml) — it only ever takes 'C-' for every sales-side movement
+   * (shipments AND returns alike) or 'V+' for purchase-side, never branching on
+   * C_DocType.IsReturn. ETP-4534.</p>
+   */
   // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
   private void enrichLinkedShipments(JSONObject rec, String invoiceId) {

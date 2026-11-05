@@ -53,7 +53,8 @@ import org.openbravo.model.common.invoice.Invoice;
  *
  * Only on a DRAFT, unprocessed sales invoice whose document type is flagged rectificative
  * ({@link RectificativeSupport#isRectificative(DocumentType)}), and never over a value already
- * chosen:
+ * chosen — except a non-rectificative {@code F*} VERI*FACTU code, which is replaced by the
+ * document type's {@code R*} code, and the TicketBAI reverse flag, which is enforced:
  * <ul>
  *   <li><b>TicketBAI</b> — only when the invoice's organization has an active {@code tbai_config}:
  *   {@code tbaiIsreverseinvoice = Y}, {@code tbaiReverseinvoicetype = I} (Por diferencias) when
@@ -99,8 +100,6 @@ final class SalesRectificativeFiscalDefaults {
   private static final String DRAFT = "DR";
   private static final String RECTIFICATIVE_PREFIX = "R";
 
-  static final String TBAI_ACTIVE_SQL =
-      "SELECT 1 FROM tbai_config WHERE ad_org_id = ? AND isactive = 'Y' LIMIT 1";
   static final String VERIFACTU_ACTIVE_SQL =
       "SELECT 1 FROM etvfac_verifactu_config WHERE ad_org_id = ad_get_org_le_bu(?, 'LE')"
           + " AND isactive = 'Y' AND in_vfactu_system IS NOT NULL LIMIT 1";
@@ -111,8 +110,10 @@ final class SalesRectificativeFiscalDefaults {
   /**
    * Applies the defaults to the invoice and flushes them when anything changed.
    *
-   * <p>Never throws: a failure is logged and answered as "nothing applied", so the save the
-   * user already made is not turned into an error by a default it did not ask for.
+   * <p>Never throws a Java exception: a failure is logged and answered as "nothing applied", so
+   * the save the user already made is not turned into an error by a default it did not ask for.
+   * A DB-level failure on the flush (a constraint or a trigger) still aborts the transaction,
+   * exactly as for {@code persistSiiAuthorizationno}: no savepoint is taken.
    *
    * @param invoiceId the sales invoice just written
    * @return the response keys and values that were written (empty when nothing changed)
@@ -157,7 +158,7 @@ final class SalesRectificativeFiscalDefaults {
     if (orgId == null) {
       return applied;
     }
-    if (configExists(TBAI_ACTIVE_SQL, orgId)) {
+    if (tbaiConfigActive(orgId)) {
       applyTbai(invoice, applied);
     }
     if (configExists(VERIFACTU_ACTIVE_SQL, orgId)) {
@@ -174,6 +175,11 @@ final class SalesRectificativeFiscalDefaults {
         && RectificativeSupport.isRectificative(invoice.getTransactionDocument());
   }
 
+  /**
+   * TicketBAI: {@code tbaiIsreverseinvoice} is ENFORCED on a rectificative draft (set to
+   * {@code Y} whatever it held, as the doc-type callout does — a rectificative is never a
+   * non-reverse TicketBAI invoice); the reverse type and code are only DEFAULTED when blank.
+   */
   private static void applyTbai(Invoice invoice, Map<String, Object> applied) {
     if (!Boolean.TRUE.equals(invoice.isTbaiIsreverseinvoice())) {
       invoice.setTbaiIsreverseinvoice(true);
@@ -211,8 +217,23 @@ final class SalesRectificativeFiscalDefaults {
   }
 
   /**
-   * Whether the config query answers a row for the organization. A failure answers
-   * {@code false}: no default is better than a default for a system the org may not use.
+   * Whether the organization has an active TicketBAI configuration — the shared lookup
+   * {@link InvoiceCalloutHelper#isTbaiConfigActive}. Never throws a Java exception: a failure
+   * answers {@code false} (no default is better than a default for a system the org may not use).
+   */
+  static boolean tbaiConfigActive(String orgId) {
+    try {
+      return InvoiceCalloutHelper.isTbaiConfigActive(orgId);
+    } catch (Exception e) {
+      log.debug("[ETP-5747] TicketBAI config lookup failed for org {}: {}", orgId, e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Whether the config query answers a row for the organization. Never throws a Java exception:
+   * a failure answers {@code false} — no default is better than a default for a system the org
+   * may not use.
    */
   static boolean configExists(String sql, String orgId) {
     try {

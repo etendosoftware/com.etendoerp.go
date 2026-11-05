@@ -1890,27 +1890,27 @@ public class SalesInvoiceHeaderHandlerTest {
 
   // ── ETP-5747: the CRUD write response carries what the form needs ─────────────
 
-  private static final String ETP5747_INVOICE = "inv-5747";
-  private static final String ETP5747_DOCTYPE = "dt-rect-5747";
+  private static final String WRITE_RESPONSE_INVOICE = "inv-write-response";
+  private static final String WRITE_RESPONSE_DOCTYPE = "dt-rectificative";
 
-  private static NeoContext etp5747WriteCtx(String method, NeoResponse previous) {
+  private static NeoContext writeResponseCtx(String method, NeoResponse previous) {
     NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
-        .httpMethod(method).endpointType(NeoEndpointType.CRUD).recordId(ETP5747_INVOICE)
+        .httpMethod(method).endpointType(NeoEndpointType.CRUD).recordId(WRITE_RESPONSE_INVOICE)
         .requestBody(new JSONObject()).build();
     ctx.setPreviousResult(previous);
     return ctx;
   }
 
-  private static JSONObject etp5747WrittenBody() throws JSONException {
-    JSONObject rec = new JSONObject().put("id", ETP5747_INVOICE)
-        .put("transactionDocument", ETP5747_DOCTYPE).put("organization", "org-5747")
+  private static JSONObject writtenInvoiceBody() throws JSONException {
+    JSONObject rec = new JSONObject().put("id", WRITE_RESPONSE_INVOICE)
+        .put("transactionDocument", WRITE_RESPONSE_DOCTYPE).put("organization", "org-write-response")
         .put("aeatsiiClaveTipo", "F1");
     return new JSONObject().put("response",
         new JSONObject().put("data", new JSONArray().put(rec)));
   }
 
   /** Every lookup answers one row whose first column is "Y" (rectificative doc type, TBAI on). */
-  private static void etp5747StubLookups(MockedStatic<OBDal> dalMock) throws SQLException {
+  private static void stubRectificativeLookups(MockedStatic<OBDal> dalMock) throws SQLException {
     OBDal dal = mock(OBDal.class);
     dalMock.when(OBDal::getInstance).thenReturn(dal);
     dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
@@ -1924,7 +1924,7 @@ public class SalesInvoiceHeaderHandlerTest {
     when(rs.getString(1)).thenReturn("Y");
     DocumentType dt = mock(DocumentType.class);
     when(dt.isEtsgIsRectificative()).thenReturn(true);
-    when(dal.get(DocumentType.class, ETP5747_DOCTYPE)).thenReturn(dt);
+    when(dal.get(DocumentType.class, WRITE_RESPONSE_DOCTYPE)).thenReturn(dt);
   }
 
   /**
@@ -1934,18 +1934,18 @@ public class SalesInvoiceHeaderHandlerTest {
    * with the document-type keys, {@code tbaiConfigActive} and the fiscal defaults just written.
    */
   @Test
-  public void etp5747WriteResponseCarriesIsRectificativeAndFiscalDefaults() throws Exception {
+  public void writeResponseCarriesIsRectificativeAndFiscalDefaults() throws Exception {
     AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      etp5747StubLookups(dalMock);
-      NeoResponse previous = new NeoResponse(201, etp5747WrittenBody())
+      stubRectificativeLookups(dalMock);
+      NeoResponse previous = new NeoResponse(201, writtenInvoiceBody())
           .withHeader("X-Test", "kept");
       Map<String, Object> defaults = new HashMap<>();
       defaults.put("tbaiReverseinvoicecode", "R4");
       defaults.put("etvfacInvType", "R1");
 
       NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
-          etp5747WriteCtx("POST", previous), null, defaults);
+          writeResponseCtx("POST", previous), null, defaults);
 
       assertNotNull(result);
       assertEquals(201, result.getHttpStatus());
@@ -1971,16 +1971,16 @@ public class SalesInvoiceHeaderHandlerTest {
    * of that response, not instead of it.
    */
   @Test
-  public void etp5747WriteResponseKeepsTheInjectedAuthorizationNumber() throws Exception {
+  public void writeResponseKeepsTheInjectedAuthorizationNumber() throws Exception {
     AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      etp5747StubLookups(dalMock);
-      JSONObject withAuthorization = etp5747WrittenBody();
+      stubRectificativeLookups(dalMock);
+      JSONObject withAuthorization = writtenInvoiceBody();
       withAuthorization.getJSONObject("response").getJSONArray("data").getJSONObject(0)
           .put("aeatsiiAuthorizationno", "AUTH-1");
 
       NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
-          etp5747WriteCtx("PATCH", NeoResponse.ok(etp5747WrittenBody())),
+          writeResponseCtx("PATCH", NeoResponse.ok(writtenInvoiceBody())),
           NeoResponse.ok(withAuthorization), Collections.emptyMap());
 
       JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
@@ -1996,12 +1996,12 @@ public class SalesInvoiceHeaderHandlerTest {
    * computed from the missing value: "false" would overwrite the true value the client holds.
    */
   @Test
-  public void etp5747WriteResponseNeverDerivesKeysFromAbsentValues() throws Exception {
+  public void writeResponseNeverDerivesKeysFromAbsentValues() throws Exception {
     JSONObject body = new JSONObject().put("response", new JSONObject().put("data",
-        new JSONArray().put(new JSONObject().put("id", ETP5747_INVOICE))));
+        new JSONArray().put(new JSONObject().put("id", WRITE_RESPONSE_INVOICE))));
 
     NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
-        etp5747WriteCtx("PATCH", NeoResponse.ok(body)), null, Collections.emptyMap());
+        writeResponseCtx("PATCH", NeoResponse.ok(body)), null, Collections.emptyMap());
 
     JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
     assertFalse(rec.has("isRectificative"));
@@ -2012,20 +2012,20 @@ public class SalesInvoiceHeaderHandlerTest {
 
   /** An error, an id-less body and an {@code _onlyReturnIds} batch response are left alone. */
   @Test
-  public void etp5747WriteResponseLeavesErrorsAndIdsOnlyResponsesAlone() throws Exception {
+  public void writeResponseLeavesErrorsAndIdsOnlyResponsesAlone() throws Exception {
     assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
-        etp5747WriteCtx("PATCH", NeoResponse.error(422, "refused")), null,
+        writeResponseCtx("PATCH", NeoResponse.error(422, "refused")), null,
         Collections.emptyMap()));
     assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
-        etp5747WriteCtx("PATCH", NeoResponse.ok(new JSONObject().put("response",
+        writeResponseCtx("PATCH", NeoResponse.ok(new JSONObject().put("response",
             new JSONObject().put("data", new JSONArray())))), null, Collections.emptyMap()));
     assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
-        etp5747WriteCtx("PATCH", null), null, Collections.emptyMap()));
+        writeResponseCtx("PATCH", null), null, Collections.emptyMap()));
 
     NeoContext idsOnly = NeoContext.builder().specName("sales-invoice").entityName("header")
         .httpMethod("POST").endpointType(NeoEndpointType.CRUD).idsOnlyResponse(true)
         .requestBody(new JSONObject()).build();
-    idsOnly.setPreviousResult(NeoResponse.ok(etp5747WrittenBody()));
+    idsOnly.setPreviousResult(NeoResponse.ok(writtenInvoiceBody()));
     assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(idsOnly, null,
         Collections.emptyMap()));
   }
