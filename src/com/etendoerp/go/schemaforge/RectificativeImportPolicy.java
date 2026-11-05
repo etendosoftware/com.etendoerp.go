@@ -76,6 +76,15 @@ final class RectificativeImportPolicy {
     return salesModalRules;
   }
 
+  /**
+   * Whether the shipment import popup of this side greys out a movement line that another invoice
+   * is already linked to (ETP-6099): the sales one does, the purchase one only greys the lines this
+   * invoice holds. Read by the {@code detail} count of {@code pendingLines}.
+   */
+  boolean excludesLinesInvoicedElsewhere() {
+    return salesModalRules;
+  }
+
   /** Whether the origin invoice and the return are compared by currency (the sales modals do). */
   boolean comparesCurrency() {
     return salesModalRules;

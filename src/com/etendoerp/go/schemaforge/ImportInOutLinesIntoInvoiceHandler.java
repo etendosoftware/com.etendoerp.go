@@ -500,6 +500,11 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return discover(candidates, doc -> {
       int pendingLines = isReturn(doc) == returns
           ? offeredLineCount(invoice, doc, returns, policy) : 0;
+      if (request.detail && !returns && pendingLines > 0) {
+        // ETP-6099: what the popup offers once expanded, so a listed document never turns out
+        // empty. Only with detail: the default answer keeps its count.
+        pendingLines = selectableLineCount(invoice, doc, policy);
+      }
       if (pendingLines == 0 && !(request.includeCovered && isReturn(doc) == returns
           && isCovered(invoice, doc, returns, policy))) {
         return null;
@@ -539,6 +544,26 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       return !pendingBeforeDrafts(doc.getId()).isEmpty();
     }
     return !isInvoicedInFull(doc) && !returnCurrencyMismatch(invoice, doc, policy);
+  }
+
+  /**
+   * The lines of a shipment / receipt the popup leaves selectable (ETP-6099, {@code detail}):
+   * something pending, not already held by THIS invoice (through the movement line or its order
+   * line) and, where the side greys them ({@link RectificativeImportPolicy
+   * #excludesLinesInvoicedElsewhere}), not linked to another invoice.
+   */
+  private int selectableLineCount(Invoice invoice, ShipmentInOut doc,
+      RectificativeImportPolicy policy) {
+    Map<String, boolean[]> links = invoiceLinkStates(doc.getId(), invoice.getId());
+    boolean excludesElsewhere = policy.excludesLinesInvoicedElsewhere();
+    int count = 0;
+    for (String lineId : signedPending(activeLines(doc), pendingQuantities(doc.getId())).keySet()) {
+      boolean[] state = links.getOrDefault(lineId, new boolean[2]);
+      if (!state[0] && !(excludesElsewhere && state[1])) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /** The {@code detail} keys of a document row (ETP-6099). */
