@@ -71,13 +71,20 @@ jobs:
           base_ref: ${{ github.base_ref }}
 
       # Jenkins runs `test --tests "com.etendoerp.go.*"` (the database-free half, finalized by
-      # goIsolatedDalTest) and then jacocoRootReport. Here all three go in one Gradle invocation:
-      # each separate call pays ~2.5 min of configuration. jacocoRootReport depends on no test
-      # task, it reads every build/jacoco/*.exec; listed last it runs after both halves, and
-      # --continue still runs it, and goIsolatedDalTest, when goTestUnit fails.
-      - name: Go tests and coverage report
+      # goIsolatedDalTest). Here both halves go in one Gradle invocation, as in the mini pipeline;
+      # --continue still runs goIsolatedDalTest when goTestUnit fails.
+      - name: Go tests
         working-directory: etendo_core
-        run: ./gradlew goTestUnit goIsolatedDalTest jacocoRootReport --continue
+        run: ./gradlew goTestUnit goIsolatedDalTest --continue
+
+      # A Gradle invocation of its own, as in Jenkins: jacocoRootReport reads every
+      # build/jacoco/*.exec without declaring the test tasks that write them, and Gradle 8 fails a
+      # build that runs it next to them ("uses this output of task ':goTestUnit' without declaring
+      # an explicit or implicit dependency"). It also runs after failed tests.
+      - name: Coverage report
+        if: ${{ !cancelled() }}
+        working-directory: etendo_core
+        run: ./gradlew jacocoRootReport
 
       # The figures to set against Jenkins' "Etendo Go Tests" stage: tests by outcome and the line
       # coverage of com.etendoerp.go in the merged report.
