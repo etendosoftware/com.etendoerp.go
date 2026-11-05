@@ -249,8 +249,8 @@ What each tier means with what ETP-5051 delivered:
    quota calls it over the period. Such a resource is **reported** at all three report points,
    but a `block` quota on it **refuses nothing** on the NEO write path (§2): making it refusable
    at a point is tier 4. Reference: `schema_forge/docs/neo-headless-extensibility.md` §2.8; the
-   production strategies are `TenantSeatCounter` (`tenantSeats`, §2.1) and `AiSpendCounter`
-   (`aiSpend`, §4.7).
+   production strategies are `TenantSeatCounter` (`tenantSeats`, §2.1), `AiSpendCounter`
+   (`aiSpend`, §4.7) and `PublicApiRequestCounter` (`publicApiRequests`, §4.8).
 4. **Enforce at an unwired place — development, additive, through the same evaluator.** For
    example at posting (the only way a posted-invoices count grows, §6), at a process, or for
    Classic writes through a DAL observer. The new point must take its verdict from
@@ -270,9 +270,9 @@ reached from a System role: a tenant sees its caps on `/account` but cannot chan
 ### 4.1 The resource exists in the catalog
 
 **Billing Resource** holds what can be counted. **The module ships it empty** — every resource is
-a row an operator adds (tier 2) or a strategy a developer deploys (tier 3). Two strategies are
-deployed, `tenantSeats` and `aiSpend`; their catalog rows are still the operator's to add (§4.6,
-§4.7).
+a row an operator adds (tier 2) or a strategy a developer deploys (tier 3). Three strategies are
+deployed, `tenantSeats`, `aiSpend` and `publicApiRequests`; their catalog rows are still the
+operator's to add (§4.6, §4.7, §4.8).
 
 | Field | Meaning |
 |---|---|
@@ -486,6 +486,34 @@ What it does and does not do:
 - Spend done in an Etendo support session (`"actor":"support"`) is not the tenant's and is left out.
 - Only priced calls count. A turn recorded without `COST_USD` (a provider that reports no cost), or
   one whose usage POST failed (the BFF logs `[ai-bff:usage] not recorded`), is not in the figure.
+
+### 4.8 The public API requests resource
+
+The requests a tenant makes through the public API, per day, are counted by the deployed strategy
+`publicApiRequests` (`PublicApiRequestCounter`, ETP-6057): the sum of `properties.count` over the
+tenant's `publicapi.request` rows of `ETGO_USAGE_EVENT`. Every request NEO answered for one of the
+tenant's API keys counts, whatever its status, and each operation of a `/sws/neo/batch` call counts
+as one request. A key presented with a wrong secret at the token exchange is recorded
+(`properties.kind = 'tokenExchange'`) but **not billed**: a key's `client_identifier` is not secret,
+so counting it would let anyone inflate a tenant's figure. Refusals the gateway answers on
+its own (429, a malformed key, 400/406/415/428) never reach Etendo and are not in the figure.
+**Until this catalog row exists the events are stored but not aggregated** into `ETGO_USAGE_DAILY`. What is counted and how: [`public-api-usage.md`](public-api-usage.md).
+
+| Field | Value |
+|---|---|
+| Search Key | `PUBLIC_API_REQUESTS` (any stable key) |
+| Name / Unit Label | `Public API requests` / `requests` |
+| Counting Mode | `S` |
+| Strategy Qualifier | `publicApiRequests` |
+| Aggregation | `sum` |
+
+- It is a flow, so `sum` adds the days; `aggregate` reads what the usage job stored, `live` sums the
+  raw rows over the period on each report.
+- A quota on it is **reported** but **refuses nothing**: no request path asks `QuotaEvaluator`. Per-tier
+  request limits are enforced at the gateway (a separate task), not here.
+- The raw rows are kept 90 days by default (`ETGO_PublicApiUsageRetentionDays`), never less than the
+  settling window plus one day, so a `live` quota sees at most that far back; the stored daily rows
+  are never purged.
 
 ---
 

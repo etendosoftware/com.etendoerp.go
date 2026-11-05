@@ -70,7 +70,6 @@
     "ProductStockWarehouseHandler",
     "ProductTransactionsHandler",
     "ProfitLossReportHandler",
-    "PurchaseOrderHeaderHandler",
     "RegisterPaymentHandler",
     "RegisterPaymentOutHandler",
     "RejectQuotationHandler",

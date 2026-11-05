@@ -20,20 +20,25 @@ package com.etendoerp.go.schemaforge.email;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Callable;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
@@ -41,7 +46,9 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
@@ -49,8 +56,12 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.NeoTenantWriteGuard;
+
 /**
  * Unit tests for {@link DalEmailSafetyStore}.
+ *
+ * @covers com.etendoerp.go.schemaforge.email.DalEmailSafetyStore
  */
 public class DalEmailSafetyStoreTest {
 
@@ -179,6 +190,44 @@ public class DalEmailSafetyStoreTest {
     verify(obDal).flush();
   }
 
+  // ETP-6114: the System rows are written inside NeoTenantWriteGuard.allowingSystemRows.
+
+  @Test
+  public void checkAndIncrementWritesInsideTheSystemRowsScope() throws Exception {
+    @SuppressWarnings("unchecked")
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(obDal.createQuery(eq(DalEmailSafetyStore.ENTITY_EMAIL_SAFETY), anyString()))
+        .thenReturn(query);
+    when(query.list()).thenReturn(Collections.emptyList());
+    List<Boolean> admitted = recordAdmissionOnSaveAndFlush();
+    DalEmailSafetyStore store = new DalEmailSafetyStore(() -> 1000L, MapRecord::new);
+
+    guarded(() -> store.checkAndIncrement(sendContext(),
+        List.of(EmailThrottleRule.perRecipient(5, 60))));
+
+    assertEquals(List.of(Boolean.TRUE, Boolean.TRUE), admitted);
+  }
+
+  /** The commit and anything after the call run with the scope closed again. */
+  @Test
+  public void recordAuditWritesInsideTheScopeAndCommitsOutsideIt() throws Exception {
+    List<Boolean> admitted = recordAdmissionOnSaveAndFlush();
+    doAnswer(invocation -> admitted.add(systemRowAdmitted())).when(sessionHandler)
+        .commitAndStart();
+    DalEmailSafetyStore store = new DalEmailSafetyStore(() -> 1000L, MapRecord::new);
+    EmailAuditRecord sent = EmailAuditRecord.create(sendContext(),
+        "reset-password:tenant-1:record-1:v1", 200, TransactionalEmailService.STATUS_SENT, "sent",
+        202, false);
+
+    boolean admittedAfter = guarded(() -> {
+      store.recordAudit(sent);
+      return systemRowAdmitted();
+    });
+
+    assertEquals(List.of(Boolean.TRUE, Boolean.TRUE, Boolean.FALSE), admitted);
+    assertFalse(admittedAfter);
+  }
+
   @Test
   public void checkAndIncrementRejectsExistingThrottleInsideWindow() {
     @SuppressWarnings("unchecked")
@@ -239,6 +288,38 @@ public class DalEmailSafetyStoreTest {
     DalEmailSafetyStore store = new DalEmailSafetyStore(() -> 1000L, MapRecord::new);
 
     assertFalse(store.isRecipientSuppressed("tenant-1", " "));
+  }
+
+  /** Records, on every save and flush, whether the real guard admits a System row right then. */
+  private List<Boolean> recordAdmissionOnSaveAndFlush() {
+    List<Boolean> admitted = new ArrayList<>();
+    doAnswer(invocation -> admitted.add(systemRowAdmitted())).when(obDal)
+        .save(any(BaseOBObject.class));
+    doAnswer(invocation -> admitted.add(systemRowAdmitted())).when(obDal).flush();
+    return admitted;
+  }
+
+  /** Fires a client-0 insert at the real guard, as Hibernate does on save. */
+  private static boolean systemRowAdmitted() {
+    Client system = mock(Client.class);
+    when(system.getId()).thenReturn("0");
+    EntityNewEvent event = mock(EntityNewEvent.class);
+    when(event.getTargetInstance()).thenReturn(system);
+    try {
+      new NeoTenantWriteGuard().onSave(event);
+      return true;
+    } catch (OBSecurityException e) {
+      return false;
+    }
+  }
+
+  /** Runs {@code body} with the guard active; its closing flush is not counted as a store write. */
+  private <T> T guarded(Callable<T> body) throws Exception {
+    return NeoTenantWriteGuard.call(() -> {
+      T result = body.call();
+      doNothing().when(obDal).flush();
+      return result;
+    });
   }
 
   private static BaseOBObject sentAuditRecord() throws Exception {
