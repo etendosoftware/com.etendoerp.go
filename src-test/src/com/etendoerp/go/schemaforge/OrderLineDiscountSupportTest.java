@@ -81,6 +81,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  *
  * @covers com.etendoerp.go.schemaforge.OrderLineDiscountSupport
  * @covers com.etendoerp.go.schemaforge.OrderLineCreateDiscount
+ * @covers com.etendoerp.go.schemaforge.OrderLineBodyRules
  */
 class OrderLineDiscountSupportTest {
 
@@ -134,7 +135,7 @@ class OrderLineDiscountSupportTest {
   void shouldApplyDiscount(String label, String body, Object listPrice, boolean expected)
       throws Exception {
     assertEquals(expected,
-        OrderLineDiscountSupport.shouldApplyDiscount(new JSONObject(body), listPrice), label);
+        OrderLineBodyRules.shouldApplyDiscount(new JSONObject(body), listPrice), label);
   }
 
   // ── alignStandardPriceWithCurrentPrice: the callout's INPUT only ──────
@@ -786,7 +787,7 @@ class OrderLineDiscountSupportTest {
       formState.put(key, body.get(key));
     }
 
-    assertEquals(expected, OrderLineDiscountSupport.shouldDeriveDiscountFromPrice(body, formState),
+    assertEquals(expected, OrderLineBodyRules.shouldDeriveDiscountFromPrice(body, formState),
         label);
   }
 

@@ -186,7 +186,7 @@ final class OrderLineCreateDiscount {
     // A zero discount is what the defaults pass and the AD column default put there, so it is not a
     // choice; the form never sends 0 with a price off the list (it sends list × (1 − discount)).
     if (body == null || !LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_DISCOUNT))
-        || OrderLineDiscountSupport.sentExplicitGrossPrice(body)) {
+        || OrderLineBodyRules.sentExplicitGrossPrice(body)) {
       return;
     }
     BigDecimal listPrice =

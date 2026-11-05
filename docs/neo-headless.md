@@ -11518,7 +11518,7 @@ QA case CP-B3: 3 × 1.50, VAT 10 %, `etendo_update {unitPrice: 1.25}` → `listP
 shows Precio 1.39, Subtotal sin descuento 4.17, Descuento 0.42, Subtotal 3.75. Left as before:
 
 - a `unitPrice` within half a cent of the stored `listPrice × (1 − d/100)` — the SPA body, which sends
-  exactly that computed price (same tolerance as `OrderLineDiscountSupport.shouldDeriveDiscountFromPrice`);
+  exactly that computed price (same tolerance as `OrderLineBodyRules.shouldDeriveDiscountFromPrice`);
 - `unitPrice` equal to the list price (the discount rule above applies the discount to it);
 - `d = 100`: there is nothing to work back from, the list price is kept;
 - a stored list price of 0 (legacy line) or a `unitPrice` of 0;
