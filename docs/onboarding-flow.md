@@ -351,11 +351,17 @@ whether the signup wizard's Company step collects Street/Number/Building Name/Ci
 single free-text address line. **While off** (default pre-launch), `address` is the only field
 read and `createLocation` populates `Address1` from it exactly as before this ticket — the 3
 structured fields are never read even if a stale client still sends them. **While on**, the wizard
-also sends `streetName`/`buildingNumber`/`buildingName`/`city`; `streetName`/`buildingNumber`/`city`
-are mandatory together **only once the user has started filling the block in**
+also sends `streetName`/`buildingNumber`/`buildingName`/`city`; `streetName`/`city` are mandatory
+together **only once the user has started filling the block in**
 (`EtendoGoJwtServlet#validateStructuredAddressBlock`) — a blank block is still accepted, matching
-the step's minimalist, fully-optional-address design. `OnboardingOrgInfoService#applyAddressFields`
-then prioritizes the structured fields over the legacy `address` when both are present, computing
+the step's minimalist, fully-optional-address design. `buildingNumber` is **not** independently
+mandatory (ETP-5806 follow-up, same rule as the 3 NEO handlers — see `neo-headless.md`
+§4.12.9 "`buildingNumber` fallback, now consistent across every channel"): a blank/omitted value
+with a present `streetName` resolves to the literal `"s/n"` via
+`StructuredAddressComposer#effectiveBuildingNumber`, both at this validator (so a direct caller that
+omits it is no longer rejected with a 400) and again at `OnboardingOrgInfoService#applyAddressFields`
+(so it is what actually gets persisted). `OnboardingOrgInfoService#applyAddressFields` then
+prioritizes the structured fields over the legacy `address` when both are present, computing
 `addressLine1`/`addressLine2` via `StructuredAddressComposer` (the same algorithm every other
 address popup uses) and persisting the 3 raw columns alongside them. `OnboardingWarehouseAddressService`
 copies the 3 structured columns too, when it mirrors the org's fiscal address onto the default

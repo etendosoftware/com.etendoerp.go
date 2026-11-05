@@ -4766,12 +4766,15 @@ the raw-field create/update shape above, for both `contacts/locationAddress` and
 `warehouse/location`. `addressLine1`/`addressLine2` are no longer accepted as free-form input in
 practice: the handler computes them itself from the 3 structured fields (`StructuredAddressComposer`,
 porting Classic's `LocationSEPA.fillAddressLines` exactly) whenever `streetName` is non-blank, and
-ignores whatever the caller sent for the two lines in that case. `streetName`, `buildingNumber`,
-`cityName` and `country` are mandatory on every create/update that is not the "reuse an existing
-C_Location" mode — stricter than Classic, where the 3 SEPA fields are optional. A create/update
-missing any of them gets a 400 naming the missing keys. **Pending:** this field-level `AGENT_PROMPT`
-on `ETGO_SF_FIELD` for `C_Location_ID` has not yet been updated in the database to mention the 3 new
-fields and the mandatoriness rule — needs an `sf-alter-db`/webhook pass, left for the user to apply.
+ignores whatever the caller sent for the two lines in that case. `streetName`, `cityName` and
+`country` are mandatory on every create/update that is not the "reuse an existing C_Location" mode —
+stricter than Classic, where the 3 SEPA fields are optional. `buildingNumber` is NOT independently
+mandatory: a blank/omitted value falls back to `"s/n"` when `streetName` is present — see
+"`buildingNumber` fallback, now consistent across every channel" below for the full rule and its
+history. A create/update missing `streetName`, `cityName` or `country` gets a 400 naming the missing
+keys. **Pending:** this field-level `AGENT_PROMPT` on `ETGO_SF_FIELD` for `C_Location_ID` has not yet
+been updated in the database to mention the 3 new fields and the mandatoriness rule — needs an
+`sf-alter-db`/webhook pass, left for the user to apply.
 
 **Gated behind `structured-address-for-sepa` (relaunch, backend-only flag, TTL 2026-11-15 —
 `docs/feature-flags-and-tenant-upgrade.md` §1).** Everything described in this note and the two
@@ -4793,8 +4796,9 @@ plain-text `addressLine1`/`addressLine2` writes with none of the rules above app
 MCP agent create or edit a `bp-location` address and bypass the structured-address requirement
 entirely. `BpLocationHandler` (`@NeoExtension(spec = "bp-location", entity = "bpLocation")`) now
 intercepts POST/PUT the same way the other two handlers do: a pre-hook validates
-`streetName`/`buildingNumber`/`cityName`/`country` as mandatory-together and the 3 structured
-fields against their max lengths, computes `addressLine1`/`addressLine2` via the same
+`streetName`/`cityName`/`country` as mandatory-together (`buildingNumber` falls back to `"s/n"`
+instead of being required — see "`buildingNumber` fallback, now consistent across every channel"
+below) and the 3 structured fields against their max lengths, computes `addressLine1`/`addressLine2` via the same
 `StructuredAddressComposer`, and a post-hook persists all 5 columns directly via DAL — bypassing
 `NeoFieldFilter` — before mirroring the final values back into the response. Every GET (list or by
 id) is enriched the same way. Country/Region/City/Postal and the base record lifecycle (id
@@ -5236,7 +5240,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
  | attachment writes — organization (ETP-5715) | upload/delete do not check that the record's organization is writable by the role | **required** (`getWritableOrganizations`); a readable-only organization is the same `404` | as the row above |
 | attachment upload (ETP-5715) | multipart `POST` with the caller's bearer token | a **single-use link** (`PUT /sws/neo/attachment/upload/{token}`, no bearer: the token is the credential) bound to session, role, document, file name and the main flag; the upload runs **as the session that asked for the link** and the document is authorized again at upload time | the bytes must not pass through the conversation; the validation and the storage are the SAME code (`NeoAttachmentStore`) |
 | the PDF of a document (ETP-5715, **reversed by ETP-6013**) | REST has no "PDF" operation: the SPA renders it in the browser (jsreport) when the document's preview is opened and stores it as the record's main attachment — unchanged by ETP-6013 | `etendo_get_document_pdf` returns the stored PDF (link + metadata). For an entity that declares `MCP_CONFIG.pdf.print` the **server renders it too, for the MCP only**: after an MCP Complete, and on an MCP request when the stored one is missing or stale (§4.12.38.1). Only when that is not possible (no declaration, read-only tier, a person's own main file, no jsreport, a failed render) does it answer the `409` | ETP-5715 declared "never renders" to avoid a second renderer to keep identical. ETP-6013 renders on the server **without** a second template: the frontend build publishes the exact template, helpers and labels the browser sends to jsreport (`printables/<document>.json`), and only the data builder is ported to Java, with a parity fixture shared by a Vitest and a JUnit test |
-| staleness of the stored PDF (ETP-5715) | the SPA serves a cached PDF only if it is not older than the record (`updated`) or the company branding (`brandingUpdated`) or the bundle that rendered it (`attachmentFreshness.js`); otherwise it **re-renders and re-uploads** | the MCP applies the first two (whole-second, strict, fail-open, the same inputs) to the main attachment of a `rendered` entity — **whatever the file is named**, as `fetchCachedBlob` does — and answers `409 pdf_stale` instead of regenerating; it **cannot** apply the bundle rule (the build epoch lives in the browser), so a PDF rendered by an older template is served as long as the data did not change | a stale PDF must not be handed out as current, and the MCP cannot regenerate; it asks for the preview to be opened again |
+| staleness of the stored PDF (ETP-5715) | the SPA serves a cached PDF only if it is not older than the record (`updated`) or the company branding (`brandingUpdated`) or the bundle that rendered it (`attachmentFreshness.js`); otherwise it **re-renders and re-uploads** | the MCP applies the first two (whole-second, strict, fail-open, the same inputs) to the main attachment of a `rendered` entity — **whatever the file is named**, as `fetchCachedBlob` does — and answers `409 pdf_stale` instead of regenerating; it **cannot** apply the bundle rule (the build epoch lives in the browser), so a PDF rendered by an older template is served as long as the data did not change | a stale PDF must not be handed out as current. Since ETP-6013 the MCP regenerates it on the server for a declared printable in a status it is stored for (§4.12.38.1); only when that is not possible (a reactivated document, which is a draft until completed again, or a render that cannot run) does it answer `pdf_stale`, and its hint sends the user to the preview only as a last resort |
 | the uploaded document of a purchase invoice or goods receipt as its "PDF" (ETP-5715) | those windows pass no `recordUpdated`: their main attachment is the counterparty's own file, never judged stale | declared per entity: `MCP_CONFIG.pdf.source:"supplier"` returns the main file as is, never stale, and answers `409 no_pdf` "This document has no supplier document attached." when there is none (§4.12.38) | the main-attachment flag marks both kinds of file; the SPA tells them apart by window (a frontend decision), so the backend must be told. **Rule: a window whose preview shows an uploaded document instead of a rendered one MUST declare `pdf.source:"supplier"`**; `McpConfigSourcedataTest.supplierPdfEntitiesAreDeclared` is the drift guard |
 | a legacy customer file as the PDF of a return material receipt (ETP-5715) | since ETP-5124 the preview renders fresh and never reads the stored file, so a customer file marked main by the retired ETP-4408 upload is invisible there | the window is `rendered`: its main file is returned as "the PDF" when newer than the record, `pdf_stale` when older | the main-attachment flag cannot tell a legacy upload from an emailed copy; declared so it is not mistaken for a bug. The fix is a data check that no such files remain (D18), not code |
 | attachment download (ETP-5715) | `GET /sws/neo/attachments/file/{id}` with a bearer token, no parent check | a signed link (`/sws/neo/document-download/{token}`, the email link's token plus an attachment-id claim), valid **10 minutes**, bound to the record, the client and the attachment | the agent never receives bytes; the email links (7 days, main attachment only) are unchanged |
@@ -5864,7 +5868,8 @@ Go's rule, gated behind `structured-address-for-sepa` (backend-only flag, TTL 20
 `docs/feature-flags-and-tenant-upgrade.md` §1), is stricter and applies at a different moment: while
 the flag is on, `streetName`/`buildingNumber`/`cityName`/`country` are mandatory-together **at
 entry** (create/update time) on every address popup and on the onboarding company step, for every
-business partner and every address, regardless of EU/non-EU status. This is a **deliberate,
+business partner and every address, regardless of EU/non-EU status (`buildingNumber`: see the
+"now consistent across every channel" note below — it is no longer independently mandatory). This is a **deliberate,
 independent Go product decision**, not a port of Classic's remittance-time rule — Go chose to
 require the fields up front so the data is always SEPA-ready when a remittance is eventually
 generated, rather than discovering a gap only at generation time the way Classic does. If product
@@ -5873,6 +5878,44 @@ inherited it". GitHub issue
 [etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24) tracks
 Classic's own, separate SEPA-compliance work, which may eventually change Classic's behavior here —
 that work is out of scope for this flag and this divergence note.
+
+**`buildingNumber` fallback, now consistent across every channel (ETP-5806 follow-up, QA finding):**
+the paragraph above remains accurate for `streetName`/`cityName`/`country` — those three are still
+mandatory-together, with no fallback, on every channel. `buildingNumber` is **no longer**
+independently mandatory anywhere: when `streetName` is present and `buildingNumber` is
+blank/omitted, every one of `ContactsLocationAddressHandler`, `WarehouseLocationHandler` and
+`BpLocationHandler` now resolves it to the literal `"s/n"` ("sin número") before both validating and
+persisting, via the single helper `StructuredAddressComposer.effectiveBuildingNumber`. A request
+that omits `buildingNumber` entirely — an MCP `etendo_create`/`etendo_update` call, a direct REST
+call, or the UI client — no longer gets a `400 Missing required field: buildingNumber`.
+
+Originally (same day, ETP-5806) this was client-only: `LocationEditorModal.jsx` and the onboarding
+`api.js` injected `"s/n"` before sending the request, while the raw handlers still rejected a request
+that omitted it, so a caller that bypassed the UI (MCP, a script, a direct integration) hit a 400 the
+UI itself would never trigger. That gap was found in QA on this same ticket and closed the same way
+on the backend: the fallback is now applied once, centrally, and every call site — REST single, REST
+batch (`BatchService` delegates to the same handlers) and MCP — reads the same effective value. There
+is **no longer a UI-vs-API divergence** for this field; the contract is the same on every channel.
+
+**`OnboardingOrgInfoService` closed the same way (ETP-5806 follow-up, second pass):** it also composes
+a structured address (`applyAddressFields`, onboarding company step) and now calls
+`StructuredAddressComposer.effectiveBuildingNumber` exactly like the 3 NEO handlers above, before both
+persisting `OBSEPABuildingNumber` and composing `Address1`/`Address2`. It is no longer an exception —
+a blank `buildingNumber` with a present `streetName` resolves to `"s/n"` on the onboarding path too,
+whether the company is provisioned through the classic wizard flow or completed from the tenant pool
+(`completeExistingLocation`).
+
+**The onboarding endpoint's OWN pre-validation gate had the same bug, one layer up (ETP-5806
+follow-up, third pass):** `POST /sws/go/onboarding` validates its payload with
+`EtendoGoJwtServlet#validateStructuredAddressBlock` *before* the request ever reaches
+`OnboardingOrgInfoService` above — fixing the service's persistence closed the write-side gap but
+left this earlier gate still rejecting a blank `buildingNumber` with a plain 400, for any caller
+that reaches the endpoint directly (a script, an integration) rather than through the wizard, which
+already injects `"s/n"` client-side. `validateStructuredAddressBlock` now reuses
+`StructuredAddressComposer.missingMandatoryFields`/`effectiveBuildingNumber` the same way the 3 NEO
+handlers do, so `buildingNumber` no longer blocks the request here either — `streetName`/`city`/
+`country` are unaffected. With both layers fixed, the "no longer a UI-vs-API divergence" claim two
+paragraphs above now holds for the onboarding endpoint too, not only for the 3 entity handlers.
 
 > **Update path: a product change on an existing line (ETP-5696, QA CP-15).** REST `PATCH`/`PUT`
 > (`NeoCrudHandler`) and MCP `etendo_update` (`McpToolRouter.handleUpdate`) are two implementations
@@ -13447,7 +13490,7 @@ rejected and the entity unpublished like any bad section; entity level wins over
 `autoFetch:false`, no render, no `recordUpdated`, `hidePrint:true`, no `print-*` artifact for it). Not supplier: `return-material-receipt` — its preview stores
 nothing (D18), so its only stored PDF is the emailed copy; it stays `rendered`. **Known risk:** a legacy customer file marked main before ETP-5124 is a main file like any
 other, so it is returned as "the PDF" when it is newer than the record, and called stale when older; the SPA would not show it (it renders fresh). The no-PDF and stale
-hints therefore say "open the preview **or send the document by email**", the one pair that is true for every rendered window. Everything else with a preview caches a rendered PDF on open.
+hints therefore say, as their last resort (only once the server could not render it, ETP-6013), "open the preview **or send the document by email from there**", the one pair that is true for every rendered window. Everything else with a preview caches a rendered PDF on open.
 **Rule for new windows: a window whose preview shows an uploaded document instead of a rendered one must declare `pdf.source:"supplier"`** (data row + `McpConfigSourcedataTest`).
 Both rows already carried an `MCP_CONFIG`; the `pdf` section is merged into it in the sourcedata XML and reaches an instance through `update.database` (no separate SQL is shipped).
 
@@ -13471,9 +13514,9 @@ others.
 | document missing, or of another client/organization | `404 not_found` | `Record not found` (identical for both; never mentions a PDF) |
 | role cannot read the window | `403 forbidden` | access denied |
 | window with no Attachments tab (payments, fiscal monitors) | `405 method_not_allowed` | `Attachments are not available for this document type, as in the application.` |
-| `rendered` entity with no main attachment (and no server render possible) | `409 no_pdf` | `This document has no PDF yet.` + hint: if the document was just completed its PDF is being generated, ask again in a few seconds; otherwise open the document's preview in the application, or send the document by email (a return receipt's preview stores nothing, only sending it does), and ask again; a draft never stores a PDF: complete it first |
+| `rendered` entity with no main attachment (and no server render possible) | `409 no_pdf` | `This document has no PDF yet.` + hint: a draft never has a PDF: complete it first, then ask again (nothing else; completing is enough); otherwise, if the document was just completed, or the call asked for more than 3 documents (`NeoDocumentPdf.SYNC_RENDERS_PER_CALL`: the ones past it are queued), its PDF is being generated, ask again in a few seconds; otherwise the server could not generate it: ask the user to open the document's preview in the application, or to send it by email from there (a return receipt's preview stores nothing), then ask again. An unknown status gets the draft remark first |
 | `supplier` entity with no main attachment | `409 no_pdf` | `This document has no supplier document attached.` + hint: attach it as main with `etendo_request_attachment_upload` (`main:true`) |
-| `rendered` main file older than the document or the branding (and no server render possible) | `409 pdf_stale` | `The stored PDF of this document is out of date…` + hint: if the document was just completed, ask again in a few seconds; otherwise ask the user to open the document's preview (or send it by email, where the preview stores nothing) so the application regenerates it |
+| `rendered` main file older than the document or the branding (and no server render possible) | `409 pdf_stale` | `The stored PDF of this document is out of date…` + hint: if the document was reactivated (a draft again: the server stores no PDF for it), complete it again, then ask again; if it was just completed, or the call asked for more than 3 documents, ask again in a few seconds; otherwise the server could not generate it: ask the user to open the document's preview, or to send it by email from there, then ask again |
 | unexpected failure on one document | `500 server_error` | `The PDF of this document could not be looked up.`; in `ids[]` it is that entry only, the others still answer (the exception class is logged, never its message) |
 | lookup failed | `500 server_error` | the helper's message |
 | spec header entity missing / a line entity | `422` | as the attachment tools |
@@ -13700,13 +13743,13 @@ small classes (`McpDocumentEmailTool`, `McpDocumentEmailRequest`, `McpDocumentEm
   agent; the MCP's `language` argument is the language of the email copy, not of the answer. The REST contract
   (`authorize`) answers in the command's `language` field, which the SPA fills with its UI locale (falling back to the
   request language when the command carries none).
-- **The PDF gate wording.** The 409 status and codes are `etendo_get_document_pdf`'s; the hint is the email tool's own ("if the document was just completed, its PDF is being generated: ask again in a few seconds. Otherwise open the document's preview in the application so its PDF is stored (or refreshed), then ask to send again", ETP-6013), because that tool's "or send it by email" is circular here. The closing sentence (a window whose preview stores nothing, a return receipt, needs its first send done from the application) is generic and true for every window: no declared property tells the backend which windows those are, and a spec literal is not allowed in shared code.
-- **The no-PDF hint depends on the document's state** (both PDF tools; `NeoDocumentPdf.Result#getDocumentStatus` / `isDraft`, read only for a MISSING PDF, after the document's authorization, in admin mode with the previous mode restored). The status is read **structurally**: the entity's status property is the one whose AD column uses a *document status* list as its reference value (`AD_Reference` `131` All_Document Status — invoices, receipts, shipments — and `FF80818130217A350130218D802B0011` Order_Document Status — the order windows; the order windows use their own list, so `131` alone would have left them without the draft advice). The column and the DAL property may be called anything. Draft is `DR`, the `AD_Ref_List` value of both lists. No column, more than one, an inactive one, no value or any failure leaves the status unknown and the hint generic. A draft gets only "This document is a draft and a draft never stores a PDF: complete it first, then open its preview in the application and ask again."; a document with another status gets the preview advice without the draft remark; unknown keeps the generic text.
+- **The PDF gate wording.** The 409 status and codes are `etendo_get_document_pdf`'s; the hint is the email tool's own ("if the document was just completed, its PDF is being generated: ask again in a few seconds. Otherwise the server could not generate (regenerate) it: ask the user to open the document's preview in the application so its PDF is stored (or refreshed), then ask to send again", ETP-6013), because that tool's "or send it by email" is circular here. A draft or a reactivated document never reaches it: the status gate refuses it first. The email tool sends one document and has no render budget, so its retry names only the just-completed case. The closing sentence (a window whose preview stores nothing, a return receipt, needs its first send done from the application) is generic and true for every window: no declared property tells the backend which windows those are, and a spec literal is not allowed in shared code.
+- **The no-PDF hint depends on the document's state** (both PDF tools; `NeoDocumentPdf.Result#getDocumentStatus` / `isDraft`, read only for a MISSING PDF, after the document's authorization, in admin mode with the previous mode restored). The status is read **structurally**: the entity's status property is the one whose AD column uses a *document status* list as its reference value (`AD_Reference` `131` All_Document Status — invoices, receipts, shipments — and `FF80818130217A350130218D802B0011` Order_Document Status — the order windows; the order windows use their own list, so `131` alone would have left them without the draft advice). The column and the DAL property may be called anything. Draft is `DR`, the `AD_Ref_List` value of both lists. No column, more than one, an inactive one, no value or any failure leaves the status unknown and the hint generic. A draft gets only "This document is a draft and a draft never has a PDF: complete it first, then ask again." (the email tool: "…then ask to send again.") — completing is enough, the server generates the PDF then (ETP-6013); a document with another status gets the retry and, last, the preview advice, without the draft remark; unknown gets "If the document is a draft, complete it first: a draft never has a PDF." before that.
 - **Explicit `null` arguments.** An explicit `null` for `subject`, `message` or `language` is `422`, like `preview` (omit the argument instead); `to`/`cc` `null` is still read as omitted.
 - **The PDF gate.** After authorization and before sending, `NeoDocumentPdf` decides: found and current continues; for a declared printable a
   missing or stale PDF is first rendered on the server (ETP-6013, §4.12.38.1) and the send continues with it; otherwise missing is `409 no_pdf`,
   stale is `409 pdf_stale`, with the answers and hints `etendo_get_document_pdf` gives (right after a Complete, ask again in a few seconds;
-  otherwise open the document's preview in the application, or send it from there), plus `sent:false`. A return material receipt's preview stores nothing (D18), so it can only be sent from the application first.
+  only if the server could not render it, open the document's preview in the application), plus `sent:false`. A return material receipt is server-rendered too (ETP-6013); only when that is not possible, since its preview stores nothing (D18), must its first send be done from the application.
 - **Outcomes.** Only `SENT` is `{sent:true, status:"SENT", spec, id, to, cc, detail, hint}`. Everything else is an error envelope with `sent:false` and
   `emailStatus`: `DUPLICATE` `409 email_duplicate` ("Not sent: an identical email was already sent at <ISO time>", `previousSentAt`);
   `THROTTLED` `429 email_throttled` (`retryAfterSeconds`, `throttleScope`); `SUPPRESSED` `403 email_suppressed`; `NO_RECIPIENT` `422 email_no_recipient`;
@@ -13739,7 +13782,7 @@ with a short "Document tools." paragraph that points to the tools instead of rep
 examples valid there (invoices: complete them all; reactivating a posted invoice un-posts it first; orders: complete, or void drafts; others:
 complete), whether `main:true` is meant for attachments (only on `purchase-invoice` and `goods-receipt`, whose PDF is the supplier document; on the rendered windows the
 main file is the document's own PDF), supplier vs rendered PDF, and email (none on `purchase-invoice` / `goods-receipt`; on `return-material-receipt` the preview stores
-nothing, so `no_pdf` / `pdf_stale` are solved by sending from the application, and the first send is done there). Applied to `sales-invoice`, `goods-shipment`,
+nothing, so when the server cannot render it a send from the application is what stores one). Since ETP-6013 the PDF sentence says the server generates the PDF once the document is completed, a draft has none (complete it first; a reactivated document, complete it again) and on `no_pdf` / `pdf_stale` the agent follows the answer's hint, instead of sending the user to the preview. Applied to `sales-invoice`, `goods-shipment`,
 `return-to-vendor-shipment`, `return-material-receipt`, `purchase-invoice`, `goods-receipt` and, as new spec prompts, `purchase-order` and `sales-order`. `sales-quotation` and
 `return-to-vendor` still have none (their tool descriptions apply). The text is in `ETGO_SF_SPEC.xml`: it reaches an instance through `update.database`, or by running
 the ETP-5715 prompts SQL (guarded by the previous value of each row).
