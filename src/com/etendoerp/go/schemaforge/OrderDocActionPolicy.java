@@ -21,8 +21,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Function;
-import java.util.function.UnaryOperator;
 
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
@@ -38,45 +36,105 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  *
  * <p><b>Called explicitly, by value.</b> It names no entity, spec or table: each order
  * customization ({@link SalesOrderHeaderHandler}, {@link PurchaseOrderHeaderHandler}) builds one
- * instance with its own allow-list, reasons and message keys, and calls it from its own
- * {@code unavailableActions} / {@code handle}. An entity gets the rule only by constructing it.
+ * instance with its own wording (a {@link Messages}), and calls it from its own
+ * {@code unavailableActions} / {@code handle}. The allow-list is the one the order windows share —
+ * Confirm on a draft or in-progress order, Reactivate on a booked one — and is a property of the
+ * window that opts in, not of this class. An entity gets the rule only by constructing it.
  * The decision on the value that will actually run, the 404 and the fail-closed 500 are
  * {@link DocActionRefusalGuard}'s.</p>
  */
 final class OrderDocActionPolicy {
 
-  private final Map<String, Set<String>> allowedByStatus;
-  private final Map<String, Set<String>> leftToExistingRules;
-  private final List<String> docActionValues;
-  private final Function<String, String> reasonNotOffered;
-  private final UnaryOperator<String> refusalKeyOf;
-  private final String recordLabel;
+  /** Close, which no order window offers. */
+  static final String DOC_ACTION_CLOSE = "CL";
+
+  /** Void, which no order window offers. */
+  static final String DOC_ACTION_VOID = "VO";
+
+  /** The values the order windows send, per stored status; any other status accepts nothing. */
+  static final Map<String, Set<String>> ALLOWED_BY_STATUS = Map.of(
+      "DR", Set.of("CO"),
+      "IP", Set.of("CO"),
+      "CO", Set.of("CO", "RE"));
 
   /**
-   * @param allowedByStatus     the values the window sends, per stored status; a status that is not
-   *                            a key accepts nothing
-   * @param leftToExistingRules values let through, per status, to the rule that answered them
-   *                            before; not advertised
-   * @param docActionValues     the values an agent could send, walked to build the advice
-   * @param reasonNotOffered    why a value is unavailable, per value
-   * @param refusalKeyOf        the {@code AD_MESSAGE} of the 400, per refused value
-   * @param recordLabel         how the order is named in the "cannot be loaded" failure
+   * Values let through, per status, to the rule that answered them before: Reactivate on a draft,
+   * which {@code DocActionReactivationRule} refuses with 422 {@code ETGO_ReactivateOnlyCompleted}.
+   * Not advertised.
    */
-  OrderDocActionPolicy(Map<String, Set<String>> allowedByStatus,
-      Map<String, Set<String>> leftToExistingRules, List<String> docActionValues,
-      Function<String, String> reasonNotOffered, UnaryOperator<String> refusalKeyOf,
-      String recordLabel) {
-    this.allowedByStatus = allowedByStatus;
-    this.leftToExistingRules = leftToExistingRules;
-    this.docActionValues = docActionValues;
-    this.reasonNotOffered = reasonNotOffered;
-    this.refusalKeyOf = refusalKeyOf;
-    this.recordLabel = recordLabel;
+  static final Map<String, Set<String>> LEFT_TO_EXISTING_RULES = Map.of("DR", Set.of("RE"));
+
+  /** The values of the {@code C_Order.DocAction} list an agent could send, for the advice. */
+  static final List<String> DOC_ACTION_VALUES =
+      List.of("CO", "RE", "VO", "CL", "PR", "AP", "RJ", "PO", "RA", "RC", "XL");
+
+  /** The refusal keys and advice reasons of one order window. */
+  static final class Messages {
+    private final String closeKey;
+    private final String closeReason;
+    private final String voidKey;
+    private final String voidReason;
+    private final String otherKey;
+
+    /**
+     * @param closeKey    the {@code AD_MESSAGE} of the 400 for Close
+     * @param closeReason why Close is unavailable, as advertised
+     * @param voidKey     the {@code AD_MESSAGE} of the 400 for Void
+     * @param voidReason  why Void is unavailable, as advertised
+     * @param otherKey    the {@code AD_MESSAGE} of the 400 for any other refused value
+     */
+    Messages(String closeKey, String closeReason, String voidKey, String voidReason,
+        String otherKey) {
+      this.closeKey = closeKey;
+      this.closeReason = closeReason;
+      this.voidKey = voidKey;
+      this.voidReason = voidReason;
+      this.otherKey = otherKey;
+    }
+  }
+
+  private final Messages messages;
+  private final String noun;
+  private final String bookedWord;
+
+  /**
+   * @param noun       how the order is named in advice and failures, e.g. {@code sales order}
+   * @param bookedWord how its completed state is named, e.g. {@code booked}
+   * @param messages   the window's refusal keys and reasons
+   */
+  OrderDocActionPolicy(String noun, String bookedWord, Messages messages) {
+    this.noun = noun;
+    this.bookedWord = bookedWord;
+    this.messages = messages;
   }
 
   /** The values the window sends in {@code status}; empty for any other status. */
   Set<String> allowedIn(String status) {
-    return status == null ? Set.of() : allowedByStatus.getOrDefault(status, Set.of());
+    return status == null ? Set.of() : ALLOWED_BY_STATUS.getOrDefault(status, Set.of());
+  }
+
+  /** Why {@code value} is unavailable: Close's and Void's own reason, else the generic one. */
+  String reasonNotOffered(String value) {
+    if (DOC_ACTION_CLOSE.equals(value)) {
+      return messages.closeReason;
+    }
+    if (DOC_ACTION_VOID.equals(value)) {
+      return messages.voidReason;
+    }
+    return "The app does not offer documentAction " + value + " on a " + noun + " in this "
+        + "status: it confirms (CO) a draft or in-progress order and reactivates (RE) a "
+        + bookedWord + " one, nothing else.";
+  }
+
+  /** The refusal key for a value the pre-hook does not allow. */
+  String refusalKeyOf(String value) {
+    if (DOC_ACTION_CLOSE.equals(value)) {
+      return messages.closeKey;
+    }
+    if (DOC_ACTION_VOID.equals(value)) {
+      return messages.voidKey;
+    }
+    return messages.otherKey;
   }
 
   /**
@@ -89,10 +147,10 @@ final class OrderDocActionPolicy {
       return;
     }
     Set<String> allowed = allowedIn(((Order) subject).getDocumentStatus());
-    for (String value : docActionValues) {
+    for (String value : DOC_ACTION_VALUES) {
       if (!allowed.contains(value)) {
         unavailable.putIfAbsent(NeoActionAvailability.valueKey(
-            OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, value), reasonNotOffered.apply(value));
+            OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, value), reasonNotOffered(value));
       }
     }
   }
@@ -110,12 +168,12 @@ final class OrderDocActionPolicy {
     try {
       Order order = OBDal.getInstance().get(Order.class, orderId);
       if (order == null) {
-        throw new IllegalStateException(recordLabel + " " + orderId + " cannot be loaded");
+        throw new IllegalStateException(Character.toUpperCase(noun.charAt(0)) + noun.substring(1) + " " + orderId + " cannot be loaded");
       }
       String status = order.getDocumentStatus();
       Set<String> allowed = new HashSet<>(allowedIn(status));
       if (status != null) {
-        allowed.addAll(leftToExistingRules.getOrDefault(status, Set.of()));
+        allowed.addAll(LEFT_TO_EXISTING_RULES.getOrDefault(status, Set.of()));
       }
       return allowed;
     } finally {
@@ -130,6 +188,6 @@ final class OrderDocActionPolicy {
    */
   NeoResponse refuseUnlessAllowed(NeoContext context) {
     return DocActionRefusalGuard.refuseUnlessAllowed(context, this::allowedDocActions,
-        refusalKeyOf);
+        this::refusalKeyOf);
   }
 }
