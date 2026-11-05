@@ -5007,7 +5007,8 @@ End to end through the UI, a quotation with a 10 % total discount → order (sta
 Known gaps, still open after the measurement (details in §4.12.20):
 
 - `etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
-  although the discount is applied.
+  although the discount is applied. (ETP-5680 added the opt-out that can close this,
+  `NeoHandler.governedCreateFields`, §4.12.14; the order-line customization does not declare it yet.)
 - ~~With an explicit `unitPrice` other than the product's standard price, `listPrice` persisted as the defaults cascade
   left it (usually 0).~~ **Closed (ETP-5714 follow-up):** an invoice line with a price, no discount and no list price now gets
   `listPrice = unitPrice` (absent or 0 counts as no list price; `InvoiceLineAmountSupport.alignListPriceWithPrice`), so the grid's "Precio" (`listPrice`) is no longer
@@ -5711,6 +5712,76 @@ now asks for deliberate values rather than a blanket echo, and points at this ke
 re-proposing the value already on the record records nothing, and `$_identifier` companion keys are
 skipped. It travels on `NeoContext.supersededDefaults`. **The REST path never reads it**: there the
 protected value came from a person, and there is nothing to warn about.
+
+##### Reconciled against the final body (ETP-5680)
+
+The cascade records the divergence **before** the entity's pre-hook runs, on the body the caller
+sent. The pre-hook may then confirm that value or rewrite it, so the raw record can be a false
+positive (a product sent with its own tax category: the callout proposes the generic one, the
+pre-hook agrees with the caller) or a false claim (`stocked:true` on a Service: reported as
+"kept", persisted as `false`). `etendo_create` therefore reports in two independent parts, once,
+after the pre-hook dispatch and just before the report (`McpSupersededReconciler.reconcileSupersededDefaults`):
+
+**`adjustedFields: { field: { sent, persisted } }`** is defined over the fields **the caller sent
+and the entity customization changed**, independent of callouts: a rewrite that no callout ever
+proposed anything for (a Service's `returnable`) is reported like one that was. The comparison is
+between the caller's values as the pre-hook receives them (snapshot taken in `handleCreate` just
+before the CREATE pre-hook dispatch, `McpSupersededReconciler.snapshotCallerValues`) and the body it
+leaves, so representation changes made earlier (type coercion, an identifier resolved to an id) are
+never reported. Fields the caller did not send (a placeholder the pre-hook replaced, a
+`taxCategory` it injected) are never reported. A key the pre-hook removed reports `persisted: null`.
+Equality is text, number or Yes/No flag. `adjustedFieldsHint` accompanies it; the key is absent when
+nothing was adjusted.
+
+**`supersededDefaults`** (callout vs sent, recorded before the pre-hook) is then reconciled:
+
+| Field state | Outcome |
+|---|---|
+| The pre-hook changed it (governed or not) | removed from `supersededDefaults`, reported only in `adjustedFields` |
+| Unchanged, and the customization declares it in `NeoHandler.governedCreateFields(ctx)` | dropped: its own rule decides, a callout proposal is not news |
+| Unchanged, not governed | stays in `supersededDefaults`, shape unchanged |
+
+`persisted` is the body handed to persistence after the pre-hook (the DAL's own defaults are not
+re-read). Because every entry that survives in `supersededDefaults` kept its value, its hint says
+"saved as sent".
+
+**Opt-out.** `NeoHandler.governedCreateFields(NeoContext)` (default: empty; resolved through the
+normal extension resolution, so it works for a `@NeoExtension` and for a qualifier-bound handler
+alike) names the properties the customization decides. It only silences this diagnostic, never
+changes a value, and is read on the MCP create path only. `ProductDefaultsHandler` declares
+`taxCategory` when `productType` is a valid type, plus `stocked` and `returnable` for the
+non-stockable types (S, E, R). Governance covers the callout proposal only: the handler fills a
+missing `taxCategory` but never corrects an explicit one, so an explicit tax category that does not
+match the type is neither corrected nor reported, and a `stocked:true` it forces off is still
+reported as `adjustedFields`. Shared code names no entity or field.
+
+**Yes/No equality.** A caller's `false` and a callout's `"N"` are the same flag and are no longer
+recorded. The test is decided by the column's type when the property is reachable (a boolean DAL
+property, i.e. the Yes/No reference `20`); with no property it falls back to a value-based
+equivalence that requires both sides to be Yes/No tokens (`NeoValueEquivalence`).
+
+No channel divergence: only `etendo_create` reports `supersededDefaults` (REST and `etendo_batch`
+never read it), so §4.12.9 is unchanged.
+
+##### Product type rules on an update (ETP-5680)
+
+`ProductDefaultsHandler.handle` accepts `POST` (create) and, as updates, both `PATCH` (what REST
+sends) and `PUT` (what `etendo_update` hands the hook): until ETP-5680 it matched `PATCH` only, so
+the MCP update skipped every product rule. On an update:
+
+- **Effective type** = the body's `productType`, else the persisted product's (read through OBDal
+  from the record id, only when the body lacks it). A non-stockable effective type (S, E, R) forces
+  `stocked` and `returnable` to `false`, so a PATCH/PUT that edits only `weight` on a Service is
+  enforced too.
+- **Tax category:** a REAL type change (valid body type different from the persisted one) with no
+  `taxCategory` key in the body sets the type's named category (same lookup as create: client, then
+  System). An explicit `taxCategory` always wins; an unchanged type never touches it; a category
+  that does not resolve leaves the body as received.
+- A failed persisted-type read leaves the body unchanged (the type is then unknown).
+
+The rules live in `ProductTypeRules` (called from `ProductDefaultsHandler`). No channel divergence remains (REST PATCH/PUT and MCP `etendo_update` reach the same handler;
+`etendo_batch` only creates and already applies the create rules); this does not mirror the form's "type becomes Item -> stocked true" watcher, so an API
+update to Item leaves `stocked` as it was.
 
 #### 4.12.15 Server identity and localized tool titles
 
@@ -10469,7 +10540,9 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
   and its hint, although the discount is now applied. The entry is recorded by the defaults cascade
   on the router's own context (`McpToolRouter.handleCreate`, reported with
   `ctx.getSupersededDefaults()`); the customization only receives the hook context, which does not
-  share it, and reaching it would be ETP-5415 plumbing. Declared, not fixed.
+  share it, and reaching it would be ETP-5415 plumbing. Declared, not fixed. Update (ETP-5680): the report is now
+  reconciled after the pre-hook and honours `NeoHandler.governedCreateFields` (§4.12.14), so the line customization
+  can silence this entry by declaring `discount`; it has not been wired there.
 - **Closed for invoice lines (ETP-5714 follow-up): the price is the list price.** The grid column "Precio" of
   `purchase-invoice/lines` and `sales-invoice/lines` is `listPrice` (`unitPrice` is `grid:false, form:false`); the form edits
   `listPrice` and derives `unitPrice = listPrice × (1 − discount/100)`, so a form line at 50 stores `listPrice 50`. With an explicit
@@ -10703,6 +10776,12 @@ wrapper fields. A new generic extension point lets the customization say so:
   union above, so `view:"create"` lists them under `required`, never `serverDefaulted`. It only
   declares what the pre-hook already enforces — it adds no check. First user:
   `FinancialAccountHandler` (`country`, §4.12.1.9).
+- `NeoHandler#governedCreateFields(NeoContext)` (ETP-5680) — DAL property names whose value on
+  create the customization **decides**, so a create-callout proposal for them is not reported as a
+  superseded default on `etendo_create` (§4.12.14). Read once by the MCP create path, after the
+  pre-hook ran (so it may look at the final body); it silences a diagnostic and changes no value;
+  an exception counts as "none". First user: `ProductDefaultsHandler` (`taxCategory` for a valid
+  `productType`, `stocked`/`returnable` for S, E, R).
 - `SalesQuotationLineHandler` and `SalesOrderLineHandler` both declare
   `OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS` = `tax`, `lineNetAmount` (ETP-5528, QA
   observation: the create view listed `lineNetAmount` as required although every create without it
@@ -11758,12 +11837,27 @@ any order creates nothing. `carryGlobalDiscount` (default `true`) is described u
 `importReceiptLines`: `{receiptId, lines?}`; `importShipmentLines`: `{shipmentId, lines?}`. `lines` omitted or empty imports **everything
 still pending**; given, it imports **exactly** those lines (the same line twice is summed; an entry without
 `sourceLineId` or with a missing / zero / non-numeric `quantity` is refused, never skipped). The answer is
-`{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], headerLinked, salesOrder?}}`
-(`salesOrder` is the order the header points at NOW when it has one; `headerLinked` is `true` only when an imported
+`{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], headerLinked, salesOrder?, order?}}` (`salesOrder` is the order the header points at NOW when it has one — the name
+of the header's DAL property, the same on purchase documents; `order` repeats it under a direction-neutral name since
+ETP-5828, and `salesOrder` stays for the callers that read it; `headerLinked` is `true` only when an imported
 line belongs to that order, so the answer never claims a link to an order none of the lines is from).
+`importOrderLines` into an invoice also answers `globalDiscount:{applied, percent, reason}` (ETP-5828 QA, the popup's
+toast *«N líneas importadas · descuento global del X % aplicado a la factura»*): `applied:true, percent:<%>,
+reason:null` when the invoice's total discount holds the orders' % after the call (set now, or already there), else
+`applied:false, percent:null` and `reason` `carryGlobalDiscountFalse` (the call sent `carryGlobalDiscount:false`) or
+`ordersWithoutDiscount` (the orders have none, nothing to carry). A discount that cannot be carried never reaches a 200:
+it is the 422 `globalDiscountConflict`. Example:
+`{"data":{"importedCount":2,"lines":[…],"headerLinked":true,"salesOrder":"A1B2…","order":"A1B2…","globalDiscount":{"applied":true,"percent":10,"reason":null}}}`.
 `availableOrders` / `availableReceipts` / `availableShipments` answer
 `{data:[{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines}], hasMore, limit,
-scanLimit}`, the `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
+scanLimit}`; `availableOrders` of an **invoice** adds `globalDiscount`, the order's `etgoTotalDiscount` as a % (null,
+zero or negative read as 0, same normalisation as the carry rule), the popup's *«Dto. global X %»* tag. It is rounded to 4 decimals for
+the comparisons and written without trailing zeros (`12.5`, `10`, never `12.5000`), like `globalDiscount.percent` of
+`importOrderLines` (ETP-5828). It also adds `amount`, the sum of the order's pending lines (unit price × pending quantity), WITHOUT
+the global discount — the import popup's row amount. `availableOrderLines` of an **invoice** adds, per line, `unitPrice`
+(the order line's net price, its line discount already applied), `discount` (that line discount as a %, written like
+`globalDiscount`) and `amount` (`unitPrice` × `pendingQuantity`, at the currency's precision), which is what the popup
+shows per line (ETP-5828, UI/MCP parity). The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
 hasMore:false, limit, scanLimit}`, where the line `id` is the `sourceLineId` the import takes. **Discovery is a bounded
 scan**: it reads the `scanLimit` (200) most recent completed candidates of the target's partner, client and currency and
 returns at most `limit` (50) documents, filtered by the same pending rule the import enforces. `hasMore` is `true` when
@@ -11788,7 +11882,7 @@ caller knows its id. Return orders and return documents are never listed.
 | `importNothingPending` | no `lines` and nothing left to import (names the covering drafts when that is why). `importOrderLines` into an invoice names the order and adds `orderId`, `documentNo`, as above |
 | `importQuantityExceedsPending` | more than what is pending of a line; extra keys `product`, `requested`, `pending`, `sourceLineId` |
 | `importQuantityNotHonoured` | order / receipt to invoice only: the native process created other quantities than planned; everything is rolled back |
-| `globalDiscountConflict` | `importOrderLines` into an invoice with `carryGlobalDiscount` true (the default) when the orders' global discount cannot be carried (see *Header link*); extra keys `conflict`, `orders:[{orderId, documentNo, globalDiscount}]`, `invoice:{totalDiscount, hadLines}`, `hint` |
+| `globalDiscountConflict` | `importOrderLines` into an invoice with `carryGlobalDiscount` true (the default) when the orders' global discount cannot be carried (see *Header link*); extra keys `conflict`, `orders:[{orderId, documentNo, globalDiscount}]`, `invoice:{totalDiscount, hadLines}`, `hint` (the percents without trailing zeros, `10` or `12.5`, as in the 200 answers) |
 
 Example: `Cannot import 11 of Agua: only 10 is still pending on this line (quantities already in draft documents count as taken).`
 An unforeseen failure is rolled back whole and answers a generic **500** (`An internal error occurred while importing
@@ -13189,8 +13283,7 @@ return.
 | `sales-invoice/header`, `purchase-invoice/header` | `availableReturns`, `availableReturnLines`, `importReturnLines` (param `returnId`) | `ImportInOutLinesIntoInvoiceHandler` (the ETP-5713 receipt / shipment delegate, with a return mode) |
 | same | `availableOriginInvoices`, `availableOriginInvoiceLines`, `importOriginInvoiceLines` (param `invoiceId`) | `ImportOriginInvoiceLinesHandler` |
 
-They take the same body and answer in the same envelope as §4.12.34 (`{data:{importedCount, lines:[…], headerLinked,
-salesOrder?}}`; the origin import adds `originInvoices:[{id, documentNo}]`), the same `error.code`s, and the `id` of
+They take the same body and answer in the same envelope as §4.12.34 (`{data:{importedCount, lines:[…], headerLinked, salesOrder?, order?}}`; the origin import adds `originInvoices:[{id, documentNo}]`), the same `error.code`s, and the `id` of
 `etendo_action` is the **draft rectificative**. The quantity a caller sends is always a **positive** number ("Return Qty",
 as the return's own lines show it); what is written is its negative, and `quantity` in the answer is negative.
 
