@@ -297,20 +297,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return rateRefusal;
     }
     autoCreateOrUpdateConversionRateDocument(context);
-    // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
-    // Mirrors PurchaseInvoiceHeaderHandler#afterHandle (ETP-4737) — the manual
-    // "Import from Source Invoice" flow links a rectificativa back to its source via
-    // C_Invoice_Reverse, same mechanism shared through AbstractInvoiceHeaderHandler.
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-      rectificationLinks.persistOriginInvoice(context);
-      persistSiiAuthorizationno(context);
-    }
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      // ETP-4783: the main CRUD write captures its response before afterHandle() runs, so
-      // aeatsiiAuthorizationno (written by persistSiiAuthorizationno()) is absent from the
-      // PATCH response. Inject it so the frontend sees the correct value without a re-fetch.
-      return injectAuthorizationnoIntoSaveResponse(context);
+      return afterNonRead(context);
     }
     NeoResponse prev = context.getPreviousResult();
     if (prev == null || prev.getBody() == null) {
@@ -353,6 +341,35 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       log.error("Error enriching sales invoice response", e);
       return null;
     }
+  }
+
+  /**
+   * The {@link #afterHandle} branch for everything that is not a CRUD read: CRUD writes and the
+   * other endpoint types (ACTION, ...).
+   *
+   * <p>On a CRUD write (POST/PUT/PATCH) it persists the origin-invoice relationship — mirrors
+   * {@code PurchaseInvoiceHeaderHandler#afterHandle} (ETP-4737): the manual "Import from Source
+   * Invoice" flow links a rectificativa back to its source via C_Invoice_Reverse — the SII
+   * authorization number, and the TicketBAI / VERI*FACTU rectificative defaults (ETP-5747), then
+   * completes the write response ({@link #completeWriteResponse}).
+   *
+   * <p>ETP-4783: the main CRUD write captures its response before afterHandle() runs, so
+   * aeatsiiAuthorizationno (written by persistSiiAuthorizationno()) is absent from the PATCH
+   * response; it is injected so the frontend sees the correct value without a re-fetch.
+   */
+  private NeoResponse afterNonRead(NeoContext context) {
+    boolean crudWrite = NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod());
+    Map<String, Object> fiscalDefaults = Collections.emptyMap();
+    if (crudWrite) {
+      rectificationLinks.persistOriginInvoice(context);
+      persistSiiAuthorizationno(context);
+      fiscalDefaults = SalesRectificativeFiscalDefaults.apply(
+          InvoiceCalloutHelper.resolveInvoiceIdFromContext(context));
+    }
+    NeoResponse authorizationResponse = injectAuthorizationnoIntoSaveResponse(context);
+    return crudWrite ? completeWriteResponse(context, authorizationResponse, fiscalDefaults)
+        : authorizationResponse;
   }
 
   // ---------------------------------------------------------------------------
@@ -414,6 +431,93 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
             this::isStandardInvoiceDocType),
         new InOutFollowUpCreator(InOutTargetBuilder.Direction.SALES, InvoiceInOutMapping::map,
             InvoiceInOutMapping.linker(InOutTargetBuilder.Direction.SALES))));
+  }
+
+  /**
+   * Completes the record a CRUD write (POST/PUT/PATCH) echoes back (ETP-5747).
+   *
+   * <p>The write response used to carry none of the virtual fields the detail GET injects, so a
+   * client that adopts the write response as the record — the SPA does exactly that when it
+   * creates an invoice and moves on (DetailView {@code primeSaved} + {@code justSaved}, which skips
+   * the post-save read) — lost {@code isRectificative} until the next full reload, and with it the
+   * SIF tab's SII "Tipo factura = R" default. Adds the fields that a header write can change and
+   * that drive the form, each one cheap (one indexed query or none):
+   * <ul>
+   *   <li>{@code isRectificative}, the subtype key and {@code docTypeLocked} — follow the document
+   *   type, which a create sets;</li>
+   *   <li>{@code tbaiConfigActive} — the TicketBAI panel's displayLogic;</li>
+   *   <li>the TicketBAI / VERI*FACTU defaults {@link SalesRectificativeFiscalDefaults} just wrote,
+   *   which the response, built before this post-hook, cannot contain.</li>
+   * </ul>
+   * The detail-only enrichments (origin / rectifying invoices, linked shipments and orders, exempt
+   * taxes, SIF attachments, reactivation block) are left out: they are derived from other tables,
+   * cost several queries each, and the SPA keeps their last-known value across a save (it merges a
+   * write response onto the record it holds) and re-reads them on every detail GET.
+   *
+   * <p>Nothing is added to an {@code _onlyReturnIds} batch response (nobody reads it), to a
+   * non-2xx response, or to a body that carries no record id.
+   *
+   * @param context the write context
+   * @param authorizationResponse the response {@link #injectAuthorizationnoIntoSaveResponse}
+   *     built, or {@code null}
+   * @param fiscalDefaults the values {@link SalesRectificativeFiscalDefaults#apply} wrote
+   * @return the completed response, or {@code authorizationResponse} when there is nothing to do
+   */
+  NeoResponse completeWriteResponse(NeoContext context, NeoResponse authorizationResponse,
+      Map<String, Object> fiscalDefaults) {
+    NeoResponse prev = context.getPreviousResult();
+    NeoResponse base = authorizationResponse != null ? authorizationResponse : prev;
+    if (context.isIdsOnlyResponse() || base == null || base.getBody() == null
+        || prev == null || prev.getHttpStatus() < 200 || prev.getHttpStatus() >= 300) {
+      return authorizationResponse;
+    }
+    try {
+      // The authorization response is already a private copy; the captured result is not.
+      JSONObject body = authorizationResponse != null ? base.getBody()
+          : new JSONObject(base.getBody().toString());
+      JSONObject rec = writtenRecord(body);
+      if (rec == null || StringUtils.isBlank(rec.optString("id", null))) {
+        return authorizationResponse;
+      }
+      for (Map.Entry<String, Object> entry : fiscalDefaults.entrySet()) {
+        rec.put(entry.getKey(), entry.getValue());
+      }
+      enrichDocTypeLocked(rec);
+      // Only from a value the response carries: a key computed from an absent one would answer
+      // "not rectificative" / "no TicketBAI" and overwrite the right value the client holds.
+      if (rec.has(FIELD_TRANSACTION_DOCUMENT)) {
+        enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
+        enrichIsRectificative(rec);
+      }
+      if (rec.has("organization")) {
+        enrichTbaiConfigActive(rec);
+      }
+      NeoResponse completed = new NeoResponse(prev.getHttpStatus(), body);
+      for (Map.Entry<String, String> header : prev.getHeaders().entrySet()) {
+        completed = completed.withHeader(header.getKey(), header.getValue());
+      }
+      return completed;
+    } catch (Exception e) {
+      log.warn("[ETP-5747] Could not complete the sales invoice write response: {}", e.getMessage());
+      return authorizationResponse;
+    }
+  }
+
+  /**
+   * The record of a write response: the first element of the {@code response.data} envelope
+   * (array or object), or the body itself when it is flat — the same two shapes
+   * {@link #injectAuthorizationnoIntoSaveResponse} accepts.
+   */
+  static JSONObject writtenRecord(JSONObject body) {
+    JSONObject wrapper = body.optJSONObject("response");
+    if (wrapper == null) {
+      return body;
+    }
+    JSONArray data = wrapper.optJSONArray("data");
+    if (data != null) {
+      return data.length() > 0 ? data.optJSONObject(0) : null;
+    }
+    return wrapper.optJSONObject("data");
   }
 
   /**
