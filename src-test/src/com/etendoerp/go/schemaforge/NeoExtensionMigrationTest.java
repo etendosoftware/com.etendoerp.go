@@ -72,6 +72,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.handlers.PaymentInReactivateHandler;
 import com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler;
 import com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandler;
+import com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler;
+import com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoExtensionIndex;
@@ -99,6 +101,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler
+ * @covers com.etendoerp.go.schemaforge.VerifactuConfigReadyHandler
  * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
  * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
  * @covers com.etendoerp.go.schemaforge.NeoRequestRouter
@@ -123,6 +128,10 @@ class NeoExtensionMigrationTest {
       new Binding(PaymentOutReactivateHandler.class, "payment-out", "header"),
       new Binding(GoodsShipmentHeaderHandler.class, "goods-shipment", "goodsShipment"),
       new Binding(SalesQuotationHeaderHandler.class, "sales-quotation", "quotation"),
+      new Binding(SiiConfigDeactivateHandler.class, "sii-config", "siiConfiguration"),
+      new Binding(TbaiConfigSequenceHandler.class, "tbai-config", "header"),
+      new Binding(VerifactuConfigReadyHandler.class, "verifactu-config",
+          "cabeceraDeConfiguraciónVerifactu"),
       new Binding(ReconciliationHandler.class, "bank-reconciliation", "bank-reconciliation"),
       new Binding(BankStatementsHandler.class, "bank-statements", "bank-statements") };
 

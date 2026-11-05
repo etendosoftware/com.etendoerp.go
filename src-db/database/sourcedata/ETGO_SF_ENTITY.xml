@@ -1091,6 +1091,7 @@
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--2FB4EB163355420D8DD676D5F92C546E-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The digital certificate is uploaded, replaced and removed only in the app (Configuración fiscal), which validates the PKCS#12 file and its password; agents only read its status","instead":"etendo_action(spec:'organization', entity:'organization', id:'<organizationId>', action:'certificate')"}}]]></MCP_CONFIG>
 <!--2FB4EB163355420D8DD676D5F92C546E--></ETGO_SF_ENTITY>
 
 <!--30DB5085A7D54F728F9445FC36591F40--><ETGO_SF_ENTITY>
@@ -1853,9 +1854,8 @@
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--52E6AF2963894C128EE72E0A10D5F01B-->  <JAVA_QUALIFIER><![CDATA[tbai-config-sequence-handler]]></JAVA_QUALIFIER>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--52E6AF2963894C128EE72E0A10D5F01B-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--52E6AF2963894C128EE72E0A10D5F01B-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--52E6AF2963894C128EE72E0A10D5F01B--></ETGO_SF_ENTITY>
 
 <!--5380CF0F9D53450D8B153F099104AC46--><ETGO_SF_ENTITY>
@@ -1951,9 +1951,8 @@
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--57DE601DBE42468BA9963E81DA56BB1C-->  <JAVA_QUALIFIER><![CDATA[sii-config-deactivate-handler]]></JAVA_QUALIFIER>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--57DE601DBE42468BA9963E81DA56BB1C-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--57DE601DBE42468BA9963E81DA56BB1C-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--57DE601DBE42468BA9963E81DA56BB1C--></ETGO_SF_ENTITY>
 
 <!--59B96B75153149EF993CD7FD3CE9439F--><ETGO_SF_ENTITY>
@@ -2011,9 +2010,8 @@
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <JAVA_QUALIFIER><![CDATA[verifactu-config-ready-handler]]></JAVA_QUALIFIER>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--5AAAB7DE44364794AE70BB19C9D66F90--></ETGO_SF_ENTITY>
 
 <!--5B942E443D7D4E4BA63F863F88CEF4D7--><ETGO_SF_ENTITY>
