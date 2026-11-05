@@ -87,9 +87,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *       in GET responses for draft invoices that carry a positive {@code etgoTotalDiscount}.</li>
  *   <li>{@code followUpFlows()} — the one goods-shipment follow-up and its sales-side wiring,
  *       and the {@code followUp} annotation written by {@code afterHandle()} (ETP-5576).</li>
+ *   <li>{@code afterHandle()} on a CRUD write — the TicketBAI / VERI*FACTU rectificative defaults
+ *       are applied to the written invoice and echoed in the write response (ETP-5747).</li>
  * </ul>
- *
- * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  *
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  */
@@ -1886,5 +1886,281 @@ public class SalesInvoiceHeaderHandlerTest {
       totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
           Mockito.never());
     }
+  }
+
+  // ── ETP-5747: the CRUD write response carries what the form needs ─────────────
+
+  private static final String WRITE_RESPONSE_INVOICE = "inv-write-response";
+  private static final String WRITE_RESPONSE_DOCTYPE = "dt-rectificative";
+
+  private static NeoContext writeResponseCtx(String method, NeoResponse previous) {
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod(method).endpointType(NeoEndpointType.CRUD).recordId(WRITE_RESPONSE_INVOICE)
+        .requestBody(new JSONObject()).build();
+    ctx.setPreviousResult(previous);
+    return ctx;
+  }
+
+  private static JSONObject writtenInvoiceBody() throws JSONException {
+    JSONObject rec = new JSONObject().put("id", WRITE_RESPONSE_INVOICE)
+        .put("transactionDocument", WRITE_RESPONSE_DOCTYPE).put("organization", "org-write-response")
+        .put("aeatsiiClaveTipo", "F1");
+    return new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(rec)));
+  }
+
+  /** Every lookup answers one row whose first column is "Y" (rectificative doc type, TBAI on). */
+  private static void stubRectificativeLookups(MockedStatic<OBDal> dalMock) throws SQLException {
+    OBDal dal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(dal.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString(1)).thenReturn("Y");
+    DocumentType dt = mock(DocumentType.class);
+    when(dt.isEtsgIsRectificative()).thenReturn(true);
+    when(dal.get(DocumentType.class, WRITE_RESPONSE_DOCTYPE)).thenReturn(dt);
+  }
+
+  /**
+   * ETP-5747 repro: a PATCH/POST of a rectificative sales invoice answered a record with no
+   * {@code isRectificative}, so the SPA — which adopts a create's response as the record — never
+   * applied the SII "Tipo factura = R" default until a reload. The write response now carries it,
+   * with the document-type keys, {@code tbaiConfigActive} and the fiscal defaults just written.
+   */
+  @Test
+  public void writeResponseCarriesIsRectificativeAndFiscalDefaults() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      stubRectificativeLookups(dalMock);
+      NeoResponse previous = new NeoResponse(201, writtenInvoiceBody())
+          .withHeader("X-Test", "kept");
+      Map<String, Object> defaults = new HashMap<>();
+      defaults.put("tbaiReverseinvoicecode", "R4");
+      defaults.put("etvfacInvType", "R1");
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
+          writeResponseCtx("POST", previous), null, defaults);
+
+      assertNotNull(result);
+      assertEquals(201, result.getHttpStatus());
+      assertEquals("kept", result.getHeaders().get("X-Test"));
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0);
+      assertTrue(rec.getBoolean("isRectificative"));
+      assertTrue(rec.getBoolean("docTypeLocked"));
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
+      assertEquals("Y", rec.getString("tbaiConfigActive"));
+      assertEquals("R4", rec.getString("tbaiReverseinvoicecode"));
+      assertEquals("R1", rec.getString("etvfacInvType"));
+      // The captured result itself is never mutated.
+      assertFalse(previous.getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0).has("isRectificative"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * The SII authorization number injected by ETP-4783 survives: the completion is applied on top
+   * of that response, not instead of it.
+   */
+  @Test
+  public void writeResponseKeepsTheInjectedAuthorizationNumber() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      stubRectificativeLookups(dalMock);
+      JSONObject withAuthorization = writtenInvoiceBody();
+      withAuthorization.getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .put("aeatsiiAuthorizationno", "AUTH-1");
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
+          writeResponseCtx("PATCH", NeoResponse.ok(writtenInvoiceBody())),
+          NeoResponse.ok(withAuthorization), Collections.emptyMap());
+
+      JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
+      assertEquals("AUTH-1", rec.getString("aeatsiiAuthorizationno"));
+      assertTrue(rec.getBoolean("isRectificative"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * A response that does not carry the document type or the organization never gets a key
+   * computed from the missing value: "false" would overwrite the true value the client holds.
+   */
+  @Test
+  public void writeResponseNeverDerivesKeysFromAbsentValues() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data",
+        new JSONArray().put(new JSONObject().put("id", WRITE_RESPONSE_INVOICE))));
+
+    NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
+        writeResponseCtx("PATCH", NeoResponse.ok(body)), null, Collections.emptyMap());
+
+    JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
+    assertFalse(rec.has("isRectificative"));
+    assertFalse(rec.has("arInvoiceSubtype"));
+    assertFalse(rec.has("tbaiConfigActive"));
+    assertTrue(rec.getBoolean("docTypeLocked"));
+  }
+
+  /** An error, an id-less body and an {@code _onlyReturnIds} batch response are left alone. */
+  @Test
+  public void writeResponseLeavesErrorsAndIdsOnlyResponsesAlone() throws Exception {
+    assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
+        writeResponseCtx("PATCH", NeoResponse.error(422, "refused")), null,
+        Collections.emptyMap()));
+    assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
+        writeResponseCtx("PATCH", NeoResponse.ok(new JSONObject().put("response",
+            new JSONObject().put("data", new JSONArray())))), null, Collections.emptyMap()));
+    assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
+        writeResponseCtx("PATCH", null), null, Collections.emptyMap()));
+
+    NeoContext idsOnly = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).idsOnlyResponse(true)
+        .requestBody(new JSONObject()).build();
+    idsOnly.setPreviousResult(NeoResponse.ok(writtenInvoiceBody()));
+    assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(idsOnly, null,
+        Collections.emptyMap()));
+  }
+
+  // ── ETP-5747: afterHandle wires the fiscal defaults into every CRUD write ──────
+
+  private static final String CREATED_INVOICE = "inv-created-5747";
+
+  /** A write body with an id only: no key is derived from an absent doc type / organization. */
+  private static JSONObject idOnlyWriteBody(String id) throws JSONException {
+    return new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(new JSONObject().put("id", id))));
+  }
+
+  /**
+   * Runs {@code afterHandle} with a DAL that finds nothing and answers no row, and with
+   * {@link SalesRectificativeFiscalDefaults#apply} replaced by a stub that returns {@code applied}.
+   *
+   * @param appliedIds receives the invoice ids {@code apply} was called with, in call order
+   * @return what {@code afterHandle} answered
+   */
+  private static NeoResponse afterHandleWithStubbedDefaults(NeoContext ctx,
+      Map<String, Object> applied, AtomicReference<List<String>> appliedIds) throws Exception {
+    List<String> ids = new java.util.ArrayList<>();
+    appliedIds.set(ids);
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<SalesRectificativeFiscalDefaults> defaultsMock =
+             Mockito.mockStatic(SalesRectificativeFiscalDefaults.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+      defaultsMock.when(() -> SalesRectificativeFiscalDefaults.apply(Mockito.nullable(String.class)))
+          .thenAnswer(i -> {
+            ids.add(i.getArgument(0));
+            return applied;
+          });
+
+      return new SalesInvoiceHeaderHandler().afterHandle(ctx);
+    }
+  }
+
+  private static Map<String, Object> tbaiDefaults() {
+    Map<String, Object> applied = new java.util.LinkedHashMap<>();
+    applied.put("tbaiIsreverseinvoice", true);
+    applied.put("tbaiReverseinvoicecode", "R4");
+    return applied;
+  }
+
+  /** PATCH: the defaults are applied to the URL record and merged into the echoed record. */
+  @Test
+  public void afterHandlePatchAppliesFiscalDefaultsToTheRecordAndEchoesThem() throws Exception {
+    NeoContext ctx = writeResponseCtx("PATCH",
+        NeoResponse.ok(idOnlyWriteBody(WRITE_RESPONSE_INVOICE)));
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    NeoResponse result = afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertEquals(Collections.singletonList(WRITE_RESPONSE_INVOICE), ids.get());
+    assertNotNull(result);
+    JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
+    assertTrue(rec.getBoolean("tbaiIsreverseinvoice"));
+    assertEquals("R4", rec.getString("tbaiReverseinvoicecode"));
+  }
+
+  /** POST: no URL id, so the defaults go to the id the create answered. */
+  @Test
+  public void afterHandlePostAppliesFiscalDefaultsToTheCreatedInvoice() throws Exception {
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(new JSONObject())
+        .build();
+    ctx.setPreviousResult(new NeoResponse(201, idOnlyWriteBody(CREATED_INVOICE)));
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    NeoResponse result = afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertEquals(Collections.singletonList(CREATED_INVOICE), ids.get());
+    assertNotNull(result);
+    assertEquals(201, result.getHttpStatus());
+    JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
+    assertEquals(CREATED_INVOICE, rec.getString("id"));
+    assertEquals("R4", rec.getString("tbaiReverseinvoicecode"));
+  }
+
+  /** Batch import ({@code _onlyReturnIds}): the defaults are still written, the response is not enriched. */
+  @Test
+  public void afterHandleIdsOnlyWriteAppliesDefaultsButLeavesTheResponseAlone() throws Exception {
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).idsOnlyResponse(true)
+        .requestBody(new JSONObject()).build();
+    NeoResponse previous = new NeoResponse(201, idOnlyWriteBody(CREATED_INVOICE));
+    ctx.setPreviousResult(previous);
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    NeoResponse result = afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertEquals(Collections.singletonList(CREATED_INVOICE), ids.get());
+    assertNull(result);
+    assertFalse(SalesInvoiceHeaderHandler.writtenRecord(previous.getBody())
+        .has("tbaiReverseinvoicecode"));
+  }
+
+  /** A read never writes fiscal defaults. */
+  @Test
+  public void afterHandleGetNeverAppliesFiscalDefaults() throws Exception {
+    NeoContext ctx = writeResponseCtx("GET",
+        NeoResponse.ok(idOnlyWriteBody(WRITE_RESPONSE_INVOICE)));
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertTrue(ids.get().isEmpty());
+  }
+
+  /** An ACTION POST (register payment, clone, …) is not a header write: no fiscal defaults. */
+  @Test
+  public void afterHandleActionPostNeverAppliesFiscalDefaults() throws Exception {
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("cloneRecord")
+        .recordId(WRITE_RESPONSE_INVOICE).requestBody(new JSONObject()).build();
+    ctx.setPreviousResult(NeoResponse.ok(idOnlyWriteBody(WRITE_RESPONSE_INVOICE)));
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    NeoResponse result = afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertTrue(ids.get().isEmpty());
+    assertNull(result);
   }
 }
