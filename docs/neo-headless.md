@@ -10458,10 +10458,13 @@ steps below in this order — both customizations call the single entry point
    `OrderLineCreateDiscount.resetCascadeDiscount` puts the discount back to 0. It reads the agent's
    own keys (`NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`, set only by `etendo_create`), so it never
    fires on REST, REST batch, `etendo_batch` or the form, and abstains when the agent sent
-   `discount` (an explicit 100 % stays 100), a price (ETP-5852 still derives its discount), or a zero
-   list price. Over MCP it also covers `purchase-order/lines`. The response still lists
-   `supersededDefaults.discount: {callout: 100}` — the cascade's proposal, recorded before the
-   pre-hook; the persisted discount is 0.
+   `discount` (an explicit 100 % stays 100), a price (ETP-5852 still derives its discount), a zero
+   list price, or when the body already holds a non-zero `unitPrice`
+   (`qualifiesForCascadeDiscountReset`). Over MCP it also covers `purchase-order/lines`. When the
+   reset applied, the customization declares `discount` governed (`OrderLineCustomization
+   .governedCreateFields`, ETP-5680 contract), so a `supersededDefaults.discount` entry carrying the
+   cascade's 100 is dropped instead of advising the agent to send it back; every other entry —
+   `listPrice: {sent: 100, callout: 0}` included — is reported as before.
 
 What the re-fire may write:
 
@@ -10601,9 +10604,11 @@ QA reopen data (quotation 1000008, Monitor, list 300, 21 % VAT): discount 5 → 
 
 Create-side lone list price (live pre-QA, `etendo_create` on `sales-quotation/quotationLine`,
 Fernet, catalog 44): `{product, orderedQuantity 2, listPrice 100}` persisted discount 100,
-`unitPrice` 0, net 0, gross 0; expected with the reset: discount 0, `unitPrice` 100, net 200 and
-the gross at the line's tax rate (to be confirmed on the next live run). Controls unchanged: no price at all → 44 / 44, discount 0;
-`listPrice` + `discount` → priced at that discount.
+`unitPrice` 0, net 0, gross 0, answering `supersededDefaults: {listPrice: {callout: 0}, discount:
+{callout: 100}}` (as relayed). Expected with the reset: discount 0, `unitPrice` 100, net 200, the
+gross at the line's tax rate, and no `supersededDefaults.discount` entry (to be confirmed on the
+next live run, with the raw response captured). Controls unchanged: no price at all → 44 / 44,
+discount 0; `listPrice` + `discount` → priced at that discount.
 
 `etendo_create` of a product whose price list entry has list price 0 and standard price 50 (QA
 quotations 1000009 by the form, 1000010 by MCP): `listPrice` 50, `unitPrice` 50, `standardPrice` 50

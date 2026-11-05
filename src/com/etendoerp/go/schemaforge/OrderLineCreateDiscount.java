@@ -40,6 +40,9 @@ final class OrderLineCreateDiscount {
   private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
   private static final BigDecimal HALF_CENT = new BigDecimal("0.005");
 
+  /** Context attribute {@link #resetCascadeDiscount} sets when it reset the discount. */
+  static final String ATTR_CASCADE_DISCOUNT_RESET = "orderLine.cascadeDiscountReset";
+
   private OrderLineCreateDiscount() {
   }
 
@@ -61,40 +64,69 @@ final class OrderLineCreateDiscount {
    * 100, unit price 0 and amounts 0 — a free line, with no warning. A discount derived from a price
    * of 0 is not a choice.
    *
-   * <p><b>MCP {@code etendo_create} only:</b> the one channel that fills defaults before the
-   * pre-hook, and so the one that sets {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}. Without that
-   * attribute the body is what the caller sent (REST single and batch, {@code etendo_batch}) — and
-   * the form, on REST, always sends {@code unitPrice} with {@code listPrice} anyway. Abstains when
-   * the caller sent {@code discount} (an explicit 100 % stays 100), {@code unitPrice} or
-   * {@code grossUnitPrice} (a negotiated price keeps deriving its discount in {@link #derive}), or
-   * when the list price is zero or missing. Total: never throws.
+   * <p><b>MCP {@code etendo_create} only</b> — see {@link #qualifiesForCascadeDiscountReset} for
+   * the exact condition. On success the context is marked ({@link #cascadeDiscountWasReset}), so the
+   * customization can declare {@code discount} governed and the cascade's 100 is not reported to the
+   * agent as a {@code supersededDefaults} value to send back. Total: never throws.
    *
    * @param ctx the pre-hook context; its request body is mutated in place
    */
   static void resetCascadeDiscount(NeoContext ctx) {
-    if (ctx == null || !ctx.isMcpOrigin() || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
-        || !METHOD_POST.equals(ctx.getHttpMethod())) {
-      return;
-    }
-    Object provided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
-    JSONObject body = ctx.getRequestBody();
-    if (!(provided instanceof Collection) || body == null) {
-      return;
-    }
-    Collection<?> sent = (Collection<?>) provided;
-    if (!sent.contains(OrderLineDiscountSupport.FIELD_LIST_PRICE)
-        || sent.contains(OrderLineDiscountSupport.FIELD_DISCOUNT)
-        || sent.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE)
-        || sent.contains(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE)
-        || LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_LIST_PRICE))) {
+    if (!qualifiesForCascadeDiscountReset(ctx)) {
       return;
     }
     try {
-      body.put(OrderLineDiscountSupport.FIELD_DISCOUNT, BigDecimal.ZERO);
+      ctx.getRequestBody().put(OrderLineDiscountSupport.FIELD_DISCOUNT, BigDecimal.ZERO);
+      ctx.setAttribute(ATTR_CASCADE_DISCOUNT_RESET, Boolean.TRUE);
     } catch (Exception e) {
       log.warn("[ORDER-LINE-PRICE] Could not reset the cascade discount of a new line on {} {}: {}",
           ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
     }
+  }
+
+  /**
+   * Whether {@link #resetCascadeDiscount} applies to this pre-hook context: an MCP CRUD create that
+   * carries {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS} — set only by {@code etendo_create}, the
+   * one channel that fills defaults before the pre-hook; without it the body is what the caller
+   * sent (REST single and batch, {@code etendo_batch}, and so the form, which always sends
+   * {@code unitPrice} with {@code listPrice} anyway) — whose agent sent {@code listPrice} and none
+   * of {@code discount} (an explicit 100 % stays 100), {@code unitPrice} or {@code grossUnitPrice}
+   * (a negotiated price keeps deriving its discount in {@link #derive}), and whose body has a
+   * non-zero list price and no price yet ({@code unitPrice} absent or 0, the cascade's 0).
+   *
+   * <p>Read on the body BEFORE the line is priced: once priced, {@code unitPrice} is the list
+   * price, so the governed-field question after the pre-hook asks
+   * {@link #cascadeDiscountWasReset} instead of re-evaluating this.
+   */
+  static boolean qualifiesForCascadeDiscountReset(NeoContext ctx) {
+    if (ctx == null || !ctx.isMcpOrigin() || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod())) {
+      return false;
+    }
+    Object provided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
+    JSONObject body = ctx.getRequestBody();
+    if (!(provided instanceof Collection) || body == null) {
+      return false;
+    }
+    return sentOnlyListPrice((Collection<?>) provided)
+        && !LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_LIST_PRICE))
+        && LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_UNIT_PRICE));
+  }
+
+  /**
+   * @return {@code true} when {@link #resetCascadeDiscount} reset this request's discount — the
+   *         answer {@code OrderLineCustomization#governedCreateFields} reads after the pre-hook
+   */
+  static boolean cascadeDiscountWasReset(NeoContext ctx) {
+    return ctx != null && Boolean.TRUE.equals(ctx.getAttribute(ATTR_CASCADE_DISCOUNT_RESET));
+  }
+
+  /** The agent priced the line by its list price alone: no discount, net or gross price sent. */
+  private static boolean sentOnlyListPrice(Collection<?> sent) {
+    return sent.contains(OrderLineDiscountSupport.FIELD_LIST_PRICE)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_DISCOUNT)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE)
+        && !sent.contains(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE);
   }
 
   /**

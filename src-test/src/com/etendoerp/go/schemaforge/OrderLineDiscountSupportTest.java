@@ -1053,14 +1053,18 @@ class OrderLineDiscountSupportTest {
    * and persisted a free line. Each row is the body as the pre-hook receives it plus the keys the
    * agent sent ({@code null}: no attribute, as on REST and {@code etendo_batch}); the first two
    * create-side line rules then run in their {@code applyLineRules} order. No product in the body,
-   * so the price-list lookup abstains and no DAL is needed.
+   * so the price-list lookup abstains and no DAL is needed. The governed set the customization
+   * then declares is {@code discount} exactly when the reset applied, so only that
+   * {@code supersededDefaults} entry is dropped.
    */
   @ParameterizedTest(name = "{0}")
   @MethodSource("loneListPriceOnCreate")
   void loneListPriceOnCreateIsPricedAtTheDiscountTheAgentSent(String label, String body,
-      String sent, String expectedUnitPrice, String expectedDiscount) throws Exception {
+      String sent, boolean mcp, String expectedUnitPrice, String expectedDiscount,
+      String expectedGoverned) throws Exception {
     JSONObject json = new JSONObject(body);
-    NeoContext ctx = mcpCtx("POST", json);
+    NeoContext ctx = NeoContext.builder().specName(SPEC).entityName(ENTITY).httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD).mcpOrigin(mcp).requestBody(json).build();
     if (sent != null) {
       ctx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, keys(sent));
     }
@@ -1070,22 +1074,36 @@ class OrderLineDiscountSupportTest {
 
     assertAmount(label, expectedUnitPrice, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
     assertAmount(label, expectedDiscount, json, OrderLineDiscountSupport.FIELD_DISCOUNT);
+    assertEquals(keys(expectedGoverned),
+        new SalesQuotationLineHandler().governedCreateFields(ctx), label + ": governed");
   }
 
   static Stream<Arguments> loneListPriceOnCreate() {
     String cascaded = "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100,\"orderedQuantity\":2}";
     return Stream.of(
         Arguments.of("lone listPrice: the cascade's 100 % is reset, priced at the list",
-            cascaded, "listPrice,orderedQuantity,product", "100", "0"),
+            cascaded, "listPrice,orderedQuantity,product", true, "100", "0", "discount"),
         Arguments.of("listPrice + discount sent: priced at that discount",
-            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":10}", "listPrice,discount", "90", "10"),
+            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":10}", "listPrice,discount", true,
+            "90", "10", ""),
         Arguments.of("explicit 100 % discount sent: kept, priced at 0",
-            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100}", "listPrice,discount", "0", "100"),
+            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100}", "listPrice,discount", true,
+            "0", "100", ""),
         Arguments.of("genuine unitPrice below list: its discount is still derived (ETP-5852)",
-            "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":0}", "listPrice,unitPrice", "29.7",
-            "10"),
+            "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":0}", "listPrice,unitPrice", true,
+            "29.7", "10", ""),
+        Arguments.of("listPrice 0 sent: no reset, the line stays at 0",
+            "{\"listPrice\":0,\"unitPrice\":0,\"discount\":0}", "listPrice", true, "0", "0", ""),
+        Arguments.of("grossUnitPrice sent: no reset, the explicit gross price wins",
+            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100,\"grossUnitPrice\":121}",
+            "listPrice,grossUnitPrice", true, "0", "100", ""),
+        Arguments.of("body already priced (non-zero unitPrice): no reset",
+            "{\"listPrice\":100,\"unitPrice\":44,\"discount\":56}", "listPrice", true, "44",
+            "56", ""),
+        Arguments.of("non-MCP context with the attribute: no reset",
+            cascaded, "listPrice", false, "0", "100", ""),
         Arguments.of("no client-provided attribute (REST, batch): the body is the caller's",
-            cascaded, null, "0", "100"));
+            cascaded, null, true, "0", "100", ""));
   }
 
   // ── ETP-5881: a line sent without a price takes the price list's, on every channel ──

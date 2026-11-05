@@ -211,15 +211,18 @@ final class OrderLineDiscountSupport {
    *
    * <p><b>A line sent with only its list price</b> is priced from it,
    * {@code unitPrice = listPrice × (1 − discount / 100)}. Over {@code etendo_create} the
-   * {@code discount} the agent did not send is first reset to 0
+   * {@code discount} the agent did not send is first reset to 0 when the body has no price yet
    * ({@link OrderLineCreateDiscount#resetCascadeDiscount}, ETP-5528): the defaults cascade leaves
    * there the 100 % that {@code SL_Order_Amt} derives from a price of 0, which priced the line at 0.
+   * {@code discount} is then governed ({@code OrderLineCustomization#governedCreateFields}), so the
+   * cascade's 100 is not reported as a superseded default.
    *
    * <p><b>Why overwriting is safe.</b> {@code standardPrice} is published read-only
    * ({@code ETGO_SF_FIELD.IsReadOnly = Y}, visibility {@code system}) on both sales-order/lines and
    * sales-quotation/quotationLine, so it is never a value the caller chose: MCP refuses it, and the
    * form sends the product callout's value, which is this same price-list standard price.
-   * {@code unitPrice} is never touched. {@code listPrice} is editable on both entities, so it is
+   * A {@code unitPrice} the caller sent is never replaced; one that is absent or 0 is filled from
+   * the caller's list price or from the catalog, as described above. {@code listPrice} is editable on both entities, so it is
    * only filled in the one state the form itself corrects — a product with no list price, priced
    * at its standard price ({@link #listPriceFromStandard}); otherwise it is left as the body has it.
    *
