@@ -101,6 +101,10 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   @Inject
   private TotalDiscountService totalDiscountService;
 
+  /** The invoice's order import, whose quantity rule "Generar factura" uses (ETP-5828). */
+  @Inject
+  private ImportOrderLinesIntoInvoiceHandler orderLineImport;
+
   /**
    * ETP-5840: the rate is the one valid on the {@code orderDate} ({@code DateOrdered}), shown as
    * "Order date". Order-family rules in {@link DocumentRateGuards#guardOrderHeader}.
@@ -186,13 +190,55 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
    */
   @Override
   public Set<String> responseEnrichedFields() {
-    return OrderDocumentAvailability.RESPONSE_ENRICHED_FIELDS;
+    return RESPONSE_ENRICHED_FIELDS;
   }
 
-  /** The order's creation actions, for {@link OrderDocumentAvailability} (ETP-5714). */
+  /** The order header's enriched keys plus {@code pendingInvoiceAmount} (ETP-5828). */
+  static final Set<String> RESPONSE_ENRICHED_FIELDS = union(
+      OrderDocumentAvailability.RESPONSE_ENRICHED_FIELDS, FIELD_PENDING_INVOICE_AMOUNT);
+
+  private static Set<String> union(Set<String> base, String extra) {
+    Set<String> all = new java.util.LinkedHashSet<>(base);
+    all.add(extra);
+    return java.util.Collections.unmodifiableSet(all);
+  }
+
+  /**
+   * The order's creation actions, for {@link OrderDocumentAvailability} (ETP-5714). ETP-5828: a
+   * sales order invoices what is pending net of its draft invoices, so a draft only hides
+   * "Generar factura" when it covers everything left.
+   */
   private static final OrderDocumentAvailability.Flow AVAILABILITY_FLOW =
       new OrderDocumentAvailability.Flow(true, CreateShipmentHandler.CONTRACT.getName(),
-          CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(), true);
+          CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(), true, true);
+
+  /** {@inheritDoc} ETP-5828: the same net-of-drafts rule as {@link #AVAILABILITY_FLOW}. */
+  @Override
+  protected boolean invoicePendingNetOfDrafts() {
+    return AVAILABILITY_FLOW.invoiceNetOfDrafts();
+  }
+
+  /**
+   * {@inheritDoc} ETP-5828: what {@code createDraftInvoice} would invoice now without explicit
+   * {@code lines} — the quantities of {@code ImportOrderLinesIntoInvoiceHandler#shipmentScopedPending}
+   * (the action's own rule), priced by {@link OrderInvoicePendingAmount}. Zero when nothing is
+   * pending net of the drafts.
+   */
+  @Override
+  protected java.math.BigDecimal pendingInvoiceAmount(String orderId) {
+    OBContext.setAdminMode(true);
+    try {
+      Order order = OBDal.getInstance().get(Order.class, orderId);
+      if (order == null) {
+        return null;
+      }
+      ImportOrderLinesIntoInvoiceHandler delegate = orderLineImport != null ? orderLineImport
+          : new ImportOrderLinesIntoInvoiceHandler();
+      return OrderInvoicePendingAmount.forOrder(order, delegate.shipmentScopedPending(order));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
 
   /**
    * {@inheritDoc} Reactivate is ruled out for an order that has linked documents, and each
