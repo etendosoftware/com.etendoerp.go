@@ -661,7 +661,8 @@ public class NeoDefaultsService {
         return;
       }
       BaseOBObject obj = OBDal.getInstance().get(targetEntity.getName(), resolvedValue.toString());
-      if (obj != null) {
+      // ETP-5819: a value can be a request-supplied id (parentId); never label another tenant's row.
+      if (obj != null && TenantOwnership.belongsToReadableClient(obj)) {
         defaults.put(propertyName + "$_identifier", obj.getIdentifier());
       }
     } catch (Exception e) {

@@ -37,7 +37,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
  * {@code Processed} flag, regardless of which code path flips it.
  *
  * <p>{@link BankStatementAggregates#apply} already derives this status from
- * {@code (processed, lineCount, matchedCount)}, but only WE call it — from
+ * {@code (processed, lineCount, matchedCount, discardedCount)}, but only WE call it — from
  * {@link BankStatementsHandler}'s own create/process/reactivate flows and from
  * {@link BankStatementLineAggregateHandler} whenever a LINE changes. A statement
  * imported through the PSD2 bank-connection sync
@@ -62,7 +62,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
  * there is no extra flush and no re-triggering of this same observer. Safe to
  * run unconditionally (no {@code suppress()} gate needed, unlike the per-line
  * observer): recomputing from the header's own already-correct
- * {@code EM_ETGO_LINE_COUNT}/{@code EM_ETGO_MATCHED_COUNT} is cheap (no query)
+ * {@code EM_ETGO_LINE_COUNT}/{@code EM_ETGO_MATCHED_COUNT}/{@code EM_ETGO_DISCARDED_COUNT}
+ * (ETP-5581: discarded lines count as resolved) is cheap (no query)
  * and idempotent — it reaches the same answer whether our own flows or an
  * external one triggered the save.
  */
@@ -112,8 +113,25 @@ public class BankStatementHeaderStatusHandler extends EntityPersistenceEventObse
         event.getCurrentState(statementEntity.getProperty(FIN_BankStatement.PROPERTY_PROCESSED)));
     int lineCount = intOf(event.getCurrentState(lineCountProp));
     int matchedCount = intOf(event.getCurrentState(matchedCountProp));
-    String status = deriveStatementStatus(processed, lineCount, matchedCount);
+    int discardedCount = discardedCountOf(event, statementEntity);
+    String status = deriveStatementStatus(processed, lineCount, matchedCount, discardedCount);
     event.setCurrentState(statusProp, status);
+  }
+
+  /**
+   * The header's stored {@code EM_ETGO_DISCARDED_COUNT} from the event state: the lines that
+   * are discarded and not matched, which count as resolved in the status (ETP-5581). {@code 0}
+   * when the running model has no such column, the same fallback
+   * {@link BankStatementAggregates} applies, so the two never disagree.
+   *
+   * @param event           the persistence event of the statement
+   * @param statementEntity the {@code FIN_BankStatement} entity
+   * @return the discarded-line count, {@code 0} when unknown
+   */
+  private static int discardedCountOf(EntityPersistenceEvent event, Entity statementEntity) {
+    Property discardedCountProp = statementEntity
+        .getPropertyByColumnName(BankStatementAggregates.COL_DISCARDED_COUNT, false);
+    return discardedCountProp == null ? 0 : intOf(event.getCurrentState(discardedCountProp));
   }
 
   private static int intOf(Object value) {

@@ -46,10 +46,9 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -82,8 +81,15 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>Import C43:      {@code POST /sws/neo/bank-statements?action=import}
  *       body: {@code { FIN_Financial_Account_ID, fileName, contentBase64 }}
  * </ul>
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5581, following the ETP-5588 recipe): the
+ * {@code ETGO_SF_ENTITY} row of the {@code bank-statements} report spec carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface (the SPA's
+ * {@code /sws/neo/bank-statements} routes, {@code etendo_action} / {@code etendo_schema} over MCP
+ * and the action contracts in discover) reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("bank-statements")
+@NeoExtension(spec = "bank-statements", entity = "bank-statements")
 public class BankStatementsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BankStatementsHandler.class);
@@ -294,6 +300,7 @@ public class BankStatementsHandler implements NeoHandler {
           + "       bs.created,"
           + "       bs.em_etgo_line_count,"
           + "       bs.em_etgo_matched_count,"
+          + "       bs.em_etgo_discarded_count,"
           + "       bs.em_etgo_total_in,"
           + "       bs.em_etgo_total_out,"
           + "       bs.em_etgo_status,"
@@ -467,7 +474,12 @@ public class BankStatementsHandler implements NeoHandler {
       if (ownedIds.isEmpty()) {
         return NeoResponse.error(400, MSG_STATEMENT_NOT_FOUND + statementIds);
       }
-      return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, loadLines(ownedIds)));
+      JSONArray lines = loadLines(ownedIds);
+      // ETP-5581 toggle point: with bank-bounce-suggestions on, a line a
+      // BankStatementLineFilterHook excludes (PSD2's discarded lines) is still listed here, marked
+      // discarded:true. With the flag off no row carries the key.
+      StatementLineFilter.markDiscarded(BankBounceSuggestionsFlag.isEnabled(), lines, ownedIds);
+      return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, lines));
     } catch (Exception e) {
       log.error("Error loading lines for statements {}", statementIds, e);
       return NeoResponse.error(500, "Internal Server Error");
@@ -594,7 +606,8 @@ public class BankStatementsHandler implements NeoHandler {
       OBDal.getInstance().save(statement);
 
       // A brand-new statement has no lines, so numbering starts at 10 with no lookup.
-      int lineCount = createLines(statement, body.optJSONArray(FIELD_LINES), 0L);
+      int lineCount = createLines(statement, body.optJSONArray(FIELD_LINES), 0L,
+          Collections.emptyMap(), new HashMap<>());
       // "Save and process" runs the statement like an import so its lines become
       // reconcilable; "Save as draft" (process=false) just persists it.
       boolean process = body.optBoolean(FIELD_PROCESS, true);
@@ -716,6 +729,12 @@ public class BankStatementsHandler implements NeoHandler {
    * {@code "process": true} also runs it after saving. {@code name} and both header
    * dates are required, exactly as on create
    * (see {@link BankStatementsSupport#validateHeaderDates}).
+   *
+   * <p>ETP-5581: a body line that carries the {@code "id"} of one of the statement's current
+   * unmatched lines keeps what that line carried — the PSD2 transaction id (else the next bank
+   * synchronization imports the movement twice), the PSD2 discard flag and button, and the
+   * bounce-pair link ({@link BankStatementLineSet#bankIdentitiesOfUnmatched}). A body line without
+   * it is a new line, as before.
    */
   NeoResponse handleUpdate(NeoContext context) {
     JSONObject body = context.getRequestBody();
@@ -743,13 +762,21 @@ public class BankStatementsHandler implements NeoHandler {
       applyEditableHeader(statement, body);
       OBDal.getInstance().save(statement);
 
+      // ETP-5581: what the unmatched lines carry (PSD2 id, discard, bounce-pair link) is read
+      // BEFORE deleteUnmatched removes them, and handed back to the rebuilt line of the same "id".
+      Map<String, BankStatementLineSet.BankIdentity> identities =
+          BankStatementLineSet.bankIdentitiesOfUnmatched(statement);
       // Matched lines are never deleted-and-recreated — see deleteUnmatched's javadoc for
       // why that would fail loudly against core's own line-level trigger.
       BankStatementLineSet.deleteUnmatched(statement);
       // Numbering continues past whatever matched lines survived deleteUnmatched, so a
       // rebuilt line cannot take a LineNo one of them already holds.
-      int newLineCount =
-          hasBodyLines ? createLines(statement, bodyLines, BankStatementLineSet.maxLineNo(statement)) : 0;
+      Map<String, FIN_BankStatementLine> rebuiltByOldId = new HashMap<>();
+      int newLineCount = hasBodyLines
+          ? createLines(statement, bodyLines, BankStatementLineSet.maxLineNo(statement),
+              identities, rebuiltByOldId)
+          : 0;
+      BankStatementLineSet.relinkBouncePairs(identities, rebuiltByOldId);
       int lineCount = newLineCount + matchedLineCount;
 
       boolean process = body.optBoolean(FIELD_PROCESS, false);
@@ -973,10 +1000,15 @@ public class BankStatementsHandler implements NeoHandler {
    *     rather than this method querying for it: on the create path there is nothing to collide
    *     with, and looking it up would be a wasted round-trip. {@code handleUpdate} is the one
    *     caller that needs it, because it keeps the matched lines (see BankStatementLineSet).
+   * @param identities what the lines {@code handleUpdate} just deleted carried, by their old id; a
+   *     body line carrying one of those ids gets it back (ETP-5581). Empty on create.
+   * @param rebuiltByOldId filled with every line rebuilt from an old id, so the bounce-pair links
+   *     can be restored once all lines exist
    * @return the number of lines actually created
    */
-  private int createLines(FIN_BankStatement statement, JSONArray lines, long startAfterLineNo)
-      throws Exception {
+  private int createLines(FIN_BankStatement statement, JSONArray lines, long startAfterLineNo,
+      Map<String, BankStatementLineSet.BankIdentity> identities,
+      Map<String, FIN_BankStatementLine> rebuiltByOldId) throws Exception {
     int count = 0;
     long lineNo = startAfterLineNo + 10L;
     for (int i = 0; i < lines.length(); i++) {
@@ -1002,8 +1034,14 @@ public class BankStatementsHandler implements NeoHandler {
       line.setReferenceNo(StringUtils.isBlank(ref) ? DEFAULT_REFERENCE : truncate(ref, 30));
 
       resolveLineReferences(line, l);
+      String oldId = l.optString(FIELD_ID, "");
+      BankStatementLineSet.BankIdentity identity = identities.get(oldId);
+      BankStatementLineSet.restoreBankIdentity(line, identity);
 
       OBDal.getInstance().save(line);
+      if (identity != null) {
+        rebuiltByOldId.put(oldId, line);
+      }
       lineNo += 10L;
       count++;
     }
@@ -1266,8 +1304,23 @@ public class BankStatementsHandler implements NeoHandler {
     return new GenericCsvBankStatementImporter().loadFile(stream, statement);
   }
 
+  /**
+   * The imported statements of an account with their stored aggregates, for the "Extractos
+   * importados" list. ETP-5581: with {@code bank-bounce-suggestions} on for the account
+   * ({@link BankBounceSuggestionsFlag#isEnabled()}, evaluated once per list), each row carries
+   * {@code discardedCount} and the status counts discarded lines as resolved, as the stored
+   * {@code EM_ETGO_STATUS} does. With the flag off the row has no {@code discardedCount} and a
+   * statement holding a discarded line derives its status again without it, so the list reads as
+   * before ETP-5581.
+   *
+   * @param accountId the financial account
+   * @return one row per statement
+   * @throws Exception when the query fails
+   */
   JSONArray loadStatements(String accountId) throws Exception {
     JSONArray arr = new JSONArray();
+    // ETP-5581 toggle point, read once per list: whether discarded lines count as resolved.
+    boolean discardsHonoured = BankBounceSuggestionsFlag.isEnabled();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(STATEMENTS_SQL)) {
@@ -1276,6 +1329,9 @@ public class BankStatementsHandler implements NeoHandler {
         while (rs.next()) {
           int lineCount = rs.getInt("em_etgo_line_count");
           int matchedCount = rs.getInt("em_etgo_matched_count");
+          // ETP-5581: with bank-bounce-suggestions on, discarded lines are resolved without being
+          // matched; NULL (a row not yet recomputed since the column was added) reads as 0.
+          int discardedCount = rs.getInt("em_etgo_discarded_count");
           BigDecimal totalIn = nullSafeBigDecimal(rs.getBigDecimal("em_etgo_total_in"));
           BigDecimal totalOut = nullSafeBigDecimal(rs.getBigDecimal("em_etgo_total_out"));
           String periodFrom = formatDate(rs.getTimestamp("period_from"));
@@ -1297,6 +1353,9 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put(FIELD_LINE_COUNT, lineCount);
           row.put("matchedCount", matchedCount);
+          if (discardsHonoured) {
+            row.put("discardedCount", discardedCount);
+          }
           // totalAmount is kept for the existing conditional filter; it is just the
           // sum of the two persisted columns, derived here so we store one less column.
           row.put("totalAmount", totalIn.add(totalOut));
@@ -1305,10 +1364,13 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("periodFrom", periodFrom);
           row.put("periodTo", periodTo);
           // Read the persisted status; fall back to deriving it for rows that
-          // predate the column and have not been backfilled yet.
+          // predate the column and have not been backfilled yet. ETP-5581: the persisted status
+          // counts discarded lines as resolved; with bank-bounce-suggestions off they are not, so
+          // a statement holding one derives its status again without them.
           String status = StringUtils.trimToEmpty(rs.getString("em_etgo_status"));
-          if (StringUtils.isBlank(status)) {
-            status = deriveStatementStatus(processed, lineCount, matchedCount);
+          if (StringUtils.isBlank(status) || (!discardsHonoured && discardedCount > 0)) {
+            status = deriveStatementStatus(processed, lineCount, matchedCount,
+                discardsHonoured ? discardedCount : 0);
           }
           row.put("status", status);
           arr.put(row);

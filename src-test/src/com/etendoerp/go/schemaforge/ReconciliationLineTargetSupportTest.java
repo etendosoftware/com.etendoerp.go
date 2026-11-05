@@ -45,10 +45,12 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -66,6 +68,13 @@ import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
  * <p>The handler is a plain mock — every DAL seam the support class needs goes through it. {@link
  * OBDal} and {@link ModelProvider} (the match-group id is an extension column read through the
  * model, see {@code ReactivationSupport.readMatchGroupId}) are mocked statically for every test.
+ *
+ * <p>ETP-5581: a stuck line a {@code BankStatementLineFilterHook} excludes (PSD2's discarded
+ * lines) is refused with the 409 {@code LINE_DISCARDED} before the heal, the only write here —
+ * only with {@code bank-bounce-suggestions} on; off, the same line is healed like any stuck line.
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationLineTargetSupport
+ * @covers com.etendoerp.go.schemaforge.StatementLineFilter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -239,7 +248,7 @@ class ReconciliationLineTargetSupportTest {
     when(line.getFinancialAccountTransaction()).thenReturn(null);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertSame(line, target.line());
     assertNull(target.error());
@@ -253,7 +262,7 @@ class ReconciliationLineTargetSupportTest {
     when(handler.loadLine(REM_ID)).thenReturn(remainder);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.error());
     assertSame(remainder, target.line());
@@ -268,7 +277,7 @@ class ReconciliationLineTargetSupportTest {
     groupOf(line);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.line());
     assertEquals(409, target.error().getHttpStatus());
@@ -282,7 +291,8 @@ class ReconciliationLineTargetSupportTest {
     processed();
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT + ": " + LINE_ID);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT + ": " + LINE_ID,
+            true);
 
     assertEquals(409, target.error().getHttpStatus());
     assertEquals(CONFLICT + ": " + LINE_ID, errorMessage(target.error()));
@@ -296,7 +306,7 @@ class ReconciliationLineTargetSupportTest {
     when(handler.loadLine(REM_ID)).thenReturn(null);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertEquals(409, target.error().getHttpStatus());
     assertEquals(CONFLICT, errorMessage(target.error()));
@@ -321,7 +331,7 @@ class ReconciliationLineTargetSupportTest {
     when(statement.isProcessed()).thenReturn(Boolean.FALSE);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertEquals(409, target.error().getHttpStatus());
     assertEquals(ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT, errorMessage(target.error()));
@@ -335,7 +345,7 @@ class ReconciliationLineTargetSupportTest {
     when(handler.normalizeReactivatedMatchGroup(line)).thenReturn(line);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.error());
     assertSame(line, target.line());
@@ -353,7 +363,7 @@ class ReconciliationLineTargetSupportTest {
     when(handler.normalizeReactivatedMatchGroup(line)).thenReturn(remainder);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertSame(remainder, target.line());
   }
@@ -363,7 +373,7 @@ class ReconciliationLineTargetSupportTest {
     List<FIN_FinaccTransaction> held = onDraftHolding(trx);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.line());
     assertEquals(409, target.error().getHttpStatus());
@@ -378,13 +388,148 @@ class ReconciliationLineTargetSupportTest {
     List<FIN_FinaccTransaction> held = onDraftHolding(trx, foreignTrx);
 
     ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT);
+        ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
 
     assertNull(target.line());
     assertEquals(409, target.error().getHttpStatus());
     assertEquals(DRAFT_HOLDS_MESSAGE, errorMessage(target.error()));
     assertNoWrite();
     assertEquals(2, held.size());
+  }
+
+  // ── ETP-5581: a discarded stuck line is never healed ─────────────────────────
+
+  private static final String DISCARDED_TEXT = "The statement line is discarded";
+
+  /**
+   * A stuck line (a movement with no reconciliation) that a {@code BankStatementLineFilterHook}
+   * excludes is refused with the 409 {@code LINE_DISCARDED} and NOT freed: the heal is a write, and
+   * the line could not be reconciled afterwards anyway.
+   */
+  @Test
+  void testResolveForMatchRefusesADiscardedStuckLineWithoutHealingIt() throws Exception {
+    when(trx.getReconciliation()).thenReturn(null);
+
+    ReconciliationLineTargetSupport.Target target;
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class)) {
+      filter.when(() -> StatementLineFilter.isExcluded(true, line, Usage.MATCH_STATEMENT_GRID))
+          .thenReturn(true);
+      messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
+          .thenReturn(DISCARDED_TEXT);
+
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
+    }
+
+    assertNotNull(target.error());
+    assertEquals(409, target.error().getHttpStatus());
+    JSONObject body = target.error().getBody();
+    assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED, body.getString("code"));
+    assertEquals(DISCARDED_TEXT, errorMessage(target.error()));
+    assertNoWrite();
+    verify(handler, never()).loadMatchGroupLines(any(), any());
+  }
+
+  /**
+   * Resolves {@link #line}, a stuck line, with the REAL {@link StatementLineFilter}: one deployed
+   * hook, a database that answers "excluded" for it, and {@code bank-bounce-suggestions} as the
+   * action entry would have evaluated it.
+   */
+  @SuppressWarnings("unchecked")
+  private ReconciliationLineTargetSupport.Target resolveStuckLineWithARealHook(boolean flagOn)
+      throws Exception {
+    when(trx.getReconciliation()).thenReturn(null);
+    when(handler.normalizeReactivatedMatchGroup(line)).thenReturn(line);
+    org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+        (alias, ctx, params) -> alias + ".etgoTestDiscarded = false";
+    org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> excluded =
+        Mockito.mock(org.openbravo.dal.service.OBQuery.class);
+    when(excluded.count()).thenReturn(1);
+    when(dal.createQuery(Mockito.eq(FIN_BankStatementLine.class), Mockito.anyString()))
+        .thenReturn(excluded);
+    try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+        Mockito.mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedStatic<OBMessageUtils> messages = Mockito.mockStatic(OBMessageUtils.class)) {
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+          .thenReturn(Collections.singletonList(hook));
+      messages.when(() -> OBMessageUtils.messageBD(StatementLineDiscard.MSG_LINE_DISCARDED))
+          .thenReturn(DISCARDED_TEXT);
+      return ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, flagOn);
+    }
+  }
+
+  /**
+   * Flag off: a stuck line the hook would exclude is healed like any stuck line — the guard
+   * answers nothing and no line query runs.
+   */
+  @Test
+  void testResolveForMatchHealsADiscardedStuckLineWithTheBounceFlagOff() throws Exception {
+    ReconciliationLineTargetSupport.Target target = resolveStuckLineWithARealHook(false);
+
+    assertNull(target.error());
+    assertSame(line, target.line());
+    assertLineDetached(line);
+    verify(handler).normalizeReactivatedMatchGroup(line);
+    verify(dal, never()).createQuery(Mockito.eq(FIN_BankStatementLine.class),
+        Mockito.anyString());
+  }
+
+  /**
+   * Flag on, same real hook and database: the discarded stuck line is refused with the 409
+   * before the heal, and nothing is freed.
+   */
+  @Test
+  void testResolveForMatchRefusesADiscardedStuckLineWithTheBounceFlagOn() throws Exception {
+    ReconciliationLineTargetSupport.Target target = resolveStuckLineWithARealHook(true);
+
+    assertNotNull(target.error());
+    assertEquals(409, target.error().getHttpStatus());
+    assertEquals(StatementLineDiscard.CODE_LINE_DISCARDED,
+        target.error().getBody().getString("code"));
+    verify(line, never()).setFinancialAccountTransaction(any());
+    verify(dal, never()).save(any());
+    verify(handler, never()).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * Guard order: a stuck line on a draft statement keeps the draft-statement answer even when it is
+   * also discarded — the discard check is never even asked.
+   */
+  @Test
+  void testResolveForMatchAnswersTheDraftStatementBeforeTheDiscard() throws Exception {
+    when(trx.getReconciliation()).thenReturn(null);
+    when(statement.isProcessed()).thenReturn(Boolean.FALSE);
+
+    ReconciliationLineTargetSupport.Target target;
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class)) {
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
+      filter.verifyNoInteractions();
+    }
+
+    assertEquals(ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT, errorMessage(target.error()));
+    assertNoWrite();
+  }
+
+  /**
+   * A pending line (no movement) is returned unchanged without asking the hooks: there is nothing
+   * to heal, and its caller runs the discard guard itself, next to its draft check.
+   */
+  @Test
+  void testResolveForMatchLeavesTheDiscardGuardOfAPendingLineToItsCaller() throws Exception {
+    when(line.getFinancialAccountTransaction()).thenReturn(null);
+
+    ReconciliationLineTargetSupport.Target target;
+    try (MockedStatic<StatementLineFilter> filter =
+        Mockito.mockStatic(StatementLineFilter.class)) {
+      target = ReconciliationLineTargetSupport.resolveForMatch(handler, line, CONFLICT, true);
+      filter.verifyNoInteractions();
+    }
+
+    assertNull(target.error());
+    assertSame(line, target.line());
   }
 
   @Test
