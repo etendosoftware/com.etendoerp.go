@@ -107,6 +107,7 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
   private static final String METHOD_PATCH = "PATCH";
 
   private static final String PARAM_FINANCIAL_ACCOUNT_ID = "financialAccountId";
+  private static final String PARAM_PARENT_ID = "parentId";
   private static final String FIELD_ID = "id";
   private static final String FIELD_FINANCIAL_ACCOUNT_ID = "financialAccountId";
   private static final String FIELD_BANK_REVAL_GAIN_ACCT = "fINBankrevaluationgainAcct";
@@ -279,8 +280,17 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
   // Resolution helpers
   // ---------------------------------------------------------------------------
 
+  /**
+   * The financial account this request is about. The SPA names it {@code financialAccountId}; the
+   * MCP's {@code etendo_list}/{@code etendo_get} name the parent of a child entity {@code parentId}
+   * (ETP-5848: an agent listing the account's accounting configuration with {@code parentId} got
+   * "financialAccountId is required" and could not read it).
+   */
   private String resolveAccountId(java.util.Map<String, String> queryParams, JSONObject body) {
     String id = queryParams != null ? StringUtils.trimToNull(queryParams.get(PARAM_FINANCIAL_ACCOUNT_ID)) : null;
+    if (id == null && queryParams != null) {
+      id = StringUtils.trimToNull(queryParams.get(PARAM_PARENT_ID));
+    }
     if (id == null && body != null) {
       id = StringUtils.trimToNull(body.optString(FIELD_FINANCIAL_ACCOUNT_ID, null));
     }

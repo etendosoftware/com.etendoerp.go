@@ -268,9 +268,14 @@ final class McpDocumentPdfTool {
       + "preview in the application (or to send the document by email, for a window whose preview "
       + "stores nothing) so the PDF is regenerated, then ask again.";
 
-  /** The retry advice for a document completed a moment ago (ETP-6013), prefixed to the no-PDF hint. */
+  /**
+   * The retry advice for a document completed a moment ago (ETP-6013), prefixed to the no-PDF hint.
+   * ETP-5848: bounded to one retry. Unbounded, an agent on a server that cannot render the PDF asked
+   * fifteen times and completed the document again between asks; neither makes the PDF appear.
+   */
   static final String JUST_COMPLETED_HINT = "If the document was just completed, its PDF is being "
-      + "generated: ask again in a few seconds. ";
+      + "generated: ask again in a few seconds, once. If it is still missing then, asking again or "
+      + "completing the document again will not produce it. ";
 
   /** What to do about a draft, for both PDF tools: only one thing is true of it. */
   static final String DRAFT_HINT_PREFIX = "This document is a draft and a draft never stores a "

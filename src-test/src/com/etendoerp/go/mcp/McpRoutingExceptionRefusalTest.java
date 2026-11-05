@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
@@ -179,6 +180,25 @@ class McpRoutingExceptionRefusalTest {
           .getString(McpConstants.KEY_HINT);
       assertFalse(complete.contains("truncated"),
           "an untruncated list must not claim to be incomplete");
+    }
+
+    @Test
+    @DisplayName("puts the names that share a word with the key first, before the cap cuts the list")
+    void closestNamesSurviveTheCap() throws JSONException {
+      List<String> available = new java.util.ArrayList<>(names(150));
+      available.add("name2");
+      JSONArray kept = McpRoutingException
+          .unknownFilterField("commercialName", "businessPartner", available).toEnvelope()
+          .getJSONArray(McpConstants.KEY_AVAILABLE);
+      assertEquals("name2", kept.getString(0), "the commercial name column must not be cut away");
+      assertEquals(McpConstants.MAX_AVAILABLE_NAMES, kept.length());
+    }
+
+    @Test
+    @DisplayName("keeps the original order when no name shares a word with the key")
+    void orderKeptWithoutAMatch() {
+      assertEquals(List.of("documentNo", "businessPartner"),
+          McpRoutingException.closestFirst("xyz", List.of("documentNo", "businessPartner")));
     }
 
     @Test
