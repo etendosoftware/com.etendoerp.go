@@ -1,7 +1,7 @@
 name: Full Pipeline Pilot
 
 # ETP-6149: the go full pipeline (Jenkins etendo-go-tests) as parallel GitHub Actions jobs, run in
-# shadow next to Jenkins on the PRs into main. Jenkins runs it almost all in series: a successful
+# shadow next to Jenkins on what reaches main. Jenkins runs it almost all in series: a successful
 # run takes a median 103 min, and a failure re-runs all of it. Here each block is its own job, so
 # a failed block re-runs alone ("Re-run failed jobs"). This is not a required check: the pilot
 # compares duration and failures per block with Jenkins before anything is replaced.
@@ -20,20 +20,23 @@ name: Full Pipeline Pilot
 # and the npm packages; NEXUS_USER/NEXUS_PASSWORD resolve dependencies; BITBUCKET_SSH_KEY clones
 # the Bitbucket modules listed in jenkinsExtraModules.txt.
 
+# Only what reaches main: the daily cut (mergeblock/*), a hotfix (hotfix/*) and the push to main.
+# Feature branches keep the mini pipeline (mini-pipeline.yml) on their PRs into develop.
 on:
   pull_request:
     branches: [main]
     types: [opened, reopened, synchronize]
   push:
-    branches: [feature/ETP-6149]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A new push to a PR replaces its running check; each push to main is measured on its own.
 concurrency:
-  group: full-pipeline-pilot-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: full-pipeline-pilot-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CORE_BRANCH: epic/ETP-3504
@@ -42,6 +45,9 @@ env:
 jobs:
   go-tests:
     name: Go tests + coverage
+    # branch-merge-policy.yml already rejects any other branch into main; this keeps such a PR
+    # from also spending two runners before it is closed.
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -136,6 +142,7 @@ jobs:
 
   integration:
     name: Integration (Tomcat + Playwright)
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # schema_forge's run-e2e-full.sh reuses a jsreport already listening on 5488, as with the
