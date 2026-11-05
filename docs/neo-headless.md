@@ -10446,6 +10446,23 @@ steps below in this order — both customizations call the single entry point
    input is aligned to the stored gross values, so the line keeps its stored price (on such a list
    the net `listPrice` is usually 0 anyway, and the rule abstains).
 
+   **A lone list price on create (`etendo_create` only, live pre-QA).** A create that sends
+   `listPrice` and **none** of `discount`, `unitPrice` or `grossUnitPrice` is priced from that list
+   price at discount 0 — `unitPrice = listPrice`, amounts derived (step 5) — as the form does when
+   "Precio" is typed with no discount. It used to persist a free line: the defaults cascade, which
+   `etendo_create` runs before the pre-hook, publishes the product selector's price as `unitPrice`
+   (0 — the selector has no price-list context), `McpLinePriceInjector` leaves it (the agent chose a
+   list price), and `SL_Order_Amt` derives `discount = (listPrice − 0) / listPrice = 100` from it;
+   `discount` is not a key the agent sent, so the cascade may write it, and step 1's
+   `applyClientListPrice` then applied the list price at 100 %. Before step 1 prices the line,
+   `OrderLineCreateDiscount.resetCascadeDiscount` puts the discount back to 0. It reads the agent's
+   own keys (`NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`, set only by `etendo_create`), so it never
+   fires on REST, REST batch, `etendo_batch` or the form, and abstains when the agent sent
+   `discount` (an explicit 100 % stays 100), a price (ETP-5852 still derives its discount), or a zero
+   list price. Over MCP it also covers `purchase-order/lines`. The response still lists
+   `supersededDefaults.discount: {callout: 100}` — the cascade's proposal, recorded before the
+   pre-hook; the persisted discount is 0.
+
 What the re-fire may write:
 
 - **Protected** (kept as the body has them): every body key except `unitPrice`, a zero
@@ -10582,6 +10599,12 @@ QA reopen data (quotation 1000008, Monitor, list 300, 21 % VAT): discount 5 → 
 1350, gross 1633.50 (REST / batch; see step 3 for MCP). CP-13 (Monitor × 10, list 200, discount
 10): `listPrice 300` alone gives `unitPrice` 270, net 2700, gross 3267, discount 10.
 
+Create-side lone list price (live pre-QA, `etendo_create` on `sales-quotation/quotationLine`,
+Fernet, catalog 44): `{product, orderedQuantity 2, listPrice 100}` persisted discount 100,
+`unitPrice` 0, net 0, gross 0; expected with the reset: discount 0, `unitPrice` 100, net 200 and
+the gross at the line's tax rate (to be confirmed on the next live run). Controls unchanged: no price at all → 44 / 44, discount 0;
+`listPrice` + `discount` → priced at that discount.
+
 `etendo_create` of a product whose price list entry has list price 0 and standard price 50 (QA
 quotations 1000009 by the form, 1000010 by MCP): `listPrice` 50, `unitPrice` 50, `standardPrice` 50
 on both — it was 0 / 50 / 50 by MCP.
@@ -10614,6 +10637,9 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
 - **The lone list price rule never fires on the form.** Every UI line write that carries
   `listPrice` also carries the `unitPrice` computed from it (`computeUnitPriceForPost`), and the
   inline edit carries `discount` too; the rule needs neither key in the patch.
+- **The create-side lone list price reset never fires on the form.** It needs
+  `ATTR_CLIENT_PROVIDED_FIELDS`, which only `etendo_create` sets; the form creates through REST, and
+  its add-line POST carries `unitPrice` with `listPrice` anyway.
 - **The `listPrice` fill never fires on the form.** The form's add-line POST always carries a
   non-zero `listPrice` for such a product (the standard price, above), and a line the user priced
   at 0 carries `unitPrice 0`.

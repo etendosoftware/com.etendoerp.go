@@ -80,6 +80,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * the old discount. Each has its own section below, with the form's own payload as a no-op row.
  *
  * @covers com.etendoerp.go.schemaforge.OrderLineDiscountSupport
+ * @covers com.etendoerp.go.schemaforge.OrderLineCreateDiscount
  */
 class OrderLineDiscountSupportTest {
 
@@ -1043,6 +1044,48 @@ class OrderLineDiscountSupportTest {
   private static NeoContext mcpCtx(String method, JSONObject body) {
     return NeoContext.builder().specName(SPEC).entityName(ENTITY).httpMethod(method)
         .endpointType(NeoEndpointType.CRUD).mcpOrigin(true).requestBody(body).build();
+  }
+
+  /**
+   * ETP-5528 live pre-QA, the "lone listPrice" create: {@code etendo_create} with
+   * {@code listPrice 100} and no discount or price reached the pre-hook carrying the defaults
+   * cascade's {@code unitPrice 0} and the {@code discount 100} {@code SL_Order_Amt} derives from it,
+   * and persisted a free line. Each row is the body as the pre-hook receives it plus the keys the
+   * agent sent ({@code null}: no attribute, as on REST and {@code etendo_batch}); the first two
+   * create-side line rules then run in their {@code applyLineRules} order. No product in the body,
+   * so the price-list lookup abstains and no DAL is needed.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("loneListPriceOnCreate")
+  void loneListPriceOnCreateIsPricedAtTheDiscountTheAgentSent(String label, String body,
+      String sent, String expectedUnitPrice, String expectedDiscount) throws Exception {
+    JSONObject json = new JSONObject(body);
+    NeoContext ctx = mcpCtx("POST", json);
+    if (sent != null) {
+      ctx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS, keys(sent));
+    }
+
+    OrderLineDiscountSupport.setStandardPriceOnCreate(ctx);
+    OrderLineCreateDiscount.derive(ctx);
+
+    assertAmount(label, expectedUnitPrice, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, expectedDiscount, json, OrderLineDiscountSupport.FIELD_DISCOUNT);
+  }
+
+  static Stream<Arguments> loneListPriceOnCreate() {
+    String cascaded = "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100,\"orderedQuantity\":2}";
+    return Stream.of(
+        Arguments.of("lone listPrice: the cascade's 100 % is reset, priced at the list",
+            cascaded, "listPrice,orderedQuantity,product", "100", "0"),
+        Arguments.of("listPrice + discount sent: priced at that discount",
+            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":10}", "listPrice,discount", "90", "10"),
+        Arguments.of("explicit 100 % discount sent: kept, priced at 0",
+            "{\"listPrice\":100,\"unitPrice\":0,\"discount\":100}", "listPrice,discount", "0", "100"),
+        Arguments.of("genuine unitPrice below list: its discount is still derived (ETP-5852)",
+            "{\"listPrice\":33,\"unitPrice\":29.7,\"discount\":0}", "listPrice,unitPrice", "29.7",
+            "10"),
+        Arguments.of("no client-provided attribute (REST, batch): the body is the caller's",
+            cascaded, null, "0", "100"));
   }
 
   // ── ETP-5881: a line sent without a price takes the price list's, on every channel ──

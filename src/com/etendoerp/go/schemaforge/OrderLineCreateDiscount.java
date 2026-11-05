@@ -19,15 +19,18 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.Collection;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * The discount a new order line's price implies, one of the line rules of
- * {@link OrderLineDiscountSupport#applyLineRules} (ETP-5852), kept apart so that class stays
- * within Sonar's method budget.
+ * The discount of a new order line created over MCP, two of the line rules of
+ * {@link OrderLineDiscountSupport#applyLineRules}, kept apart so that class stays within Sonar's
+ * method budget: the discount a sent price implies ({@link #derive}, ETP-5852), and the discount
+ * the defaults cascade left on a line sent with only its list price
+ * ({@link #resetCascadeDiscount}, ETP-5528).
  */
 final class OrderLineCreateDiscount {
 
@@ -38,6 +41,60 @@ final class OrderLineCreateDiscount {
   private static final BigDecimal HALF_CENT = new BigDecimal("0.005");
 
   private OrderLineCreateDiscount() {
+  }
+
+  /**
+   * The "lone listPrice" create (ETP-5528, live pre-QA): an {@code etendo_create} that sends
+   * {@code listPrice} and neither {@code discount} nor a price of its own gets {@code discount 0},
+   * the form's value for a "Precio" typed with no discount, so
+   * {@link LinePriceListSupport#applyClientListPrice} then prices it at
+   * {@code listPrice × (1 − 0 / 100)} and {@link OrderLineDiscountSupport#deriveAmountsOnCreate}
+   * derives the amounts from that price.
+   *
+   * <p><b>Why the body's discount is not the caller's.</b> On {@code etendo_create} the defaults
+   * cascade runs before the pre-hook. {@code SL_Order_Product} publishes the product selector's
+   * price — 0, the selector has no price-list context — as {@code unitPrice};
+   * {@code McpLinePriceInjector} leaves it, as the agent chose a list price; and
+   * {@code SL_Order_Amt} then derives {@code discount = (listPrice − 0) / listPrice × 100 = 100}
+   * from it. {@code discount} is not a key the agent sent, so the cascade may write it, and the list
+   * price was then applied at 100 %: {@code listPrice 100, orderedQuantity 2} persisted discount
+   * 100, unit price 0 and amounts 0 — a free line, with no warning. A discount derived from a price
+   * of 0 is not a choice.
+   *
+   * <p><b>MCP {@code etendo_create} only:</b> the one channel that fills defaults before the
+   * pre-hook, and so the one that sets {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}. Without that
+   * attribute the body is what the caller sent (REST single and batch, {@code etendo_batch}) — and
+   * the form, on REST, always sends {@code unitPrice} with {@code listPrice} anyway. Abstains when
+   * the caller sent {@code discount} (an explicit 100 % stays 100), {@code unitPrice} or
+   * {@code grossUnitPrice} (a negotiated price keeps deriving its discount in {@link #derive}), or
+   * when the list price is zero or missing. Total: never throws.
+   *
+   * @param ctx the pre-hook context; its request body is mutated in place
+   */
+  static void resetCascadeDiscount(NeoContext ctx) {
+    if (ctx == null || !ctx.isMcpOrigin() || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod())) {
+      return;
+    }
+    Object provided = ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS);
+    JSONObject body = ctx.getRequestBody();
+    if (!(provided instanceof Collection) || body == null) {
+      return;
+    }
+    Collection<?> sent = (Collection<?>) provided;
+    if (!sent.contains(OrderLineDiscountSupport.FIELD_LIST_PRICE)
+        || sent.contains(OrderLineDiscountSupport.FIELD_DISCOUNT)
+        || sent.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE)
+        || sent.contains(OrderLineDiscountSupport.FIELD_GROSS_UNIT_PRICE)
+        || LineAmountSupport.isZero(body.opt(OrderLineDiscountSupport.FIELD_LIST_PRICE))) {
+      return;
+    }
+    try {
+      body.put(OrderLineDiscountSupport.FIELD_DISCOUNT, BigDecimal.ZERO);
+    } catch (Exception e) {
+      log.warn("[ORDER-LINE-PRICE] Could not reset the cascade discount of a new line on {} {}: {}",
+          ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
+    }
   }
 
   /**
