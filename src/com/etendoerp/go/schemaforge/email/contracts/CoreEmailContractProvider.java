@@ -96,15 +96,16 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
         new AccountLinkEmailContract("set-password", contractResolver,
             SET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
             NOTE_EXPIRY, NOTE_IGNORE),
+        // ETP-6081: both carry the 7-day one-time login link, so their copy counts days.
         new AccountLinkEmailContract("new-account", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            ValidityWindow.Unit.HOURS, NOTE_EXPIRY),
+            ValidityWindow.Unit.DAYS, NOTE_EXPIRY),
         new AccountLinkEmailContract("environment-ready", contractResolver,
             ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS,
             DASHBOARD_LINK_PATH),
         new AccountLinkEmailContract("verify-email", contractResolver,
             VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            ValidityWindow.Unit.HOURS, NOTE_EXPIRY, NOTE_IGNORE),
+            ValidityWindow.Unit.DAYS, NOTE_EXPIRY, NOTE_IGNORE),
         // An invited operator gets a welcome of its own: its button goes to the dashboard, not to
         // email verification, because an invitation is itself the proof that somebody meant to
         // reach this address (ETP-5003).

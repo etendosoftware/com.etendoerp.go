@@ -38,6 +38,7 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.onboarding.OnboardingStreamWriter;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.terms.TermsAndConditionsService;
 
 /**
  * Accounts created through the signup API (ETP-5847): passwordless, with no confirmation mail, and
@@ -104,6 +105,7 @@ public class SignupAccountService {
   private final TransactionalAuthEmailSender emailSender;
   private final Consumer<Runnable> worker;
   private final Supplier<EtendoGoJwtServlet> provisioner;
+  private final TermsAndConditionsService termsService = new TermsAndConditionsService();
 
   /** Creates the service on the runtime email sender and the shared background workers. */
   public SignupAccountService() {
@@ -130,7 +132,10 @@ public class SignupAccountService {
         return SignupAccountDalHelper.createSignupAccount(request.email(), request.name(),
             request.onboardingDraft(), new SignupAccountDalHelper.SignupData(request.channel(),
                 request.sendEmails(), request.source(),
-                request.termsAccepted() ? new Date() : null)).getId();
+                request.termsAccepted() ? new Date() : null,
+                // ETP-6081: the site shows no version of its own; the one in force is recorded.
+                request.termsAccepted() ? termsService.resolveAcceptedVersion(null, null) : null))
+            .getId();
       } catch (RuntimeException e) {
         EtendoGoDalHelper.rollbackDalChanges("signup account creation", e, log);
         throw e;
