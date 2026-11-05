@@ -138,7 +138,7 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
   /** The order's creation actions, for {@link OrderDocumentAvailability} (ETP-5714). */
   private static final OrderDocumentAvailability.Flow AVAILABILITY_FLOW =
       new OrderDocumentAvailability.Flow(false, CreateGoodsReceiptHandler.CONTRACT.getName(),
-          CreatePurchaseInvoiceHandler.ORDER_CONTRACT.getName(), false);
+          CreatePurchaseInvoiceHandler.ORDER_CONTRACT.getName(), false, false);
 
   /** Close, which the Purchase Order window never offers (ETP-6108). */
   static final String DOC_ACTION_CLOSE = "CL";

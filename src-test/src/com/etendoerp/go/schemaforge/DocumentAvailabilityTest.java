@@ -67,6 +67,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  *
  * @covers com.etendoerp.go.schemaforge.DocumentAvailability
  * @covers com.etendoerp.go.schemaforge.OrderDocumentAvailability
+ * @covers com.etendoerp.go.schemaforge.OrderInvoicePending
  * @covers com.etendoerp.go.schemaforge.InOutInvoiceAvailability
  * @covers com.etendoerp.go.schemaforge.InvoiceDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.ReturnDocumentAvailability
@@ -317,9 +318,10 @@ class DocumentAvailabilityTest {
     private static final String INVOICE = "createPurchaseInvoice";
 
     private final OrderDocumentAvailability.Flow purchase =
-        new OrderDocumentAvailability.Flow(false, RECEIVE, INVOICE, false);
+        new OrderDocumentAvailability.Flow(false, RECEIVE, INVOICE, false, false);
     private final OrderDocumentAvailability.Flow sales =
-        new OrderDocumentAvailability.Flow(true, "createShipment", "createDraftInvoice", true);
+        new OrderDocumentAvailability.Flow(true, "createShipment", "createDraftInvoice", true,
+            true);
 
     private OrderLine line(String productId, String ordered, String invoiced) {
       OrderLine line = mock(OrderLine.class);
@@ -344,6 +346,15 @@ class DocumentAvailabilityTest {
     private Map<String, String> judge(Order order, OrderDocumentAvailability.Flow flow,
         boolean goodsPending, Set<String> goodsDrafts, List<String> draftInvoices)
         throws Exception {
+      return judge(order, flow, goodsPending, goodsDrafts, draftInvoices, Map.of());
+    }
+
+    /** Same, with what the draft invoices hold per order line (ETP-5828, the net rule). */
+    private Map<String, String> judge(Order order, OrderDocumentAvailability.Flow flow,
+        boolean goodsPending, Set<String> goodsDrafts, List<String> draftInvoices,
+        Map<String, BigDecimal> heldByDrafts) throws Exception {
+      List<Object[]> heldRows = new java.util.ArrayList<>();
+      heldByDrafts.forEach((lineId, quantity) -> heldRows.add(new Object[] { lineId, quantity }));
       try (MockedStatic<InOutLineFromOrderFactory> factory =
           mockStatic(InOutLineFromOrderFactory.class);
           MockedStatic<AbstractOrderHeaderHandler> linked =
@@ -374,6 +385,13 @@ class DocumentAvailabilityTest {
         when(query.setParameter(anyString(), any())).thenReturn(query);
         when(query.setParameterList(anyString(), anyCollection())).thenReturn(query);
         when(query.list()).thenReturn(draftInvoices);
+        @SuppressWarnings("unchecked")
+        Query<Object[]> heldQuery = mock(Query.class);
+        when(session.createQuery(OrderInvoicePending.DRAFT_QUANTITIES_HQL, Object[].class))
+            .thenReturn(heldQuery);
+        when(heldQuery.setParameter(anyString(), any())).thenReturn(heldQuery);
+        when(heldQuery.setParameterList(anyString(), anyCollection())).thenReturn(heldQuery);
+        when(heldQuery.list()).thenReturn(heldRows);
         return OrderDocumentAvailability.unavailable(order, flow);
       }
     }
@@ -397,6 +415,48 @@ class DocumentAvailabilityTest {
       assertTrue(unavailable.get(RECEIVE).contains("draft goods receipt (GR-1)"));
       assertTrue(unavailable.get(RECEIVE).contains("complete or delete it"));
       assertTrue(unavailable.get(INVOICE).contains("draft invoice (INV-D1, INV-D2)"));
+    }
+
+    @Test
+    @DisplayName("sales: a draft invoice rules invoicing out only when it holds everything left")
+    void salesDraftInvoiceRulesOutOnlyWhenItCoversEverything() throws Exception {
+      Object[][] cases = {
+          // name, held by the drafts (null = no draft line of this order), expected reason
+          // fragment (null = available)
+          // linked by C_Invoice.C_Order_ID only: it is a draft of the order, yet holds nothing
+          { "a header-only draft holds no line", null, null },
+          { "a draft holds part", "2", null },
+          { "the drafts hold all", "5", "draft invoice (INV-D1) already covers what is left" },
+          { "the drafts hold more", "7", "draft invoice (INV-D1) already covers what is left" },
+      };
+      for (Object[] c : cases) {
+        OrderLine pending = line("P1", "5", "0");
+        when(pending.getId()).thenReturn("L1");
+        Map<String, BigDecimal> held = c[1] == null ? Map.of()
+            : Map.of("L1", new BigDecimal((String) c[1]));
+        Map<String, String> unavailable = judge(completed(pending), sales, true, Set.of(),
+            List.of("INV-D1"), held);
+        String reason = unavailable.get("createDraftInvoice");
+        if (c[2] == null) {
+          assertNull(reason, (String) c[0]);
+        } else {
+          assertTrue(reason != null && reason.contains((String) c[2]), c[0] + ": " + reason);
+        }
+      }
+      // the purchase flow keeps the ETP-5714 rule: any draft invoice rules it out
+      OrderLine pending = line("P1", "5", "0");
+      when(pending.getId()).thenReturn("L1");
+      assertTrue(judge(completed(pending), purchase, true, Set.of(), List.of("INV-D1"),
+          Map.of("L1", BigDecimal.ONE)).get(INVOICE).contains("already exists for this order"));
+    }
+
+    @Test
+    @DisplayName("draft-covers reason with no readable draft number: the sentence without an empty ()")
+    void draftCoversReasonWithoutNumbersHasNoEmptyParentheses() {
+      String reason = OrderDocumentAvailability.draftCoversInvoiceReason(List.of());
+
+      assertEquals(OrderDocumentAvailability.DRAFT_COVERS_INVOICE_UNNAMED, reason);
+      assertFalse(reason.contains("()"), reason);
     }
 
     @Test

@@ -91,9 +91,21 @@ final class OrderImportRequest {
 
   /** {@code carryGlobalDiscount}: absent or null is {@code true}; a non-boolean is a 400. */
   static boolean parseCarryDiscount(JSONObject body) {
-    Object value = body == null ? null : body.opt(PARAM_CARRY_DISCOUNT);
+    return parseBoolean(body, PARAM_CARRY_DISCOUNT, true);
+  }
+
+  /**
+   * An optional boolean flag of a request ({@code includeCovered}, ETP-5828): absent or null is
+   * {@code false}; a non-boolean is a 400.
+   */
+  static boolean parseFlag(JSONObject body, String key) {
+    return parseBoolean(body, key, false);
+  }
+
+  private static boolean parseBoolean(JSONObject body, String key, boolean whenAbsent) {
+    Object value = body == null ? null : body.opt(key);
     if (value == null || JSONObject.NULL.equals(value)) {
-      return true;
+      return whenAbsent;
     }
     if (value instanceof Boolean) {
       return (Boolean) value;
@@ -102,7 +114,7 @@ final class OrderImportRequest {
     if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
       return Boolean.parseBoolean(text);
     }
-    throw badRequest(PARAM_CARRY_DISCOUNT + " must be true or false");
+    throw badRequest(key + " must be true or false");
   }
 
   /** Whether {@code key} carries a value: a key sent as JSON null counts as absent. */

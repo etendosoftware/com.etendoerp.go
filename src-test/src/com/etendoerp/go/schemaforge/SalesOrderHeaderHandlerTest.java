@@ -1341,7 +1341,15 @@ public class SalesOrderHeaderHandlerTest {
     String invoice = contracts.get("createDraftInvoice").getDescription();
     assertTrue("must warn that the invoice is completed despite the name",
         invoice.contains("COMPLETES") && invoice.contains("despite the name"));
-    assertEquals(List.of("lines", "allowDuplicate"), contracts.get("createDraftInvoice").getParams().stream()
+    // ETP-5828: allowDuplicate is gone — pending is net of the drafts, there is nothing to allow
+    assertTrue(invoice.contains("DRAFT sales invoices already hold")
+        && invoice.contains(OrderDocumentAvailability.DRAFT_COVERS_INVOICE_SUFFIX));
+    // the one quantity rule, with or without a draft (shipment-scoped, drafts counted)
+    assertTrue(invoice.contains("one rule applies with or without a draft")
+        && invoice.contains("invoiced only for what those shipments still hold")
+        && invoice.contains("including one whose shipped quantity draft invoices already hold"));
+    assertFalse(invoice.contains("as importOrderLines would"));
+    assertEquals(List.of("lines"), contracts.get("createDraftInvoice").getParams().stream()
         .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
   }
 
@@ -1354,11 +1362,9 @@ public class SalesOrderHeaderHandlerTest {
     }
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice", new JSONObject().put("lines",
         new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2")))));
-    // ETP-5714: allowDuplicate is a declared optional boolean; a string is refused before anything runs
-    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice",
-        new JSONObject().put("allowDuplicate", true)));
+    // ETP-5828: allowDuplicate is no longer declared on the sales order, so MCP refuses it as unknown
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
-        "createDraftInvoice", new JSONObject().put("allowDuplicate", "true")).getHttpStatus());
+        "createDraftInvoice", new JSONObject().put("allowDuplicate", true)).getHttpStatus());
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
         "createShipment", new JSONObject().put("warehouseId", "W1")).getHttpStatus());
   }
