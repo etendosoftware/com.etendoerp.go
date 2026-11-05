@@ -71,7 +71,6 @@
     "ProductStockWarehouseHandler",
     "ProductTransactionsHandler",
     "ProfitLossReportHandler",
-    "PurchaseOrderHeaderHandler",
     "ReconciliationHandler",
     "RegisterPaymentHandler",
     "RegisterPaymentOutHandler",
