@@ -5192,6 +5192,23 @@ than keeping two in step. ETP-5415 closed enough of that gap to turn it back on 
 > that declares any (`header`, §4.12.1.3), so `defaultTax` is callable but not listed by
 > `etendo_schema(view:"actions")` for `purchase-invoice`.
 
+> **Keys a write post-hook adds are outside the field filter — on every channel, so not a
+> divergence (ETP-5747).** `etendo_create` / `etendo_update` run `NeoFieldFilter.filterGetResponse`
+> on core's response and only then the entity's post-hook (`McpHookExecutor.runPostHookResponse`).
+> That is the REST ordering too: `NeoCrudHandler` filters the write response before
+> `handleWithHooks` runs `afterHandle`, and `/batch` goes through the same `NeoCrudHandler`. So a key
+> the post-hook puts on the written record is returned even though it is not in the spec's exposed
+> field set, by REST single, `/batch`, `etendo_batch`, `etendo_create` and `etendo_update` alike.
+> The case that surfaced it (QA, ETP-5747): the `sales-invoice/header` write response carries
+> `isRectificative`, `arInvoiceSubtype`, `docTypeLocked`, `tbaiConfigActive` and the TicketBAI /
+> VERI*FACTU keys `SalesRectificativeFiscalDefaults` just wrote (the ETP-5747 paragraph of §4.12.36). Intentional
+> and harmless: they are virtual keys the detail GET already returns past the same filter, or
+> columns of the very record being written that the server itself just set. The MCP write verbs
+> take no `fields:[…]` projection (`fields` is the write payload), so — unlike `etendo_list` /
+> `etendo_get`, where the projection runs after the read hook and has the last word — there is
+> nothing on MCP that would trim them. A handler that must not expose a key it computes must not
+> put it on the response; the filter will not remove it.
+
 ##### Closed (ETP-5415)
 
 | step | how |
@@ -5337,7 +5354,7 @@ Other MCP-only refusals declared in §4.12.6:
 |---|---|---|
 | `etendo_defaults` on an entity whose create `MCP_CONFIG.verbs` hides | defaults served | **405 `method_not_allowed`**, same envelope as `etendo_create` |
 | `etendo_create` — what the entity's pre-hook sees of the mandatory-defaults pass (ETP-5680) | the pre-hook runs first: no placeholder exists yet | the pass runs first; the placeholder keys are forwarded on the hook context (`NeoContext#getFallbackDefaults`), so the product's `taxCategory` follows `productType` and `uOM` takes the `IsDefault` unit on both channels. Declared and closed for the product; any other entity must opt in the same way |
-| `etendo_defaults` input that depends on the record's current values (ETP-5680, ETP-5852) | `GET .../defaults?productType=S` | optional `recordContext` object; its scalar entries (≤ 32, ≤ 256 characters each) become `NeoContext#getQueryParams()` of the DEFAULTS hooks, with `parentId`/`assetId`/`view`/`spec`/`entity` never overridden. They reach the entity's DEFAULTS customization exactly as `?key=value` does on REST `/defaults` — there is no allowlist, and some handlers read generic keys (e.g. `action`, `accountId`, `statementId`), so a caller should send only current field values of the record. Since ETP-5852 the generic resolver applies every entry that names an included field of the entity before the callout cascade (`NeoDefaultsRecordContext#apply`, protected from the cascade), so `{businessPartner}` on a document header returns that partner's payment terms, method and price list; other keys are ignored there. The entities that need a value first declare it in `MCP_CONFIG.defaults.context`, listed in the `etendo_defaults` `recordContext` description. `ProductDefaultsHandler` reads `productType` and returns the defaults of that type: `productType` is set to the requested one (no stale `productType$_identifier`), `taxCategory` becomes the type's named category when the tenant has it, and `typeTaxCategory` repeats it for the UI (absent when the category does not exist, then `taxCategory` is unchanged) — so copying `taxCategory` from these defaults into `etendo_create` stays consistent with the type |
+| `etendo_defaults` input that depends on the record's current values (ETP-5680, ETP-5852) | `GET .../defaults?productType=S` | optional `recordContext` object; its scalar entries (≤ 32, ≤ 256 characters each) become `NeoContext#getQueryParams()` of the DEFAULTS hooks, with `parentId`/`assetId`/`view`/`spec`/`entity` never overridden. They reach the entity's DEFAULTS customization exactly as `?key=value` does on REST `/defaults` — there is no allowlist, and some handlers read generic keys (e.g. `action`, `accountId`, `statementId`), so a caller should send only current field values of the record. Since ETP-5852 the generic resolver applies every entry that names an included field of the entity before the callout cascade (`NeoDefaultsRecordContext#apply`, protected from the cascade), so `{businessPartner}` on a document header returns that partner's payment terms, method and price list; other keys are ignored there. The entities that need a value first declare it in `MCP_CONFIG.defaults.context`, listed in the `etendo_defaults` `recordContext` description. `ProductDefaultsHandler` reads `productType` and returns the defaults of that type: `productType` is set to the requested one (no stale `productType$_identifier`), `taxCategory` becomes the type's named category when the tenant has it, and `typeTaxCategory` repeats it for the UI (absent when the category does not exist, then `taxCategory` is unchanged) — so copying `taxCategory` from these defaults into `etendo_create` stays consistent with the type. The product entity declares `productType` in `MCP_CONFIG.defaults.context`, so the `etendo_defaults` catalog lists it as required context |
 | get, update, delete or action by id on a record outside the entity's tab filter (ETP-5852) — a purchase invoice id on `sales-invoice/header`, a sales order id on `purchase-order/header` | **served** — core's read by id (`DefaultJsonDataService` with `id`) and the write paths ignore the tab's HQL where clause | **404 `not_found`**, nothing read or changed; when the caller's role can see the record, `detail` and `foundIn` name the `spec/entity` pairs over the same table whose filter admits it (`McpSpecScope`). A filter with `@…@` placeholders is not judged |
 | response shape of `etendo_create` / `etendo_update` / `etendo_action` (ETP-5945, ETP-5852) | n/a (REST keeps core's `{response:{data:[…]}}`) | `etendo_create` and `etendo_update` answer one record as `{data:{…}}`, like `etendo_get`; `etendo_update` also carries the record `url`. Every `etendo_action` result carries `success` (boolean) and `message` (first of `message`/`processMessage`/`detail`/`title`, Etendo message keys translated) next to its own keys (`McpActionEnvelope`). `etendo_batch` (sync result and every `etendo_job_status` row) adds the same `url` to each committed op on a primary entity (`McpRecordUrls#addBatchUrls`), and answers a keyed refusal (`error.messageKeys`, e.g. `PeriodNotValid`) as `etendo_create` does: 422, `code`, `messageKeys` and the key's hint, instead of REST's 400 (`McpBatchEnvelope`). `PeriodNotValid` gets the open-the-period hint on every tool |
 | list of a child entity across every parent (ETP-5852, M-13 / M-46) | n/a (the SPA reads lines inside their document) | `etendo_list(allParents:true)`, on purpose and only where `MCP_CONFIG.parent.allParents` (with `reason`) allows it — today `sales-order/lines`, `purchase-order/lines`, `goods-movements/movementLine`, `sales-invoice/paymentPlan`, `purchase-invoice/paymentPlan`, `fiscal-calendar/year` (ETP-6036: its parent `calendar` is excluded from the spec, so there is no parent id to pass and the years are only reachable this way). The rows are scoped to the parent tab's own filter (`e.<parentField>.id in (select p.id from <Parent> p where …)`, `McpAllParents`), so sales lines never include purchase or quotation lines; the answer carries `allParents:true` and `allParentsNote` (which says "parent record" when the parent entity is not in the spec). Without the argument the parent stays required (`parent_required`, whose hint then names `allParents`); with `parentId` too, or on another entity, 422. `etendo_schema`/`etendo_discover` publish `allParentsAllowed` and `allParentsReason`. The scope keeps the parent tab's id and re-reads the tab in each request (ETP-6036): the cached `Tab` belongs to an earlier request's session, and reading its table lazily answered 500 (`LazyInitializationException`) on every `allParents` read after the first |
@@ -13275,6 +13292,56 @@ line → invoice and injected both keys. The SPA's related-documents definition 
 chip dedupe over the full `originInvoices` record. The method and both keys are gone: an invoice relates
 to another invoice only through `C_Invoice_Reverse` (`originInvoices`, `rectifyingInvoices`). Purchase
 invoices never had them.
+
+**ETP-5747 — the sales invoice header write response carries `isRectificative`, and the TicketBAI /
+VERI*FACTU rectificative fields are defaulted on the server.** Two gaps, one cause: everything about a
+rectificative was computed either on the detail GET or by the header callout when its trigger was
+`transactionDocument`.
+
+- *Write response.* `SalesInvoiceHeaderHandler#afterHandle` returned early on every non-GET request
+  (only the ETP-4783 `aeatsiiAuthorizationno` was injected), so a POST/PUT/PATCH echoed a record with
+  none of the detail virtual keys. The SPA adopts a create's response as the record
+  (`primeSaved` + `justSaved` skip the post-save read), so `isRectificative` stayed absent until a reload
+  and the SIF tab never applied its SII "Tipo factura = R" default. `completeWriteResponse` now adds, on a
+  2xx CRUD POST/PUT/PATCH: `docTypeLocked` (always `true`), `isRectificative` and `arInvoiceSubtype`
+  (only when the response carries `transactionDocument` — computed from an absent value they would
+  answer "not rectificative" and overwrite the right value the client holds), `tbaiConfigActive` (only
+  when it carries `organization`) and the keys of the defaults below that were just written. HTTP
+  status and headers of the captured result are kept and the captured body is never mutated. Nothing is
+  added to a non-2xx response, to a body with no record id, or to an `_onlyReturnIds` batch response
+  (the defaults are still written to the invoice in that case; they are just not echoed). Left out on purpose: origin /
+  rectifying invoices, `hasRectifications`, linked shipments and orders, exempt taxes, SIF attachment
+  ids and the reactivation block — several queries each, derived from other tables, and the SPA keeps
+  their last-known value across a save (it merges a write response onto the record) and re-reads them
+  on the next detail GET.
+- *Server-side defaults* (`SalesRectificativeFiscalDefaults`, called on every CRUD POST/PUT/PATCH of
+  the header, ids-only included). Only on a draft (`DR`), unprocessed sales invoice whose document type
+  is `EM_Etsg_Isrectificative = 'Y'`:
+  - with an active `tbai_config` for the invoice organization (`InvoiceCalloutHelper.isTbaiConfigActive`,
+    the same lookup behind `tbaiConfigActive`): `tbaiIsreverseinvoice` is **enforced** to `Y` (a
+    rectificative is never a non-reverse TicketBAI invoice — the callout does the same);
+    `tbaiReverseinvoicetype = I` and `tbaiReverseinvoicecode = R4` only when blank (the callout's values);
+  - with an active VERI*FACTU config in the system for the legal entity (the
+    `ETVFAC_C_INVOICE_SET_VERIFACTU` gate): `etvfacInvType` = the document type's `em_etvfac_inv_type`
+    (when that is an `R*` code) over a blank or non-rectificative `F*` value — an `R*` value already on the
+    invoice is kept; then, when the type is `R*` and `etvfacReverseinvtype` is blank, the document type's
+    reverse type, or `I` when the document type has none.
+
+  Any other value already set is never overwritten, and nothing is ever cleared. The values are
+  flushed in the write's transaction without a savepoint: a Java failure while computing them is logged
+  and answered as "nothing applied", but a DB-level failure on the flush aborts the write, as for
+  `persistSiiAuthorizationno`. An invoice created with the rectificative type already
+  set (SPA "Importar desde factura origen", `etendo_create`, `/batch`) never fired the doc-type callout,
+  so TicketBAI kept no reverse code (its XML generator then fails with `TBAI_SetKey`) and VERI*FACTU
+  showed `F1` while in draft. SII is **not** defaulted on the server: `EM_AEATSII_C_INV_RECT_CHK` requires
+  `aeatsiiMotivoRectif` once the type is `R`, and the motivo is a user choice — that default stays in the
+  SPA (`useSifFieldPatcher.js`), driven by the `isRectificative` the write response now carries.
+- Same behaviour on REST single, `/batch` and MCP `etendo_create` / `etendo_update` (all run the
+  header's `afterHandle`); no divergence to declare. The added keys are not AD fields of the spec and
+  are put by the post-hook, after `NeoFieldFilter.filterGetResponse` has run, so they reach the caller
+  outside the spec's exposed field set on every channel alike — see the ETP-5747 note in §4.12.9.
+  Purchase invoices are unchanged: SII offers no `R` in `EM_Aeatsii_Clave_Tipo_Fc`,
+  VERI*FACTU never sends a purchase, and the TicketBAI reverse fields are sales-only.
 
 **ETP-5745 (5th fix) — `SiiSendHandler` replaces two drifted classic validation sentences with a
 bilingual GO sentence.** `SIIUtils.invoicePreviousValidations` (classic `org.openbravo.module.sii`,
