@@ -436,7 +436,7 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         + "and i.businessPartner.id = :bp and i.active = true and i.client.id = :client "
         + "and i.organization.id in (:orgs)"
         + (withCurrency ? " and i.currency.id = :cur" : "")
-        + " order by i.creationDate desc, i.documentNo desc";
+        + " order by i.creationDate desc, i.documentNo desc, i.id desc";
   }
 
   /** Completed invoices of the partner, newest created first, from {@code offset}; bounded. */
@@ -467,7 +467,7 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         "select iol.salesOrderLine.id, io.id, io.documentNo, iol.movementQuantity "
             + "from MaterialMgmtShipmentInOutLine iol join iol.shipmentReceipt io "
             + "where io.documentStatus = 'DR' and io.salesTransaction = :sot "
-            + "and iol.active = true and iol.salesOrderLine.id in (:ids) order by io.creationDate",
+            + "and iol.salesOrderLine.id in (:ids) order by io.creationDate",
         Object[].class).setParameter("sot", sales).setParameterList("ids", orderLineIds).list();
     for (Object[] row : rows) {
       holdings.add(new DraftHolding((String) row[0], (String) row[1], (String) row[2],

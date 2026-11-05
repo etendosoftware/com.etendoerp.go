@@ -498,12 +498,18 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
     List<ShipmentInOut> candidates = candidates(partnerId, sales, currencyId, returns, request);
     return discover(candidates, doc -> {
-      int pendingLines = isReturn(doc) == returns
-          ? offeredLineCount(invoice, doc, returns, policy) : 0;
-      if (request.detail && !returns && pendingLines > 0) {
-        // ETP-6099: what the popup offers once expanded, so a listed document never turns out
-        // empty. Only with detail: the default answer keeps its count.
-        pendingLines = selectableLineCount(invoice, doc, policy);
+      int pendingLines = 0;
+      if (isReturn(doc) == returns && returns) {
+        pendingLines = offeredReturnLineCount(invoice, doc, policy);
+      } else if (isReturn(doc) == returns) {
+        // Read once per candidate and reused by the detail count below.
+        Map<String, BigDecimal> magnitudes = pendingQuantities(doc.getId());
+        pendingLines = magnitudes.size();
+        if (request.detail && pendingLines > 0) {
+          // ETP-6099: what the popup offers once expanded, so a listed document never turns out
+          // empty. Only with detail: the default answer keeps its count.
+          pendingLines = selectableLineCount(invoice, doc, magnitudes, policy);
+        }
       }
       if (pendingLines == 0 && !(request.includeCovered && isReturn(doc) == returns
           && isCovered(invoice, doc, returns, policy))) {
@@ -553,11 +559,11 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    * #excludesLinesInvoicedElsewhere}), not linked to another invoice.
    */
   private int selectableLineCount(Invoice invoice, ShipmentInOut doc,
-      RectificativeImportPolicy policy) {
+      Map<String, BigDecimal> magnitudes, RectificativeImportPolicy policy) {
     Map<String, boolean[]> links = invoiceLinkStates(doc.getId(), invoice.getId());
     boolean excludesElsewhere = policy.excludesLinesInvoicedElsewhere();
     int count = 0;
-    for (String lineId : signedPending(activeLines(doc), pendingQuantities(doc.getId())).keySet()) {
+    for (String lineId : signedPending(activeLines(doc), magnitudes).keySet()) {
       boolean[] state = links.getOrDefault(lineId, new boolean[2]);
       if (!state[0] && !(excludesElsewhere && state[1])) {
         count++;
@@ -581,15 +587,13 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   }
 
   /**
-   * How many lines of the document the import offers. A return is judged as the window's modal
-   * judges it: not already invoiced in full, in the invoice's currency when the side compares it,
-   * and with a line left to credit ({@link #returnPending}).
+   * How many lines of a return the import offers, judged as the window's modal judges it: not
+   * already invoiced in full, in the invoice's currency when the side compares it, and with a line
+   * left to credit ({@link #returnPending}). A shipment / receipt counts its
+   * {@link #pendingQuantities} in the list action itself, read once per candidate.
    */
-  private int offeredLineCount(Invoice invoice, ShipmentInOut doc, boolean returns,
+  private int offeredReturnLineCount(Invoice invoice, ShipmentInOut doc,
       RectificativeImportPolicy policy) {
-    if (!returns) {
-      return pendingQuantities(doc.getId()).size();
-    }
     if (isInvoicedInFull(doc) || returnCurrencyMismatch(invoice, doc, policy)) {
       return 0;
     }
@@ -855,7 +859,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     if (currencyId != null) {
       hql.append(" and io.etgoCurrency.id = :cur");
     }
-    hql.append(" order by io.movementDate desc, io.documentNo desc");
+    hql.append(" order by io.movementDate desc, io.documentNo desc, io.id desc");
     org.hibernate.query.Query<ShipmentInOut> query = OBDal.getInstance().getSession()
         .createQuery(hql.toString(), ShipmentInOut.class).setParameter("sot", sales)
         .setParameter("bp", partnerId).setParameter("client", sessionClientId())
@@ -878,7 +882,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         + "and io.documentType.return = true "
         + "and io.businessPartner.id = :bp and io.active = true and io.client.id = :client "
         + "and io.organization.id in (:orgs)"
-        + " order by io.movementDate desc, io.documentNo desc";
+        + " order by io.movementDate desc, io.documentNo desc, io.id desc";
   }
 
   /** Completed returns of the partner, newest first; a bounded scan (see {@link #scanLimit()}). */

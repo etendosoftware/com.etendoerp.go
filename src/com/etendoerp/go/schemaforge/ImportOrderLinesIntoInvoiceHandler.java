@@ -859,9 +859,9 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       hql.append(" and exists (select 1 from OrderLine ol where ol.salesOrder.id = o.id"
           + " and ol.active = true and ol.product.id <> :dto"
           + " and ol.orderedQuantity <> ol.invoicedQuantity)");
-      hql.append(" order by o.creationDate desc, o.documentNo desc");
+      hql.append(" order by o.creationDate desc, o.documentNo desc, o.id desc");
     } else {
-      hql.append(" order by o.orderDate desc, o.documentNo desc");
+      hql.append(" order by o.orderDate desc, o.documentNo desc, o.id desc");
     }
     org.hibernate.query.Query<Order> query = OBDal.getInstance().getSession()
         .createQuery(hql.toString(), Order.class).setParameter("sot", sales)

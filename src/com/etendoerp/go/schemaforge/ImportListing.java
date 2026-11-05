@@ -118,8 +118,17 @@ final class ImportListing {
 
   /** An optional boolean: absent or null is {@code false}, anything but a boolean a 400. */
   static boolean flag(JSONObject body, String key) {
+    return parseBoolean(body, key, false, DocumentLineImport.ERROR_INVALID_PARAMETER);
+  }
+
+  /**
+   * The one boolean parser of the import actions (also behind {@link OrderImportRequest}'s flags):
+   * absent or JSON null is {@code whenAbsent}; a boolean, or the text {@code true} / {@code false}
+   * in any case, is read; anything else is a 400 with {@code errorCode}.
+   */
+  static boolean parseBoolean(JSONObject body, String key, boolean whenAbsent, String errorCode) {
     if (!present(body, key)) {
-      return false;
+      return whenAbsent;
     }
     Object value = body.opt(key);
     if (value instanceof Boolean) {
@@ -129,7 +138,8 @@ final class ImportListing {
     if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
       return Boolean.parseBoolean(text);
     }
-    throw invalid(key + " must be true or false");
+    throw new DocumentLineImport.ImportRefusal(HttpServletResponse.SC_BAD_REQUEST, errorCode,
+        key + " must be true or false", null);
   }
 
   /** A whole number from {@code min} to {@code max}, or a 400 naming the key. */

@@ -366,10 +366,14 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
       if (policy.isRectificative(invoice)) {
         return null;
       }
-      int pendingLines = offeredLines(invoice, imported).size();
+      // Every line the popup lists, read once; the pending ones are those not imported here.
+      List<InvoiceLine> listed = offeredLines(invoice, Set.of());
+      int pendingLines = 0;
+      for (InvoiceLine line : listed) {
+        pendingLines += imported.contains(line.getId()) ? 0 : 1;
+      }
       // ETP-6099 includeCovered: the popup lists an invoice whose lines are all imported here too.
-      if (pendingLines == 0 && !(request.includeCovered
-          && !offeredLines(invoice, Set.of()).isEmpty())) {
+      if (pendingLines == 0 && !(request.includeCovered && !listed.isEmpty())) {
         return null;
       }
       JSONObject row = documentRow(invoice.getId(), invoice.getDocumentNo(),
@@ -377,16 +381,16 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
           currencyId(invoice), pendingLines);
       if (request.detail) {
         ImportListing.putCreationDate(row, invoice.getCreationDate());
-        row.put("amount", listedAmount(invoice));
+        row.put("amount", listedAmount(invoice, listed));
       }
       return row;
     }, request);
   }
 
   /** unitPrice x |quantity| over every listed line of the source, at its currency's precision. */
-  private BigDecimal listedAmount(Invoice source) {
+  private static BigDecimal listedAmount(Invoice source, List<InvoiceLine> listed) {
     BigDecimal sum = BigDecimal.ZERO;
-    for (InvoiceLine line : offeredLines(source, Set.of())) {
+    for (InvoiceLine line : listed) {
       sum = sum.add(orZero(line.getUnitPrice()).multiply(line.getInvoicedQuantity().abs()));
     }
     return sum.setScale(precisionOf(source), RoundingMode.HALF_UP);
@@ -540,7 +544,7 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
         + "and i.businessPartner.id = :bp and i.active = true and i.client.id = :client "
         + "and i.organization.id in (:orgs) and i.id <> :target"
         + (withCurrency ? " and i.currency.id = :cur" : "")
-        + " order by i.invoiceDate desc, i.documentNo desc";
+        + " order by i.invoiceDate desc, i.documentNo desc, i.id desc";
   }
 
   /** Completed invoices of the partner, newest first; a bounded scan (see {@link #scanLimit()}). */

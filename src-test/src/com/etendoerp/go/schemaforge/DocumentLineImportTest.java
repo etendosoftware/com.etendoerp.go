@@ -539,6 +539,35 @@ public class DocumentLineImportTest {
     }
   }
 
+  /**
+   * parseBoolean is the one boolean parser of the import actions: absent / null answer the given
+   * default, a boolean or "true"/"false" in any case is read, and anything else is a 400 carrying
+   * the caller's error code — importInvalidParameter for the listing flags, importInvalidLine for
+   * OrderImportRequest's.
+   */
+  @Test
+  public void parseBoolean_honoursTheDefault_andRefusesWithTheCallersCode() throws Exception {
+    for (boolean whenAbsent : new boolean[] { true, false }) {
+      assertEquals(whenAbsent, ImportListing.parseBoolean(null, "k", whenAbsent, "x"));
+      assertEquals(whenAbsent, ImportListing.parseBoolean(body("{}"), "k", whenAbsent, "x"));
+      assertEquals(whenAbsent,
+          ImportListing.parseBoolean(body("{\"k\":null}"), "k", whenAbsent, "x"));
+    }
+    assertTrue(ImportListing.parseBoolean(body("{\"k\":true}"), "k", false, "x"));
+    assertFalse(ImportListing.parseBoolean(body("{\"k\":\" FaLsE \"}"), "k", true, "x"));
+    for (String code : new String[] { DocumentLineImport.ERROR_INVALID_PARAMETER,
+        DocumentLineImport.ERROR_INVALID_LINE }) {
+      try {
+        ImportListing.parseBoolean(body("{\"k\":\"yes\"}"), "k", false, code);
+        fail(code + ": \"yes\" must be refused");
+      } catch (ImportRefusal refusal) {
+        assertEquals(code, 400, refusal.response().getHttpStatus());
+        assertEquals(code, refusal.code());
+        assertEquals("k must be true or false", errorOf(refusal).getString("message"));
+      }
+    }
+  }
+
   /** creationDate is an ISO-8601 instant in UTC truncated to the second, or JSON null. */
   @Test
   public void putCreationDate_isAnIsoUtcInstant_orNull() throws Exception {

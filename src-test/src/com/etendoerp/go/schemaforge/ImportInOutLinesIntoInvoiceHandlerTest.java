@@ -1344,7 +1344,8 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     String hql = ImportInOutLinesIntoInvoiceHandler.candidateReturnsHql();
     assertTrue(hql, hql.contains("io.documentType.return = true")
         && hql.contains("io.client.id = :client") && hql.contains("io.organization.id in (:orgs)")
-        && hql.contains("io.active = true"));
+        && hql.contains("io.active = true")
+        && hql.endsWith("order by io.movementDate desc, io.documentNo desc, io.id desc"));
     assertFalse(hql.contains("urrency"));
   }
 

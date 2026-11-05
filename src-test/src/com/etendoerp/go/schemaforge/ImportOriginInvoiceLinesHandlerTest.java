@@ -773,7 +773,8 @@ public class ImportOriginInvoiceLinesHandlerTest {
     String hql = ImportOriginInvoiceLinesHandler.candidateInvoicesHql(true);
     assertTrue(hql, hql.contains("i.documentStatus = 'CO'") && hql.contains("i.active = true")
         && hql.contains("i.client.id = :client") && hql.contains("i.organization.id in (:orgs)")
-        && hql.contains("i.id <> :target") && hql.contains("i.currency.id = :cur"));
+        && hql.contains("i.id <> :target") && hql.contains("i.currency.id = :cur")
+        && hql.endsWith("order by i.invoiceDate desc, i.documentNo desc, i.id desc"));
     assertFalse(ImportOriginInvoiceLinesHandler.candidateInvoicesHql(false).contains(":cur"));
   }
 

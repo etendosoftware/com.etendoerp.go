@@ -527,7 +527,7 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
     if (currencyId != null) {
       hql.append(" and o.currency.id = :cur");
     }
-    hql.append(" order by o.orderDate desc, o.documentNo desc");
+    hql.append(" order by o.orderDate desc, o.documentNo desc, o.id desc");
     org.hibernate.query.Query<Order> query = OBDal.getInstance().getSession()
         .createQuery(hql.toString(), Order.class).setParameter("sot", sales)
         .setParameter("bp", partnerId).setParameter("client", sessionClientId())

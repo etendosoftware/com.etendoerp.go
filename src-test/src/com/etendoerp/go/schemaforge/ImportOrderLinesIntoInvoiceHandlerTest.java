@@ -88,6 +88,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceLineImportHandler
  * @covers com.etendoerp.go.schemaforge.InvoiceGlobalDiscountRule
  * @covers com.etendoerp.go.schemaforge.OrderImportRequest
+ * @covers com.etendoerp.go.schemaforge.ImportListing
  */
 public class ImportOrderLinesIntoInvoiceHandlerTest {
 
@@ -1634,7 +1635,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   /**
    * ETP-5828 (sales) and ETP-6099 (purchase too): with includeCovered the invoice also gets the
    * lines with nothing left, at 0 — the popup greys them out and so reads every line it shows from
-   * this one call. Without it they stay out.
+   * this one call. Without it they stay out. A non-boolean includeCovered / detail is a 400
+   * importInvalidParameter on both directions.
    */
   @Test
   public void availableOrderLines_includeCovered_addsTheCoveredLinesAtZero_onBothDirections()
@@ -1652,6 +1654,13 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       assertEquals(side, "Pan", rows.getJSONObject(1).getString("product$_identifier"));
       assertEquals(side, List.of("ol1"), ids(run(probe, "availableOrderLines",
           "{\"orderId\":\"o1\"}").getBody().getJSONObject("response").getJSONArray("data")));
+      // The listing flags go through ImportListing on both directions: a non-boolean is a 400
+      // importInvalidParameter (only importOrderLines' own flags answer importInvalidLine).
+      for (String bad : new String[] { "\"includeCovered\":\"yes\"", "\"detail\":1" }) {
+        NeoResponse refused = run(probe, "availableOrderLines", "{\"orderId\":\"o1\"," + bad + "}");
+        assertEquals(side + " " + bad, 400, refused.getHttpStatus());
+        assertEquals(side + " " + bad, "importInvalidParameter", errorCode(refused));
+      }
     }
   }
 

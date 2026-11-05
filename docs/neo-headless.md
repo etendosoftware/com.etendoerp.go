@@ -12759,7 +12759,11 @@ movements.
 | `includeCovered` | `false` | also the candidates with nothing left to import, at `pendingLines: 0` |
 | `detail` | `false` | the extra document keys below; on every list action at least `creationDate` (ISO-8601 instant, UTC), so a popup that sorted by creation date can re-sort a list the server orders by document date (the server order is unchanged) |
 
-A value out of range, or a flag that is not a boolean, is a **400 `importInvalidParameter`**. With `limit` or `offset`
+A value out of range, or a flag that is not a boolean, is a **400 `importInvalidParameter`** — also for
+`includeCovered` / `detail` on the line actions, so the sales invoice's `availableOrderLines`, which answered a
+non-boolean `includeCovered` with `importInvalidLine` before ETP-6099, now answers `importInvalidParameter` (`true` /
+`false` as text, in any case, stay accepted). Every candidate scan ends its sort on the document id, so paging with
+`offset` never skips nor repeats a document whose date and number tie with another. With `limit` or `offset`
 sent the page also answers `offset` and `nextOffset` (the scan position after the last candidate examined, `null` when
 `hasMore` is false). **Completeness:** calling again with `offset = nextOffset` while `hasMore` is true examines every
 candidate of the partner, so nothing is left out however many there are — a single page cannot guarantee it, because

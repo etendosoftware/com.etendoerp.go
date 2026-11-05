@@ -579,18 +579,19 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
       assertTrue(hql, hql.contains("i.documentStatus = 'CO'")
           && hql.contains("i.salesTransaction = :sot") && hql.contains("i.businessPartner.id = :bp")
           && hql.contains("i.client.id = :client") && hql.contains("i.organization.id in (:orgs)")
-          && hql.endsWith("order by i.creationDate desc, i.documentNo desc"));
+          && hql.endsWith("order by i.creationDate desc, i.documentNo desc, i.id desc"));
       assertEquals(hql, withCurrency, hql.contains("i.currency.id = :cur"));
     }
   }
 
   /**
-   * draftHoldings reads the active lines of the DRAFT documents of the direction on the given order
-   * lines, and maps each row; no order line, no query.
+   * draftHoldings reads every line, active or not, of the DRAFT documents of the direction on the
+   * given order lines (the same draft set as InOutLineFromOrderFactory.loadDraftQuantities), and
+   * maps each row; no order line, no query.
    */
   @Test
   @SuppressWarnings({ "unchecked", "rawtypes" })
-  public void draftHoldings_readsTheActiveDraftLinesOfTheDirection() {
+  public void draftHoldings_readsEveryDraftLineOfTheDirection() {
     ImportInvoiceLinesIntoInOutHandler handler = new ImportInvoiceLinesIntoInOutHandler();
     assertTrue(handler.draftHoldings(List.of(), true).isEmpty());
 
@@ -613,7 +614,7 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
       verify(session).createQuery(hql.capture(), eq(Object[].class));
       assertTrue(hql.getValue(), hql.getValue().contains("io.documentStatus = 'DR'")
           && hql.getValue().contains("io.salesTransaction = :sot")
-          && hql.getValue().contains("iol.active = true")
+          && !hql.getValue().contains("iol.active")
           && hql.getValue().contains("iol.salesOrderLine.id in (:ids)"));
       verify(query).setParameter("sot", true);
       verify(query).setParameterList("ids", List.of("olA"));
