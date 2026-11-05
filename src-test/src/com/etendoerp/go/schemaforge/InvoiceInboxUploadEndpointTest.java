@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -112,6 +114,29 @@ class InvoiceInboxUploadEndpointTest {
     access.verifyNoInteractions();
     obContext.verifyNoInteractions();
     intake.verifyNoInteractions();
+  }
+
+  @Test
+  void featureDisabledIsTheVeryEnvelopeOfTheFlagOffRefusal() throws Exception {
+    flag.when(InvoiceInboxFlag::isEnabled).thenReturn(false);
+
+    NeoResponse helper = InvoiceInboxUploadEndpoint.featureDisabled();
+    NeoResponse refused = InvoiceInboxUploadEndpoint.handle(request(MULTIPART, 100L));
+
+    assertRefusal(helper, 403, "feature_disabled");
+    assertEquals(helper.getBody().toString(), refused.getBody().toString());
+    assertEquals("The invoice inbox is not enabled for this user.",
+        helper.getBody().getJSONObject("error").getString("message"));
+  }
+
+  @Test
+  void isWritableOrganizationRefusesTheStarOrgAndAcceptsOnlyWritableOnes() {
+    contextOf(ORG_ID, Set.of(ORG_ID, "0"));
+    OBContext context = OBContext.getOBContext();
+
+    assertFalse(InvoiceInboxUploadEndpoint.isWritableOrganization(context, "0"));
+    assertTrue(InvoiceInboxUploadEndpoint.isWritableOrganization(context, ORG_ID));
+    assertFalse(InvoiceInboxUploadEndpoint.isWritableOrganization(context, "OTHER-ORG"));
   }
 
   @Test

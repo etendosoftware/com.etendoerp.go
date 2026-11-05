@@ -42,9 +42,9 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * (multipart, repeated part {@value #PART_NAME}) into the invoice inbox, one
  * {@code ETGO_INCOMING_DOCUMENT} row per accepted file.
  *
- * <p>This class only orchestrates. It is the <b>only toggle point</b> of
- * {@link InvoiceInboxFlag}: the flag is evaluated here, at request entry, before the multipart is
- * read and before any row is created. The per-file work, and the entity identity, live in
+ * <p>This class only orchestrates. It is the toggle point of {@link InvoiceInboxFlag} for the
+ * upload (the spec read is gated by {@link InvoiceInboxHeaderHandler}): the flag is evaluated here,
+ * at request entry, before the multipart is read and before any row is created. The per-file work, and the entity identity, live in
  * {@link InvoiceInboxIntake}.
  *
  * <p>Whole-request refusals use the NEO error envelope ({@link NeoErrorResponses#toResponse}) and
@@ -96,7 +96,7 @@ final class InvoiceInboxUploadEndpoint {
     // The flag is read FIRST, here and nowhere else, at request entry where the request user is
     // the account owner. The extraction worker (ETP-6048) must not re-evaluate it.
     if (!InvoiceInboxFlag.isEnabled()) {
-      return refuse(403, CODE_FEATURE_DISABLED, InvoiceInboxMessages.DISABLED);
+      return featureDisabled();
     }
     if (!NeoAccessHelper.hasWindowAccess(WINDOW_ID, "POST")) {
       return NeoErrorResponses.toResponse(403, CODE_ACCESS_DENIED,
@@ -209,7 +209,7 @@ final class InvoiceInboxUploadEndpoint {
   }
 
   /** A real, writable organization of the role: never "*" and never one outside the role's scope. */
-  private static boolean isWritableOrganization(OBContext context, String orgId) {
+  static boolean isWritableOrganization(OBContext context, String orgId) {
     return !STAR_ORG.equals(orgId) && context.getWritableOrganizations() != null
         && context.getWritableOrganizations().contains(orgId);
   }
@@ -232,6 +232,14 @@ final class InvoiceInboxUploadEndpoint {
             "maxFileMB", String.valueOf(NeoAttachmentPolicy.MAX_SIZE_MB),
             "maxRequestMB", String.valueOf(MAX_REQUEST_BYTES / (1024L * 1024L))),
         List.of(InvoiceInboxMessages.REQUEST_TOO_LARGE));
+  }
+
+  /**
+   * The {@code feature_disabled} refusal (403), shared with {@link InvoiceInboxHeaderHandler} so the
+   * upload and the spec read answer a user without the flag with the very same envelope.
+   */
+  static NeoResponse featureDisabled() {
+    return refuse(403, CODE_FEATURE_DISABLED, InvoiceInboxMessages.DISABLED);
   }
 
   private static NeoResponse refuse(int status, String code, String messageKey) {

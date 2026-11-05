@@ -2072,7 +2072,13 @@ Content-Type: multipart/form-data      (repeated part name: files, 1..20)
 **Gate and access.** The flag `invoice-inbox` (`InvoiceInboxFlag`, per account, off by default) is
 evaluated **first**, at request entry, before the multipart is read: off answers `403
 feature_disabled` and nothing is created. The OCR/extraction worker (ETP-6048) must NOT re-evaluate
-it (it has no request user). Then the role needs write access to the Invoice Inbox window
+it (it has no request user). **The spec read is gated by the same flag** (ETP-6049): `InvoiceInboxHeaderHandler`
+(`@NeoExtension(spec = "invoice-inbox", entity = "header")`) refuses every request on the spec
+with the same `403 feature_disabled` envelope when the flag is off, so `GET
+/sws/neo/invoice-inbox/header` (list and by id) and the MCP `etendo_list` / `etendo_get` (READ
+surface, same `NeoExtensionDispatcher`) answer nothing instead of the inbox rows. Flag on: the
+hook returns `null` and the default handling is unchanged. The upload is not routed through it. The same handler serves the `discard` action and gates it first (see **Discard** below).
+Then the role needs write access to the Invoice Inbox window
 (`NeoAccessHelper.hasWindowAccess(window, "POST")`, else `403 access_denied` with the standard
 "Access denied to spec for current role" text). The Compras and Financiero templates carry a full
 grant (`TemplateRoleWindowAccess`). The NEO built-in path runs in admin mode, so the DAL does not
@@ -2242,6 +2248,35 @@ is pure (no DB); `InvoiceInboxStatusPolicy.apply(row, result)` only moves `PENDI
 `InvoiceInboxSummary.syncFrom(document, row)` copies the header into the summary columns
 (`C_BPARTNER_ID` only for a `linked` vendor, `POREFERENCE` empty when over 20 characters). Edits
 must be bound with `@NeoExtension(spec = "invoice-inbox", ...)`, never `Java_Qualifier`.
+
+**Discard (ETP-6049).** `POST /sws/neo/invoice-inbox/header/{id}/action/discard` (no body needed)
+moves a document that waits for the user to `DISCARDED`. It is a NEO action served by
+`InvoiceInboxHeaderHandler` (ACTION surface, delegating to `InvoiceInboxDiscard`), not CRUD: the
+spec stays read-only (`GET`/`GETBYID`) and nothing in `ETGO_SF_*` changed, because sub-endpoints
+(`/action/*`) are not gated by the method flags (`NeoMethodPolicy`). The order on a request is:
+router window access (`POST` needs write on the Invoice Inbox window) -> `NeoActionRecordGuard`
+(another tenant's id: 404 "Record not found", judged before the flag) -> the handler pre-hook, which
+answers `403 feature_disabled` when the flag is off **before** reaching the action -> the action.
+
+| Case | HTTP | Body |
+|---|---|---|
+| `PENDING_REVIEW`, `ERROR`, `READY` | 200 | `{id, status:"DISCARDED", discardedAt, alreadyDiscarded:false}` |
+| already `DISCARDED` | 200 (idempotent, `discarded_at` unchanged) | same, `alreadyDiscarded:true` |
+| `PROCESSING`, `CONFIRMED` | 409 | `error.code=not_discardable` (message carries the current status) |
+| unknown id, or another client's | 404 | `error.code=not_found` (the guard's own text when it judged first) |
+| organization of the row not writable by the role | 403 | `error.code=org_not_allowed` |
+| flag off | 403 | `error.code=feature_disabled` |
+| `GET .../action/discard` | 405 | (`GET` on an action means "list") |
+
+The change is one atomic `UPDATE ... SET status='DISCARDED', discarded_at=now() WHERE id=:id AND
+status IN ('PENDING_REVIEW','ERROR','READY') AND ad_client_id IN (readable clients)`: the first
+writer wins, so a concurrent confirm (ETP-6051, which must claim the row with its own
+`WHERE status IN (...)`) is never overwritten. It keeps `ERROR_CODE` and leaves `REVIEWED`,
+`ADJUSTED`, the invoice link, the attachment and the extraction alone. The worker (ETP-6048) writes
+only `WHERE status = 'PROCESSING'`, so it can not race a discard. The texts are the English defaults
+of `InvoiceInboxMessages` (no `AD_MESSAGE` rows: the SPA translates by `error.code`). **Hidden from
+MCP:** `agentExcludedActions()` returns `discard`, so `etendo_action` answers 405 `actionHidden`
+("its customization keeps it for people only"); declared in §4.12.9.
 
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
@@ -5361,6 +5396,13 @@ inherited it". GitHub issue
 Classic's own, separate SEPA-compliance work, which may eventually change Classic's behavior here —
 that work is out of scope for this flag and this divergence note.
 
+**Declared divergence: `discard` of the invoice inbox is REST-only (ETP-6049).** The action
+`POST /sws/neo/invoice-inbox/header/{id}/action/discard` works from the SPA and plain REST, and is
+hidden from MCP (`InvoiceInboxHeaderHandler.agentExcludedActions()` = `discard`: `etendo_action`
+answers 405 `actionHidden`). It is irreversible and ships for people first; it will be declared with
+an `actionContract` next to the confirm action (ETP-6051) so agents get both at once. Exposing it
+earlier is removing that one override.
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and
@@ -7891,6 +7933,8 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 **`capabilities.isAdminOrClientAdmin`** (ETP-4513) is the proactive signal the frontend uses to decide whether to show admin-only settings entries — e.g. the "Configuración > Roles" menu item, backed by `SFRolesOverview` (§8c) — up front, instead of showing them to every role and handling denial only once the page itself loads.
 
 **`capabilities.isOwner`** (ETP-5395, backed by `AD_User.EM_ETGO_Is_Owner` — ETP-4830, §7 item 10) reflects whether the CURRENT USER — not the current role — is the tenant's onboarding owner. Unlike the other two capabilities above, it is resolved identically in BOTH branches of the resolution order (steps 2 and 3), via `OwnerSupport.isOwner(String)`, off the current user captured before admin mode the same way the current role is captured for the rest of this webhook. Ownership is orthogonal to admin status: a client-admin who happens to also be the tenant owner still gets `isOwner: true`, and one who is not still gets `isOwner: false`. The frontend uses it to gate "Primeros pasos" (First Steps onboarding) visibility to the owner only.
+
+**`capabilities.invoiceInbox`** (ETP-6049) mirrors the backend-only `invoice-inbox` flag. It sits in the same `capabilities` object, per account (the requesting user's `ETGO_ACCOUNT` email via `GoAccountResolver`, plus the current tenant), identical in BOTH branches of the resolution order: an admin or client-admin is not exempt from the flag. It is evaluated by `InvoiceInboxFlag.isEnabledFor(accountEmail)`, which stays the one evaluator of the key, and is `false` on any error (the flag reader never throws). Same shape as `productMovements`; the Invoice Inbox menu entry and window read it and the browser never evaluates the flag. It is not in the session bootstrap (`/sws/go/session`).
 
 ---
 
