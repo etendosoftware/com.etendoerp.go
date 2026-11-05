@@ -22,6 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mockStatic;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
@@ -79,7 +85,8 @@ class InvoiceInboxMessagesTest {
         InvoiceInboxMessages.NO_FILES, InvoiceInboxMessages.TOO_MANY_FILES,
         InvoiceInboxMessages.REQUEST_TOO_LARGE, InvoiceInboxMessages.UNSUPPORTED_TYPE,
         InvoiceInboxMessages.EMPTY_FILE, InvoiceInboxMessages.STORE_FAILED,
-        InvoiceInboxMessages.ORG_NOT_ALLOWED };
+        InvoiceInboxMessages.ORG_NOT_ALLOWED, InvoiceInboxMessages.NOT_FOUND,
+        InvoiceInboxMessages.NOT_DISCARDABLE, InvoiceInboxMessages.DISCARD_ORG_NOT_ALLOWED };
     try (MockedStatic<OBMessageUtils> utils = mockStatic(OBMessageUtils.class)) {
       for (String key : keys) {
         utils.when(() -> OBMessageUtils.messageBD(key)).thenReturn(key);
@@ -145,5 +152,50 @@ class InvoiceInboxMessagesTest {
     assertEquals("＠a＠b＠", InvoiceInboxMessages.neutralize("@a@b@"));
     assertEquals("", InvoiceInboxMessages.neutralize(null));
     assertEquals("plain.pdf", InvoiceInboxMessages.neutralize("plain.pdf"));
+  }
+
+  // ---------------------------------------------------------------- ETP-6049 discard keys
+
+  @Test
+  void theDiscardKeysAnswerWithTheirEnglishDefaultsWhenThereIsNoAdRow() {
+    try (MockedStatic<OBMessageUtils> utils = mockStatic(OBMessageUtils.class)) {
+      assertEquals("The document was not found.",
+          InvoiceInboxMessages.text(InvoiceInboxMessages.NOT_FOUND));
+      assertEquals("The document belongs to an organization you cannot write to.",
+          InvoiceInboxMessages.text(InvoiceInboxMessages.DISCARD_ORG_NOT_ALLOWED));
+    }
+  }
+
+  @Test
+  void notDiscardableCarriesTheCurrentStatus() {
+    try (MockedStatic<OBMessageUtils> utils = mockStatic(OBMessageUtils.class)) {
+      String text = InvoiceInboxMessages.text(InvoiceInboxMessages.NOT_DISCARDABLE,
+          "status", "CONFIRMED");
+
+      assertTrue(text.contains("CONFIRMED"), text);
+      assertFalse(text.contains("@status@"), text);
+    }
+  }
+
+  @Test
+  void theDefaultTableHasAnEntryForEveryKeyConstant() throws Exception {
+    Field table = InvoiceInboxMessages.class.getDeclaredField("DEFAULTS");
+    table.setAccessible(true);
+    Map<?, ?> defaults = (Map<?, ?>) table.get(null);
+    Set<Object> keys = new HashSet<>();
+    for (Field f : InvoiceInboxMessages.class.getDeclaredFields()) {
+      if (Modifier.isStatic(f.getModifiers()) && f.getType() == String.class
+          && f.getName().equals(f.getName().toUpperCase())) {
+        f.setAccessible(true);
+        Object key = f.get(null);
+        if (String.valueOf(key).startsWith("ETGO_InvoiceInbox")) {
+          keys.add(key);
+        }
+      }
+    }
+
+    assertEquals(12, defaults.size());
+    assertEquals(12, keys.size());
+    assertEquals(keys, defaults.keySet());
   }
 }

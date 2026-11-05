@@ -86,6 +86,8 @@ final class DocumentLineImport {
   static final String ERROR_NOTHING_PENDING = "importNothingPending";
   /** An entry of {@code lines} that cannot be understood. */
   static final String ERROR_INVALID_LINE = "importInvalidLine";
+  /** A request parameter outside its accepted values (ETP-5828: {@code availableOrders.limit}). */
+  static final String ERROR_INVALID_PARAMETER = "importInvalidParameter";
   /** The source or the target does not exist. */
   static final String ERROR_NOT_FOUND = "importDocumentNotFound";
   /** The target has no price list to price the imported lines with. */
@@ -511,7 +513,8 @@ final class DocumentLineImport {
 
   /**
    * {@code {response:{data:{importedCount, lines:[{id, sourceLineId, product, productName,
-   * quantity}], headerLinked, salesOrder?}}}} — the envelope of the module's other import actions.
+   * quantity}], headerLinked, salesOrder?, order?}}}} — the envelope of the module's other import
+   * actions. {@code order} repeats {@code salesOrder} under a direction-neutral name.
    *
    * <p>The header link is reported as it is: {@code salesOrder} is the order the header points at
    * NOW (when it has one) and {@code headerLinked} is {@code true} only when an imported line
@@ -548,7 +551,11 @@ final class DocumentLineImport {
     data.put(KEY_LINES, array);
     data.put("headerLinked", linked);
     if (headerOrderId != null) {
+      // `salesOrder` is the header's DAL property name (C_Order_ID), the same on purchase
+      // documents, and is kept for the callers that read it; `order` says the same with a
+      // direction-neutral name (ETP-5828).
       data.put("salesOrder", headerOrderId);
+      data.put("order", headerOrderId);
     }
     for (Map.Entry<String, Object> entry : extra.entrySet()) {
       data.put(entry.getKey(), entry.getValue());

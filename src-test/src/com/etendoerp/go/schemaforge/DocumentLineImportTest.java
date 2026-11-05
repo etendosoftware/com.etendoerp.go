@@ -381,6 +381,7 @@ public class DocumentLineImportTest {
     assertEquals(2, data.getInt("importedCount"));
     assertTrue(data.getBoolean("headerLinked"));
     assertEquals("o1", data.getString("salesOrder"));
+    assertEquals("the direction-neutral name repeats it", "o1", data.getString("order"));
     JSONArray lines = data.getJSONArray("lines");
     assertEquals(2, lines.length());
     JSONObject first = lines.getJSONObject(0);
@@ -399,6 +400,7 @@ public class DocumentLineImportTest {
     JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
     assertFalse(data.getBoolean("headerLinked"));
     assertFalse(data.has("salesOrder"));
+    assertFalse(data.has("order"));
   }
 
   @Test

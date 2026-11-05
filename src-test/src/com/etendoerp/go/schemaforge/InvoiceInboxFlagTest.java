@@ -222,6 +222,72 @@ class InvoiceInboxFlagTest {
     }
   }
 
+  // ---------------------------------------------------------------- isEnabledFor(email)
+
+  @Test
+  void isEnabledForPublishesTheEmailAndTheCurrentClientAndEqualsTheExplicitForm() {
+    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+    OBContext context = contextOfClient(CLIENT_ID);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      obContext.when(OBContext::getOBContext).thenReturn(context);
+
+      boolean viaCurrent = withProvider(provider, () -> InvoiceInboxFlag.isEnabledFor(ACCOUNT_EMAIL));
+      boolean explicit = withProvider(provider,
+          () -> InvoiceInboxFlag.isEnabled(ACCOUNT_EMAIL, CLIENT_ID));
+
+      assertTrue(viaCurrent);
+      assertEquals(explicit, viaCurrent);
+      EvaluationContext ctx = provider.contexts.get(0);
+      assertEquals(ACCOUNT_EMAIL, ctx.getTargetingKey());
+      assertEquals(CLIENT_ID, stringValue(ctx, FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
+      assertEquals(provider.contexts.get(0).getTargetingKey(),
+          provider.contexts.get(1).getTargetingKey());
+    }
+  }
+
+  @ParameterizedTest
+  @NullAndEmptySource
+  @ValueSource(strings = { "   " })
+  void isEnabledForABlankEmailIsUntargetedAndReadsOff(String blankEmail) {
+    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+    OBContext context = contextOfClient(CLIENT_ID);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      obContext.when(OBContext::getOBContext).thenReturn(context);
+
+      boolean enabled = withProvider(provider, () -> InvoiceInboxFlag.isEnabledFor(blankEmail));
+
+      assertFalse(enabled);
+      EvaluationContext ctx = provider.contexts.get(0);
+      assertNull(stringValue(ctx, FeatureFlagContext.ATTRIBUTE_EMAIL));
+      assertEquals(CLIENT_ID, stringValue(ctx, FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
+    }
+  }
+
+  @Test
+  void isEnabledForWithNoOBContextOmitsTheTenantWithoutThrowing() {
+    CapturingProvider provider = new CapturingProvider(false, ACCOUNT_EMAIL_LOWERCASE);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      obContext.when(OBContext::getOBContext).thenReturn(null);
+
+      boolean enabled = assertDoesNotThrow(
+          () -> withProvider(provider, () -> InvoiceInboxFlag.isEnabledFor(ACCOUNT_EMAIL)));
+
+      assertTrue(enabled);
+      assertNull(stringValue(provider.contexts.get(0), FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
+    }
+  }
+
+  @Test
+  void isEnabledForAnUnconfiguredFlagIsOff() {
+    OBContext context = contextOfClient(CLIENT_ID);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      obContext.when(OBContext::getOBContext).thenReturn(context);
+
+      assertFalse(InvoiceInboxFlag.isEnabledFor(ACCOUNT_EMAIL));
+      assertFalse(InvoiceInboxFlag.isEnabledFor(null));
+    }
+  }
+
   // ---------------------------------------------------------------- fail closed
 
   @Test

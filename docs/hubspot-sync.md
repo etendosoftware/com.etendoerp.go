@@ -17,11 +17,15 @@ Code: `com.etendoerp.go.hubspot`.
 
 | Event | When | HubSpot |
 |---|---|---|
-| `ACCOUNT_CREATED` | the account is created (registration or first SSO login) | contact upserted by email: `firstname`/`lastname` (the account name split at its first space), `etendo_camino_entrada=self_serve`, `lifecyclestage=lead` |
-| `DEMO_READY` | the onboarding creates the demo (`markDemoReady`) | contact: `etendo_inicio_prueba`, `etendo_fin_prueba` (`yyyy-MM-dd`, UTC). Company: `name`, `country`, associated with the contact. Deal `{company} — Self-serve` in the trial stage, with `etendo_account_id`, `etendo_camino_entrada_deal=self_serve` and `etendo_estado_suscripcion=trial`, associated with the contact and the company |
+| `ACCOUNT_CREATED` | the account is created (registration or first SSO login) | contact upserted by email: `firstname`/`lastname` (the account name split at its first space), `etendo_camino_entrada=self_serve`, `lifecyclestage=lead`, and `phone` when the account has one |
+| `DEMO_READY` | the onboarding creates the demo (`markDemoReady`) | contact: `phone` when the account has one, `etendo_inicio_prueba`, `etendo_fin_prueba` (`yyyy-MM-dd`, UTC). Company: `name`, `country`, associated with the contact. Deal `{company} — Self-serve` in the trial stage, with `etendo_account_id`, `etendo_camino_entrada_deal=self_serve` and `etendo_estado_suscripcion=trial`, associated with the contact and the company |
 | `DEMO_ENTERED` | first entry into the demo | contact: `etendo_prueba_activada=si`; deal to the active stage, unless it is already won or lost |
 | `PAID` | a paid checkout of the account after its demo | deal to the won stage, with `etendo_plan` = the plan's `ETGO_PLAN.VALUE` |
 | `DEMO_EXPIRED` | the trial ends unpaid (the access policy answers `DEMO_TRIAL_EXPIRED`) | deal to the lost stage |
+
+The contact's `phone` is `ETGO_ACCOUNT.PHONE` read when the event is sent (ETP-6081): one value
+with its prefix, `+34 600123456`. The register form asks for it, optionally, so it travels with
+`ACCOUNT_CREATED`. An SSO sign-up has none. The sync never clears it in HubSpot.
 
 ### Billing events
 

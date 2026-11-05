@@ -50,6 +50,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.schemaforge.InvoiceInboxFlag;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
@@ -69,6 +70,8 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  * Also the {@code structuredAddressForSepa} capability (ETP-5806) — mirrors
  * {@link GoFeatureFlags#FLAG_STRUCTURED_ADDRESS_FOR_SEPA} identically in both branches, stubbed
  * directly so the assertions are independent of the local {@code Openbravo.properties} toggle.
+ *
+ * <p>Also the {@code invoiceInbox} capability (ETP-6049): per account, same value in both branches.
  *
  * @covers com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap
  */
@@ -669,6 +672,80 @@ class SFWindowAccessMapTest {
                     argThat(ctx -> ctx.getTargetingKey() == null
                             && !ctx.getAttributes().containsKey(FeatureFlagContext.ATTRIBUTE_EMAIL))));
         }
+    }
+
+    // ── invoiceInbox capability (ETP-6049) ───────────────────────────────────
+
+    /** Runs the webhook with {@code InvoiceInboxFlag.isEnabledFor(email)} stubbed; returns capabilities. */
+    private JSONObject capabilitiesWithInvoiceInbox(String accountEmail, boolean on) throws Exception {
+        try (MockedStatic<InvoiceInboxFlag> inbox = mockStatic(InvoiceInboxFlag.class);
+             MockedStatic<GoAccountResolver> resolver = mockStatic(GoAccountResolver.class)) {
+            resolver.when(GoAccountResolver::currentAccountEmail).thenReturn(accountEmail);
+            inbox.when(() -> InvoiceInboxFlag.isEnabledFor(accountEmail)).thenReturn(on);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            inbox.verify(() -> InvoiceInboxFlag.isEnabledFor(accountEmail));
+            return new JSONObject(responseVars.get(RESULT)).getJSONObject("capabilities");
+        }
+    }
+
+    @Test
+    @DisplayName("Restricted role resolves invoiceInbox from the flag, on and off")
+    void testInvoiceInboxFollowsTheFlagForRestrictedRole() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenRestrictedRole("role-inbox-" + on);
+            stubWindowAccessRows(Collections.emptyList());
+            stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+            JSONObject capabilities = capabilitiesWithInvoiceInbox("Owner@Example.com", on);
+
+            assertTrue(capabilities.has("invoiceInbox"));
+            assertEquals(on, capabilities.getBoolean("invoiceInbox"));
+        }
+    }
+
+    /** Admin bypass: the flag is not folded into the blanket trues; an admin is not exempt. */
+    @Test
+    @DisplayName("Admin bypass resolves invoiceInbox from the flag, not a fixed true")
+    void testInvoiceInboxFollowsTheFlagForAdminBypass() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenSystemAdminRole();
+            stubSpecRows(Collections.emptyList());
+            stubWindowAccessRows(Collections.emptyList());
+
+            JSONObject capabilities = capabilitiesWithInvoiceInbox("Owner@Example.com", on);
+
+            assertTrue(capabilities.has("invoiceInbox"));
+            assertEquals(on, capabilities.getBoolean("invoiceInbox"));
+            assertTrue(capabilities.getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+    @Test
+    @DisplayName("invoiceInbox is evaluated for the account resolved for the request, unchanged")
+    void testInvoiceInboxIsTargetedOnTheRequestAccount() throws Exception {
+        givenRestrictedRole("role-inbox-target");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        // capabilitiesWithInvoiceInbox verifies the exact email reached isEnabledFor.
+        JSONObject capabilities = capabilitiesWithInvoiceInbox("Owner@Example.com", true);
+
+        assertTrue(capabilities.getBoolean("invoiceInbox"));
+    }
+
+    @Test
+    @DisplayName("invoiceInbox with no account resolved is evaluated with a null email and does not fail")
+    void testInvoiceInboxWithNoAccountIsOffAndDoesNotFailTheRequest() throws Exception {
+        givenRestrictedRole("role-inbox-no-account");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        JSONObject capabilities = capabilitiesWithInvoiceInbox(null, false);
+
+        assertFalse(capabilities.getBoolean("invoiceInbox"));
     }
 
     // ── structuredAddressForSepa capability (ETP-5806) ──────────────────────
