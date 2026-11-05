@@ -1142,6 +1142,7 @@ class ContactsLocationAddressHandlerTest {
     // translated value below is what fails if a call site ever slips back to getName().
     when(country.getName()).thenReturn("United States");
     when(country.getIdentifier()).thenReturn("Estados Unidos");
+    when(country.getISOCountryCode()).thenReturn("US");
     when(geoLoc.getCountry()).thenReturn(country);
 
     Region region = mock(Region.class);
@@ -1173,8 +1174,31 @@ class ContactsLocationAddressHandlerTest {
     assertEquals("62704", enriched.getString("postalCode"));
     assertEquals("US", enriched.getString("country"));
     assertEquals("Estados Unidos", enriched.getString("country$_identifier"));
+    // ETP-6090: the public API's country_code.
+    assertEquals("US", enriched.getString("countryCode"));
     assertEquals("IL", enriched.getString("region"));
     assertEquals("Illinois", enriched.getString("region$_identifier"));
+  }
+
+  /** ETP-6090: no country, or a country without an ISO code, reads as a null countryCode. */
+  @Test
+  void testAfterHandleGetByIdReturnsNullCountryCodeWhenUnknown() throws Exception {
+    Location noCountry = mock(Location.class);
+    Location noIsoCode = mock(Location.class);
+    when(noIsoCode.getCountry()).thenReturn(mock(Country.class));
+    when(obDal.get(Location.class, "no-country")).thenReturn(noCountry);
+    when(obDal.get(Location.class, "no-iso")).thenReturn(noIsoCode);
+
+    for (String geoLocId : new String[] { "no-country", "no-iso" }) {
+      JSONObject jsonRecord = new JSONObject();
+      jsonRecord.put("id", "bpl-id");
+      jsonRecord.put("locationAddress", geoLocId);
+      NeoContext ctx = buildContextWithPrevious("GET", "bpl-id", buildPreviousResult(jsonRecord));
+
+      JSONObject enriched = handler.afterHandle(ctx).getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(enriched.isNull("countryCode"), geoLocId);
+    }
   }
 
   /**

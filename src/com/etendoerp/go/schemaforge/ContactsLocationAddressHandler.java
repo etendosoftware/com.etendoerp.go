@@ -87,6 +87,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
   private static final String FIELD_TAX_LOCATION = "taxLocation";
   private static final String FIELD_COUNTRY = "country";
+  private static final String FIELD_COUNTRY_CODE = "countryCode";
   private static final String FIELD_REGION = "region";
   private static final String FIELD_ADDRESS_LINE1 = "addressLine1";
   private static final String FIELD_ADDRESS_LINE2 = "addressLine2";
@@ -972,9 +973,13 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       // Region is deliberately left on getName(): C_Region has no _Trl table, so there is
       // nothing to translate and the two calls would be equivalent.
       locationJson.put("country$_identifier",  geoLoc.getCountry().getIdentifier());
+      // ETP-6090: the ISO code a public API client sends on write, returned on read.
+      String isoCode = geoLoc.getCountry().getISOCountryCode();
+      locationJson.put(FIELD_COUNTRY_CODE,     isoCode != null ? isoCode : JSONObject.NULL);
     } else {
       locationJson.put(FIELD_COUNTRY,          JSONObject.NULL);
       locationJson.put("country$_identifier",  JSONObject.NULL);
+      locationJson.put(FIELD_COUNTRY_CODE,     JSONObject.NULL);
     }
     if (geoLoc.getRegion() != null) {
       locationJson.put(FIELD_REGION,           geoLoc.getRegion().getId());
