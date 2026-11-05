@@ -41,7 +41,8 @@ on:
     branches: [main]
     types: [opened, reopened, synchronize]
   push:
-    branches: [main]
+    # TEMPORARY (ETP-6149): measures the integration job from its own branch; removed before the PR.
+    branches: [main, feature/ETP-6149]
   workflow_dispatch:
 
 permissions:
