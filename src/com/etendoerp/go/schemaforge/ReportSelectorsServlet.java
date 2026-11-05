@@ -584,10 +584,6 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     }
   }
 
-  private JSONArray toJsonItems(List<Object[]> rows) throws JSONException {
-    return toJsonItems(rows, NO_EXTRA_KEYS);
-  }
-
   private JSONArray toJsonItems(List<Object[]> rows, String[] extraKeys) throws JSONException {
     JSONArray items = new JSONArray();
     for (Object[] row : rows) {
