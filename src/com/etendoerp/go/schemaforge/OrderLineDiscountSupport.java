@@ -17,6 +17,16 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.AMOUNT_INPUTS;
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.changesAmountInput;
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.changesOnlyListPrice;
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.hasValue;
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.isUpdate;
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.sentExplicitGrossPrice;
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.shouldApplyDiscount;
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.shouldDeriveDiscountFromPrice;
+import static com.etendoerp.go.schemaforge.OrderLineBodyRules.storedDiscount;
+
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
@@ -66,9 +76,18 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  *       caller sent — and, for a product with no list price, that standard price as its list
  *       price, as the form does.</li>
  *   <li>{@link #applyDiscount}: a discount the price does not reflect yet is turned into a price by
- *       re-firing {@code SL_Order_Amt} for {@code discount}, the only code that does that.</li>
- *   <li>{@link #applyUnitPrice}: an update that changes only the price gets the discount the price
- *       implies, re-firing {@code SL_Order_Amt} for {@code unitPrice}.</li>
+ *       re-firing {@code SL_Order_Amt} for {@code discount}, the only code that does that. An
+ *       update that sets only the list price
+ *       ({@link OrderLineBodyRules#changesOnlyListPrice}: {@code listPrice} without
+ *       {@code unitPrice}, {@code discount} or an explicit gross price, CP-13) takes the same
+ *       re-fire with the line's stored discount, so {@code unitPrice = listPrice × (1 −
+ *       discount / 100)} and the amounts follow, as when the form changes "Precio".</li>
+ *   <li>{@link #applyUnitPrice}: an update that changes only the net price gets the discount the
+ *       price implies, re-firing {@code SL_Order_Amt} for {@code unitPrice}. Reached by REST and
+ *       batch only: on MCP, {@code McpLinePriceInjector.applyAgentPriceOnUpdate} (ETP-5852) turns
+ *       a lone {@code unitPrice} into the form's "Precio" first — {@code listPrice} = the sent
+ *       value, {@code unitPrice} = it with the line's discount — which this rule then reads as the
+ *       price the line already has.</li>
  *   <li>{@link #deriveAmountsOnUpdate(NeoContext)}: any other update of quantity, price or tax gets
  *       its {@code lineGrossAmount} refreshed.</li>
  *   <li>{@link #deriveAmountsOnCreate(NeoContext)}: every created line gets its
@@ -77,7 +96,9 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * </ol>
  * The value rule that decides whether an amount in the body is the caller's or a stale
  * server-derived one lives in {@link LineAmountSupport}, shared with the sales invoice line
- * customization ({@link InvoiceLineAmountSupport}).
+ * customization ({@link InvoiceLineAmountSupport}). The predicates that read which rule a body
+ * asks for ({@link OrderLineBodyRules}) live apart, so this class stays within Sonar's method
+ * budget.
  *
  * <p><b>When the discount is applied — the form's own rule.</b> The form always sends
  * {@code unitPrice = listPrice × (1 − discount / 100)} ({@code computeUnitPriceForPost}). The body
@@ -105,11 +126,12 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * line's current price as its standard price ({@link #alignStandardPriceWithCurrentPrice}), or it
  * would misread the line's current discount.
  *
- * <p><b>Not reachable from here:</b> the IMP-45 {@code supersededDefaults} entry {@code etendo_create}
- * attaches for {@code discount} (the defaults cascade proposed 0, the caller's 5 was kept). It is
- * recorded on the router's own cascade context, not on the hook context this class receives, so it
- * is still reported although the discount is applied — declared in {@code neo-headless.md}
- * §4.12.20.
+ * <p><b>The {@code discount} superseded default.</b> The IMP-45 {@code supersededDefaults} entry
+ * {@code etendo_create} attaches for {@code discount} is recorded on the router's own cascade
+ * context, not on the hook context this class receives. It is dropped by the customization
+ * declaring {@code discount} governed on an MCP create that sends it or whose cascade discount was
+ * reset ({@code OrderLineCustomization#governedCreateFields},
+ * {@link OrderLineCreateDiscount#governsDiscountOnCreate}) — see {@code neo-headless.md} §4.12.20.
  */
 final class OrderLineDiscountSupport {
 
@@ -130,8 +152,6 @@ final class OrderLineDiscountSupport {
   static final String FIELD_LINE_GROSS_AMOUNT = "lineGrossAmount";
 
   private static final String METHOD_POST = "POST";
-  private static final String METHOD_PUT = "PUT";
-  private static final String METHOD_PATCH = "PATCH";
 
   /** {@code C_OrderLine.C_Currency_ID}: the line's currency, read for its rounding precision. */
   static final String FIELD_CURRENCY = OrderLine.PROPERTY_CURRENCY;
@@ -139,19 +159,6 @@ final class OrderLineDiscountSupport {
   /** The amounts {@link NeoCommercialLinePolicy#injectCommercialAmounts} derives for an order line. */
   private static final List<String> AMOUNT_OUTPUTS = Arrays.asList(FIELD_LINE_NET_AMOUNT,
       FIELD_LINE_GROSS_AMOUNT);
-
-  /** The inputs those amounts are derived from; a patch that changes one refreshes them. */
-  private static final List<String> AMOUNT_INPUTS = Arrays.asList(FIELD_ORDERED_QTY,
-      FIELD_UNIT_PRICE, FIELD_GROSS_UNIT_PRICE, FIELD_TAX);
-
-  private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
-
-  /**
-   * How far an update's {@code unitPrice} may be from {@code listPrice × (1 − discount / 100)} and
-   * still be the price the line already has (the form rounds it with {@code toFixed(6)} over a
-   * float).
-   */
-  private static final BigDecimal HALF_CENT = new BigDecimal("0.005");
 
   /**
    * The fields of a new sales order or quotation line the server derives on create from another
@@ -201,11 +208,20 @@ final class OrderLineDiscountSupport {
    * for it, and {@code McpLinePriceInjector} only covers MCP. A non-zero price in the body is never
    * replaced.
    *
+   * <p><b>A line sent with only its list price</b> is priced from it,
+   * {@code unitPrice = listPrice × (1 − discount / 100)}. Over {@code etendo_create} the
+   * {@code discount} the agent did not send is first reset to 0 when the body has no price yet
+   * ({@link OrderLineCreateDiscount#resetCascadeDiscount}, ETP-5528): the defaults cascade leaves
+   * there the 100 % that {@code SL_Order_Amt} derives from a price of 0, which priced the line at 0.
+   * {@code discount} is then governed ({@code OrderLineCustomization#governedCreateFields}), so the
+   * cascade's 100 is not reported as a superseded default.
+   *
    * <p><b>Why overwriting is safe.</b> {@code standardPrice} is published read-only
    * ({@code ETGO_SF_FIELD.IsReadOnly = Y}, visibility {@code system}) on both sales-order/lines and
    * sales-quotation/quotationLine, so it is never a value the caller chose: MCP refuses it, and the
    * form sends the product callout's value, which is this same price-list standard price.
-   * {@code unitPrice} is never touched. {@code listPrice} is editable on both entities, so it is
+   * A {@code unitPrice} the caller sent is never replaced; one that is absent or 0 is filled from
+   * the caller's list price or from the catalog, as described above. {@code listPrice} is editable on both entities, so it is
    * only filled in the one state the form itself corrects — a product with no list price, priced
    * at its standard price ({@link #listPriceFromStandard}); otherwise it is left as the body has it.
    *
@@ -225,6 +241,8 @@ final class OrderLineDiscountSupport {
     if (body == null) {
       return;
     }
+    // A lone list price over etendo_create carries the cascade's discount, not the agent's: 0 first.
+    OrderLineCreateDiscount.resetCascadeDiscount(ctx);
     try {
       // The caller's own list price is the price (ETP-5881): the price list is not applied to it.
       boolean clientPriced = LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE,
@@ -344,8 +362,14 @@ final class OrderLineDiscountSupport {
    * discount yet (see the class javadoc for the rule), and writes back the derived price and
    * amounts.
    *
+   * <p>An update that sets only the list price ({@link OrderLineBodyRules#changesOnlyListPrice},
+   * CP-13) qualifies too: the stored line's discount is written into the body
+   * ({@link OrderLineBodyRules#storedDiscount}, unchanged, and so protected from the callout) and
+   * the re-fire prices the line from the new list price.
+   *
    * <p>Total: never throws. A body that does not qualify, a line that cannot be read, or a callout
-   * that fails leaves the body exactly as it was.
+   * that fails leaves the body as it was (a lone list price may keep the stored discount it was
+   * given, the value the line already has).
    *
    * @param ctx the pre-hook context; its request body is mutated in place
    * @return {@code true} when the re-fire ran to the end — on an update its amounts are then
@@ -360,31 +384,28 @@ final class OrderLineDiscountSupport {
    * steps of one request share a single read ({@link #applyLineRules}).
    */
   static boolean applyDiscount(NeoContext ctx, StoredLine storedLine) {
-    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())) {
+    if (!qualifiesForDiscountRefire(ctx)) {
       return false;
     }
-    String method = ctx.getHttpMethod();
-    boolean create = METHOD_POST.equals(method);
-    boolean update = isUpdate(method);
+    boolean create = METHOD_POST.equals(ctx.getHttpMethod());
+    boolean update = !create;
     JSONObject body = ctx.getRequestBody();
-    // Cheap pre-check before any read: without a discount, or with an explicit gross price, the
-    // full rule can never hold.
-    if ((!create && !update) || !hasValue(body, FIELD_DISCOUNT)
-        || sentExplicitGrossPrice(body)) {
-      return false;
-    }
-    // Every write channel builds its hook context with the tab, and NeoCalloutService reads it off
-    // the context rather than off the argument, so a context without one cannot run the callout.
+    // A list price sent alone on an update (CP-13) re-prices the line with its current discount.
+    boolean listPriceOnly = update && changesOnlyListPrice(body);
     Tab adTab = ctx.getAdTab();
-    if (adTab == null) {
-      return false;
-    }
     try {
       JSONObject formState = create ? createFormState(body) : storedLine.get();
       if (formState == null || isZero(formState.opt(FIELD_LIST_PRICE))) {
         // No list price: the callout's discount branch has nothing to discount from and would
         // publish a price of 0. Abstain rather than write that over whatever comes later.
         return false;
+      }
+      if (listPriceOnly) {
+        // Into the callout's input too: a stored NULL discount stays JSONObject.NULL in the form
+        // state, and the cascade skips a NULL trigger, so no callout would run.
+        BigDecimal discount = storedDiscount(formState);
+        body.put(FIELD_DISCOUNT, discount);
+        formState.put(FIELD_DISCOUNT, discount);
       }
       if (!shouldApplyDiscount(body, formState.opt(FIELD_LIST_PRICE))) {
         return false;
@@ -414,15 +435,42 @@ final class OrderLineDiscountSupport {
   }
 
   /**
+   * The cheap entry guard of {@link #applyDiscount(NeoContext, StoredLine)}, checked before any
+   * read: a CRUD create or update whose body carries a discount (or, on an update, a lone list
+   * price — {@link OrderLineBodyRules#changesOnlyListPrice}), no explicit gross price, and a
+   * context with its tab.
+   * Every write channel builds its hook context with the tab, and {@code NeoCalloutService} reads
+   * it off the context rather than off the argument, so a context without one cannot run the
+   * callout.
+   */
+  static boolean qualifiesForDiscountRefire(NeoContext ctx) {
+    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || ctx.getAdTab() == null) {
+      return false;
+    }
+    String method = ctx.getHttpMethod();
+    boolean update = isUpdate(method);
+    if (!METHOD_POST.equals(method) && !update) {
+      return false;
+    }
+    JSONObject body = ctx.getRequestBody();
+    boolean requestsDiscount = hasValue(body, FIELD_DISCOUNT)
+        || (update && changesOnlyListPrice(body));
+    return requestsDiscount && !sentExplicitGrossPrice(body);
+  }
+
+  /**
    * Every rule of the two customizations, in order — the single entry point
    * {@link SalesOrderLineHandler} and {@link SalesQuotationLineHandler} call from their pre-hook,
    * so the order lives once:
    * <ol>
    *   <li>{@link #setStandardPriceOnCreate} — the standard price (and, for a product with no list
    *       price, the list price) of a new line;</li>
-   *   <li>{@link #applyDiscount} — a discount the price does not reflect yet;</li>
-   *   <li>{@link #applyUnitPrice} — an update that changes only the price: the discount follows
-   *       it, as {@code SL_Order_Amt} does;</li>
+   *   <li>{@link #applyDiscount} — a discount the price does not reflect yet, or an update that
+   *       sets only the list price (re-priced with the line's stored discount);</li>
+   *   <li>{@link #applyUnitPrice} — an update that changes only the net price: the discount
+   *       follows it, as {@code SL_Order_Amt} does (REST and batch; see the class javadoc for
+   *       MCP);</li>
    *   <li>{@link #deriveAmountsOnUpdate(NeoContext)} — any other update that changes an amount
    *       input, when neither re-fire above ran (they derive the amounts themselves);</li>
    *   <li>{@link #deriveAmountsOnCreate(NeoContext)} — the gross amount of a new line.</li>
@@ -462,9 +510,10 @@ final class OrderLineDiscountSupport {
    * zeroed. The form never hit it: its inline edit sends the whole row. Writing the stored values
    * back changes nothing in the line; it only lets that derivation see the line it saves.
    *
-   * <p>Only when the patch changes an amount input ({@link #changesAmountInput}). In
-   * {@link #applyLineRules} it runs after the re-fires (their price is the body's and is kept), on
-   * what the caller sent. Total: never throws.
+   * <p>Only when the patch changes an amount input
+   * ({@link OrderLineBodyRules#changesAmountInput}). In {@link #applyLineRules} it runs after the
+   * re-fires (their price is the body's and is kept), on what the caller sent. Total: never
+   * throws.
    *
    * @param ctx the pre-hook context; its request body is mutated in place
    */
@@ -489,10 +538,21 @@ final class OrderLineDiscountSupport {
    * {@code discount} it publishes, chained back into its own {@code inpdiscount} branch, finds
    * nothing left to change. Amounts are then derived as on a discount update.
    *
+   * <p><b>Not reached by a lone {@code unitPrice} on MCP any more.</b>
+   * {@code McpLinePriceInjector.applyAgentPriceOnUpdate} (ETP-5852, called by
+   * {@code McpToolRouter} before the pre-hook) rewrites it as the form's "Precio":
+   * {@code listPrice} = the sent value, {@code unitPrice} = it × (1 − the line's discount / 100).
+   * {@link OrderLineBodyRules#shouldDeriveDiscountFromPrice} then sees the price the list and
+   * discount already give and abstains, so the discount is kept and only the amounts are derived.
+   * What still reaches this rule is a REST {@code PATCH}/{@code PUT} or an {@code etendo_batch}
+   * update that sends {@code unitPrice} without {@code discount}. An update that sends only
+   * {@code listPrice} is {@link #applyDiscount}'s (CP-13).
+   *
    * <p><b>The form never reaches it.</b> {@code unitPrice} is not a form input on either entity
    * (decisions: {@code grid:false, form:false}); both UI line writes send it computed as
-   * {@code listPrice × (1 − discount / 100)} — see {@link #shouldDeriveDiscountFromPrice}, which
-   * is a no-op on exactly that value.
+   * {@code listPrice × (1 − discount / 100)} — see
+   * {@link OrderLineBodyRules#shouldDeriveDiscountFromPrice}, which is a no-op on exactly that
+   * value.
    *
    * <p>Total: never throws.
    *
@@ -538,39 +598,6 @@ final class OrderLineDiscountSupport {
           ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
       return false;
     }
-  }
-
-  /**
-   * Whether an update's {@code unitPrice} is a new price whose discount must be derived: the patch
-   * carries a {@code unitPrice}, no {@code discount} key and no explicit gross price; the line
-   * (stored, overlaid with the patch) has a list price; and the price is NOT the one the line's
-   * current list price and discount already give — {@code listPrice × (1 − discount / 100)},
-   * within half a cent.
-   *
-   * <p>That last clause is what keeps the form out: the side-panel save sends the edited keys
-   * plus exactly that computed {@code unitPrice} (from the open line's {@code listPrice} and
-   * {@code discount}), and the inline edit sends the whole row, {@code discount} included. Half a
-   * cent absorbs the form's {@code toFixed(6)} float rounding. A line with no list price (a
-   * tax-included list carries its list price on the gross side) is left alone, as the discount
-   * re-fire leaves it.
-   *
-   * @param patch     the update body
-   * @param formState the stored line overlaid with the patch; {@code null} abstains
-   */
-  static boolean shouldDeriveDiscountFromPrice(JSONObject patch, JSONObject formState) {
-    if (formState == null || !hasValue(patch, FIELD_UNIT_PRICE) || patch.has(FIELD_DISCOUNT)
-        || sentExplicitGrossPrice(patch)) {
-      return false;
-    }
-    BigDecimal listPrice = decimal(formState.opt(FIELD_LIST_PRICE));
-    BigDecimal unitPrice = decimal(patch.opt(FIELD_UNIT_PRICE));
-    if (listPrice == null || listPrice.signum() == 0 || unitPrice == null) {
-      return false;
-    }
-    BigDecimal discount = decimal(formState.opt(FIELD_DISCOUNT));
-    BigDecimal current = discount == null ? listPrice
-        : listPrice.subtract(listPrice.multiply(discount).divide(HUNDRED));
-    return unitPrice.subtract(current).abs().compareTo(HALF_CENT) >= 0;
   }
 
   /**
@@ -621,27 +648,6 @@ final class OrderLineDiscountSupport {
   }
 
   /**
-   * Whether an update patch changes an input of the line's amounts — it carries
-   * {@code orderedQuantity}, {@code unitPrice}, {@code grossUnitPrice} or {@code tax} — and leaves
-   * {@code lineGrossAmount} to the server (a patch that sends it is the caller's, and is kept).
-   */
-  static boolean changesAmountInput(JSONObject patch) {
-    if (patch == null || patch.has(FIELD_LINE_GROSS_AMOUNT)) {
-      return false;
-    }
-    for (String input : AMOUNT_INPUTS) {
-      if (patch.has(input)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private static boolean isUpdate(String method) {
-    return METHOD_PUT.equals(method) || METHOD_PATCH.equals(method);
-  }
-
-  /**
    * Makes the callout's INPUT standard price the line's current effective price, so
    * {@code SL_Order_Amt} measures the discount the line really has now.
    *
@@ -665,35 +671,6 @@ final class OrderLineDiscountSupport {
     if (!isZero(grossUnitPrice)) {
       formState.put(FIELD_GROSS_STANDARD_PRICE, grossUnitPrice);
     }
-  }
-
-  /**
-   * The form's rule (see the class javadoc): the body carries a discount, no explicit gross price,
-   * and either no {@code unitPrice}, or a non-zero discount with {@code unitPrice} equal to the
-   * undiscounted {@code listPrice}. Amounts compare by value, scale-insensitive
-   * ({@code 18 == 18.00}).
-   *
-   * @param body      the write body
-   * @param listPrice the line's list price — the body's on a create, the stored line overlaid with
-   *                  the patch on an update
-   */
-  static boolean shouldApplyDiscount(JSONObject body, Object listPrice) {
-    if (!hasValue(body, FIELD_DISCOUNT) || sentExplicitGrossPrice(body)) {
-      return false;
-    }
-    if (!hasValue(body, FIELD_UNIT_PRICE)) {
-      return true;
-    }
-    return !isZero(body.opt(FIELD_DISCOUNT)) && sameAmount(body.opt(FIELD_UNIT_PRICE), listPrice);
-  }
-
-  /**
-   * A non-zero {@code grossUnitPrice} is a price the caller chose. A zero one is not: it is what a
-   * net price list carries ({@code NeoCommercialLinePolicy.normalizeOrderLineSelectorPriceMapping}
-   * zeroes it) and what the defaults pass injects.
-   */
-  static boolean sentExplicitGrossPrice(JSONObject body) {
-    return hasValue(body, FIELD_GROSS_UNIT_PRICE) && !isZero(body.opt(FIELD_GROSS_UNIT_PRICE));
   }
 
   /**
@@ -1023,10 +1000,6 @@ final class OrderLineDiscountSupport {
       String key = derivedKeys.next();
       body.put(key, derived.get(key));
     }
-  }
-
-  private static boolean hasValue(JSONObject body, String key) {
-    return body != null && body.has(key) && !body.isNull(key);
   }
 
   /** Scale-insensitive equality of two amounts; {@code false} when either is not a number. */

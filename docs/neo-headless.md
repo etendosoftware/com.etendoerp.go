@@ -5367,9 +5367,10 @@ End to end through the UI, a quotation with a 10 % total discount → order (sta
 
 Known gaps, still open after the measurement (details in §4.12.20):
 
-- `etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
-  although the discount is applied. (ETP-5680 added the opt-out that can close this,
-  `NeoHandler.governedCreateFields`, §4.12.14; the order-line customization does not declare it yet.)
+- ~~`etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
+  although the discount is applied.~~ **Closed (ETP-5528):** the order-line customization now
+  declares `discount` governed on an MCP create (`NeoHandler.governedCreateFields`, §4.12.14; see
+  §4.12.20).
 - ~~With an explicit `unitPrice` other than the product's standard price, `listPrice` persisted as the defaults cascade
   left it (usually 0).~~ **Closed (ETP-5714 follow-up):** an invoice line with a price, no discount and no list price now gets
   `listPrice = unitPrice` (absent or 0 counts as no list price; `InvoiceLineAmountSupport.alignListPriceWithPrice`), so the grid's "Precio" (`listPrice`) is no longer
@@ -10700,6 +10701,7 @@ and amounts as the same line entered in the form. Two gaps broke that:
 | QA reopen CP-7: `etendo_update orderedQuantity:6` (list 300, discount 20) persisted net 1440 but kept the previous `lineGrossAmount` 1161.60 (expected 1742.40) | The `C_OrderLine` trigger derives `LineNetAmt = qty × PriceActual` on a net list; nothing on the `etendo_update` path derives the gross unless a discount re-fire ran. | `deriveAmountsOnUpdate`, below. |
 | QA reopen CP-8: a product whose price list entry has list price 0 and standard price 50 was created with `listPrice 0` (the form persists 50), so the list-based subtotal and discount did not add up, also in the order converted from it | `McpLinePriceInjector` copies the entry's `PriceList` (0). The form never keeps a 0 there: it copies the selector's standard price into `listPrice` and puts it back when the product callout answers 0 (sources below). | `setStandardPriceOnCreate`, below. |
 | QA reopen CP-9: `etendo_update unitPrice:270` (list 300, discount 20, qty 5) kept discount 20 and gross 1452 (expected 10 and 1633.50) | `SL_Order_Amt` derives the discount from `inppriceactual`, but only when that field changes in a form; a sparse patch runs no callout. | `applyUnitPrice`, below. |
+| QA reopen CP-13: `etendo_update listPrice:300` (Monitor, qty 10, list 200, discount 10) kept `unitPrice` 180, net 1800, gross 2178 (expected 270 / 2700 / 3267, discount 10 kept — what changing "Precio" in the form gives) | No rule reacted to `listPrice`: the discount re-fire needs `discount` in the patch, `applyUnitPrice` needs `unitPrice`, and `listPrice` is not an amount input. | `applyDiscount` (lone `listPrice`), below. |
 
 ##### The rules live in three customizations
 
@@ -10780,6 +10782,50 @@ steps below in this order — both customizations call the single entry point
    caller's `unitPrice` is overwritten with the discounted price (`unitPrice` is not protected in
    this re-fire). This predates the QA reopen and is what the form does with those two values.
 
+   **A lone list price (update only, QA reopen CP-13).** An update patch that carries `listPrice`
+   and **no** `unitPrice` key, **no** `discount` key and no explicit gross price
+   (`changesOnlyListPrice`) takes this same re-fire with the line's **stored** discount: that
+   discount is written into the body (unchanged, so protected) and `SL_Order_Amt` prices the line
+   from the new list price — `unitPrice = listPrice × (1 − discount/100)` with core's precision,
+   then the amounts as below (currency precision as on every update path, ETP-5703). A patch with
+   `listPrice` **and** `discount` already took the first bullet. A patch that carries `unitPrice` is
+   never touched by this: the caller's (or the form's) price wins as before. `McpLinePriceInjector
+   .applyAgentPriceOnUpdate` (ETP-5852) bails when `listPrice` is sent, so it does not interfere.
+   Over MCP this also covers `purchase-order/lines` (`PurchaseOrderLineHandler` runs every rule on
+   MCP only; on REST it keeps its own rules, see "The rules live in three customizations").
+   **Declared limit — tax-included price lists:** a lone `listPrice` update does not reprice there.
+   `SL_Order_Amt` works on the gross side (`grossPriceList`, `baseGrossUnitPrice`), and the callout
+   input is aligned to the stored gross values, so the line keeps its stored price (on such a list
+   the net `listPrice` is usually 0 anyway, and the rule abstains).
+
+   **A lone list price on create (`etendo_create` only, live pre-QA).** A create that sends
+   `listPrice` and **none** of `discount`, `unitPrice` or `grossUnitPrice` is priced from that list
+   price at discount 0 — `unitPrice = listPrice`, amounts derived (step 5) — as the form does when
+   "Precio" is typed with no discount. It used to persist a free line: the defaults cascade, which
+   `etendo_create` runs before the pre-hook, publishes the product selector's price as `unitPrice`
+   (0 — the selector has no price-list context), `McpLinePriceInjector` leaves it (the agent chose a
+   list price), and `SL_Order_Amt` derives `discount = (listPrice − 0) / listPrice = 100` from it;
+   `discount` is not a key the agent sent, so the cascade may write it, and step 1's
+   `applyClientListPrice` then applied the list price at 100 %. Before step 1 prices the line,
+   `OrderLineCreateDiscount.resetCascadeDiscount` puts the discount back to 0. It reads the agent's
+   own keys (`NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`, set only by `etendo_create`), so it never
+   fires on REST, REST batch, `etendo_batch` or the form, and abstains when the agent sent
+   `discount` (an explicit 100 % stays 100), a price (ETP-5852 still derives its discount), a zero
+   list price, or when the body already holds a non-zero `unitPrice`
+   (`qualifiesForCascadeDiscountReset`). Over MCP it also covers `purchase-order/lines`.
+
+   **`discount` is governed on an MCP create** (`OrderLineCustomization.governedCreateFields` →
+   `OrderLineCreateDiscount.governsDiscountOnCreate`, ETP-5680 contract) whenever the agent sent
+   `discount` or the reset above applied. The create cascade's proposal for it is `SL_Order_Amt` run
+   on the protected list price against the selector's `unitPrice` 0, never a meaningful value, and
+   the `supersededDefaultsHint` told the agent to "send the callout value instead". Observed before
+   (live pre-QA, build 6f93aad2e, values saved correctly): `listPrice` + `discount 10` →
+   `discount: {sent: 10, callout: 100}`; `discount 20` → `{sent: 20, callout: 100}`; `discount 100` →
+   `{sent: 100, callout: 67}`. Those entries are now dropped. `listPrice` is never governed: its
+   `{sent: 100, callout: 0}` entry is still reported (the hint already calls a callout of 0
+   ignorable). REST, REST batch and `etendo_batch` never report superseded defaults, so nothing
+   changes there.
+
 What the re-fire may write:
 
 - **Protected** (kept as the body has them): every body key except `unitPrice`, a zero
@@ -10816,7 +10862,13 @@ Amounts after the re-fire:
   their pre-hook.
 - A line with no list price is left alone: the callout would discount from 0.
 
-**3. `applyUnitPrice`** (update only, QA reopen CP-9). An update whose patch carries `unitPrice`,
+**3. `applyUnitPrice`** (update only, QA reopen CP-9). **Reached by REST and `etendo_batch` only.**
+On `etendo_update`, `McpLinePriceInjector.applyAgentPriceOnUpdate` (ETP-5852, called by
+`McpToolRouter.handleUpdate` before the pre-hook) treats a lone `unitPrice` as the form's "Precio":
+`listPrice` = the sent value, `unitPrice` = it × (1 − the line's discount/100). This rule then sees
+the price the list and discount already give and abstains — the discount is kept and step 4 derives
+the amounts. That is the accepted product behaviour since ETP-5852; the CP-9 figures below are the
+REST/batch ones. An update whose patch carries `unitPrice`,
 no `discount` key and no explicit gross price, on a line with a list price, where that price is
 **not** the one the line already has — `listPrice × (1 − discount/100)` over the stored line
 overlaid with the patch, within half a cent (`shouldDeriveDiscountFromPrice`). It re-fires
@@ -10899,13 +10951,32 @@ Fernet, list = standard price 18, net list, 21 % VAT, qty 10. `std` = `standardP
 | discount 5 → 0 | 18 / 180 / 217.80 |
 | `orderedQuantity 6` only, at discount 5 | 17.10 / 102.60 / 124.15 (gross derived, step 4) |
 | `tax` only | gross derived at the new rate (step 4) |
-| `unitPrice 16.20` only, from discount 5 | discount 10, 16.20 / 162 / 196.02 (step 3) |
+| `unitPrice 16.20` only, from discount 5 — REST / batch | discount 10, 16.20 / 162 / 196.02 (step 3) |
+| `unitPrice 16.20` only, from discount 5 — `etendo_update` | read as "Precio" (ETP-5852): list 16.20, discount 5 kept, 15.39 / 153.90 / 186.22 (step 4) |
+| `listPrice 20` only, at discount 5 | discount 5 kept, 19 / 190 / 229.90 (step 2, lone list price) |
 | `unitPrice 17.10` only, at discount 5 (the price it already has) | no re-fire; gross derived (step 4) |
 | `discount 5` + `unitPrice 20` | discount 5 kept, 20 kept (the caller's price); gross derived over 20 (step 4) |
 
 QA reopen data (quotation 1000008, Monitor, list 300, 21 % VAT): discount 5 → 20 → `orderedQuantity
 6` gives net 1440 / gross 1742.40; `unitPrice 270` on qty 5 at discount 20 gives discount 10, net
-1350, gross 1633.50.
+1350, gross 1633.50 (REST / batch; see step 3 for MCP). CP-13 (Monitor × 10, list 200, discount
+10): `listPrice 300` alone gives `unitPrice` 270, net 2700, gross 3267, discount 10.
+
+Create-side lone list price (`etendo_create`, Fernet, catalog 44, qty 2, 21 % VAT). Before the
+reset, `{product, orderedQuantity 2, listPrice 100}` persisted discount 100, `unitPrice` 0, net 0,
+gross 0. Live QA after it (local build 6f93aad2e; quotation 1000021, lines 60–100; order
+PV1000071, lines 20–40), `unitPrice` / discount / net / gross:
+
+| case | result |
+|---|---|
+| C-1 `sales-quotation/quotationLine`, C-2 `sales-order/lines`: `listPrice 100` alone | 100 / 0 / 200 / 242, `supersededDefaults` verbatim `{"listPrice":{"sent":100,"callout":0}}` (no `discount` entry) |
+| `listPrice 100` + `discount 10` | 90 / 10 / 180 / 217.80 |
+| `unitPrice 29.70` on list 33 | discount 10 derived (ETP-5852), net 59.40, gross 71.87 |
+| `listPrice 100` + `discount 100` | 0 / 100 / 0 / 0 |
+| no price at all | 44 / 0 / 88 / 106.48 |
+| CP-13 update, `listPrice 300` alone | 270 / 2700 / 3267 |
+| CP-9 update | list 270, discount 20, `unitPrice` 216, net 1296, gross 1568.16 |
+| `orderedQuantity 12` update | net 3240, gross 3920.40 |
 
 `etendo_create` of a product whose price list entry has list price 0 and standard price 50 (QA
 quotations 1000009 by the form, 1000010 by MCP): `listPrice` 50, `unitPrice` 50, `standardPrice` 50
@@ -10936,6 +11007,12 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
   is read-only on both entities (`ETGO_SF_FIELD.IsReadOnly = Y`): `filterWriteRequest` drops
   anything the pre-hook writes there, and `NeoCrudHandler.executeUpdate` derives it with
   `injectCommercialAmounts` exactly as before.
+- **The lone list price rule never fires on the form.** Every UI line write that carries
+  `listPrice` also carries the `unitPrice` computed from it (`computeUnitPriceForPost`), and the
+  inline edit carries `discount` too; the rule needs neither key in the patch.
+- **The create-side lone list price reset never fires on the form.** It needs
+  `ATTR_CLIENT_PROVIDED_FIELDS`, which only `etendo_create` sets; the form creates through REST, and
+  its add-line POST carries `unitPrice` with `listPrice` anyway.
 - **The `listPrice` fill never fires on the form.** The form's add-line POST always carries a
   non-zero `listPrice` for such a product (the standard price, above), and a line the user priced
   at 0 carries `unitPrice 0`.
@@ -10959,13 +11036,10 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
   derives it only from what the patch itself carries.
 - A tax-included price list: `standardPrice` is not filled, and `etendo_create` gets no price from
   `McpLinePriceInjector` either, so the rule usually abstains (no list price).
-- `etendo_create` with a discount still answers `supersededDefaults: {discount: {sent: 5, callout: 0}}`
-  and its hint, although the discount is now applied. The entry is recorded by the defaults cascade
-  on the router's own context (`McpToolRouter.handleCreate`, reported with
-  `ctx.getSupersededDefaults()`); the customization only receives the hook context, which does not
-  share it, and reaching it would be ETP-5415 plumbing. Declared, not fixed. Update (ETP-5680): the report is now
-  reconciled after the pre-hook and honours `NeoHandler.governedCreateFields` (§4.12.14), so the line customization
-  can silence this entry by declaring `discount`; it has not been wired there.
+- ~~`etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
+  although the discount is applied.~~ **Closed (ETP-5528):** the order-line customization declares
+  `discount` governed on every MCP create that sends it (or whose cascade discount it reset), so the
+  entry is dropped; see "discount is governed on an MCP create" in step 2.
 - **Closed for invoice lines (ETP-5714 follow-up): the price is the list price.** The grid column "Precio" of
   `purchase-invoice/lines` and `sales-invoice/lines` is `listPrice` (`unitPrice` is `grid:false, form:false`); the form edits
   `listPrice` and derives `unitPrice = listPrice × (1 − discount/100)`, so a form line at 50 stores `listPrice 50`. With an explicit
@@ -11789,7 +11863,7 @@ QA case CP-B3: 3 × 1.50, VAT 10 %, `etendo_update {unitPrice: 1.25}` → `listP
 shows Precio 1.39, Subtotal sin descuento 4.17, Descuento 0.42, Subtotal 3.75. Left as before:
 
 - a `unitPrice` within half a cent of the stored `listPrice × (1 − d/100)` — the SPA body, which sends
-  exactly that computed price (same tolerance as `OrderLineDiscountSupport.shouldDeriveDiscountFromPrice`);
+  exactly that computed price (same tolerance as `OrderLineBodyRules.shouldDeriveDiscountFromPrice`);
 - `unitPrice` equal to the list price (the discount rule above applies the discount to it);
 - `d = 100`: there is nothing to work back from, the list price is kept;
 - a stored list price of 0 (legacy line) or a `unitPrice` of 0;
