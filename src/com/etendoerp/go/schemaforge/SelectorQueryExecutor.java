@@ -32,6 +32,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.base.structure.IdentifierProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
@@ -169,6 +170,10 @@ final class SelectorQueryExecutor {
       throws Exception {
     JSONArray items = new JSONArray();
     final boolean hasDottedDisplay = meta.displayProperty != null && meta.displayProperty.contains(".");
+    if (!hasDottedDisplay) {
+      // a dotted display only falls back to the identifier, so preloading would add loads
+      IdentifierProvider.getInstance().preloadTranslations(rows);
+    }
     for (BaseOBObject bob : rows) {
       JSONObject item = new JSONObject();
       item.put("id", SelectorRowMapper.normalizeEntityId(bob.getId().toString()));
@@ -243,6 +248,7 @@ final class SelectorQueryExecutor {
   static JSONArray buildRichItems(List<BaseOBObject> rows, SelectorMeta meta)
       throws Exception {
     JSONArray items = new JSONArray();
+    preloadIdentifierTranslations(rows, meta.gridFields);
     for (BaseOBObject bob : rows) {
       JSONObject item = new JSONObject();
       item.put("id", resolveRichItemId(bob, meta));
@@ -696,20 +702,33 @@ final class SelectorQueryExecutor {
     return SelectorRowMapper.normalizeEntityId(bob.getId().toString());
   }
 
-  private static Object resolvePropertyValue(BaseOBObject bob, String propertyPath) {
-    try {
-      String[] parts = propertyPath.split("\\.");
-      Object current = bob;
-      for (String part : parts) {
-        if (current == null) {
-          return null;
-        }
-        if (current instanceof BaseOBObject) {
-          current = ((BaseOBObject) current).get(part);
-        } else {
-          return current;
+  /**
+   * ETP-6103 — looks up in one query per translation entity the translations that the labels of the
+   * page would otherwise look up one row at a time: the rows' own identifiers and the objects their
+   * grid fields show. A grid path that cannot be walked is skipped here, as its cell shows null.
+   */
+  private static void preloadIdentifierTranslations(List<BaseOBObject> rows,
+      List<RichFieldMeta> gridFields) {
+    List<Object> objects = new ArrayList<>(rows);
+    for (BaseOBObject bob : rows) {
+      for (RichFieldMeta fieldMeta : gridFields) {
+        try {
+          Object leaf = resolvePath(bob, fieldMeta.property);
+          if (leaf instanceof BaseOBObject) {
+            objects.add(leaf);
+          }
+        } catch (Exception e) {
+          log.debug("Could not resolve property {} on {}: {}",
+              fieldMeta.property, bob.getId(), e.getMessage());
         }
       }
+    }
+    IdentifierProvider.getInstance().preloadTranslations(objects);
+  }
+
+  private static Object resolvePropertyValue(BaseOBObject bob, String propertyPath) {
+    try {
+      Object current = resolvePath(bob, propertyPath);
       if (current instanceof BaseOBObject) {
         return ((BaseOBObject) current).getIdentifier();
       }
@@ -719,6 +738,18 @@ final class SelectorQueryExecutor {
           propertyPath, bob.getId(), e.getMessage());
       return null;
     }
+  }
+
+  /** Walks a dotted path, stopping at the first null or non-object hop. */
+  private static Object resolvePath(BaseOBObject bob, String propertyPath) {
+    Object current = bob;
+    for (String part : propertyPath.split("\\.")) {
+      if (!(current instanceof BaseOBObject)) {
+        return current;
+      }
+      current = ((BaseOBObject) current).get(part);
+    }
+    return current;
   }
 
   /**

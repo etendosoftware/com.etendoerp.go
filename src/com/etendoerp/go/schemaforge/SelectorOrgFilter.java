@@ -142,7 +142,7 @@ public final class SelectorOrgFilter {
    * Append a full-text search predicate across all searchable properties of a custom-HQL selector.
    * Standard rich selectors use {@link #appendRichSearchFilter} instead.
    *
-   * <p>Emits an OR clause: {@code (lower(COALESCE(cast(<expr> as string), '')) LIKE :search)}.
+   * <p>Emits an OR clause: {@code (upper(COALESCE(cast(<expr> as string), '')) LIKE upper(:search))}.
    * No-op when {@code search} is blank or {@code searchableProps} is empty.
    *
    * <p>Each fragment is resolved via {@link #resolveSearchableExpression(String, String)}:
