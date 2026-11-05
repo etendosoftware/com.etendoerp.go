@@ -23,12 +23,9 @@ import java.util.Map;
 
 import javax.inject.Inject;
 
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
-import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import org.openbravo.base.structure.BaseOBObject;
 import java.util.Set;
@@ -62,7 +59,7 @@ import java.util.Set;
  * linked documents or not — the Sales Order window never offers it, and core's Close zeroes the
  * pending quantities and leaves a draft shipment dangling. Same resolution and fail-closed rules
  * as Reactivate ({@link DocActionRefusalGuard}); advertised by {@link #unavailableActions}.
- * Purchase orders do not opt in.
+ * ETP-6108: the purchase order opts in too.
  *
  * <p>ETP-6026: the {@code DocAction} button is an ALLOW-list of what the window offers, decided on
  * the stored {@code documentStatus} ({@link #ALLOWED_BY_STATUS}): Confirm ({@code CO}) on a draft
@@ -77,7 +74,8 @@ import java.util.Set;
  * Void, Close, Prepare ({@code PR}, which used to take a draft to {@code IP} over MCP),
  * {@code AP}, {@code --}, nothing at all — is refused with 400
  * ({@code DocActionRefusalGuard#refuseUnlessAllowed}; Close and Void keep their own messages).
- * Advertised by {@link #unavailableActions}. Purchase orders do not opt in.
+ * Advertised by {@link #unavailableActions}. ETP-6108: the purchase order applies the same rule
+ * through the shared {@link OrderDocActionPolicy}.
  *
  * <p><b>Binding (ETP-6026).</b> Bound by {@link NeoExtension} on every channel. The row's
  * {@code Java_Qualifier} ({@code salesOrderHeaderHandler}) and the class's {@code @Named} were
@@ -195,6 +193,15 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
           CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(), true);
 
   /**
+   * The allow-list mechanics (ETP-6108: shared with the purchase order through
+   * {@link OrderDocActionPolicy}), fed with this window's allow-list, reasons and message keys.
+   */
+  private static final OrderDocActionPolicy DOC_ACTION_POLICY =
+      new OrderDocActionPolicy(ALLOWED_BY_STATUS, LEFT_TO_EXISTING_RULES, DOC_ACTION_VALUES,
+          SalesOrderHeaderHandler::reasonNotOffered, SalesOrderHeaderHandler::refusalKeyOf,
+          "Sales order");
+
+  /**
    * {@inheritDoc} Reactivate is ruled out for an order that has linked documents, and each
    * creation action when nothing is left to do or a draft already covers it (ETP-5714). Close is
    * ruled out on every sales order, whatever its status: the app never offers it and the pre-hook
@@ -206,21 +213,13 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   public Map<String, String> unavailableActions(BaseOBObject subject) {
     Map<String, String> unavailable =
         new LinkedHashMap<>(OrderDocumentAvailability.unavailable(subject, AVAILABILITY_FLOW));
-    if (subject instanceof Order) {
-      Set<String> allowed = allowedIn(((Order) subject).getDocumentStatus());
-      for (String value : DOC_ACTION_VALUES) {
-        if (!allowed.contains(value)) {
-          unavailable.putIfAbsent(NeoActionAvailability.valueKey(
-              OrderDocumentAvailability.ACTION_DOCUMENT_ACTION, value), reasonNotOffered(value));
-        }
-      }
-    }
+    DOC_ACTION_POLICY.addUnavailable(unavailable, subject);
     return unavailable;
   }
 
   /** The values the window sends in {@code status}; empty for any other status (ETP-6026). */
   static Set<String> allowedIn(String status) {
-    return status == null ? Set.of() : ALLOWED_BY_STATUS.getOrDefault(status, Set.of());
+    return DOC_ACTION_POLICY.allowedIn(status);
   }
 
   /** Why {@code value} is unavailable: Close's and Void's own reason, else the generic one. */
@@ -249,29 +248,14 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   /**
    * The {@code DocAction} values the pre-hook lets through, from the stored {@code documentStatus}
-   * (ETP-6026): the window's allow-list plus {@link #LEFT_TO_EXISTING_RULES}. Read under admin
-   * mode, as the DocAction resolution reads the record.
+   * (ETP-6026): the window's allow-list plus {@link #LEFT_TO_EXISTING_RULES}.
    *
    * @param orderId the order the button runs on
    * @return the accepted values
    * @throws IllegalStateException when the order cannot be loaded — the guard then fails closed
    */
   static Set<String> allowedDocActions(String orderId) {
-    OBContext.setAdminMode(true);
-    try {
-      Order order = OBDal.getInstance().get(Order.class, orderId);
-      if (order == null) {
-        throw new IllegalStateException("Sales order " + orderId + " cannot be loaded");
-      }
-      String status = order.getDocumentStatus();
-      Set<String> allowed = new java.util.HashSet<>(allowedIn(status));
-      if (status != null) {
-        allowed.addAll(LEFT_TO_EXISTING_RULES.getOrDefault(status, Set.of()));
-      }
-      return allowed;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return DOC_ACTION_POLICY.allowedDocActions(orderId);
   }
 
   @Override
@@ -288,8 +272,7 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
       return reactivationRefusal;
     }
     // ETP-6026: only the DocAction values the window offers in the order's status run.
-    NeoResponse notOffered = DocActionRefusalGuard.refuseUnlessAllowed(context,
-        SalesOrderHeaderHandler::allowedDocActions, SalesOrderHeaderHandler::refusalKeyOf);
+    NeoResponse notOffered = DOC_ACTION_POLICY.refuseUnlessAllowed(context);
     if (notOffered != null) {
       return notOffered;
     }
