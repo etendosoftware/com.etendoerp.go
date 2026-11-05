@@ -21,12 +21,16 @@ import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 
 /**
  * {@link HubSpotOutboxStore} in native SQL on the DAL session, so its writes join whatever
@@ -44,6 +48,7 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
   private static final String PARAM_ERROR = "error";
   private static final String PARAM_ENVIRONMENT = "environment";
   private static final String PARAM_TYPE = "type";
+  private static final String PARAM_SINCE = "since";
 
   private static final String BILLING_TYPES = "('PAYMENT', 'PAYMENT_FAILED', 'CANCEL_REQUESTED',"
       + " 'CANCEL_REVERTED', 'CANCELED')";
@@ -61,19 +66,64 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
       + " and status = 'SENT' and event_type in " + BILLING_TYPES
       + " and occurred_at > :occurred";
 
+  private static final String CANCELED_BEFORE_SQL = "select count(*) from etgo_hubspot_outbox"
+      + " where etgo_account_id = :account and environment_id = :environment"
+      + " and status = 'SENT' and event_type = '" + CANCELED + "'"
+      + " and occurred_at < :occurred";
+
   private static final String ENVIRONMENT_DEAL_SQL = "select hubspot_object_id, payload"
       + " from etgo_hubspot_outbox where etgo_account_id = :account and event_type = :type"
       + " and event_key = :environment and status = 'SENT'";
 
+  /** How long after its expiry a demo is still watched for a late payment. */
+  static final int EXPIRED_WATCH_DAYS = 90;
+
+  // A demo that expired stays open: paying after the trial ended still moves the deal (ETP-6082).
+  // It is dropped once it paid, or some months after it expired, so the pass does not grow forever.
+  // Every column is aliased: Hibernate refuses two unnamed columns of the same kind ("exists").
   private static final String OPEN_DEMOS_SQL = "select d.etgo_account_id, d.environment_id,"
       + " d.created, exists (select 1 from etgo_hubspot_outbox e"
       + "   where e.etgo_account_id = d.etgo_account_id and e.event_type = 'DEMO_ENTERED')"
+      + " as entered,"
+      + " exists (select 1 from etgo_hubspot_outbox x"
+      + "   where x.etgo_account_id = d.etgo_account_id and x.event_type = 'DEMO_EXPIRED')"
+      + " as expired,"
+      + " (select count(*) from etgo_hubspot_outbox m"
+      + "   where m.etgo_account_id = d.etgo_account_id and m.event_type = 'MILESTONE')"
+      + " as milestones"
       + " from etgo_hubspot_outbox d"
       + " where d.event_type = 'DEMO_READY' and d.status in ('PENDING', 'SENT')"
       + " and d.environment_id is not null"
       + " and not exists (select 1 from etgo_hubspot_outbox c"
-      + "   where c.etgo_account_id = d.etgo_account_id and c.event_type in ('PAID', 'DEMO_EXPIRED'))"
+      + "   where c.etgo_account_id = d.etgo_account_id and c.event_type = 'PAID')"
+      + " and not exists (select 1 from etgo_hubspot_outbox c"
+      + "   where c.etgo_account_id = d.etgo_account_id and c.event_type = 'DEMO_EXPIRED'"
+      + "   and c.created < now() - interval '" + EXPIRED_WATCH_DAYS + " days')"
       + " order by d.created";
+
+  /**
+   * What the owner did in the demo. A row counts when it is newer than the demo and was not
+   * loaded by the onboarding or the sample data: every row those load is mapped in
+   * {@code AD_REF_DATA_LOADED}. An import is an asynchronous batch job, which only the import
+   * dialog starts. The completed and posted dates are the invoice's last update.
+   */
+  private static final String MILESTONES_SQL = "select"
+      + " (select min(j.finished) from etgo_batch_job j where j.ad_client_id = :environment"
+      + "   and j.created >= :since and j.state in ('SUCCEEDED', 'PARTIAL')"
+      + "   and j.processed_rows > 0) as m_import,"
+      + ownRows("min(t.created)", "c_bpartner", "291", "") + " as m_partner,"
+      + ownRows("min(t.created)", "m_product", "208", "") + " as m_product,"
+      + ownRows("min(t.created)", "c_order", "259", "") + " as m_order,"
+      + ownRows("min(t.created)", "c_invoice", "318", "") + " as m_invoice,"
+      + ownRows("min(t.updated)", "c_invoice", "318", " and t.docstatus = 'CO'")
+      + " as m_completed,"
+      + ownRows("min(t.updated)", "c_invoice", "318", " and t.posted = 'Y'") + " as m_posted";
+
+  private static final String PRODUCTIVE_SQL = "select case when exists (select 1"
+      + "   from ad_preference p where p.ad_client_id = :environment and p.attribute = :attribute"
+      + "   and p.isactive = 'Y' and coalesce(p.value, '') <> '')"
+      + " or exists (select 1 from etgo_checkout_request c where c.etgo_account_id = :account"
+      + "   and c.created_client_id is not null) then 1 else 0 end";
 
   // ETGO_GO_SESSION covers the SPA's cookie path; ETGO_USAGE_EVENT also covers the legacy bearer
   // login and survives the session rows being purged. Either one is an entry.
@@ -82,14 +132,17 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
       + " or exists (select 1 from etgo_usage_event where ad_client_id = :environment"
       + "   and event_type = 'session.login') then 1 else 0 end";
 
-  private static final String PAID_SQL = "select p.value from etgo_checkout_request c"
+  // The interval is the bought price's; the plan's own is the fallback for an older purchase.
+  private static final String PAID_SQL = "select p.value,"
+      + " coalesce(pp.billing_interval, p.billing_interval) from etgo_checkout_request c"
       + " left join etgo_plan p on p.etgo_plan_id = c.etgo_plan_id"
+      + " left join etgo_plan pp on pp.provider_price_id = c.stripe_price_id"
       + " where c.etgo_account_id = :account and c.paid_at is not null and c.paid_at >= :since"
       + " order by c.paid_at desc";
 
   private static final String PENDING_SQL = "select o.etgo_hubspot_outbox_id, o.etgo_account_id,"
       + " o.event_type, o.environment_id, o.payload, o.attempt_count, o.next_attempt_at,"
-      + " a.email, a.name, o.occurred_at, a.phone"
+      + " a.email, a.name, o.occurred_at, a.phone, a.sector"
       + " from etgo_hubspot_outbox o join etgo_account a on a.etgo_account_id = o.etgo_account_id"
       + " where o.status = 'PENDING' and o.isactive = 'Y'"
       + " order by o.created, o.etgo_hubspot_outbox_id";
@@ -99,6 +152,13 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
       String payload) {
     return OBDal.getInstance().getSession().doReturningWork(connection -> HubSpotOutbox
         .enqueue(connection, accountId, eventType, environmentId, payload));
+  }
+
+  @Override
+  public boolean enqueueKeyed(String accountId, String eventType, String eventKey,
+      String environmentId, String payload) {
+    return OBDal.getInstance().getSession().doReturningWork(connection -> HubSpotOutbox
+        .enqueue(connection, accountId, eventType, eventKey, environmentId, payload, null));
   }
 
   @Override
@@ -125,6 +185,16 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
   public boolean hasNewerBillingEvent(String accountId, String environmentId,
       Instant occurredAt) {
     Object count = query(NEWER_BILLING_SQL)
+        .setParameter(PARAM_ACCOUNT, accountId)
+        .setParameter(PARAM_ENVIRONMENT, environmentId)
+        .setParameter("occurred", Timestamp.from(occurredAt))
+        .getSingleResult();
+    return count instanceof Number && ((Number) count).intValue() > 0;
+  }
+
+  @Override
+  public boolean wasCanceledBefore(String accountId, String environmentId, Instant occurredAt) {
+    Object count = query(CANCELED_BEFORE_SQL)
         .setParameter(PARAM_ACCOUNT, accountId)
         .setParameter(PARAM_ENVIRONMENT, environmentId)
         .setParameter("occurred", Timestamp.from(occurredAt))
@@ -169,7 +239,8 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
     for (Object row : query(OPEN_DEMOS_SQL).getResultList()) {
       Object[] columns = (Object[]) row;
       demos.add(new OpenDemo((String) columns[0], (String) columns[1], instant(columns[2]),
-          Boolean.TRUE.equals(columns[3])));
+          Boolean.TRUE.equals(columns[3]), Boolean.TRUE.equals(columns[4]),
+          columns[5] instanceof Number ? ((Number) columns[5]).intValue() : 0));
     }
     return demos;
   }
@@ -182,14 +253,65 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
   }
 
   @Override
+  public Map<String, Instant> findMilestones(String environmentId, Instant since) {
+    Object[] dates = (Object[]) query(MILESTONES_SQL)
+        .setParameter(PARAM_ENVIRONMENT, environmentId)
+        .setParameter(PARAM_SINCE, Timestamp.from(since))
+        .getSingleResult();
+    Map<String, Instant> reached = new LinkedHashMap<>();
+    for (int i = 0; i < MILESTONES.size(); i++) {
+      Instant at = instant(dates[i]);
+      if (at != null) {
+        reached.put(MILESTONES.get(i), at);
+      }
+    }
+    return reached;
+  }
+
+  @Override
+  public boolean hasProductiveEnvironment(String accountId, String environmentId) {
+    Object result = query(PRODUCTIVE_SQL)
+        .setParameter(PARAM_ENVIRONMENT, environmentId)
+        .setParameter("attribute", TenantEnvironmentLifecycleService.ASSOCIATED_PRODUCTIVE_ATTRIBUTE)
+        .setParameter(PARAM_ACCOUNT, accountId)
+        .getSingleResult();
+    return result instanceof Number && ((Number) result).intValue() == 1;
+  }
+
+  @Override
   public Optional<PaidCheckout> findPaidCheckout(String accountId, Instant since) {
     List<?> rows = query(PAID_SQL)
         .setParameter(PARAM_ACCOUNT, accountId)
-        .setParameter("since", Timestamp.from(since))
+        .setParameter(PARAM_SINCE, Timestamp.from(since))
         .setMaxResults(1)
         .getResultList();
-    return rows.isEmpty() ? Optional.empty()
-        : Optional.of(new PaidCheckout((String) rows.get(0)));
+    if (rows.isEmpty()) {
+      return Optional.empty();
+    }
+    Object[] c = (Object[]) rows.get(0);
+    return Optional.of(new PaidCheckout((String) c[0], hubSpotInterval((String) c[1])));
+  }
+
+  /** {@code ETGO_PLAN.BILLING_INTERVAL} as the deal's {@code etendo_periodicidad}. */
+  static String hubSpotInterval(String billingInterval) {
+    if ("year".equals(billingInterval)) {
+      return StripeSubscriptionEvents.ANNUAL;
+    }
+    return "month".equals(billingInterval) ? StripeSubscriptionEvents.MONTHLY : null;
+  }
+
+  /**
+   * One milestone's date: {@code aggregate} over the demo's rows of {@code table} that its owner
+   * created.
+   */
+  private static String ownRows(String aggregate, String table, String tableId,
+      String condition) {
+    String key = table + "_id";
+    return " (select " + aggregate + " from " + table + " t where t.ad_client_id = :environment"
+        + " and t.created >= :since" + condition
+        + " and not exists (select 1 from ad_ref_data_loaded r"
+        + "   where r.ad_client_id = :environment and r.ad_table_id = '" + tableId + "'"
+        + "   and r.specific_id = t." + key + "))";
   }
 
   @Override
@@ -199,7 +321,7 @@ class DalHubSpotOutboxStore implements HubSpotOutboxStore {
       Object[] c = (Object[]) row;
       pending.add(new PendingEvent((String) c[0], (String) c[1], (String) c[2], (String) c[3],
           (String) c[4], c[5] == null ? 0 : ((Number) c[5]).intValue(), instant(c[6]),
-          (String) c[7], (String) c[8], instant(c[9]), (String) c[10]));
+          (String) c[7], (String) c[8], instant(c[9]), (String) c[10], (String) c[11]));
     }
     return pending;
   }

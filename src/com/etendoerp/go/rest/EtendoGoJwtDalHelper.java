@@ -118,6 +118,7 @@ final class EtendoGoJwtDalHelper {
   static final String PROPERTY_EMAIL_VERIFIED = "emailVerified";
   /** ETP-6081 — ETGO_ACCOUNT.PHONE. */
   static final String PROPERTY_PHONE = "phone";
+  static final String PROPERTY_SECTOR = "sector";
   // ETP-5115: the constants naming the account's inline SSO columns are gone with the last reader
   // of those columns. The columns themselves stay as the migration fallback and are read only by
   // AccountIdentityDalHelper, through Account's own generated property names.

@@ -428,6 +428,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       FIELD_BUILDING_NAME, FIELD_CITY_NAME, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   /** ETP-6081 — the optional phone, "+34 600123456", stored on the account. */
   private static final String FIELD_PHONE = "phone";
+  private static final String FIELD_SECTOR = "sector";
+  private static final String FIELD_SECTOR_MISSING = "sectorMissing";
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -2578,6 +2580,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (phone != null) {
         account.set(EtendoGoJwtDalHelper.PROPERTY_PHONE, phone);
       }
+      // ETP-6082: the business sector of the register form, for HubSpot. The form requires it; a
+      // value outside the list is dropped rather than refusing the sign-up over a marketing field.
+      String sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
+      if (sector != null) {
+        account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
+      }
       // ETP-6081: the consent to promotional mail is a choice of its own; a body without it (an
       // older screen) gave none.
       TermsAndConditionsService.recordMarketingConsent(account,
@@ -2586,10 +2594,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // version it showed is recorded with the account.
       EtendoGoJwtDalHelper.recordTermsAcceptance(account, termsService.resolveAcceptedVersion(
           body.optString(FIELD_TERMS_VERSION, null), language), new Date());
-      // createAccount committed the account; this commit carries its phone, its terms and its
-      // HubSpot event, which reads the phone when it is sent.
-      HubSpotOutbox.accountCreated(account);
-      EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
+      // createAccount committed the account; this commit carries its phone, sector and terms. Its
+      // HubSpot event waits for the address to be confirmed (ETP-6082, handleVerifyEmail).
+      EtendoGoDalHelper.commitDalChanges("account sign-up details", log);
       String normalizedLanguage = StringUtils.trimToNull(language);
       // ETP-4798: the session token below still comes back, so the user keeps filling in the
       // onboarding form and their draft keeps saving. What the unconfirmed address blocks is the
@@ -2851,7 +2858,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
       return created;
     }
+    boolean confirming = EmailVerificationDalHelper.isEmailVerificationPending(account);
     EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
+    if (confirming) {
+      // ETP-6082: an account registered by the form and confirmed by signing in with its
+      // provider is a lead from now on, as if it had followed the mailed link.
+      reportConfirmedAccount(account);
+    }
     return account;
   }
 
@@ -3036,6 +3049,36 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-6082: a sign-up becomes a HubSpot lead, and gets its deal, once its address is proven:
+   * by the confirmation link, by the welcome mail's login link, or by signing in with an identity
+   * provider on that address. An account created by an SSO sign-in is reported when it is created
+   * instead (its provider vouched). Reporting it twice adds nothing.
+   *
+   * @param account the account whose address was just confirmed
+   */
+  /**
+   * ETP-6082 — keeps the business sector the company step asked for, on an account that had none.
+   * A sector already chosen at sign-up is never overwritten. Committed before provisioning, which
+   * switches the context to the new tenant; HubSpot reads it when it sends the demo's event.
+   */
+  static boolean isSectorMissing(Account account) {
+    return account.get(EtendoGoJwtDalHelper.PROPERTY_SECTOR) == null;
+  }
+
+  static void storeMissingSector(Account account, String sector) {
+    if (sector == null || !isSectorMissing(account)) {
+      return;
+    }
+    account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
+    EtendoGoDalHelper.commitDalChanges("account sector", log);
+  }
+
+  private static void reportConfirmedAccount(Account account) {
+    HubSpotOutbox.accountCreated(account);
+    EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
+  }
+
+  /**
    * POST /sws/go/verify-email
    * Body: { "token": "..." }
    *
@@ -3087,6 +3130,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       if (!EmailVerificationDalHelper.isEmailVerified(account)) {
         EmailVerificationDalHelper.consumeEmailVerification(account, new Date());
+        reportConfirmedAccount(account);
       }
 
       JSONObject result = new JSONObject();
@@ -3517,6 +3561,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           EmailVerificationDalHelper.isEmailVerificationPending(account));
       result.put("authMethods", buildAuthMethods(account));
       result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(authenticated.sessionRecord));
+      // ETP-6082: the onboarding asks the business sector only when the account has none yet.
+      result.put(FIELD_SECTOR_MISSING, isSectorMissing(account));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -5727,6 +5773,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (onboardingRequest == null) {
       return null;
     }
+    storeMissingSector(authenticated.account, onboardingRequest.sector);
     // ETP-5689: an additional environment arrives without a full name; fall back to the
     // account's name (then its email) here, once, so both the pooled and the classic path name
     // the owner after the person instead of the client-suffixed username.
@@ -6337,6 +6384,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.upgradeAction = body.optString("upgradeAction", UPGRADE_ACTION_CREATE_PRODUCTIVE).trim();
       // ETP-5426: opt-in, off unless the form explicitly sends true.
       data.includeSampleData = body.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
+      // ETP-6082: the company step asks the business sector only of an account that has none (an
+      // SSO sign-up never sees the register form). Anything outside HubSpot's list is dropped.
+      data.sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -7032,8 +7082,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       String accountId = account.getId();
+      boolean confirming = EmailVerificationDalHelper.isEmailVerificationPending(account);
       SignupAccountDalHelper.consumeLoginLink(account, new Date());
       Account consumed = EtendoGoJwtDalHelper.findActiveAccountById(accountId);
+      if (confirming) {
+        // ETP-6082: since ETP-6081 the welcome mail carries this link, not the confirmation-only
+        // one, so following it is how most sign-ups confirm their address.
+        reportConfirmedAccount(consumed);
+      }
       String environmentUserId = SignupAccountDalHelper.environmentUserId(consumed);
       IssuedGoSession issued = goSessionService.create(accountId, AUTH_METHOD_LINK,
           request.getHeader(HEADER_USER_AGENT), null);
@@ -7724,7 +7780,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Build the standard {@code {id, email, name}} JSON projection of an account, shared by every
+   * Build the standard {@code {id, email, name, sectorMissing}} JSON projection of an account, shared by every
    * endpoint that returns account data.
    */
   private static JSONObject buildAccountJson(Account account) throws JSONException {
@@ -7732,6 +7788,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     accountJson.put("id", account.getId());
     accountJson.put(FIELD_EMAIL, account.getEmail());
     accountJson.put("name", account.getName());
+    // ETP-6082: the onboarding asks the business sector only when the account has none yet.
+    accountJson.put(FIELD_SECTOR_MISSING, isSectorMissing(account));
     return accountJson;
   }
 
@@ -7928,6 +7986,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5426: the signup form's "include sample data" opt-in. Honoured only when
     // OnboardingSampleDataService.isEligible accepts the request.
     private boolean includeSampleData;
+    // ETP-6082: the business sector, sent only when the account had none.
+    private String sector;
     // ETP-5847: set for an environment the signup API creates, which mails its own ready message
     // (with a login link, or none at all when the caller turned mails off).
     private boolean skipEnvironmentReadyMail;

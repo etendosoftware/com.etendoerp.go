@@ -34,7 +34,9 @@ import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
  * Which Stripe billing events HubSpot hears about, and what it is told.
  *
  * <ul>
- *   <li>{@code invoice.paid}: a payment, every one of them, a zero total included.</li>
+ *   <li>{@code invoice.paid}: a payment. One of zero (a free first month, a full discount) is no
+ *       payment and is left out (ETP-6082). The billing reason tells the first charge from a
+ *       renewal.</li>
  *   <li>{@code invoice.payment_failed}: a failed charge; each attempt Stripe makes is one.</li>
  *   <li>{@code customer.subscription.updated}: only when a cancellation is scheduled or
  *       withdrawn. The date reported is when the owner asked, not when the period ends.</li>
@@ -52,6 +54,10 @@ final class StripeSubscriptionEvents {
   static final String FIELD_AMOUNT = "amount";
   static final String FIELD_CURRENCY = "currency";
   static final String FIELD_INTERVAL = "interval";
+  static final String FIELD_BILLING_REASON = "billingReason";
+
+  /** The billing reason of an invoice a subscription renewal issued. */
+  static final String REASON_RENEWAL = "subscription_cycle";
 
   static final String MONTHLY = "monthly";
   static final String ANNUAL = "annual";
@@ -104,6 +110,9 @@ final class StripeSubscriptionEvents {
     try {
       switch (StringUtils.trimToEmpty(type)) {
         case "invoice.paid":
+          if (isZeroPayment(object)) {
+            return Optional.empty();
+          }
           return Optional.of(new Translated(HubSpotOutboxStore.PAYMENT,
               StringUtils.defaultIfBlank(StripeJson.text(object, "id"), eventId), created,
               invoiceRequestId(object), subscriptionId, paymentPayload(object, subscriptionId,
@@ -178,7 +187,16 @@ final class StripeSubscriptionEvents {
     if (interval != null) {
       payload.put(FIELD_INTERVAL, interval);
     }
+    String reason = StripeJson.text(invoice, "billing_reason");
+    if (StringUtils.isNotBlank(reason)) {
+      payload.put(FIELD_BILLING_REASON, reason);
+    }
     return payload.toString();
+  }
+
+  /** An invoice that states it collected nothing. One that does not say is still a payment. */
+  static boolean isZeroPayment(JSONObject invoice) {
+    return invoice.has("amount_paid") && invoice.optLong("amount_paid", 0L) <= 0L;
   }
 
   /**
