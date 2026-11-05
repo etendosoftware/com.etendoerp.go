@@ -439,6 +439,12 @@ class HubSpotEventSender {
         properties.put("lastname", lastName);
       }
     }
+    // ETP-6081: optional, and asked after the account exists, so it reaches HubSpot with the
+    // first event sent once the profile step stored it (the demo's, normally). Never cleared.
+    String phone = StringUtils.trimToNull(event.phone());
+    if (phone != null) {
+      properties.put("phone", phone);
+    }
     return properties;
   }
 

@@ -4046,6 +4046,137 @@ first create without it was refused. The handler now declares
 `serverDefaulted`. `etendo_defaults` still answers the suggested country — a form may prefill it —
 but the schema no longer claims the server fills it.
 
+##### 4.12.1.10 Fiscal Configuration — `fiscalSystemCatalog` and `configureFiscalSystem` on `sii-config` (ETP-6053)
+
+A billing system (SIF) is activated through one declared write action of `sii-config/siiConfiguration`, by the
+SPA's Fiscal Configuration window (REST) and by agents (MCP) alike — never through a create on the
+fiscal-configuration specs. The rules live only in `com.etendoerp.go`
+(`schemaforge/fiscal/FiscalSifRules`); the window keeps no copy of them.
+
+```
+GET  /sws/neo/sii-config/siiConfiguration/{orgId}/action/fiscalSystemCatalog
+POST /sws/neo/sii-config/siiConfiguration/{orgId}/action/configureFiscalSystem  {system, territory}
+
+etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>',
+              action:'configureFiscalSystem', parameters:{system:'TBAI', territory:'bizkaia'})
+```
+
+`id` is the organization, not an `AEATSII_CONFIG` row: the action record guard
+(`NeoActionRecordGuard`) lets an id that is not a row of the entity's table through, and the
+action checks the organization itself. Both actions are served by `FiscalSystemConfigureAction`,
+delegated from `SiiConfigDeactivateHandler` (the pair's single `@NeoExtension`; the annotation is
+not repeatable). The SII Configuration's own AD buttons are unaffected.
+
+**Which access gates them.** Every request on `sii-config` is gated by
+`NeoRequestRouter.handleWindowSpecRequest` on the role's access to the **SII Configuration window**
+(`C1D3A2A017AC4B82B9FEE6F4D2A0C55A`) — read for `fiscalSystemCatalog`, read-write for
+`configureFiscalSystem`; MCP gates `etendo_action` on the same spec access. That window is the one
+the Fiscal Configuration page itself is gated on (`useWindowAccess`, ETP-5395), so the actions need
+exactly the access the page has, and nothing on Organization. `configureFiscalSystem` then requires
+read-write on the window of **every system it creates** — TicketBAI and VERI*FACTU have their own —
+and refuses a role without it before writing anything, in the request language (403
+`ETGO_FiscalSifNoWindowAccess`, *"Tu rol no tiene permiso para configurar VERI*FACTU: no puede
+modificar su ventana."*); the batch re-checks each window anyway. (They lived on
+`organization/organization` for a while during ETP-6053, which wrongly required write access to
+the Organization window.)
+
+**`fiscalSystemCatalog`** (read, `GET` only — any other method is 405): the rules as data —
+`{systems:[...], territories:[{territory, systems, sii:{navarra, guipuzcoa, taxtype}|null,
+tbaiTerritory|null, verifactuTaxType|null}]}`. `systems` is what the territory allows; the other
+keys are the values a config record of that territory carries. The window renders its manual
+system choice and the SII veto from `systems`, and identifies the territory of a stored
+configuration (its "Estado" panel) from the record values. It was chosen over the action contract
+because a contract can list the allowed values of each parameter but not which pairs are valid,
+and over a new endpoint because it lives with the action that applies the rules, under the same
+access gate, is discoverable by agents too, and needs no data change. It is pinned byte for byte by
+`fiscal/fiscalSystemCatalog.golden.json` in this module's tests and by the same file in the SPA's
+tests; both suites assert its SHA-256, so the two copies cannot drift unnoticed.
+
+**`configureFiscalSystem`** (write, `POST`):
+
+| Parameter | Values |
+|---|---|
+| `system` (required) | `SII`, `TBAI`, `SII+TBAI`, `VERIFACTU` |
+| `territory` | `navarra`, `alava`, `bizkaia`, `gipuzkoa`, `baleares` (common territory and Balearic Islands), `canarias`, `ceuta` (Ceuta and Melilla). Required, except when SII is added to an existing TicketBAI: then it is TicketBAI's own and may be left out |
+
+Before the rules, the parameters are checked against the action contract (`NeoActionContract`,
+422 on a missing `system` or a value outside the listed options), and an `id` that is not an organization the role can
+read answers 404 *Organization not found* (both in English, like every shared refusal).
+
+Refusals, in this order, in the request language (`NeoMessageText`, keys in `error.messageKeys`):
+
+| Rule | Refusal |
+|---|---|
+| `id` must not be the `*` organization (`0`) | 400 `ETGO_FiscalSifOrgStar` — *"No se puede activar un sistema de facturación en la organización «*». Usa la organización de tu empresa."* |
+| `id` must be the session's organization (the records land there, `organization` is server-owned, §4.12.17) | 400 `ETGO_FiscalSifOrgMismatch` |
+| no activation while `ETSG_ForceTestMode` is on for the client (`FiscalTestModeResolver`) | 409 `ETGO_FiscalSifTestMode` — *"Solo podrá activar un sistema fiscal en un entorno productivo."* (the window's `fiscal.testModeLock.warning`) |
+| "Añadir SII" — `system:'SII'` on an organization whose only active SIF is TicketBAI, with no territory or a Basque one: TicketBAI must have a territory | 409 `ETGO_FiscalSifTbaiNoTerritory` (a legacy row) |
+| … and the territory, when sent, must be TicketBAI's | 400 `ETGO_FiscalSifTerritoryMismatch` |
+| otherwise the territory is required | 400 `ETGO_FiscalSifTerritoryRequired` |
+| the territory must allow the system: Navarra → SII; Álava/Bizkaia/Gipuzkoa → TBAI, SII+TBAI; Baleares/Canarias → SII, VERIFACTU; Ceuta/Melilla → VERIFACTU | 400 `ETGO_FiscalSifNotAllowed` |
+| no other active SIF in the organization | 409 `ETGO_FiscalSifAlreadyConfigured` |
+| read-write access to the window of every system it creates | 403 `ETGO_FiscalSifNoWindowAccess` |
+
+Territories are named in refusals as the window names them (`ETGO_FiscalSifTerritory_<id>` catalog
+keys, e.g. *Ceuta / Melilla (IPSI)*, *España / Baleares*), never by their parameter value. The
+window shows the message as it is, below its confirm button or the "Añadir SII" button.
+
+Every value derived from the territory is built here and is not a parameter: SII `navarra`,
+`guipuzcoa` and `taxtype`, TicketBAI `etsgSifTerritory`, VERI*FACTU `tAXType` (*Impuesto de
+aplicación*), plus the defaults (adoption dates = today, production flags, `nextSendWaitTime`,
+`defaultQR`). "Añadir SII" gets the SII part of SII+TBAI for TicketBAI's territory (`taxtype`
+IVA, and `guipuzcoa` for Gipuzkoa).
+
+**The SII is acogido al SII from creation, on every channel** (`INSIISYSTEM = 'Y'`, with
+`fechaAcogidaSII` = today). Until ETP-6053 the wizard posted it with `acogidaAlSII: 'N'` and turned
+it on with its detail save (`SiiConfigDeactivateHandler.afterHandle` on PUT), so a user who left
+the detail step without saving kept a configuration that was active but not acogido. One behaviour
+for both channels removes that state; the detail step is unaffected (its save sets the same `'Y'`).
+The consequence is that `AEATSII_CHECK_SIFS_CONFIGS_TRG` runs at the activation instead of at the
+detail save: `em_etsg_has_sii_config` is set, and a VERI*FACTU conflict refused, at that moment —
+the action has already refused any other active SIF, so the trigger only backs it up. The action
+sends `acogidaAlSII: 'Y'` and runs its batch inside `FiscalSifGuard.asFiscalSystemActivation`, so
+the SII customization's `afterHandle` also sets `INSIISYSTEM = 'Y'` by native SQL on that POST,
+inside the batch; if the trigger refuses, the whole activation rolls back.
+
+The records are created through `BatchService.executeBatch` — the `/sws/neo/batch` pipeline —
+so the role's access to each fiscal window is checked, each entity's customization runs
+(TicketBAI sequences, auto-send schedules, VERI*FACTU adoption date, SII acogida), and
+SII + TicketBAI commit or roll back together. A refusal raised inside (a trigger, the entity
+rules below) comes back with its status, message and `messageKeys`. The action calls the batch
+with no MCP preprocessor, so the MCP field gates (`MCP_CONFIG.fields.readOnly`, below) never
+apply to the values it derives — they are the agent's restrictions, not the action's.
+
+**Concurrent activations are serialized per organization.** Before reading the active
+configurations, the action locks the organization's `AD_OrgInfo` row
+(`FiscalSifGuard.lockOrganization`, `SELECT … FOR UPDATE`). The checks and the batch run in the
+request's single transaction (`BatchService` defers every write to its final `commitAndClose`; a
+refusal rolls back), so the lock is held until the records are committed: a second activation of
+the same organization waits, then sees the first one's records and is refused by the "one active
+SIF" rule. An organization without an `AD_OrgInfo` row locks nothing (total; no error). The lock
+is per requested organization, while the SIF triggers keep their flags per legal entity: moot in GO,
+where a client has one organization, and relevant only if multi-org is ever supported.
+
+Answer: `{system, territory, created:[{system, spec, entity, id}], certificate:{exists}}`.
+`system` is the resulting SIF — `SII+TBAI` after "Añadir SII", whose `created` holds only the
+SII record — and `territory` the one the records were built for. When
+the organization has no active signing certificate, a `warning` message
+(`ETGO_FiscalSifNoCertificate`) says it must be uploaded from Configuración fiscal (agents cannot
+write the certificate, see §4.12.9, *Fiscal Configuration*). The records are then read and edited
+on `sii-config/siiConfiguration`, `tbai-config/header` and
+`verifactu-config/cabeceraDeConfiguraciónVerifactu` — the window's detail step, or
+`etendo_get` / `etendo_update`.
+
+**Entity rules on every channel** (`FiscalSifGuard`, run first in the `handle()` of
+`SiiConfigDeactivateHandler`, `TbaiConfigSequenceHandler` and `VerifactuConfigReadyHandler`,
+bound by `@NeoExtension` since ETP-6053): a config is never created inactive
+(400 `ETGO_FiscalSifInactiveCreate`), never in forced test mode (409 `ETGO_FiscalSifTestMode`),
+and only one is active per system and organization (409 `ETGO_FiscalSifOneActive`, also on a REST
+reactivation). TicketBAI had no database rule for the last one; SII and VERI*FACTU keep their
+triggers (`AEATSII_ONE_ACTIVE_CONFIG_TRG`, `ETVFAC_ONE_ACTIVE_CONFIG_TRG`), which are now reached
+only outside NEO. They hold on every channel on purpose: `BatchService` builds its hook context
+without `mcpOrigin`, so an MCP-only create rule would be bypassed by a batched create.
+
 #### 4.12.2 `etendo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
@@ -5402,9 +5533,10 @@ End to end through the UI, a quotation with a 10 % total discount → order (sta
 
 Known gaps, still open after the measurement (details in §4.12.20):
 
-- `etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
-  although the discount is applied. (ETP-5680 added the opt-out that can close this,
-  `NeoHandler.governedCreateFields`, §4.12.14; the order-line customization does not declare it yet.)
+- ~~`etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
+  although the discount is applied.~~ **Closed (ETP-5528):** the order-line customization now
+  declares `discount` governed on an MCP create (`NeoHandler.governedCreateFields`, §4.12.14; see
+  §4.12.20).
 - ~~With an explicit `unitPrice` other than the product's standard price, `listPrice` persisted as the defaults cascade
   left it (usually 0).~~ **Closed (ETP-5714 follow-up):** an invoice line with a price, no discount and no list price now gets
   `listPrice = unitPrice` (absent or 0 counts as no list price; `InvoiceLineAmountSupport.alignListPriceWithPrice`), so the grid's "Precio" (`listPrice`) is no longer
@@ -5798,6 +5930,28 @@ earlier is removing that one override.
 > re-derived on update (ETP-5286 on REST, ETP-5696 on MCP). An agent or integration that changes the
 > product must send the price itself. Whether the server should re-price on a product change changes
 > REST and MCP alike, so it needs its own decision; the tax of the new product was not tested.
+
+##### Fiscal Configuration — REST and MCP differ on purpose (ETP-6053, declared)
+
+The SPA's Fiscal Configuration window and agents reach the same three entities
+(`sii-config/siiConfiguration`, `tbai-config/header`,
+`verifactu-config/cabeceraDeConfiguraciónVerifactu`) and the certificate of `organization`, with
+deliberately different powers. Every MCP difference below is `MCP_CONFIG` or `isMcpOrigin()`, so
+REST and the SPA are unchanged.
+
+| Operation | REST (the SPA) | MCP |
+|---|---|---|
+| Create a config | `configureFiscalSystem` (§4.12.1.10) — the onboarding wizard and "Añadir SII" call it; a direct `POST` per entity is still accepted for other REST callers | `etendo_create` and `etendo_batch` hidden (`MCP_CONFIG.verbs.create:false`, 405); only `configureFiscalSystem` |
+| Deactivate ("Cambiar SIF") | `PUT {active:false}` → smart deactivation | refused: any change of `active` on `etendo_update` is 400 `ETGO_FiscalSifActiveByAgent` (an echo of the current value passes) |
+| Reactivate | `PUT {active:true}`, subject to one active per system | refused, as above |
+| Delete | `DELETE` (unused by the SPA, kept) | `etendo_delete` hidden (`MCP_CONFIG.verbs.delete:false`, 405) |
+| VERI*FACTU `tAXType` (*Impuesto de aplicación*) | editable until `isReady` | read-only: field-level `MCP_CONFIG.fields.readOnly:true`, 422 `read_only_field` on create and update |
+| Values the window never edits and the activation sets: SII `acogidaAlSII` (`INSIISYSTEM`), `entornoDeProduccin` (`PRODUCCION`), `adjuntarArchivosXML` (`ADJUNTOS`); TicketBAI `productionEnv`, `uSEAsproductDesc`, `validatePreviousInvoice` | written by `configureFiscalSystem`; the detail step never changes them (`SiiSection` PUTs the SII ones back with the record's values, `TbaiSection` leaves the TicketBAI ones out of its PUT) | read-only: field-level `MCP_CONFIG.fields.readOnly:true` (ETP-6053 QA), 422 `read_only_field`. The window edits only the SII authorization number and TicketBAI auto-send, which stay writable |
+| Other territory-derived fields (SII `navarra`/`guipuzcoa`/`taxtype`, TicketBAI `etsgSifTerritory`) | derived by `configureFiscalSystem` and created through its batch (customization exemption of `NeoFieldFilter`); the window no longer sends them | read-only already (curation), 422 `read_only_field` |
+| Certificate (`organization/certificadoDigital`, `ETSG_Certificate`) | uploaded, replaced and deleted through `/sws/neo/certificate` (not a spec) | `etendo_create` / `etendo_update` / `etendo_delete` hidden (`MCP_CONFIG.verbs`), status readable with the `certificate` action |
+
+The shared refusal of `read_only_field` (§4.12.11) stays in English, like every shared refusal;
+the fiscal refusals of `FiscalSifGuard` and `configureFiscalSystem` are in the request language.
 
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
@@ -7208,7 +7362,7 @@ Both creation and active-state synchronization are best-effort secondary effects
 
 This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.3 — it carries no `error: "stale_record"` discriminator, since it can only ever happen on `POST` (`stale_record` is a `PUT`/`PATCH`-only concept). See `ChartOfAccountsSaveValidationSupport`'s class javadoc for the full save-validation rule list (code format, protected parent-like codes, code-immutability on update); this is the one new rule ETP-5101 added to it. *Known gap, not yet fixed:* the duplicate lookup (`findDuplicateSearchKey`) scopes only on `ElementValue.PROPERTY_CLIENT`, not the actual DB uniqueness pair `(C_Element_ID, VALUE)`, and omits `setFilterOnActive(false)` — so it can both miss a real duplicate and flag a false one relative to the real constraint. Treat the `409` contract above as the intended behavior, not yet a hardened guarantee.
 
-**Real-world example — `TbaiConfigSequenceHandler`** (`schemaforge/handlers/TbaiConfigSequenceHandler.java`, `@Named("tbai-config-sequence-handler")`, wired as the `header` entity's `JAVA_QUALIFIER` for the `tbai-config` spec): a post-hook (`afterHandle`) that runs on every successful `POST`/`PUT` of the TBAI Fiscal Configuration. It walks the config's organization tree — plus organization `*` (id `0`), added explicitly since Document Types are very commonly defined at org `*` and would otherwise be silently excluded (same precedent as `SelectorOrgFilter#buildOrganizationPredicate`) — and finds every **active** `DocumentType` whose backing table is `C_Invoice` — which naturally covers sales invoices (`ARI`), purchase invoices (`API`), and their credit notes (`ARC`/`APC`), since all four share that table. Rather than one sequence per Document Type, it ensures the whole scope shares **exactly one** chaining `Sequence` (prefix `TBAI-`): it reuses one already assigned to any qualifying Document Type in scope, or creates a single new one only if none exists yet. This is the core fiscal-correctness rule — TicketBAI chains invoice numbers with a single scope-wide counter, so independent per-Document-Type sequences could collide. A Document Type that already has a chaining sequence (`EM_Tbai_Ad_Sequence_ID`) is left untouched, so re-saving the config is safe (idempotent). Any error is logged and swallowed: this is a best-effort secondary side effect and must never fail the parent save request.
+**Real-world example — `TbaiConfigSequenceHandler`** (`schemaforge/handlers/TbaiConfigSequenceHandler.java`, bound by `@NeoExtension(spec = "tbai-config", entity = "header")` since ETP-6053; before that by `@Named("tbai-config-sequence-handler")` and the `header` entity's `JAVA_QUALIFIER`): a post-hook (`afterHandle`) that runs on every successful `POST`/`PUT` of the TBAI Fiscal Configuration. It walks the config's organization tree — plus organization `*` (id `0`), added explicitly since Document Types are very commonly defined at org `*` and would otherwise be silently excluded (same precedent as `SelectorOrgFilter#buildOrganizationPredicate`) — and finds every **active** `DocumentType` whose backing table is `C_Invoice` — which naturally covers sales invoices (`ARI`), purchase invoices (`API`), and their credit notes (`ARC`/`APC`), since all four share that table. Rather than one sequence per Document Type, it ensures the whole scope shares **exactly one** chaining `Sequence` (prefix `TBAI-`): it reuses one already assigned to any qualifying Document Type in scope, or creates a single new one only if none exists yet. This is the core fiscal-correctness rule — TicketBAI chains invoice numbers with a single scope-wide counter, so independent per-Document-Type sequences could collide. A Document Type that already has a chaining sequence (`EM_Tbai_Ad_Sequence_ID`) is left untouched, so re-saving the config is safe (idempotent). Any error is logged and swallowed: this is a best-effort secondary side effect and must never fail the parent save request.
 
 **Real-world example — `TbaiXmlgeneratorHandler` (failed TicketBAI sends leave a trace, ETP-5700):** `schemaforge/TbaiXmlgeneratorHandler.java` (`@Named("tbai-xmlgenerator")`, delegated to by `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler` for the `Em_Tbai_Xmlgenerator` action) runs ticketbai's `XMLConvertionFromInvoice`. That process only writes `tbai_syncinvoice` once the tax authority has answered; a send that fails earlier (a local validation while building the XML such as a missing postal code, signing, connection) only returns the error in `responseActions`. Since the invoice's stored computed status `EM_ETGO_Tbai_Status` (`ETGO_GET_TBAI_STATUS`) reads the latest `tbai_syncinvoice.estado` and answers `Pendiente` when there is none, the chip stayed `Pendiente` after a failed send. On a failed action (error `NeoResponse` or exception) the handler now writes the same trace ticketbai's own auto-send writes in `ProcessInvoiceTbaiHook#generateTbaiStatusLog`: a `TbaiSyncinvoice` (`estado = "Error"`, `descripcion = "01"`) plus a `TbaiValcode` with the message truncated to 1000 chars. It does so **only when the invoice's `tbai_syncinvoice` row count did not change during the call** — a rejection ticketbai already recorded (`Rechazado`, "already received") is never duplicated, and the check does not depend on the translated message text. The rows are flushed into the request transaction and committed with it: an error `NeoResponse` is a returned value, not a thrown exception, so neither `NeoServletSupport` nor `DalRequestFilter` rolls it back. A failure to write the trace is logged and never masks the original error. The handler also strips `<fully.qualified.ExceptionClass>: ` prefixes (ticketbai's `XMLUtils` wraps errors as `new OBException(e)`) from both the stored description and the returned message. Same handler on every channel (REST action and MCP `etendo_action`), so no divergence to declare in §4.12.9.
 
@@ -10744,6 +10898,7 @@ and amounts as the same line entered in the form. Two gaps broke that:
 | QA reopen CP-7: `etendo_update orderedQuantity:6` (list 300, discount 20) persisted net 1440 but kept the previous `lineGrossAmount` 1161.60 (expected 1742.40) | The `C_OrderLine` trigger derives `LineNetAmt = qty × PriceActual` on a net list; nothing on the `etendo_update` path derives the gross unless a discount re-fire ran. | `deriveAmountsOnUpdate`, below. |
 | QA reopen CP-8: a product whose price list entry has list price 0 and standard price 50 was created with `listPrice 0` (the form persists 50), so the list-based subtotal and discount did not add up, also in the order converted from it | `McpLinePriceInjector` copies the entry's `PriceList` (0). The form never keeps a 0 there: it copies the selector's standard price into `listPrice` and puts it back when the product callout answers 0 (sources below). | `setStandardPriceOnCreate`, below. |
 | QA reopen CP-9: `etendo_update unitPrice:270` (list 300, discount 20, qty 5) kept discount 20 and gross 1452 (expected 10 and 1633.50) | `SL_Order_Amt` derives the discount from `inppriceactual`, but only when that field changes in a form; a sparse patch runs no callout. | `applyUnitPrice`, below. |
+| QA reopen CP-13: `etendo_update listPrice:300` (Monitor, qty 10, list 200, discount 10) kept `unitPrice` 180, net 1800, gross 2178 (expected 270 / 2700 / 3267, discount 10 kept — what changing "Precio" in the form gives) | No rule reacted to `listPrice`: the discount re-fire needs `discount` in the patch, `applyUnitPrice` needs `unitPrice`, and `listPrice` is not an amount input. | `applyDiscount` (lone `listPrice`), below. |
 
 ##### The rules live in three customizations
 
@@ -10824,6 +10979,50 @@ steps below in this order — both customizations call the single entry point
    caller's `unitPrice` is overwritten with the discounted price (`unitPrice` is not protected in
    this re-fire). This predates the QA reopen and is what the form does with those two values.
 
+   **A lone list price (update only, QA reopen CP-13).** An update patch that carries `listPrice`
+   and **no** `unitPrice` key, **no** `discount` key and no explicit gross price
+   (`changesOnlyListPrice`) takes this same re-fire with the line's **stored** discount: that
+   discount is written into the body (unchanged, so protected) and `SL_Order_Amt` prices the line
+   from the new list price — `unitPrice = listPrice × (1 − discount/100)` with core's precision,
+   then the amounts as below (currency precision as on every update path, ETP-5703). A patch with
+   `listPrice` **and** `discount` already took the first bullet. A patch that carries `unitPrice` is
+   never touched by this: the caller's (or the form's) price wins as before. `McpLinePriceInjector
+   .applyAgentPriceOnUpdate` (ETP-5852) bails when `listPrice` is sent, so it does not interfere.
+   Over MCP this also covers `purchase-order/lines` (`PurchaseOrderLineHandler` runs every rule on
+   MCP only; on REST it keeps its own rules, see "The rules live in three customizations").
+   **Declared limit — tax-included price lists:** a lone `listPrice` update does not reprice there.
+   `SL_Order_Amt` works on the gross side (`grossPriceList`, `baseGrossUnitPrice`), and the callout
+   input is aligned to the stored gross values, so the line keeps its stored price (on such a list
+   the net `listPrice` is usually 0 anyway, and the rule abstains).
+
+   **A lone list price on create (`etendo_create` only, live pre-QA).** A create that sends
+   `listPrice` and **none** of `discount`, `unitPrice` or `grossUnitPrice` is priced from that list
+   price at discount 0 — `unitPrice = listPrice`, amounts derived (step 5) — as the form does when
+   "Precio" is typed with no discount. It used to persist a free line: the defaults cascade, which
+   `etendo_create` runs before the pre-hook, publishes the product selector's price as `unitPrice`
+   (0 — the selector has no price-list context), `McpLinePriceInjector` leaves it (the agent chose a
+   list price), and `SL_Order_Amt` derives `discount = (listPrice − 0) / listPrice = 100` from it;
+   `discount` is not a key the agent sent, so the cascade may write it, and step 1's
+   `applyClientListPrice` then applied the list price at 100 %. Before step 1 prices the line,
+   `OrderLineCreateDiscount.resetCascadeDiscount` puts the discount back to 0. It reads the agent's
+   own keys (`NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`, set only by `etendo_create`), so it never
+   fires on REST, REST batch, `etendo_batch` or the form, and abstains when the agent sent
+   `discount` (an explicit 100 % stays 100), a price (ETP-5852 still derives its discount), a zero
+   list price, or when the body already holds a non-zero `unitPrice`
+   (`qualifiesForCascadeDiscountReset`). Over MCP it also covers `purchase-order/lines`.
+
+   **`discount` is governed on an MCP create** (`OrderLineCustomization.governedCreateFields` →
+   `OrderLineCreateDiscount.governsDiscountOnCreate`, ETP-5680 contract) whenever the agent sent
+   `discount` or the reset above applied. The create cascade's proposal for it is `SL_Order_Amt` run
+   on the protected list price against the selector's `unitPrice` 0, never a meaningful value, and
+   the `supersededDefaultsHint` told the agent to "send the callout value instead". Observed before
+   (live pre-QA, build 6f93aad2e, values saved correctly): `listPrice` + `discount 10` →
+   `discount: {sent: 10, callout: 100}`; `discount 20` → `{sent: 20, callout: 100}`; `discount 100` →
+   `{sent: 100, callout: 67}`. Those entries are now dropped. `listPrice` is never governed: its
+   `{sent: 100, callout: 0}` entry is still reported (the hint already calls a callout of 0
+   ignorable). REST, REST batch and `etendo_batch` never report superseded defaults, so nothing
+   changes there.
+
 What the re-fire may write:
 
 - **Protected** (kept as the body has them): every body key except `unitPrice`, a zero
@@ -10860,7 +11059,13 @@ Amounts after the re-fire:
   their pre-hook.
 - A line with no list price is left alone: the callout would discount from 0.
 
-**3. `applyUnitPrice`** (update only, QA reopen CP-9). An update whose patch carries `unitPrice`,
+**3. `applyUnitPrice`** (update only, QA reopen CP-9). **Reached by REST and `etendo_batch` only.**
+On `etendo_update`, `McpLinePriceInjector.applyAgentPriceOnUpdate` (ETP-5852, called by
+`McpToolRouter.handleUpdate` before the pre-hook) treats a lone `unitPrice` as the form's "Precio":
+`listPrice` = the sent value, `unitPrice` = it × (1 − the line's discount/100). This rule then sees
+the price the list and discount already give and abstains — the discount is kept and step 4 derives
+the amounts. That is the accepted product behaviour since ETP-5852; the CP-9 figures below are the
+REST/batch ones. An update whose patch carries `unitPrice`,
 no `discount` key and no explicit gross price, on a line with a list price, where that price is
 **not** the one the line already has — `listPrice × (1 − discount/100)` over the stored line
 overlaid with the patch, within half a cent (`shouldDeriveDiscountFromPrice`). It re-fires
@@ -10943,13 +11148,32 @@ Fernet, list = standard price 18, net list, 21 % VAT, qty 10. `std` = `standardP
 | discount 5 → 0 | 18 / 180 / 217.80 |
 | `orderedQuantity 6` only, at discount 5 | 17.10 / 102.60 / 124.15 (gross derived, step 4) |
 | `tax` only | gross derived at the new rate (step 4) |
-| `unitPrice 16.20` only, from discount 5 | discount 10, 16.20 / 162 / 196.02 (step 3) |
+| `unitPrice 16.20` only, from discount 5 — REST / batch | discount 10, 16.20 / 162 / 196.02 (step 3) |
+| `unitPrice 16.20` only, from discount 5 — `etendo_update` | read as "Precio" (ETP-5852): list 16.20, discount 5 kept, 15.39 / 153.90 / 186.22 (step 4) |
+| `listPrice 20` only, at discount 5 | discount 5 kept, 19 / 190 / 229.90 (step 2, lone list price) |
 | `unitPrice 17.10` only, at discount 5 (the price it already has) | no re-fire; gross derived (step 4) |
 | `discount 5` + `unitPrice 20` | discount 5 kept, 20 kept (the caller's price); gross derived over 20 (step 4) |
 
 QA reopen data (quotation 1000008, Monitor, list 300, 21 % VAT): discount 5 → 20 → `orderedQuantity
 6` gives net 1440 / gross 1742.40; `unitPrice 270` on qty 5 at discount 20 gives discount 10, net
-1350, gross 1633.50.
+1350, gross 1633.50 (REST / batch; see step 3 for MCP). CP-13 (Monitor × 10, list 200, discount
+10): `listPrice 300` alone gives `unitPrice` 270, net 2700, gross 3267, discount 10.
+
+Create-side lone list price (`etendo_create`, Fernet, catalog 44, qty 2, 21 % VAT). Before the
+reset, `{product, orderedQuantity 2, listPrice 100}` persisted discount 100, `unitPrice` 0, net 0,
+gross 0. Live QA after it (local build 6f93aad2e; quotation 1000021, lines 60–100; order
+PV1000071, lines 20–40), `unitPrice` / discount / net / gross:
+
+| case | result |
+|---|---|
+| C-1 `sales-quotation/quotationLine`, C-2 `sales-order/lines`: `listPrice 100` alone | 100 / 0 / 200 / 242, `supersededDefaults` verbatim `{"listPrice":{"sent":100,"callout":0}}` (no `discount` entry) |
+| `listPrice 100` + `discount 10` | 90 / 10 / 180 / 217.80 |
+| `unitPrice 29.70` on list 33 | discount 10 derived (ETP-5852), net 59.40, gross 71.87 |
+| `listPrice 100` + `discount 100` | 0 / 100 / 0 / 0 |
+| no price at all | 44 / 0 / 88 / 106.48 |
+| CP-13 update, `listPrice 300` alone | 270 / 2700 / 3267 |
+| CP-9 update | list 270, discount 20, `unitPrice` 216, net 1296, gross 1568.16 |
+| `orderedQuantity 12` update | net 3240, gross 3920.40 |
 
 `etendo_create` of a product whose price list entry has list price 0 and standard price 50 (QA
 quotations 1000009 by the form, 1000010 by MCP): `listPrice` 50, `unitPrice` 50, `standardPrice` 50
@@ -10980,6 +11204,12 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
   is read-only on both entities (`ETGO_SF_FIELD.IsReadOnly = Y`): `filterWriteRequest` drops
   anything the pre-hook writes there, and `NeoCrudHandler.executeUpdate` derives it with
   `injectCommercialAmounts` exactly as before.
+- **The lone list price rule never fires on the form.** Every UI line write that carries
+  `listPrice` also carries the `unitPrice` computed from it (`computeUnitPriceForPost`), and the
+  inline edit carries `discount` too; the rule needs neither key in the patch.
+- **The create-side lone list price reset never fires on the form.** It needs
+  `ATTR_CLIENT_PROVIDED_FIELDS`, which only `etendo_create` sets; the form creates through REST, and
+  its add-line POST carries `unitPrice` with `listPrice` anyway.
 - **The `listPrice` fill never fires on the form.** The form's add-line POST always carries a
   non-zero `listPrice` for such a product (the standard price, above), and a line the user priced
   at 0 carries `unitPrice 0`.
@@ -11003,13 +11233,10 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
   derives it only from what the patch itself carries.
 - A tax-included price list: `standardPrice` is not filled, and `etendo_create` gets no price from
   `McpLinePriceInjector` either, so the rule usually abstains (no list price).
-- `etendo_create` with a discount still answers `supersededDefaults: {discount: {sent: 5, callout: 0}}`
-  and its hint, although the discount is now applied. The entry is recorded by the defaults cascade
-  on the router's own context (`McpToolRouter.handleCreate`, reported with
-  `ctx.getSupersededDefaults()`); the customization only receives the hook context, which does not
-  share it, and reaching it would be ETP-5415 plumbing. Declared, not fixed. Update (ETP-5680): the report is now
-  reconciled after the pre-hook and honours `NeoHandler.governedCreateFields` (§4.12.14), so the line customization
-  can silence this entry by declaring `discount`; it has not been wired there.
+- ~~`etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
+  although the discount is applied.~~ **Closed (ETP-5528):** the order-line customization declares
+  `discount` governed on every MCP create that sends it (or whose cascade discount it reset), so the
+  entry is dropped; see "discount is governed on an MCP create" in step 2.
 - **Closed for invoice lines (ETP-5714 follow-up): the price is the list price.** The grid column "Precio" of
   `purchase-invoice/lines` and `sales-invoice/lines` is `listPrice` (`unitPrice` is `grid:false, form:false`); the form edits
   `listPrice` and derives `unitPrice = listPrice × (1 − discount/100)`, so a form line at 50 stores `listPrice 50`. With an explicit
@@ -11833,7 +12060,7 @@ QA case CP-B3: 3 × 1.50, VAT 10 %, `etendo_update {unitPrice: 1.25}` → `listP
 shows Precio 1.39, Subtotal sin descuento 4.17, Descuento 0.42, Subtotal 3.75. Left as before:
 
 - a `unitPrice` within half a cent of the stored `listPrice × (1 − d/100)` — the SPA body, which sends
-  exactly that computed price (same tolerance as `OrderLineDiscountSupport.shouldDeriveDiscountFromPrice`);
+  exactly that computed price (same tolerance as `OrderLineBodyRules.shouldDeriveDiscountFromPrice`);
 - `unitPrice` equal to the list price (the discount rule above applies the discount to it);
 - `d = 100`: there is nothing to work back from, the list price is kept;
 - a stored list price of 0 (legacy line) or a `unitPrice` of 0;

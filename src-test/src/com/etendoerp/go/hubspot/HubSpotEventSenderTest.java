@@ -117,6 +117,28 @@ class HubSpotEventSenderTest {
   }
 
   @Test
+  void aContactWithoutPhoneSendsNone() throws Exception {
+    sender.send(event(HubSpotOutboxStore.ACCOUNT_CREATED, null), NOW);
+
+    JSONObject properties = call("POST", "/crm/v3/objects/contacts/batch/upsert").body()
+        .getJSONArray("inputs").getJSONObject(0).getJSONObject("properties");
+    assertFalse(properties.has("phone"));
+  }
+
+  @Test
+  void theStoredPhoneReachesTheContactWithItsPrefix() throws Exception {
+    PendingEvent event = new PendingEvent("row-3", ACCOUNT, HubSpotOutboxStore.ACCOUNT_CREATED,
+        CLIENT, null, 0, null, "ana@empresa.es", "Ana García López", null, "+34 600123456");
+
+    sender.send(event, NOW);
+
+    JSONObject contact = call("POST", "/crm/v3/objects/contacts/batch/upsert").body()
+        .getJSONArray("inputs")
+        .getJSONObject(0).getJSONObject("properties");
+    assertEquals("+34 600123456", contact.getString("phone"));
+  }
+
+  @Test
   void aReadyDemoDatesTheTrialAndCreatesTheDealWithItsCompany() throws Exception {
     when(trials.find(CLIENT, NOW)).thenReturn(Optional.of(new DemoTrials.Trial(
         Instant.parse("2026-10-15T09:00:00Z"), Instant.parse("2026-10-29T09:00:00Z"), false)));
