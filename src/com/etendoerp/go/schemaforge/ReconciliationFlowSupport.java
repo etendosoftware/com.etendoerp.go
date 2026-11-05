@@ -33,6 +33,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
@@ -396,17 +397,51 @@ final class ReconciliationFlowSupport {
    * redirected to its remainder, so a batch carrying both the head and the remainder names one row
    * twice. The ids of the accepted groups' lines are tracked, and a later group landing on one of
    * them is rejected (409) before anything is matched.
+   *
+   * @param handler    the reconciliation handler
+   * @param account    the account of the call
+   * @param groupsJson the submitted groups
+   * @param prepared   the groups that passed, appended to
+   * @param results    the per-group failures, appended to
+   * @throws Exception when a group cannot be prepared
    */
   static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results)
       throws Exception {
-    Set<String> takenLineIds = new HashSet<>();
+    prepareAllGroups(handler, account, groupsJson, prepared, results, new HashSet<>(),
+        BankBounceSuggestionsFlag.isEnabled());
+  }
+
+  /**
+   * {@link #prepareAllGroups(ReconciliationHandler, FIN_FinancialAccount, JSONArray, List,
+   * JSONArray)} against lines an earlier step of the same call already took (ETP-5581: the lines
+   * of the bounce pairs {@code applySuggestions} discarded first). The
+   * {@code {kind:"bouncePair"}} groups are skipped here — that earlier step answered them — and a
+   * group of any other {@code kind} than {@code "transaction"} is refused (400); a group with no
+   * {@code kind} is a transaction group, as before.
+   *
+   * @param handler          the reconciliation handler
+   * @param account          the account of the call
+   * @param groupsJson       the submitted groups
+   * @param prepared         the groups that passed, appended to
+   * @param results          the per-group failures, appended to
+   * @param takenLineIds     the lines already taken in this call, updated with every accepted group
+   * @param discardsHonoured whether discarded lines are honoured: {@code bank-bounce-suggestions}
+   *                         as {@code applySuggestions} evaluated it, once for the whole call
+   * @throws Exception when a group cannot be prepared
+   */
+  static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
+      JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results,
+      Set<String> takenLineIds, boolean discardsHonoured) throws Exception {
     for (int i = 0; i < groupsJson.length(); i++) {
       JSONObject groupEntry = groupsJson.optJSONObject(i);
-      if (groupEntry == null) {
+      if (groupEntry == null || BankBouncePairService.isBouncePairGroup(groupEntry)) {
         continue;
       }
-      NeoResponse prepError = prepareGroup(handler, account, groupEntry, prepared, takenLineIds);
+      String kind = groupEntry.optString(BankBounceSuggestions.KEY_KIND, "");
+      NeoResponse prepError = kind.isEmpty() || BankBounceSuggestions.KIND_TRANSACTION.equals(kind)
+          ? prepareGroup(handler, account, groupEntry, prepared, takenLineIds, discardsHonoured)
+          : NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Unsupported group kind: " + kind);
       if (prepError != null) {
         JSONObject failure = prepError.getBody();
         if (failure != null && !failure.has(ReconciliationHandler.KEY_STATEMENT_LINE_ID)) {
@@ -418,9 +453,23 @@ final class ReconciliationFlowSupport {
     }
   }
 
+  /**
+   * Validates one transaction group of {@code applySuggestions} and, when it passes, appends it to
+   * {@code out} and its line to {@code takenLineIds}.
+   *
+   * @param handler          the reconciliation handler
+   * @param account          the account of the call
+   * @param groupEntry       the submitted group
+   * @param out              the groups that passed, appended to
+   * @param takenLineIds     the lines already taken in this call, updated on success
+   * @param discardsHonoured whether discarded lines are honoured: {@code bank-bounce-suggestions}
+   *                         as {@code applySuggestions} evaluated it, once for the whole call
+   * @return the refusal, or {@code null} when the group was prepared
+   * @throws Exception when the group cannot be prepared
+   */
   static NeoResponse prepareGroup(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONObject groupEntry, List<ReconciliationHandler.PreparedGroup> out,
-      Set<String> takenLineIds) throws Exception {
+      Set<String> takenLineIds, boolean discardsHonoured) throws Exception {
     String statementLineId = groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, null);
     if (StringUtils.isBlank(statementLineId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "statementLineId is required");
@@ -440,7 +489,7 @@ final class ReconciliationFlowSupport {
     // to its pending remainder, a stuck line is freed first, a draft-held or fully reconciled one is
     // refused — plus the batch-only rule: an effective line already taken by an accepted group.
     ReconciliationLineTargetSupport.Target target =
-        resolveGroupLine(handler, requested, statementLineId, takenLineIds);
+        resolveGroupLine(handler, requested, statementLineId, takenLineIds, discardsHonoured);
     if (target.error() != null) {
       return target.error();
     }
@@ -448,31 +497,26 @@ final class ReconciliationFlowSupport {
     // ETP-5121: same rule the manual path applies. Reached only by a client applying a STALE
     // preview - the statement was reactivated between autoMatch and applySuggestions - or by a
     // direct API call, since loadPendingLines no longer proposes a draft statement's lines at all.
-    // It MUST stay above createTransactionForRule below: that call persists a transaction, and a
-    // NeoResponse.error returned afterwards still commits it, leaving an orphan movement per
-    // rejected group. prepareAllGroups stamps statementLineId onto the failure, so the message
-    // does not repeat it.
+    // It MUST stay above withRuleTransaction below: its createTransactionForRule persists a
+    // transaction, and a NeoResponse.error returned afterwards still commits it, leaving an orphan
+    // movement per rejected group. prepareAllGroups stamps statementLineId onto the failure, so the
+    // message does not repeat it.
     if (ReconciliationSupport.isOnDraftStatement(line)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT);
     }
-
-    List<String> operationIds = readOperationIds(groupEntry);
+    // ETP-5581 toggle point: with bank-bounce-suggestions on, a line excluded by a
+    // BankStatementLineFilterHook (PSD2's discarded lines) is never reconciled; off, it answers
+    // null. Above withRuleTransaction for the same reason as the draft guard.
+    NeoResponse discarded = StatementLineFilter.discardedLineError(discardsHonoured, line,
+        Usage.AUTO_MATCH_CANDIDATES);
+    if (discarded != null) {
+      return discarded;
+    }
 
     // When a rule group requires creating a new transaction, do that first.
-    JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
-    if (createPaymentSpec != null && StringUtils.isNotBlank(createPaymentSpec.optString("glItemId", null))) {
-      String newTxnId = handler.createTransactionForRule(account, line, createPaymentSpec);
-      if (StringUtils.isNotBlank(newTxnId)) {
-        operationIds = new ArrayList<>(operationIds);
-        operationIds.add(newTxnId);
-        // Increment the rule's matchCount.
-        String ruleId = createPaymentSpec.optString("ruleId", null);
-        if (StringUtils.isNotBlank(ruleId)) {
-          AutoMatchSupport.incrementMatchCount(ruleId);
-        }
-      }
-    }
+    List<String> operationIds =
+        withRuleTransaction(handler, account, line, groupEntry, readOperationIds(groupEntry));
 
     if (operationIds.isEmpty()) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -507,20 +551,66 @@ final class ReconciliationFlowSupport {
   }
 
   /**
+   * Creates the transaction a rule group asks for and appends it to the group's operations. A group
+   * asks for one with a {@code createPayment} spec carrying a {@code glItemId}; when the handler
+   * creates it, its id is appended to a copy of {@code operationIds} and the rule's
+   * {@code matchCount} is incremented (when the spec names a {@code ruleId}). Split out of
+   * {@link #prepareGroup} to keep it under Sonar java:S3776.
+   *
+   * @param handler      the reconciliation handler
+   * @param account      the account of the call
+   * @param line         the effective statement line of the group
+   * @param groupEntry   the submitted group
+   * @param operationIds the operations the group submitted
+   * @return {@code operationIds} plus the new transaction id when one was created, otherwise
+   *         {@code operationIds} itself
+   * @throws Exception when the rule transaction cannot be created
+   */
+  private static List<String> withRuleTransaction(ReconciliationHandler handler,
+      FIN_FinancialAccount account, FIN_BankStatementLine line, JSONObject groupEntry,
+      List<String> operationIds) throws Exception {
+    JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
+    if (createPaymentSpec == null
+        || StringUtils.isBlank(createPaymentSpec.optString("glItemId", null))) {
+      return operationIds;
+    }
+    String newTxnId = handler.createTransactionForRule(account, line, createPaymentSpec);
+    if (StringUtils.isBlank(newTxnId)) {
+      return operationIds;
+    }
+    List<String> withNewTxn = new ArrayList<>(operationIds);
+    withNewTxn.add(newTxnId);
+    // Increment the rule's matchCount.
+    String ruleId = createPaymentSpec.optString("ruleId", null);
+    if (StringUtils.isNotBlank(ruleId)) {
+      AutoMatchSupport.incrementMatchCount(ruleId);
+    }
+    return withNewTxn;
+  }
+
+  /**
    * {@link ReconciliationLineTargetSupport#resolveForMatch} for one {@code applySuggestions} group,
    * refusing an effective line an earlier accepted group of the same batch already took (409, the
    * same message as any other already-reconciled group). The duplicate check reads only ids, and a
    * line in {@code takenLineIds} is already pending, so the usual duplicates (the same id twice, or
    * a partial head plus its remainder) reach this refusal without any heal. Split out of
    * {@link #prepareGroup} to keep it under Sonar java:S3776.
+   *
+   * @param handler          the reconciliation handler
+   * @param requested        the requested line, owned by the account
+   * @param statementLineId  its id as requested
+   * @param takenLineIds     the lines already taken in this call
+   * @param discardsHonoured whether discarded lines are honoured, as the call evaluated the flag
+   * @return the line to operate on, or the refusal
+   * @throws Exception when the line cannot be resolved
    */
   private static ReconciliationLineTargetSupport.Target resolveGroupLine(
       ReconciliationHandler handler, FIN_BankStatementLine requested, String statementLineId,
-      Set<String> takenLineIds) throws Exception {
+      Set<String> takenLineIds, boolean discardsHonoured) throws Exception {
     String conflictMessage = ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED + ": "
         + statementLineId;
-    ReconciliationLineTargetSupport.Target target =
-        ReconciliationLineTargetSupport.resolveForMatch(handler, requested, conflictMessage);
+    ReconciliationLineTargetSupport.Target target = ReconciliationLineTargetSupport
+        .resolveForMatch(handler, requested, conflictMessage, discardsHonoured);
     if (target.error() == null && takenLineIds.contains(target.line().getId())) {
       return ReconciliationLineTargetSupport.Target.failed(
           NeoResponse.error(HttpServletResponse.SC_CONFLICT, conflictMessage));

@@ -65,8 +65,9 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
  * <p><b>No record identifier ever leaves this class</b> (PM legal rule): the only id is the tenant
  * as {@code account_id}. Sending happens on one bounded background thread, so neither a slow
  * Mixpanel nor a large import makes a save wait; when the queue is full the event is dropped
- * (telemetry is best-effort and has no retry or de-duplication — {@code NeoTelemetryService}
- * sends each event once and carries no event id).</p>
+ * (telemetry is best-effort and has no retry — {@code NeoTelemetryService} sends each event
+ * once; since ETP-5581 the Mixpanel sink adds a random {@code $insert_id} to every event, so
+ * Mixpanel drops a duplicate submission of the same emission).</p>
  *
  * <p>Writes that do not go through NEO's contact CRUD emit nothing: SQL data-fixes, the demo-data
  * copy, onboarding sample data.</p>

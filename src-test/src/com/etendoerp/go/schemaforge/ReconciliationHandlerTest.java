@@ -18,12 +18,14 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -67,7 +69,6 @@ import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Criterion;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -90,7 +91,6 @@ import org.openbravo.base.model.Property;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -137,9 +137,19 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  *   <li>reconcileGroup with explicit conversion (ETP-5657): end to end through the handler — the
  *       payment carries the stated transaction amount and its reproducing rate, and the usual tail
  *       closes the line, leaves a pending remainder, or posts a within-tolerance difference.</li>
+ *   <li>Discarded lines (ETP-5581, honoured only with {@code bank-bounce-suggestions} on): with
+ *       the flag on, pendingLines leaves the lines a {@code BankStatementLineFilterHook} excludes
+ *       out and counts them in {@code counts.discarded}, and {@code status=discarded} lists them
+ *       alone with their {@code bounceLink}; with the flag off they are plain pending lines, there
+ *       is no {@code counts.discarded} and {@code status=discarded} is ignored — also with a real
+ *       hook deployed, which is then never asked; a matched line counts as reconciled even when
+ *       PSD2 flags it discarded; loadPendingLines appends the hooks' {@code AUTO_MATCH_CANDIDATES}
+ *       condition to its tenant-filtered OBQuery only with the flag on.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
+ * @covers com.etendoerp.go.schemaforge.StatementLineFilter
+ * @covers com.etendoerp.go.schemaforge.ReactivationSupport
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationHandlerTest {
@@ -504,7 +514,11 @@ public class ReconciliationHandlerTest {
     doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class)) {
+      // The payload asserted below is the one from before ETP-5581: pinned off, so a local
+      // Openbravo.properties or -D override that turns bank-bounce-suggestions on cannot change it.
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubConnection(dal, ps, rs);
@@ -1115,7 +1129,11 @@ public class ReconciliationHandlerTest {
     // seam so it does not consume the shared rs.next() sequence reserved for the main query.
     doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class)) {
+      // State and counts from before ETP-5581: pinned off, so a local Openbravo.properties or -D
+      // override that turns bank-bounce-suggestions on cannot add the bounce/discarded keys.
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(false);
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubConnection(dal, ps, rs);
@@ -1152,6 +1170,447 @@ public class ReconciliationHandlerTest {
       assertEquals(2, counts.getInt("all"));
       assertEquals(2, counts.getInt("pending"));
     }
+  }
+
+  // ── buildPendingLines: discarded lines (ETP-5581, gated by bank-bounce-suggestions) ──
+
+  /** DAL property names the mocked model answers for the bounce link columns. */
+  private static final String PROP_PAIR_LINE = "etgoBouncePairLine";
+  private static final String PROP_DISCARDED_AT = "etgoBounceDiscarded";
+  private static final String PROP_SIGNAL = "etgoBounceSignal";
+  private static final String PROP_CONFIDENCE = "etgoBounceConfidence";
+
+  /**
+   * Runs {@code buildPendingLines} over three pending rows {@code l1} (100.00), {@code l2} (-30.00)
+   * and {@code l3} (-20.00), with {@code excluded} as what the {@code BankStatementLineFilterHook}s
+   * exclude for {@code MATCH_STATEMENT_GRID} and the bounce flag in {@code flagOn}. The bounce
+   * detector finds no pair, so with the flag on only the flag's own keys can appear.
+   *
+   * @param excluded the ids the hooks exclude
+   * @param flagOn   whether {@code bank-bounce-suggestions} is on for the request
+   * @param filters  the request filters ({@code status=discarded} lists the excluded lines)
+   * @param lineSetup extra stubbing on the three line mocks, by id
+   * @return the envelope's {@code data}
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  private JSONObject runPendingLinesWithDiscarded(Set<String> excluded, boolean flagOn,
+      Map<String, String> filters, Map<String, FIN_BankStatementLine> lineSetup) throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true, true, true, false);
+    when(rs.getString("fin_bankstatementline_id")).thenReturn("l1", "l2", "l3");
+    when(rs.getTimestamp("datetrx")).thenReturn(null);
+    when(rs.getString("description")).thenReturn("D1", "D2", "D3");
+    when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("100.00"),
+        new BigDecimal("-30.00"), new BigDecimal("-20.00"));
+    when(rs.getString("line_status")).thenReturn("PENDING", "PENDING", "PENDING");
+    when(rs.getString("partner_name")).thenReturn("", "", "");
+    when(rs.getString("reference_no")).thenReturn("", "", "");
+    when(rs.getString("match_group_id")).thenReturn("", "", "");
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    when(account.getMatchingAlgorithm()).thenReturn(null);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil =
+            mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<ModelProvider> model = mockStatic(ModelProvider.class);
+        MockedStatic<StatementLineFilter> filter =
+            mockStatic(StatementLineFilter.class, CALLS_REAL_METHODS);
+        MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class);
+        MockedStatic<BankBounceDetector> detector =
+            mockStatic(BankBounceDetector.class, CALLS_REAL_METHODS)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubConnection(dal, ps, rs);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.singletonList(mock(FIN_Reconciliation.class)));
+      stubBounceLinkColumns(model);
+      filter.when(() -> StatementLineFilter.excludedLineIds(account,
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage
+              .MATCH_STATEMENT_GRID)).thenReturn(excluded);
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
+      detector.when(() -> BankBounceDetector.detectQuietly(any(), any(), anyInt()))
+          .thenReturn(Collections.emptyList());
+      List<FIN_BankStatementLine> dalLines = new ArrayList<>();
+      for (String id : Arrays.asList("l1", "l2", "l3")) {
+        FIN_BankStatementLine line = lineSetup.containsKey(id) ? lineSetup.get(id)
+            : mock(FIN_BankStatementLine.class);
+        when(line.getId()).thenReturn(id);
+        when(line.getDescription()).thenReturn("D");
+        when(line.getReferenceNo()).thenReturn("");
+        when(line.getBpartnername()).thenReturn("");
+        dalLines.add(line);
+      }
+      // status=discarded reads the listed lines in one query (StatementLineFilter.linesById).
+      @SuppressWarnings("unchecked")
+      org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> linesQuery =
+          mock(org.openbravo.dal.service.OBQuery.class);
+      when(linesQuery.list()).thenReturn(dalLines);
+      when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(linesQuery);
+
+      NeoResponse response = handler.buildPendingLines(ACC_ID, CLIENT_ID,
+          new HashSet<>(Arrays.asList(ORG_ID)), filters);
+
+      // The exclusion stub is keyed by this account and MATCH_STATEMENT_GRID: any other argument
+      // falls through to the real method, which finds no hook and excludes nothing.
+      assertEquals(200, response.getHttpStatus());
+      // ETP-5581: the flag is read once for the whole request and handed down.
+      flag.verify(BankBounceSuggestionsFlag::isEnabled, times(1));
+      return response.getBody().getJSONObject("response").getJSONObject("data");
+    }
+  }
+
+  /** Maps the four {@code EM_ETGO_Bounce_*} link columns to DAL properties on a mocked model. */
+  private static void stubBounceLinkColumns(MockedStatic<ModelProvider> model) {
+    ModelProvider provider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    model.when(ModelProvider::getInstance).thenReturn(provider);
+    when(provider.getEntity(FIN_BankStatementLine.ENTITY_NAME)).thenReturn(entity);
+    Map<String, String> columns = new HashMap<>();
+    columns.put(BankBouncePairService.COL_PAIR_LINE, PROP_PAIR_LINE);
+    columns.put(BankBouncePairService.COL_DISCARDED_AT, PROP_DISCARDED_AT);
+    columns.put(BankBouncePairService.COL_SIGNAL, PROP_SIGNAL);
+    columns.put(BankBouncePairService.COL_CONFIDENCE, PROP_CONFIDENCE);
+    for (Map.Entry<String, String> column : columns.entrySet()) {
+      Property property = mock(Property.class);
+      when(property.getName()).thenReturn(column.getValue());
+      when(entity.getPropertyByColumnName(column.getKey(), false)).thenReturn(property);
+    }
+  }
+
+  /**
+   * The ids of the rows.
+   *
+   * @param rows the rows
+   * @return their ids
+   * @throws Exception when a row cannot be read
+   */
+  private static Set<String> ids(JSONArray rows) throws Exception {
+    Set<String> ids = new HashSet<>();
+    for (int i = 0; i < rows.length(); i++) {
+      ids.add(rows.getJSONObject(i).getString("id"));
+    }
+    return ids;
+  }
+
+  /**
+   * With {@code bank-bounce-suggestions} off the panel is the one from before ETP-5581: a line a
+   * {@code BankStatementLineFilterHook} would exclude (PSD2's discarded lines) is a plain pending
+   * line, in {@code lines}, {@code total} and the state counts, with no {@code discarded} state
+   * and no {@code counts.discarded}. The hooks are not even asked.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesWithTheFlagOffListsTheDiscardedLinesAsPending() throws Exception {
+    JSONObject data = runPendingLinesWithDiscarded(Collections.singleton("l2"), false,
+        Collections.emptyMap(), Collections.emptyMap());
+
+    JSONArray lines = data.getJSONArray("lines");
+    assertEquals(new HashSet<>(Arrays.asList("l1", "l2", "l3")), ids(lines));
+    assertEquals(0, new BigDecimal("50.00").compareTo(new BigDecimal(data.getString("total"))));
+    JSONObject counts = data.getJSONObject("counts");
+    assertEquals(3, counts.getInt("all"));
+    assertEquals(3, counts.getInt("pending"));
+    assertFalse(counts.has(StatementLineDiscard.KEY_DISCARDED));
+    for (int i = 0; i < lines.length(); i++) {
+      assertEquals("pending", lines.getJSONObject(i).getString("state"));
+      assertFalse(lines.getJSONObject(i).has(StatementLineDiscard.KEY_DISCARDED));
+    }
+    assertEquals(1, data.getInt("draftReconciliationCount"));
+  }
+
+  /**
+   * With {@code bank-bounce-suggestions} off, {@code status=discarded} is not honoured: it is
+   * ignored like any other status value and the default answer comes back, discarded lines
+   * included as pending.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesWithTheFlagOffIgnoresStatusDiscarded() throws Exception {
+    Map<String, String> filters = new HashMap<>();
+    filters.put("status", StatementLineFilter.STATUS_DISCARDED);
+
+    JSONObject data = runPendingLinesWithDiscarded(new HashSet<>(Arrays.asList("l2", "l3")),
+        false, filters, Collections.emptyMap());
+
+    assertEquals(new HashSet<>(Arrays.asList("l1", "l2", "l3")), ids(data.getJSONArray("lines")));
+    JSONObject counts = data.getJSONObject("counts");
+    assertEquals(3, counts.getInt("all"));
+    assertFalse(counts.has(StatementLineDiscard.KEY_DISCARDED));
+  }
+
+  /**
+   * With {@code bank-bounce-suggestions} on, the lines a {@code BankStatementLineFilterHook}
+   * excludes (PSD2's discarded lines) are left out of {@code lines}, {@code total} and every state
+   * count, and counted in {@code counts.discarded} alone; only the flag's own key
+   * ({@code counts.bounce}) is added.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesLeavesTheDiscardedLinesOutWithTheBounceFlagOnToo() throws Exception {
+    JSONObject data = runPendingLinesWithDiscarded(Collections.singleton("l2"), true,
+        Collections.emptyMap(), Collections.emptyMap());
+
+    assertEquals(new HashSet<>(Arrays.asList("l1", "l3")), ids(data.getJSONArray("lines")));
+    assertEquals(0, new BigDecimal("80.00").compareTo(new BigDecimal(data.getString("total"))));
+    JSONObject counts = data.getJSONObject("counts");
+    assertEquals(2, counts.getInt("all"));
+    assertEquals(2, counts.getInt("pending"));
+    assertEquals(1, counts.getInt(StatementLineDiscard.KEY_DISCARDED));
+    assertEquals("no pair was detected", 0, counts.getInt(BankBounceSuggestions.STATE_BOUNCE));
+    verify(handler).loadPendingLines(eq(ACC_ID), eq(true));
+  }
+
+  /**
+   * With the flag off the panel is what it was before ETP-5581: no bounce detection runs (the
+   * Automatch candidates are not even loaded), no {@code bounce} state or count, and no row carries
+   * a {@code bouncePair} annotation or a {@code kind}, and no {@code counts.discarded}.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesWithTheBounceFlagOffIsUnchanged() throws Exception {
+    JSONObject data = runPendingLinesWithDiscarded(Collections.emptySet(), false,
+        Collections.emptyMap(), Collections.emptyMap());
+
+    JSONArray lines = data.getJSONArray("lines");
+    assertEquals(new HashSet<>(Arrays.asList("l1", "l2", "l3")), ids(lines));
+    JSONObject counts = data.getJSONObject("counts");
+    assertFalse(counts.has(BankBounceSuggestions.STATE_BOUNCE));
+    assertFalse(counts.has(StatementLineDiscard.KEY_DISCARDED));
+    assertEquals(3, counts.getInt("pending"));
+    for (int i = 0; i < lines.length(); i++) {
+      JSONObject row = lines.getJSONObject(i);
+      assertFalse(row.has(BankBounceSuggestions.KEY_BOUNCE_PAIR));
+      assertFalse(row.has(BankBounceSuggestions.KEY_KIND));
+      assertFalse(row.has(StatementLineDiscard.KEY_DISCARDED));
+      assertEquals("pending", row.getString("state"));
+    }
+    assertEquals(0, new BigDecimal("50.00").compareTo(new BigDecimal(data.getString("total"))));
+    verify(handler, never()).loadPendingLines(any(), anyBoolean());
+  }
+
+  /**
+   * With {@code bank-bounce-suggestions} on, {@code status=discarded} answers with the discarded
+   * lines alone, each marked {@code state/status = discarded} with nothing reconciled, and its
+   * {@code bounceLink}: the pair it was discarded with, or {@code null} for a line discarded on its
+   * own.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesStatusDiscardedListsOnlyThemWithTheirBounceLink() throws Exception {
+    FIN_BankStatementLine paired = mock(FIN_BankStatementLine.class);
+    FIN_BankStatementLine counterpart = mock(FIN_BankStatementLine.class);
+    when(counterpart.getId()).thenReturn("l-orig");
+    when(paired.get(PROP_PAIR_LINE)).thenReturn(counterpart);
+    when(paired.get(PROP_DISCARDED_AT)).thenReturn(new Date(0L));
+    when(paired.get(PROP_SIGNAL)).thenReturn("return_text");
+    when(paired.get(PROP_CONFIDENCE)).thenReturn("high");
+    Map<String, FIN_BankStatementLine> setup = new HashMap<>();
+    setup.put("l2", paired);
+    Map<String, String> filters = new HashMap<>();
+    filters.put("status", StatementLineFilter.STATUS_DISCARDED);
+
+    JSONObject data = runPendingLinesWithDiscarded(new HashSet<>(Arrays.asList("l2", "l3")),
+        true, filters, setup);
+
+    JSONArray lines = data.getJSONArray("lines");
+    assertEquals(new HashSet<>(Arrays.asList("l2", "l3")), ids(lines));
+    assertEquals(0, new BigDecimal("-50.00").compareTo(new BigDecimal(data.getString("total"))));
+    JSONObject counts = data.getJSONObject("counts");
+    assertEquals(2, counts.getInt(StatementLineFilter.STATUS_DISCARDED));
+    assertEquals("only the discarded count", 1, counts.length());
+    assertEquals(1, data.getInt("draftReconciliationCount"));
+    for (int i = 0; i < lines.length(); i++) {
+      JSONObject row = lines.getJSONObject(i);
+      assertEquals("discarded", row.getString("state"));
+      assertEquals("discarded", row.getString("status"));
+      assertTrue(row.getBoolean(StatementLineDiscard.KEY_DISCARDED));
+      assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(row.getString("reconciledAmount"))));
+      assertTrue(row.has(StatementLineFilter.KEY_BOUNCE_LINK));
+      if ("l2".equals(row.getString("id"))) {
+        JSONObject link = row.getJSONObject(StatementLineFilter.KEY_BOUNCE_LINK);
+        assertEquals("l-orig", link.getString(BankBouncePairService.KEY_COUNTERPART_LINE_ID));
+        assertEquals("return_text", link.getString("signal"));
+        assertEquals("high", link.getString("confidence"));
+        assertFalse(link.isNull("discardedAt"));
+      } else {
+        assertTrue("a line discarded alone has no link",
+            row.isNull(StatementLineFilter.KEY_BOUNCE_LINK));
+      }
+    }
+  }
+
+  /** The contexts the deployed hook of {@link #runPendingLinesWithARealHook} was asked with. */
+  private final List<org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext>
+      realHookContexts = new ArrayList<>();
+  /** The HQL of the excluded-lines query {@link #runPendingLinesWithARealHook} saw, if any. */
+  private final List<String> excludedLinesHql = new ArrayList<>();
+
+  /**
+   * Runs {@code buildPendingLines} with the REAL {@link StatementLineFilter} and one deployed
+   * {@code BankStatementLineFilterHook}, over three rows: {@code l1} pending, {@code l2} pending and
+   * PSD2-discarded, {@code l3} RECONCILED (matched) although PSD2-discarded too. The database
+   * answers the excluded-lines query as it would: only the UNMATCHED discarded line, {@code l2}.
+   *
+   * @param flagOn  whether {@code bank-bounce-suggestions} is on for the request
+   * @param filters the request filters
+   * @return the envelope's {@code data}
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @SuppressWarnings("unchecked")
+  private JSONObject runPendingLinesWithARealHook(boolean flagOn, Map<String, String> filters)
+      throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true, true, true, false);
+    when(rs.getString("fin_bankstatementline_id")).thenReturn("l1", "l2", "l3");
+    when(rs.getTimestamp(anyString())).thenReturn(null);
+    when(rs.getString("description")).thenReturn("D1", "D2", "D3");
+    when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("100.00"),
+        new BigDecimal("-30.00"), new BigDecimal("-20.00"));
+    when(rs.getString("line_status")).thenReturn("PENDING", "PENDING", "RECONCILED");
+    when(rs.getString("partner_name")).thenReturn("", "", "");
+    when(rs.getString("reference_no")).thenReturn("", "", "");
+    when(rs.getString("match_group_id")).thenReturn("", "", "");
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    when(account.getMatchingAlgorithm()).thenReturn(null);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
+    org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+        (alias, context, params) -> {
+          realHookContexts.add(context);
+          return alias + ".etgoTestDiscarded = false";
+        };
+    org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> excludedQuery =
+        mock(org.openbravo.dal.service.OBQuery.class);
+    org.hibernate.query.Query<String> excludedIds = mock(org.hibernate.query.Query.class);
+    when(excludedQuery.createQuery(String.class)).thenReturn(excludedIds);
+    when(excludedIds.list()).thenReturn(Collections.singletonList("l2"));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil =
+            mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<ModelProvider> model = mockStatic(ModelProvider.class);
+        MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+            mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubConnection(dal, ps, rs);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      stubBounceLinkColumns(model);
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+          .thenReturn(Collections.singletonList(hook));
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
+      when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenAnswer(inv -> {
+        excludedLinesHql.add(inv.getArgument(1));
+        return excludedQuery;
+      });
+      for (String id : Arrays.asList("l1", "l2", "l3")) {
+        FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+        when(line.getId()).thenReturn(id);
+        when(line.getDescription()).thenReturn("D");
+        when(line.getReferenceNo()).thenReturn("");
+        when(line.getBpartnername()).thenReturn("");
+        when(dal.get(FIN_BankStatementLine.class, id)).thenReturn(line);
+      }
+
+      NeoResponse response = handler.buildPendingLines(ACC_ID, CLIENT_ID,
+          new HashSet<>(Arrays.asList(ORG_ID)), filters);
+
+      assertEquals(200, response.getHttpStatus());
+      return response.getBody().getJSONObject("response").getJSONObject("data");
+    }
+  }
+
+  /**
+   * The row with the given id.
+   *
+   * @param rows the rows
+   * @param id   the id
+   * @return the row; fails the test when there is none
+   * @throws Exception when a row cannot be read
+   */
+  private static JSONObject rowById(JSONArray rows, String id) throws Exception {
+    for (int i = 0; i < rows.length(); i++) {
+      if (id.equals(rows.getJSONObject(i).getString("id"))) {
+        return rows.getJSONObject(i);
+      }
+    }
+    throw new AssertionError("no row " + id);
+  }
+
+  /**
+   * Flag off, with a real hook deployed: the hooks are not asked and the database is not queried;
+   * the discarded line is a plain pending line, there is no {@code counts.discarded} and no
+   * {@code discarded} state, and {@code status=discarded} is ignored like any other status.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesWithARealHookAndTheFlagOffAskNoHook() throws Exception {
+    for (Map<String, String> filters : Arrays.asList(Collections.<String, String>emptyMap(),
+        Collections.singletonMap("status", StatementLineFilter.STATUS_DISCARDED))) {
+      realHookContexts.clear();
+      excludedLinesHql.clear();
+
+      JSONObject data = runPendingLinesWithARealHook(false, filters);
+
+      assertTrue("no hook is asked with the flag off", realHookContexts.isEmpty());
+      assertTrue("no excluded-lines query runs", excludedLinesHql.isEmpty());
+      JSONArray lines = data.getJSONArray("lines");
+      assertEquals(new HashSet<>(Arrays.asList("l1", "l2", "l3")), ids(lines));
+      assertEquals("pending", rowById(lines, "l2").getString("state"));
+      JSONObject counts = data.getJSONObject("counts");
+      assertFalse(counts.has(StatementLineDiscard.KEY_DISCARDED));
+      assertEquals(3, counts.getInt("all"));
+      for (int i = 0; i < lines.length(); i++) {
+        assertNotEquals(StatementLineFilter.STATUS_DISCARDED,
+            lines.getJSONObject(i).getString("state"));
+        assertFalse(lines.getJSONObject(i).has(StatementLineDiscard.KEY_DISCARDED));
+      }
+    }
+  }
+
+  /**
+   * Flag on, with a real hook deployed: the hook is asked for {@code MATCH_STATEMENT_GRID}, the
+   * excluded-lines query reads only unmatched lines, so the matched-but-discarded line {@code l3}
+   * shows as reconciled and is NOT in {@code counts.discarded}; only {@code l2} is.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesWithARealHookAndTheFlagOnKeepAMatchedDiscardedLineReconciled()
+      throws Exception {
+    JSONObject data = runPendingLinesWithARealHook(true, Collections.emptyMap());
+
+    assertEquals(1, realHookContexts.size());
+    assertEquals(org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage
+        .MATCH_STATEMENT_GRID, realHookContexts.get(0).getUsage());
+    assertEquals(1, excludedLinesHql.size());
+    assertTrue(excludedLinesHql.get(0), excludedLinesHql.get(0).contains(HQL_UNMATCHED));
+    JSONArray lines = data.getJSONArray("lines");
+    assertEquals(new HashSet<>(Arrays.asList("l1", "l3")), ids(lines));
+    JSONObject l3 = rowById(lines, "l3");
+    assertEquals(ReconciliationHandler.STATUS_RECONCILED, l3.getString("state"));
+    assertEquals(ReconciliationHandler.STATUS_RECONCILED, l3.getString("status"));
+    JSONObject counts = data.getJSONObject("counts");
+    assertEquals(1, counts.getInt(StatementLineDiscard.KEY_DISCARDED));
+    assertEquals(2, counts.getInt("all"));
+    assertEquals(1, counts.getInt(ReconciliationHandler.STATUS_RECONCILED));
   }
 
   // ── createTransactionForRule (T7) ─────────────────────────────────────────────
@@ -1488,7 +1947,8 @@ public class ReconciliationHandlerTest {
     when(line.getDescription()).thenReturn("Transfer");
     when(line.getReferenceNo()).thenReturn("");
     when(line.getTransactionDate()).thenReturn(null);
-    doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Collections.singletonList(line)).when(handler)
+        .loadPendingLines(eq(ACC_ID), anyBoolean());
 
     doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler)
         .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt(), any());
@@ -1545,7 +2005,8 @@ public class ReconciliationHandlerTest {
     when(line.getReferenceNo()).thenReturn("");
     when(line.getBpartnername()).thenReturn("");
     when(line.getTransactionDate()).thenReturn(null);
-    doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Collections.singletonList(line)).when(handler)
+        .loadPendingLines(eq(ACC_ID), anyBoolean());
 
     // No 1:1 standard suggestion.
     doReturn(new HashSet<String>()).when(handler)
@@ -1664,7 +2125,7 @@ public class ReconciliationHandlerTest {
 
     FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
-    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
 
     FIN_FinaccTransaction t1 = autoMatchTxn("t1", "1.00");
     FIN_FinaccTransaction t2 = autoMatchTxn("t2", "1.00");
@@ -1708,7 +2169,7 @@ public class ReconciliationHandlerTest {
     FIN_BankStatementLine l1 = autoMatchLine("l1", "50.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "50.00");
     FIN_BankStatementLine l3 = autoMatchLine("l3", "50.00");
-    doReturn(Arrays.asList(l1, l2, l3)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Arrays.asList(l1, l2, l3)).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
 
     FIN_FinaccTransaction t1 = autoMatchTxn("t1", "50.00");
     FIN_FinaccTransaction t2 = autoMatchTxn("t2", "50.00");
@@ -1758,7 +2219,8 @@ public class ReconciliationHandlerTest {
     FIN_BankStatementLine lUnique = autoMatchLine("lUnique", "30.00");
     FIN_BankStatementLine lDup1 = autoMatchLine("lDup1", "10.00");
     FIN_BankStatementLine lDup2 = autoMatchLine("lDup2", "10.00");
-    doReturn(Arrays.asList(lUnique, lDup1, lDup2)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Arrays.asList(lUnique, lDup1, lDup2)).when(handler)
+        .loadPendingLines(eq(ACC_ID), anyBoolean());
 
     FIN_FinaccTransaction tUnique = autoMatchTxn("tUnique", "30.00");
     FIN_FinaccTransaction tDupA = autoMatchTxn("tDupA", "10.00");
@@ -1816,7 +2278,7 @@ public class ReconciliationHandlerTest {
 
     FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
-    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(ACC_ID);
+    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(eq(ACC_ID), anyBoolean());
 
     FIN_FinaccTransaction t1 = autoMatchTxn("t1", "1.00");
     doReturn(t1).when(handler).loadTransaction("t1");
@@ -2029,138 +2491,231 @@ public class ReconciliationHandlerTest {
     }
   }
 
-  // ── loadPendingLines: the criteria the Automatch is built from (ETP-5121) ────
+  // ── loadPendingLines: the query the Automatch is built from (ETP-5121, ETP-5581) ──
   //
-  // This seam replaced a raw getSession().createQuery(hql) with an OBCriteria (the ETP-4950
-  // pattern), so the old "stub session.createQuery and assert the bound parameter" test is gone:
-  // the method no longer touches getSession() at all, and that test asserted nothing about the
-  // WHERE clause anyway — it would have stayed green through the very regression QA reported.
+  // This seam was a raw getSession().createQuery(hql), then an OBCriteria (the ETP-4950 pattern),
+  // and since ETP-5581 an OBQuery: the BankStatementLineFilterHooks contribute HQL conditions,
+  // which an OBCriteria cannot take. It is still a DAL query, so OBQuery adds the readable-client
+  // and readable-organization filter itself.
   //
-  // What IS observable without a database is the SHAPE of the criteria: the Criterion objects the
-  // handler hands to OBCriteria.add(). Hibernate renders them predictably —
-  // SimpleExpression.toString() is propertyName + op + value ("bs.processed=true") and
-  // NullExpression.toString() is propertyName + " is null" — so the restrictions can be read back
-  // off the captured arguments. Both formats were verified against hibernate-core 5.6.15's
-  // bytecode, and the same technique is already used in UserRoleCompositionServiceTest. If a
-  // Hibernate upgrade ever changes those renderings these two tests fail loudly (wrong string, not
-  // silently green), which is the acceptable failure mode.
+  // What is observable without a database is the HQL handed to OBDal.createQuery and the named
+  // parameters bound to it. These tests read both back off the mocks. No query runs here: list()
+  // is stubbed, so whether the database then excludes a row is outside these tests.
 
-  /** Alias {@code loadPendingLines} joins the parent bank statement under. */
-  private static final String STATEMENT_ALIAS = "bs";
-  /** {@code Restrictions.eq(bs.processed, true)} as Hibernate renders it. */
-  private static final String CRITERION_PROCESSED_GATE =
-      STATEMENT_ALIAS + "." + FIN_BankStatement.PROPERTY_PROCESSED + "=true";
-  /** {@code Restrictions.isNull(financialAccountTransaction)} as Hibernate renders it. */
-  private static final String CRITERION_UNMATCHED =
-      FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION + " is null";
+  /** HQL alias {@code loadPendingLines} gives the statement line. */
+  private static final String LINE_ALIAS = "bsl";
+  /** The {@code processed} gate on the line's statement, as written in the HQL. */
+  private static final String HQL_PROCESSED_GATE =
+      LINE_ALIAS + "." + FIN_BankStatementLine.PROPERTY_BANKSTATEMENT + "."
+          + FIN_BankStatement.PROPERTY_PROCESSED + " = true";
+  /** The unmatched restriction, as written in the HQL. */
+  private static final String HQL_UNMATCHED =
+      LINE_ALIAS + "." + FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION + " is null";
+  /** Condition the test hook contributes, and its named parameter. */
+  private static final String HOOK_CONDITION = "bsl.description <> :hookExcludedText";
+  private static final String HOOK_PARAM = "hookExcludedText";
+  private static final String HOOK_VALUE = "DISCARDED";
 
-  /** The criteria mock the last {@link #capturePendingLinesCriteria} call drove. */
-  private OBCriteria<FIN_BankStatementLine> pendingLinesCriteria;
+  /** The query mock the last {@link #capturePendingLinesHql} call drove. */
+  private org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> pendingLinesQuery;
+  /** The named parameters the last {@link #capturePendingLinesHql} call bound. */
+  private Map<String, Object> pendingLinesParams;
 
   /**
-   * Runs {@code loadPendingLines} against a mocked {@link OBCriteria} and returns every
-   * {@link Criterion} it added, rendered via {@code toString()}. The criteria mock itself is left in
-   * {@link #pendingLinesCriteria} so a caller can verify its other interactions (the joins).
+   * Runs {@code loadPendingLines} against a mocked {@link org.openbravo.dal.service.OBQuery} and
+   * returns the HQL it was built from, whitespace-collapsed. The query mock and its bound named
+   * parameters are kept in {@link #pendingLinesQuery} and {@link #pendingLinesParams}.
    *
-   * <p>These tests cannot go vacuously green if the seam is ever rewritten back to raw HQL: such a
-   * version would never call {@code createCriteria}, so {@code add} would be captured zero times
-   * and the {@code atLeastOnce()} verification would fail rather than trivially pass.
-   *
-   * @param rows what the criteria should return, i.e. the rows the Automatch would receive
-   * @return the rendered restrictions, in the order the handler added them
+   * @param rows             what the query returns, i.e. the rows the Automatch would receive
+   * @param discardsHonoured {@code bank-bounce-suggestions} as the action entry evaluated it
+   * @return the HQL handed to {@code OBDal.createQuery}
    */
   @SuppressWarnings("unchecked")
-  private List<String> capturePendingLinesCriteria(List<FIN_BankStatementLine> rows) {
-    OBCriteria<FIN_BankStatementLine> criteria = mock(OBCriteria.class);
-    pendingLinesCriteria = criteria;
-    List<String> rendered = new ArrayList<>();
+  private String capturePendingLinesHql(List<FIN_BankStatementLine> rows,
+      boolean discardsHonoured) {
+    org.openbravo.dal.service.OBQuery<FIN_BankStatementLine> query =
+        mock(org.openbravo.dal.service.OBQuery.class);
+    pendingLinesQuery = query;
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(criteria);
-      when(criteria.add(any(Criterion.class))).thenReturn(criteria);
-      when(criteria.list()).thenReturn(rows);
+      when(dal.createQuery(eq(FIN_BankStatementLine.class), anyString())).thenReturn(query);
+      when(query.setNamedParameters(any())).thenReturn(query);
+      when(query.list()).thenReturn(rows);
 
-      List<FIN_BankStatementLine> result = handler.loadPendingLines(ACC_ID);
-      assertEquals("the criteria's rows must be returned verbatim", rows.size(), result.size());
+      List<FIN_BankStatementLine> result = handler.loadPendingLines(ACC_ID, discardsHonoured);
+      assertEquals("the query's rows must be returned verbatim", rows.size(), result.size());
 
-      ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
-      verify(criteria, atLeastOnce()).add(captor.capture());
-      for (Criterion criterion : captor.getAllValues()) {
-        rendered.add(criterion.toString());
-      }
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(dal).createQuery(eq(FIN_BankStatementLine.class), hql.capture());
+      ArgumentCaptor<Map<String, Object>> params = ArgumentCaptor.forClass(Map.class);
+      verify(query).setNamedParameters(params.capture());
+      pendingLinesParams = params.getValue();
+      // Never a raw session query: only the DAL query applies the tenant filter by itself.
+      verify(dal, never()).getSession();
+      return hql.getValue().replaceAll("\\s+", " ").trim();
     }
-    return rendered;
+  }
+
+  /** An account mock for the {@code loadAccount} seam of {@code loadPendingLines}. */
+  private FIN_FinancialAccount pendingLinesAccount() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    return account;
   }
 
   /**
    * ETP-5121 (QA round). {@code loadPendingLines} is the ONLY source of lines
    * {@code buildAutoMatch} proposes, and it must not offer a line whose bank statement is still in
-   * DRAFT. Before this change the query had no {@code processed} predicate at all: reactivating a
+   * DRAFT. Before that change the query had no {@code processed} predicate at all: reactivating a
    * statement removed its pending line from the left panel — which gates on it through
-   * {@code PENDING_LINES_SQL} — while the Automatch modal went on suggesting that same line, and
-   * applying the suggestion succeeded. Two independent line-selection paths, one rule; this test
-   * pins the missing half.
+   * {@code PENDING_LINES_SQL} — while the Automatch modal went on suggesting that same line.
    *
-   * <p><b>What this proves:</b> the restriction {@code bs.processed = true} is handed to the DAL,
-   * on the alias joined to the line's own {@code bankStatement}, together with the unmatched
-   * restriction that makes it a "pending" line at all.
-   *
-   * <p><b>What it does NOT prove:</b> that the database then excludes the row. No criteria is ever
-   * executed here — {@code list()} is stubbed — so the mapping from these Criterion objects to SQL,
-   * and the SQL's own behaviour, are outside this test. The criteria shape is the only thing
-   * observable without a database; end-to-end filtering is covered by the QA scenario itself.
+   * <p><b>What this proves:</b> the restriction {@code processed = true} on the line's own
+   * {@code bankStatement} is in the HQL, together with the unmatched restriction that makes it a
+   * "pending" line at all, and the account id is bound as a named parameter.
    */
   @Test
   public void testLoadPendingLinesOnlyProposesLinesOfAProcessedStatement() {
-    List<String> restrictions =
-        capturePendingLinesCriteria(Arrays.asList(mock(FIN_BankStatementLine.class)));
+    pendingLinesAccount();
 
-    assertTrue("the Automatch must not propose a DRAFT statement's lines: expected the restriction "
-            + CRITERION_PROCESSED_GATE + " among " + restrictions,
-        restrictions.contains(CRITERION_PROCESSED_GATE));
-    assertTrue("a proposable line is by definition still unmatched; expected "
-            + CRITERION_UNMATCHED + " among " + restrictions,
-        restrictions.contains(CRITERION_UNMATCHED));
-    // The processed flag lives on the statement, so it is only readable through the join.
-    verify(pendingLinesCriteria)
-        .createAlias(FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, STATEMENT_ALIAS);
+    String hql = capturePendingLinesHql(Arrays.asList(mock(FIN_BankStatementLine.class)), true);
+
+    assertTrue("the Automatch must not propose a DRAFT statement's lines: expected "
+        + HQL_PROCESSED_GATE + " in " + hql, hql.contains(HQL_PROCESSED_GATE));
+    assertTrue("a proposable line is by definition still unmatched; expected " + HQL_UNMATCHED
+        + " in " + hql, hql.contains(HQL_UNMATCHED));
+    assertEquals(ACC_ID, pendingLinesParams.get(StatementLineFilter.PARAM_ACCOUNT_ID));
+    assertTrue("ordered by transaction date then line number; got " + hql,
+        hql.endsWith("order by bsl." + FIN_BankStatementLine.PROPERTY_TRANSACTIONDATE + " asc, bsl."
+            + FIN_BankStatementLine.PROPERTY_LINENO + " asc"));
   }
 
   /**
    * ETP-5121: the already-reconciled exception {@code PENDING_LINES_SQL} carries is deliberately
-   * ABSENT here, and that asymmetry is intentional rather than an oversight.
+   * ABSENT here. The panel's query lets a reconciled line of a reactivated statement through
+   * because it still has to list it under "Conciliadas"; that exception requires a NON-NULL
+   * {@code FIN_FinAcc_Transaction_ID}, which contradicts this query's own unmatched restriction.
+   * This test exists so a future "restore parity with PENDING_LINES_SQL" edit fails loudly.
    *
-   * <p>The panel's query lets a reconciled line of a reactivated statement through because it still
-   * has to list it under "Conciliadas". That exception requires a NON-NULL
-   * {@code FIN_FinAcc_Transaction_ID}, which directly contradicts this query's own
-   * {@code financialAccountTransaction is null} restriction — the intersection is empty, so
-   * repeating it here would add a join and a disjunction that no row could ever satisfy. The
-   * Automatch only ever looks at unmatched lines; a reconciled one has nothing left to suggest.
-   *
-   * <p>This test exists so a future "restore parity with PENDING_LINES_SQL" edit fails loudly
-   * instead of silently adding dead SQL: it asserts no restriction mentions a reconciliation and
-   * none is a disjunction, and that the join count stays at one.
+   * <p>ETP-5581: with no {@code BankStatementLineFilterHook} deployed (none is, without a CDI
+   * container) the query carries no hook condition either: the predicates are the old criteria's.
    */
   @Test
   public void testLoadPendingLinesAddsNoAlreadyReconciledException() {
-    List<String> restrictions = capturePendingLinesCriteria(Collections.emptyList());
+    pendingLinesAccount();
 
-    for (String restriction : restrictions) {
-      assertFalse("no restriction may reference a reconciliation — the unmatched gate already makes "
-              + "the exception unsatisfiable (ETP-5121); got: " + restriction,
-          restriction.toLowerCase(Locale.ROOT).contains("reconciliation"));
-      // Hibernate's Junction renders as "(a or b)"; the exception could only be expressed that way.
-      assertFalse("the processed gate must stay unconditional here, with no OR-ed exception; got: "
-          + restriction, restriction.contains(" or "));
+    String hql = capturePendingLinesHql(Collections.emptyList(), true);
+
+    assertFalse("no predicate may reference a reconciliation (ETP-5121); got: " + hql,
+        hql.toLowerCase(Locale.ROOT).contains("reconciliation"));
+    assertFalse("the processed gate must stay unconditional, with no OR-ed exception; got: " + hql,
+        hql.contains(" or "));
+    assertTrue("the unmatched restriction is the reason the exception is redundant; got: " + hql,
+        hql.contains(HQL_UNMATCHED));
+    assertFalse("no hook is deployed, so no hook condition may be appended; got: " + hql,
+        hql.contains(" and ("));
+    assertEquals("only the account id is bound", Collections.singleton(
+        StatementLineFilter.PARAM_ACCOUNT_ID), pendingLinesParams.keySet());
+  }
+
+  /**
+   * ETP-5581: with {@code bank-bounce-suggestions} on, the condition every
+   * {@code BankStatementLineFilterHook} contributes for {@code AUTO_MATCH_CANDIDATES} is appended
+   * to the query, with its named parameters, so a line PSD2 marks as discarded is never proposed.
+   * The hook is handed the account of the call, and the tenant filter OBQuery applies by default is
+   * never switched off.
+   */
+  @Test
+  public void testLoadPendingLinesAppliesTheLineFilterHookAndKeepsTheTenantFilter() {
+    FIN_FinancialAccount account = pendingLinesAccount();
+    List<org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext> seen = new ArrayList<>();
+    org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+        (alias, context, params) -> {
+          seen.add(context);
+          params.put(HOOK_PARAM, HOOK_VALUE);
+          return HOOK_CONDITION;
+        };
+
+    String hql;
+    try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+        mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+          .thenReturn(Collections.singletonList(hook));
+      hql = capturePendingLinesHql(Collections.emptyList(), true);
     }
-    // The unmatched restriction is what makes the exception unsatisfiable, so it must still be there.
-    assertTrue("the unmatched restriction is the reason the exception is redundant; got: "
-        + restrictions, restrictions.contains(CRITERION_UNMATCHED));
-    // A reconciliation exception would need a second join to read rec.processed through. Only the
-    // two-argument overload is counted — the one the statement join itself uses, and the natural
-    // way such an edit would be written.
-    verify(pendingLinesCriteria, times(1)).createAlias(anyString(), anyString());
+
+    assertTrue("the hook's condition must be appended to the WHERE clause; got " + hql,
+        hql.contains(" and (" + HOOK_CONDITION + ") order by "));
+    assertTrue("the other predicates are kept; got " + hql,
+        hql.contains(HQL_PROCESSED_GATE) && hql.contains(HQL_UNMATCHED));
+    assertEquals(HOOK_VALUE, pendingLinesParams.get(HOOK_PARAM));
+    assertEquals(ACC_ID, pendingLinesParams.get(StatementLineFilter.PARAM_ACCOUNT_ID));
+    assertEquals(1, seen.size());
+    assertEquals(org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage
+        .AUTO_MATCH_CANDIDATES, seen.get(0).getUsage());
+    assertEquals(account, seen.get(0).getAccount());
+    verify(pendingLinesQuery, never()).setFilterOnReadableClients(false);
+    verify(pendingLinesQuery, never()).setFilterOnReadableOrganization(false);
+    verify(pendingLinesQuery, never()).setFilterOnActive(false);
+  }
+
+  /**
+   * ETP-5581: with {@code bank-bounce-suggestions} off a deployed hook adds nothing to the
+   * auto-match candidates: it is not asked, and only the account id is bound.
+   */
+  @Test
+  public void testLoadPendingLinesWithTheFlagOffAsksNoHook() {
+    pendingLinesAccount();
+    AtomicBoolean asked = new AtomicBoolean();
+    org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+        (alias, context, params) -> {
+          asked.set(true);
+          params.put(HOOK_PARAM, HOOK_VALUE);
+          return HOOK_CONDITION;
+        };
+
+    String hql;
+    try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+        mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+          .thenReturn(Collections.singletonList(hook));
+      hql = capturePendingLinesHql(Collections.emptyList(), false);
+    }
+
+    assertFalse(asked.get());
+    assertFalse("no hook condition with the flag off; got " + hql, hql.contains(HOOK_CONDITION));
+    assertTrue(hql.contains(HQL_UNMATCHED) && hql.contains(HQL_PROCESSED_GATE));
+    assertEquals("only the account id is bound", Collections.singleton(
+        StatementLineFilter.PARAM_ACCOUNT_ID), pendingLinesParams.keySet());
+  }
+
+  /** An account the caller does not own resolves to no account: no hook is asked, nothing added. */
+  @Test
+  public void testLoadPendingLinesWithoutAnAccountAppendsNoHookCondition() {
+    doReturn(null).when(handler).loadAccount(ACC_ID);
+    AtomicBoolean asked = new AtomicBoolean();
+    org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook hook =
+        (alias, context, params) -> {
+          asked.set(true);
+          return HOOK_CONDITION;
+        };
+
+    String hql;
+    try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+        mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstances(
+          org.openbravo.advpaymentmngt.hook.BankStatementLineFilterHook.class))
+          .thenReturn(Collections.singletonList(hook));
+      hql = capturePendingLinesHql(Collections.emptyList(), true);
+    }
+
+    assertFalse(asked.get());
+    assertFalse(hql.contains(HOOK_CONDITION));
+    assertTrue(hql.contains(HQL_UNMATCHED));
   }
 
   // ── buildInvoiceCandidates: invoice-mode right panel ──────────────────────────
@@ -3406,7 +3961,8 @@ public class ReconciliationHandlerTest {
     when(trx.getReconciliation()).thenReturn(rec);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, trx);
 
-    List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(line, rec);
+    List<FIN_FinaccTransaction> result =
+        ReactivationSupport.transactionsOfLineIn(handler, line, rec);
 
     assertEquals(1, result.size());
     assertEquals(trx, result.get(0));
@@ -3443,7 +3999,8 @@ public class ReconciliationHandlerTest {
         .when(handler).loadMatchGroupLines(statement, "GRP-1");
 
     try (MockedStatic<ModelProvider> mp = mockMatchGroupProperty()) {
-      List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(anchor, rec);
+      List<FIN_FinaccTransaction> result =
+          ReactivationSupport.transactionsOfLineIn(handler, anchor, rec);
 
       assertEquals(2, result.size());
       assertTrue(result.contains(ownTrx));
@@ -3463,7 +4020,8 @@ public class ReconciliationHandlerTest {
     when(trx.getReconciliation()).thenReturn(otherRec);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, trx);
 
-    List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(line, rec);
+    List<FIN_FinaccTransaction> result =
+        ReactivationSupport.transactionsOfLineIn(handler, line, rec);
 
     assertTrue(result.isEmpty());
   }
