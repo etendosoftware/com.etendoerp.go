@@ -227,11 +227,16 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
     // guarantees streetName+buildingNumber are both present whenever the structured block was used
     // at all (buildingName alone can never reach here).
     if (StringUtils.isNotBlank(effectiveStreetName)) {
+      // ETP-5806 follow-up: a blank buildingNumber with a present street falls back to "s/n" —
+      // same rule the 3 NEO handlers (Contacts/Warehouse/BpLocation) already apply — so the
+      // onboarding path cannot silently persist a street with no building number either.
+      String effectiveBuildingNumber = StructuredAddressComposer.effectiveBuildingNumber(
+          effectiveStreetName, buildingNumber);
       location.setOBSEPAStreetName(effectiveStreetName.trim());
-      location.setOBSEPABuildingNumber(StringUtils.trimToNull(buildingNumber));
+      location.setOBSEPABuildingNumber(StringUtils.trimToNull(effectiveBuildingNumber));
       location.setOBSEPABuildingName(StringUtils.trimToNull(buildingName));
       ComposedAddress composed = StructuredAddressComposer.composeAddressLines(effectiveStreetName,
-          buildingNumber, buildingName);
+          effectiveBuildingNumber, buildingName);
       location.setAddressLine1(composed.getAddress1());
       location.setAddressLine2(composed.getAddress2());
     } else if (StringUtils.isNotBlank(address)) {
