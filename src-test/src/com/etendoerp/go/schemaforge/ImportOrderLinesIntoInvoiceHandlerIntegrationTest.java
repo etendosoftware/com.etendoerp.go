@@ -72,6 +72,8 @@ import org.openbravo.test.base.TestConstants;
  *
  * @covers com.etendoerp.go.schemaforge.ImportInOutLinesIntoInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.ImportOriginInvoiceLinesHandler
+ * @covers com.etendoerp.go.schemaforge.ImportInvoiceLinesIntoInOutHandler
+ * @covers com.etendoerp.go.schemaforge.InOutLineFromOrderFactory
  */
 public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseTest {
 
@@ -111,6 +113,25 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
     for (boolean withCurrency : new boolean[] {false, true}) {
       session.createQuery(ImportOriginInvoiceLinesHandler.candidateInvoicesHql(withCurrency),
           Invoice.class);
+    }
+  }
+
+  /**
+   * ETP-6099: the queries of the invoice import into a shipment / receipt and of the draft-shipment
+   * note resolve against the model. The two draft queries are run (an id no line points at, so the
+   * answer is empty): their HQL is inline, and running it is the only way to parse it.
+   */
+  @Test
+  public void invoiceIntoInOutImportQueriesResolveAgainstTheRealModel() {
+    org.hibernate.Session session = OBDal.getInstance().getSession();
+    for (boolean withCurrency : new boolean[] {false, true}) {
+      session.createQuery(ImportInvoiceLinesIntoInOutHandler.candidateInvoicesHql(withCurrency),
+          Invoice.class);
+    }
+    java.util.Set<String> noLine = java.util.Set.of("ETP6099-NO-SUCH-ORDER-LINE");
+    for (boolean sales : new boolean[] {false, true}) {
+      assertTrue(new ImportInvoiceLinesIntoInOutHandler().draftHoldings(noLine, sales).isEmpty());
+      assertTrue(InOutLineFromOrderFactory.draftDocumentNos(noLine, sales, null).isEmpty());
     }
   }
 

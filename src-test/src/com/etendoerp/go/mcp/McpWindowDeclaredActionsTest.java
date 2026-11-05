@@ -604,7 +604,19 @@ class McpWindowDeclaredActionsTest {
         "sales-invoice     | importOrderLines       | {\"orderId\":\"o\"}     |",
         "sales-invoice     | importShipmentLines    | {\"shipmentId\":\"s\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
         "sales-invoice     | importShipmentLines    | {\"receiptId\":\"s\"}   | receiptId",
-        "sales-invoice     | availableShipments     | {}                    |" })
+        "sales-invoice     | availableShipments     | {}                    |",
+        // ETP-6099: the shared listing parameters, and the invoice import of the goods documents
+        "sales-invoice     | availableShipments     | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "sales-invoice     | availableOrders        | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "purchase-invoice  | availableOrders        | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "purchase-invoice  | availableOrderLines    | {\"orderId\":\"o\",\"includeCovered\":true,\"detail\":true} |",
+        "goods-shipment    | availableInvoices      | {}                    |",
+        "goods-shipment    | availableInvoices      | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "goods-shipment    | availableInvoiceLines  | {\"invoiceId\":\"i\",\"includeCovered\":true} |",
+        "goods-shipment    | availableInvoiceLines  | {}                    | missing:invoiceId",
+        "goods-receipt     | availableInvoices      | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"includeCovered\":true} |",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"orderId\":\"o\"} | orderId" })
     void lineImportActionsAreJudgedByTheirDeclaredContracts(String window, String action,
         String body, String refusal) throws Exception {
       Map<String, NeoActionContract> declared;

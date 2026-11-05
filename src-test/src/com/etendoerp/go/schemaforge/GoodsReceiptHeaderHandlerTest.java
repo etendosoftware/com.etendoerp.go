@@ -1056,8 +1056,8 @@ public class GoodsReceiptHeaderHandlerTest {
         new GoodsReceiptHeaderHandler().actionContracts();
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
-            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord", "post",
-            "unpost"),
+            "importOrderLines", "availableInvoices", "availableInvoiceLines",
+            "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
@@ -1234,6 +1234,53 @@ public class GoodsReceiptHeaderHandlerTest {
 
     assertNull(handler.handle(ctx));
     verify(delegate).handle(ctx);
+  }
+
+  // ── invoice import listing (ETP-6099) ─────────────────────────────────────
+
+  /**
+   * availableInvoices / availableInvoiceLines go to the invoice-import delegate, which is handed
+   * the receipt's own policy on the context: nothing else names the purchase-side rules.
+   */
+  @Test
+  public void handle_dispatchesTheInvoiceListingWithTheReceiptPolicy() throws Exception {
+    ImportInvoiceLinesIntoInOutHandler delegate = mock(ImportInvoiceLinesIntoInOutHandler.class);
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsReceiptHeaderHandler.class.getDeclaredField("importInvoiceLinesHandler");
+    field.setAccessible(true);
+    field.set(handler, delegate);
+    for (String action : new String[] { "availableInvoices", "availableInvoiceLines" }) {
+      NeoContext ctx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName(action).recordId("r1").build();
+      NeoResponse expected = NeoResponse.ok(new JSONObject().put("action", action));
+      when(delegate.handle(ctx)).thenReturn(expected);
+
+      assertSame(action, expected, handler.handle(ctx));
+      assertSame(action, GoodsReceiptHeaderHandler.INVOICE_IMPORT_POLICY,
+          ctx.getAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE));
+    }
+  }
+
+  /**
+   * The receipt's popup rules: invoices with a negative grand total are not offered (a missing
+   * total is), and pending deducts neither the delivered quantity nor this receipt's own draft.
+   */
+  @Test
+  public void invoiceImportPolicy_offersNoNegativeTotal_andDeductsOnlyOtherDrafts() {
+    ImportInvoiceLinesIntoInOutHandler.SourcePolicy policy =
+        GoodsReceiptHeaderHandler.INVOICE_IMPORT_POLICY;
+    Object[][] cases = { { "-0.01", false }, { "0", true }, { "120.50", true }, { null, true } };
+    for (Object[] c : cases) {
+      org.openbravo.model.common.invoice.Invoice invoice =
+          mock(org.openbravo.model.common.invoice.Invoice.class);
+      when(invoice.getGrandTotalAmount()).thenReturn(c[0] == null ? null
+          : new BigDecimal((String) c[0]));
+
+      assertEquals(String.valueOf(c[0]), c[1], policy.offered.test(invoice));
+    }
+    assertFalse("delivered is not deducted on a receipt", policy.deductsDelivered);
+    assertFalse("only OTHER draft receipts are deducted", policy.deductsTargetDraft);
   }
 
   /**

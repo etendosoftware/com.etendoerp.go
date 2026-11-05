@@ -87,12 +87,14 @@ class NeoExtensionParityTest {
   /*
    * A pair still bound by Java_Qualifier, because this gate polices the qualifier fallback. It was
    * sales-order/header until ETP-6026 migrated that pair to @NeoExtension, then purchase-order/
-   * header until ETP-6108 did; goods-receipt/goodsReceipt (GoodsReceiptHeaderHandler) is the
-   * closest sibling still on the legacy binding.
+   * header until ETP-6108 did, then goods-receipt/goodsReceipt until ETP-6099 did;
+   * return-to-vendor-shipment/returnToVendorShipment (ReturnToVendorShipmentHeaderHandler, still
+   * {@code @Named} with its row's Java_Qualifier set) is the closest sibling still on the legacy
+   * binding.
    */
-  private static final String SPEC = "goods-receipt";
-  private static final String ENTITY = "goodsReceipt";
-  private static final String QUALIFIER = "goodsReceiptHeaderHandler";
+  private static final String SPEC = "return-to-vendor-shipment";
+  private static final String ENTITY = "returnToVendorShipment";
+  private static final String QUALIFIER = "returnToVendorShipmentHeaderHandler";
 
   /** Query-param key the differing-work stub branches on; stands in for any per-channel input. */
   private static final String CHANNEL_HINT = "channel";
