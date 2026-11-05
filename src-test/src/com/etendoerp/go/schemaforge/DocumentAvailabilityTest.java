@@ -72,6 +72,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  * @covers com.etendoerp.go.schemaforge.InvoiceDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.ReturnDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.OrderDocActionPolicy
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
  *
  * <p>ETP-5876 adds, per invoice, the import actions that do not suit its kind (see
@@ -209,20 +211,20 @@ class DocumentAvailabilityTest {
 
     @Test
     @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing "
-        + "out — except, on a sales order, every documentAction value but CO on a draft or "
-        + "in-progress order")
+        + "out — except, on a sales or purchase order, every documentAction value but CO on a "
+        + "draft or in-progress order")
     void unlinkedDraftOrOtherRulesNothingOut() throws Exception {
       try (MockedStatic<OBDal> ignored = linkedDocuments(false)) {
         assertTrue(OrderDocumentAvailability.unavailable(order("CO")).isEmpty());
       }
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-        // ETP-5704 / ETP-6026: the sales order is an allow-list — a draft or in-progress order
-        // takes CO and nothing else; a purchase order does not opt in.
+        // ETP-5704 / ETP-6026 / ETP-6108: the sales and purchase orders are an allow-list — a
+        // draft or in-progress order takes CO and nothing else.
         for (String status : new String[] { "DR", "IP" }) {
           assertEquals(keysExcept("CO"),
               new SalesOrderHeaderHandler().unavailableActions(order(status)).keySet(), status);
-          assertTrue(new PurchaseOrderHeaderHandler().unavailableActions(order(status)).isEmpty(),
-              status);
+          assertEquals(keysExcept("CO"),
+              new PurchaseOrderHeaderHandler().unavailableActions(order(status)).keySet(), status);
         }
         assertTrue(OrderDocumentAvailability.unavailable(mock(Invoice.class)).isEmpty());
         assertTrue(new SalesOrderHeaderHandler().unavailableActions(mock(Invoice.class)).isEmpty());
@@ -233,8 +235,8 @@ class DocumentAvailabilityTest {
     }
 
     @Test
-    @DisplayName("a completed sales order rules Close and Void out, and Reactivate too only with "
-        + "linked documents; a purchase order never rules Close or Void out")
+    @DisplayName("a completed sales or purchase order rules Close and Void out, and Reactivate "
+        + "too only with linked documents")
     void completedSalesOrderRulesOutClose() throws Exception {
       for (boolean linked : new boolean[] { false, true }) {
         try (MockedStatic<OBDal> ignored = linkedDocuments(linked)) {
@@ -253,9 +255,17 @@ class DocumentAvailabilityTest {
           assertEquals(expected, sales.keySet().stream()
               .filter(k -> k.startsWith(DOCUMENT_ACTION + ":"))
               .collect(java.util.stream.Collectors.toSet()), label);
-          assertFalse(purchase.containsKey(VOID), label);
           assertEquals(linked, sales.containsKey(REACTIVATE), label);
-          assertFalse(purchase.containsKey(CLOSE), label);
+          // ETP-6108: the purchase order is the same allow-list, with its own reasons
+          assertTrue(purchase.containsKey(CLOSE), label);
+          assertTrue(purchase.containsKey(VOID), label);
+          assertEquals(PurchaseOrderHeaderHandler.REASON_CLOSE_NOT_OFFERED, purchase.get(CLOSE),
+              label);
+          assertEquals(PurchaseOrderHeaderHandler.REASON_VOID_NOT_OFFERED, purchase.get(VOID),
+              label);
+          assertEquals(expected, purchase.keySet().stream()
+              .filter(k -> k.startsWith(DOCUMENT_ACTION + ":"))
+              .collect(java.util.stream.Collectors.toSet()), label);
           assertEquals(linked, purchase.containsKey(REACTIVATE), label);
         }
       }
