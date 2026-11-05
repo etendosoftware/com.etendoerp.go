@@ -14,6 +14,8 @@ import java.lang.reflect.Field;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -41,6 +43,12 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
  * <p>{@link ModelProvider} and {@link TriggerHandler} are mocked statically so
  * {@code isValidEvent} passes without a DB or an active import. Modelled on
  * {@code BankStatementLinePendingAmountHandlerTest}.
+ *
+ * <p>Discarded lines count as resolved: the status also reads the header's own
+ * {@code EM_ETGO_DISCARDED_COUNT} from the event, and reads it as {@code 0} when the running
+ * model has no such column. Not gated by {@code bank-bounce-suggestions}: the flag is never read.
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementHeaderStatusHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -170,6 +178,106 @@ class BankStatementHeaderStatusHandlerTest {
     handler.onUpdate(event);
 
     verify(event, never()).setCurrentState(any(), any());
+  }
+
+  // ── discarded lines count as resolved ────────────────────────────────────────
+
+  /** On update derives reconciled when matched plus discarded cover every line. */
+  @Test
+  void onUpdateDerivesReconciledWhenMatchedPlusDiscardedCoverEveryLine() {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, true, 3, 1);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(2L);
+
+    handler.onUpdate(event);
+
+    verify(event).setCurrentState(statusProp, "RECONCILED");
+  }
+
+  /** On new derives partial when only a discarded line is resolved. */
+  @Test
+  void onNewDerivesPartialWhenOnlyADiscardedLineIsResolved() {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityNewEvent event = mock(EntityNewEvent.class);
+    wireEvent(event, true, 4, 0);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(1L);
+
+    handler.onNew(event);
+
+    verify(event).setCurrentState(statusProp, "PARTIAL");
+  }
+
+  /** On update not processed stays draft whatever the discarded count. */
+  @Test
+  void onUpdateNotProcessedStaysDraftWhateverTheDiscardedCount() {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, false, 2, 0);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(2L);
+
+    handler.onUpdate(event);
+
+    verify(event).setCurrentState(statusProp, "DRAFT");
+  }
+
+  /**
+   * Not gated (ETP-5581): a persistence event cannot see the per-account, per-request
+   * {@code bank-bounce-suggestions} flag, so the discarded count resolves lines whatever the flag
+   * would answer, and the flag is never read.
+   */
+  @ParameterizedTest
+  @ValueSource(booleans = { true, false })
+  void onUpdateCountsDiscardedLinesWhateverTheBounceFlagAndNeverReadsIt(boolean flagOn) {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, true, 3, 1);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(2L);
+
+    try (MockedStatic<BankBounceSuggestionsFlag> flag = mockStatic(BankBounceSuggestionsFlag.class)) {
+      flag.when(BankBounceSuggestionsFlag::isEnabled).thenReturn(flagOn);
+      flag.clearInvocations();
+
+      handler.onUpdate(event);
+
+      flag.verifyNoInteractions();
+    }
+    verify(event).setCurrentState(statusProp, "RECONCILED");
+  }
+
+  /** A header not yet recomputed since the column was added holds NULL: it reads as 0. */
+  @Test
+  void onUpdateReadsANullDiscardedCountAsZero() {
+    Property discardedCountProp = withDiscardedCountColumn();
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, true, 3, 1);
+    when(event.getCurrentState(discardedCountProp)).thenReturn(null);
+
+    handler.onUpdate(event);
+
+    verify(event).setCurrentState(statusProp, "PARTIAL");
+  }
+
+  /**
+   * Without {@code EM_ETGO_DISCARDED_COUNT} in the model the count is 0, the same fallback
+   * {@link BankStatementAggregates} applies: a statement with 2 of 3 lines matched stays PARTIAL.
+   */
+  @Test
+  void onUpdateDerivesWithZeroDiscardedWhenTheColumnIsMissing() {
+    EntityUpdateEvent event = mock(EntityUpdateEvent.class);
+    wireEvent(event, true, 3, 2);
+
+    handler.onUpdate(event);
+
+    verify(event).setCurrentState(statusProp, "PARTIAL");
+  }
+
+  /** Maps {@code EM_ETGO_DISCARDED_COUNT} on the statement entity and returns its property. */
+  private Property withDiscardedCountColumn() {
+    Property discardedCountProp = mock(Property.class);
+    when(statementEntity.getPropertyByColumnName(BankStatementAggregates.COL_DISCARDED_COUNT,
+        false)).thenReturn(discardedCountProp);
+    return discardedCountProp;
   }
 
   /**

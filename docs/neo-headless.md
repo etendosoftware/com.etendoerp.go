@@ -2901,15 +2901,22 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
 
 | Action | Kind | Parameters (required in **bold**) | SPA route reused |
 |---|---|---|---|
-| `pendingLines` | read | `dateFrom`, `dateTo`, `q` | `GET ?action=pendingLines` |
+| `pendingLines` | read | `dateFrom`, `dateTo`, `q`, `status` (`discarded`, honoured only with flag `bank-bounce-suggestions` on) | `GET ?action=pendingLines` |
 | `candidates` | read | **`statementLineId`**, `kind` (transactions\|invoices), `docType` (receipts\|payments), `dateFrom`, `dateTo` | `GET ?action=candidates` |
 | `autoMatch` | read | — | `GET ?action=autoMatch` |
 | `reconcileGroup` | write | **`statementLineId`**, `operationIds[]`, `invoices[{invoiceId,scheduleId}]`, `paymentMethodId`, `writeoffDifference`, `actualPayment` (number), `conversionRate` (number), `convertedAmount` (number), `glItemId`, `description` | `POST ?action=reconcileGroup` |
 | `reconcileDifference` | write | **`statementLineId`**, `glItemId`, `description` | `POST ?action=reconcileDifference` |
-| `applySuggestions` | write | **`groups[{statementLineId, operationIds[], createPayment?}]`** | `POST ?action=applySuggestions` |
+| `applySuggestions` | write | **`groups[{statementLineId, operationIds[], createPayment?}]`**; a bounce pair: `{kind:"bouncePair", statementLineId, counterpartLineId}` | `POST ?action=applySuggestions` |
 | `undoReconciliation` | write | **`statementLineId`** | `POST ?action=reactivate` |
 | `removeOperation` | write | **`statementLineId`**, **`transactionIds[]`** | `POST ?action=removeOperation` |
 | `reactivateSelected` | write | **`statementLineId`**, **`transactionIds[]`** | `POST ?action=reactivateSelected` |
+| `discardPair` | write | **`statementLineId`**, **`counterpartLineId`** | `POST ?action=discardPair` (ETP-5581, flag `bank-bounce-suggestions`) |
+| `restorePair` | write | **`lineId`** | `POST ?action=restorePair` (ETP-5581, flag `bank-bounce-suggestions`) |
+
+Not declared to agents on purpose (UI-only, ETP-5581): `dismissPair` (the panel's *No es un rebote*,
+KPI telemetry only) and the `applySuggestions` body key `bounceDecisions` (the modal's report of the
+pairs it showed and did not apply). An agent calling either gets the contract's 422 (unknown action
+/ undeclared key); see *Discarded lines and bounce pairs* and the declared exception below.
 
 Notes: 1:1, 1:N and partial matches are all `reconcileGroup` (a shortfall beyond tolerance leaves
 a pending remainder, exactly as in the UI). `glItemId` is optional on `reconcileDifference`
@@ -3063,11 +3070,303 @@ and for `etendo_action` alike — both enter the same `ReconciliationHandlerSupp
   same effective line (e.g. a partial head redirected to its remainder plus the remainder itself).
   The first accepted group keeps it; any later one is reported in `results[]` as a 409
   `Statement line is already reconciled: <requested id>`, before anything is matched.
+- **A discarded line is never reconciled (ETP-5581, with `bank-bounce-suggestions` on).** With the
+  flag on for the account, an unmatched line that a `BankStatementLineFilterHook` excludes —
+  PSD2's discarded lines (`EM_PSD2_Is_Discarded = Y`), or any other module's exclusion — is refused
+  with the coded **409 `LINE_DISCARDED`** (`AD_MESSAGE` `ETGO_StatementLineDiscarded`) by
+  `reconcileGroup`, every `applySuggestions` group, `reconcileDifference`, and the stuck-line heal
+  of `resolveForMatch` (before it writes). Each check sits next to the draft-statement guard and
+  runs before any write. Restore the line first (`restorePair`, or PSD2's Restore button in
+  Classic). **With the flag off there is no such refusal**: a discarded line is a plain pending
+  line and is reconciled like any other.
+
+##### Discarded lines and bounce pairs (ETP-5581)
+
+Everything here is behind the backend-only flag `bank-bounce-suggestions`, evaluated per account
+and per request by `BankBounceSuggestionsFlag` (see `docs/feature-flags-and-tenant-upgrade.md`).
+**With the flag off, Etendo behaves exactly as before ETP-5581**: Etendo GO does not honour the
+lines APRM's `BankStatementLineFilterHook` excludes at all, so a line PSD2 discarded (in Classic, or
+here while the flag was on) is a plain pending line — listed in `pendingLines` and counted under
+*Pendientes* / *Todos*, proposed by `autoMatch`, reconcilable on every write path (no
+`LINE_DISCARDED`); there is no `counts.discarded`, `status=discarded` is ignored like any status the
+panel filters client-side, no row of `bank-statements?action=lines` carries `discarded`,
+`bank-statements?action=list` has no `discardedCount` and does not count discarded lines as
+resolved, and `discardPair` / `restorePair` answer 403 `BOUNCE_SUGGESTIONS_OFF`. The two stored
+counters below are the exception (*Not gated: the stored counters*). With the flag on, two layers
+apply: honouring the discarded lines, and the bounce-pair suggestions.
+
+**Respecting discarded lines (flag on).** `StatementLineFilter` is the GO side of the hook (PSD2's
+`Psd2DiscardedLineFilter` excludes its discarded lines) and the toggle point of every caller below:
+with the flag off each of its answers is "nothing excluded". With the flag on and no hook, or no
+excluded line, every answer is the same as with the flag off, plus `counts.discarded: 0` and
+`discarded:false` on the statement lines. **Only unmatched lines count as discarded**: a line matched
+to a transaction counts as reconciled whatever its PSD2 flag says (the case of a line discarded
+while the flag was on and reconciled while it was off) — in the exclusion, the counts, the status
+and the pair validation (`DISCARD_NOT_ALLOWED`, not `LINE_DISCARDED`). The write guards never meet
+such a line: the reconcile paths refuse it as already reconciled first. A stuck line (a movement
+with no reconciliation) is not reconciled, so a discarded one is still refused before its heal.
+
+| Where | Usage passed to the hook | Behaviour (flag on) |
+|---|---|---|
+| `pendingLines` | `MATCH_STATEMENT_GRID` | Excluded lines are left out of `lines`, `total` and every count, and counted in **`counts.discarded`**. `status=discarded` answers **only** them: each row has `state`/`status` `discarded`, `discarded:true`, nothing reconciled, and `bounceLink` (`{counterpartLineId, discardedAt, signal, confidence}`, or `null` for a line discarded on its own); `counts` then carries only `discarded` — the other filters keep the counts of the default request, so this call does not run the matching engine. `PENDING_LINES_SQL` is unchanged: the hooks answer HQL, so the excluded ids are read once through the hook and the rows are split in Java. |
+| `autoMatch` candidates (`loadPendingLines`) | `AUTO_MATCH_CANDIDATES` | Excluded lines are never proposed (now an `OBQuery`, keeping the readable client/org filter). |
+| `bank-statements?action=lines` | `MATCH_STATEMENT_GRID` | Excluded lines are still listed, with **`discarded:true`** (every row carries `discarded`). |
+| Write paths | per path | 409 `LINE_DISCARDED`, see *Line targeting* above. |
+
+**Bounce suggestions (flag `bank-bounce-suggestions`; off ⇒ every answer unchanged, byte for byte —
+except the MCP's static action list, a declared exception in §4.12.9, and the stored counters
+below).**
+A bounce is a line and the line that reverses it: opposite sign, **exact** amount, the bounce dated
+on or after the original and at most **60 days** later (`BankBounceDetector`). Only pending,
+not-excluded lines that carry `EM_PSD2_Transaction_Identifier` and belong to no split group are
+candidates. A pair needs at least one signal — `pis_link` (the original's description ends with
+the end-to-end id of a PSD2-initiated payment of the account), `return_text` (bank bounce wording
+on the bounce, `BankBounceLineText`), `counterparty` (same counterparty on both). Confidence is
+`high` with bounce wording on the same day or a PIS link backed by timing (within the account's
+date tolerance) or wording, `review` otherwise; an **ambiguous** pair (several equally eligible
+originals) is always `review`, names no original and carries its candidates. A pair is **never
+proposed** when either line is the bank movement of a real ERP payment (`BankBouncePaymentGuard`,
+answered `HAS_PAYMENT` on the write paths), including a line that may be one invoice of a larger
+multi-invoice payment.
+
+**Statement adjacency.** Banks write a return next to the line it reverses, but the order of the
+lines **within a day is not taken as chronological**: PSD2 numbers a statement's lines by their
+position in the bank's (Salt Edge) transaction list, the booking day carries no time, and real
+statements show a return written *before* its payment. So both neighbours of a bounce count the
+same: the line just before it and the line just after it among the account's auto-match candidate
+lines of the **same `FIN_BankStatement`, ordered by `Line`** (a line already reconciled or
+discarded between the two is not in that list and does not separate them; an edited statement that
+renumbers its lines changes who is adjacent to whom — accepted, adjacency follows the current
+numbering). A neighbour **qualifies** when it is one of the bounce's eligible originals (opposite
+sign, exact amount, the date rules above, at least one signal) and the payment guard lets the two
+lines go. Adjacency decides only when that is unambiguous:
+
+- **exactly one** qualifying neighbour → it is the original: a plain pair, `adjacent:true`. These
+  are settled first and their originals reserved;
+- **both** neighbours qualify → after dropping the neighbours reserved above (one left makes it the
+  previous case, which is settled again), an **ambiguous** `review` pair whose candidates are
+  **only those two neighbours**, `adjacent:true` (the panel reads it as *2 salidas posibles*). Two
+  such pairs may share a neighbour; both are offered;
+- **no** qualifying neighbour (or all of them reserved, or a single neighbour that is also the only
+  one of another bounce) → the ordinary rules, unchanged, over the lines adjacency did not reserve.
+
+Adjacency only decides **who pairs with whom**. It is neither a signal nor a reason for confidence:
+`signals`/`signal`, the stored `EM_ETGO_Bounce_Signal` and `confidence` follow the rules above, so
+an adjacent pair with only the counterparty, or with bounce wording on a later day, stays `review`
+(unchecked). Example (one statement, lines dated 24/08 in this order): `-0,61` (120), `+0,61`
+RETROCESIÓN (130), `-0,61` (140), `+0,61` RETROCESIÓN (150), `-0,61` (160), `+0,15` RETROCESIÓN
+(170), `-0,15` (180) gives 180↔170 `high` (the 0,15 return comes before its payment) and two
+ambiguous `review` pairs, 130 over [120, 140] and 150 over [140, 160], both offered although they
+share 140.
+
+- **`autoMatch`.** A `high` pair reserves its two lines before transaction matching (the loop skips
+  them); a `review` pair is offered after, blocked only by the lines it would really take: its
+  bounce and, for a plain pair, its original — taken by a transaction group, a `high` pair or
+  another plain pair. An ambiguous pair loses the candidates taken that way and is offered while one
+  is left (exactly one left makes it a plain `review` pair on that candidate); candidates shared by
+  several ambiguous pairs do **not** block each other, so every such pair is offered. Every
+  transaction group gains `kind:"transaction"`; each pair is a group `{kind:"bouncePair", groupKey,
+  origin:"bounce", statementLine (the original, null when ambiguous), counterpartLine (the bounce
+  line), candidates ([{line, signals, signal}], ambiguous only), ambiguous, adjacent (the original,
+  or the two candidates, are the bounce's statement neighbours; never raises the confidence),
+  confidence, signals, signal (primary: pis_link > return_text > counterparty), operations:[],
+  isNew:false, difference:0}`. `kpis.bouncePairs` counts them; `kpis.groupsFound` and the
+  `bank_match_attempted` telemetry keep counting transaction groups only.
+- **`pendingLines`.** Same detection over the same candidate lines and the same precedence, so the
+  panel and the modal agree: a line of an offered pair gets `state:"bounce"` (counted in
+  **`counts.bounce`**, out of `pending`) and `bouncePair: {groupKey, role (original | bounce |
+  candidate), ambiguous, adjacent, confidence, signals, signal, counterpartLine, candidates}`. A
+  candidate line shared by several ambiguous pairs is annotated once, by the first of them; every
+  pair's bounce line still carries its own `groupKey` and lists all its candidates, so the distinct
+  `groupKey`s of the `bounce` rows still equal `kpis.bouncePairs`. Under a date or text filter, a
+  `review` pair is judged on its visible lines only.
+- **`applySuggestions`.** `{kind:"bouncePair", statementLineId, counterpartLineId}` groups are
+  validated and discarded **first**, in the same request transaction; their lines join the set the
+  transaction groups are prepared against, so a line checked in two groups is refused (409) the
+  second time. Each pair succeeds or fails alone in `results[]` (`{kind, statementLineId,
+  counterpartLineId, discarded:true}` or the coded refusal). A group of an unknown `kind` is refused
+  (400); a group with no `kind` and no operations is refused as before. With the flag off every
+  bounce group answers 403 `BOUNCE_SUGGESTIONS_OFF`. The `reconciliation_match_evaluated`
+  telemetry counts transaction groups only. **Optional `bounceDecisions: [{groupKey, decision}]`**
+  (flag on only; read for the KPI, never validated, never an error): the SPA sends it whenever the
+  modal showed at least one bounce pair (possibly `[]`), one entry per shown pair it did NOT check —
+  `decision` `unchecked`, or `sent_to_panel` for *Revisar en el panel* — ambiguous pairs included.
+  `groupKey` is the `autoMatch` group's, as received; checked pairs go in `groups` as before. It is
+  resolved through the call's detection (read before the transaction groups take their lines); an
+  unknown key or decision, a repeated key and the key of a pair applied in the same call are
+  ignored. It changes nothing in the answer and writes nothing. A call still needs at least one
+  group (400 otherwise, as before).
+- **`discardPair {financialAccountId, statementLineId, counterpartLineId}`** (flag required, 403
+  `BOUNCE_SUGGESTIONS_OFF` otherwise): the panel's discard, also for an ambiguous pair once its
+  original is chosen. Same validation as the `applySuggestions` groups. Answers 200
+  `{discarded:true, statementLineId, counterpartLineId, signal, confidence}`.
+- **`dismissPair {financialAccountId, statementLineId, counterpartLineId?}`** (flag required, 403
+  `BOUNCE_SUGGESTIONS_OFF` otherwise): the panel's *No es un rebote*. **Writes nothing**: the
+  rejection is not stored, so detection proposes the pair again on the next `autoMatch` /
+  `pendingLines`. It exists only to record the decision for the KPI. `statementLineId` is the line
+  selected in the panel, in any role (bounce, original or candidate); `counterpartLineId` is the
+  other line the card shows (the chosen original of an ambiguous pair), omitted while none is
+  chosen — the pair is resolved from either line, in either order, through the action's detection.
+  400 without `statementLineId` or with the same line twice; 404 / 400 for a line not found or of
+  another account. Answers 200 `{ok:true}` (in the usual `response.data` envelope), also for lines
+  detection does not pair (nothing is recorded then). UI-only: not in the MCP contracts.
+- **`restorePair {financialAccountId, lineId}`** (flag required, 403 `BOUNCE_SUGGESTIONS_OFF`
+  otherwise, like `discardPair`: with the flag off Etendo does not honour discarded lines, so there
+  is nothing to undo here; Classic's PSD2 Restore button still works): restores the line AND the
+  counterpart it is linked to, and clears the link on both. A discarded line with no link
+  (discarded alone in Classic) is restored alone; a line that is neither discarded nor linked is
+  left as it is. Answers 200 `{restored:[ids], lineId, counterpartLineId}`.
+- **Always by pair.** Etendo GO has no single-line discard; Classic keeps PSD2's per-line Discard /
+  Restore button.
+- **KPI events (Mixpanel, flag on only, best effort).** `BankBounceKpiTelemetry` emits
+  `backend_bank_bounce_pair_decided` (one per pair decided: `applySuggestions` applied groups →
+  `discarded` / `failed` on a 409, `bounceDecisions` → `unchecked` / `sent_to_panel`, surface
+  `modal`; `discardPair` → `discarded` / `failed`, `dismissPair` → `unchecked`, surface `panel`),
+  `backend_bank_bounce_pair_restored` (a `restorePair` of a linked pair, with the stored signal and
+  confidence and `days_since_decided`) and `backend_bank_bounce_suggestions_applied` (one summary per
+  `applySuggestions` that decided a pair). What the pair was proposed as is read from the action's
+  own detection, never from the client; no line id, amount, counterparty or text leaves the server.
+  An agent's `applySuggestions` (MCP, no `bounceDecisions`) that applied at least one `bouncePair`
+  group also sends `unchecked` for every detected preselected pair it left out (no line taken by a
+  group of the call); with no `bouncePair` group it sends no bounce event. A 409 is `failed` on
+  both surfaces, without the proposal properties when the detection does not see the pair.
+  `backend_bank_bounce_pair_restored` also carries `preselected` (stored confidence `high`), and
+  `days_since_decided` counts UTC calendar days.
+  A telemetry failure never fails or rolls back the action. Full contract:
+  `docs/backend-observability.md` → *Bank Bounce-Pair KPIs (ETP-5581)*.
+
+**What a discard writes, on both lines.** PSD2's flag and button together
+(`EM_PSD2_Is_Discarded = Y`, `EM_PSD2_Discard_Line = Y`), exactly as PSD2's own
+`DiscardBankStatementLine` does (`StatementLineDiscard`; the coupling is deliberate, PSD2 exposes no
+public service), plus this module's link columns on `FIN_BankStatementLine`:
+`EM_ETGO_Bounce_Pair_Line_ID` (the counterpart; `ON DELETE SET NULL`), `EM_ETGO_Bounce_Discarded`
+(when), `EM_ETGO_Bounce_Signal` (list `pis_link` / `return_text` / `counterparty`, null for a pair
+with no signal) and `EM_ETGO_Bounce_Confidence` (list `high` / `review`). Restoring clears all four.
+**The stored confidence records what the system suggested, not the user's final choice** (the KPI
+counts `high` pairs only): it is `high` ONLY when detection proposed exactly this pair (same bounce,
+same original, not ambiguous) as `high`. Any other pair is stored `review`, whatever its signals
+would give in isolation — an ambiguous pair resolved in the panel by choosing one of its candidates
+(e.g. the return 924 with the transfer 925 out of [923, 925]), a pair detection proposed for review,
+or a pair detection did not propose at all (sent through the panel, the API or the MCP). The stored
+signal is still the one detection gave that pair or candidate, else the signals of the two lines.
+The `confidence` of the `discardPair` answer is the stored one.
+
+**Concurrency and reads per action.** Every path that writes a pair (`discardPair`, the
+`applySuggestions` bounce groups, `restorePair`) locks both lines `FOR UPDATE` in id order and
+re-reads them before checking their state (`BankBouncePairService.lockLines`, `Session.refresh`
+with `PESSIMISTIC_WRITE`), once they are known to belong to the account; two requests over the same
+lines run one after the other and the second sees the first's result. `restorePair` treats a link
+as a pair only when the counterpart points back: a one-sided link restores the line alone and
+leaves the other line as it is. The flag is evaluated ONCE per action entry
+(`BankBounceSuggestionsFlag`, the only reader) and handed down — `StatementLineFilter` and the
+guards take it as a parameter — and an `applySuggestions` call with several bounce groups loads the
+account's detection once and shares it (`BankBouncePairService.Detection`).
+
+**Validation and coded refusals** (shared by `discardPair` and the `applySuggestions` groups, in
+this order; every refusal has the top-level `code`, `message`, and `error.messageKeys` with the
+`AD_MESSAGE`). The texts a user or agent reads (the `AD_MESSAGE` texts and the MCP action
+descriptions) call the feature a **bank rejection** ("rechazo bancario" in the SPA); the
+identifiers keep `bounce` (message keys, codes such as `BOUNCE_SUGGESTIONS_OFF`, `kind:"bouncePair"`,
+`bounceDecisions`, `counts.bounce`, the flag key and the telemetry event names):
+
+| Code | Status | `AD_MESSAGE` | When |
+|---|---|---|---|
+| — | 400 / 404 | — | missing id, the same line twice, a line not found or of another account |
+| `LINE_DISCARDED` | 409 | `ETGO_StatementLineDiscarded` | an unmatched line is already excluded (PSD2-discarded or excluded by a hook); a matched one is `DISCARD_NOT_ALLOWED`, the hooks are not asked for it |
+| `DISCARD_NOT_ALLOWED` | 409 | `ETGO_BounceDiscardNotAllowed` | a line is reconciled or not imported by PSD2, the bounce is outside the 60-day window, or the PSD2 discard columns are not installed |
+| `LINE_NOT_PENDING` | 409 | `ETGO_BounceLineNotPending` | a line is inactive, on a draft statement, in a split group, or already taken by another group of the same call |
+| `SIGN_MISMATCH` | 409 | `ETGO_BounceSignMismatch` | the lines do not have opposite signs |
+| `AMOUNT_MISMATCH` | 409 | `ETGO_BounceAmountMismatch` | the amounts differ |
+| `HAS_PAYMENT` | 409 | `ETGO_BounceHasPayment` | a line is the bank movement of a real ERP payment |
+| `BOUNCE_SUGGESTIONS_OFF` | 403 | `ETGO_BounceSuggestionsOff` | the flag is off for the account |
+
+A pair the detection did not propose (no signal) is accepted when it passes all of the above: the
+user chose it, and its signal is stored as null.
+
+**Editing a statement keeps the discard (`bank-statements?action=update`).** The update deletes and
+recreates the unmatched lines; a body line that carries the `id` of the line it replaces keeps the
+PSD2 transaction id, the PSD2 discard flag and button and the bounce-pair link
+(`BankStatementLineSet.bankIdentitiesOfUnmatched` / `restoreBankIdentity` / `relinkBouncePairs`).
+A body line without `id` is a new line, as before — the SPA's statement editor does not send it
+yet, so until it does an edit still loses them.
+
+**Discarded lines count as resolved in every Etendo counter — with the flag on.** Product
+decision: Etendo discards lines as bounce pairs (Classic's PSD2 button can discard a single line,
+which `restorePair` restores alone), and a discarded line is
+**resolved** — never pending, and never reported as matched to a transaction. With the flag on, the
+counters outside this API agree with the pending panel:
+
+- **Statement aggregates and status** (`BankStatementAggregates`,
+  `BankStatementsSupport.deriveStatementStatus(processed, lineCount, matchedCount,
+  discardedCount)`). A new stored column `FIN_BankStatement.EM_ETGO_Discarded_Count` counts the
+  active lines that are discarded and not matched; `EM_ETGO_Matched_Count` keeps counting only
+  lines matched to a transaction (the two are disjoint). The status treats `matched +
+  discarded` as resolved: none → `PENDING`, some → `PARTIAL`, all → `RECONCILED`, so a
+  statement whose lines are all matched or discarded is `RECONCILED`. Still pending is
+  `lineCount − matchedCount − discardedCount`. `EM_ETGO_Total_In` / `_Out` remain the
+  statement's totals and include discarded lines. With the flag on, `bank-statements?action=list`
+  returns `discardedCount` next to `matchedCount` and the stored status; **with it off** the row has
+  no `discardedCount`, and a statement whose stored `EM_ETGO_Discarded_Count` is above 0 derives its
+  status again with `discardedCount = 0` (`BankStatementsHandler.loadStatements`), so the list shows
+  what it showed before ETP-5581. The discard flag is read by column name
+  (`StatementLineDiscard`), not through the APRM hook, because `BankStatementLineAggregateHandler`
+  must see the in-flight value of the line being saved; that observer recomputes on every line
+  update, so a discard or restore — by Classic's PSD2 button, or by `discardPair` /
+  `restorePair`, which update two lines — refreshes each affected statement.
+  `BankStatementHeaderStatusHandler` derives the status from the same three stored counts.
+- **The account's *Por conciliar*** stored computed column (`ETGO_ACCOUNT_PENDING_COUNT` →
+  `EM_ETGO_Pending_Count`, served as `eTGOPendingCount` by the `financial-account` CRUD and as
+  `pendingCount` by `financial-accounts-page`) counts only lines with
+  `em_psd2_is_discarded = 'N'`, and its `FIN_BankStatementLine` dependency watches
+  `EM_PSD2_Is_Discarded`, so the counter refreshes when a line is discarded or restored. The
+  function has no catch-all: missing data already yields 0 (`COUNT` + `COALESCE`, so an unknown
+  account counts 0), and any other error fails loudly instead of showing "0 por conciliar".
+  **Known open item — the module dependency is not declared.** Reading a PSD2 column from a
+  computed column makes the computed-column policy (CLAUDE.md) ask for
+  `com.etendoerp.psd2.bank.integration` in `com.etendoerp.go`'s `AD_MODULE_DEPENDENCY`; it is
+  today only a Gradle dependency (`build.gradle`, `[2.0.0,)`). Nothing in the build requires the
+  record: `export.database`, `update.database` and the `ad_scd_*` trigger generation do not check
+  module dependencies, and `ETGO_SF_FIELD.xml` already references PSD2 columns without it. What
+  it would guard is an AD-level install of this module without PSD2, where the watched-column row
+  would point at a missing `AD_COLUMN` and the function would fail at run time.
+
+**Not gated: the stored counters.** Three values are computed in SQL or in persistence events,
+which cannot see a per-account, per-request flag, so they count discarded lines whatever the flag
+says:
+
+- `FIN_Financial_Account.EM_ETGO_Pending_Count` (*Por conciliar*, `ETGO_ACCOUNT_PENDING_COUNT`):
+  read by the account list column `eTGOPendingCount` (and its advanced filter), by
+  `financial-accounts-page` as `pendingCount` (the *Conciliación* tab badge, the *Conciliar (N)*
+  pill) and by its sidebar count of accounts with pending items;
+- `FIN_BankStatement.EM_ETGO_Discarded_Count` and `EM_ETGO_Status`, written by
+  `BankStatementAggregates` / `BankStatementHeaderStatusHandler` (Java, but in persistence events,
+  whatever user or process triggers them). The statements list re-derives the status with the flag
+  off, as said above; the generic `bank-statements` CRUD still serves the stored values (both are
+  `system` fields, not shown by the SPA).
+
+**Known limitation, accepted for the flag's lifetime.** If the flag is turned off for an account
+that already discarded pairs, its *Por conciliar* counter keeps leaving those lines out while the
+reconciliation panel lists them as pending again — e.g. **47 in the account list against 49 in the
+panel**, until the flag is turned back on or the lines are restored in Classic. No data-fix is
+planned: if the feature is killed, removing its code — **including the change to
+`ETGO_ACCOUNT_PENDING_COUNT`, which must be reverted** (back to counting every unmatched line, and
+the `EM_PSD2_Is_Discarded` watched column removed) — restores the old counter; the stored values
+then need the same refresh as below. Registered in `flags-registry.json` (`etendo_schema_forge`),
+feature `bank-bounce-suggestions`.
+
+Classic APRM is unchanged: these are Etendo-only columns. **Deploying this change on a database
+that already holds discarded lines** needs one refresh of each: `SELECT
+ad_scd_rebuild('870AD3030E334C3CB5BED17CB44C2A1B')` for the pending counter (changing an existing
+column's function leaves its stored values alone), and the *Backfill Bank Statement Aggregates*
+process (`BackfillBankStatementAggregatesProcess`) for the statement counts and status.
+
+REST and MCP run the same wrappers, so there is no divergence between channels.
 
 ##### 4.12.1.2 Bank statement agent actions (ETP-5447, ETP-5469)
 
 The second spec on this mechanism is **`bank-statements`** (`BankStatementsHandler`,
-`@Named("bank-statements")`), the report spec (`SPEC_TYPE=R`) behind the SPA's
+`@NeoExtension(spec = "bank-statements", entity = "bank-statements")` since ETP-5581, see §5.3.a),
+the report spec (`SPEC_TYPE=R`) behind the SPA's
 `/sws/neo/bank-statements?action=…` routes. Its one included entity is also named
 `bank-statements`, so that is the `entity` `etendo_action` / `etendo_schema` take (the value
 `NeoActionContract.SpecActions#getEntityName()` resolves, and `actionEntity` in `etendo_discover`).
@@ -4291,8 +4590,8 @@ The shape and the rules are in §4.12.1.3.
 | `return-to-vendor-shipment/returnToVendorShipment` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `RM_Shipment_Pickedit` → `importReceiptLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | *Pick/Edit Lines* has no process connected. `GenerateTo` (AD_Process 154, *Generate Invoice from Shipment*, `isdisplayed = N` in the tab) and `Invoicefromshipment` (no process) are the classic ways to invoice a shipment; on a return they would not build the factura rectificativa the app builds (negative lines, link to the invoice it rectifies, confirmed). The target is the header's declared `createReturnInvoice` (§4.12.33). Keys are AD column names |
 | `return-material-receipt/returnMaterialReceipt` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `RM_Receipt_PickEdit` → `importShipmentLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | the sales mirror of the previous row |
 | `purchase-order/header` | — | redirect `rMReceiveMaterials` → `createGoodsReceipt`, `rMCreateInvoice` → `createPurchaseInvoice` (ETP-5709) | the classic *Receive Materials* button has no process connected for an agent, and *Create Invoice* is undocumented for it. The targets are the header's declared contracts (`PurchaseOrderHeaderHandler`): `createGoodsReceipt` creates a DRAFT receipt, `createPurchaseInvoice` creates AND completes a purchase invoice. The preconditions (source must be completed, draft-aware pending quantity) are described in the ETP-5709 paragraphs of §4.12.9 and apply to a redirected call exactly as to a direct one |
-| `purchase-order/header` (ETP-5714) | `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines` (ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE | *Pick from Receipt* is a pick-and-edit window with no process an agent can run; Cancel and Replace is a classic multi-step flow (replacement order plus reversal of the original's documents) with no MCP equivalent, and its second step has no meaning alone. The redirect row above is kept. `valuesByStatus` is advisory availability (§4.12.35), from core's `ActionButtonUtility.docAction` |
-| `sales-order/header` (ETP-5714) | `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines`, `RM_Pickfromreceipt` (the last two: ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO; `IP` → CO; `CO` → RE; `VO`, `CL` → none — exactly the allow-list `SalesOrderHeaderHandler` enforces since ETP-6026 (`ALLOWED_BY_STATUS`, via `DocActionRefusalGuard.refuseUnlessAllowed`): the form shows Confirmar on a draft and on an in-progress order (it is not processed) and the menu/bulk bar offer Reactivate on a booked one; every other effective value is refused with 400 — CL with `ETGO_SalesOrderCloseNotOffered` (ETP-5704), VO with `ETGO_SalesOrderVoidNotOffered`, anything else (PR, which took a draft to `IP`; AP; `--`; nothing at all) with `ETGO_SalesOrderActionNotOffered` (`{0}` = the value). RE on a draft (`DR`) is let through to the rule that answered it before (`DocActionReactivationRule`'s 422 `ETGO_ReactivateOnlyCompleted`, which covers `DR` only), so the bulk bar's Reactivar over drafts answers exactly as before; RE on `IP`, `VO`, `CL` or any other non-booked status gets the 400 above instead of core's technical `@AlreadyPosted@`. RE is still advertised on `CO` only. CO on a booked order is let through without being advertised: the bulk bar sends it to every row of a mixed draft + booked selection, and `DocActionIdempotency` answers that row `alreadyApplied`. The purchase order keeps its own list, VO and PR included (out of ETP-6026 scope) | the sales order had no `MCP_CONFIG` until now. Cancel and Replace is a real flow in the app, but it is a multi-step flow with no declared contract, so it is withheld from agents with a reason rather than offered half-supported; reactivate (RE, only without linked documents), edit and complete again instead |
+| `purchase-order/header` (ETP-5714) | `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines` (ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO; `IP` → CO; `CO` → RE; `VO`, `CL` → none — the same allow-list as the sales order, enforced since ETP-6108 by `PurchaseOrderHeaderHandler` through the shared `OrderDocActionPolicy` (`ALLOWED_BY_STATUS`, `DocActionRefusalGuard.refuseUnlessAllowed`): the Purchase Order window shows Confirmar on a draft, Reactivar on a completed order with nothing linked (it hides it once a receipt or invoice exists), and never Close, Void or Prepare. Every other effective value is refused with 400 — CL with `ETGO_PurchaseOrderCloseNotOffered` (before ETP-6108 Close ran over MCP and zeroed the ordered quantities and totals), VO with `ETGO_PurchaseOrderVoidNotOffered`, anything else (PR, AP, `--`, nothing at all) with `ETGO_PurchaseOrderActionNotOffered` (`{0}` = the value); CO on a completed order is let through unadvertised (bulk-bar idempotency) and RE on a draft goes to `DocActionReactivationRule`'s 422, both exactly as on sales. `IP` is treated like sales (the row could not be reproduced on screen). The reasons advertised are the purchase order's own. The purchase order is `@NeoExtension(spec = "purchase-order", entity = "header")`; its `Java_Qualifier` and `@Named` were removed in the same change (`EXTENSION_CEILING` 86 → 85) | *Pick from Receipt* is a pick-and-edit window with no process an agent can run; Cancel and Replace is a classic multi-step flow (replacement order plus reversal of the original's documents) with no MCP equivalent, and its second step has no meaning alone. The redirect row above is kept. `valuesByStatus` is advisory availability (§4.12.35), from core's `ActionButtonUtility.docAction` |
+| `sales-order/header` (ETP-5714) | `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines`, `RM_Pickfromreceipt` (the last two: ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO; `IP` → CO; `CO` → RE; `VO`, `CL` → none — exactly the allow-list `SalesOrderHeaderHandler` enforces since ETP-6026 (`ALLOWED_BY_STATUS`, via `DocActionRefusalGuard.refuseUnlessAllowed`): the form shows Confirmar on a draft and on an in-progress order (it is not processed) and the menu/bulk bar offer Reactivate on a booked one; every other effective value is refused with 400 — CL with `ETGO_SalesOrderCloseNotOffered` (ETP-5704), VO with `ETGO_SalesOrderVoidNotOffered`, anything else (PR, which took a draft to `IP`; AP; `--`; nothing at all) with `ETGO_SalesOrderActionNotOffered` (`{0}` = the value). RE on a draft (`DR`) is let through to the rule that answered it before (`DocActionReactivationRule`'s 422 `ETGO_ReactivateOnlyCompleted`, which covers `DR` only), so the bulk bar's Reactivar over drafts answers exactly as before; RE on `IP`, `VO`, `CL` or any other non-booked status gets the 400 above instead of core's technical `@AlreadyPosted@`. RE is still advertised on `CO` only. CO on a booked order is let through without being advertised: the bulk bar sends it to every row of a mixed draft + booked selection, and `DocActionIdempotency` answers that row `alreadyApplied`. The purchase order has the same allow-list since ETP-6108 (row above) | the sales order had no `MCP_CONFIG` until now. Cancel and Replace is a real flow in the app, but it is a multi-step flow with no declared contract, so it is withheld from agents with a reason rather than offered half-supported; reactivate (RE, only without linked documents), edit and complete again instead |
 | `sales-quotation/quotation` (ETP-5714 follow-up, ETP-6026) | `Create_POLines`, `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace` (the last two added after the live test); ETP-6026 adds `RM_AddOrphanLine`, `EM_APRM_AddPayment`, `EM_Etpr_Remove_Payment`, `EM_Psd2_Generate_Bank_Payment` (DB column names, what the actions view publishes as `column`): the window offers none of them, and the live test showed each failing with a technical error (`Missing mandatory parameter: M_Product_ID`, `JSONObject["payments"] not found.`). Each with its own `reasons` entry | `valuesByStatus.documentAction` (ETP-6026): `DR` → CO (Confirm, DR→UE); `UE` → RJ (routed to the reject flow; acceptance is the separate `Convertquotation` action); `IP`, `VO`, `CA`, `CJ`, `CL`, `ETGO_CI` → none. Since ETP-6026 `SalesQuotationHeaderHandler` enforces it as an allow-list (`ALLOWED_BY_STATUS`: CO on a draft only; RJ is routed to the reject flow before it): RE, VO and CL answer 400 `ETGO_QuotationReactivateNotOffered` / `ETGO_QuotationVoidNotOffered` / `ETGO_QuotationCloseNotOffered` in every status, and any other value (PR, which took a draft to `IP`; AP; CO outside a draft; `--`; nothing at all) `ETGO_QuotationActionNotOffered`. An `IP` quotation accepts nothing: its Confirmar opens no modal. RE was allowed on a voided quotation until ETP-6026, but the app never offers Reactivate (the generated `processes` list is empty, so `processOverrides.Reactivate` never renders) and core's `C_Order_Post` refuses any action on a `VO`/`CL`/`RE` document (`@AlreadyPosted@`), so that path only ended in a technical error | the quotation tab carries the same two classic buttons. *Create Lines From* and *Pick from Receipt* open pick-and-edit windows that no Etendo GO screen renders (`api.actions` in the generated pages is metadata, `processes` is empty), so an agent that could call them would do something the app cannot show. `Create_POLines` is also hidden on `purchase-order/header`, where `decisions.json` keeps it `discarded` (it has no spec field there; the hidden entry is what lists it under `withheldActions` and refuses it with its reason). The legacy return specs have no screen and are left as they are |
 
 **A redirect target is not validated at runtime (ETP-5709).** `McpActionsSection.validateRedirect` only requires each target to be a non-blank string; it never checks that the target is an action the entity serves. A typo or a renamed action still loads, and the agent is then told to call something that answers 404. Every `redirect` target must therefore be an action the entity declares (an `actionContracts()` entry or a handler-served action). Also, `reason` is mandatory in every `actions` section, `redirect`-only ones included: `validate` rejects a section without it, and an unusable section fails the entity closed (§4.12.6). `redirectReason` and `reasons` refine the text per action; they do not replace `reason`.
@@ -4950,6 +5249,27 @@ The transfer (§4.12.1.5) follows the same pattern:
 | `OpenClose` (DB column name) | Classic button path, not the handler (fails in `OB.OpenClose.openClose`) | the contract's alias: run as `openClose` by the handler |
 | `N`, `docAction` or any undeclared key | reaches the handler (unread keys ignored; `N` goes to Process 167) | **422** before anything runs |
 | `documents.openClose` | served | **405** — `MCP_CONFIG.actions` hides it (not offered by the calendar) |
+
+##### REST and MCP on the bounce-pair surface with `bank-bounce-suggestions` off (ETP-5581, declared exception)
+
+The MCP's declared actions are static (`ReconciliationAgentActions.CONTRACTS`, built once), so
+`etendo_schema(view:"actions")` and `etendo_discover` show `discardPair`, `restorePair` and the
+`status` option `discarded` of `pendingLines` whatever the flag says. The behaviour is the same on
+both channels — it is only the advertised surface that differs. User decision: declared, not
+filtered per request.
+
+| what | REST / SPA, flag off | MCP, flag off |
+|---|---|---|
+| `discardPair`, `restorePair` | 403 `BOUNCE_SUGGESTIONS_OFF`; the SPA never offers them (it renders what the backend sends) | listed, and answer the same 403 (their descriptions say "only available when bank rejection suggestions are enabled") |
+| `pendingLines` `status=discarded` | ignored like any status the panel filters client-side | `discarded` listed as the option's only value; ignored the same way (the description says so) |
+
+Also declared (any flag value): `dismissPair` and the `applySuggestions` key `bounceDecisions` are
+**REST-only**. They feed the bounce-pair KPI from the SPA's modal and panel, which an agent does
+not have; the MCP refuses them with the contract's 422 (unknown action / undeclared key). An agent's
+`applySuggestions` and `discardPair` still emit their decision events, with `channel: "mcp"`; in
+place of `bounceDecisions`, an agent's `applySuggestions` that applied at least one `bouncePair`
+group reports the preselected pairs it left out as `unchecked` (inferred by the backend), and one
+with no `bouncePair` group reports nothing for bounces.
 
 ##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, aligned)
 
@@ -6541,6 +6861,31 @@ classes no `@Named`.
 behaviour stays in that class and each entity is bound by a concrete (empty) subclass — the same
 shape `SalesOrderLineHandler`/`SalesQuotationLineHandler` use (§4.12.20). Nothing binds the base
 class itself.
+
+**Migrated (ETP-5581).** Two more pairs, the two report specs (`SPEC_TYPE=R`) of the bank
+reconciliation, bind by annotation **only**: their `ETGO_SF_ENTITY` rows carry no
+`JAVA_QUALIFIER` (there is no `decisions.json` for either spec) and the classes no `@Named`.
+`EXTENSION_CEILING` went from 88 to 86.
+
+| `(spec, entity)` | class | former qualifier |
+|---|---|---|
+| `bank-reconciliation` / `bank-reconciliation` | `ReconciliationHandler` | `bankReconciliation` |
+| `bank-statements` / `bank-statements` | `BankStatementsHandler` | `bank-statements` |
+
+Both override only `handle` and `actionContracts`, and every reader of those resolves annotation
+first: the SPA's routes go through `NeoRequestRouter.handleReportSpecRequest` →
+`NeoExtensionDispatcher` (the context's `entityName` is the spec name, which is why the annotated
+entity equals the spec), `etendo_action` / `etendo_schema` through the dispatcher and
+`McpDeclaredActions` (`NeoHandlerLookup.forEntityQuietly`), and the discover catalog through
+`NeoActionContract.resolve`. The audit of the generic services found no branch on either pair; the
+`bank-reconciliation` mentions in `ToolRegistry`, `McpToolRouter` and `McpReportActionsSchema` are
+comments naming an example of a structural rule (a report spec whose handler declares actions).
+
+**One visible change:** the `reportHandler` attribute that MCP publishes for a report spec
+(`McpResourceProvider`, from `NeoReportCallability.reportHandlerName`) is the entity's qualifier
+while it has one and the simple class name otherwise. For these two specs it changed from
+`bankReconciliation` / `bank-statements` to `ReconciliationHandler` / `BankStatementsHandler`.
+Nothing in the SPA or the artifacts reads it.
 
 Still pending from the same audit: the `accountingDate` re-injection in
 `NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living
@@ -12190,7 +12535,7 @@ verdict. Shared code names no entity; the handlers' customizations declare their
 | goods receipt, goods shipment | **derived** (ETP-5714 follow-up, `InOutInvoiceAvailability`): `createPurchaseInvoice` / `createDraftInvoice` is `availableNow:false` when `NeoInvoiceSupport.computePendingQtyPerLineOrThrow(id, true)` is empty, i.e. everything is invoiced ("Nothing is left to invoice") or only a draft invoice covers it (the same question as `pendingExists`, and the call's own "has nothing left to invoice" refusal); a failed lookup answers "nothing derived" and is logged by `McpDeclaredActions.unavailableFor` |
 | return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again is refused with 409 `returnInvoiceAlreadyExists` and creates nothing, unless `allowDuplicate:true` is passed" on the return to vendor; "…: one per return, as on the screen." on the customer return, ETP-6026), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
 | purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, `CO` → RE only: the screen offers Reactivate and nothing else on a completed invoice, and Confirm on a draft (its menu, the bulk bar and every custom component were searched: none sends RC or VO), and a classic reversal of an issued invoice is a fiscal risk next to the factura rectificativa flow. `valuesByStatus` itself is advisory, so the invoice header entities also carry `MCP_CONFIG.actions.values: {"DocAction": ["CO","RE"]}`, which IS enforced: `etendo_action` and each item of `etendo_action_batch` (both go through `McpDeclaredActions.precheck`) answer **422** `422 validation_error` listing `allowedValues` for any other `docAction` (RC, VO, PR, AP, CL, XL...), and the actions view narrows `actionValues` to the two. `etendo_update` cannot run a document action (the CRUD layer never calls a process; `documentAction` is a system field there). MCP-only: the REST and SPA layers never read `MCP_CONFIG`. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified). `RE` on a posted invoice un-posts it first, on the server, for every channel (ETP-5684, §4.12.36); when RE is ruled out nothing is un-posted |
-| purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`; **derived** (ETP-5714 follow-up, `OrderDocumentAvailability.unavailable(subject, Flow)`): the goods action is `availableNow:false` when no line has quantity left to receive/ship (`InOutLineFromOrderFactory.collectPendingLines`, the call's own rule) or a draft receipt/shipment covers it (the reason names the draft), the invoice action when no line has quantity left to invoice (ordered minus invoiced with the ordered sign) or a draft invoice of the order exists (HQL over active `Invoice`s and lines by `salesOrder` or by its lines, restricted to the clients and organizations the role reads inside the query itself, since `Session.createQuery` applies no readable filter, the app's "needs an invoice" rule), each with a reason that says what to do instead; each action is judged on its own, so a failure in one is logged at warn and does not drop the Reactivate advice or the other action. Advisory, and the calls agree: the invoice actions refuse a linked draft with 409 `draftInvoiceExists` unless `allowDuplicate:true` (see "From an order" in §4.12.9). `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → RE on the sales order (CL removed in the ETP-5704 QA round: the app does not offer Close), CL, RE on the purchase order. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order); on the **sales order** CL is ruled out on every record whatever its status (`SalesOrderHeaderHandler.unavailableActions`, ETP-5704 QA: the app does not offer Close; enforced by `DocActionRefusalGuard`). Sales quotation: `documentAction:RE` is ruled out on any quotation whose `documentStatus` is not `VO` (`SalesQuotationHeaderHandler.unavailableActions`, enforced in its pre-hook) |
+| purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`; **derived** (ETP-5714 follow-up, `OrderDocumentAvailability.unavailable(subject, Flow)`): the goods action is `availableNow:false` when no line has quantity left to receive/ship (`InOutLineFromOrderFactory.collectPendingLines`, the call's own rule) or a draft receipt/shipment covers it (the reason names the draft), the invoice action when no line has quantity left to invoice (ordered minus invoiced with the ordered sign) or a draft invoice of the order exists (HQL over active `Invoice`s and lines by `salesOrder` or by its lines, restricted to the clients and organizations the role reads inside the query itself, since `Session.createQuery` applies no readable filter, the app's "needs an invoice" rule), each with a reason that says what to do instead; each action is judged on its own, so a failure in one is logged at warn and does not drop the Reactivate advice or the other action. Advisory, and the calls agree: the invoice actions refuse a linked draft with 409 `draftInvoiceExists` unless `allowDuplicate:true` (see "From an order" in §4.12.9). `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO; `IP` → CO; `CO` → RE, on the sales order (ETP-5704 QA, ETP-6026) and on the purchase order (ETP-6108): the app does not offer Close, Void or Prepare on either. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order and, since ETP-6108, the purchase order by `OrderReactivationGuard`); on the **sales order** and the **purchase order** every `documentAction` value outside the allow-list of the record's status is ruled out (CL and VO with their own reasons; `SalesOrderHeaderHandler` / `PurchaseOrderHeaderHandler.unavailableActions` over `OrderDocActionPolicy`, ETP-5704 QA, ETP-6026, ETP-6108: the app does not offer Close; enforced by `DocActionRefusalGuard`). Reactivate with linked documents is advised and enforced (`OrderReactivationGuard`, 400) on both; the purchase order answers with its own `ETGO_PurchaseOrderReactivateLinkedDocs` (goods receipts or invoices; sales keeps `ETGO_OrderReactivateLinkedDocs`) Sales quotation: `documentAction:RE` is ruled out on any quotation whose `documentStatus` is not `VO` (`SalesQuotationHeaderHandler.unavailableActions`, enforced in its pre-hook) |
 
 The `documentAction` values come from core's `ActionButtonUtility.docAction` (the real transitions), not from the AD list:
 a draft **invoice** is completed (CO) and, unlike a draft order, cannot be voided from the combo; goods documents offer CO
