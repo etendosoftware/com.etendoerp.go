@@ -276,7 +276,7 @@ final class McpDocumentEmailTool {
     if (pdf.getStatus() == NeoDocumentPdf.Status.MISSING) {
       problem.put(McpConstants.KEY_HINT, missingHint(pdf));
     } else if (pdf.getStatus() == NeoDocumentPdf.Status.STALE) {
-      problem.put(McpConstants.KEY_HINT, McpDocumentPdfTool.JUST_COMPLETED_HINT
+      problem.put(McpConstants.KEY_HINT, McpDocumentPdfTool.STALE_RETRY_HINT
           + "Otherwise the server could not regenerate it: ask the user to open the document's "
           + "preview in the application so its PDF is refreshed, then ask to send again. "
           + PREVIEW_STORES_NOTHING);

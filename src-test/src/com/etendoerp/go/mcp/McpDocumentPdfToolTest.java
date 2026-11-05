@@ -436,7 +436,10 @@ class McpDocumentPdfToolTest {
       assertEquals("This document is a draft and a draft never has a PDF: complete it first, "
           + "then ask again.", draft);
       // ETP-6013: a just-completed document gets its PDF from the server; the retry comes first.
-      assertTrue(completed.startsWith(McpDocumentPdfTool.JUST_COMPLETED_HINT
+      // A multi-id call queues the documents past its render budget: the retry names that case.
+      assertTrue(completed.contains("this call asked for more than "
+          + NeoDocumentPdf.SYNC_RENDERS_PER_CALL + " documents"), completed);
+      assertTrue(completed.startsWith(McpDocumentPdfTool.RETRY_HINT
           + "Otherwise the server could not generate it: ask the user to open the document's "
           + "preview in the application, or to send the document by email from there"), completed);
       assertFalse(completed.contains("draft"), completed);

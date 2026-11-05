@@ -690,6 +690,7 @@ class McpDocumentEmailToolTest {
 
       assertNotSent(result, 409, "pdf_stale");
       String hint = result.getString("hint");
+      assertTrue(hint.startsWith(McpDocumentPdfTool.STALE_RETRY_HINT), hint);
       assertTrue(hint.contains("refreshed") && hint.contains("ask to send again"), hint);
       assertFalse(hint.contains("send the document by email"), hint);
     }

@@ -258,6 +258,10 @@ final class McpDocumentPdfTool {
     }
   }
 
+  /** The queued case of a multi-id call, inside the retry clauses. */
+  private static final String OVER_BUDGET = "or this call asked for more than "
+      + NeoDocumentPdf.SYNC_RENDERS_PER_CALL + " documents";
+
   /**
    * The last resort of the PDF tool's hints (ETP-6013): the application, ONLY for what the server
    * could not render (no printable declared, a read-only role, a person's own main file, no
@@ -274,12 +278,25 @@ final class McpDocumentPdfTool {
    * so asking again shortly comes next; the application only where the server cannot.
    */
   static final String STALE_HINT = "If the document was reactivated, complete it again, then ask "
-      + "again. If it was just completed, its PDF is being regenerated: ask again in a few "
-      + "seconds. Otherwise " + APP_FALLBACK;
+      + "again. If it was just completed, " + OVER_BUDGET + ", its PDF is being regenerated: ask "
+      + "again in a few seconds. Otherwise " + APP_FALLBACK;
 
   /** The retry advice for a document completed a moment ago (ETP-6013), prefixed to the no-PDF hint. */
   static final String JUST_COMPLETED_HINT = "If the document was just completed, its PDF is being "
       + "generated: ask again in a few seconds. ";
+
+  /** The same retry for a stale PDF, worded "regenerated"; the email tool's stale hint uses it. */
+  static final String STALE_RETRY_HINT = "If the document was just completed, its PDF is being "
+      + "regenerated: ask again in a few seconds. ";
+
+  /**
+   * This tool's retry advice (ETP-6013): besides a document completed a moment ago, a multi-id call
+   * renders at most {@link NeoDocumentPdf#SYNC_RENDERS_PER_CALL} documents and queues the rest, which
+   * answer no_pdf / pdf_stale while they render. The email tool sends one document, unbudgeted, so it
+   * keeps {@link #JUST_COMPLETED_HINT}.
+   */
+  static final String RETRY_HINT = "If the document was just completed, " + OVER_BUDGET
+      + ", its PDF is being generated: ask again in a few seconds. ";
 
   /**
    * What to do about a draft, for both PDF tools: complete it. Completing is enough — the PDF is
@@ -304,7 +321,7 @@ final class McpDocumentPdfTool {
     if (result.isDraft()) {
       return DRAFT_HINT;
     }
-    String advice = JUST_COMPLETED_HINT + "Otherwise " + APP_FALLBACK;
+    String advice = RETRY_HINT + "Otherwise " + APP_FALLBACK;
     return result.getDocumentStatus() == null ? UNKNOWN_STATUS_DRAFT_REMARK + advice : advice;
   }
 
