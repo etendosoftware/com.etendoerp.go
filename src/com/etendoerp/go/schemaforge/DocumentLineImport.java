@@ -86,6 +86,8 @@ final class DocumentLineImport {
   static final String ERROR_NOTHING_PENDING = "importNothingPending";
   /** An entry of {@code lines} that cannot be understood. */
   static final String ERROR_INVALID_LINE = "importInvalidLine";
+  /** A request parameter outside its accepted values (ETP-5828: {@code availableOrders.limit}). */
+  static final String ERROR_INVALID_PARAMETER = "importInvalidParameter";
   /** The source or the target does not exist. */
   static final String ERROR_NOT_FOUND = "importDocumentNotFound";
   /** The target has no price list to price the imported lines with. */

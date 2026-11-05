@@ -280,6 +280,9 @@ public class BatchService {
       return;
     }
 
+    // ETP-6057: a public API batch counts one request per operation; a no-op for any other caller.
+    NeoPublicApiUsage.noteBatchOperations(request, operations);
+
     if (body.optBoolean(BatchJobService.PARAM_ASYNC, false)) {
       handleAsync(body, operations, response);
       return;

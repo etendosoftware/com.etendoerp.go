@@ -650,11 +650,11 @@ class McpConfigSourcedataTest {
    * ETP-5714: the {@code documentAction} values per status follow core's
    * {@code ActionButtonUtility.docAction} (the real DocAction transitions), not the AD list: an
    * invoice offers CO on a draft and only RE once completed (the screen's Reactivate; no reversal, RC removed
-   * in the QA follow-up), an order CO/VO/PR on a draft. Once completed a purchase order offers
-   * CL/RE, while a sales order offers only RE: the app never offers Close on a sales order and its
-   * pre-hook refuses it (ETP-5704). ETP-6026: the sales order is an allow-list — CO on a draft or
-   * in-progress order, RE on a booked one, nothing else (no VO, no PR); the purchase order keeps
-   * VO and PR. A quotation is offered CO on a draft and RJ Under evaluation, nothing else; the
+   * in the QA follow-up). The app never offers Close on an order and the pre-hook refuses it
+   * (ETP-5704). ETP-6026: the sales order is an allow-list — CO on a draft or in-progress order,
+   * RE on a booked one, nothing else (no VO, no PR). ETP-6108: the purchase order is the same
+   * list (the Purchase Order window offers Confirmar on a draft, Reactivar on a completed order
+   * with nothing linked, never Close, Void or Prepare). A quotation is offered CO on a draft and RJ Under evaluation, nothing else; the
    * other statuses (IP, VO, CA, CJ, CL and ETGO_CI, the one CreateDraftInvoiceHandler sets) offer
    * nothing. Advisory data, so its content is asserted here.
    */
@@ -662,13 +662,13 @@ class McpConfigSourcedataTest {
   @DisplayName("order and invoice headers declare documentAction values per status from core's transitions")
   void documentActionValuesByStatus() throws IOException, JSONException {
     Map<String, Set<String>> completedValues = Map.of(
-        PURCHASE_ORDER_HEADER_ID, Set.of("CL", "RE"),
+        PURCHASE_ORDER_HEADER_ID, Set.of("RE"),
         SALES_ORDER_HEADER_ID, Set.of("RE"));
     Map<String, Set<String>> draftValues = Map.of(
-        PURCHASE_ORDER_HEADER_ID, Set.of("CO", "VO", "PR"),
+        PURCHASE_ORDER_HEADER_ID, Set.of("CO"),
         SALES_ORDER_HEADER_ID, Set.of("CO"));
     Map<String, Set<String>> inProgressValues = Map.of(
-        PURCHASE_ORDER_HEADER_ID, Set.of("CO", "VO"),
+        PURCHASE_ORDER_HEADER_ID, Set.of("CO"),
         SALES_ORDER_HEADER_ID, Set.of("CO"));
     for (String id : List.of(PURCHASE_ORDER_HEADER_ID, SALES_ORDER_HEADER_ID)) {
       JSONObject values = valuesByStatusOf(id);
@@ -680,9 +680,11 @@ class McpConfigSourcedataTest {
       assertEquals(0, values.getJSONArray("CL").length(), id);
       assertResolvesCleanly(id);
     }
-    // ETP-5704: the sales order's advisory list must never offer Close again.
-    assertFalse(setOf(valuesByStatusOf(SALES_ORDER_HEADER_ID).getJSONArray("CO")).contains("CL"),
-        "a completed sales order is not offered CL");
+    // ETP-5704 / ETP-6108: an order's advisory list must never offer Close again.
+    for (String id : List.of(SALES_ORDER_HEADER_ID, PURCHASE_ORDER_HEADER_ID)) {
+      assertFalse(setOf(valuesByStatusOf(id).getJSONArray("CO")).contains("CL"),
+          "a completed order is not offered CL: " + id);
+    }
     JSONObject quotation = valuesByStatusOf(SALES_QUOTATION_HEADER_ID);
     assertEquals(Set.of("CO"), setOf(quotation.getJSONArray("DR")));
     assertEquals(Set.of("RJ"), setOf(quotation.getJSONArray("UE")));
@@ -732,6 +734,30 @@ class McpConfigSourcedataTest {
       assertFalse(xml.contains("VO applies"), file);
       assertFalse(xml.contains("cannot be voided"), file);
       assertFalse(xml.contains("there is no void or reversal"), file);
+    }
+  }
+
+  /**
+   * ETP-6108: the app offers no Close on an order and the pre-hook refuses it, so no order agent
+   * prompt may recommend {@code documentAction CL} — the lines entities used to say "close the
+   * order" once documents were linked.
+   */
+  @Test
+  @DisplayName("no order prompt recommends closing the order (documentAction CL)")
+  void orderPromptsDoNotRecommendClose() throws IOException {
+    String xml = new String(Files.readAllBytes(sourcedataDir().resolve("ETGO_SF_ENTITY.xml")),
+        StandardCharsets.UTF_8);
+    String[] orderLinePrompts = { "F391AE6AB4D742DB8A38A8801BE6D513",
+        "B845C674D49D48BF950AE2389C56C49F" };
+    for (String id : orderLinePrompts) {
+      Matcher m = Pattern.compile("<!--" + id + "-->\\s*<AGENT_PROMPT><!\\[CDATA\\[(.*?)]]>",
+          Pattern.DOTALL).matcher(xml);
+      assertTrue(m.find(), "prompt of " + id);
+      String prompt = m.group(1);
+      assertTrue(prompt.contains("documentAction RE"), id);
+      assertFalse(prompt.contains("documentAction CL"), id);
+      assertFalse(prompt.toLowerCase().contains("close the order"), id);
+      assertTrue(prompt.contains("neither reactivated nor closed"), id);
     }
   }
 

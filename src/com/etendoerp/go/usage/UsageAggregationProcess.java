@@ -64,6 +64,10 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * from the menu, or a Process Request run immediately or later once, is never gated. A scheduled run
  * also checks the freshness of the stored usage first ({@link UsageFreshness}), so a schedule that
  * falls behind its cadence is logged.
+ *
+ * <p><b>Retention (ETP-6057).</b> A settling-window run ends by deleting the raw
+ * {@code publicapi.request} usage rows past their retention ({@link PublicApiUsageRetention}); a
+ * backfill run does not.</p>
  */
 public class UsageAggregationProcess extends DalBaseProcess {
 
@@ -119,6 +123,11 @@ public class UsageAggregationProcess extends DalBaseProcess {
           from == null ? service.runForSettlingWindow() : service.run(from, to);
 
       OBDal.getInstance().flush();
+      if (from == null) {
+        // ETP-6057: the settling-window run (the schedule) also expires raw public API rows.
+        // Never throws; a backfill of a past range never purges.
+        PublicApiUsageRetention.purge(new Date());
+      }
 
       if (result.getResourcesFailed() > 0) {
         fail(bundle, "Usage Aggregation Finished With Errors", partialFailureMessage(result));
