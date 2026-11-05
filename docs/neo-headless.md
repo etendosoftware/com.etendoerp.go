@@ -13101,6 +13101,41 @@ chip dedupe over the full `originInvoices` record. The method and both keys are 
 to another invoice only through `C_Invoice_Reverse` (`originInvoices`, `rectifyingInvoices`). Purchase
 invoices never had them.
 
+**ETP-5747 — the sales invoice header write response carries `isRectificative`, and the TicketBAI /
+VERI*FACTU rectificative fields are defaulted on the server.** Two gaps, one cause: everything about a
+rectificative was computed either on the detail GET or by the header callout when its trigger was
+`transactionDocument`.
+
+- *Write response.* `SalesInvoiceHeaderHandler#afterHandle` returned early on every non-GET request
+  (only the ETP-4783 `aeatsiiAuthorizationno` was injected), so a POST/PUT/PATCH echoed a record with
+  none of the detail virtual keys. The SPA adopts a create's response as the record
+  (`primeSaved` + `justSaved` skip the post-save read), so `isRectificative` stayed absent until a reload
+  and the SIF tab never applied its SII "Tipo factura = R" default. `completeWriteResponse` now adds, on a
+  2xx CRUD write: `isRectificative` and `arInvoiceSubtype` (only when the response carries
+  `transactionDocument`), `docTypeLocked`, `tbaiConfigActive` (only when it carries `organization`) and
+  the defaults below. HTTP status and headers of the captured result are kept, the captured body is
+  never mutated, and an `_onlyReturnIds` batch response is left as is. Left out on purpose: origin /
+  rectifying invoices, `hasRectifications`, linked shipments and orders, exempt taxes, SIF attachment
+  ids and the reactivation block — several queries each, derived from other tables, and the SPA keeps
+  their last-known value across a save (it merges a write response onto the record) and re-reads them
+  on the next detail GET.
+- *Server-side defaults* (`SalesRectificativeFiscalDefaults`, called on every CRUD write of the header,
+  ids-only included). On a draft, unprocessed sales invoice whose document type is
+  `EM_Etsg_Isrectificative = 'Y'`, never over a value already set: with an active `tbai_config` for the
+  invoice organization, `tbaiIsreverseinvoice = Y`, `tbaiReverseinvoicetype = I`,
+  `tbaiReverseinvoicecode = R4` (the callout's values); with an active VERI*FACTU config in the system
+  for the legal entity (the `ETVFAC_C_INVOICE_SET_VERIFACTU` gate), `etvfacInvType` = the document type's
+  `em_etvfac_inv_type` when the invoice holds a blank or `F*` value, then `etvfacReverseinvtype` = the
+  document type's reverse type, or `I`, when blank. An invoice created with the rectificative type already
+  set (SPA "Importar desde factura origen", `etendo_create`, `/batch`) never fired the doc-type callout,
+  so TicketBAI kept no reverse code (its XML generator then fails with `TBAI_SetKey`) and VERI*FACTU
+  showed `F1` while in draft. SII is **not** defaulted on the server: `EM_AEATSII_C_INV_RECT_CHK` requires
+  `aeatsiiMotivoRectif` once the type is `R`, and the motivo is a user choice — that default stays in the
+  SPA (`useSifFieldPatcher.js`), driven by the `isRectificative` the write response now carries.
+- Same behaviour on REST single, `/batch` and MCP (all run the header's `afterHandle`); no divergence to
+  declare. Purchase invoices are unchanged: SII offers no `R` in `EM_Aeatsii_Clave_Tipo_Fc`,
+  VERI*FACTU never sends a purchase, and the TicketBAI reverse fields are sales-only.
+
 **ETP-5745 (5th fix) — `SiiSendHandler` replaces two drifted classic validation sentences with a
 bilingual GO sentence.** `SIIUtils.invoicePreviousValidations` (classic `org.openbravo.module.sii`,
 untouched by this fix — always emits Spanish regardless of the GO session's locale) names a field
