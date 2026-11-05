@@ -6,19 +6,32 @@ name: Full Pipeline Pilot
 # a failed block re-runs alone ("Re-run failed jobs"). This is not a required check: the pilot
 # compares duration and failures per block with Jenkins before anything is replaced.
 #
-# Both jobs build the environment the way Jenkins builds it (.github/actions/etendo-env:
+# Both test jobs build the environment the way Jenkins builds it (.github/actions/etendo-env:
 # etendo-localenv, its own PostgreSQL, install, the GOClient seeds, smartbuild):
 #   go-tests     the module's Java suite, both halves, and the JaCoCo report. Sonar and the
 #                coverage comparison stay in Jenkins during the pilot: a second analysis of the
 #                same branch would overwrite the one Jenkins publishes.
 #   integration  Tomcat, jsreport and E2E_SUITE=integration from schema_forge, the same 57 specs
 #                as Jenkins.
+#   cell-report  after both: the TESTS POR CÉLULA report Jenkins builds (cell-report.mjs, from
+#                com.etendoerp.jenkins.pipelines), the run summary and, when the DD_API_KEY secret
+#                exists, the run sent to Datadog as etendo.ci.pilot.* metrics. Reporting only: it
+#                never turns the run red.
 # The Mocked E2E block is left out: the schema_forge pipeline runs the same suite on the same
 # branch of the cut.
 #
+# Where the results are: the run summary (tests per suite, the failing tests by cell with their
+# message, the flaky ones, the coverage of com.etendoerp.go) and, for 30 days, the run's artifacts:
+#   cell-report                    TESTS POR CÉLULA (index.html) and its summary.json
+#   go-tests-reports               Gradle test reports and the JaCoCo XML
+#   playwright-report-integration  the Playwright report, with the traces and videos of retries
+#   local-env-logs                 the environment build and Tomcat logs
+#   go-junit, pw-cell-results      the raw results cell-report reads
+#
 # Secrets: ETENDOBOT_TOKEN reads etendo_core, schema_forge, etendo-localenv, the GitHub modules
 # and the npm packages; NEXUS_USER/NEXUS_PASSWORD resolve dependencies; BITBUCKET_SSH_KEY clones
-# the Bitbucket modules listed in jenkinsExtraModules.txt.
+# the Bitbucket modules listed in jenkinsExtraModules.txt and com.etendoerp.jenkins.pipelines;
+# DD_API_KEY (optional, EU site) sends the metrics.
 
 # Only what reaches main: the daily cut (mergeblock/*), a hotfix (hotfix/*) and the push to main.
 # Feature branches keep the mini pipeline (mini-pipeline.yml) on their PRs into develop.
@@ -41,15 +54,19 @@ concurrency:
 env:
   CORE_BRANCH: epic/ETP-3504
   MODULE_BRANCH: ${{ github.head_ref || github.ref_name }}
+  PIPELINES_REPO: git@bitbucket.org:koodu_software/com.etendoerp.jenkins.pipelines.git
+  RETENTION_DAYS: 30
 
 jobs:
   go-tests:
     name: Go tests + coverage
     # branch-merge-policy.yml already rejects any other branch into main; this keeps such a PR
-    # from also spending two runners before it is closed.
+    # from also spending runners before it is closed.
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    outputs:
+      schema_forge_branch: ${{ steps.build-env.outputs.schema_forge_branch }}
     steps:
       - name: Checkout etendo_core
         uses: actions/checkout@v4
@@ -66,6 +83,7 @@ jobs:
           path: etendo_core/modules/com.etendoerp.go
 
       - name: Build the Etendo GO environment
+        id: build-env
         uses: ./etendo_core/modules/com.etendoerp.go/.github/actions/etendo-env
         with:
           etendobot_token: ${{ secrets.ETENDOBOT_TOKEN }}
@@ -93,7 +111,8 @@ jobs:
         run: ./gradlew jacocoRootReport
 
       # The figures to set against Jenkins' "Etendo Go Tests" stage: tests by outcome and the line
-      # coverage of com.etendoerp.go in the merged report.
+      # coverage of com.etendoerp.go in the merged report. The failing tests by cell are in the
+      # cell-report job's summary.
       - name: Summary
         if: always()
         working-directory: etendo_core
@@ -137,7 +156,19 @@ jobs:
             etendo_core/build/reports/tests/goTestUnit
             etendo_core/build/reports/tests/goIsolatedDalTest
             etendo_core/build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml
-          retention-days: 7
+          retention-days: ${{ env.RETENTION_DAYS }}
+          if-no-files-found: ignore
+
+      # The JUnit XML of both halves, for cell-report: it lands as goTestUnit/ and goIsolatedDalTest/.
+      - name: Upload the JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-junit
+          path: |
+            etendo_core/build/test-results/goTestUnit/*.xml
+            etendo_core/build/test-results/goIsolatedDalTest/*.xml
+          retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: ignore
 
   integration:
@@ -145,6 +176,8 @@ jobs:
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    outputs:
+      schema_forge_branch: ${{ steps.build-env.outputs.schema_forge_branch }}
     # schema_forge's run-e2e-full.sh reuses a jsreport already listening on 5488, as with the
     # Jenkins sidecar: the printable specs render through it.
     services:
@@ -172,6 +205,7 @@ jobs:
           path: etendo_core/modules/com.etendoerp.go
 
       - name: Build the Etendo GO environment
+        id: build-env
         uses: ./etendo_core/modules/com.etendoerp.go/.github/actions/etendo-env
         with:
           etendobot_token: ${{ secrets.ETENDOBOT_TOKEN }}
@@ -217,6 +251,26 @@ jobs:
         working-directory: etendo_core/schema_forge
         run: npx playwright install --with-deps chromium
 
+      # The Playwright reporter of the per-cell report. Without it the suite still runs, only the
+      # report misses the E2E results.
+      - name: Clone the cell report scripts
+        id: cell-scripts
+        env:
+          BITBUCKET_SSH_KEY: ${{ secrets.BITBUCKET_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BITBUCKET_SSH_KEY" | tr -d '\r' > ~/.ssh/pipelines
+          chmod 600 ~/.ssh/pipelines
+          if GIT_SSH_COMMAND="ssh -i $HOME/.ssh/pipelines -o StrictHostKeyChecking=no" \
+              git clone -q --depth 1 --branch develop "$PIPELINES_REPO" "$RUNNER_TEMP/pipelines"; then
+            echo "dir=$RUNNER_TEMP/pipelines/etendo-go/utils/cell-report" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::com.etendoerp.jenkins.pipelines could not be cloned: no per-cell E2E results."
+          fi
+
+      # PW_TEST_REPORTER adds the cell reporter to schema_forge's reporters (html and list stay), as
+      # cellReport.groovy does in Jenkins. Only when the file is there: Playwright aborts on a
+      # reporter it cannot load.
       - name: Integration E2E
         working-directory: etendo_core/schema_forge
         env:
@@ -224,7 +278,14 @@ jobs:
           E2E_EMAIL_SINK: '1'
           E2E_PROVISIONING_FAILURE: '1'
           PLAYWRIGHT_HTML_REPORT: ${{ github.workspace }}/etendo_core/schema_forge/e2e/playwright-report-integration
-        run: make test-e2e-headless
+          CELL_SCRIPTS: ${{ steps.cell-scripts.outputs.dir }}
+        run: |
+          if [ -n "$CELL_SCRIPTS" ] && [ -f "$CELL_SCRIPTS/pw-cell-reporter.cjs" ]; then
+            export PW_TEST_REPORTER="$CELL_SCRIPTS/pw-cell-reporter.cjs"
+            export CELL_REPORT_PW_DIR="$RUNNER_TEMP/pw-cell"
+            export CELL_REPORT_PW_SUITE=e2e-integration
+          fi
+          make test-e2e-headless
 
       - name: Disk and memory at the end
         if: always()
@@ -243,7 +304,16 @@ jobs:
         with:
           name: playwright-report-integration
           path: etendo_core/schema_forge/e2e/playwright-report-integration
-          retention-days: 7
+          retention-days: ${{ env.RETENTION_DAYS }}
+          if-no-files-found: ignore
+
+      - name: Upload the per-cell E2E results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pw-cell-results
+          path: ${{ runner.temp }}/pw-cell
+          retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: ignore
 
       - name: Upload the environment logs
@@ -252,5 +322,115 @@ jobs:
         with:
           name: local-env-logs
           path: etendo_core/build/local-env/*.log
-          retention-days: 7
+          retention-days: ${{ env.RETENTION_DAYS }}
+          if-no-files-found: ignore
+
+  cell-report:
+    name: Cell report
+    needs: [go-tests, integration]
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read   # the run's job timings, for Datadog
+    env:
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout the cell map and the report script
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: go
+          sparse-checkout: |
+            src-test/cells
+            scripts
+
+      - name: Checkout the schema_forge cell map
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo_schema_forge
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: ${{ needs.go-tests.outputs.schema_forge_branch || needs.integration.outputs.schema_forge_branch || 'develop' }}
+          path: sf
+          sparse-checkout: e2e/support
+
+      - name: Download the Go results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: go-junit
+          path: results/go
+
+      - name: Download the E2E results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: pw-cell-results
+          path: results/pw
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Clone the cell report scripts
+        id: cell-scripts
+        continue-on-error: true
+        env:
+          BITBUCKET_SSH_KEY: ${{ secrets.BITBUCKET_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BITBUCKET_SSH_KEY" | tr -d '\r' > ~/.ssh/pipelines
+          chmod 600 ~/.ssh/pipelines
+          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/pipelines -o StrictHostKeyChecking=no" \
+            git clone -q --depth 1 --branch develop "$PIPELINES_REPO" "$RUNNER_TEMP/pipelines"
+          echo "dir=$RUNNER_TEMP/pipelines/etendo-go/utils/cell-report" >> "$GITHUB_OUTPUT"
+
+      # The suite states say why a suite has no results (see cell-report.mjs): the job's result,
+      # and e2e-mocked=pipeline, the suite this pipeline leaves to schema_forge.
+      - name: Per-cell report
+        if: steps.cell-scripts.outputs.dir != ''
+        continue-on-error: true
+        env:
+          CELL_SCRIPTS: ${{ steps.cell-scripts.outputs.dir }}
+          GO_RESULT: ${{ needs.go-tests.result }}
+          E2E_RESULT: ${{ needs.integration.result }}
+        run: |
+          state() { case "$1" in success) echo passed ;; failure) echo failed ;; cancelled) echo aborted ;; *) echo not-run ;; esac; }
+          result=SUCCESS
+          if [ "$GO_RESULT" != success ] || [ "$E2E_RESULT" != success ]; then result=FAILURE; fi
+          node "$CELL_SCRIPTS/cell-report.mjs" --out cell-report \
+            --go-cells go/src-test/cells \
+            --go-results results/go/goTestUnit --go-results results/go/goIsolatedDalTest \
+            --e2e-cells sf/e2e/support/test-cell.mjs --pw-results results/pw \
+            --suite-state "go=$(state "$GO_RESULT")" --suite-state e2e-mocked=pipeline \
+            --suite-state "e2e-integration=$(state "$E2E_RESULT")" \
+            --build-url "$RUN_URL" --build-result "$result"
+
+      - name: Summary
+        continue-on-error: true
+        run: |
+          python3 go/scripts/full-pipeline-pilot-report.py summary --cell-summary cell-report/summary.json \
+            --pw-dir results/pw --run-url "$RUN_URL" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Tags of few values on purpose: every distinct combination is a custom metric in Datadog.
+      - name: Send the run to Datadog
+        if: env.DD_API_KEY != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" > jobs.json || echo '{}' > jobs.json
+          python3 go/scripts/full-pipeline-pilot-report.py datadog --cell-summary cell-report/summary.json \
+            --jobs jobs.json --tag ci:github-actions --tag repo:com.etendoerp.go \
+            --tag "event:$GITHUB_EVENT_NAME" --tag "kind:${MODULE_BRANCH%%/*}"
+
+      - name: Upload the per-cell report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cell-report
+          path: cell-report
+          retention-days: ${{ env.RETENTION_DAYS }}
           if-no-files-found: ignore
