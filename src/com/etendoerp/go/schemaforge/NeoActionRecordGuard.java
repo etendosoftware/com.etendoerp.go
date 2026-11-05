@@ -99,13 +99,16 @@ public final class NeoActionRecordGuard {
 
   /**
    * Strict CRUD target guard, before customization dispatch or optimistic-version reads.
-   * Unlike actions, CRUD always addresses a row in its tab: missing rows/model/session are refused.
-   * Write ownership uses the current client and writable organizations, never readable System data.
+   * Unlike actions, CRUD normally addresses a row in its tab: missing rows/model/session are
+   * refused. Write ownership uses the current client and writable organizations, never readable
+   * System data. A tab-less entity (no AD_Tab) has no row here for this guard to resolve
+   * structurally, so it passes through and ownership is left to the entity's own customization
+   * (e.g. {@code WarehouseLocationHandler}'s own {@code TenantOwnership.loadOwned} call).
    *
    * @param entity   the SchemaForge entity whose tab holds the targeted row
    * @param recordId the id of the row the CRUD request writes or deletes
    * @return a 404 when the row is missing, unresolvable or not writable by the current tenant, or
-   *         {@code null} when the write may proceed
+   *         {@code null} when the write may proceed (including every tab-less entity)
    */
   public static NeoResponse writeRefusalFor(SFEntity entity, String recordId) {
     if (entity == null || StringUtils.isBlank(recordId) || OBContext.getOBContext() == null) {
@@ -113,6 +116,18 @@ public final class NeoActionRecordGuard {
     }
     OBContext.setAdminMode(true);
     try {
+      if (isTabless(entity)) {
+        // A tab-less entity (e.g. warehouse/location, ETP-4526) has no AD_Tab-backed row for this
+        // STRUCTURAL guard to resolve: resolveRecord() always answers null for it, which is the
+        // "cannot tell" case everywhere else in this class (see isForeignRecord's own early return
+        // below, and NeoWritePreflight#refusalFor's own tab-less bypass for the reference-ownership/
+        // activeness checks). Answering null here previously fell through to
+        // TenantOwnership.isWritableByCurrentTenant(null), which is unconditionally false — so every
+        // PUT/PATCH/DELETE on a tab-less entity was refused with a 404 before its own customization
+        // (which already does its own TenantOwnership check, e.g. WarehouseLocationHandler) ever
+        // ran. Ownership of a tab-less entity's row is left entirely to that customization.
+        return null;
+      }
       BaseOBObject row = resolveRecord(entity, recordId);
       return TenantOwnership.isWritableByCurrentTenant(row)
           ? null : NeoResponse.error(404, MSG_RECORD_NOT_FOUND);
@@ -122,6 +137,12 @@ public final class NeoActionRecordGuard {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /** Whether {@code entity} has no AD_Tab (or no table on it) — tab-less by design, not a lookup failure. */
+  private static boolean isTabless(SFEntity entity) {
+    Tab tab = entity.getADTab();
+    return tab == null || tab.getTable() == null;
   }
 
   /**
