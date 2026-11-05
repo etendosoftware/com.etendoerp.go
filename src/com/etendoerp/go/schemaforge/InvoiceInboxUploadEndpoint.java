@@ -67,6 +67,12 @@ final class InvoiceInboxUploadEndpoint {
   /** The multipart part name that carries the files. */
   static final String PART_NAME = "files";
 
+  /** The spec this endpoint belongs to. Only this class may name it (extension guardrails). */
+  private static final String SPEC_NAME = "invoice-inbox";
+
+  /** The path segment after the spec that selects the upload. */
+  private static final String UPLOAD_SEGMENT = "upload";
+
   /** Whole-request limit in bytes (210 MB); owned by {@link NeoAttachmentPolicy}. */
   static final long MAX_REQUEST_BYTES = NeoAttachmentPolicy.MAX_REQUEST_BYTES;
 
@@ -84,6 +90,21 @@ final class InvoiceInboxUploadEndpoint {
   private static final String STAR_ORG = "0";
 
   private InvoiceInboxUploadEndpoint() {
+  }
+
+  /**
+   * Whether a request is this endpoint: {@code POST /invoice-inbox/upload}, the only verb and path
+   * it serves. The generic built-in dispatcher asks here instead of naming the spec itself, so the
+   * identity stays with the spec's own code. Any other verb or path of the spec falls through to
+   * the regular spec router.
+   *
+   * @param specName the first path segment
+   * @param entityName the second path segment
+   * @param method the HTTP method
+   */
+  static boolean serves(String specName, String entityName, String method) {
+    return SPEC_NAME.equals(specName) && UPLOAD_SEGMENT.equals(entityName)
+        && "POST".equals(method);
   }
 
   /**

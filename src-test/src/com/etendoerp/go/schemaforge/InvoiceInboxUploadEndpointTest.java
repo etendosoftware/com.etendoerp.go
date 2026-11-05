@@ -507,4 +507,22 @@ class InvoiceInboxUploadEndpointTest {
         .getString("incomingDocumentId"));
     processor.verify(() -> InvoiceInboxProcessor.submit(anyString()), times(2));
   }
+
+  /**
+   * The route decision lives here, not in the generic built-in dispatcher: exactly
+   * {@code POST /invoice-inbox/upload}, nothing else of the spec and nothing null.
+   */
+  @Test
+  void servesOnlyPostOnTheInvoiceInboxUploadPath() {
+    assertTrue(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "POST"));
+
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "GET"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "post"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "header", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("sales-order", "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("image", "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves(null, "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", null, "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", null));
+  }
 }
