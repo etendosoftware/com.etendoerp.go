@@ -605,7 +605,27 @@ class McpWindowDeclaredActionsTest {
         "sales-invoice     | importOrderLines       | {\"orderId\":\"o\"}     |",
         "sales-invoice     | importShipmentLines    | {\"shipmentId\":\"s\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
         "sales-invoice     | importShipmentLines    | {\"receiptId\":\"s\"}   | receiptId",
-        "sales-invoice     | availableShipments     | {}                    |" })
+        "sales-invoice     | availableShipments     | {}                    |",
+        // ETP-6099: the shared listing parameters, and the invoice import of the goods documents
+        "sales-invoice     | availableShipments     | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "sales-invoice     | availableOrders        | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "purchase-invoice  | availableOrders        | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "purchase-invoice  | availableOrderLines    | {\"orderId\":\"o\",\"includeCovered\":true,\"detail\":true} |",
+        "goods-shipment    | availableInvoices      | {}                    |",
+        "goods-shipment    | availableInvoices      | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "goods-shipment    | availableInvoiceLines  | {\"invoiceId\":\"i\",\"includeCovered\":true} |",
+        "goods-shipment    | availableInvoiceLines  | {}                    | missing:invoiceId",
+        "goods-receipt     | availableInvoices      | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"includeCovered\":true} |",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"orderId\":\"o\"} | orderId",
+        // ETP-6099 follow-up: pendingBasis is REST-only (§4.12.9), declared in no contract, so the
+        // MCP refuses it as an unknown parameter and keeps the server rule.
+        "purchase-invoice  | availableOrders        | {\"pendingBasis\":\"classic\"} | pendingBasis",
+        "purchase-invoice  | availableOrderLines    | {\"orderId\":\"o\",\"pendingBasis\":\"classic\"} | pendingBasis",
+        "purchase-invoice  | availableReceipts      | {\"pendingBasis\":\"server\"} | pendingBasis",
+        "purchase-invoice  | availableReceiptLines  | {\"receiptId\":\"r\",\"pendingBasis\":\"classic\"} | pendingBasis",
+        "goods-receipt     | availableInvoices      | {\"pendingBasis\":\"classic\"} | pendingBasis",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"pendingBasis\":\"classic\"} | pendingBasis" })
     void lineImportActionsAreJudgedByTheirDeclaredContracts(String window, String action,
         String body, String refusal) throws Exception {
       Map<String, NeoActionContract> declared;
