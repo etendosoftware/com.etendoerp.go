@@ -115,6 +115,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String KEY_AMOUNT = "amount";
   static final String KEY_UNIT_PRICE = "unitPrice";
   static final String KEY_DISCOUNT = "discount";
+  /** Classic {@code availableOrderLines}: THIS invoice already has a line of the order line. */
+  static final String KEY_IMPORTED_HERE = "importedHere";
   /** The three order actions of a normal invoice (a rectificative takes none, ETP-5876). */
   static final Set<String> ACTIONS =
       Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES, ACTION_IMPORT);
@@ -254,18 +256,36 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return ACTIONS;
   }
 
+  /**
+   * The two listings that take {@code pendingBasis: "classic"} where the header's policy offers it
+   * (ETP-6099 follow-up: the purchase invoice,
+   * {@link RectificativeImportPolicy#offersClassicPending}).
+   */
+  static final Set<String> CLASSIC_PENDING_ACTIONS =
+      Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES);
+
+  @Override
+  protected boolean classicPendingOffered(NeoContext context, String action) {
+    return CLASSIC_PENDING_ACTIONS.contains(action)
+        && RectificativeImportPolicy.from(context).offersClassicPending();
+  }
+
   @Override
   protected NeoResponse execute(NeoContext context, String action) throws Exception {
     JSONObject body = context.getRequestBody();
+    boolean classic = classicPending(context);
     if (ACTION_AVAILABLE_ORDERS.equals(action)) {
-      return availableOrders(requireExistingInvoice(context.getRecordId()), body);
+      Invoice invoice = requireExistingInvoice(context.getRecordId());
+      return classic ? classicAvailableOrders(invoice, body) : availableOrders(invoice, body);
     }
     if (ACTION_AVAILABLE_LINES.equals(action)) {
       Invoice invoice = requireExistingInvoice(context.getRecordId());
       Order order = requireSourceOrder(invoice, requireParam(body, PARAM_ORDER_ID));
       // ETP-6099: includeCovered and detail on both directions (the purchase popup lists here too).
-      return availableOrderLines(order, ImportListing.includeCovered(body),
-          ImportListing.detail(body));
+      boolean includeCovered = ImportListing.includeCovered(body);
+      boolean detail = ImportListing.detail(body);
+      return classic ? classicAvailableOrderLines(invoice, order, includeCovered, detail)
+          : availableOrderLines(order, includeCovered, detail);
     }
     return importLines(requireDraftInvoice(context.getRecordId()), body);
   }
@@ -720,6 +740,96 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   }
 
   // ---------------------------------------------------------------------------
+  // pendingBasis "classic" (ETP-6099 follow-up)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * {@code availableOrders} with the purchase popup's own rule from before ETP-6099
+   * ({@code invoiceOrderImport.js}, {@code importVia: 'client'}: {@code fetchOrderDocuments} +
+   * {@code filterCandidateOrders}): the partner's completed orders of the invoice's direction, in
+   * the invoice's currency when it has one, whose {@code invoiceStatus} is below 100, newest created
+   * first. A return order is left out (it is never importable). {@code pendingLines} counts the
+   * lines the popup leaves selectable: classic pending ({@link OrderInvoicePending#classic}, no
+   * draft deduction) above 0 and not already on THIS invoice; an order left at 0 is listed only with
+   * {@code includeCovered}. {@code amount} sums those lines.
+   */
+  private NeoResponse classicAvailableOrders(Invoice invoice, JSONObject body)
+      throws JSONException {
+    boolean sales = Boolean.TRUE.equals(invoice.isSalesTransaction());
+    String partnerId = invoice.getBusinessPartner() == null ? null
+        : invoice.getBusinessPartner().getId();
+    String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
+    ImportListing.ListRequest request = listRequest(body);
+    List<Order> candidates = findClassicCandidateOrders(partnerId, sales, currencyId,
+        request.offset, request.scan);
+    Set<String> importedHere = orderLinesOnInvoice(invoice.getId());
+    return discover(candidates, order -> classicOrderRow(order, partnerId, importedHere, request),
+        request);
+  }
+
+  private JSONObject classicOrderRow(Order order, String partnerId, Set<String> importedHere,
+      ImportListing.ListRequest request) throws JSONException {
+    if (isReturn(order) || !isBelowFullyInvoiced(order)) {
+      return null;
+    }
+    Map<String, BigDecimal> selectable = new LinkedHashMap<>();
+    for (Map.Entry<String, BigDecimal> line : OrderInvoicePending.classic(order).entrySet()) {
+      if (line.getValue().signum() > 0 && !importedHere.contains(line.getKey())) {
+        selectable.put(line.getKey(), line.getValue());
+      }
+    }
+    if (selectable.isEmpty() && !request.includeCovered) {
+      return null;
+    }
+    String orderCurrency = order.getCurrency() == null ? null : order.getCurrency().getId();
+    JSONObject row = documentRow(order.getId(), order.getDocumentNo(), day(order.getOrderDate()),
+        partnerId, order.getBusinessPartner().getName(), orderCurrency, selectable.size());
+    row.put(KEY_GLOBAL_DISCOUNT,
+        InvoiceGlobalDiscountRule.reportedPercent(order.getEtgoTotalDiscount()));
+    row.put(KEY_AMOUNT, pendingOrderAmount(order, selectable));
+    if (request.detail) {
+      ImportListing.putCreationDate(row, order.getCreationDate());
+    }
+    return row;
+  }
+
+  /** {@code Number(o.invoiceStatus ?? 0) < 100}, the old popup's filter. */
+  private boolean isBelowFullyInvoiced(Order order) {
+    Long status = invoiceStatusOf(order);
+    return status == null || status < 100;
+  }
+
+  /**
+   * {@code availableOrderLines} with the purchase popup's own rule from before ETP-6099
+   * ({@code fetchOrderLines} + {@code orderLineRow}, {@code importVia: 'client'}): every listed line
+   * of the order (active, not the total-discount line) at {@code pendingQuantity = max(0, ordered -
+   * invoiced)}, no draft deduction, plus {@code importedHere} (THIS invoice has an active line
+   * linked to it). A line at 0 or {@code importedHere} is what the popup greys out: listed only with
+   * {@code includeCovered}; its {@code pendingQuantity} stays the classic value, as the popup's
+   * {@code _maxQty} did.
+   */
+  private NeoResponse classicAvailableOrderLines(Invoice invoice, Order order,
+      boolean includeCovered, boolean detail) throws JSONException {
+    Map<String, BigDecimal> pending = OrderInvoicePending.classic(order);
+    Set<String> importedHere = orderLinesOnInvoice(invoice.getId());
+    JSONArray rows = new JSONArray();
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal left = pending.get(ol.getId());
+      boolean here = importedHere.contains(ol.getId());
+      if (left == null || (!includeCovered && (left.signum() <= 0 || here))) {
+        continue;
+      }
+      JSONObject row = OrderImportListing.availableLineRow(order, ol, left);
+      row.put(KEY_IMPORTED_HERE, here);
+      if (detail) {
+        OrderImportListing.putLineDetail(row, ol);
+      }
+      rows.put(row);
+    }
+    return completePage(rows);
+  }
+
+  // ---------------------------------------------------------------------------
   // Loading and validating
   // ---------------------------------------------------------------------------
 
@@ -829,6 +939,44 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       remaining.put((String) row[0], (BigDecimal) row[1]);
     }
     return remaining;
+  }
+
+  /**
+   * The candidates of the classic {@code availableOrders} (ETP-6099 follow-up): the completed,
+   * active orders of the partner and direction in the session's client, in the invoice's currency
+   * when it has one, newest created first (the old popup's {@code _sortBy=creationDate desc}),
+   * from {@code offset}; the {@code invoiceStatus} filter is applied per row.
+   */
+  protected List<Order> findClassicCandidateOrders(String partnerId, boolean sales,
+      String currencyId, int offset, int scan) {
+    StringBuilder hql = new StringBuilder("from Order o where o.documentStatus = 'CO' "
+        + "and o.salesTransaction = :sot and o.businessPartner.id = :bp and o.active = true "
+        + "and o.client.id = :client");
+    if (currencyId != null) {
+      hql.append(" and o.currency.id = :cur");
+    }
+    hql.append(" order by o.creationDate desc, o.documentNo desc, o.id desc");
+    org.hibernate.query.Query<Order> query = OBDal.getInstance().getSession()
+        .createQuery(hql.toString(), Order.class).setParameter("sot", sales)
+        .setParameter("bp", partnerId).setParameter("client", sessionClientId())
+        .setFirstResult(offset).setMaxResults(scan);
+    if (currencyId != null) {
+      query.setParameter("cur", currencyId);
+    }
+    return new ArrayList<>(query.list());
+  }
+
+  /** Seam: the order's {@code invoiceStatus} computed column (the % invoiced the window shows). */
+  protected Long invoiceStatusOf(Order order) {
+    return order.getInvoiceStatus();
+  }
+
+  /** Seam: the order lines the active lines of this invoice are linked to. */
+  protected Set<String> orderLinesOnInvoice(String invoiceId) {
+    return new java.util.HashSet<>(OBDal.getInstance().getSession().createQuery(
+        "select il.salesOrderLine.id from InvoiceLine il where il.invoice.id = :inv "
+            + "and il.active = true and il.salesOrderLine is not null", String.class)
+        .setParameter("inv", invoiceId).list());
   }
 
   /**

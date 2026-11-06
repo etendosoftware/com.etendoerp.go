@@ -73,12 +73,14 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
    * The invoices this receipt's "Import from invoice" popup offers (ETP-6099): the ones whose grand
    * total is not negative, as the popup always filtered them. Pending keeps the popup's rule (ETP-6099
    * product decision): a linked line 0, any other its quantity minus what OTHER draft receipts hold
-   * of its order line; the delivered quantity is NOT deducted.
+   * of its order line; the delivered quantity is NOT deducted. Its popup asks for
+   * {@code pendingBasis: "classic"} (ETP-6099 follow-up), offered here only: a linked line 0, any
+   * other its invoiced quantity, no draft deducted, exactly as before ETP-6099.
    */
   static final ImportInvoiceLinesIntoInOutHandler.SourcePolicy INVOICE_IMPORT_POLICY =
       new ImportInvoiceLinesIntoInOutHandler.SourcePolicy(
           invoice -> invoice.getGrandTotalAmount() == null
-              || invoice.getGrandTotalAmount().signum() >= 0, false, false);
+              || invoice.getGrandTotalAmount().signum() >= 0, false, false, true);
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String FIELD_MOVEMENT_DATE = "movementDate";

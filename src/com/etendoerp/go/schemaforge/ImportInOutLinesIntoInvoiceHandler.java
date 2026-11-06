@@ -329,6 +329,21 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return ACTIONS;
   }
 
+  /**
+   * The two receipt listings that take {@code pendingBasis: "classic"} where the header's policy
+   * offers it (ETP-6099 follow-up: the purchase invoice,
+   * {@link RectificativeImportPolicy#offersClassicPending}). The shipment and return listings and
+   * every import keep the server rule only.
+   */
+  static final Set<String> CLASSIC_PENDING_ACTIONS =
+      Set.of(ACTION_AVAILABLE_RECEIPTS, ACTION_AVAILABLE_RECEIPT_LINES);
+
+  @Override
+  protected boolean classicPendingOffered(NeoContext context, String action) {
+    return CLASSIC_PENDING_ACTIONS.contains(action)
+        && RectificativeImportPolicy.from(context).offersClassicPending();
+  }
+
   @Override
   protected NeoResponse execute(NeoContext context, String action) throws Exception {
     boolean returns = RETURN_ACTIONS.contains(action);
@@ -337,15 +352,19 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     JSONObject body = context.getRequestBody();
     String idParam = idParamOf(returns, sales);
     RectificativeImportPolicy policy = RectificativeImportPolicy.from(context);
+    boolean classic = classicPending(context);
     if (LIST_ACTIONS.contains(action)) {
       Invoice invoice = requireInvoiceOfDirection(context.getRecordId(), sales, false);
-      return availableDocuments(invoice, isSales(invoice), returns, policy, listRequest(body));
+      return classic ? classicAvailableDocuments(invoice, listRequest(body))
+          : availableDocuments(invoice, isSales(invoice), returns, policy, listRequest(body));
     }
     if (LINES_ACTIONS.contains(action)) {
       Invoice invoice = requireInvoiceOfDirection(context.getRecordId(), sales, false);
       ShipmentInOut source = requireSource(invoice, requireParam(body, idParam), returns, policy);
-      return availableLines(invoice, source, returns, policy,
-          new LineListing(ImportListing.includeCovered(body), ImportListing.detail(body)));
+      LineListing listing =
+          new LineListing(ImportListing.includeCovered(body), ImportListing.detail(body));
+      return classic ? classicAvailableLines(invoice, source, listing)
+          : availableLines(invoice, source, returns, policy, listing);
     }
     return importLines(requireInvoiceOfDirection(context.getRecordId(), sales, true), body,
         idParam, returns, policy);
@@ -735,6 +754,86 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   }
 
   // ---------------------------------------------------------------------------
+  // pendingBasis "classic" (ETP-6099 follow-up)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * {@code availableReceipts} with the purchase popup's own rule from before ETP-6099
+   * ({@code ImportFromGoodsReceiptModal.jsx}, {@code fetchDocuments}): the partner's completed
+   * receipts, newest created first, whose header order is in the invoice's currency (a receipt
+   * without an order is never excluded by currency, the popup could not compare it); returns are
+   * left out (never importable here). NOTHING deducts what other invoices hold, completed or draft:
+   * a receipt invoiced elsewhere is listed again, as it was. {@code pendingLines} counts the lines
+   * the popup leaves selectable: a quantity, and not already held by THIS invoice (through the
+   * receipt line or its order line); a receipt left at 0 is listed only with {@code includeCovered}.
+   */
+  private NeoResponse classicAvailableDocuments(Invoice invoice,
+      ImportListing.ListRequest request) throws JSONException {
+    String partnerId = invoice.getBusinessPartner() == null ? null
+        : invoice.getBusinessPartner().getId();
+    String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
+    List<ShipmentInOut> candidates = findClassicCandidateDocuments(partnerId, isSales(invoice),
+        currencyId, request.offset, request.scan);
+    return discover(candidates, doc -> {
+      if (isReturn(doc)) {
+        return null;
+      }
+      Map<String, boolean[]> links = invoiceLinkStates(doc.getId(), invoice.getId());
+      int pendingLines = 0;
+      for (ShipmentInOutLine line : activeLines(doc).values()) {
+        pendingLines += classicPendingOf(line, links).signum() != 0 ? 1 : 0;
+      }
+      if (pendingLines == 0 && !request.includeCovered) {
+        return null;
+      }
+      String docCurrency = doc.getEtgoCurrency() == null ? null : doc.getEtgoCurrency().getId();
+      JSONObject row = documentRow(doc.getId(), doc.getDocumentNo(), day(doc.getMovementDate()),
+          partnerId, doc.getBusinessPartner().getName(), docCurrency, pendingLines);
+      if (request.detail) {
+        putDocumentDetail(row, doc, false);
+      }
+      return row;
+    }, request);
+  }
+
+  /**
+   * {@code availableReceiptLines} with the old popup's rule ({@code fetchLines}): every active line
+   * at its FULL movement quantity, unless THIS invoice already holds it (an active line linked to
+   * the receipt line or to its order line: {@code importedHere}, pending 0). Nothing deducts other
+   * invoices. A line at 0 is listed only with {@code includeCovered}; {@code detail} adds the
+   * standard keys ({@code movementQuantity}, {@code importedHere}, ...).
+   */
+  private NeoResponse classicAvailableLines(Invoice invoice, ShipmentInOut source,
+      LineListing listing) throws JSONException {
+    Map<String, boolean[]> links = invoiceLinkStates(source.getId(), invoice.getId());
+    LineDetail detail = new LineDetail(links, Set.of(), Set.of(), false);
+    JSONArray rows = new JSONArray();
+    for (ShipmentInOutLine line : activeLines(source).values()) {
+      BigDecimal left = classicPendingOf(line, links);
+      if (left.signum() == 0 && !listing.includeCovered) {
+        continue;
+      }
+      JSONObject row = DocumentLineImport.lineRow(line.getId(), line.getLineNo(),
+          line.getProduct() == null ? null : line.getProduct().getId(),
+          line.getProduct() == null ? null : line.getProduct().getName(),
+          line.getUOM() == null ? null : line.getUOM().getId(), left);
+      if (listing.detail) {
+        putLineDetail(row, line, left, false, detail);
+      }
+      rows.put(row);
+    }
+    return completePage(rows);
+  }
+
+  /** The classic pending of a receipt line: its movement quantity, or 0 when held here. */
+  private static BigDecimal classicPendingOf(ShipmentInOutLine line,
+      Map<String, boolean[]> links) {
+    boolean[] state = links.get(line.getId());
+    boolean importedHere = state != null && state[0];
+    return importedHere || !hasQuantity(line) ? BigDecimal.ZERO : line.getMovementQuantity();
+  }
+
+  // ---------------------------------------------------------------------------
   // Loading and validating
   // ---------------------------------------------------------------------------
 
@@ -863,6 +962,36 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     org.hibernate.query.Query<ShipmentInOut> query = OBDal.getInstance().getSession()
         .createQuery(hql.toString(), ShipmentInOut.class).setParameter("sot", sales)
         .setParameter("bp", partnerId).setParameter("client", sessionClientId())
+        .setFirstResult(offset).setMaxResults(scan);
+    if (currencyId != null) {
+      query.setParameter("cur", currencyId);
+    }
+    return new ArrayList<>(query.list());
+  }
+
+  /**
+   * The HQL behind {@link #findClassicCandidateDocuments}: the completed, active movements of one
+   * direction and partner in the session's client, newest created first; with a currency, only the
+   * ones whose header order is in it or that have no order (the old popup's comparison). Exposed so
+   * a test parses it against the real model.
+   */
+  static String classicCandidateDocumentsHql(boolean withCurrency) {
+    // An explicit LEFT join: an implicit io.salesOrder.currency path would be an inner join and
+    // silently drop the receipts without an order, which the popup kept.
+    return "select io from MaterialMgmtShipmentInOut io left join io.salesOrder so "
+        + "where io.documentStatus = 'CO' and io.salesTransaction = :sot "
+        + "and io.businessPartner.id = :bp and io.active = true and io.client.id = :client"
+        + (withCurrency ? " and (so.id is null or so.currency.id = :cur)" : "")
+        + " order by io.creationDate desc, io.documentNo desc, io.id desc";
+  }
+
+  /** The candidates of the classic {@code availableReceipts}, from {@code offset}; bounded. */
+  protected List<ShipmentInOut> findClassicCandidateDocuments(String partnerId, boolean sales,
+      String currencyId, int offset, int scan) {
+    org.hibernate.query.Query<ShipmentInOut> query = OBDal.getInstance().getSession()
+        .createQuery(classicCandidateDocumentsHql(currencyId != null), ShipmentInOut.class)
+        .setParameter("sot", sales).setParameter("bp", partnerId)
+        .setParameter("client", sessionClientId())
         .setFirstResult(offset).setMaxResults(scan);
     if (currencyId != null) {
       query.setParameter("cur", currencyId);

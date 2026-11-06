@@ -56,6 +56,9 @@ final class ImportListing {
   static final String PARAM_OFFSET = "offset";
   static final String PARAM_INCLUDE_COVERED = "includeCovered";
   static final String PARAM_DETAIL = "detail";
+  static final String PARAM_PENDING_BASIS = "pendingBasis";
+  static final String PENDING_BASIS_SERVER = "server";
+  static final String PENDING_BASIS_CLASSIC = "classic";
   static final String KEY_CREATION_DATE = "creationDate";
   /** The longest page a caller may ask for. */
   static final int MAX_LIMIT = 1000;
@@ -104,6 +107,38 @@ final class ImportListing {
     int offset = offsetSent ? wholeNumber(body, PARAM_OFFSET, 0, Integer.MAX_VALUE) : 0;
     return new ListRequest(limit, offset, Math.max(defaultScan, limit),
         flag(body, PARAM_INCLUDE_COVERED), flag(body, PARAM_DETAIL), limitSent || offsetSent);
+  }
+
+  /**
+   * {@code pendingBasis} (ETP-6099 follow-up, product decision): {@code "server"} (the default) is
+   * the server's pending rule, drafts deducted; {@code "classic"} is the rule the window's popup
+   * computed in the browser before it listed through the actions, kept for the purchase popups so
+   * that ETP-6099 changes their speed and not their numbers. Only the actions whose header offers it
+   * accept {@code "classic"}; anywhere else it is a 400, never silently ignored.
+   *
+   * @param offered whether the action of this call, on this header, has a classic rule
+   * @return {@code true} for {@code "classic"}
+   * @throws DocumentLineImport.ImportRefusal 400 {@code importInvalidParameter} on any other value,
+   *     or on {@code "classic"} where it is not offered
+   */
+  static boolean classicPending(JSONObject body, boolean offered) {
+    if (!present(body, PARAM_PENDING_BASIS)) {
+      return false;
+    }
+    Object value = body.opt(PARAM_PENDING_BASIS);
+    String text = value instanceof String ? ((String) value).trim() : null;
+    if (PENDING_BASIS_SERVER.equals(text)) {
+      return false;
+    }
+    if (PENDING_BASIS_CLASSIC.equals(text)) {
+      if (offered) {
+        return true;
+      }
+      throw invalid(PARAM_PENDING_BASIS + " \"" + PENDING_BASIS_CLASSIC
+          + "\" is not available on this action");
+    }
+    throw invalid(PARAM_PENDING_BASIS + " must be \"" + PENDING_BASIS_SERVER + "\" or \""
+        + PENDING_BASIS_CLASSIC + "\"");
   }
 
   /** {@code includeCovered} of a lines action. */

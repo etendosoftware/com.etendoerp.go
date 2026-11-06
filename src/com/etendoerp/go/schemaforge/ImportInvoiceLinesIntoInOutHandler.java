@@ -98,12 +98,24 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     final boolean deductsDelivered;
     /** Whether the drafts deducted include the target's own lines. */
     final boolean deductsTargetDraft;
+    /**
+     * Whether the two listings accept {@code pendingBasis: "classic"} (ETP-6099 follow-up, product
+     * decision): the goods receipt's popup rule from before it listed through the actions, a line
+     * at {@code linked ? 0 : invoiced} with NO draft deduction ({@link #classicLineStates}).
+     */
+    final boolean offersClassicPending;
 
     SourcePolicy(Predicate<Invoice> offered, boolean deductsDelivered,
         boolean deductsTargetDraft) {
+      this(offered, deductsDelivered, deductsTargetDraft, false);
+    }
+
+    SourcePolicy(Predicate<Invoice> offered, boolean deductsDelivered,
+        boolean deductsTargetDraft, boolean offersClassicPending) {
       this.offered = offered;
       this.deductsDelivered = deductsDelivered;
       this.deductsTargetDraft = deductsTargetDraft;
+      this.offersClassicPending = offersClassicPending;
     }
   }
 
@@ -181,16 +193,23 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     return ACTIONS;
   }
 
+  /** Both listings take {@code pendingBasis: "classic"} where the header's policy offers it. */
+  @Override
+  protected boolean classicPendingOffered(NeoContext context, String action) {
+    return ACTIONS.contains(action) && policyOf(context).offersClassicPending;
+  }
+
   @Override
   protected NeoResponse execute(NeoContext context, String action) throws Exception {
     ShipmentInOut target = requireTarget(context.getRecordId());
     SourcePolicy policy = policyOf(context);
     JSONObject body = context.getRequestBody();
+    boolean classic = classicPending(context);
     if (ACTION_AVAILABLE_INVOICES.equals(action)) {
-      return availableInvoices(target, policy, listRequest(body));
+      return availableInvoices(target, policy, listRequest(body), classic);
     }
     Invoice source = requireSource(target, requireParam(body, PARAM_INVOICE_ID), policy.offered);
-    return availableLines(target, source, policy, ImportListing.includeCovered(body));
+    return availableLines(target, source, policy, ImportListing.includeCovered(body), classic);
   }
 
   private static SourcePolicy policyOf(NeoContext context) {
@@ -203,7 +222,7 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
   // ---------------------------------------------------------------------------
 
   private NeoResponse availableInvoices(ShipmentInOut target, SourcePolicy policy,
-      ImportListing.ListRequest request) throws JSONException {
+      ImportListing.ListRequest request, boolean classic) throws JSONException {
     boolean sales = isSales(target);
     String partnerId = target.getBusinessPartner() == null ? null
         : target.getBusinessPartner().getId();
@@ -214,7 +233,8 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       if (!policy.offered.test(invoice)) {
         return null;
       }
-      List<LineState> lines = lineStates(target, invoice, policy);
+      List<LineState> lines = classic ? classicLineStates(invoice)
+          : lineStates(target, invoice, policy);
       int pendingLines = 0;
       for (LineState line : lines) {
         pendingLines += line.pending.signum() > 0 ? 1 : 0;
@@ -235,9 +255,10 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
   }
 
   private NeoResponse availableLines(ShipmentInOut target, Invoice source, SourcePolicy policy,
-      boolean includeCovered) throws JSONException {
+      boolean includeCovered, boolean classic) throws JSONException {
     JSONArray rows = new JSONArray();
-    for (LineState state : lineStates(target, source, policy)) {
+    for (LineState state : classic ? classicLineStates(source)
+        : lineStates(target, source, policy)) {
       if (state.pending.signum() <= 0 && !includeCovered) {
         continue;
       }
@@ -328,6 +349,30 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       states.add(new LineState(line, orderLine == null ? null : orderLine.getId(),
           pending.max(BigDecimal.ZERO), orderLine == null ? Set.of()
               : others.getOrDefault(orderLine.getId(), Set.of())));
+    }
+    return states;
+  }
+
+  /**
+   * The lines of {@code invoice} under {@code pendingBasis: "classic"} (ETP-6099 follow-up), the
+   * goods receipt popup's rule before it listed through the actions
+   * ({@code ImportFromPurchaseInvoiceModal.jsx}, {@code enrichLines}): only the lines with an
+   * invoiced quantity above 0, each at {@code linked ? 0 : invoiced}. Nothing deducts drafts or
+   * deliveries; {@code orderLine} is resolved as in {@link #lineStates} (display only) and
+   * {@code inDraftDocuments} is empty, the old popup showed none.
+   */
+  List<LineState> classicLineStates(Invoice invoice) {
+    Map<String, OrderLine> byProduct = headerOrderLinesByProduct(invoice);
+    List<LineState> states = new ArrayList<>();
+    for (InvoiceLine line : listedLines(invoice)) {
+      BigDecimal quantity = orZero(line.getInvoicedQuantity());
+      if (quantity.signum() <= 0) {
+        continue;
+      }
+      OrderLine orderLine = line.getSalesOrderLine() != null ? line.getSalesOrderLine()
+          : byProduct.get(line.getProduct() == null ? null : line.getProduct().getId());
+      states.add(new LineState(line, orderLine == null ? null : orderLine.getId(),
+          line.getGoodsShipmentLine() != null ? BigDecimal.ZERO : quantity, Set.of()));
     }
     return states;
   }

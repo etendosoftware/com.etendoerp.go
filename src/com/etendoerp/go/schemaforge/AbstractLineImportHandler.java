@@ -77,6 +77,8 @@ abstract class AbstractLineImportHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
     try {
+      // ETP-6099 follow-up: a pendingBasis this action does not offer is refused before anything.
+      classicPending(context);
       enterAdminMode();
       try {
         return execute(context, context.getFieldName());
@@ -94,6 +96,24 @@ abstract class AbstractLineImportHandler implements NeoHandler {
       rollback();
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERR_INTERNAL);
     }
+  }
+
+  /**
+   * Seam (ETP-6099 follow-up): whether {@code action} accepts {@code pendingBasis: "classic"} on
+   * the header that serves this request. Decided from the per-direction policy that header put on
+   * the context, never from an entity name; nothing offers it by default.
+   */
+  protected boolean classicPendingOffered(NeoContext context, String action) {
+    return false;
+  }
+
+  /**
+   * The {@code pendingBasis} of this request ({@link ImportListing#classicPending}): {@code true}
+   * for {@code "classic"} on an action that offers it; a 400 for it anywhere else.
+   */
+  protected final boolean classicPending(NeoContext context) {
+    return ImportListing.classicPending(context.getRequestBody(),
+        classicPendingOffered(context, context.getFieldName()));
   }
 
   /**

@@ -5164,6 +5164,20 @@ this fix.
 > and an MCP agent connects with its own OAuth client. Otherwise the MCP would be an uncounted way
 > around public API billing and limits.
 
+> **Import popups: the SPA's purchase listings use the classic pending rule, MCP and every
+> default caller the server rule (ETP-6099 follow-up).** The purchase invoice's
+> `availableOrders` / `availableOrderLines` / `availableReceipts` / `availableReceiptLines` and the
+> goods receipt's `availableInvoices` / `availableInvoiceLines` accept `pendingBasis: "classic"`,
+> which the SPA's purchase popups send: no draft deduction anywhere, a receipt line at its full
+> movement quantity unless THIS invoice holds it (so a receipt invoiced elsewhere is listed again),
+> exactly what those popups computed in the browser before ETP-6099. The parameter is **not
+> declared** in any contract, so an MCP call carrying it is refused as an unknown parameter and the
+> MCP (and any REST caller that omits it) gets the server rule: drafts deducted (§4.12.34). Reason:
+> ETP-6099 was scoped to speed only; changing the pending rule the purchase screens show was out of
+> scope (product owner decision). The two rules can therefore list different documents and
+> quantities for the same invoice; the SPA's sales popups and the goods receipt's «desde pedido»
+> already used the server rule and are unchanged. See §4.12.34, *`pendingBasis`*.
+
 > **Scope parity for actions (ETP-5783).** Running a document action or a process needs
 > `etendo:process` on every channel: the REST action route (by path), `POST` on a process spec (by
 > spec type) and MCP `etendo_action` (`McpAuthorizationService.requiredScopeFor`; the tool is
@@ -12834,8 +12848,9 @@ candidates with nothing pending are read but not listed. Before ETP-6099 only th
 **Line actions** (`availableOrderLines`, `availableShipmentLines`, `availableReceiptLines`, `availableReturnLines`,
 `availableOriginInvoiceLines`, `availableInvoiceLines`): `includeCovered` (also the lines with nothing left, at
 `pendingQuantity: 0`, which the popups grey out; before, only the sales invoice's `availableOrderLines` took it) and
-`detail`. The pending quantity is always the server's rule (drafts deducted, ETP-5709), also where a popup used to
-compute it in the browser without drafts.
+`detail`. The pending quantity is the server's rule (drafts deducted, ETP-5709), also where a popup used to
+compute it in the browser without drafts — except under `pendingBasis: "classic"`, which the three purchase popups
+send (see *`pendingBasis`* below).
 
 | Action (target) | "Covered" candidate / line | `detail` adds |
 |---|---|---|
@@ -12852,7 +12867,7 @@ compute it in the browser without drafts.
 
 The filters themselves are unchanged and equal to the popups' (purchase origin invoices: not rectificative, no currency
 filter; sales: not rectificative, same currency). Known differences with what the popups computed in the browser, all
-on the server's side by decision: pending deducts drafts everywhere; a shipment / receipt is matched by its own
+on the server's side by decision: pending deducts drafts everywhere (unless the call sends `pendingBasis: "classic"`, below); a shipment / receipt is matched by its own
 `etgoCurrency`, not by its order's; the candidates come newest **movement / invoice / order date** first where the popup
 sorted by creation date (the client re-sorts if it must).
 
@@ -12878,12 +12893,44 @@ Only lines with something pending unless `includeCovered`. The line keys are alw
 keep compatible); `availableInvoices` takes `detail` only for `creationDate`. The popup shows no row total for them (no
 price), so there is no `amount`.
 
+**`pendingBasis`: the purchase popups keep their old pending rule (ETP-6099 follow-up).** The list
+above moved every popup to the server rule (drafts deducted). Product decision: ETP-6099 is about
+speed, so the three PURCHASE popups get exactly the rule they computed in the browser before, and
+ask for it with an optional `pendingBasis` (`"server"`, the default, or `"classic"`). Absent or
+`"server"`, every action answers exactly as described above. `"classic"` is accepted only where the
+header's per-direction policy offers it (`RectificativeImportPolicy.offersClassicPending()`, set by
+`RectificativeImportPolicy.forHeader` for the purchase side; `SourcePolicy.offersClassicPending`,
+set by `GoodsReceiptHeaderHandler.INVOICE_IMPORT_POLICY`; checked by
+`AbstractLineImportHandler.classicPendingOffered`, no entity name in the delegates). On any other
+action or direction (sales invoice, goods shipment, the goods receipt's `availableOrders` /
+`availableOrderLines`, returns, origin invoices, every `import*` write) and for any other value it
+is a **400 `importInvalidParameter`**. It is not declared in the contracts, so MCP refuses it as an
+unknown parameter: the MCP always gets the server rule (declared divergence, §4.12.9).
+`limit`, `offset`, `includeCovered`, `detail` work the same with it; `pendingLines`, `amount` and
+the covered rows are computed with the classic pending, so a document the popup would grey out
+entirely comes at `pendingLines: 0` (listed only with `includeCovered`).
+
+| Action (target) under `"classic"` | Documents listed | Line pending | Mirrors (before ETP-6099) |
+|---|---|---|---|
+| `availableOrders` (purchase invoice) | completed, active orders of the partner and direction, in the invoice's currency when it has one, `invoiceStatus` (the order's computed % invoiced) below 100, newest **created** first; return orders left out (not importable). `pendingLines` / `amount`: the lines with classic pending > 0 and not on this invoice | — | `invoiceOrderImport.js` `fetchOrderDocuments` + `filterCandidateOrders` (`documentStatus === 'CO' && businessPartner === bpId && invoiceStatus < 100`, then `currency === invoiceCurrency`) |
+| `availableOrderLines` (purchase invoice) | — | every active line except the total-discount line at `max(0, ordered − invoiced)`, no draft deduction; adds `importedHere` (this invoice has an active line linked to the order line). Covered = pending 0 or `importedHere`, listed only with `includeCovered`, its `pendingQuantity` left at the classic value (the popup's `_maxQty`) | `fetchOrderLines` (`Math.max(0, ordered − invoiced)`) + `orderLineRow` (`_alreadyImported: alreadyInCurrent \|\| pending <= 0`) |
+| `availableReceipts` (purchase invoice) | completed, active receipts of the partner, newest **created** first, whose header order is in the invoice's currency or that have no order; returns left out. NOTHING invoiced elsewhere (completed or draft) is deducted, so a fully invoiced receipt is listed again. `pendingLines`: lines with a quantity not held by this invoice | — | `ImportFromGoodsReceiptModal.jsx` `fetchDocuments` (`CO && businessPartner === bpId && invoiced !== true` — the goods-receipt spec has no `invoiced` field, so that test never excluded anything — and `!salesOrder \|\| orderCurrency === invoiceCurrency`) |
+| `availableReceiptLines` (purchase invoice) | — | the full movement quantity; 0 when this invoice holds the receipt line or its order line (`importedHere`) | `fetchLines` (`_maxQty: movementQuantity`, `_alreadyImported: receipt line or order line on this invoice`) |
+| `availableInvoices` (goods receipt) | unchanged filters (completed, partner, direction, receipt currency, grand total ≥ 0, newest created first); listed when a line is pending | — | `ImportFromPurchaseInvoiceModal.jsx` `fetchDocuments` |
+| `availableInvoiceLines` (goods receipt) | — | only the lines with an invoiced quantity > 0, at `linked ? 0 : invoiced`: no draft, no delivery deducted; `inDraftDocuments` empty | `enrichLines` (`_maxQty: alreadyLinked ? 0 : qty`, `.filter(invoicedQuantity > 0)`) |
+
+Not reproduced on purpose: the old reads stopped at 500 company-wide documents (the defect
+ETP-6099 fixes), and the old popups only learnt that a document was entirely greyed once its lines
+were loaded; the classic `pendingLines` says it up front.
+
 **Binding (ETP-6099).** `GoodsReceiptHeaderHandler` moved from `@Named("goodsReceiptHeaderHandler")` + the row's
 `JAVA_QUALIFIER` to `@NeoExtension(spec = "goods-receipt", entity = "goodsReceipt")` (touch-means-migrate, §5.3.a):
 qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING` 80 → 79, the class removed from `legacyHandlers` in
 `scripts/extension-guardrails-allowlist.json`.
 
-**Channels.** REST and MCP reach the same delegates; no divergence is introduced.
+**Channels.** REST and MCP reach the same delegates. One divergence is declared (§4.12.9): `pendingBasis: "classic"`
+is REST-only (undeclared in the contracts), so the SPA's purchase popups list with the classic rule and the MCP with the
+server rule.
 
 #### 4.12.35 Discoverability: which actions apply to a document now, and what its values mean (ETP-5714)
 
