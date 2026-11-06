@@ -339,7 +339,20 @@ public class NeoDefaultsService {
     // unconditionally at the primitive level, so an excluded column always comes back
     // null/absent here too — matching the "no default configured" contract this guard promises
     // — instead of silently swapping one wrong value for a different, cross-tenant one.
-    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())) {
+    // ETP-5745 CP-17: also gated on the column being MANDATORY — mirroring the CREATE path's
+    // own identical fallback (NeoMandatoryDefaultsService#tryInjectFirstFromLookup, ETP-4274:
+    // "non-mandatory columns stop after the genuine default-resolution passes... applying [the
+    // fallback] to optional columns would over-inject"). This /defaults bootstrap path never
+    // had that same gate, so an OPTIONAL List-reference column with no AD_Column default and no
+    // AD_Ref_List row flagged IsDefault (e.g. a rectification "motivo"/code whose business rule
+    // is that NO value may ever be silently guessed) fell through to "whichever row happens to
+    // sort first" (List references order by SeqNo, and a reference whose rows were never given
+    // one falls back to AD_Ref_List_ID, which is arbitrary). A nullable column is, by
+    // definition, one where "no value yet" is a valid, meaningful state; only a NOT NULL column
+    // needs SOME value to avoid breaking the save, which is the one case this fallback exists
+    // for (structural: keyed on the column's own NOT NULL flag, never on which column it is).
+    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())
+        && Boolean.TRUE.equals(adColumn.isMandatory())) {
       resolvedValue = resolveFirstComboOption(adColumn, ctx);
     }
     if (resolvedValue != null) {
