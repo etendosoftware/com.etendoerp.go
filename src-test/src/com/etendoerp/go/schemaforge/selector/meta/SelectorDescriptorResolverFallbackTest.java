@@ -38,6 +38,8 @@ import org.openbravo.base.model.Property;
  * mirrors the classic Etendo behavior where the display field is always part of
  * the suggestion-box search predicate, plus a sane {@code name}/{@code searchKey}
  * fallback for selectors whose display property is an identifier alias.
+ *
+ * @covers com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorResolver
  */
 class SelectorDescriptorResolverFallbackTest {
 
