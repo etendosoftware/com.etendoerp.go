@@ -256,9 +256,9 @@ final class InvoiceCalloutHelper {
   private static final String VERIFACTU_INV_TYPE_DEFAULT = "F1";
 
   /**
-   * When the user changes the document type ({@code transactionDocument} trigger), CLEARS a
-   * stale {@code R1}-{@code R5} {@code etvfacInvType} back to the generic default
-   * ({@code "F1"}) when the newly-selected document type is NOT rectificative.
+   * When the user changes the document type ({@code transactionDocument} trigger), sets
+   * {@code etvfacInvType} to EMPTY when the newly-selected document type is rectificative, or
+   * back to the generic default ({@code "F1"}) when it is not.
    *
    * <p>ETP-5745 CP-20: this method used to copy the NEW DocType's own configured
    * {@code em_etvfac_inv_type} onto the invoice whenever the document type became rectificative
@@ -267,15 +267,23 @@ final class InvoiceCalloutHelper {
    * ANY code — even one a human configured on the DocType itself, once, for every invoice of
    * that type — is still picking a reason on behalf of THIS specific invoice, exactly the
    * fiscal judgement call {@code aeatsiiMotivoRectif}/{@code tbaiReverseinvoicecode} are never
-   * allowed to guess either (see {@code SalesRectificativeFiscalDefaults}' class javadoc). A
-   * rectificative document type now leaves {@code etvfacInvType} completely untouched — the
+   * allowed to guess either (see {@code SalesRectificativeFiscalDefaults}' class javadoc). The
    * user must pick an {@code R1}-{@code R5} code manually, and
    * {@link RectificationFiscalCodeGuard} blocks completion while it is still {@code F*}/blank.
    *
-   * <p>The CLEARING side is kept and unconditional once more: switching AWAY from a
-   * rectificative doc type still blanks a stale {@code R1}-{@code R5} back to {@code "F1"},
-   * which is cleanup of a now-irrelevant value, not a guess (same reasoning as
-   * {@code tbaiReverseinvoicecode}'s own clear-on-revert).
+   * <p>ETP-5745 CP-22: a rectificative document type now ACTIVELY CLEARS
+   * {@code etvfacInvType} to {@code ""} — CP-20 had left it untouched instead, which meant SII's
+   * Clave visibly flips to {@code "R"} and TicketBAI's Código field visibly appears the instant
+   * the user picks a rectificative doc type, but VERI*FACTU's own "Tipo de Factura" silently sat
+   * at {@code "F1"} with no visual cue that it, too, needs a manual choice before completion —
+   * the user only found out at the 422. Clearing it gives the SAME "something needs your
+   * attention" signal the other two systems already have (the Select shows its empty-state
+   * placeholder — see {@code useSifFieldPatcher.js}'s matching exclusion of a rectificative
+   * invoice from its own F1-backfill effect, CP-22).
+   *
+   * <p>The CLEARING-to-{@code "F1"} side (switching AWAY from a rectificative doc type) is
+   * unchanged: cleanup of a now-irrelevant {@code R1}-{@code R5} value, not a guess (same
+   * reasoning as {@code tbaiReverseinvoicecode}'s own clear-on-revert).
    * No-op when the trigger is not {@code transactionDocument}, or when
    * {@link RectificativeSupport#isColumnPresent()} is {@code false} (no way to tell direction).
    *
@@ -307,16 +315,15 @@ final class InvoiceCalloutHelper {
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
             boolean isRectificative = "Y".equalsIgnoreCase(rs.getString(1));
-            if (!isRectificative) {
-              // Updates entries must be { "value": "..." } objects, not raw strings —
-              // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
-              // would give entry.value === undefined and silently skip the update.
-              JSONObject fieldUpdate = new JSONObject();
-              fieldUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, VERIFACTU_INV_TYPE_DEFAULT);
-              updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, fieldUpdate);
-              log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: cleared etvfacInvType to {} for docType={}",
-                  VERIFACTU_INV_TYPE_DEFAULT, docTypeId);
-            }
+            String effectiveInvType = isRectificative ? "" : VERIFACTU_INV_TYPE_DEFAULT;
+            // Updates entries must be { "value": "..." } objects, not raw strings —
+            // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
+            // would give entry.value === undefined and silently skip the update.
+            JSONObject fieldUpdate = new JSONObject();
+            fieldUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, effectiveInvType);
+            updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, fieldUpdate);
+            log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: set etvfacInvType to '{}' for docType={}",
+                effectiveInvType, docTypeId);
           }
         }
       }
