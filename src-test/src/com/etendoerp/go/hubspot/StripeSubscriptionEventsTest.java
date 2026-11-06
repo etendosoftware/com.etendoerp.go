@@ -108,13 +108,23 @@ class StripeSubscriptionEventsTest {
   }
 
   @Test
-  void aZeroInvoiceFromACouponIsStillAPayment() throws Exception {
+  void aZeroInvoiceFromACouponIsNoPayment() throws Exception {
+    // ETP-6082: a free month or a full discount must not count as the customer paying.
     JSONObject free = invoice(new JSONObject()).put("amount_paid", 0);
 
-    Translated paid = StripeSubscriptionEvents.translate("invoice.paid",
-        event("evt_1", free, null)).orElseThrow();
+    assertTrue(StripeSubscriptionEvents.translate("invoice.paid",
+        event("evt_1", free, null)).isEmpty());
+  }
 
-    assertEquals("0.00", payload(paid).getString("amount"));
+  @Test
+  void aPaymentCarriesItsBillingReasonSoARenewalIsTold() throws Exception {
+    JSONObject renewal = invoice(new JSONObject()).put("billing_reason", "subscription_cycle");
+
+    Translated paid = StripeSubscriptionEvents.translate("invoice.paid",
+        event("evt_1", renewal, null)).orElseThrow();
+
+    assertEquals(StripeSubscriptionEvents.REASON_RENEWAL,
+        payload(paid).getString(StripeSubscriptionEvents.FIELD_BILLING_REASON));
   }
 
   @Test
