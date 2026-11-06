@@ -84,6 +84,7 @@ com.etendoerp.go.schemaforge.NeoResponseTest
 com.etendoerp.go.schemaforge.NeoSelectorEndpointTest
 com.etendoerp.go.schemaforge.NeoSelectorExecutionHelperTest
 com.etendoerp.go.schemaforge.NeoSelectorServiceTest
+com.etendoerp.go.schemaforge.NeoSelectorStatementCountIntegrationTest
 com.etendoerp.go.schemaforge.NeoSequencePreviewHelperTest
 com.etendoerp.go.schemaforge.NeoServerOwnedFieldsTest
 com.etendoerp.go.schemaforge.NeoServletDestroyTest
@@ -111,6 +112,7 @@ com.etendoerp.go.schemaforge.SelectorQueryBuilderTest
 com.etendoerp.go.schemaforge.SelectorQueryExecutorTest
 com.etendoerp.go.schemaforge.SelectorResponseSupportTest
 com.etendoerp.go.schemaforge.SelectorRowMapperTest
+com.etendoerp.go.schemaforge.SelectorSearchIntegrationTest
 com.etendoerp.go.schemaforge.SelectorValidationResolverTest
 com.etendoerp.go.schemaforge.SifSubRecordAttachmentsTest
 com.etendoerp.go.schemaforge.SqlToHqlTranslatorTest
