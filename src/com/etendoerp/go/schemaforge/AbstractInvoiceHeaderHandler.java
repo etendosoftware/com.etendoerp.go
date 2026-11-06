@@ -589,16 +589,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     String value = "N"; // default: TBAI not active
     try {
       String orgId = rec.isNull("organization") ? null : rec.optString("organization", null);
-      if (orgId != null && !orgId.isEmpty()) {
-        String sql = "SELECT 1 FROM tbai_config WHERE ad_org_id = ? AND isactive = 'Y' LIMIT 1";
-        Connection conn = OBDal.getReadOnlyInstance().getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-          ps.setString(1, orgId);
-          try (ResultSet rs = ps.executeQuery()) {
-            value = rs.next() ? "Y" : "N";
-          }
-        }
-      }
+      value = InvoiceCalloutHelper.isTbaiConfigActive(orgId) ? "Y" : "N";
     } catch (Exception e) {
       log.debug("[ETP-4783] enrichTbaiConfigActive: {}", e.getMessage());
     }

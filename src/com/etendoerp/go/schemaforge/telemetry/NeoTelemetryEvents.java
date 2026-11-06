@@ -90,6 +90,31 @@ public final class NeoTelemetryEvents {
   public static final String BACKEND_CONTACT_TYPE_CHANGED = "backend_contact_type_changed";
 
   /**
+   * ETP-5581 — one decision on one suggested bounce pair: applied (discarded or failed), left
+   * unchecked or sent to the panel in the {@code applySuggestions} modal, or discarded / dismissed
+   * ("No es un rebote") in the reconciliation panel. Emitted by {@code BankBounceKpiTelemetry},
+   * flag {@code bank-bounce-suggestions} on only. Never a record identifier.
+   */
+  public static final String BACKEND_BANK_BOUNCE_PAIR_DECIDED =
+      "backend_bank_bounce_pair_decided";
+
+  /**
+   * ETP-5581 — a pair discarded as a bounce pair was restored by {@code restorePair}. Emitted by
+   * {@code BankBounceKpiTelemetry}; carries the stored signal and confidence and the whole days
+   * since the discard. Never a record identifier.
+   */
+  public static final String BACKEND_BANK_BOUNCE_PAIR_RESTORED =
+      "backend_bank_bounce_pair_restored";
+
+  /**
+   * ETP-5581 — summary of one {@code applySuggestions} call that included bounce pairs: how many
+   * were shown, discarded, unchecked and sent to the panel, and whether the user changed the
+   * preselection. Emitted by {@code BankBounceKpiTelemetry}.
+   */
+  public static final String BACKEND_BANK_BOUNCE_SUGGESTIONS_APPLIED =
+      "backend_bank_bounce_suggestions_applied";
+
+  /**
    * Generic backend write-operation timing event emitted by NEO CRUD.
    */
   public static final String BACKEND_WRITE_OPERATION_COMPLETED =

@@ -186,6 +186,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `fiscal-model-390` | `etendo.go.flags.fiscal-model-390` | `ETGO_FLAG_FISCAL_MODEL_390` | absent ⇒ **`false`** (Modelo 390 hidden; TTL 2027-01-01) |
 | `invoice-inbox` | `etendo.go.flags.invoice-inbox` | `ETGO_FLAG_INVOICE_INBOX` | absent ⇒ **`false`** (inbox upload refused; per account on a hosted arm only; TTL 2027-01-31, provisional) — see its section below |
 | `product-movements-tab` | `etendo.go.flags.product-movements-tab` | `ETGO_FLAG_PRODUCT_MOVEMENTS_TAB` | absent ⇒ **`false`** (no Movements tab on the Product window; placeholder TTL 2027-01-31) |
+| `bank-bounce-suggestions` | `etendo.go.flags.bank-bounce-suggestions` | `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS` | absent ⇒ **`false`** (no bounce-pair suggestions and discarded lines not honoured: Etendo as before ETP-5581; per account on a hosted arm only; placeholder TTL 2026-12-31). Registered before any code reads it — see its section below |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -778,8 +779,18 @@ off, **before** the multipart is read and before any row or OCR work is created.
 `ETGO_INCOMING_DOCUMENT` table and the `Invoice Inbox` window ship unconditionally: the flag gates
 behaviour, not schema.
 
-**The toggle point.** `InvoiceInboxUploadEndpoint` is the one class that calls
-`InvoiceInboxFlag.isEnabled()`, at request entry.
+Everything of the inbox is contained in the flag, not only the upload: the **read** of the
+`invoice-inbox` spec (REST list/by id and MCP `etendo_list`/`etendo_get`) answers the same `403
+feature_disabled` when it is off (ETP-6049).
+
+**The toggle points.** All call `InvoiceInboxFlag.isEnabled()` / `isEnabledFor()`, never the key:
+- `InvoiceInboxUploadEndpoint` (upload), at request entry.
+- `InvoiceInboxHeaderHandler`, an `@NeoExtension(spec = "invoice-inbox", entity = "header")` pre-hook
+  that refuses every request on the spec when off (REST single/batch and MCP read, same dispatcher).
+  It also serves the `discard` action (`POST .../header/{id}/action/discard`, ETP-6049): the flag
+  is judged first in the same `handle`, so the action sits behind the same gate, with no second
+  evaluation point.
+- `SFWindowAccessMap`, which publishes `capabilities.invoiceInbox` for the UI.
 
 **The one gate.** `InvoiceInboxFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
 `GoFeatureFlags.FLAG_INVOICE_INBOX`. Never read the key anywhere else. It has no window or entity
@@ -789,6 +800,8 @@ identity in it.
   (`GoAccountResolver.currentAccountEmail()`) and the current tenant (`clientId`).
 - `InvoiceInboxFlag.isEnabled(accountEmail, clientId)` is the explicit overload for callers that do
   not run as the account owner.
+- `InvoiceInboxFlag.isEnabledFor(accountEmail)` takes an already-resolved account and the current
+  tenant; `SFWindowAccessMap` uses it (ETP-6049).
 
 **Evaluate at request entry, never in the OCR worker.** The asynchronous OCR worker has no
 `OBContext` user, so `currentAccountEmail()` returns `null` there and a targeted user would look
@@ -802,7 +815,10 @@ key, `Email` and lowercase `email`) and `clientId`. Write Datadog rules on the l
 attribute only, against lowercase values (never on the identifier, a percentage or a tenant
 attribute: the web client and the backend use different targeting keys). With no resolvable account
 the context carries `clientId` only, so an email rule does not match and the default stays off. The
-web client has no key for this flag yet; story ETP-6049 adds it when the inbox gets a UI.
+browser still has no flag key of its own (ETP-6049): `SFWindowAccessMap` publishes the answer as
+`capabilities.invoiceInbox` (per account, outside the admin branch, `false` on any error), exactly like
+`productMovements`, and the Invoice Inbox menu entry and window read that capability. There is still
+one evaluator, `InvoiceInboxFlag`; a change reaches a user when the access map is next loaded.
 
 **Turning it on locally:** `etendo.go.flags.invoice-inbox=true` in `Openbravo.properties` (or
 `-Detendo.go.flags.invoice-inbox=true`, or `ETGO_FLAG_INVOICE_INBOX=true` in Tomcat's environment),
@@ -814,10 +830,87 @@ add rules on the lowercase `email` attribute. The local property is inert while 
 selected, and an undefined key resolves to `false`, so a missing setting looks exactly like "off".
 
 **Retirement (TTL 2027-01-31, provisional until confirmed with product):** the inbox then ships to
-everyone. Unwrap the toggle point (the flag check at the top of `InvoiceInboxUploadEndpoint.handle`), delete
+everyone. Unwrap the toggle points (the flag check at the top of `InvoiceInboxUploadEndpoint.handle`, remove
+the flag gate from `InvoiceInboxHeaderHandler` (the handler stays: it serves `discard`), the
+`SFWindowAccessMap` capability), delete
 `InvoiceInboxFlag.java` and its test, delete `FLAG_INVOICE_INBOX` from `GoFeatureFlags`, remove this
 section and the configuration-table row, and delete the hosted setting. Keep the registry feature
 entry in `etendo_schema_forge`.
+
+### `bank-bounce-suggestions` (ETP-5581) — backend-only, per account, off by default
+
+> **Status: implemented — backend (com.etendoerp.go) and SPA (`etendo_schema_forge`, which ships
+> with it and never evaluates the flag).** Registered on day one (registry
+> entry `bank-bounce-suggestions` in `etendo_schema_forge` `flags-registry.json`). The only evaluator
+> is `BankBounceSuggestionsFlag` (`GoFeatureFlags.FLAG_BANK_BOUNCE_SUGGESTIONS`). Toggle points:
+> `ReconciliationHandler.buildAutoMatch` and `buildPendingLines` (bounce pairs, the `bounce` state),
+> `ReconciliationHandler.applySuggestions` (`bouncePair` groups, and the KPI events through the
+> detection it hands to `BankBounceKpiTelemetry.ModalDecisions`),
+> `BankBouncePairService.discardPair`, `restorePair` and `dismissPair` (KPI-only, writes nothing),
+> every caller of `StatementLineFilter`
+> (whether discarded lines are honoured at all) and `BankStatementsHandler.loadStatements`.
+> Contract: `docs/neo-headless.md` §4.12.1.1, *Discarded lines and bounce pairs*.
+
+Gates the automatic **bounce-pair suggestions** in the bank reconciliation of PSD2-synced financial
+accounts. A bounce is an outgoing bank-statement line plus the line that reverses it: same amount,
+opposite sign. Positive polarity: `true` = suggestions on. Default and every failure = `false`.
+
+**What it gates.**
+
+- The backend auto-match detects candidate bounce pairs and returns them in its answer.
+- The SPA shows those pairs in the "Posibles rebotes" section of the auto-match modal, and the pairs
+  can be reviewed in the reconciliation panel.
+- Accepting a pair logically discards **both** statement lines (`EM_PSD2_IS_DISCARDED`, a column of
+  the PSD2 module) and links them as a pair. Discard and restore always act on the pair, never on a
+  single line; both answer 403 `BOUNCE_SUGGESTIONS_OFF` with the flag off.
+- Honouring discarded lines at all. With the flag off a discarded line (discarded in Classic, or
+  here while the flag was on) is a plain pending line: listed, counted under *Pendientes*, proposed
+  by auto-match and reconcilable, with no `counts.discarded`, no `status=discarded`, no
+  `discarded` marker on the statement lines and no `discardedCount` in the statements list — the
+  behaviour from before ETP-5581. With it on, only an UNMATCHED discarded line counts as discarded;
+  a reconciled one counts as reconciled.
+
+**What it does not gate: the stored counters.** The account's *Por conciliar* counter
+(`EM_ETGO_Pending_Count`, function `ETGO_ACCOUNT_PENDING_COUNT`) and the statement's
+`EM_ETGO_Discarded_Count` / `EM_ETGO_Status` are computed in SQL or in persistence events, which
+cannot see a per-account flag, so they leave discarded lines out whatever the flag says. Known
+limitation: turning the flag off for an account that already discarded pairs leaves its counter
+lower than its reconciliation panel (e.g. 47 against 49) until the flag is turned back on. Killing
+the feature must revert the `ETGO_ACCOUNT_PENDING_COUNT` change (see the retirement note below).
+
+**Backend-only.** No key in the web client's `flag-keys.js`, and none must be added. The SPA renders
+only what the auto-match answer carries, so a browser key would be a second evaluator. **Evaluated
+once per action** and handed down (`StatementLineFilter` and the guards take the boolean).
+
+**Declared exception: the MCP surface.** The MCP's declared actions are static, so
+`etendo_schema` / `etendo_discover` list `discardPair`, `restorePair` and `pendingLines`'
+`status=discarded` option even with the flag off; they answer 403 / are ignored exactly as on REST.
+User decision: declared (`docs/neo-headless.md` §4.12.9), not filtered per request.
+
+**Targeting.** Per account: `FeatureFlagContext.forAccount(<ETGO_ACCOUNT email>)`, the email resolved
+the way `PortalLinkPolicy#currentAccountEmail` does (`GoAccountResolver.currentAccountEmail()`), the
+same shape as `bp-portal-link`. No account, no email or a failed lookup means **off**, never on.
+Write Datadog rules on the lowercase `email` attribute against lowercase values. Evaluate per request
+and never cache the answer in a `static final`.
+
+**Turning it on locally:** `etendo.go.flags.bank-bounce-suggestions=true` in `Openbravo.properties`
+(or `ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS=true` in Tomcat's environment), with no Datadog/ConfigCat arm
+selected, then restart Tomcat.
+
+**Rollout prerequisite:** the hosted setting does not exist yet. Before targeting anyone on a
+shared environment, create the `bank-bounce-suggestions` **boolean** setting in Datadog (ConfigCat
+as the fallback) with default `false`, in each environment, then add rules on the lowercase `email`
+attribute. Until then nobody can be targeted and no pilot can start: an undefined key resolves to
+`false`, and the local property is inert while a hosted arm is selected.
+
+**TTL 2026-12-31 — placeholder, not a commitment.** It is the end of the current quarter (Q4 2026).
+Revisit it once the first account is targeted. Retiring the flag means the suggestions ship to
+everyone: unwrap the toggle points, delete the flag constant, this section and its
+configuration-table row, and delete the hosted setting. Keep the registry feature entry. **Killing
+it instead** removes the owned code and every toggle point AND reverts the ETP-5581 change to
+`ETGO_ACCOUNT_PENDING_COUNT` (count every unmatched line again, drop the `EM_PSD2_Is_Discarded`
+watched column), then `ad_scd_rebuild` of the counter: that, not a data-fix, restores the old
+*Por conciliar*.
 
 ### `usage-aggregation-schedule` (ETP-5051) — backend-only, strictly off by default
 

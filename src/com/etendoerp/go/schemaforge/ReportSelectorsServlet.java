@@ -144,14 +144,24 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
      * if it only appears in orderBy it is bound on the data query only.
      */
     final boolean bindClient;
+    /** JSON keys for the columns after id/name/label, in SELECT order. */
+    final String[] extraKeys;
 
     SelectorQuery(String select, StringBuilder fromWhere, String orderBy, boolean bindClient) {
+      this(select, fromWhere, orderBy, bindClient, NO_EXTRA_KEYS);
+    }
+
+    SelectorQuery(String select, StringBuilder fromWhere, String orderBy, boolean bindClient,
+        String[] extraKeys) {
       this.select = select;
       this.fromWhere = fromWhere;
       this.orderBy = orderBy;
       this.bindClient = bindClient;
+      this.extraKeys = extraKeys;
     }
   }
+
+  private static final String[] NO_EXTRA_KEYS = new String[0];
 
   // ---------------------------------------------------------------------------
   // HTTP entry points
@@ -255,7 +265,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     dataQuery.setFirstResult(req.offset);
     List<Object[]> rows = dataQuery.list();
 
-    JSONArray items = toJsonItems(rows);
+    JSONArray items = toJsonItems(rows, sq.extraKeys);
 
     JSONObject result = new JSONObject();
     result.put("items", items);
@@ -412,20 +422,33 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         ORDER_BY_NAME, true);
   }
 
+  /**
+   * The fiscal years of the client. Each row also carries the year's first and last day
+   * ({@code startDate} / {@code endDate}, {@code yyyy-MM-dd}, from its periods) so the report
+   * view can preload a July-to-June year as 01/07 → today (ETP-6080).
+   *
+   * <p>With {@code selectedOrgId}, only the years of the calendar that org actually uses:
+   * its own, or the one it inherits from its calendar owner ({@code ad_org_getcalendarowner}).
+   * An org with no calendar owner (not ready) gets no years.</p>
+   */
   private SelectorQuery buildYearQuery(SelectorRequest req) {
     StringBuilder fromWhere = new StringBuilder(
         "FROM c_year y JOIN c_calendar c ON c.c_calendar_id = y.c_calendar_id"
         + " WHERE y.isactive='Y' AND y.ad_client_id = :clientId"
         + " AND (y.year || ' (' || c.name || ')') ILIKE :search");
     if (req.selectedOrgId != null) {
-      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org o"
-          + " WHERE o.c_calendar_id = c.c_calendar_id AND o.ad_org_id = :selectedOrgId)");
+      fromWhere.append(" AND c.c_calendar_id = (SELECT o.c_calendar_id FROM ad_org o"
+          + " WHERE o.ad_org_id = ad_org_getcalendarowner(:selectedOrgId))");
     }
     return new SelectorQuery(
         "SELECT y.c_year_id AS id,"
         + " y.year || ' (' || c.name || ')' AS name,"
-        + " y.year || ' (' || c.name || ')' AS label",
-        fromWhere, "ORDER BY y.year DESC", true);
+        + " y.year || ' (' || c.name || ')' AS label,"
+        + " (SELECT to_char(MIN(p.startdate), 'YYYY-MM-DD') FROM c_period p"
+        + " WHERE p.c_year_id = y.c_year_id) AS startdate,"
+        + " (SELECT to_char(MAX(p.enddate), 'YYYY-MM-DD') FROM c_period p"
+        + " WHERE p.c_year_id = y.c_year_id) AS enddate",
+        fromWhere, "ORDER BY y.year DESC", true, new String[]{ "startDate", "endDate" });
   }
 
   /**
@@ -561,13 +584,16 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     }
   }
 
-  private JSONArray toJsonItems(List<Object[]> rows) throws JSONException {
+  private JSONArray toJsonItems(List<Object[]> rows, String[] extraKeys) throws JSONException {
     JSONArray items = new JSONArray();
     for (Object[] row : rows) {
       JSONObject item = new JSONObject();
       item.put("id", toText(row[0]));
       item.put("name", toText(row[1]));
       item.put("label", toText(row[2]));
+      for (int i = 0; i < extraKeys.length; i++) {
+        item.put(extraKeys[i], toText(row[3 + i]));
+      }
       items.put(item);
     }
     return items;
