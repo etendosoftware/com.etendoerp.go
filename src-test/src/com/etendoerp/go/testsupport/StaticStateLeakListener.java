@@ -11,6 +11,7 @@ import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.junit.platform.engine.TestExecutionResult;
+import org.junit.platform.engine.support.descriptor.ClassSource;
 import org.junit.platform.launcher.TestExecutionListener;
 import org.junit.platform.launcher.TestIdentifier;
 import org.junit.platform.launcher.TestPlan;
@@ -34,6 +35,13 @@ import org.openbravo.database.ExternalConnectionPool;
  * throws (a test runs it with {@code OBPropertiesProvider} mocked), the map stays empty, every
  * later {@code getConnection()} skips the initialization and DAL setup dies with
  * {@code "datasource" is null}.</li>
+ * <li><b>Request context.</b> {@code OBContext.instance} is a {@code ThreadLocal} too. A mocked
+ * test that installs a real context and never clears it hands it to every later class of its JVM,
+ * so code that reads {@code OBContext.getOBContext()} behaves differently depending on which
+ * classes Gradle grouped into that fork. {@code TenantOwnership.loadOwned()}, for instance, only
+ * skips the tenant check when there is no context. Checked once per class, only for classes that
+ * are not {@code *IntegrationTest}: a DAL test leaves its context set by design and its base class
+ * installs a new one before each test.</li>
  * </ul>
  *
  * <p><b>How.</b> Registered through
@@ -63,7 +71,16 @@ public class StaticStateLeakListener implements TestExecutionListener {
       TestExecutionResult testExecutionResult) {
     String source = testIdentifier.getLegacyReportingName() + " [" + testIdentifier.getUniqueId()
         + "]";
-    checkAndRepair(source);
+    checkAndRepair(source, isFinishedUnitTestClass(testIdentifier));
+  }
+
+  /** A top-level test class that needs no database has just finished. */
+  private static boolean isFinishedUnitTestClass(TestIdentifier testIdentifier) {
+    return testIdentifier.getSource()
+        .filter(ClassSource.class::isInstance)
+        .map(source -> ((ClassSource) source).getClassName())
+        .filter(name -> !name.contains("$") && !name.endsWith("IntegrationTest"))
+        .isPresent();
   }
 
   @Override
@@ -79,8 +96,19 @@ public class StaticStateLeakListener implements TestExecutionListener {
    * @return the leaks found, empty when the state was clean
    */
   static List<String> checkAndRepair(String source) {
+    return checkAndRepair(source, false);
+  }
+
+  /**
+   * As {@link #checkAndRepair(String)}, and when {@code unitClassFinished} also repairs a request
+   * context the finished unit-test class left installed.
+   */
+  static List<String> checkAndRepair(String source, boolean unitClassFinished) {
     List<String> found = new ArrayList<>();
     try {
+      if (unitClassFinished && repairContext()) {
+        found.add("OBContext left set (setOBContext without setOBContext(null))");
+      }
       if (repairAdminMode()) {
         found.add("admin mode left set (unbalanced setAdminMode/restorePreviousMode)");
       }
@@ -126,6 +154,15 @@ public class StaticStateLeakListener implements TestExecutionListener {
         "adminModeTrace", "crossOrgAdminModeTrace", "adminModeSet" }) {
       threadLocal(field).remove();
     }
+    return true;
+  }
+
+  private static boolean repairContext() throws ReflectiveOperationException {
+    ThreadLocal<?> current = threadLocal("instance");
+    if (current.get() == null) {
+      return false;
+    }
+    current.remove();
     return true;
   }
 
