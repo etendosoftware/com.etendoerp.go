@@ -1,0 +1,233 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.invoice.Invoice;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
+/**
+ * Replicates, for the completion step of the NEO/MCP write path, the "a rectificative invoice
+ * needs its rectification motive/code" rule that today only ever runs on the classic UI — across
+ * ALL THREE fiscal systems that may be active for the invoice's organization (ETP-5745 CP-13/CP-14).
+ *
+ * <h2>Why</h2>
+ *
+ * <p>Each fiscal system that tracks WHY an invoice is being corrected needs that choice from a
+ * human — it is never guessed:
+ * <ul>
+ *   <li><b>SII</b> — {@code aeatsiiMotivoRectif} ('Motivo de rectificación').</li>
+ *   <li><b>TicketBAI</b> — {@code tbaiReverseinvoicecode} ('Código de rectificación').</li>
+ *   <li><b>VERI*FACTU</b> — folded into {@code etvfacInvType} itself: an {@code R1}-{@code R5} code
+ *   names both "this is a correction" and "for this reason" in one field, so "the code is missing"
+ *   here means the field is still a non-rectificative one ({@code F*}, including the AD default
+ *   {@code F1}) or blank.</li>
+ * </ul>
+ *
+ * <p>Nothing auto-fills any of them — see {@link SalesRectificativeFiscalDefaults}'s class javadoc
+ * ("What it does not do") for why a prior version of this guard's sibling class auto-picked
+ * {@code R4} for TicketBAI, and why that was reverted (ETP-5745 CP-14): it is exactly the same
+ * class of fiscal judgement call as SII's motivo, and fabricating it on the caller's behalf is not
+ * this module's call to make. The STRUCTURAL fields each system needs (SII's {@code aeatsiiClaveTipo}
+ * /{@code aeatsiiTipoRectif}; TicketBAI's {@code tbaiIsreverseinvoice}/{@code tbaiReverseinvoicetype})
+ * ARE corrected automatically — those name "this is a correction", not "why" — but the code/motive
+ * itself is always a human decision this guard only ever BLOCKS on, never supplies.
+ *
+ * <p>None of the three systems' validators reach the MCP/REST write path today:
+ * {@code useSifFieldPatcher.js} only runs in the browser SPA, {@code FacturasEventHandler} is
+ * gated on a classic {@code windowId} request parameter NEO never sends, and the DB CHECK
+ * constraints involved (e.g. {@code EM_AEATSII_C_INV_RECT_CHK}) only cover SII and throw a raw,
+ * unfriendly violation instead of a validation message naming the field.
+ *
+ * <h2>What this guard does</h2>
+ *
+ * <p>Right before completion (mirroring where {@link RectificationTotalGuard} sits), for a SALES
+ * invoice (purchase-side corrective support is not implemented yet — see the same ETP-5745 CP-10
+ * precedent in {@code useSifFieldPatcher.js}) whose document type is structurally rectificative
+ * ({@link RectificativeSupport#isRectificative} — a document-type flag, never a spec/table name):
+ * <ol>
+ *   <li>checks, independently, whether SII (always, when the structural condition above holds),
+ *   TicketBAI (only when the org has an active {@code tbai_config}) and VERI*FACTU (only when the
+ *   legal entity has an active, in-system {@code etvfac_verifactu_config}) are each still missing
+ *   their own code/motive;</li>
+ *   <li>if ONE OR MORE are missing, refuses the completion with a single 422 that names, in order
+ *   and only the ones that actually failed, which system(s) still need a choice — never a fixed
+ *   "SII y TicketBAI" string;</li>
+ *   <li>otherwise, corrects {@code aeatsiiClaveTipo} to {@code "R"} and defaults
+ *   {@code aeatsiiTipoRectif} to {@code "I"} when still blank (unchanged from the original CP-13
+ *   fix), and lets the completion proceed.</li>
+ * </ol>
+ *
+ * <p><b>Fails OPEN on a read/write error</b>, mirroring {@link RectificationTotalGuard}: this
+ * guard's own failure to resolve or persist a fiscal field must never block a legitimate completion
+ * it cannot evaluate.
+ *
+ * <p><b>Placement.</b> Invoice-specific, not shared NEO code: wired from
+ * {@link AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded}, alongside
+ * {@link RectificationTotalGuard}. Applies identically to any invoice spec built on
+ * {@code C_Invoice} — nothing here branches on a spec or table name, only on the document type's
+ * own rectificative flag, the invoice's own {@code IsSOTrx}, and each system's own active
+ * configuration.
+ */
+final class RectificationFiscalCodeGuard {
+
+  private static final Logger log = LogManager.getLogger(RectificationFiscalCodeGuard.class);
+
+  private static final String CLAVE_TIPO_RECTIFICATIVA = "R";
+  private static final String TIPO_RECTIF_DEFAULT = "I";
+  private static final String RECTIFICATIVE_PREFIX = "R";
+
+  private static final String SYSTEM_SII = "SII";
+  private static final String SYSTEM_TBAI = "TicketBAI";
+  private static final String SYSTEM_VERIFACTU = "Verifactu";
+
+  /** Stable identity sent in messageKeys — a plain string, not an AD_MESSAGE (ETP-5692 precedent). */
+  static final String MSG_RECTIFICATION_CODE_REQUIRED = "ETGO_InvoiceRectificationCodeRequired";
+
+  private RectificationFiscalCodeGuard() {
+  }
+
+  /**
+   * Applies the rectificative fiscal-code rule when the request is a completion action; otherwise
+   * a no-op. See the class javadoc for the full rule.
+   *
+   * @param context the current request
+   * @return a 422 naming the system(s) still missing their code/motive, or {@code null} to let the
+   *     completion proceed
+   */
+  static NeoResponse checkAndApply(NeoContext context) {
+    if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
+      return null;
+    }
+    String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
+    if (StringUtils.isBlank(invoiceId)) {
+      return null;
+    }
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      if (invoice == null || !Boolean.TRUE.equals(invoice.isSalesTransaction())) {
+        return null;
+      }
+      DocumentType docType = invoice.getTransactionDocument();
+      if (!RectificativeSupport.isRectificative(docType)) {
+        return null;
+      }
+      String orgId = invoice.getOrganization() != null ? invoice.getOrganization().getId() : null;
+      List<String> missing = missingSystems(invoice, orgId);
+      if (!missing.isEmpty()) {
+        return reject(missing);
+      }
+      boolean changed = correctClaveTipo(invoice) | defaultTipoRectif(invoice);
+      if (changed) {
+        OBDal.getInstance().save(invoice);
+        OBDal.getInstance().flush();
+      }
+      return null;
+    } catch (RuntimeException | JSONException e) {
+      log.warn("Could not evaluate the rectification fiscal-code guard for invoice {}: {}",
+          invoiceId, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * The fiscal systems, in SII/TicketBAI/VERI*FACTU order, that are active for {@code orgId} and
+   * still missing their rectification code/motive on {@code invoice}.
+   */
+  private static List<String> missingSystems(Invoice invoice, String orgId) {
+    List<String> missing = new ArrayList<>();
+    if (StringUtils.isBlank(invoice.getAeatsiiMotivoRectif())) {
+      missing.add(SYSTEM_SII);
+    }
+    if (StringUtils.isNotBlank(orgId)) {
+      if (SalesRectificativeFiscalDefaults.tbaiConfigActive(orgId)
+          && StringUtils.isBlank(invoice.getTbaiReverseinvoicecode())) {
+        missing.add(SYSTEM_TBAI);
+      }
+      if (SalesRectificativeFiscalDefaults.configExists(
+          SalesRectificativeFiscalDefaults.VERIFACTU_ACTIVE_SQL, orgId)
+          && !isRectificativeVerifactuCode(invoice.getEtvfacInvType())) {
+        missing.add(SYSTEM_VERIFACTU);
+      }
+    }
+    return missing;
+  }
+
+  private static boolean isRectificativeVerifactuCode(String code) {
+    return code != null && code.startsWith(RECTIFICATIVE_PREFIX);
+  }
+
+  /** @return {@code true} when the value was changed */
+  private static boolean correctClaveTipo(Invoice invoice) {
+    if (CLAVE_TIPO_RECTIFICATIVA.equals(invoice.getAeatsiiClaveTipo())) {
+      return false;
+    }
+    invoice.setAeatsiiClaveTipo(CLAVE_TIPO_RECTIFICATIVA);
+    return true;
+  }
+
+  /** @return {@code true} when the value was changed */
+  private static boolean defaultTipoRectif(Invoice invoice) {
+    if (StringUtils.isNotBlank(invoice.getAeatsiiTipoRectif())) {
+      return false;
+    }
+    invoice.setAeatsiiTipoRectif(TIPO_RECTIF_DEFAULT);
+    return true;
+  }
+
+  /**
+   * The 422 refusal, in the same flat {@code success:false}/{@code message}/{@code messageKeys}/
+   * {@code messageParams} shape {@link RectificationTotalGuard} answers with — explicitly naming
+   * the system(s) still missing their code, dynamically built from {@code missingSystems} (never a
+   * hardcoded "SII y TicketBAI" string).
+   */
+  private static NeoResponse reject(List<String> missingSystems) throws JSONException {
+    String message = "Debe seleccionar un motivo/código de rectificación en la solapa SIF para "
+        + joinSpanish(missingSystems);
+
+    JSONObject body = new JSONObject();
+    body.put("success", false);
+    body.put("message", message);
+    body.put("messageKeys", new JSONArray(List.of(MSG_RECTIFICATION_CODE_REQUIRED)));
+    JSONObject messageParams = new JSONObject();
+    messageParams.put("systems", new JSONArray(missingSystems));
+    body.put("messageParams", messageParams);
+    return NeoResponse.error(NeoActionContract.SC_UNPROCESSABLE, body);
+  }
+
+  /** Spanish list join: {@code "SII"}, {@code "SII y TicketBAI"}, {@code "SII, TicketBAI y Verifactu"}. */
+  private static String joinSpanish(List<String> items) {
+    int size = items.size();
+    if (size == 1) {
+      return items.get(0);
+    }
+    String allButLast = String.join(", ", items.subList(0, size - 1));
+    return allButLast + " y " + items.get(size - 1);
+  }
+}

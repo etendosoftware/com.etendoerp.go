@@ -284,6 +284,11 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
       rectificationLinks.persistOriginInvoice(context);
       persistSiiAuthorizationno(context);
+      // ETP-5745 CP-14: structural TicketBAI/VERI*FACTU rectificative defaults on every header
+      // write, not just completion — restores the ETP-5747 behavior (never merged into this
+      // long-lived branch), minus the tbaiReverseinvoicecode auto-pick it used to do. See
+      // SalesRectificativeFiscalDefaults' class javadoc for the full rule.
+      SalesRectificativeFiscalDefaults.apply(InvoiceCalloutHelper.resolveInvoiceIdFromContext(context));
     }
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       // ETP-4783: the main CRUD write captures its response before afterHandle() runs, so
