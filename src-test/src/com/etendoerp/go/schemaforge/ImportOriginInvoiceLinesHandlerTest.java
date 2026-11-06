@@ -827,8 +827,9 @@ public class ImportOriginInvoiceLinesHandlerTest {
   public void availableOriginInvoices_detail_addsCreationDateAndTheUnsignedTotalOfEveryLine()
       throws Exception {
     // Each case holds the standard precision of the source currency (null when unknown) and the
-    // expected amount.
-    Object[][] cases = { { null, "31.50" }, { 0L, "32" } };
+    // expected amount. The precision is always stubbed: an unstubbed Long getter of a Mockito
+    // mock answers 0, not null, and would silently turn the "unknown" case into scale 0.
+    Object[][] cases = { { null, "31.50" }, { 0L, "32" }, { 3L, "31.500" } };
     for (Object[] c : cases) {
       Probe probe = purchase();
       Invoice source = probe.invoices.get("src");
@@ -836,9 +837,7 @@ public class ImportOriginInvoiceLinesHandlerTest {
       source.getInvoiceLineList().add(credit);
       holdCopyOf(probe.target, source.getInvoiceLineList().get(0));
       org.openbravo.model.common.currency.Currency sourceCurrency = currency("eur");
-      if (c[0] != null) {
-        when(sourceCurrency.getStandardPrecision()).thenReturn((Long) c[0]);
-      }
+      when(sourceCurrency.getStandardPrecision()).thenReturn((Long) c[0]);
       doReturn(sourceCurrency).when(source).getCurrency();
       Date created = Date.from(java.time.Instant.parse("2026-11-05T09:12:33.789Z"));
       when(source.getCreationDate()).thenReturn(created);
@@ -886,6 +885,8 @@ public class ImportOriginInvoiceLinesHandlerTest {
     Invoice neg = completed("neg", false, credit);
     probe.invoices.put("neg", neg);
     holdCopyOf(probe.target, credit);
+    org.openbravo.model.common.currency.Currency targetCurrency = probe.target.getCurrency();
+    when(targetCurrency.getStandardPrecision()).thenReturn(2L);
 
     JSONObject row = page(probe.run("availableOriginInvoiceLines",
         "{\"invoiceId\":\"neg\",\"includeCovered\":true,\"detail\":true}"))
