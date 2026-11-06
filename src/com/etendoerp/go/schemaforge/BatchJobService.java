@@ -315,23 +315,40 @@ public final class BatchJobService {
     }
     Set<String> ids = new HashSet<>();
     for (int i = 0; i < ops.length(); i++) {
-      JSONObject op = ops.optJSONObject(i);
-      if (op == null) {
-        return opPrefix(i) + " must be an object";
+      String invalid = validateOperation(i, ops.optJSONObject(i), ids);
+      if (invalid != null) {
+        return invalid;
       }
-      String id = op.optString("id", null);
-      if (StringUtils.isBlank(id) || StringUtils.isBlank(op.optString("spec", null))
-          || StringUtils.isBlank(op.optString("entity", null))) {
-        return opPrefix(i) + " requires 'id', 'spec', 'entity'";
-      }
-      if (!ids.add(id)) {
-        return opPrefix(i) + ".id duplicates an earlier op";
-      }
-      String parentRef = op.optString("parentRef", null);
-      if (StringUtils.isNotBlank(parentRef) && !ids.contains(parentRef)) {
-        return opPrefix(i) + ".parentRef '" + parentRef
-            + "' does not match any earlier op id";
-      }
+    }
+    return null;
+  }
+
+  /**
+   * One operation of {@link #validate}: well-formed, a fresh id, and every reference it makes
+   * points back to an earlier operation. Adds the operation's id to {@code ids}.
+   *
+   * @return the reason the operation is unacceptable, or {@code null} when it is well-formed
+   */
+  private static String validateOperation(int i, JSONObject op, Set<String> ids) {
+    if (op == null) {
+      return opPrefix(i) + " must be an object";
+    }
+    String id = op.optString("id", null);
+    if (StringUtils.isBlank(id) || StringUtils.isBlank(op.optString("spec", null))
+        || StringUtils.isBlank(op.optString("entity", null))) {
+      return opPrefix(i) + " requires 'id', 'spec', 'entity'";
+    }
+    if (!ids.add(id)) {
+      return opPrefix(i) + ".id duplicates an earlier op";
+    }
+    if (BatchService.isDeleteOperation(op)
+        && StringUtils.isBlank(op.optString(BatchService.FIELD_RECORD_ID, null))) {
+      // ETP-6143: refuse the whole job up front rather than start it and fail this row later.
+      return opPrefix(i) + " DELETE requires 'recordId'";
+    }
+    String parentRef = op.optString("parentRef", null);
+    if (StringUtils.isNotBlank(parentRef) && !ids.contains(parentRef)) {
+      return opPrefix(i) + ".parentRef '" + parentRef + "' does not match any earlier op id";
     }
     return null;
   }
