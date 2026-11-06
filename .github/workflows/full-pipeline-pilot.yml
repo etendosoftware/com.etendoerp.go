@@ -41,8 +41,7 @@ on:
     branches: [main]
     types: [opened, reopened, synchronize]
   push:
-    # TEMPORARY (ETP-6149): validates the Datadog metrics from its own branch; removed before the merge.
-    branches: [main, feature/ETP-6149]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
