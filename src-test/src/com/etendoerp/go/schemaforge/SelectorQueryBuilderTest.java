@@ -31,7 +31,10 @@ import java.util.Collections;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
@@ -156,6 +159,39 @@ class SelectorQueryBuilderTest {
     assertTrue(result.endsWith(")"), "should be parenthesized: " + result);
   }
 
+  /**
+   * ETP-6103 — a fragment that is a plain string column is searched as {@code upper(col)}, with no
+   * cast, so a trigram index on {@code upper(col)} can serve it; anything else keeps the cast.
+   */
+  @Test
+  @DisplayName("appendCustomSearchFilter searches a string column as upper(col), others cast")
+  void testAppendFilterStringColumnSkipsCast() {
+    Property stringProperty = mock(Property.class);
+    when(stringProperty.isPrimitive()).thenReturn(true);
+    when(stringProperty.getPrimitiveObjectType()).thenReturn((Class) String.class);
+    Property numberProperty = mock(Property.class);
+    when(numberProperty.isPrimitive()).thenReturn(true);
+    when(numberProperty.getPrimitiveObjectType()).thenReturn((Class) java.math.BigDecimal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    when(modelProvider.getEntity("BusinessPartner")).thenReturn(entity);
+
+    try (MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class);
+        MockedStatic<DalUtil> dal = mockStatic(DalUtil.class)) {
+      mp.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      dal.when(() -> DalUtil.getPropertyFromPath(entity, "name")).thenReturn(stringProperty);
+      dal.when(() -> DalUtil.getPropertyFromPath(entity, "creditLimit")).thenReturn(numberProperty);
+
+      StringBuilder hql = new StringBuilder();
+      SelectorOrgFilter.appendCustomSearchFilter(hql, Arrays.asList("e.name", "e.creditLimit"), "e",
+          "mi", false, "BusinessPartner");
+      String result = hql.toString();
+      assertTrue(result.contains("upper(e.name) LIKE upper(:search)"), result);
+      assertTrue(result.contains("upper(COALESCE(cast(e.creditLimit as string), '')) LIKE upper(:search)"),
+          result);
+    }
+  }
+
   /** Mixed: one bare + one dotted — each handled independently. */
   @Test
   @DisplayName("appendCustomSearchFilter handles mixed bare + dotted fragments")
@@ -178,9 +214,9 @@ class SelectorQueryBuilderTest {
         SearchableFragment.ofRelativePath("product.name"),
         SearchableFragment.ofRelativePath("name"),
         SearchableFragment.ofClauseLeftPart("bp.searchKey")), "e", "mi", false);
-    assertEquals(" WHERE (lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(e.name as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(bp.searchKey as string), '')) LIKE :search)", hql.toString());
+    assertEquals(" WHERE (upper(COALESCE(cast(e.product.name as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(e.name as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(bp.searchKey as string), '')) LIKE upper(:search))", hql.toString());
   }
 
   /** Rich path: no-op when search is blank, like the custom path. */
@@ -258,8 +294,8 @@ class SelectorQueryBuilderTest {
     String where = withoutOrgFilters(() -> SelectorQueryBuilder.buildRichQueryWhereClause(
         meta, "p", "e.active = true", "e", null).getHql());
 
-    assertEquals("as e where e.active = true AND (lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(e.product.searchKey as string), '')) LIKE :search)", where);
+    assertEquals("as e where e.active = true AND (upper(COALESCE(cast(e.product.name as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(e.product.searchKey as string), '')) LIKE upper(:search))", where);
   }
 
   /** Custom-HQL path: unchanged — a dotted fragment is used as written, whatever its origin. */
@@ -277,9 +313,9 @@ class SelectorQueryBuilderTest {
         " FROM BusinessPartner bp", "bp", meta, null, "mi", null).getHql());
 
     assertEquals(" FROM BusinessPartner bp WHERE ("
-        + "lower(COALESCE(cast(contact.name as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(bp.searchKey as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(bp.name as string), '')) LIKE :search)", from);
+        + "upper(COALESCE(cast(contact.name as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(bp.searchKey as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(bp.name as string), '')) LIKE upper(:search))", from);
   }
 
   // --------------------------------------------------------------------
