@@ -39,8 +39,6 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.order.Order;
-import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
@@ -75,8 +73,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * price of the invoice's CURRENT price list (a return alone has no relation to the price it was
  * sold at: {@code createReturnInvoice} is the way to credit at the original price), and the cap and
  * the candidate rules are each window modal's own, neither stricter nor laxer ({@link
- * #returnPending}): sales nets every invoice line linked to the return line whatever the status of
- * its invoice, and compares the currency of the return's sales order; purchase offers the return
+ * InOutInvoiceListing#returnPending}): sales nets every invoice line linked to the return line
+ * whatever the status of its invoice, and compares the currency of the return's sales order; purchase offers the return
  * line's quantity, skips only a line this invoice already holds and compares no currency; both list
  * only returns whose {@code invoiceStatus} is below 100. On the SALES side the rectificative is
  * linked in {@code C_Invoice_Reverse} to the completed invoices the imported return lines rectify
@@ -109,7 +107,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
 
   /** Joins the steps of the flow sentence of a contract. */
   private static final String THEN = ", then ";
-  private static final String DOCUMENT = "Document ";
+  private static final String PARAM_CLIENT = "client";
   private static final String PARAM_RECEIPT_ID = "receiptId";
   private static final String PARAM_SHIPMENT_ID = "shipmentId";
   private static final String PARAM_RETURN_ID = "returnId";
@@ -153,9 +151,6 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String RETURN_LINE_DETAIL = "movementQuantity (positive), orderLine, "
       + "orderLineDiscount and blockedReason (null when offered, else " + REASON_ORDER_LINE_INVOICED
       + ", " + REASON_CREDITED_IN_FULL + " or " + REASON_IMPORTED_HERE + ")";
-  private static final String KEY_ORDER = "order";
-  private static final String KEY_ORDER_LINE = "orderLine";
-  private static final String KEY_MOVEMENT_QUANTITY = "movementQuantity";
 
   /**
    * The three contracts of the invoice this delegate is injected in, in flow order.
@@ -353,20 +348,24 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     String idParam = idParamOf(returns, sales);
     RectificativeImportPolicy policy = RectificativeImportPolicy.from(context);
     boolean classic = classicPending(context);
+    InOutInvoiceSourceRules rules = new InOutInvoiceSourceRules(this);
+    InOutInvoiceListing listings = new InOutInvoiceListing(this);
     if (LIST_ACTIONS.contains(action)) {
-      Invoice invoice = requireInvoiceOfDirection(context.getRecordId(), sales, false);
-      return classic ? classicAvailableDocuments(invoice, listRequest(body))
-          : availableDocuments(invoice, isSales(invoice), returns, policy, listRequest(body));
+      Invoice invoice = rules.requireInvoiceOfDirection(context.getRecordId(), sales, false);
+      return classic ? listings.classicAvailableDocuments(invoice, listRequest(body))
+          : listings.availableDocuments(invoice, InOutInvoiceSourceRules.isSales(invoice),
+              returns, policy, listRequest(body));
     }
     if (LINES_ACTIONS.contains(action)) {
-      Invoice invoice = requireInvoiceOfDirection(context.getRecordId(), sales, false);
-      ShipmentInOut source = requireSource(invoice, requireParam(body, idParam), returns, policy);
-      LineListing listing =
-          new LineListing(ImportListing.includeCovered(body), ImportListing.detail(body));
-      return classic ? classicAvailableLines(invoice, source, listing)
-          : availableLines(invoice, source, returns, policy, listing);
+      Invoice invoice = rules.requireInvoiceOfDirection(context.getRecordId(), sales, false);
+      ShipmentInOut source = rules.requireSource(invoice, requireParam(body, idParam), returns,
+          policy);
+      InOutInvoiceListing.LineListing listing = new InOutInvoiceListing.LineListing(
+          ImportListing.includeCovered(body), ImportListing.detail(body));
+      return classic ? listings.classicAvailableLines(invoice, source, listing)
+          : listings.availableLines(invoice, source, returns, policy, listing);
     }
-    return importLines(requireInvoiceOfDirection(context.getRecordId(), sales, true), body,
+    return importLines(rules.requireInvoiceOfDirection(context.getRecordId(), sales, true), body,
         idParam, returns, policy);
   }
 
@@ -375,10 +374,6 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       return PARAM_RETURN_ID;
     }
     return Boolean.TRUE.equals(sales) ? PARAM_SHIPMENT_ID : PARAM_RECEIPT_ID;
-  }
-
-  private static boolean isSales(Invoice invoice) {
-    return Boolean.TRUE.equals(invoice.isSalesTransaction());
   }
 
   // ---------------------------------------------------------------------------
@@ -392,7 +387,8 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       // The quantity of a return line is a positive number for the caller; it is credited.
       requested.replaceAll((id, quantity) -> quantity.abs());
     }
-    ShipmentInOut source = requireSource(invoice, requireParam(body, idParam), returns, policy);
+    ShipmentInOut source = new InOutInvoiceSourceRules(this).requireSource(invoice,
+        requireParam(body, idParam), returns, policy);
 
     Map<String, ShipmentInOutLine> linesById = new LinkedHashMap<>();
     Map<String, String> documentLines = new LinkedHashMap<>();
@@ -406,7 +402,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     Map<String, BigDecimal> pendingMagnitudes = returns ? Map.of()
         : pendingQuantities(source.getId());
     Map<String, BigDecimal> pending = returns
-        ? returnPending(invoice, source, linesById, policy)
+        ? new InOutInvoiceListing(this).returnPending(invoice, source, linesById, policy)
         : signedPending(linesById, pendingMagnitudes);
     Map<String, BigDecimal> planned = DocumentLineImport.plan(requested, documentLines, pending);
     if (returns) {
@@ -469,30 +465,6 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   }
 
   /**
-   * What a return line can still be credited, as a POSITIVE magnitude, computed as the modal of the
-   * invoice's side does (ETP-5876), whichever sign the return stored:
-   * <ul>
-   *   <li><b>purchase</b> ({@code ImportFromGoodsReturnModal}): the movement quantity, and a line
-   *       is left out only when THIS invoice already holds a line for it; drafts and completed
-   *       invoices of other documents are not counted;</li>
-   *   <li><b>sales</b> ({@code ImportFromReturnShipmentModal}): the movement quantity minus the
-   *       quantity of EVERY invoice line linked to the return line, whatever the status of its
-   *       invoice (voided ones included), this invoice's own lines among them; and a line whose
-   *       order line is already on an invoice line that is linked to a movement line, or is on this
-   *       invoice, is not offered at all.</li>
-   * </ul>
-   */
-  private Map<String, BigDecimal> returnPending(Invoice invoice, ShipmentInOut source,
-      Map<String, ShipmentInOutLine> lines, RectificativeImportPolicy policy) {
-    boolean presenceOnly = policy.capsReturnsByPresence();
-    Map<String, BigDecimal> credited = presenceOnly ? Map.of() : creditedQuantities(source.getId());
-    Set<String> blocked = presenceOnly ? Set.of()
-        : blockedOrderLines(source.getId(), invoice.getId());
-    return ReturnLineCredit.pending(lines, ReturnLineCredit.movementLineIdsOf(invoice),
-        presenceOnly, credited, blocked);
-  }
-
-  /**
    * The native selection of a credit: one entry per planned line, at the planned (negative)
    * quantity. Built here and not by {@code MultiDocumentInvoiceSupport}, which gives the quantity
    * the sign of the movement line and would turn the credit of a positive-stored return positive.
@@ -504,423 +476,6 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
           entry.getValue().toPlainString()));
     }
     return selected;
-  }
-
-  // ---------------------------------------------------------------------------
-  // available documents / lines
-  // ---------------------------------------------------------------------------
-
-  private NeoResponse availableDocuments(Invoice invoice, boolean sales, boolean returns,
-      RectificativeImportPolicy policy, ImportListing.ListRequest request) throws JSONException {
-    String partnerId = invoice.getBusinessPartner() == null ? null
-        : invoice.getBusinessPartner().getId();
-    String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
-    List<ShipmentInOut> candidates = candidates(partnerId, sales, currencyId, returns, request);
-    return discover(candidates, doc -> {
-      int pendingLines = 0;
-      if (isReturn(doc) == returns && returns) {
-        pendingLines = offeredReturnLineCount(invoice, doc, policy);
-      } else if (isReturn(doc) == returns) {
-        // Read once per candidate and reused by the detail count below.
-        Map<String, BigDecimal> magnitudes = pendingQuantities(doc.getId());
-        pendingLines = magnitudes.size();
-        if (request.detail && pendingLines > 0) {
-          // ETP-6099: what the popup offers once expanded, so a listed document never turns out
-          // empty. Only with detail: the default answer keeps its count.
-          pendingLines = selectableLineCount(invoice, doc, magnitudes, policy);
-        }
-      }
-      if (pendingLines == 0 && !(request.includeCovered && isReturn(doc) == returns
-          && isCovered(invoice, doc, returns, policy))) {
-        return null;
-      }
-      String docCurrency = doc.getEtgoCurrency() == null ? null : doc.getEtgoCurrency().getId();
-      JSONObject row = documentRow(doc.getId(), doc.getDocumentNo(), day(doc.getMovementDate()),
-          partnerId, doc.getBusinessPartner().getName(), docCurrency, pendingLines);
-      if (request.detail) {
-        putDocumentDetail(row, doc, returns);
-      }
-      return row;
-    }, request);
-  }
-
-  /**
-   * The candidates of one list call: the delegate's own seams on a first page that asked for no
-   * longer scan (what the unit tests override), the paged reads otherwise (ETP-6099).
-   */
-  private List<ShipmentInOut> candidates(String partnerId, boolean sales, String currencyId,
-      boolean returns, ImportListing.ListRequest request) {
-    if (request.isDefault(scanLimit())) {
-      return returns ? findCandidateReturns(partnerId, sales)
-          : findCandidateDocuments(partnerId, sales, currencyId);
-    }
-    return returns ? findCandidateReturns(partnerId, sales, request.offset, request.scan)
-        : findCandidateDocuments(partnerId, sales, currencyId, request.offset, request.scan);
-  }
-
-  /**
-   * {@code includeCovered} (ETP-6099): a document with no line left that the window's popup still
-   * lists. A shipment / receipt with something pending before drafts (drafts hold all of it); a
-   * return not invoiced in full and, where the side compares it, in the invoice's currency.
-   */
-  private boolean isCovered(Invoice invoice, ShipmentInOut doc, boolean returns,
-      RectificativeImportPolicy policy) {
-    if (!returns) {
-      return !pendingBeforeDrafts(doc.getId()).isEmpty();
-    }
-    return !isInvoicedInFull(doc) && !returnCurrencyMismatch(invoice, doc, policy);
-  }
-
-  /**
-   * The lines of a shipment / receipt the popup leaves selectable (ETP-6099, {@code detail}):
-   * something pending, not already held by THIS invoice (through the movement line or its order
-   * line) and, where the side greys them ({@link RectificativeImportPolicy
-   * #excludesLinesInvoicedElsewhere}), not linked to another invoice.
-   */
-  private int selectableLineCount(Invoice invoice, ShipmentInOut doc,
-      Map<String, BigDecimal> magnitudes, RectificativeImportPolicy policy) {
-    Map<String, boolean[]> links = invoiceLinkStates(doc.getId(), invoice.getId());
-    boolean excludesElsewhere = policy.excludesLinesInvoicedElsewhere();
-    int count = 0;
-    for (String lineId : signedPending(activeLines(doc), magnitudes).keySet()) {
-      boolean[] state = links.getOrDefault(lineId, new boolean[2]);
-      if (!state[0] && !(excludesElsewhere && state[1])) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  /** The {@code detail} keys of a document row (ETP-6099). */
-  private void putDocumentDetail(JSONObject row, ShipmentInOut doc, boolean returns)
-      throws JSONException {
-    ImportListing.putCreationDate(row, doc.getCreationDate());
-    Order order = doc.getSalesOrder();
-    ImportListing.putNullable(row, KEY_ORDER, order == null ? null : order.getId());
-    if (returns) {
-      ImportListing.putNullable(row, "sourceDocumentNo", sourceDocumentNos(doc.getId()));
-    } else {
-      ImportListing.putNullable(row, "orderDocumentNo",
-          order == null ? null : order.getDocumentNo());
-    }
-  }
-
-  /**
-   * How many lines of a return the import offers, judged as the window's modal judges it: not
-   * already invoiced in full, in the invoice's currency when the side compares it, and with a line
-   * left to credit ({@link #returnPending}). A shipment / receipt counts its
-   * {@link #pendingQuantities} in the list action itself, read once per candidate.
-   */
-  private int offeredReturnLineCount(Invoice invoice, ShipmentInOut doc,
-      RectificativeImportPolicy policy) {
-    if (isInvoicedInFull(doc) || returnCurrencyMismatch(invoice, doc, policy)) {
-      return 0;
-    }
-    return returnPending(invoice, doc, activeLines(doc), policy).size();
-  }
-
-  private static Map<String, ShipmentInOutLine> activeLines(ShipmentInOut doc) {
-    Map<String, ShipmentInOutLine> lines = new LinkedHashMap<>();
-    for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
-      if (line.isActive()) {
-        lines.put(line.getId(), line);
-      }
-    }
-    return lines;
-  }
-
-  /** The window lists only returns whose {@code invoiceStatus} is below 100. */
-  private boolean isInvoicedInFull(ShipmentInOut doc) {
-    BigDecimal status = invoiceStatusOf(doc.getId());
-    return status != null && status.compareTo(BigDecimal.valueOf(100)) >= 0;
-  }
-
-  /**
-   * The sales modal compares the currency of the return's sales order, when it has one, with the
-   * invoice's; the purchase modal compares nothing.
-   */
-  private static boolean returnCurrencyMismatch(Invoice invoice, ShipmentInOut doc,
-      RectificativeImportPolicy policy) {
-    if (!policy.comparesCurrency() || doc.getSalesOrder() == null
-        || doc.getSalesOrder().getCurrency() == null || invoice.getCurrency() == null) {
-      return false;
-    }
-    return !doc.getSalesOrder().getCurrency().getId().equals(invoice.getCurrency().getId());
-  }
-
-  /** What a lines call asked for (ETP-6099). */
-  static final class LineListing {
-    final boolean includeCovered;
-    final boolean detail;
-
-    LineListing(boolean includeCovered, boolean detail) {
-      this.includeCovered = includeCovered;
-      this.detail = detail;
-    }
-  }
-
-  private NeoResponse availableLines(Invoice invoice, ShipmentInOut source, boolean returns,
-      RectificativeImportPolicy policy, LineListing listing) throws JSONException {
-    Map<String, ShipmentInOutLine> linesById = activeLines(source);
-    Map<String, BigDecimal> pending = returns
-        ? returnPending(invoice, source, linesById, policy)
-        : signedPending(linesById, pendingQuantities(source.getId()));
-    LineDetail detail = listing.detail ? lineDetail(invoice, source, returns, policy) : null;
-    JSONArray rows = new JSONArray();
-    for (ShipmentInOutLine line : linesById.values()) {
-      BigDecimal left = pending.get(line.getId());
-      if (left == null && listing.includeCovered && hasQuantity(line)) {
-        left = BigDecimal.ZERO;
-      }
-      if (left != null) {
-        JSONObject row = DocumentLineImport.lineRow(line.getId(), line.getLineNo(),
-            line.getProduct() == null ? null : line.getProduct().getId(),
-            line.getProduct() == null ? null : line.getProduct().getName(),
-            line.getUOM() == null ? null : line.getUOM().getId(), left);
-        if (listing.detail) {
-          putLineDetail(row, line, left, returns, detail);
-        }
-        rows.put(row);
-      }
-    }
-    return completePage(rows);
-  }
-
-  private static boolean hasQuantity(ShipmentInOutLine line) {
-    return line.getMovementQuantity() != null && line.getMovementQuantity().signum() != 0;
-  }
-
-  /** What the {@code detail} keys of the lines of one document are read from. */
-  static final class LineDetail {
-    /** Standard: per movement line, {@code [importedHere, invoicedElsewhere]}. */
-    final Map<String, boolean[]> links;
-    /** Returns: the movement lines this invoice holds. */
-    final Set<String> inTarget;
-    /** Returns (sales): the order lines already invoiced through a movement line or here. */
-    final Set<String> blocked;
-    final boolean presenceOnly;
-
-    LineDetail(Map<String, boolean[]> links, Set<String> inTarget, Set<String> blocked,
-        boolean presenceOnly) {
-      this.links = links;
-      this.inTarget = inTarget;
-      this.blocked = blocked;
-      this.presenceOnly = presenceOnly;
-    }
-  }
-
-  private LineDetail lineDetail(Invoice invoice, ShipmentInOut source, boolean returns,
-      RectificativeImportPolicy policy) {
-    if (!returns) {
-      return new LineDetail(invoiceLinkStates(source.getId(), invoice.getId()), Set.of(),
-          Set.of(), false);
-    }
-    boolean presenceOnly = policy.capsReturnsByPresence();
-    return new LineDetail(Map.of(), ReturnLineCredit.movementLineIdsOf(invoice),
-        presenceOnly ? Set.of() : blockedOrderLines(source.getId(), invoice.getId()),
-        presenceOnly);
-  }
-
-  /** The {@code detail} keys of one line row (ETP-6099). */
-  private static void putLineDetail(JSONObject row, ShipmentInOutLine line, BigDecimal left,
-      boolean returns, LineDetail detail) throws JSONException {
-    OrderLine orderLine = line.getSalesOrderLine();
-    BigDecimal movement = line.getMovementQuantity();
-    ImportListing.putNullable(row, KEY_MOVEMENT_QUANTITY,
-        returns && movement != null ? movement.abs() : movement);
-    ImportListing.putNullable(row, KEY_ORDER_LINE, orderLine == null ? null : orderLine.getId());
-    row.put("orderLineDiscount", ImportListing.trimmed(orderLine == null ? null
-        : orderLine.getDiscount()));
-    if (!returns) {
-      boolean[] state = detail.links.getOrDefault(line.getId(), new boolean[2]);
-      row.put(REASON_IMPORTED_HERE, state[0]);
-      row.put("invoicedElsewhere", state[1]);
-      return;
-    }
-    ImportListing.putNullable(row, "blockedReason",
-        left.signum() != 0 ? null : blockedReason(line, orderLine, detail));
-  }
-
-  /** Why a return line is not offered, as the window's modal of the side would judge it. */
-  private static String blockedReason(ShipmentInOutLine line, OrderLine orderLine,
-      LineDetail detail) {
-    if (detail.presenceOnly) {
-      return detail.inTarget.contains(line.getId()) ? REASON_IMPORTED_HERE : null;
-    }
-    if (orderLine != null && detail.blocked.contains(orderLine.getId())) {
-      return REASON_ORDER_LINE_INVOICED;
-    }
-    return REASON_CREDITED_IN_FULL;
-  }
-
-  // ---------------------------------------------------------------------------
-  // pendingBasis "classic" (ETP-6099 follow-up)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * {@code availableReceipts} with the purchase popup's own rule from before ETP-6099
-   * ({@code ImportFromGoodsReceiptModal.jsx}, {@code fetchDocuments}): the partner's completed
-   * receipts, newest created first, whose header order is in the invoice's currency (a receipt
-   * without an order is never excluded by currency, the popup could not compare it); returns are
-   * left out (never importable here). NOTHING deducts what other invoices hold, completed or draft:
-   * a receipt invoiced elsewhere is listed again, as it was. {@code pendingLines} counts the lines
-   * the popup leaves selectable: a quantity, and not already held by THIS invoice (through the
-   * receipt line or its order line); a receipt left at 0 is listed only with {@code includeCovered}.
-   */
-  private NeoResponse classicAvailableDocuments(Invoice invoice,
-      ImportListing.ListRequest request) throws JSONException {
-    String partnerId = invoice.getBusinessPartner() == null ? null
-        : invoice.getBusinessPartner().getId();
-    String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
-    List<ShipmentInOut> candidates = findClassicCandidateDocuments(partnerId, isSales(invoice),
-        currencyId, request.offset, request.scan);
-    return discover(candidates, doc -> {
-      if (isReturn(doc)) {
-        return null;
-      }
-      int pendingLines = countClassicPendingLines(doc,
-          invoiceLinkStates(doc.getId(), invoice.getId()));
-      if (pendingLines == 0 && !request.includeCovered) {
-        return null;
-      }
-      String docCurrency = doc.getEtgoCurrency() == null ? null : doc.getEtgoCurrency().getId();
-      JSONObject row = documentRow(doc.getId(), doc.getDocumentNo(), day(doc.getMovementDate()),
-          partnerId, doc.getBusinessPartner().getName(), docCurrency, pendingLines);
-      if (request.detail) {
-        putDocumentDetail(row, doc, false);
-      }
-      return row;
-    }, request);
-  }
-
-  /**
-   * {@code availableReceiptLines} with the old popup's rule ({@code fetchLines}): every active line
-   * at its FULL movement quantity, unless THIS invoice already holds it (an active line linked to
-   * the receipt line or to its order line: {@code importedHere}, pending 0). Nothing deducts other
-   * invoices. A line at 0 is listed only with {@code includeCovered}; {@code detail} adds the
-   * standard keys ({@code movementQuantity}, {@code importedHere}, ...).
-   */
-  private NeoResponse classicAvailableLines(Invoice invoice, ShipmentInOut source,
-      LineListing listing) throws JSONException {
-    Map<String, boolean[]> links = invoiceLinkStates(source.getId(), invoice.getId());
-    LineDetail detail = new LineDetail(links, Set.of(), Set.of(), false);
-    JSONArray rows = new JSONArray();
-    for (ShipmentInOutLine line : activeLines(source).values()) {
-      BigDecimal left = classicPendingOf(line, links);
-      if (left.signum() == 0 && !listing.includeCovered) {
-        continue;
-      }
-      JSONObject row = DocumentLineImport.lineRow(line.getId(), line.getLineNo(),
-          line.getProduct() == null ? null : line.getProduct().getId(),
-          line.getProduct() == null ? null : line.getProduct().getName(),
-          line.getUOM() == null ? null : line.getUOM().getId(), left);
-      if (listing.detail) {
-        putLineDetail(row, line, left, false, detail);
-      }
-      rows.put(row);
-    }
-    return completePage(rows);
-  }
-
-  /** How many active lines of {@code doc} keep a classic pending other than 0. */
-  private static int countClassicPendingLines(ShipmentInOut doc, Map<String, boolean[]> links) {
-    int pendingLines = 0;
-    for (ShipmentInOutLine line : activeLines(doc).values()) {
-      pendingLines += classicPendingOf(line, links).signum() != 0 ? 1 : 0;
-    }
-    return pendingLines;
-  }
-
-  /** The classic pending of a receipt line: its movement quantity, or 0 when held here. */
-  private static BigDecimal classicPendingOf(ShipmentInOutLine line,
-      Map<String, boolean[]> links) {
-    boolean[] state = links.get(line.getId());
-    boolean importedHere = state != null && state[0];
-    return importedHere || !hasQuantity(line) ? BigDecimal.ZERO : line.getMovementQuantity();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Loading and validating
-  // ---------------------------------------------------------------------------
-
-  /**
-   * The target invoice of the direction the action belongs to ({@code null}: any, the direction
-   * of a return action is the invoice's). A write needs a draft with a price list; a read only
-   * needs the invoice.
-   */
-  private Invoice requireInvoiceOfDirection(String id, Boolean sales, boolean write) {
-    Invoice invoice = write ? requireDraftInvoice(id) : requireExistingInvoice(id);
-    if (sales != null && isSales(invoice) != sales) {
-      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_DIRECTION_MISMATCH,
-          "This is a " + (sales ? "purchase" : "sales") + " invoice: use "
-              + (sales ? ACTION_IMPORT_RECEIPT_LINES : ACTION_IMPORT_SHIPMENT_LINES) + " for it");
-    }
-    return invoice;
-  }
-
-  private ShipmentInOut requireSource(Invoice invoice, String sourceId, boolean returns,
-      RectificativeImportPolicy policy) {
-    ShipmentInOut source = requireCommonSource(invoice, sourceId);
-    if (returns) {
-      requireReturnRules(invoice, source, policy);
-    } else {
-      requireStandardRules(invoice, source);
-    }
-    return source;
-  }
-
-  /** What every source must satisfy: exists for the caller, completed, same side and partner. */
-  private ShipmentInOut requireCommonSource(Invoice invoice, String sourceId) {
-    ShipmentInOut source = loadSource(sourceId);
-    if (source == null) {
-      throw DocumentLineImport.notFound("Document", sourceId);
-    }
-    requireOwnClient("Document", sourceId, source.getClient());
-    DocumentLineImport.requireCompletedSource(source.getDocumentNo(), source.getDocumentStatus());
-    DocumentLineImport.requireSameDirection(isSales(invoice),
-        Boolean.TRUE.equals(source.isSalesTransaction()), source.getDocumentNo());
-    DocumentLineImport.requireSameBusinessPartner(
-        invoice.getBusinessPartner() == null ? null : invoice.getBusinessPartner().getId(),
-        source.getBusinessPartner() == null ? null : source.getBusinessPartner().getId(),
-        source.getDocumentNo());
-    return source;
-  }
-
-  /** A shipment or receipt: same currency, and never a return. */
-  private void requireStandardRules(Invoice invoice, ShipmentInOut source) {
-    DocumentLineImport.requireSameCurrency(
-        invoice.getCurrency() == null ? null : invoice.getCurrency().getId(),
-        source.getEtgoCurrency() == null ? null : source.getEtgoCurrency().getId(),
-        source.getDocumentNo());
-    if (isReturn(source)) {
-      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_DIRECTION_MISMATCH,
-          DOCUMENT + source.getDocumentNo() + " is a return: it is credited through a "
-              + "rectificative invoice (" + ACTION_IMPORT_RETURN_LINES + " or "
-              + "createReturnInvoice on the return), not imported here");
-    }
-  }
-
-  /** A return: it is one, in the invoice's currency where the side compares it, not yet in full. */
-  private void requireReturnRules(Invoice invoice, ShipmentInOut source,
-      RectificativeImportPolicy policy) {
-    if (!isReturn(source)) {
-      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_SOURCE_NOT_RETURN,
-          DOCUMENT + source.getDocumentNo() + " is not a return: " + ACTION_AVAILABLE_RETURNS
-              + " lists the returns a rectificative invoice can take lines from");
-    }
-    if (returnCurrencyMismatch(invoice, source, policy)) {
-      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_CURRENCY_MISMATCH, DOCUMENT
-          + source.getDocumentNo() + " is in another currency than the document it is imported "
-          + "into");
-    }
-    if (isInvoicedInFull(source)) {
-      throw DocumentLineImport.refusal(DocumentLineImport.ERROR_NOTHING_PENDING,
-          "Return " + source.getDocumentNo() + " is already invoiced in full: it is not offered");
-    }
-  }
-
-  private static boolean isReturn(ShipmentInOut doc) {
-    return doc.getDocumentType() != null && Boolean.TRUE.equals(doc.getDocumentType().isReturn());
   }
 
   private static String label(ShipmentInOutLine line) {
@@ -967,7 +522,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     hql.append(" order by io.movementDate desc, io.documentNo desc, io.id desc");
     org.hibernate.query.Query<ShipmentInOut> query = OBDal.getInstance().getSession()
         .createQuery(hql.toString(), ShipmentInOut.class).setParameter("sot", sales)
-        .setParameter("bp", partnerId).setParameter("client", sessionClientId())
+        .setParameter("bp", partnerId).setParameter(PARAM_CLIENT, sessionClientId())
         .setFirstResult(offset).setMaxResults(scan);
     if (currencyId != null) {
       query.setParameter("cur", currencyId);
@@ -997,7 +552,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     org.hibernate.query.Query<ShipmentInOut> query = OBDal.getInstance().getSession()
         .createQuery(classicCandidateDocumentsHql(currencyId != null), ShipmentInOut.class)
         .setParameter("sot", sales).setParameter("bp", partnerId)
-        .setParameter("client", sessionClientId())
+        .setParameter(PARAM_CLIENT, sessionClientId())
         .setFirstResult(offset).setMaxResults(scan);
     if (currencyId != null) {
       query.setParameter("cur", currencyId);
@@ -1009,7 +564,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    * The HQL behind {@link #findCandidateReturns}: the completed return documents of one direction
    * and business partner, in the session's client and in an organization the role reads. No
    * currency filter: the windows' modals compare it (sales) or not (purchase) per document, see
-   * {@link #returnCurrencyMismatch}. Exposed so a test parses it against the real model.
+   * {@link InOutInvoiceSourceRules#returnCurrencyMismatch}. Exposed so a test parses it against the real model.
    */
   static String candidateReturnsHql() {
     return "from MaterialMgmtShipmentInOut io "
@@ -1031,7 +586,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return new ArrayList<>(OBDal.getInstance().getSession()
         .createQuery(candidateReturnsHql(), ShipmentInOut.class)
         .setParameter("sot", sales).setParameter("bp", partnerId)
-        .setParameter("client", sessionClientId())
+        .setParameter(PARAM_CLIENT, sessionClientId())
         .setParameterList("orgs", Arrays.asList(OBContext.getOBContext().getReadableOrganizations()))
         .setFirstResult(offset).setMaxResults(scan).list());
   }

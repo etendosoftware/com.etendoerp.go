@@ -94,15 +94,16 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
     String doc = sales ? "goods shipment" : "goods receipt";
     String oneStep = sales ? "createShipment on the sales order" : "createGoodsReceipt on the "
         + "purchase order";
+    String verb = sales ? "ship" : "receive";
     String flow = " Flow: create the draft " + doc + " header with etendo_create (business partner "
         + "and the rest defaulted; etendo_schema view:\"create\" is the authority), call "
         + "availableOrders, then availableOrderLines, then importOrderLines on that header, and "
-        + "confirm it with documentAction (CO). To " + (sales ? "ship" : "receive") + " a whole "
+        + "confirm it with documentAction (CO). To " + verb + " a whole "
         + "order in ONE step, without a draft header to fill, call " + oneStep + " instead.";
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(ACTION_AVAILABLE_ORDERS, NeoActionContract.read(ACTION_AVAILABLE_ORDERS,
         "Lists the completed " + order + "s of this " + doc + "'s business partner and currency "
-            + "that still have quantity to " + (sales ? "ship" : "receive") + ": {data:[{id, "
+            + "that still have quantity to " + verb + ": {data:[{id, "
             + "documentNo, date, businessPartner, businessPartner$_identifier, currency, "
             + "pendingLines}], hasMore, limit, scanLimit}. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending counts what draft documents already hold. "
             + ImportInOutLinesIntoInvoiceHandler.LISTING_NOTE + " includeCovered also lists the "
@@ -117,7 +118,7 @@ public class ImportOrderLinesIntoInOutHandler extends AbstractLineImportHandler 
             + "product, product$_identifier, uOM, pendingQuantity}], hasMore:false}, where pendingQuantity is "
             + "ordered minus delivered minus what any draft document (this one included) already "
             + "holds, and the id is the sourceLineId importOrderLines takes. includeCovered also "
-            + "lists the order's other product lines (nothing left to " + (sales ? "ship" : "receive")
+            + "lists the order's other product lines (nothing left to " + verb
             + ") at pendingQuantity 0; detail adds " + LINE_DETAIL_KEYS + ". Step 2." + flow,
         ImportListing.linesParams(LINE_DETAIL_KEYS,
             NeoActionContract.Param.required(PARAM_ORDER_ID, NeoActionContract.TYPE_STRING,
