@@ -6,8 +6,9 @@
 # Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
 @incluye ventas-compras
 
-# --- con mocks (31)
+# --- con mocks (36)
 com.etendoerp.go.schemaforge.AgingReportHandlerTest
+com.etendoerp.go.schemaforge.BpLocationHandlerTest
 com.etendoerp.go.schemaforge.BusinessPartnerHandlerTest
 com.etendoerp.go.schemaforge.CloneShipmentHookTest
 com.etendoerp.go.schemaforge.ContactNameSyncHandlerTest
@@ -34,11 +35,14 @@ com.etendoerp.go.schemaforge.SalesQuotationHeaderHandlerTest
 com.etendoerp.go.schemaforge.email.contracts.SalesDocumentEmailContractsTest
 com.etendoerp.go.schemaforge.handlers.BusinessPartnerCategoryAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.ContactHandlerTest
+com.etendoerp.go.schemaforge.handlers.ContactRoleListScopeTest
+com.etendoerp.go.schemaforge.handlers.ContactTypeRulesTest
+com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetryTest
 com.etendoerp.go.schemaforge.handlers.CustomerAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.VendorAccountingHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicyTest
 com.etendoerp.go.schemaforge.util.NeoAddressHelperTest
+com.etendoerp.go.schemaforge.util.StructuredAddressComposerTest
 
 # --- integración (BD) (1)
 com.etendoerp.go.schemaforge.BusinessPartnerHandlerChildDataSqlIntegrationTest
-

@@ -58,6 +58,7 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
+import com.etendoerp.go.schemaforge.InvoiceInboxHeaderHandler;
 import com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler;
 import com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
@@ -728,6 +729,23 @@ class McpWindowDeclaredActionsTest {
       when(handler.agentExcludedActions()).thenReturn(Set.of("psd2GenerateBankPayment"));
       assertEquals(405, refused(null, "EM_Psd2_Generate_Bank_Payment").toEnvelope()
           .getInt(McpConstants.KEY_STATUS));
+    }
+
+    /**
+     * ETP-6049: the invoice inbox header customization keeps {@code discard} for people. The real
+     * exclusion set is wired in, so removing it from the handler fails this test.
+     */
+    @Test
+    @DisplayName("the invoice inbox discard action is refused 405 as hidden, without any row config")
+    void invoiceInboxDiscardIsRefusedInCode() throws Exception {
+      when(handler.agentExcludedActions())
+          .thenReturn(new InvoiceInboxHeaderHandler().agentExcludedActions());
+
+      JSONObject env = refused(null, "discard").toEnvelope();
+
+      assertEquals(405, env.getInt(McpConstants.KEY_STATUS));
+      assertTrue(env.getString(McpConstants.KEY_DETAIL)
+          .contains("its customization keeps it for people only"), env.toString());
     }
 
     @Test

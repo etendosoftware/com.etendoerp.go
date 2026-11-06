@@ -25,6 +25,7 @@ import java.sql.Savepoint;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -37,8 +38,9 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
- * Where business code reports the account events HubSpot learns about: a new account, a demo
- * ready, and the Stripe billing events. The other events (first entry into the demo, payment,
+ * Where business code reports the account events HubSpot learns about: a new account (once its
+ * address is confirmed, or at once when an identity provider vouched for it), a demo ready, and
+ * the Stripe billing events. The other events (first entry into the demo, payment,
  * expired trial) are detected by {@link HubSpotSyncService} itself.
  *
  * <p>Each call adds a row to the outbox in the caller's transaction and does not commit: the event
@@ -56,6 +58,26 @@ public final class HubSpotOutbox {
 
   static final String FIELD_COMPANY_NAME = "companyName";
   static final String FIELD_COUNTRY = "country";
+  static final String FIELD_COUNTRY_CODE = "countryCode";
+
+  /**
+   * The business sectors the register form offers: the internal values of the HubSpot contact's
+   * {@code sector} enumeration, which marketing keeps fixed (ETP-6082). Any other value would make
+   * HubSpot refuse the whole contact.
+   */
+  public static final Set<String> SECTORS = Set.of("industria", "distribución_logística",
+      "servicios", "startups_tecnología", "otro");
+
+  /**
+   * Reads a sector sent by the register form.
+   *
+   * @param value what the form sent
+   * @return the sector, or {@code null} when it is not one of {@link #SECTORS}
+   */
+  public static String sector(String value) {
+    String sector = StringUtils.trimToNull(value);
+    return sector != null && SECTORS.contains(sector) ? sector : null;
+  }
 
   // clock_timestamp(), not now(): now() is the transaction's start, so two events reported in one
   // transaction (a first entry and a payment detected in the same pass) would tie, and the sync
@@ -108,9 +130,12 @@ public final class HubSpotOutbox {
   }
 
   /**
-   * Reports a new account.
+   * Reports a new account: the contact and the deal in its first stage. Called when the owner
+   * confirms the address (ETP-6082: an unconfirmed sign-up is not a lead yet), or when the account
+   * is created by a single sign-on, whose provider already vouched for the address. Reporting it
+   * twice adds nothing.
    *
-   * @param account the account just created
+   * @param account the account
    */
   public static void accountCreated(Account account) {
     if (account == null || StringUtils.isNotBlank(account.getSignupChannel())) {
@@ -142,7 +167,7 @@ public final class HubSpotOutbox {
         return;
       }
       enqueue(connection, accountId, HubSpotOutboxStore.DEMO_READY, clientId,
-          demoPayload(companyName, countryName(connection, countryCode)));
+          demoPayload(companyName, countryName(connection, countryCode), countryCode));
     });
   }
 
@@ -215,10 +240,18 @@ public final class HubSpotOutbox {
   }
 
   static String demoPayload(String companyName, String country) {
+    return demoPayload(companyName, country, null);
+  }
+
+  static String demoPayload(String companyName, String country, String countryCode) {
     try {
       JSONObject payload = new JSONObject();
       payload.put(FIELD_COMPANY_NAME, StringUtils.trimToEmpty(companyName));
       payload.put(FIELD_COUNTRY, StringUtils.trimToEmpty(country));
+      String code = StringUtils.upperCase(StringUtils.trimToNull(countryCode));
+      if (code != null) {
+        payload.put(FIELD_COUNTRY_CODE, code);
+      }
       return payload.toString();
     } catch (JSONException e) {
       throw new IllegalStateException("Could not build the demo event payload", e);

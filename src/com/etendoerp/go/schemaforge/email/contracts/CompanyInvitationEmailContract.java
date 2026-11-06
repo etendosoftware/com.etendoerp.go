@@ -24,6 +24,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.Invitation;
@@ -156,7 +157,18 @@ public final class CompanyInvitationEmailContract implements EmailContract {
     if (StringUtils.isBlank(recordId)) {
       return Optional.empty();
     }
-    return Optional.ofNullable(OBDal.getInstance().get(Invitation.class, recordId));
+    // ETP-5819: through the NEO email endpoint recordId comes from the request, so another
+    // tenant's invitation reads as not found. The server's own send (TransactionalAuthEmailSender)
+    // runs in the System context with an id it created, and must still find it.
+    return Optional.ofNullable(OBDal.getInstance().get(Invitation.class, recordId))
+        .filter(invitation -> isSystemContext() || invitation.getClient() != null
+            && DalEmailContractDataResolver.isReadableClient(invitation.getClient().getId()));
+  }
+
+  private static boolean isSystemContext() {
+    OBContext context = OBContext.getOBContext();
+    return context != null && context.getCurrentClient() != null
+        && "0".equals(context.getCurrentClient().getId());
   }
 
   /**

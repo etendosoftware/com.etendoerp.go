@@ -88,13 +88,6 @@ class NeoBuiltInEndpointHandler {
     return "fiscal390".equals(specName) ? fiscal390Handler : null;
   }
 
-  /** ETP-6047: {@code POST /invoice-inbox/upload}, the only verb and path this built-in serves. */
-  private static boolean isInvoiceInboxUpload(NeoServlet.NeoPathInfo pathInfo, String method) {
-    return "invoice-inbox".equals(pathInfo.specName)
-        && IMAGE_UPLOAD_SEGMENT.equals(pathInfo.entityName)
-        && METHOD_POST.equals(method);
-  }
-
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     if (pathInfo.specName == null) {
@@ -115,6 +108,31 @@ class NeoBuiltInEndpointHandler {
     if ("session".equals(pathInfo.specName)) {
       return handleSessionEndpoint(method, response);
     }
+    if (handleStoredResourceEndpoint(pathInfo, method, request, response)) {
+      return true;
+    }
+    // ETP-6047: the invoice inbox bulk upload. The branch only delegates; the flag, the access
+    // check and the entity work live in InvoiceInboxUploadEndpoint. Any other verb or path of this
+    // spec falls through to the regular spec router.
+    if (InvoiceInboxUploadEndpoint.serves(pathInfo.specName, pathInfo.entityName, method)) {
+      servlet.writeResponse(response, InvoiceInboxUploadEndpoint.handle(request));
+      return true;
+    }
+    AbstractFiscalHandler fiscalHandler = fiscalHandlerFor(pathInfo.specName);
+    if (fiscalHandler != null) {
+      fiscalHandler.handle(pathInfo.entityName, method, request, response);
+      return true;
+    }
+    return handleConfigurationAndUtilityEndpoint(pathInfo, method, request, response);
+  }
+
+  /**
+   * The per-user / per-tenant stored resources: saved filters, grid views, the fiscal certificate
+   * and attachments. Each branch only delegates; returns {@code false} when the spec is none of
+   * them.
+   */
+  private boolean handleStoredResourceEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
     if ("filters".equals(pathInfo.specName)) {
       handleFiltersEndpoint(pathInfo, method, request, response);
       return true;
@@ -131,18 +149,16 @@ class NeoBuiltInEndpointHandler {
       handleAttachmentsEndpoint(method, request, response);
       return true;
     }
-    // ETP-6047: the invoice inbox bulk upload. The branch only delegates; the flag, the access
-    // check and the entity work live in InvoiceInboxUploadEndpoint. Any other verb or path of this
-    // spec falls through to the regular spec router.
-    if (isInvoiceInboxUpload(pathInfo, method)) {
-      servlet.writeResponse(response, InvoiceInboxUploadEndpoint.handle(request));
-      return true;
-    }
-    AbstractFiscalHandler fiscalHandler = fiscalHandlerFor(pathInfo.specName);
-    if (fiscalHandler != null) {
-      fiscalHandler.handle(pathInfo.entityName, method, request, response);
-      return true;
-    }
+    return false;
+  }
+
+  /**
+   * The configuration and utility built-ins checked last: the fiscal-models catalog, the email
+   * contracts, the amortization plan generator and the exchange-rate validator. Returns
+   * {@code false} when the request is none of them, so it falls through to the spec router.
+   */
+  private boolean handleConfigurationAndUtilityEndpoint(NeoServlet.NeoPathInfo pathInfo,
+      String method, HttpServletRequest request, HttpServletResponse response) throws IOException {
     if ("fiscal-models-catalog".equals(pathInfo.specName)) {
       handleFiscalModelsCatalogEndpoint(method, request, response);
       return true;

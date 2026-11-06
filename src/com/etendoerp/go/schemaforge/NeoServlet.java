@@ -30,6 +30,7 @@ import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.usage.IsolatedDalRead;
+import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
 import com.smf.securewebservices.SWSConfig;
 
@@ -107,6 +108,12 @@ public class NeoServlet extends HttpBaseServlet {
   @Override
   public void destroy() {
     try {
+      // ETP-6057: first, so the last minute of public API counts is written before anything stops.
+      PublicApiUsageCounter.getDefault().shutdown();
+    } catch (RuntimeException e) {
+      log.debug("Could not flush the public API usage counter on servlet destroy.", e);
+    }
+    try {
       UsageEventRecorder.shutdown();
     } catch (Exception e) {
       log.debug("Could not stop the usage event writer on servlet destroy.", e);
@@ -162,6 +169,16 @@ public class NeoServlet extends HttpBaseServlet {
 
   private void processRequest(HttpServletRequest request, HttpServletResponse response,
       String method) throws IOException {
+    try {
+      dispatchRequest(request, response, method);
+    } finally {
+      // ETP-6057: counts the answer of a public API request, whichever path wrote it.
+      NeoPublicApiUsage.getDefault().recordRequest(request, response, method);
+    }
+  }
+
+  private void dispatchRequest(HttpServletRequest request,
+      HttpServletResponse response, String method) throws IOException {
     if (handleUnauthenticatedRoute(request, response, method)) {
       return;
     }
@@ -177,14 +194,11 @@ public class NeoServlet extends HttpBaseServlet {
 
     try {
       OBContext.setAdminMode();
-      if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
-        return;
-      }
-
-      if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
-        return;
-      }
-      requestRouter.handleSpecRequest(pathInfo, method, request, response);
+      // ETP-5819: admin mode skips the DAL's tenant check on writes; the guard restores it.
+      NeoTenantWriteGuard.call(() -> {
+        dispatch(pathInfo, method, request, response);
+        return null;
+      });
     } catch (MalformedJsonException e) {
       // A body or JSON parameter the client sent could not be parsed: its error, not ours.
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
@@ -197,6 +211,17 @@ public class NeoServlet extends HttpBaseServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private void dispatch(NeoPathInfo pathInfo, String method, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
+      return;
+    }
+    if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
+      return;
+    }
+    requestRouter.handleSpecRequest(pathInfo, method, request, response);
   }
 
   /**

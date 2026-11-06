@@ -27,30 +27,36 @@ import com.etendoerp.go.common.GoRuntimeProperties;
  * <p>Each value is read as a JVM system property, then {@code Openbravo.properties}, then an
  * environment variable ({@link GoRuntimeProperties}). Only the token has no default: without it
  * the sync sends nothing and the outbox keeps every event pending. The pipeline and stage ids
- * default to the "Self-serve" pipeline of the production portal; a test portal has its own ids
- * and must configure them.
+ * default to the "Self-Serve" pipeline of the production portal, so production needs the token
+ * alone; a test portal has its own ids and must configure them.
  *
- * @param token       the private app token, {@code null} when not configured
- * @param apiBaseUrl  the API root, without a trailing slash
- * @param pipelineId  the deal pipeline every self-serve deal is created in
- * @param trialStage  the stage of a deal whose demo is ready
- * @param activeStage the stage of a deal whose owner entered the demo
- * @param wonStage    the stage of a deal whose owner paid
- * @param lostStage   the stage of a deal whose trial ended unpaid
+ * @param token             the private app token, {@code null} when not configured
+ * @param apiBaseUrl        the API root, without a trailing slash
+ * @param pipelineId        the deal pipeline every self-serve deal is created in
+ * @param accountStage      MQL: the account exists and its address is confirmed
+ * @param activatedStage    SQL: the owner used the ERP for the first time (a qualification
+ *                          milestone)
+ * @param cardStage         the owner paid the checkout: the demo became a productive
+ * @param firstPaymentStage the subscription renewed for the first time
+ * @param expiredStage      the trial ended with no productive environment
+ * @param lostStage         the subscription was cancelled
  */
 public record HubSpotConfiguration(String token, String apiBaseUrl, String pipelineId,
-    String trialStage, String activeStage, String wonStage, String lostStage) {
+    String accountStage, String activatedStage, String cardStage, String firstPaymentStage,
+    String expiredStage, String lostStage) {
 
   static final String TOKEN_PROPERTY = "etendo.go.hubspot.token";
   static final String TOKEN_ENV = "ETGO_HUBSPOT_TOKEN";
   static final String DEFAULT_API_BASE_URL = "https://api.hubapi.com";
 
-  /** "Self-serve" pipeline and its stages in portal 52086088, read on 2026-10-22. */
-  static final String DEFAULT_PIPELINE = "944761479";
-  static final String DEFAULT_TRIAL_STAGE = "1458221379";
-  static final String DEFAULT_ACTIVE_STAGE = "1458221380";
-  static final String DEFAULT_WON_STAGE = "1458221381";
-  static final String DEFAULT_LOST_STAGE = "1458221382";
+  /** "Self-Serve" pipeline and its stages in portal 52086088, read on 2026-11-05. */
+  static final String DEFAULT_PIPELINE = "952774980";
+  static final String DEFAULT_ACCOUNT_STAGE = "1471483196";
+  static final String DEFAULT_ACTIVATED_STAGE = "1471483197";
+  static final String DEFAULT_CARD_STAGE = "1471504904";
+  static final String DEFAULT_FIRST_PAYMENT_STAGE = "1471504905";
+  static final String DEFAULT_EXPIRED_STAGE = "1471504906";
+  static final String DEFAULT_LOST_STAGE = "1471504907";
 
   /** Where the settings come from. */
   @FunctionalInterface
@@ -80,9 +86,12 @@ public record HubSpotConfiguration(String token, String apiBaseUrl, String pipel
         StringUtils.removeEnd(read(settings, "api.base.url", "API_BASE_URL",
             DEFAULT_API_BASE_URL), "/"),
         read(settings, "pipeline", "PIPELINE", DEFAULT_PIPELINE),
-        read(settings, "stage.trial", "STAGE_TRIAL", DEFAULT_TRIAL_STAGE),
-        read(settings, "stage.active", "STAGE_ACTIVE", DEFAULT_ACTIVE_STAGE),
-        read(settings, "stage.won", "STAGE_WON", DEFAULT_WON_STAGE),
+        read(settings, "stage.account", "STAGE_ACCOUNT", DEFAULT_ACCOUNT_STAGE),
+        read(settings, "stage.activated", "STAGE_ACTIVATED", DEFAULT_ACTIVATED_STAGE),
+        read(settings, "stage.card", "STAGE_CARD", DEFAULT_CARD_STAGE),
+        read(settings, "stage.first.payment", "STAGE_FIRST_PAYMENT",
+            DEFAULT_FIRST_PAYMENT_STAGE),
+        read(settings, "stage.expired", "STAGE_EXPIRED", DEFAULT_EXPIRED_STAGE),
         read(settings, "stage.lost", "STAGE_LOST", DEFAULT_LOST_STAGE));
   }
 

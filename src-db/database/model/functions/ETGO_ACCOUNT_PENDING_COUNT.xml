@@ -7,12 +7,15 @@
       <body><![CDATA[v_bank NUMBER;
 v_cash NUMBER;
 BEGIN
-  -- Unmatched bank-statement lines (bank / card accounts)
+  -- Unmatched bank-statement lines (bank / card accounts). A line discarded by PSD2
+  -- (EM_PSD2_Is_Discarded = 'Y'; in Etendo only ever as part of a bounce pair) is resolved,
+  -- not pending (ETP-5581).
   SELECT COUNT(*) INTO v_bank
   FROM   fin_bankstatementline bsl
   JOIN   fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id
   WHERE  bs.fin_financial_account_id = p_fin_financial_account_id
     AND  bsl.fin_finacc_transaction_id IS NULL
+    AND  bsl.em_psd2_is_discarded = 'N'
     AND  bsl.isactive = 'Y'
     AND  bs.isactive  = 'Y';
 

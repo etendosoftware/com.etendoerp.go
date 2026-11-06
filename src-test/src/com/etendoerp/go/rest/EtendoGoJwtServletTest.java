@@ -102,8 +102,12 @@ public class EtendoGoJwtServletTest {
 
   private static final String TEST_APP_BASE_URL = "https://app.example.test";
 
-  /** ETP-4798: a pinned confirmation link, so these tests never read the machine's app base URL. */
-  private static final String VERIFY_LINK = "https://app.example.test/onboarding?verifyToken=tok";
+  /**
+   * ETP-4798: a pinned confirmation link, so these tests never read the machine's app base URL.
+   * Since ETP-6081 the link mailed at registration is the one-time login link, which confirms the
+   * address and opens a session.
+   */
+  private static final String VERIFY_LINK = "https://app.example.test/onboarding?loginToken=tok";
   // Any test that drives /register to a successful createAccount must also mock
   // EmailVerificationDalHelper: registration now stores a verification token, and
   // issueEmailVerification swallows the resulting failure, so an unmocked call shows up as
@@ -334,6 +338,7 @@ public class EtendoGoJwtServletTest {
     body.put("email", "new@test.com");
     body.put("password", "Str0ng!Pass1");
     body.put("name", "New User");
+    body.put("sector", "servicios");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
     Account account = mock(Account.class);
@@ -350,7 +355,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class);
          MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
-      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString()))
           .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("new@test.com"))
           .thenReturn(null);
@@ -363,8 +368,10 @@ public class EtendoGoJwtServletTest {
       // The token is stored before the mail goes out, so a click can be honoured.
       verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
           eq(account), anyString(), any(Date.class)));
-      // ETP-5847: the new account is reported to HubSpot.
-      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
+      // ETP-6082: the sector is kept for HubSpot, but the account is reported only once its
+      // address is confirmed.
+      hubSpot.verify(() -> HubSpotOutbox.sector("servicios"));
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account), never());
     }
 
     assertEquals(201, resp.status);
@@ -376,6 +383,66 @@ public class EtendoGoJwtServletTest {
     // The servlet calls the overload that also carries the link's expiry, which is what lets the
     // copy state a real validity window; verifying the three-argument one passed nothing.
     verify(emailSender).sendNewAccount(eq(account), isNull(), eq(VERIFY_LINK), any(Date.class));
+  }
+
+  @Test
+  public void registerWithoutAPasswordCreatesAnAccountWithNoLocalPassword() throws Exception {
+    // ETP-6081: the register form no longer asks for a password. The account is created without
+    // one, and the welcome mail carries the one-time login link that lets it in from elsewhere.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "nopass@test.com");
+    body.put("password", "");
+    body.put("name", "No Pass");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("nopass@test.com");
+    when(account.getName()).thenReturn("No Pass");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class);
+         MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString())).thenReturn(VERIFY_LINK);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("nopass@test.com"))
+          .thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
+          eq("nopass@test.com"), isNull(), eq("No Pass"), anyString()))
+          .thenReturn(account);
+
+      servletWithEmailSender.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.createAccount(
+          eq("nopass@test.com"), isNull(), eq("No Pass"), anyString()));
+      verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
+          eq(account), anyString(), any(Date.class)));
+    }
+
+    assertEquals(201, resp.status);
+    verify(emailSender).sendNewAccount(eq(account), isNull(), eq(VERIFY_LINK), any(Date.class));
+    // ETP-6081: a body without the consent to promotional mail gave none.
+    verify(account).set("marketingConsent", false);
+  }
+
+  @Test
+  public void anSsoBodyCarriesTheMarketingConsentOnlyWhenItSaysSo() {
+    // ETP-6081: the consent rides next to the provider credential; anything but an explicit true
+    // (missing, false, a body that is not JSON) records no consent.
+    assertTrue(EtendoGoJwtServlet.marketingConsentOf("{\"credential\":\"x\",\"marketingConsent\":true}"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf("{\"marketingConsent\":false}"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf("{\"credential\":\"x\"}"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf("credential=x"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf("{not json"));
+    assertFalse(EtendoGoJwtServlet.marketingConsentOf(null));
+    assertEquals("2026-11",
+        EtendoGoJwtServlet.termsVersionOf("{\"termsVersion\":\" 2026-11 \",\"marketingConsent\":true}"));
   }
 
   @Test
@@ -403,7 +470,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
-      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString())).thenReturn(null);
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString())).thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("nolink@test.com"))
           .thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
@@ -444,7 +511,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          MockedStatic<EmailVerificationDalHelper> verifyMock =
              mockStatic(EmailVerificationDalHelper.class)) {
-      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString()))
           .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("localized@test.com"))
           .thenReturn(null);
@@ -490,7 +557,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          MockedStatic<EmailVerificationDalHelper> verifyMock =
              mockStatic(EmailVerificationDalHelper.class)) {
-      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString()))
           .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("new@test.com"))
           .thenReturn(null);
@@ -745,6 +812,65 @@ public class EtendoGoJwtServletTest {
     }
 
     assertEquals(200, resp.status);
+  }
+
+  @Test
+  public void ssoSignInOfAnUnconfirmedRegisteredAccountReportsItToHubSpot() throws Exception {
+    // ETP-6082: signing in with the provider confirms the address, like the mailed link.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"credential\":\"id-token\"}")));
+    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "google-sub",
+        "user@gmail.com", "Google User", true);
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, rawBody) -> assertion);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@gmail.com");
+    when(account.getName()).thenReturn("Google User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock =
+             mockStatic(EmailVerificationDalHelper.class);
+         MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class);
+         MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(account);
+      verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerificationPending(account))
+          .thenReturn(true);
+
+      ssoServlet.doPost(req, resp.response);
+
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
+    }
+  }
+
+  @Test
+  public void theOnboardingKeepsTheSectorOfAnAccountThatHadNone() {
+    Account account = mock(Account.class);
+
+    try (MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class)) {
+      EtendoGoJwtServlet.storeMissingSector(account, "industria");
+
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, "industria");
+      commitMock.verify(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()));
+    }
+  }
+
+  @Test
+  public void theOnboardingNeverOverwritesTheSectorChosenAtSignUp() {
+    Account account = mock(Account.class);
+    when(account.get(EtendoGoJwtDalHelper.PROPERTY_SECTOR)).thenReturn("servicios");
+
+    try (MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class)) {
+      EtendoGoJwtServlet.storeMissingSector(account, "industria");
+      EtendoGoJwtServlet.storeMissingSector(mock(Account.class), null);
+
+      verify(account, never()).set(anyString(), any());
+      commitMock.verifyNoInteractions();
+    }
   }
 
   @Test
@@ -1097,7 +1223,9 @@ public class EtendoGoJwtServletTest {
     Account account = mock(Account.class);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
-         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class);
+         MockedStatic<EtendoGoDalHelper> commitMock = mockStatic(EtendoGoDalHelper.class);
+         MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
       verifyMock.when(() -> EmailVerificationDalHelper.findAccountByVerifyTokenHash(
           anyString(), any(Date.class))).thenReturn(account);
       verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerified(account)).thenReturn(false);
@@ -1106,6 +1234,8 @@ public class EtendoGoJwtServletTest {
 
       verifyMock.verify(() -> EmailVerificationDalHelper.consumeEmailVerification(
           eq(account), any(Date.class)));
+      // ETP-6082: confirming the address is what makes the sign-up a HubSpot lead.
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
     }
 
     assertEquals(200, resp.status);
@@ -1131,7 +1261,11 @@ public class EtendoGoJwtServletTest {
           anyString(), any(Date.class))).thenReturn(account);
       verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerified(account)).thenReturn(true);
 
-      servlet.doPost(req, resp.response);
+      try (MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
+        servlet.doPost(req, resp.response);
+
+        hubSpot.verify(() -> HubSpotOutbox.accountCreated(any(Account.class)), never());
+      }
 
       verifyMock.verify(() -> EmailVerificationDalHelper.consumeEmailVerification(
           any(Account.class), any(Date.class)), never());
@@ -1179,7 +1313,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
-      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString()))
           .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
@@ -1227,7 +1361,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
-      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString()))
           .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("undeliverable@test.com"))
           .thenReturn(null);

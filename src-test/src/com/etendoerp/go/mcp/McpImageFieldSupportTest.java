@@ -50,6 +50,8 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Image;
 
+import com.etendoerp.go.schemaforge.TenantOwnership;
+
 /**
  * Unit tests for {@link McpImageFieldSupport} (ETP-5184).
  *
@@ -279,6 +281,21 @@ class McpImageFieldSupportTest {
       JSONObject body = new JSONObject();
       body.put(property, MISSING_IMAGE_ID);
       JSONObject error = validate(body, column, property);
+      assertNotNull(error);
+      assertEquals("unknown_image_id",
+          error.getJSONArray("invalidImageFields").getJSONObject(0).getString("reason"));
+    }
+
+    @Test
+    @DisplayName("an image of another tenant is refused like a missing one")
+    void imageOfAnotherTenantIsRefusedAsUnknown() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("image", EXISTING_IMAGE_ID);
+      JSONObject error;
+      try (MockedStatic<TenantOwnership> ownership = mockStatic(TenantOwnership.class)) {
+        // ETP-5819: loadOwned answers null for a row the caller's tenant does not own.
+        error = validate(body, "AD_Image_ID", "image");
+      }
       assertNotNull(error);
       assertEquals("unknown_image_id",
           error.getJSONArray("invalidImageFields").getJSONObject(0).getString("reason"));

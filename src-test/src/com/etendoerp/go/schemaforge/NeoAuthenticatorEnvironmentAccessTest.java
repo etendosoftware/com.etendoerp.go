@@ -377,7 +377,8 @@ class NeoAuthenticatorEnvironmentAccessTest {
     System.setProperty(LEGACY_BEARER_PROPERTY, "true");
     when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
     swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
-    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(null);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(null, null));
 
     HttpServletRequest request = oauth2Request();
     HttpServletResponse response = mock(HttpServletResponse.class);
@@ -405,7 +406,8 @@ class NeoAuthenticatorEnvironmentAccessTest {
     identity.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
     identity.put(OAuth2Filter.ATTR_CLIENT_ID, CLIENT_ID);
     identity.put(OAuth2Filter.ATTR_SCOPES, "neo:read");
-    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
 
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getMethod()).thenReturn("POST");
@@ -537,7 +539,8 @@ class NeoAuthenticatorEnvironmentAccessTest {
     identity.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
     identity.put(OAuth2Filter.ATTR_CLIENT_ID, clientId);
     identity.put(OAuth2Filter.ATTR_SCOPES, "neo:*");
-    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
   }
 
   private static GoSessionRecord validRecord(String clientId) {

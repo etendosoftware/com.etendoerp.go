@@ -483,6 +483,65 @@ public class McpServletTest {
   }
 
   @Test
+  public void aPublicApiKeyTokenIsRefusedWith403AndNoToolRunsNorJwtFallback() throws Exception {
+    when(request.getAttribute(OAuth2Filter.ATTR_USER_ID)).thenReturn(null);
+    when(request.getHeader("Authorization")).thenReturn("Bearer public-key-token");
+    Map<String, String> identity = new HashMap<>();
+    identity.put(OAuth2Filter.ATTR_USER_ID, "user2");
+    identity.put(OAuth2Filter.ATTR_ROLE_ID, "role2");
+    identity.put(OAuth2Filter.ATTR_CLIENT_ID, "client2");
+    identity.put(OAuth2Filter.ATTR_ORG_ID, "org2");
+    identity.put(OAuth2Filter.ATTR_SCOPES, "etendo:read");
+    identity.put(OAuth2Filter.ATTR_PUBLIC_API_KEY, "true");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 3)
+        .put("method", "tools/list").toString());
+
+    try (MockedStatic<OAuth2Filter> oauth2Mock = mockStatic(OAuth2Filter.class);
+         MockedStatic<com.smf.securewebservices.utils.SecureWebServicesUtils> jwtMock =
+             mockStatic(com.smf.securewebservices.utils.SecureWebServicesUtils.class)) {
+      oauth2Mock.when(() -> OAuth2Filter.validateToken("public-key-token")).thenReturn(identity);
+
+      servlet.doPost(request, response);
+
+      jwtMock.verifyNoInteractions();
+    }
+
+    verify(response).setStatus(HttpServletResponse.SC_FORBIDDEN);
+    String body = getResponseBody();
+    assertTrue(body, body.contains(OAuth2Filter.MSG_PUBLIC_KEY_NOT_FOR_MCP));
+    assertFalse("no JSON-RPC result: nothing ran", body.contains("\"jsonrpc\""));
+  }
+
+  @Test
+  public void aTokenWhoseKeyIsNotPublicPassesWhetherTheFlagIsFalseOrAbsent() throws Exception {
+    for (String flag : new String[] { "false", null }) {
+      newExchange();
+      when(request.getAttribute(OAuth2Filter.ATTR_USER_ID)).thenReturn(null);
+      when(request.getHeader("Authorization")).thenReturn("Bearer tok");
+      Map<String, String> identity = new HashMap<>();
+      identity.put(OAuth2Filter.ATTR_USER_ID, "user2");
+      identity.put(OAuth2Filter.ATTR_ROLE_ID, "role2");
+      identity.put(OAuth2Filter.ATTR_CLIENT_ID, "client2");
+      identity.put(OAuth2Filter.ATTR_ORG_ID, "org2");
+      identity.put(OAuth2Filter.ATTR_SCOPES, "neo:read");
+      if (flag != null) {
+        identity.put(OAuth2Filter.ATTR_PUBLIC_API_KEY, flag);
+      }
+      setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", "ping")
+          .toString());
+
+      try (MockedStatic<OAuth2Filter> oauth2Mock = mockStatic(OAuth2Filter.class)) {
+        oauth2Mock.when(() -> OAuth2Filter.validateToken("tok")).thenReturn(identity);
+
+        servlet.doPost(request, response);
+      }
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      assertEquals(4, new JSONObject(getResponseBody()).getInt("id"));
+    }
+  }
+
+  @Test
   public void doPostWithInvalidTokenReturns401WhenBothOAuth2AndJwtFail() throws Exception {
     when(request.getAttribute(OAuth2Filter.ATTR_USER_ID)).thenReturn(null);
     when(request.getHeader("Authorization")).thenReturn("Bearer bad-token");
@@ -2190,5 +2249,49 @@ public class McpServletTest {
     recordedRowForToolsCall("0", "0", "realOrg", "realClient", false);
 
     assertNull(McpUsageTelemetry.currentTenant());
+  }
+
+  /** ETP-5819: a write refused at the closing flush is a permanent forbidden, not a server error. */
+  @Test
+  public void toolsCallWhoseWriteIsRefusedByTheTenantGuardAnswersForbiddenContent() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read neo:write");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 7).put("method", "tools/call")
+        .put("params", new JSONObject().put("name", "etendo_create")
+            .put("arguments", new JSONObject().put("spec", "product")))
+        .toString());
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
+      sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
+          anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenThrow(new org.openbravo.base.exception.OBSecurityException("Write access denied"));
+
+      servlet.doPost(request, response);
+    }
+
+    JSONObject answer = new JSONObject(getResponseBody());
+    assertFalse("must not be a JSON-RPC error: " + answer, answer.has("error"));
+    String text = answer.getJSONObject("result").toString();
+    assertTrue(text, text.contains("403"));
+    assertTrue(text, text.contains("Write access denied"));
+  }
+
+  /** Negative pair: any other exception from the tool is NOT mapped to forbidden. */
+  @Test
+  public void toolsCallWhoseExecutionThrowsSomethingElseIsNotForbidden() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read neo:write");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 8).put("method", "tools/call")
+        .put("params", new JSONObject().put("name", "etendo_create")
+            .put("arguments", new JSONObject().put("spec", "product")))
+        .toString());
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
+      sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
+          anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenThrow(new IllegalStateException("db down"));
+
+      servlet.doPost(request, response);
+    }
+
+    assertFalse(getResponseBody().contains("\"status\":403"));
   }
 }

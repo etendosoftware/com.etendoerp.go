@@ -725,8 +725,15 @@ public class OnboardingOrgInfoServiceTest {
     verify(location, never()).setAddressLine1(anyString());
   }
 
+  /**
+   * ETP-5806 follow-up (QA finding): a blank/whitespace-only buildingNumber with a present
+   * streetName is no longer trimmed to {@code null} — it falls back to the {@code "s/n"}
+   * convention, via {@link com.etendoerp.go.schemaforge.util.StructuredAddressComposer
+   * #effectiveBuildingNumber}, the same rule the 3 NEO handlers (Contacts/Warehouse/BpLocation)
+   * already apply. {@code buildingName} has no such fallback and is still trimmed to {@code null}.
+   */
   @Test
-  public void testCreateLocationTrimsBlankBuildingNumberAndNameToNull() {
+  public void testCreateLocationBlankBuildingNumberFallsBackToSlashNBuildingNameStillTrimsToNull() {
     OnboardingOrgInfoService service = new OnboardingOrgInfoService();
     Client client = mock(Client.class);
     Organization org = mock(Organization.class);
@@ -748,8 +755,41 @@ public class OnboardingOrgInfoServiceTest {
           "lola@example.com"));
     }
 
-    verify(location).setOBSEPABuildingNumber(isNull());
+    verify(location).setOBSEPABuildingNumber("s/n");
     verify(location).setOBSEPABuildingName(isNull());
+    verify(location).setAddressLine1("Gran Via, s/n");
+  }
+
+  /**
+   * ETP-5806 follow-up (QA finding): a buildingNumber that is {@code null} (field omitted from
+   * the inbound payload, as opposed to sent blank) falls back to {@code "s/n"} exactly the same
+   * as a whitespace-only value — {@code effectiveBuildingNumber} treats both as blank.
+   */
+  @Test
+  public void testCreateLocationNullBuildingNumberFallsBackToSlashN() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+      service.createLocation(client, org, country, addressInput(null, "Gran Via", null, null, "Madrid",
+          "lola@example.com"));
+    }
+
+    verify(location).setOBSEPABuildingNumber("s/n");
+    verify(location).setAddressLine1("Gran Via, s/n");
   }
 
   /**

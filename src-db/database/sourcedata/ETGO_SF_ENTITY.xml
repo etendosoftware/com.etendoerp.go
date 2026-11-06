@@ -1091,6 +1091,7 @@
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--2FB4EB163355420D8DD676D5F92C546E-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The digital certificate is uploaded, replaced and removed only in the app (Configuración fiscal), which validates the PKCS#12 file and its password; agents only read its status","instead":"etendo_action(spec:'organization', entity:'organization', id:'<organizationId>', action:'certificate')"}}]]></MCP_CONFIG>
 <!--2FB4EB163355420D8DD676D5F92C546E--></ETGO_SF_ENTITY>
 
 <!--30DB5085A7D54F728F9445FC36591F40--><ETGO_SF_ENTITY>
@@ -1853,9 +1854,8 @@
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--52E6AF2963894C128EE72E0A10D5F01B-->  <JAVA_QUALIFIER><![CDATA[tbai-config-sequence-handler]]></JAVA_QUALIFIER>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--52E6AF2963894C128EE72E0A10D5F01B-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--52E6AF2963894C128EE72E0A10D5F01B-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--52E6AF2963894C128EE72E0A10D5F01B--></ETGO_SF_ENTITY>
 
 <!--5380CF0F9D53450D8B153F099104AC46--><ETGO_SF_ENTITY>
@@ -1951,9 +1951,8 @@
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--57DE601DBE42468BA9963E81DA56BB1C-->  <JAVA_QUALIFIER><![CDATA[sii-config-deactivate-handler]]></JAVA_QUALIFIER>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--57DE601DBE42468BA9963E81DA56BB1C-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--57DE601DBE42468BA9963E81DA56BB1C-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--57DE601DBE42468BA9963E81DA56BB1C--></ETGO_SF_ENTITY>
 
 <!--59B96B75153149EF993CD7FD3CE9439F--><ETGO_SF_ENTITY>
@@ -2011,9 +2010,8 @@
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <JAVA_QUALIFIER><![CDATA[verifactu-config-ready-handler]]></JAVA_QUALIFIER>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--5AAAB7DE44364794AE70BB19C9D66F90--></ETGO_SF_ENTITY>
 
 <!--5B942E443D7D4E4BA63F863F88CEF4D7--><ETGO_SF_ENTITY>
@@ -2558,7 +2556,6 @@
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--6B27214820954CE1A69B092D349E0E34-->  <JAVA_QUALIFIER><![CDATA[bankReconciliation]]></JAVA_QUALIFIER>
 <!--6B27214820954CE1A69B092D349E0E34-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--6B27214820954CE1A69B092D349E0E34--></ETGO_SF_ENTITY>
 
@@ -2950,6 +2947,7 @@
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <JAVA_QUALIFIER><![CDATA[productDefaultsHandler]]></JAVA_QUALIFIER>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <AGENT_PROMPT><![CDATA[A product's name is not unique: two products can share it. Identify one by its searchKey (code) or id. When several match what the user said, do not pick one: show them (name, searchKey, prices) and ask. If the user cannot tell, suggest — for them to confirm — the one used in that contact's most recent order or invoice (etendo_list on sales-order/header filtered by businessPartner, newest first, then its lines).]]></AGENT_PROMPT>
+<!--7973D68DD39E4F4C8D759A3007A27D56-->  <MCP_CONFIG><![CDATA[{"defaults":{"context":["productType"],"reason":"The tax category and the stocked and returnable flags follow the product type."}}]]></MCP_CONFIG>
 <!--7973D68DD39E4F4C8D759A3007A27D56--></ETGO_SF_ENTITY>
 
 <!--7ACF14A002FC4C66B993576581225D63--><ETGO_SF_ENTITY>
@@ -3837,7 +3835,6 @@
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <JAVA_QUALIFIER><![CDATA[bank-statements]]></JAVA_QUALIFIER>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7--></ETGO_SF_ENTITY>
 
@@ -4015,7 +4012,7 @@
 <!--B845C674D49D48BF950AE2389C56C49F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <SEQNO><![CDATA[20]]></SEQNO>
-<!--B845C674D49D48BF950AE2389C56C49F-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no shipment or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked documents: close the order (documentAction CL), which closes what is still pending on every line, not on one.]]></AGENT_PROMPT>
+<!--B845C674D49D48BF950AE2389C56C49F-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no shipment or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked shipments or invoices, the order can be neither reactivated nor closed (the app offers neither, and documentAction is refused with 400), so the order stays as it is and any correction goes through the linked documents.]]></AGENT_PROMPT>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search sales order lines by product or category across orders (which orders sold X); allParents keeps them to lines of sales orders, never purchase or quotation lines."}}]]></MCP_CONFIG>
 <!--B845C674D49D48BF950AE2389C56C49F--></ETGO_SF_ENTITY>
 
@@ -4181,6 +4178,25 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--C0FB5CD0063142659C78CBE42B85891E-->  <JAVA_QUALIFIER><![CDATA[match-rule]]></JAVA_QUALIFIER>
 <!--C0FB5CD0063142659C78CBE42B85891E-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--C0FB5CD0063142659C78CBE42B85891E--></ETGO_SF_ENTITY>
+
+<!--C24AEA2FDC3C460DB477EA58C8C5A864--><ETGO_SF_ENTITY>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ETGO_SF_ENTITY_ID><![CDATA[C24AEA2FDC3C460DB477EA58C8C5A864]]></ETGO_SF_ENTITY_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <NAME><![CDATA[header]]></NAME>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ETGO_SF_SPEC_ID><![CDATA[7A63B6AA5CE44D77A52E41790BD8094A]]></ETGO_SF_SPEC_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_TAB_ID><![CDATA[AB6E71CD965B41B1913B44BE660456FA]]></AD_TAB_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPOST><![CDATA[N]]></ISPOST>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864--></ETGO_SF_ENTITY>
 
 <!--C339170F5740439186792CD2023D45A6--><ETGO_SF_ENTITY>
 <!--C339170F5740439186792CD2023D45A6-->  <ETGO_SF_ENTITY_ID><![CDATA[C339170F5740439186792CD2023D45A6]]></ETGO_SF_ENTITY_ID>
@@ -5419,9 +5435,8 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--F1775FF66155444992AC0B1E38CFA3BB-->  <JAVA_QUALIFIER><![CDATA[purchaseOrderHeaderHandler]]></JAVA_QUALIFIER>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--F1775FF66155444992AC0B1E38CFA3BB-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["RM_Pickfromreceipt","Cancelandreplace","Confirmcancelandreplace","Create_POLines"],"redirect":{"RM_ReceiveMaterials":"createGoodsReceipt","RM_CreateInvoice":"createPurchaseInvoice"},"reasons":{"RM_ReceiveMaterials":"Classic button with no process connected for the agent; createGoodsReceipt creates a draft goods receipt from this order","RM_CreateInvoice":"Classic button, undocumented for the agent; createPurchaseInvoice creates a completed purchase invoice from this order","RM_Pickfromreceipt":"The classic Pick from Receipt button opens a pick-and-edit window that has no process an agent can run, and it has no MCP equivalent: receive goods with createGoodsReceipt, or invoice a receipt with createPurchaseInvoice on the goods receipt","Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"redirectReason":"Classic purchase-order buttons are not the supported agent path","reason":"Classic purchase-order buttons are not the supported agent path; use createGoodsReceipt / createPurchaseInvoice","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO","VO","PR"],"IP":["CO","VO"],"CO":["CL","RE"],"VO":[],"CL":[]}}}},"defaults":{"context":["businessPartner"],"reason":"Payment terms, payment method and price list come from the business partner."},"pdf":{"source":"rendered","print":{"document":"purchase-order"},"reason":"the purchase-order printable (DOCUMENT_TEMPLATE) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
+<!--F1775FF66155444992AC0B1E38CFA3BB-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["RM_Pickfromreceipt","Cancelandreplace","Confirmcancelandreplace","Create_POLines"],"redirect":{"RM_ReceiveMaterials":"createGoodsReceipt","RM_CreateInvoice":"createPurchaseInvoice"},"reasons":{"RM_ReceiveMaterials":"Classic button with no process connected for the agent; createGoodsReceipt creates a draft goods receipt from this order","RM_CreateInvoice":"Classic button, undocumented for the agent; createPurchaseInvoice creates a completed purchase invoice from this order","RM_Pickfromreceipt":"The classic Pick from Receipt button opens a pick-and-edit window that has no process an agent can run, and it has no MCP equivalent: receive goods with createGoodsReceipt, or invoice a receipt with createPurchaseInvoice on the goods receipt","Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"redirectReason":"Classic purchase-order buttons are not the supported agent path","reason":"Classic purchase-order buttons are not the supported agent path; use createGoodsReceipt / createPurchaseInvoice","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO"],"IP":["CO"],"CO":["RE"],"VO":[],"CL":[]}}}},"defaults":{"context":["businessPartner"],"reason":"Payment terms, payment method and price list come from the business partner."},"pdf":{"source":"rendered","print":{"document":"purchase-order"},"reason":"the purchase-order printable (DOCUMENT_TEMPLATE) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--F1775FF66155444992AC0B1E38CFA3BB--></ETGO_SF_ENTITY>
 
 <!--F25F57EA043045CD8E34377220D5BF36--><ETGO_SF_ENTITY>
@@ -5501,7 +5516,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <SEQNO><![CDATA[20]]></SEQNO>
-<!--F391AE6AB4D742DB8A38A8801BE6D513-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no receipt or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked documents: close the order (documentAction CL), which closes what is still pending on every line, not on one.]]></AGENT_PROMPT>
+<!--F391AE6AB4D742DB8A38A8801BE6D513-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no receipt or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked receipts or invoices, the order can be neither reactivated nor closed (the app offers neither, and documentAction is refused with 400), so the order stays as it is and any correction goes through the linked documents.]]></AGENT_PROMPT>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search purchase order lines by product across orders (which orders bought X); allParents keeps them to lines of purchase orders, never sales or return lines."}}]]></MCP_CONFIG>
 <!--F391AE6AB4D742DB8A38A8801BE6D513--></ETGO_SF_ENTITY>
 

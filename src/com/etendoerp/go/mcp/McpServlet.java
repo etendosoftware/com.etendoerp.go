@@ -49,6 +49,7 @@ import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.schemaforge.NeoPrintAfterComplete;
 import com.etendoerp.go.schemaforge.NeoWriteChannel;
+import com.etendoerp.go.schemaforge.NeoTenantWriteGuard;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -664,6 +665,15 @@ public class McpServlet extends HttpServlet {
 
     // Try OAuth2 token first
     Map<String, String> tokenIdentity = OAuth2Filter.validateToken(bearerToken);
+    if (tokenIdentity != null
+        && Boolean.parseBoolean(tokenIdentity.get(OAuth2Filter.ATTR_PUBLIC_API_KEY))) {
+      // ETP-6057 — a public API key is for the public API only (counted and limited there); the
+      // same refusal OAuth2Filter answers on the filtered mappings.
+      log.warn("Refused MCP request made with a public API key token");
+      sendJsonError(request, response, HttpServletResponse.SC_FORBIDDEN,
+          OAuth2Filter.MSG_PUBLIC_KEY_NOT_FOR_MCP);
+      return null;
+    }
     if (tokenIdentity != null) {
       return new AuthIdentity(
           tokenIdentity.get(OAuth2Filter.ATTR_USER_ID),
@@ -935,17 +945,27 @@ public class McpServlet extends HttpServlet {
     log.info("MCP tools/call: tool={}, user={}, role={}, client={}, org={}",
         toolName, identity.userId, identity.roleId, identity.clientId, identity.orgId);
 
-    return McpSessionManager.executeInContext(
-        identity.userId, identity.roleId, identity.clientId,
-        identity.orgId, null, () -> {
-          OBContext.setAdminMode(true);
-          try {
-            McpToolRouter router = new McpToolRouter();
-            return router.route(toolName, arguments, parseScopes(identity.scopes));
-          } finally {
-            OBContext.restorePreviousMode();
-          }
-        });
+    // ETP-5819: outside executeInContext so its closing flush, and its rollback, are guarded too.
+    try {
+      return NeoTenantWriteGuard.call(() -> McpSessionManager.executeInContext(
+          identity.userId, identity.roleId, identity.clientId,
+          identity.orgId, null, () -> {
+            OBContext.setAdminMode(true);
+            try {
+              McpToolRouter router = new McpToolRouter();
+              return router.route(toolName, arguments, parseScopes(identity.scopes));
+            } finally {
+              OBContext.restorePreviousMode();
+            }
+          }));
+    } catch (org.openbravo.base.exception.OBSecurityException e) {
+      // A write refused at the closing flush, after the router already answered: still a
+      // permanent refusal, so forbidden like the router's own, not a retryable server error.
+      log.warn("MCP tool '{}' write refused for the current tenant: {} session={}", toolName,
+          e.getMessage(), McpUsageTelemetry.sessionForLog());
+      return McpToolRouter.wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName,
+          e.getMessage()));
+    }
   }
 
   // ── Handler: resources/list ─────────────────────────────────────────────

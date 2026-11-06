@@ -36,10 +36,17 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Collections;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -519,6 +526,124 @@ class PurchaseInvoiceOcrLookupsTest {
     }
   }
 
+  // ── vendors by tax id (ETP-6048) ───────────────────────────────────────────
+
+  @Nested
+  @DisplayName("vendors by tax id")
+  class VendorsByTaxId {
+
+    @SuppressWarnings("unchecked")
+    private OBQuery<BusinessPartner> query(BusinessPartner... found) {
+      OBQuery<BusinessPartner> query = mock(OBQuery.class);
+      when(query.list()).thenReturn(List.of(found));
+      when(dal.createQuery(eq(BusinessPartner.class), anyString())).thenReturn(query);
+      return query;
+    }
+
+    private void sessionClient(String clientId) {
+      org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+      when(client.getId()).thenReturn(clientId);
+      OBContext context = mock(OBContext.class);
+      when(context.getCurrentClient()).thenReturn(client);
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+    }
+
+    private BusinessPartner partner(String id, String name) {
+      BusinessPartner partner = mock(BusinessPartner.class);
+      when(partner.getId()).thenReturn(id);
+      when(partner.getName()).thenReturn(name);
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(partner)).thenReturn(true);
+      return partner;
+    }
+
+    @Test
+    @DisplayName("asks for active vendors of the session's client, by every spelling of the id, up to the limit")
+    void queryShape() {
+      sessionClient("CLIENT1");
+      OBQuery<BusinessPartner> query = query(partner("V1", "Blanquiceleste"));
+
+      List<Party> parties = lookups.vendorsByTaxId("ESB81639719", 10);
+
+      assertEquals(1, parties.size());
+      assertEquals("V1", parties.get(0).id());
+      assertEquals("Blanquiceleste", parties.get(0).name());
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(dal).createQuery(eq(BusinessPartner.class), hql.capture());
+      assertTrue(hql.getValue().contains("bp.vendor = true"), hql.getValue());
+      assertTrue(hql.getValue().contains("bp.active = true"));
+      assertTrue(hql.getValue().contains("bp.client.id = :clientId"));
+      assertTrue(hql.getValue().contains("in (:spellings)"));
+      verify(query).setNamedParameter("clientId", "CLIENT1");
+      @SuppressWarnings("unchecked")
+      ArgumentCaptor<java.util.Set<String>> spellings = ArgumentCaptor.forClass(java.util.Set.class);
+      verify(query).setNamedParameter(eq("spellings"), spellings.capture());
+      assertTrue(spellings.getValue().contains("ESB81639719"), "as read");
+      assertTrue(spellings.getValue().contains("B81639719"), "without the prefix");
+      verify(query).setMaxResult(10);
+    }
+
+    @Test
+    @DisplayName("two vendors sharing a tax id are both returned, for the matcher to call it ambiguous")
+    void sharedTaxIdReturnsBoth() {
+      sessionClient("CLIENT1");
+      query(partner("V1", "Alfa"), partner("V2", "Beta"));
+
+      assertEquals(List.of("V1", "V2"), lookups.vendorsByTaxId("44666500V", 10).stream()
+          .map(Party::id).collect(java.util.stream.Collectors.toList()));
+    }
+
+    @Test
+    @DisplayName("a partner the tenant cannot see is dropped from the answer")
+    void foreignPartnersAreDropped() {
+      sessionClient("CLIENT1");
+      BusinessPartner foreign = mock(BusinessPartner.class);
+      when(foreign.getId()).thenReturn("X1");
+      tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(foreign)).thenReturn(false);
+      query(partner("V1", "Alfa"), foreign);
+
+      assertEquals(List.of("V1"), lookups.vendorsByTaxId("44666500V", 10).stream()
+          .map(Party::id).collect(java.util.stream.Collectors.toList()));
+    }
+
+    @Test
+    @DisplayName("a blank id is not searched; a failing query is an empty answer, not an error")
+    void blankAndFailure() {
+      assertTrue(lookups.vendorsByTaxId("", 10).isEmpty());
+      assertTrue(lookups.vendorsByTaxId(null, 10).isEmpty());
+      verify(dal, org.mockito.Mockito.never()).createQuery(eq(BusinessPartner.class), anyString());
+
+      sessionClient("CLIENT1");
+      when(dal.createQuery(eq(BusinessPartner.class), anyString()))
+          .thenThrow(new IllegalStateException("db"));
+      assertTrue(lookups.vendorsByTaxId("44666500V", 10).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the stored tax id of a vendor is read through the tenant guard and trimmed")
+    void vendorTaxIdIsGuardedAndTrimmed() {
+      BusinessPartner vendor = mock(BusinessPartner.class);
+      when(vendor.getTaxID()).thenReturn(" B81639719 ");
+      tenantMock.when(() -> TenantOwnership.loadOwned(BusinessPartner.class, "V1")).thenReturn(vendor);
+      tenantMock.when(() -> TenantOwnership.loadOwned(BusinessPartner.class, "GONE")).thenReturn(null);
+
+      assertEquals("B81639719", lookups.vendorTaxId("V1"));
+      assertEquals("", lookups.vendorTaxId("GONE"));
+    }
+
+    @Test
+    @DisplayName("a vendor without a tax id, or a failing read, is no tax id on file")
+    void vendorTaxIdMissingOrFailing() {
+      BusinessPartner vendor = mock(BusinessPartner.class);
+      when(vendor.getTaxID()).thenReturn(null);
+      tenantMock.when(() -> TenantOwnership.loadOwned(BusinessPartner.class, "V1")).thenReturn(vendor);
+      assertEquals("", lookups.vendorTaxId("V1"));
+
+      tenantMock.when(() -> TenantOwnership.loadOwned(BusinessPartner.class, "V2"))
+          .thenThrow(new IllegalStateException("db"));
+      assertEquals("", lookups.vendorTaxId("V2"));
+    }
+  }
+
   // ── the organization's tax id ──────────────────────────────────────────────
 
   @Nested
@@ -534,14 +659,16 @@ class PurchaseInvoiceOcrLookupsTest {
     }
 
     @Test
-    @DisplayName("is the TaxID of the current organization's information")
+    @DisplayName("is the TaxID of the current organization's information, read through the worker's own DAL")
     void readsTheOrganizationInformation() {
       sessionOrganization();
       OrganizationInformation info = mock(OrganizationInformation.class);
       when(info.getTaxID()).thenReturn("B81639719");
-      when(readOnlyDal.get(OrganizationInformation.class, "ORG1")).thenReturn(info);
+      when(dal.get(OrganizationInformation.class, "ORG1")).thenReturn(info);
 
       assertEquals("B81639719", lookups.organizationTaxId());
+      verify(readOnlyDal, org.mockito.Mockito.never()).get(eq(OrganizationInformation.class),
+          anyString());
     }
 
     @Test
@@ -550,7 +677,7 @@ class PurchaseInvoiceOcrLookupsTest {
       sessionOrganization();
       assertNull(lookups.organizationTaxId());
 
-      when(readOnlyDal.get(OrganizationInformation.class, "ORG1"))
+      when(dal.get(OrganizationInformation.class, "ORG1"))
           .thenThrow(new IllegalStateException("db"));
       assertNull(lookups.organizationTaxId());
     }
@@ -569,5 +696,107 @@ class PurchaseInvoiceOcrLookupsTest {
     assertTrue(OcrLookupsRegistry.forResolver("unknown").isEmpty());
     assertTrue(OcrLookupsRegistry.forResolver(null).isEmpty());
     assertNotNull(PurchaseInvoiceOcrLookups.RESOLVER);
+  }
+
+  // ── selector failures: the answer and the WARN that names the kind ─────────
+
+  /** Collects the WARN events the lookups log, to check their kind and that they carry no document text. */
+  private static final class WarnCapture extends AbstractAppender implements AutoCloseable {
+    private final Logger logger;
+    private final List<String> warnings = new ArrayList<>();
+
+    WarnCapture() {
+      super("capture-selector-warn", null, null, true, Property.EMPTY_ARRAY);
+      logger = (Logger) LogManager.getLogger(PurchaseInvoiceOcrLookups.class);
+      start();
+      logger.addAppender(this);
+    }
+
+    @Override
+    public void append(LogEvent event) {
+      if (event.getLevel() == Level.WARN) {
+        warnings.add(event.getMessage().getFormattedMessage());
+      }
+    }
+
+    @Override
+    public void close() {
+      logger.removeAppender(this);
+      stop();
+    }
+  }
+
+  @Nested
+  @DisplayName("selector failures")
+  class SelectorFailures {
+
+    private static final String DOCUMENT_TEXT = "SECRET-INVOICE-TEXT";
+
+    private String onlyWarning(WarnCapture capture) {
+      assertEquals(1, capture.warnings.size(), capture.warnings.toString());
+      String warning = capture.warnings.get(0);
+      assertFalse(warning.contains(DOCUMENT_TEXT), "the log must not carry document text");
+      assertFalse(warning.contains("V1"), "the log must not carry ids");
+      return warning;
+    }
+
+    @Test
+    @DisplayName("a spec that is not found: no vendors, address UNKNOWN, WARN names the missing spec")
+    void specMissing() {
+      supportMock.when(() -> NeoServletSupport.findSpec("purchase-invoice")).thenReturn(null);
+
+      try (WarnCapture capture = new WarnCapture()) {
+        assertTrue(lookups.searchVendors(DOCUMENT_TEXT, 20).isEmpty());
+        assertTrue(onlyWarning(capture).contains("spec purchase-invoice not found"));
+      }
+      try (WarnCapture capture = new WarnCapture()) {
+        assertEquals(AddressState.UNKNOWN, lookups.vendorAddress("V1").state());
+        assertTrue(onlyWarning(capture).contains("spec purchase-invoice not found"));
+      }
+      selectorMock.verifyNoInteractions();
+    }
+
+    @Test
+    @DisplayName("an HTTP answer of 400 or more: no vendors, address UNKNOWN, WARN names the status")
+    void httpFailure() {
+      selectorAnswers(NeoResponse.error(403, "forbidden"));
+
+      try (WarnCapture capture = new WarnCapture()) {
+        assertTrue(lookups.searchVendors(DOCUMENT_TEXT, 20).isEmpty());
+        assertTrue(onlyWarning(capture).contains("HTTP 403"));
+      }
+      try (WarnCapture capture = new WarnCapture()) {
+        assertEquals(AddressState.UNKNOWN, lookups.vendorAddress("V1").state());
+        assertTrue(onlyWarning(capture).contains("HTTP 403"));
+      }
+    }
+
+    @Test
+    @DisplayName("an exception: no vendors, address UNKNOWN, WARN names the exception class only")
+    void exceptionFailure() {
+      selectorMock.when(() -> NeoSelectorService.querySelector(anyString(), anyString(),
+          anyString(), any(), anyInt(), anyInt(), anyMap()))
+          .thenThrow(new IllegalStateException(DOCUMENT_TEXT + " V1"));
+
+      try (WarnCapture capture = new WarnCapture()) {
+        assertTrue(lookups.searchVendors(DOCUMENT_TEXT, 20).isEmpty());
+        assertTrue(onlyWarning(capture).contains("IllegalStateException"));
+      }
+      try (WarnCapture capture = new WarnCapture()) {
+        assertEquals(AddressState.UNKNOWN, lookups.vendorAddress("V1").state());
+        assertTrue(onlyWarning(capture).contains("IllegalStateException"));
+      }
+    }
+
+    @Test
+    @DisplayName("a successful selector logs no warning")
+    void successLogsNothing() throws Exception {
+      selectorAnswers(items(new JSONObject().put("id", "V1").put("label", "Acme")));
+
+      try (WarnCapture capture = new WarnCapture()) {
+        assertEquals(1, lookups.searchVendors("Acme", 20).size());
+        assertTrue(capture.warnings.isEmpty(), capture.warnings.toString());
+      }
+    }
   }
 }

@@ -38,6 +38,7 @@ import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.WindowAccess;
 
 import com.etendoerp.go.roles.overlap.HigherPrecedenceSkip;
+import com.etendoerp.go.schemaforge.NeoTenantWriteGuard;
 
 /**
  * ETP-5019 — extracted out of {@link UserRoleCompositionService} (SonarQube S1448, that class was
@@ -118,7 +119,8 @@ class RoleInheritanceReconciliationService {
     for (RoleInheritance inheritance : existing) {
       if (!desiredIds.contains(inheritance.getInheritFrom().getId())) {
         long removeStart = System.nanoTime();
-        OBDal.getInstance().remove(inheritance);
+        // ETP-5819: core retracts the copied accesses (System rows) right here, on remove.
+        NeoTenantWriteGuard.allowingSystemRows(() -> OBDal.getInstance().remove(inheritance));
         // Same core RoleInheritanceEventHandler fan-out as the ADD loop below (see its own
         // comment) — deleting this row triggers RoleInheritanceManager#applyRemoveInheritance,
         // which retracts every AccessTypeInjector's propagated rows (window, tab, field, process,
@@ -128,7 +130,8 @@ class RoleInheritanceReconciliationService {
         // ClientList check the ADD loop already guards against.
         OBContext.setAdminMode(false);
         try {
-          OBDal.getInstance().flush();
+          // ETP-5819: the NEO write guard needs the same exemption, for System rows only.
+          NeoTenantWriteGuard.allowingSystemRows(() -> OBDal.getInstance().flush());
         } finally {
           OBContext.restorePreviousMode();
         }
@@ -192,7 +195,8 @@ class RoleInheritanceReconciliationService {
     inheritance.setInheritFrom(template);
     inheritance.setSequenceNumber(sequenceNumber);
     long saveStart = System.nanoTime();
-    OBDal.getInstance().save(inheritance);
+    // ETP-5819: core copies the template's accesses (System rows) right here, on save.
+    NeoTenantWriteGuard.allowingSystemRows(() -> OBDal.getInstance().save(inheritance));
     RoleCompositionMetrics.addStageTime("save", System.nanoTime() - saveStart);
     // Saving this AD_Role_Inheritance row fires core's RoleInheritanceEventHandler, which
     // fans out through EVERY registered AccessTypeInjector (window, tab, field, process,
@@ -210,7 +214,8 @@ class RoleInheritanceReconciliationService {
     long flushStart = System.nanoTime();
     OBContext.setAdminMode(false);
     try {
-      OBDal.getInstance().flush();
+      // ETP-5819: the NEO write guard needs the same exemption, for System rows only.
+      NeoTenantWriteGuard.allowingSystemRows(() -> OBDal.getInstance().flush());
     } finally {
       OBContext.restorePreviousMode();
     }

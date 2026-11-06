@@ -1575,4 +1575,97 @@ public class CalloutRequestBuilderTest {
 
     assertEquals("12.50", params.get("inpissotrx")[0]);
   }
+
+  // ── blankForeignReferences (ETP-5819) ──────────────────────────────────
+
+  private static final String INP_PARTNER = "inpcBpartnerId";
+  private static final String PARTNER_ENTITY = "BusinessPartner";
+
+  /** A tab whose entity has one FK column, C_BPartner_ID, to {@link #PARTNER_ENTITY}. */
+  private Tab tabWithPartnerReference(Property partner) {
+    Table table = mock(Table.class);
+    when(table.getId()).thenReturn("TABLE-1");
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+    Entity entity = mock(Entity.class);
+    when(entity.getProperties()).thenReturn(Collections.singletonList(partner));
+    when(modelProvider.getEntityByTableId("TABLE-1")).thenReturn(entity);
+    return tab;
+  }
+
+  private static Property partnerProperty() {
+    Entity target = mock(Entity.class);
+    when(target.getName()).thenReturn(PARTNER_ENTITY);
+    Property property = mock(Property.class);
+    when(property.getTargetEntity()).thenReturn(target);
+    when(property.getColumnName()).thenReturn("C_BPartner_ID");
+    return property;
+  }
+
+  /** A row owned by {@code clientId}; Organization is client-enabled, like any tenant row. */
+  private static Organization rowOfClient(String clientId) {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    Organization row = mock(Organization.class);
+    when(row.getClient()).thenReturn(client);
+    return row;
+  }
+
+  private Map<String, String[]> blank(Tab tab, String partnerId) {
+    when(obContext.getReadableClients()).thenReturn(new String[] { "CLIENT-001", "0" });
+    Map<String, String[]> params = new HashMap<>();
+    params.put(INP_PARTNER, new String[] { partnerId });
+    CalloutRequestBuilder.blankForeignReferences(tab, params);
+    return params;
+  }
+
+  @Test
+  public void blankForeignReferencesBlanksARowOfAnotherClient() {
+    Organization foreign = rowOfClient("CLIENT-OTHER");
+    when(dal.get(PARTNER_ENTITY, "BP-FOREIGN")).thenReturn(foreign);
+
+    assertEquals("", blank(tabWithPartnerReference(partnerProperty()), "BP-FOREIGN")
+        .get(INP_PARTNER)[0]);
+  }
+
+  @Test
+  public void blankForeignReferencesKeepsARowOfTheCaller() {
+    Organization own = rowOfClient("CLIENT-001");
+    when(dal.get(PARTNER_ENTITY, "BP-OWN")).thenReturn(own);
+
+    assertEquals("BP-OWN", blank(tabWithPartnerReference(partnerProperty()), "BP-OWN")
+        .get(INP_PARTNER)[0]);
+  }
+
+  /** A missing row, or an id the entity cannot even parse, names nothing to leak. */
+  @Test
+  public void blankForeignReferencesKeepsMissingOrUnresolvableIds() {
+    Tab tab = tabWithPartnerReference(partnerProperty());
+    when(dal.get(PARTNER_ENTITY, "BP-BROKEN")).thenThrow(new IllegalArgumentException("bad id"));
+
+    assertEquals("BP-MISSING", blank(tab, "BP-MISSING").get(INP_PARTNER)[0]);
+    assertEquals("BP-BROKEN", blank(tab, "BP-BROKEN").get(INP_PARTNER)[0]);
+    assertEquals("", blank(tab, "").get(INP_PARTNER)[0]);
+  }
+
+  /** One-to-many and column-less properties carry no inp* value; nothing is looked up. */
+  @Test
+  public void blankForeignReferencesSkipsPropertiesWithoutAColumnValue() {
+    Property children = partnerProperty();
+    when(children.isOneToMany()).thenReturn(true);
+
+    blank(tabWithPartnerReference(children), "BP-FOREIGN");
+    verify(dal, never()).get(anyString(), anyString());
+  }
+
+  @Test
+  public void blankForeignReferencesIgnoresATabWithoutEntity() {
+    Map<String, String[]> params = new HashMap<>();
+    params.put(INP_PARTNER, new String[] { "BP-FOREIGN" });
+
+    CalloutRequestBuilder.blankForeignReferences(null, params);
+
+    assertEquals("BP-FOREIGN", params.get(INP_PARTNER)[0]);
+    verify(dal, never()).get(anyString(), anyString());
+  }
 }

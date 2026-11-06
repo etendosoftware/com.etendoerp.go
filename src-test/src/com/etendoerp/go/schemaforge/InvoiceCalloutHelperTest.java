@@ -40,7 +40,10 @@ import org.openbravo.dal.service.OBDal;
  * <p>Covers ETP-5229: the new {@code tbaiReverseinvoicecode} field must be autofilled/cleared
  * for SALES invoices only ({@code c_doctype.issotrx = 'Y'}), mirroring the existing
  * {@code tbaiIsreverseinvoice}/{@code tbaiReverseinvoicetype} conditional-set/clear pattern, while
- * remaining untouched for purchase invoices.
+ * remaining untouched for purchase invoices. Also covers {@link InvoiceCalloutHelper#isTbaiConfigActive}
+ * (ETP-5747), the TicketBAI-config lookup shared by the header enrichment and the fiscal defaults.
+ *
+ * @covers com.etendoerp.go.schemaforge.InvoiceCalloutHelper
  */
 public class InvoiceCalloutHelperTest {
 
@@ -138,6 +141,36 @@ public class InvoiceCalloutHelperTest {
           AbstractInvoiceHeaderHandler.FIELD_TRANSACTION_DOCUMENT, requestBodyFor("dt-4"), updates);
 
       assertFalse(updates.has("tbaiReverseinvoicecode"));
+    }
+  }
+
+  // ── isTbaiConfigActive — the one TicketBAI-config lookup (ETP-5747) ─────────
+
+  @Test
+  public void isTbaiConfigActive_blankOrg_falseWithoutQuerying() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      assertFalse(InvoiceCalloutHelper.isTbaiConfigActive(null));
+      assertFalse(InvoiceCalloutHelper.isTbaiConfigActive(""));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void isTbaiConfigActive_answersWhetherTheOrgHasAnActiveConfig() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(InvoiceCalloutHelper.TBAI_ACTIVE_SQL)).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+
+      org.junit.Assert.assertTrue(InvoiceCalloutHelper.isTbaiConfigActive("org-tbai"));
+      assertFalse(InvoiceCalloutHelper.isTbaiConfigActive("org-tbai"));
+      Mockito.verify(ps, Mockito.times(2)).setString(1, "org-tbai");
     }
   }
 }

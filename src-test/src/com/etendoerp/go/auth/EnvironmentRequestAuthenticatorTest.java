@@ -62,6 +62,7 @@ import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.oauth2.PublicApiKeyAttribution;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
@@ -71,6 +72,7 @@ import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.SessionRoleRevokedException;
+import com.etendoerp.go.usageevents.PublicApiCaller;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -602,7 +604,8 @@ class EnvironmentRequestAuthenticatorTest {
     swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
     Map<String, String> identity = new HashMap<>();
     identity.put(OAuth2Filter.ATTR_SCOPES, "etendo:*");
-    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
 
     EnvironmentAuthOutcome outcome =
         authenticator.authenticate(bearerRequest(OAUTH2_TOKEN), SurfacePolicy.NEO_API);
@@ -762,7 +765,8 @@ class EnvironmentRequestAuthenticatorTest {
     identity.put(OAuth2Filter.ATTR_ORG_ID, "0");
     identity.put(OAuth2Filter.ATTR_CLIENT_ID, "0");
     identity.put(OAuth2Filter.ATTR_SCOPES, "neo:*");
-    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
     OBDal dal = mock(OBDal.class);
     Session session = mock(Session.class);
     when(dal.getSession()).thenReturn(session);
@@ -833,6 +837,204 @@ class EnvironmentRequestAuthenticatorTest {
     assertEquals("0", outcome.getClientId());
   }
 
+  // ======================= public API key usage attribution (ETP-6057) =======================
+
+  private static final String KEY_ID = "key-public";
+  private static final PublicApiCaller KEY_CALLER =
+      new PublicApiCaller(CLIENT_ID, ORG_ID, USER_ID, ROLE_ID, KEY_ID);
+
+  /** A validated OAuth2 identity of a key; {@code publicKey} is what the key row's scopes decided. */
+  private void stubKeyIdentity(String scopes, String publicKey) {
+    stubOAuth2(scopes);
+    Map<String, String> identity = new HashMap<>();
+    identity.put(OAuth2Filter.ATTR_USER_ID, USER_ID);
+    identity.put(OAuth2Filter.ATTR_ROLE_ID, ROLE_ID);
+    identity.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
+    identity.put(OAuth2Filter.ATTR_CLIENT_ID, CLIENT_ID);
+    identity.put(OAuth2Filter.ATTR_SCOPES, scopes);
+    identity.put(OAuth2Filter.ATTR_KEY_ID, KEY_ID);
+    identity.put(OAuth2Filter.ATTR_PUBLIC_API_KEY, publicKey);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
+  }
+
+  private static void verifyAttributed(HttpServletRequest request, PublicApiCaller caller) {
+    verify(request).setAttribute(PublicApiKeyAttribution.REQUEST_ATTRIBUTE, caller);
+  }
+
+  private static void verifyNotAttributed(HttpServletRequest request) {
+    verify(request, never()).setAttribute(eq(PublicApiKeyAttribution.REQUEST_ATTRIBUTE), any());
+  }
+
+  @Test
+  void anAcceptedPublicKeyRequestIsAttributedToItsKeyAndTenant() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubKeyIdentity("etendo:read", "true");
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertTrue(outcome.isAuthenticated());
+    verifyAttributed(request, KEY_CALLER);
+  }
+
+  @Test
+  void aPublicKeyRequestRefusedForScopeIsStillAttributed() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubKeyIdentity("etendo:read", "true");
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+    when(request.getMethod()).thenReturn("POST");
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(Status.INSUFFICIENT_SCOPE, outcome.getStatus());
+    verifyAttributed(request, KEY_CALLER);
+  }
+
+  @Test
+  void aPublicKeyRequestRefusedByTheCommercialGuardIsStillAttributed() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubKeyIdentity("etendo:read", "true");
+    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.SUBSCRIPTION_REQUIRED);
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(402, outcome.getHttpStatus());
+    verifyAttributed(request, KEY_CALLER);
+  }
+
+  @Test
+  void anExpiredOrRevokedPublicKeyTokenIsAttributedThroughItsOwner() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(null, null));
+    Map<String, String> owner = new HashMap<>();
+    owner.put(OAuth2Filter.ATTR_USER_ID, USER_ID);
+    owner.put(OAuth2Filter.ATTR_ROLE_ID, ROLE_ID);
+    owner.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
+    owner.put(OAuth2Filter.ATTR_CLIENT_ID, CLIENT_ID);
+    owner.put(OAuth2Filter.ATTR_KEY_ID, KEY_ID);
+    owner.put(OAuth2Filter.ATTR_PUBLIC_API_KEY, "true");
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(null, owner));
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals("Invalid or expired token", outcome.getMessage());
+    verifyAttributed(request, KEY_CALLER);
+  }
+
+  @Test
+  void anInvalidPublicKeyTokenAttachesItsOwnerWithASingleCheckTokenCall() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    Map<String, String> owner = new HashMap<>();
+    owner.put(OAuth2Filter.ATTR_USER_ID, USER_ID);
+    owner.put(OAuth2Filter.ATTR_ROLE_ID, ROLE_ID);
+    owner.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
+    owner.put(OAuth2Filter.ATTR_CLIENT_ID, CLIENT_ID);
+    owner.put(OAuth2Filter.ATTR_KEY_ID, KEY_ID);
+    owner.put(OAuth2Filter.ATTR_PUBLIC_API_KEY, "true");
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(null, owner));
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(401, outcome.getHttpStatus());
+    verifyAttributed(request, KEY_CALLER);
+    oauth2FilterStatic.verify(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN), times(1));
+    oauth2FilterStatic.verify(() -> OAuth2Filter.validateToken(anyString()), never());
+  }
+
+  @Test
+  void aCheckTokenThatAnswersNullIs401AndAttachesNothing() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN)).thenReturn(null);
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals("Invalid or expired token", outcome.getMessage());
+    verifyNotAttributed(request);
+    oauth2FilterStatic.verify(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN), times(1));
+  }
+
+  @Test
+  void anInvalidTokenOfNoKnownKeyIsNotAttributed() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(null, null));
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(401, outcome.getHttpStatus());
+    verifyNotAttributed(request);
+  }
+
+  @Test
+  void aNonPublicOAuth2TokenIsNotAttributed() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubKeyIdentity("etendo:read", "false");
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+
+    assertTrue(authenticator.authenticate(request, SurfacePolicy.NEO_API).isAuthenticated());
+
+    verifyNotAttributed(request);
+  }
+
+  @Test
+  void aCookieSessionAndALegacyJwtAreNotAttributed() {
+    HttpServletRequest cookie = requestFor(AuthScheme.COOKIE);
+    assertTrue(authenticator.authenticate(cookie, SurfacePolicy.NEO_API).isAuthenticated());
+    verifyNotAttributed(cookie);
+
+    HttpServletRequest jwt = requestFor(AuthScheme.JWT);
+    assertTrue(authenticator.authenticate(jwt, SurfacePolicy.NEO_API).isAuthenticated());
+    verifyNotAttributed(jwt);
+  }
+
+  @Test
+  void theCallerIsTheTenantOfTheRoleWhenTheOwnerOrgIsStar() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    Map<String, String> identity = new HashMap<>();
+    identity.put(OAuth2Filter.ATTR_USER_ID, USER_ID);
+    identity.put(OAuth2Filter.ATTR_ROLE_ID, ROLE_ID);
+    identity.put(OAuth2Filter.ATTR_ORG_ID, "0");
+    identity.put(OAuth2Filter.ATTR_CLIENT_ID, "0");
+    identity.put(OAuth2Filter.ATTR_ROLE_CLIENT_ID, "tenant-of-role-1");
+    identity.put(OAuth2Filter.ATTR_SCOPES, "etendo:read");
+    identity.put(OAuth2Filter.ATTR_KEY_ID, KEY_ID);
+    identity.put(OAuth2Filter.ATTR_PUBLIC_API_KEY, "true");
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
+    when(lifecycleService.evaluateAccess(anyString(), eq(true), any(Instant.class)))
+        .thenReturn(Decision.ALLOWED);
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.doReturningWork(any())).thenReturn("tenant-of-role-1");
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      authenticator.authenticate(request, SurfacePolicy.NEO_API);
+    }
+
+    verifyAttributed(request,
+        new PublicApiCaller("tenant-of-role-1", "0", USER_ID, ROLE_ID, KEY_ID));
+  }
+
   // ============================== fixtures ==============================
 
   /** A request carrying exactly one credential of the given scheme, the collaborators agreeing. */
@@ -880,7 +1082,8 @@ class EnvironmentRequestAuthenticatorTest {
     identity.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
     identity.put(OAuth2Filter.ATTR_CLIENT_ID, CLIENT_ID);
     identity.put(OAuth2Filter.ATTR_SCOPES, scopes);
-    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    oauth2FilterStatic.when(() -> OAuth2Filter.checkToken(OAUTH2_TOKEN))
+        .thenReturn(OAuth2Filter.TokenCheck.of(identity, null));
   }
 
   private static HttpServletRequest bearerRequest(String token) {
