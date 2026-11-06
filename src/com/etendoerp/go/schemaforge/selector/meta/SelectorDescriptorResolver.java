@@ -329,6 +329,10 @@ public final class SelectorDescriptorResolver {
         addIfAbsent(searchableProps, PROP_SEARCH_KEY);
       }
     }
+    // Still nothing (e.g. C_Invoice, shown by its documentNo): search the text the label shows.
+    if (searchableProps.isEmpty()) {
+      addStringIdentifierProperties(searchableProps, targetEntity);
+    }
     // "description" is searched only when the label shows it, so every result matches text the user
     // can see (ETP-6103). ETP-4975: "IAE Activity Type" (epiae_type) shows Key + Description, so
     // typing "alquiler" must still find it. Last resort when nothing else is searchable: an empty
@@ -337,6 +341,14 @@ public final class SelectorDescriptorResolver {
     if (targetEntity.hasProperty(PROP_DESCRIPTION)
         && (searchableProps.isEmpty() || isIdentifierProperty(targetEntity, PROP_DESCRIPTION))) {
       addIfAbsent(searchableProps, PROP_DESCRIPTION);
+    }
+  }
+
+  private static void addStringIdentifierProperties(List<String> props, Entity entity) {
+    for (Property identifier : entity.getIdentifierProperties()) {
+      if (identifier.isPrimitive() && String.class.equals(identifier.getPrimitiveObjectType())) {
+        addIfAbsent(props, identifier.getName());
+      }
     }
   }
 

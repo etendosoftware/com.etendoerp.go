@@ -79,6 +79,8 @@ class NeoSelectorExecutionHelper {
       return;
     }
     appendAndIfNeeded(hql);
+    // upper() on both sides is case-insensitive like lower(), and a trigram index on upper(col) can
+    // serve it; only tables that have one speed up (locally just c_bpartner).
     hql.append("upper(e.").append(displayProperty).append(") LIKE upper(:search)");
   }
 

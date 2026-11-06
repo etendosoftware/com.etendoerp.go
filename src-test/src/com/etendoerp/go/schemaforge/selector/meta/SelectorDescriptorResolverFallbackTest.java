@@ -290,10 +290,24 @@ class SelectorDescriptorResolverFallbackTest {
   }
 
   @Test
+  @DisplayName("With no name or search key, searches the text identifier the label shows, not description")
+  void searchesTheTextIdentifierBeforeDescription() {
+    List<String> props = new ArrayList<>();
+    Entity entity = entityWithIdentifier(List.of("documentNo"), "documentNo", "description");
+    Property documentNo = entity.getIdentifierProperties().get(0);
+    lenient().when(documentNo.getPrimitiveObjectType()).thenReturn((Class) String.class);
+
+    SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "_identifier", "id");
+
+    assertEquals(List.of("documentNo"), props);
+  }
+
+  @Test
   @DisplayName("Keeps description when nothing else is searchable, so the search is never dropped")
   void keepsDescriptionWhenNothingElseIsSearchable() {
     List<String> props = new ArrayList<>();
-    Entity entity = entityWithIdentifier(List.of("documentNo"), "description");
+    // a date identifier is not text: there is nothing the label shows that can be searched
+    Entity entity = entityWithIdentifier(List.of("accountingDate"), "description");
 
     SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "_identifier", "id");
 
