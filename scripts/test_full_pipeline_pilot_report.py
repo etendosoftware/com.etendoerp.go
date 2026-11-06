@@ -120,19 +120,32 @@ class DatadogSeriesTest(unittest.TestCase):
     def test_sends_the_failing_tests_of_every_cell_including_the_green_ones(self):
         series = self.series()
         self.assertEqual(series[('etendo.ci.pilot.cell.failed_tests', ('cell:ventas',))], 1)
-        self.assertEqual(series[('etendo.ci.pilot.cell.failed_tests', ('cell:sin_célula',))], 0)
+        self.assertEqual(series[('etendo.ci.pilot.cell.failed_tests', ('cell:sin_celula',))], 0)
 
-    def test_sends_the_duration_of_the_finished_jobs_only(self):
+    def test_sends_the_duration_of_the_finished_jobs_and_of_the_run(self):
         jobs = [
             {'name': 'Go tests + coverage', 'status': 'completed', 'conclusion': 'success',
              'started_at': '2026-11-05T17:58:06Z', 'completed_at': '2026-11-05T18:17:09Z'},
+            {'name': 'Integration (Tomcat + Playwright)', 'status': 'completed', 'conclusion': 'failure',
+             'started_at': '2026-11-05T17:58:06Z', 'completed_at': '2026-11-05T18:24:06Z'},
             {'name': 'Cell report', 'status': 'in_progress', 'conclusion': None,
              'started_at': '2026-11-05T18:48:00Z', 'completed_at': None},
         ]
         series = self.series(jobs=jobs)
-        durations = {k: v for k, v in series.items() if k[0] == 'etendo.ci.pilot.job.duration_minutes'}
-        self.assertEqual(durations, {('etendo.ci.pilot.job.duration_minutes',
-                                      ('job:go_tests_+_coverage', 'result:success')): 19.05})
+        durations = {k: v for k, v in series.items() if 'duration' in k[0]}
+        self.assertEqual(durations, {
+            ('etendo.ci.pilot.job.duration_minutes', ('job:go_tests_coverage', 'result:success')): 19.05,
+            ('etendo.ci.pilot.job.duration_minutes', ('job:integration_tomcat_playwright', 'result:failure')): 26.0,
+            ('etendo.ci.pilot.run.duration_minutes', ()): 26.0,
+        })
+
+    def test_no_finished_job_sends_no_run_duration(self):
+        series = self.series(jobs=[{'name': 'Cell report', 'status': 'in_progress'}])
+        self.assertFalse([k for k in series if 'duration' in k[0]])
+
+    def test_tag_values_are_plain_ascii_words(self):
+        self.assertEqual(report._tag('Integration (Tomcat + Playwright)'), 'integration_tomcat_playwright')
+        self.assertEqual(report._tag(' sin célula '), 'sin_celula')
 
 
 class MainTest(unittest.TestCase):

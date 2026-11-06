@@ -32,8 +32,10 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -135,22 +137,34 @@ def summary_markdown(model, flaky=(), run_url=''):
 
 
 def _tag(value):
-    """Datadog turns spaces into underscores anyway; doing it here keeps the tags predictable."""
-    return str(value).strip().lower().replace(' ', '_')
+    """A tag value a dashboard can filter on: lowercase ASCII letters, digits and single
+    underscores. Datadog would turn '(', '+' and spaces into underscores of its own, leaving values
+    like 'integration__tomcat___playwright_'; accents are dropped the same way ('sin célula' ->
+    'sin_celula')."""
+    ascii_text = unicodedata.normalize('NFKD', str(value)).encode('ascii', 'ignore').decode('ascii')
+    return re.sub(r'[^a-z0-9]+', '_', ascii_text.lower()).strip('_')
 
 
-def _minutes(job):
+def _span(job):
+    """(start, end) of a finished job, or None."""
+    if job.get('status') != 'completed':
+        return None
     try:
-        start = datetime.fromisoformat(job['started_at'].replace('Z', '+00:00'))
-        end = datetime.fromisoformat(job['completed_at'].replace('Z', '+00:00'))
+        return (datetime.fromisoformat(job['started_at'].replace('Z', '+00:00')),
+                datetime.fromisoformat(job['completed_at'].replace('Z', '+00:00')))
     except (KeyError, AttributeError, TypeError, ValueError):
         return None
+
+
+def _minutes(start, end):
     return round((end - start).total_seconds() / 60, 2)
 
 
 def datadog_series(model, jobs=(), tags=(), now=None):
     """The /api/v2/series payload of one run: tests per suite and outcome, failing tests per cell,
-    and the duration of every finished job."""
+    the duration of every finished job, and the run's own duration, from the first finished job's
+    start to the last one's end: the jobs run in parallel, so that is what compares with the whole
+    Jenkins build."""
     now = int(now if now is not None else time.time())
     base = list(tags)
 
@@ -169,11 +183,16 @@ def datadog_series(model, jobs=(), tags=(), now=None):
     for cell in model.get('cells') or []:
         series.append(point('etendo.ci.pilot.cell.failed_tests', len(failures.get(cell) or []),
                             [f'cell:{_tag(cell)}']))
+    spans = []
     for job in jobs:
-        minutes = _minutes(job) if job.get('status') == 'completed' else None
-        if minutes is not None:
-            series.append(point('etendo.ci.pilot.job.duration_minutes', minutes,
+        span = _span(job)
+        if span:
+            spans.append(span)
+            series.append(point('etendo.ci.pilot.job.duration_minutes', _minutes(*span),
                                 [f"job:{_tag(job.get('name', ''))}", f"result:{job.get('conclusion') or 'unknown'}"]))
+    if spans:
+        series.append(point('etendo.ci.pilot.run.duration_minutes',
+                            _minutes(min(s for s, _ in spans), max(e for _, e in spans)), []))
     return {'series': series}
 
 
