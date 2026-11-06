@@ -1646,6 +1646,29 @@ started a job can read or cancel it (anyone else gets **404**); a finished job c
 (**409**). The worker runs as the requester (user, role, client, organization, language captured at
 submit) and always releases its context and DAL session.
 
+**Bulk delete: `DELETE` operations (ETP-6143).** An operation with `"method":"DELETE"` and a
+`"recordId"` removes that record instead of creating one:
+
+```json
+{ "async": true, "_onlyReturnIds": true, "operations": [
+  { "id": "del-0", "spec": "product", "entity": "header", "method": "DELETE", "recordId": "<id>" },
+  { "id": "del-1", "spec": "product", "entity": "header", "method": "DELETE", "recordId": "<id>" } ] }
+```
+
+It runs the same checks as `DELETE /sws/neo/{spec}/{entity}/{id}`: spec access for `DELETE`, the
+accounting-entity policy, the entity's `isDelete` method flag, the write preflight
+(`NeoActionRecordGuard`) and the customization hooks (channel `REST_BATCH`). It takes no `body` and no
+`parentRef`; a `DELETE` without `recordId` is a **400** (on `async:true`, before any job is created). A
+successful operation reports `{id, ok:true, method:"DELETE", recordId}`. A refusal carries the
+server's own status and message, so a record that is still referenced comes back per row as
+**409** `record_in_use`. Inside a batch the delete joins the batch's transaction: the two commits core's
+`remove` makes become flushes (`NeoBatchJsonDataService#remove`), so a synchronous batch that mixes
+creates and deletes stays atomic. With `async:true` every delete operation is its own row (it references
+nothing), so each record is deleted in its own transaction, a record in use fails alone, and
+`processedRows` / `totalRows` give the progress. The SPA's grid "Delete selected" uses this path for two
+or more rows (`useBulkRowDelete`): one request instead of one `DELETE` per row, paced by the job workers
+rather than by the browser.
+
 #### Failure body: `message` + `messageKeys` (ETP-5316)
 
 When the action runs a DB procedure (`CallProcess` -> `ProcessInstance`) and it fails, the `400`
