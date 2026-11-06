@@ -48,7 +48,8 @@ on:
     branches: [main]
     types: [opened, reopened, synchronize]
   push:
-    branches: [main]
+    # TEMPORARY (ETP-6180): validates the Sonar steps from its own branch; removed before the PR.
+    branches: [main, feature/ETP-6180]
   workflow_dispatch:
 
 permissions:
