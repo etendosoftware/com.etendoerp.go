@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.signup;
 
+import java.util.regex.Pattern;
+
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -50,6 +52,7 @@ final class SignupRequest {
   static final String FIELD_SEND_EMAILS = "sendEmails";
   static final String FIELD_TERMS_ACCEPTED = "termsAccepted";
   static final String FIELD_SOURCE = "source";
+  static final String FIELD_HUBSPOT_DEAL_ID = "hubspotDealId";
 
   static final String CODE_INVALID_REQUEST = "INVALID_REQUEST";
   static final String CODE_REQUIRED_FIELD = "REQUIRED_FIELD";
@@ -59,6 +62,10 @@ final class SignupRequest {
   static final String CODE_UNSUPPORTED_LANGUAGE = "UNSUPPORTED_LANGUAGE";
   static final String CODE_INVALID_TAX_ID_FORMAT = "INVALID_TAX_ID_FORMAT";
   static final String CODE_INVALID_TAX_ID_CHECK_DIGIT = "INVALID_TAX_ID_CHECK_DIGIT";
+  static final String CODE_INVALID_HUBSPOT_DEAL_ID = "INVALID_HUBSPOT_DEAL_ID";
+
+  /** A HubSpot record id: digits only. Bounded so a stray value never reaches the outbox. */
+  private static final Pattern HUBSPOT_ID = Pattern.compile("\\d{1,30}");
 
   /** {@code ETGO_ACCOUNT.SIGNUP_SOURCE} is VARCHAR(2000). */
   static final int SOURCE_MAX_LENGTH = 2000;
@@ -77,6 +84,7 @@ final class SignupRequest {
   private final boolean sendEmails;
   private final boolean termsAccepted;
   private final String source;
+  private final String hubspotDealId;
 
   private SignupRequest(JSONObject body) throws SignupException {
     name = requiredText(body, FIELD_NAME);
@@ -95,6 +103,7 @@ final class SignupRequest {
     termsAccepted = body.optBoolean(FIELD_TERMS_ACCEPTED, false);
     JSONObject sourceObject = body.optJSONObject(FIELD_SOURCE);
     source = sourceObject == null ? null : sourceObject.toString();
+    hubspotDealId = StringUtils.trimToNull(optionalText(body, FIELD_HUBSPOT_DEAL_ID));
     validate();
   }
 
@@ -130,6 +139,10 @@ final class SignupRequest {
       throw badRequest(CODE_UNSUPPORTED_LANGUAGE, FIELD_LANGUAGE, "Language is not supported");
     }
     validateTaxId();
+    if (hubspotDealId != null && !HUBSPOT_ID.matcher(hubspotDealId).matches()) {
+      throw badRequest(CODE_INVALID_HUBSPOT_DEAL_ID, FIELD_HUBSPOT_DEAL_ID,
+          "hubspotDealId must be the id of a HubSpot deal");
+    }
   }
 
   /** Same rule as the app's onboarding (ETP-5190): Spanish ids only, blank allowed. */
@@ -169,7 +182,7 @@ final class SignupRequest {
   /** The account to create, for {@link SignupAccountService#create}. */
   SignupAccountService.NewAccount toNewAccount(String channel) throws JSONException {
     return new SignupAccountService.NewAccount(email, name, toOnboardingDraft(), channel,
-        sendEmails, source, termsAccepted);
+        sendEmails, source, termsAccepted, hubspotDealId);
   }
 
   private static String requiredText(JSONObject body, String field) throws SignupException {
