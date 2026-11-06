@@ -161,7 +161,9 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "), offset and includeCovered are optional; with limit or offset the answer adds "
             + "offset and nextOffset (page on while hasMore). includeCovered also lists the orders "
             + "whose pending lines are all held by draft invoices, with pendingLines 0 and amount 0; "
-            + "detail adds creationDate (ISO instant, UTC)."
+            + "detail adds creationDate (ISO instant, UTC) and leaves out of pendingLines and "
+            + "amount the lines this invoice already holds (an order left at 0 is then listed only "
+            + "with includeCovered)."
             + " Step 1." + flow,
         OrderImportListing.availableOrdersParams())
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
@@ -175,7 +177,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "ordered minus invoiced minus what any draft invoice (this one included) already "
             + "holds, and the id is the sourceLineId importOrderLines takes. includeCovered also "
             + "lists the lines with nothing left at pendingQuantity 0; detail adds "
-            + OrderImportListing.LINE_DETAIL_KEYS + ". Step 2." + flow,
+            + OrderImportListing.LINE_DETAIL_KEYS + " and importedHere (this invoice has an "
+            + "active line linked to the order line). Step 2." + flow,
         OrderImportListing.availableLinesParams())
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
@@ -285,7 +288,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       boolean includeCovered = ImportListing.includeCovered(body);
       boolean detail = ImportListing.detail(body);
       return classic ? classicAvailableOrderLines(invoice, order, includeCovered, detail)
-          : availableOrderLines(order, includeCovered, detail);
+          : availableOrderLines(invoice, order, includeCovered, detail);
     }
     return importLines(requireDraftInvoice(context.getRecordId()), body);
   }
@@ -623,8 +626,27 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         ? findCandidateOrders(partnerId, sales, currencyId, request.scan)
         : findCandidateOrders(partnerId, sales, currencyId, request.offset, request.scan);
     Function<Order, Map<String, BigDecimal>> pendingOf = pendingLookup(candidates, sales);
+    // ETP-6099: with detail, the lines THIS invoice already holds are not selectable in the popup.
+    Set<String> importedHere = request.detail ? orderLinesOnInvoice(invoice.getId()) : Set.of();
     return discover(candidates, order -> availableOrderRow(order, partnerId,
-        pendingOf.apply(order), request), request);
+        selectableOnly(pendingOf.apply(order), importedHere), request), request);
+  }
+
+  /**
+   * The pending lines the popup leaves selectable (ETP-6099, {@code detail}): those not already
+   * linked from an active line of THIS invoice. Pending is quantity-based, so a line partly on this
+   * invoice still has some left, but the popup greys it out ({@code importedHere}); counting it
+   * listed an order that turned out empty once expanded. Without {@code detail} the set is empty
+   * and the pending map is returned as is, so the default answer is unchanged.
+   */
+  static Map<String, BigDecimal> selectableOnly(Map<String, BigDecimal> pending,
+      Set<String> importedHere) {
+    if (importedHere.isEmpty() || pending.isEmpty()) {
+      return pending;
+    }
+    Map<String, BigDecimal> selectable = new LinkedHashMap<>(pending);
+    selectable.keySet().removeAll(importedHere);
+    return selectable;
   }
 
   /**
@@ -654,7 +676,10 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
 
   /**
    * One {@code availableOrders} row, or {@code null} when the order has nothing pending (with
-   * {@code includeCovered}: nothing pending even before drafts, ETP-6099).
+   * {@code includeCovered}: nothing pending even before drafts, ETP-6099). With {@code detail} the
+   * {@code pending} map holds only the selectable lines ({@link #selectableOnly}), so an order
+   * whose remaining lines are all on this invoice comes at {@code pendingLines} 0 and is listed
+   * only with {@code includeCovered} (its lines are held by a draft: this one).
    */
   private JSONObject availableOrderRow(Order order, String partnerId,
       Map<String, BigDecimal> pending, ImportListing.ListRequest request) throws JSONException {
@@ -702,10 +727,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
    * import popup shows them greyed out as already imported, and so reads every line it shows, with
    * its price, from this ONE call instead of a second request per order.
    */
-  private NeoResponse availableOrderLines(Order order, boolean includeCovered, boolean detail)
-      throws JSONException {
+  private NeoResponse availableOrderLines(Invoice invoice, Order order, boolean includeCovered,
+      boolean detail) throws JSONException {
     boolean sales = Boolean.TRUE.equals(order.isSalesTransaction());
     Map<String, BigDecimal> pending = pendingToInvoice(order, sales);
+    // ETP-6099: detail adds importedHere, as the classic path does; the default answer is unchanged.
+    Set<String> importedHere = detail ? orderLinesOnInvoice(invoice.getId()) : Set.of();
     JSONArray rows = new JSONArray();
     for (OrderLine ol : order.getOrderLineList()) {
       BigDecimal left = pending.get(ol.getId());
@@ -716,6 +743,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         JSONObject row = OrderImportListing.availableLineRow(order, ol, left);
         if (detail) {
           OrderImportListing.putLineDetail(row, ol);
+          row.put(KEY_IMPORTED_HERE, importedHere.contains(ol.getId()));
         }
         rows.put(row);
       }
