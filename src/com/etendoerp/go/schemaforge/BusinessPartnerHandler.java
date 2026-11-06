@@ -29,8 +29,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.regex.Pattern;
 
-import javax.inject.Named;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -43,6 +41,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.schemaforge.handlers.ContactSepaMandateDefaults;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeRules;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetry;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
@@ -116,10 +115,17 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * checks the field name and falls through ({@code null}) for every other selector field this
  * entity exposes, so no other column or window is affected.
  *
- * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerHandler'} on the
- * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
+ * <p>On POST/PATCH/PUT, {@code handle()} also applies the customer's SEPA mandate rules (ETP-6148,
+ * see {@link ContactSepaMandateDefaults}): behind the {@code sepa-remittances} flag, a customer whose
+ * mandate identifier ends up blank takes its tax ID and one whose signature date ends up empty takes
+ * its creation date (today on create); a value the caller sends always wins. With the flag off the
+ * two mandate keys are dropped from the body (never persisted, never rejected).
+ *
+ * <p>Bound with {@code @NeoExtension(spec = "contacts", entity = "businessPartner")} (ETP-6148,
+ * migrated from {@code JAVA_QUALIFIER = 'businessPartnerHandler'}). No {@code @Named}: the class is a
+ * {@code @Dependent} bean resolved through {@code NeoExtensionIndex} on every channel.
  */
-@Named("businessPartnerHandler")
+@NeoExtension(spec = "contacts", entity = "businessPartner")
 public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
@@ -387,6 +393,9 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       if (contactTypeError != null) {
         return contactTypeError;
       }
+      // After the contact-type rules: a type re-inherited from the category decides whether the
+      // contact is a customer, and so whether its SEPA mandate is defaulted (ETP-6148).
+      ContactSepaMandateDefaults.apply(ctx, body);
 
       deriveName(ctx, body);
 

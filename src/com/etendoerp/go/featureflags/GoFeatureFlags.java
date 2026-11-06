@@ -465,6 +465,35 @@ public final class GoFeatureFlags {
   public static final String FLAG_BANK_BOUNCE_SUGGESTIONS = "bank-bounce-suggestions";
 
   /**
+   * ETP-6148 (epic ETP-3504, "SEPA remittances") — gates the <b>behaviour</b> of SEPA remittances,
+   * never their schema. Positive polarity: {@code true} = remittances are enabled. Strictly off by
+   * default: an unconfigured flag, an unreachable control plane and any evaluation error all read
+   * as {@code false}.
+   *
+   * <p><b>What it gates.</b> The «Admite remesas» toggle of a financial account
+   * ({@code EM_ETGO_ALLOW_REMITTANCE}, in the Edit Account modal) and the lazy provisioning and
+   * payment-method links it triggers — off, changing it is refused with 403
+   * {@code feature_disabled}; the default SEPA mandate of a customer — off, its keys are dropped
+   * from the write body; and the {@code remittance} spec (header and lines) — off, 403
+   * {@code feature_disabled}. <b>Not gated:</b> the {@code FIN_FINANCIAL_ACCOUNT.EM_ETGO_ALLOW_REMITTANCE}
+   * column, the messages, and the DAL observer that guards the remittance links — an observer
+   * cannot read a per-account flag, and remittance data only exists where the flag was on. The
+   * remittance status is not this module's: it is {@code REM_REMITTANCE.REMITTANCE_STATUS}, owned
+   * and maintained by {@code org.openbravo.module.remittance} (added by ETP-6148).
+   *
+   * <p><b>One reader.</b> Only {@code SepaRemittancesFlag} reads this key, evaluated per request
+   * and never cached. <b>Targeted per account</b>: the context carries the {@code ETGO_ACCOUNT}
+   * email of the request user (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; a Datadog rule must be written on the lowercase {@code email} attribute alone.
+   * Locally {@code etendo.go.flags.sepa-remittances} / {@code ETGO_FLAG_SEPA_REMITTANCES}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}. The web client reads
+   * {@code capabilities.sepaRemittances} off {@code SFWindowAccessMap} and never evaluates the flag.
+   * TTL 2027-03-31 (provisional, to confirm with product).
+   */
+  public static final String FLAG_SEPA_REMITTANCES = "sepa-remittances";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

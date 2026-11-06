@@ -102,9 +102,14 @@ import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
  *       rule matrix lives in {@link FinancialAccountHandlerCountryTest}.</li>
  *   <li>delete: hard delete → 204; blockers → 409; missing id → 400; unknown
  *       account → 404 (ETP-5474).</li>
+ *   <li>«Admite remesas» (ETP-6148): the {@link FinancialAccountRemittanceSupport} rules run
+ *       through the handler's create/update pre-hook and its post-hook, with the support's flag
+ *       and DAL seams stubbed — flag gate, Bank + IBAN requirement, open-remittance refusal,
+ *       provisioning in the pre-hook and link reconciliation in the post-hook.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountRemittanceSupport
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountHandlerTest {
@@ -2537,6 +2542,450 @@ public class FinancialAccountHandlerTest {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, new JSONObject()));
     assertNull(new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+
+  // ── «Admite remesas» (ETP-6148): FinancialAccountRemittanceSupport through the hooks ──────────
+
+  private static final String FIELD_ALLOW = FinancialAccountRemittanceSupport.FIELD_ALLOW;
+  /** {@link #ES_IBAN} with its check digits broken: well shaped, fails the mod-97 checksum. */
+  private static final String ES_IBAN_BAD_CHECKSUM = "ES0021000418450200051332";
+
+  /**
+   * Swaps in a remittance support whose flag and DAL seams are stubbed: the flag answers
+   * {@code flagOn}, the account has {@code openRemittances} open remittances, and provisioning and
+   * link reconciliation are recorded instead of run.
+   */
+  private FinancialAccountRemittanceSupport stubRemittance(boolean flagOn, long openRemittances) {
+    FinancialAccountRemittanceSupport support = spy(new FinancialAccountRemittanceSupport());
+    doReturn(flagOn).when(support).isFlagEnabled();
+    doReturn(openRemittances).when(support).countOpenRemittances(any());
+    org.mockito.Mockito.doNothing().when(support).ensureClient(any());
+    org.mockito.Mockito.doNothing().when(support).ensureAccountLinks(any(), anyBoolean());
+    doReturn(mock(Client.class)).when(support).currentClient();
+    handler.remittanceSupport = support;
+    return support;
+  }
+
+  /** A stored Bank account with {@code iban}, Spain as its country and the given flag value. */
+  private FIN_FinancialAccount storedRemittanceAccount(String iban, boolean allow) {
+    FIN_FinancialAccount account = stubStoredBankAccount(iban, stubSpainWithIbanMeta());
+    when(account.isETGOAllowRemittance()).thenReturn(allow);
+    when(account.getClient()).thenReturn(mock(Client.class));
+    return account;
+  }
+
+  private static String messageKey(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getJSONArray("messageKeys").getString(0);
+  }
+
+  /** Flag off: a body that turns the setting ON for an account that has it off is refused. */
+  @Test
+  public void testRemittanceFlagOffRefusesAChangeOfTheSettingWith403() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(false, 0);
+    storedRemittanceAccount(ES_IBAN, false);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_ALLOW, true));
+
+    assertEquals(403, response.getHttpStatus());
+    assertEquals("feature_disabled",
+        response.getBody().getJSONObject("error").getString("code"));
+    assertEquals(SepaRemittancesFlag.MSG_DISABLED, messageKey(response));
+    verify(support, never()).ensureClient(any());
+  }
+
+  /** Flag off: turning the setting OFF is a change too, and is refused the same way. */
+  @Test
+  public void testRemittanceFlagOffRefusesTurningTheSettingOff() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(false, 0);
+    storedRemittanceAccount(ES_IBAN, true);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_ALLOW, false));
+
+    assertEquals(403, response.getHttpStatus());
+    verify(support, never()).countOpenRemittances(any());
+  }
+
+  /**
+   * Flag off: a client that reads the record and writes it back whole echoes the stored value. That
+   * changes nothing, so it passes — both for an account that allows remittances and one that does
+   * not.
+   */
+  @Test
+  public void testRemittanceFlagOffLetsAnEchoOfTheStoredValueThrough() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(false, 0);
+    storedRemittanceAccount(ES_IBAN, true);
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put(FIELD_ALLOW, "Y")));
+
+    storedRemittanceAccount(ES_IBAN, false);
+    JSONObject echoOff = new JSONObject().put(FIELD_ALLOW, false);
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, echoOff));
+    assertEquals(Boolean.FALSE, echoOff.get(FIELD_ALLOW));
+    verify(support, never()).ensureClient(any());
+  }
+
+  /** Flag off on create: a create that asks for remittances is a change from "no account". */
+  @Test
+  public void testRemittanceFlagOffRefusesACreateThatAllowsRemittances() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(false, 0);
+    stubValidCreate();
+
+    NeoResponse response = handler.validateAndEnrichCreate(
+        validCreateBody().put("iBAN", ES_IBAN).put(FIELD_ALLOW, true));
+
+    assertEquals(403, response.getHttpStatus());
+    verify(support, never()).ensureClient(any());
+  }
+
+  /** ON requires a Bank account: a Cash account is refused with 400 NotBank. */
+  @Test
+  public void testRemittanceOnACashAccountIsRefusedNotBank() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    stubValidCreate();
+
+    NeoResponse response = handler.validateAndEnrichCreate(
+        validCreateBody().put("type", "C").put(FIELD_ALLOW, true));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_NOT_BANK, messageKey(response));
+    verify(support, never()).ensureClient(any());
+  }
+
+  /** ON requires an IBAN: a Bank account created without one is refused with 400 IbanRequired. */
+  @Test
+  public void testRemittanceOnABankAccountWithoutIbanIsRefusedIbanRequired() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    stubValidCreate();
+
+    NeoResponse response = handler.validateAndEnrichCreate(validCreateBody().put(FIELD_ALLOW, true));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_IBAN_REQUIRED, messageKey(response));
+    verify(support, never()).ensureClient(any());
+  }
+
+  /**
+   * A valid Bank create that turns remittances on passes, normalizes the flag to a boolean, and
+   * provisions the current client in the pre-hook — before the generic CRUD saves anything — while
+   * the account links are left to the post-hook.
+   */
+  @Test
+  public void testRemittanceCreateTurningOnProvisionsTheClientBeforeTheSave() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    Client client = mock(Client.class);
+    doReturn(client).when(support).currentClient();
+    stubValidCreate();
+    JSONObject body = validCreateBody().put("iBAN", ES_IBAN).put(FIELD_ALLOW, "Y");
+
+    assertNull(handler.handle(contextFor("POST", body, null)));
+
+    assertEquals(Boolean.TRUE, body.get(FIELD_ALLOW));
+    verify(support).ensureClient(client);
+    verify(support, never()).ensureAccountLinks(any(), anyBoolean());
+  }
+
+  /** A create that does not carry the key never reaches the remittance rules at all. */
+  @Test
+  public void testRemittanceCreateWithoutTheKeySkipsTheRules() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(false, 0);
+    stubValidCreate();
+
+    assertNull(handler.validateAndEnrichCreate(validCreateBody()));
+    verify(support, never()).checkWrite(any(), any(), any());
+  }
+
+  /**
+   * Turning remittances on for an account saved long ago re-checks the STORED IBAN against the
+   * stored country: a legacy row with a broken IBAN is refused with IbanRequired and nothing is
+   * provisioned.
+   */
+  @Test
+  public void testRemittanceTurningOnRechecksTheStoredIban() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    storedRemittanceAccount(ES_IBAN_BAD_CHECKSUM, false);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_ALLOW, true));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_IBAN_REQUIRED, messageKey(response));
+    verify(support, never()).ensureClient(any());
+  }
+
+  /** The same update over a stored, valid IBAN passes and provisions the ACCOUNT's client. */
+  @Test
+  public void testRemittanceTurningOnWithAValidStoredIbanProvisionsTheAccountClient()
+      throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    FIN_FinancialAccount stored = storedRemittanceAccount(ES_IBAN, false);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put(FIELD_ALLOW, true)));
+
+    verify(support).ensureClient(stored.getClient());
+    verify(support, never()).currentClient();
+  }
+
+  /**
+   * A unique violation while provisioning (a document type inserted at the same instant by a writer
+   * outside RemittanceSepaProvisioning) leaves the transaction unusable: it is rolled back and
+   * answered 409 ETGO_RemittanceProvisioningConflict, never a 500. SQLState 23505 is found whether
+   * it sits in the cause chain (Hibernate's ConstraintViolationException) or in the JDBC
+   * next-exception chain of a batch failure.
+   */
+  @Test
+  public void testRemittanceProvisioningUniqueViolationIsRolledBackAndAnswered409()
+      throws Exception {
+    java.sql.SQLException duplicate = new java.sql.SQLException(
+        "duplicate key value violates unique constraint \"c_doctype_name\"", "23505");
+    java.sql.SQLException batch = new java.sql.SQLException("Batch entry 0 was aborted", "HY000");
+    batch.setNextException(
+        new java.sql.SQLException("duplicate key value violates unique constraint", "23505"));
+    List<RuntimeException> failures = Arrays.asList(
+        new org.openbravo.base.exception.OBException("flush failed",
+            new org.hibernate.exception.ConstraintViolationException("could not insert", duplicate,
+                "c_doctype_name")),
+        new javax.persistence.PersistenceException("flush failed",
+            new org.hibernate.exception.GenericJDBCException("could not execute batch", batch)));
+
+    for (RuntimeException failure : failures) {
+      FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+      org.mockito.Mockito.doNothing().when(support).rollback();
+      doThrow(failure).when(support).ensureClient(any());
+      storedRemittanceAccount(ES_IBAN, false);
+
+      NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID,
+          new JSONObject().put(FIELD_ALLOW, true));
+
+      assertEquals(failure.toString(), 409, response.getHttpStatus());
+      assertEquals(FinancialAccountRemittanceSupport.MSG_PROVISIONING_CONFLICT,
+          messageKey(response));
+      verify(support).rollback();
+    }
+  }
+
+  /** Any other provisioning failure, a non-unique SQLState included, is rethrown unanswered. */
+  @Test
+  public void testRemittanceProvisioningOtherFailuresAreRethrownWithoutRollback() throws Exception {
+    List<RuntimeException> failures = Arrays.asList(
+        new IllegalStateException("boom"),
+        new org.openbravo.base.exception.OBException("fk",
+            new java.sql.SQLException("violates foreign key constraint", "23503")));
+
+    for (RuntimeException failure : failures) {
+      FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+      org.mockito.Mockito.doNothing().when(support).rollback();
+      doThrow(failure).when(support).ensureClient(any());
+      storedRemittanceAccount(ES_IBAN, false);
+
+      // try/fail/catch rather than Assert.assertThrows: the root build resolves junit-4.12 first.
+      try {
+        handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put(FIELD_ALLOW, true));
+        org.junit.Assert.fail("expected the provisioning failure to be rethrown: " + failure);
+      } catch (RuntimeException thrown) {
+        assertSame(failure, thrown);
+      }
+      verify(support, never()).rollback();
+    }
+  }
+
+  /** isUniqueViolation walks both chains and stops on a self-referencing cause. */
+  @Test
+  public void testRemittanceIsUniqueViolationReadsTheCauseAndNextExceptionChains() {
+    java.sql.SQLException batch = new java.sql.SQLException("batch", "HY000");
+    batch.setNextException(new java.sql.SQLException("dup", "23505"));
+
+    assertTrue(FinancialAccountRemittanceSupport.isUniqueViolation(
+        new RuntimeException(new RuntimeException(new java.sql.SQLException("dup", "23505")))));
+    assertTrue(FinancialAccountRemittanceSupport.isUniqueViolation(new RuntimeException(batch)));
+    assertFalse(FinancialAccountRemittanceSupport.isUniqueViolation(
+        new RuntimeException(new java.sql.SQLException("fk", "23503"))));
+    assertFalse(FinancialAccountRemittanceSupport.isUniqueViolation(new RuntimeException("x")));
+    assertFalse(FinancialAccountRemittanceSupport.isUniqueViolation(null));
+  }
+
+  /** Re-saving an account that already allows remittances does not provision again. */
+  @Test
+  public void testRemittanceKeepingTheSettingOnDoesNotProvisionAgain() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    storedRemittanceAccount(ES_IBAN, true);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put(FIELD_ALLOW, true)));
+    verify(support, never()).ensureClient(any());
+  }
+
+  /** While the account allows remittances, clearing its IBAN is refused. */
+  @Test
+  public void testRemittanceClearingTheIbanWhileOnIsRefused() throws Exception {
+    stubRemittance(true, 0);
+    storedRemittanceAccount(ES_IBAN, true);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject("{\"iBAN\": null}"));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_IBAN_REQUIRED, messageKey(response));
+  }
+
+  /** While the account allows remittances, changing its type away from Bank is refused. */
+  @Test
+  public void testRemittanceChangingTheTypeAwayFromBankWhileOnIsRefused() throws Exception {
+    stubRemittance(true, 0);
+    storedRemittanceAccount(ES_IBAN, true);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put("type", "C"));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_NOT_BANK, messageKey(response));
+  }
+
+  /** Turning remittances off with open remittances is refused with 422 naming the count. */
+  @Test
+  public void testRemittanceTurningOffWithOpenRemittancesIsRefusedWithTheCount()
+      throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 3);
+    FIN_FinancialAccount stored = storedRemittanceAccount(ES_IBAN, true);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_ALLOW, false));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_OPEN_REMITTANCES, messageKey(response));
+    assertTrue(errorMessage(response), errorMessage(response).contains("3"));
+    verify(support).countOpenRemittances(stored);
+  }
+
+  /** Turning remittances off with none open passes, without the Bank/IBAN checks. */
+  @Test
+  public void testRemittanceTurningOffWithNoOpenRemittancesPasses() throws Exception {
+    stubRemittance(true, 0);
+    storedRemittanceAccount(null, true);
+
+    JSONObject body = new JSONObject().put(FIELD_ALLOW, "N");
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    assertEquals(Boolean.FALSE, body.get(FIELD_ALLOW));
+  }
+
+  /** Archiving an account that allows remittances is refused while it has open remittances. */
+  @Test
+  public void testRemittanceArchivingWithOpenRemittancesIsRefusedWithTheCount() throws Exception {
+    stubRemittance(true, 2);
+    FIN_FinancialAccount stored = storedRemittanceAccount(ES_IBAN, true);
+    doReturn(false).when(handler).hasOpenReconciliations(stored);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID, archiveBody());
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_OPEN_REMITTANCES, messageKey(response));
+    assertTrue(errorMessage(response), errorMessage(response).contains("2"));
+  }
+
+  /** Archiving an account that does not allow remittances never counts them. */
+  @Test
+  public void testRemittanceArchivingAnAccountWithoutTheSettingDoesNotCount() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 5);
+    FIN_FinancialAccount stored = storedRemittanceAccount(ES_IBAN, false);
+    doReturn(false).when(handler).hasOpenReconciliations(stored);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, archiveBody()));
+    verify(support, never()).countOpenRemittances(any());
+  }
+
+  /** An update that cannot affect the rules (a rename) never reaches them. */
+  @Test
+  public void testRemittanceIrrelevantUpdateSkipsTheRules() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    doReturn(false).when(handler).nameExists("Renamed", ACC_ID);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, new JSONObject().put("name", "Renamed")));
+    verify(support, never()).checkWrite(any(), any(), any());
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** After a successful update that carried the key, the links follow the persisted value. */
+  @Test
+  public void testRemittanceAfterUpdateReconcilesTheLinksWithThePersistedValue()
+      throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    FIN_FinancialAccount stored = storedRemittanceAccount(ES_IBAN, true);
+    NeoContext ctx = putContext("{\"" + FIELD_ALLOW + "\": true}", false, new JSONObject());
+
+    assertNull(handler.afterHandle(ctx));
+
+    verify(support).ensureAccountLinks(stored, true);
+    verify(handler).exitAdminMode();
+  }
+
+  /** The links are unlinked (enabled=false) when the persisted account no longer allows them. */
+  @Test
+  public void testRemittanceAfterUpdateTurningOffUnlinks() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    FIN_FinancialAccount stored = storedRemittanceAccount(ES_IBAN, false);
+    NeoContext ctx = putContext("{\"" + FIELD_ALLOW + "\": false}", false, new JSONObject());
+
+    assertNull(handler.afterHandle(ctx));
+
+    verify(support).ensureAccountLinks(stored, false);
+  }
+
+  /**
+   * No reconciliation when it cannot have changed anything: the body did not carry the key, the
+   * save failed, or the flag is off.
+   */
+  @Test
+  public void testRemittanceAfterUpdateSkipsWhenNothingCouldHaveChanged() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    storedRemittanceAccount(ES_IBAN, true);
+    assertNull(handler.afterHandle(putContext("{\"name\": \"x\"}", false, new JSONObject())));
+
+    NeoContext failed = putContext("{\"" + FIELD_ALLOW + "\": true}", false, new JSONObject());
+    when(failed.getPreviousResult()).thenReturn(NeoResponse.error(400, "nope"));
+    assertNull(handler.afterHandle(failed));
+
+    doReturn(false).when(support).isFlagEnabled();
+    assertNull(handler.afterHandle(putContext("{\"" + FIELD_ALLOW + "\": true}", false,
+        new JSONObject())));
+
+    verify(support, never()).ensureAccountLinks(any(), anyBoolean());
+  }
+
+  /** A failure while reconciling is logged, not answered: the account is already saved. */
+  @Test
+  public void testRemittanceAfterUpdateSwallowsALinkFailure() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    storedRemittanceAccount(ES_IBAN, true);
+    doThrow(new IllegalStateException("link boom")).when(support)
+        .ensureAccountLinks(any(), anyBoolean());
+
+    assertNull(handler.afterHandle(
+        putContext("{\"" + FIELD_ALLOW + "\": true}", false, new JSONObject())));
+    verify(support).ensureAccountLinks(any(), eq(true));
+  }
+
+  /** After a create, the new account is provisioned first and then linked to the methods. */
+  @Test
+  public void testRemittanceAfterCreateLinksTheNewAccountAfterProvisioning() throws Exception {
+    FinancialAccountRemittanceSupport support = stubRemittance(true, 0);
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getRequestBody()).thenReturn(new JSONObject().put(FIELD_ALLOW, true));
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, new JSONObject()));
+    doReturn(ACC_ID).when(handler).extractCreatedId(ctx);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.isETGOAllowRemittance()).thenReturn(true);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountSupport> accountSupport =
+        mockStatic(FinancialAccountSupport.class)) {
+      assertNull(handler.afterHandle(ctx));
+
+      accountSupport.verify(() -> FinancialAccountSupport.provisionNewAccount(account));
+      verify(support).ensureAccountLinks(account, true);
+    }
   }
 
 }

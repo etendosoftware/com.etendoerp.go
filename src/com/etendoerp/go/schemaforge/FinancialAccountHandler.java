@@ -249,6 +249,12 @@ public class FinancialAccountHandler implements NeoHandler {
       new FinancialAccountBankConnectionActions();
 
   /**
+   * The «Admite remesas» rules (ETP-6148). Package-visible and non-final so unit tests can swap in
+   * one with its DAL and flag seams stubbed.
+   */
+  FinancialAccountRemittanceSupport remittanceSupport = new FinancialAccountRemittanceSupport();
+
+  /**
    * The movement, funds-transfer and bank disconnection actions of the account, declared for
    * agents (ETP-5558, ETP-5804): the SPA runs them through {@code financial-account-transactions}
    * and {@code financial-account-bank-connection}, specs the MCP does not serve.
@@ -404,6 +410,7 @@ public class FinancialAccountHandler implements NeoHandler {
         return null;
       }
       addImportFromAdvisory(context);
+      applyRemittanceLinks(context, context.getRecordId());
       return null;
     }
     if (!METHOD_POST.equals(context.getHttpMethod()) || !NeoEndpointTypes.isCrud(context)) {
@@ -429,8 +436,38 @@ public class FinancialAccountHandler implements NeoHandler {
     } finally {
       exitAdminMode();
     }
+    // Inline, NOT in provisionNewAccount: that seam holds what EVERY new account receives (default
+    // payment methods, accounting defaults) and is shared with the bank-connection creation flow.
+    // The remittance links are not a default: they follow eTGOAllowRemittance in this request's
+    // body and run only while the sepa-remittances flag is on, so they belong to this hook alone.
+    applyRemittanceLinks(context, extractCreatedId(context));
     // Keep the original CRUD response untouched.
     return null;
+  }
+
+  /**
+   * ETP-6148: after a successful create or update that carried {@code eTGOAllowRemittance}, links
+   * or unlinks the remittance payment methods ({@link FinancialAccountRemittanceSupport#afterWrite}).
+   * The account is already saved, so a failure is logged, not answered: the next save of the flag
+   * repairs the links, because they are reconciled idempotently.
+   */
+  private void applyRemittanceLinks(NeoContext context, String accountId) {
+    JSONObject request = context.getRequestBody();
+    NeoResponse prev = context.getPreviousResult();
+    if (request == null || !request.has(FinancialAccountRemittanceSupport.FIELD_ALLOW)
+        || StringUtils.isBlank(accountId) || prev == null || prev.getHttpStatus() < 200
+        || prev.getHttpStatus() >= 300) {
+      return;
+    }
+    try {
+      enterAdminMode();
+      remittanceSupport.afterWrite(loadAccount(accountId));
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to reconcile the remittance links of {}",
+          accountId, e);
+    } finally {
+      exitAdminMode();
+    }
   }
 
   /**
@@ -739,6 +776,14 @@ public class FinancialAccountHandler implements NeoHandler {
     if (countryError != null) {
       return countryError;
     }
+    // ETP-6148: «Admite remesas» on create. Before the provider upsert below for the same reason
+    // as the country check: a refused create must leave nothing behind.
+    if (body.has(FinancialAccountRemittanceSupport.FIELD_ALLOW)) {
+      NeoResponse remittanceError = remittanceSupport.checkWrite(body, null, type);
+      if (remittanceError != null) {
+        return remittanceError;
+      }
+    }
     // Persist the chosen Salt Edge provider (offline "with bank selected" flow, bank and card
     // accounts): upsert the provider and inject the FK so the account remembers its bank. The
     // account stays offline — this is metadata only — but a later bank connect can then preselect
@@ -793,7 +838,29 @@ public class FinancialAccountHandler implements NeoHandler {
     if (toleranceError != null) {
       return toleranceError;
     }
-    return validateCountryAndIban(body, id);
+    NeoResponse countryError = validateCountryAndIban(body, id);
+    if (countryError != null) {
+      return countryError;
+    }
+    return validateRemittanceUpdate(body, id);
+  }
+
+  /**
+   * ETP-6148: the «Admite remesas» rules on update — the flag itself, and a type change or IBAN
+   * clear on an account that allows remittances. Loads the account only when the body can affect
+   * them, so the ordinary partial update (rename, tolerances) never reaches the DAL here.
+   */
+  private NeoResponse validateRemittanceUpdate(JSONObject body, String id) throws JSONException {
+    if (!remittanceSupport.isRelevant(body)) {
+      return null;
+    }
+    FIN_FinancialAccount stored = loadAccount(id);
+    if (stored == null) {
+      return null;
+    }
+    String effectiveType =
+        normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored));
+    return remittanceSupport.checkWrite(body, stored, effectiveType);
   }
 
   // ---------------------------------------------------------------------------

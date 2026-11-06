@@ -106,6 +106,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * @covers com.etendoerp.go.schemaforge.VerifactuConfigReadyHandler
  * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
  * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
+ * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
  * @covers com.etendoerp.go.schemaforge.NeoRequestRouter
  * @covers com.etendoerp.go.schemaforge.util.NeoHandlerLookup
  * @covers com.etendoerp.go.schemaforge.util.NeoReportCallability
@@ -133,7 +134,8 @@ class NeoExtensionMigrationTest {
       new Binding(VerifactuConfigReadyHandler.class, "verifactu-config",
           "cabeceraDeConfiguraciónVerifactu"),
       new Binding(ReconciliationHandler.class, "bank-reconciliation", "bank-reconciliation"),
-      new Binding(BankStatementsHandler.class, "bank-statements", "bank-statements") };
+      new Binding(BankStatementsHandler.class, "bank-statements", "bank-statements"),
+      new Binding(BusinessPartnerHandler.class, "contacts", "businessPartner") };
 
   /** The bean classes to deploy in the mocked CDI container, one per migrated binding. */
   private static final List<Class<? extends NeoHandler>> MIGRATED_TYPES = Stream.of(MIGRATED)
@@ -231,12 +233,12 @@ class NeoExtensionMigrationTest {
     try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
       weld.when(WeldUtils::getStaticInstanceBeanManager).thenReturn(bm);
 
-      SFEntity qualified = entity("contacts", "businessPartner", "businessPartnerHandler");
+      SFEntity qualified = entity("contacts", "contact", "contactHandler");
       assertSame(legacy, NeoHandlerLookup.forEntity(qualified,
-          q -> "businessPartnerHandler".equals(q) ? legacy : null));
+          q -> "contactHandler".equals(q) ? legacy : null));
       assertTrue(NeoHandlerLookup.hasCustomization(qualified));
 
-      SFEntity plain = entity("contacts", "contact", null);
+      SFEntity plain = entity("contacts", "bp-trend", null);
       assertNull(NeoHandlerLookup.forEntity(plain, q -> fail("a blank qualifier is never resolved")));
       assertFalse(NeoHandlerLookup.hasCustomization(plain));
     }

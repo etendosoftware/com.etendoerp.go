@@ -155,6 +155,15 @@ public final class TemplateRoleWindowAccess {
    */
   public static final String INVOICE_INBOX_WINDOW_ID = "81AC659E93504927B459E0CAE80CE923";
 
+  /**
+   * {@code AD_Window_ID} of the Classic "Remittance" window (module
+   * {@code org.openbravo.module.remittance}), served as the {@code remittance} spec (ETP-6148),
+   * granted FULL to Financiero only: creating and editing a remittance header is a write gated by
+   * {@code NeoAccessHelper#hasWindowAccess}. The module script
+   * {@code EnsureSystemRoleTemplatesScript} keeps its own literal copy by design.
+   */
+  public static final String REMITTANCE_WINDOW_ID = "FF8080812E71F7C7012E71FD0499001B";
+
   /** One window grant: the window id and whether it is read-only ("R") vs. full ("✓") access. */
   public static final class WindowGrant {
     private final String windowId;
@@ -249,7 +258,7 @@ public final class TemplateRoleWindowAccess {
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 34 grants: 25 from the original ticket
+   * Finance ("Financiero") column of the ETP-4878 matrix — 35 grants: 25 from the original ticket
    * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
    * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
    * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
@@ -266,7 +275,9 @@ public final class TemplateRoleWindowAccess {
    * inventario" / Inventory Stock Report ({@code 6346B88619F948F9A42224BDB0B239FA}, shared with
    * Compras/Almacén, NOT Ventas — see class javadoc), and 1 more grant from ETP-6047: "Invoice Inbox"
    * ({@code 81AC659E93504927B459E0CAE80CE923}, shared with Compras), granted FULL because the
-   * inbox upload is a {@code POST} gated by {@code NeoAccessHelper#hasWindowAccess}.
+   * inbox upload is a {@code POST} gated by {@code NeoAccessHelper#hasWindowAccess}, and 1 more
+   * from ETP-6148: the Classic "Remittance" window ({@code FF8080812E71F7C7012E71FD0499001B},
+   * {@link #REMITTANCE_WINDOW_ID}, Financiero-only, FULL).
    */
   private static List<WindowGrant> financeGrants() {
     return list(
@@ -303,7 +314,8 @@ public final class TemplateRoleWindowAccess {
         full("27A453FA86974745977672F1A8DCCEFF"),              // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
         full("D647D118F5014D00AF47A636B2CD0DD3"),              // Informes financieros — Financial Reports (ETP-5116, Financiero-only)
         full(INVENTORY_STOCK_REPORT_WINDOW_ID),              // Informes de inventario — Inventory Stock Report (ETP-5116)
-        full(INVOICE_INBOX_WINDOW_ID));                      // Bandeja de facturas — Invoice Inbox (ETP-6047)
+        full(INVOICE_INBOX_WINDOW_ID),                       // Bandeja de facturas — Invoice Inbox (ETP-6047)
+        full(REMITTANCE_WINDOW_ID));                         // Remesas — Remittance (ETP-6148, Financiero-only)
   }
 
   /**

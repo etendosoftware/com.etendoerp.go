@@ -2281,6 +2281,101 @@ MCP:** `agentExcludedActions()` returns `discard`, so `etendo_action` answers 40
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
 
+### 4.6c SEPA remittances: the `remittance` spec and «Admite remesas» (ETP-6148)
+
+Classic's «Remittance» window (`org.openbravo.module.remittance`, window
+`FF8080812E71F7C7012E71FD0499001B`) served as the spec `remittance`: header `remittance`
+(`REM_Remittance`) and read-only `lines` (`REM_RemittanceLine`). Behind the per-account flag
+`sepa-remittances` (`SepaRemittancesFlag`, off by default). Only two columns are new; everything else
+is Classic's model.
+
+- **The account toggle.** `FIN_FINANCIAL_ACCOUNT.EM_ETGO_ALLOW_REMITTANCE` (field
+  `eTGOAllowRemittance` of `financial-account/account`), enforced by
+  `FinancialAccountRemittanceSupport` from `FinancialAccountHandler`: changing it with the flag off is
+  `403 feature_disabled`; on needs a Bank account with a valid IBAN (`400`); off, or archiving, with
+  open remittances is `422 ETGO_RemittanceAccountHasOpenRemittances`.
+- **Lazy provisioning.** The first account of a client turned on runs
+  `RemittanceSepaProvisioning.ensureClient` in the pre-hook (a failure aborts the save): the «In
+  Remittance» execution process, an active `REM_REM` document type and sequence, two payment methods
+  (SEPA direct debit collection, SEPA credit transfer payment) and their `REM_Remittance_Type` rows,
+  marked by the type parameter `ETGO_SEPA_SCHEME` = `CORE` / `SCT` — the only way they are found
+  again, never by name. Serialized per client by a PostgreSQL advisory lock; a leftover unique
+  conflict is `409 ETGO_RemittanceProvisioningConflict`. After the save both methods are linked to
+  the account with the setup Classic's `checkPMSetup` requires; turning off leaves the links
+  inactive.
+- **Header** (`RemittanceHeaderHandler`, `@NeoExtension(spec = "remittance", entity =
+  "remittance")`): flag off is `403 feature_disabled` on every surface; writes need an account that
+  allows remittances and a provisioned type linked to it (`422`); a processed remittance is not
+  editable (`422`). Selectors are served in `handle()`: `financialAccount` offers only accounts with
+  the toggle on, `remittanceType` only the provisioned types linked to the request's
+  `FIN_Financial_Account_ID`. DEFAULTS never prefill an account without the toggle. Interactive
+  callouts never reach Classic's `REM_RemittanceType_FinAccount` (it runs type → account, the
+  reverse of this window, and fails on a cleared type); the handler answers them itself.
+- **Name suggestion.** On a new remittance, a callout for `dueDate` or `remittanceType` answers
+  `updates.name = {value, suggested: true}` with «Cobros noviembre 2026» (pay-in type), «Pagos
+  noviembre 2026» (pay-out type) or «Remesa noviembre 2026» (no type yet); English «Collections /
+  Payments / Remittance November 2026». Words from the `neo_hints` catalog
+  (`ETGO_RemittanceName{Collections,Payments,Generic}`), month from the JDK, both in the request
+  language; at most 60 characters (`RemittanceNameSuggestion`). Not offered when the form carries an
+  `id` (an existing remittance keeps its name) or when its name is not itself a suggestion (a name
+  the user typed). `suggested: true` asks the SPA to apply it only to a name field the user never
+  edited in that form session, cleared included. Every other callout answers empty. A create
+  without a name but with a `dueDate` — REST, and MCP through `resolveServerCreateFields` — gets
+  the suggestion; a name the caller sends always wins, and updates are never touched.
+- **Lines** (`RemittanceLinesHandler`): `GET`, and `DELETE` while the remittance is not processed
+  (the generic delete, which is all REM's `DeleteRemittanceLineActionHandler` does; a processed
+  one is `422 ETGO_RemittanceProcessedNotEditable`, and `REM_REMITTANCELINE_TRG` refuses it too).
+  `POST`/`PUT`/`PATCH` are `405 ETGO_RemittanceLinesReadOnly`; lines are only added by
+  `selectDueItems`. DELETE also needs the entity's `ISDELETE` in its NEO configuration.
+- **«Procesar»** — declared action `process` of the header (`RemittanceProcessAction`), POST, body
+  `{"fieldValues": {grouping?: "P" | "GGPD"}}` (default `P`, one payment per line; `GGPD` per
+  business partner and due date). Both remittance actions are declared `withFieldValuesBody()`:
+  the SPA presses them through its generic process dialog, which posts `fieldValues`, and
+  `etendo_action` wraps the agent's flat parameters the same way; a flat body is still accepted.
+  Runs Classic's `REMRemittanceProcess` (the «Process Remittance» button) directly, so window
+  write access is enough, as for the button. REM checks lines, repeated payments, amounts and the
+  account ↔ method link (`checkPMSetup`, which the provisioned links satisfy), creates the
+  payments, marks the remittance processed and refreshes its status → `{status, message}`. 422
+  `ETGO_RemittanceAlreadyProcessed`, `ETGO_RemittanceNoLines`, or `ETGO_RemittanceProcessFailed`
+  with REM's text.
+- **«Reactivar»** — declared action `reactivate` of the header, POST, no parameters (body
+  `{"fieldValues": {}}` or empty): the same `REMRemittanceProcess` with action `R`. REM refuses a
+  posted remittance, one with settled or returned lines, or one whose payments cannot be
+  reactivated; on success it removes the payments the processing created and its status returns
+  to `PE` → `{status, message}`. 422 `ETGO_RemittanceNotProcessed` (not processed) or
+  `ETGO_RemittanceReactivateFailed` with REM's text.
+- **«Seleccionar desde factura»** — declared actions of the header (`RemittanceDueItems`), record id
+  = the remittance, flag-gated (403), refused on a processed remittance (422
+  `ETGO_RemittanceProcessedNotEditable`) or one without type, account or due date (422
+  `ETGO_RemittanceTypeOrAccountMissing`):
+  - `availableDueItems` (read; params `search`, `page` from 1, `pageSize` default 50, max 200) →
+    `{items: [{id (FIN_Payment_Schedule), documentNo, businessPartner, dueDate (expected date,
+    yyyy-MM-dd), outstandingAmount, currency (ISO), alreadyInRemittance}], total}`, ordered by
+    dueDate then documentNo. Candidates follow Classic's «Select Invoices and Orders» rules
+    without its default payment-method filter: unpaid, not cancelled, not invoice-paid, invoice
+    schedules only, with a business partner, organization in the remittance org's child tree,
+    expected date ≤ the remittance due date, direction from the account ↔ type-method link
+    (pay-in → sales, pay-out → purchase, both → any); plus the invoice currency = the account
+    currency and not already a line of another unprocessed remittance. One row per invoice payment
+    schedule.
+  - `selectDueItems` (POST; body `{ids: [...]}`) re-checks every id against the same rules (422
+    `ETGO_RemittanceDueItemNotAvailable` with `error.invalidIds`), then runs Classic's
+    `REMSelectInvoicesAndOrders` (process `99E532BA0306450A839F5DE238375238`) through
+    `NeoProcessService.executeObuiappClass` with each schedule's full outstanding amount and no
+    `_allRows`, so existing lines are never deleted → `{created, message}`. A refusal by REM is 422
+    `ETGO_RemittanceDueItemsSelectionFailed`.
+  - The lines endpoint itself stays read-only (405).
+- **Status.** `REM_REMITTANCE.REMITTANCE_STATUS` (field `remittanceStatus`, list
+  `REM_RemittanceStatus`: `PE`, `PR`, `CT`/`PT`, `CP`/`PP`, `AN`) belongs to the remittance module
+  (`org.openbravo.module.remittance`, the remittance module's `REMITTANCE_STATUS` added by
+  ETP-6148): its own processes set it at every transition (process, reactivate, settle, return and
+  their undo) through `RemittanceStatusUtil`. It is not backfilled: a remittance that existed
+  before the column keeps the default `'PE'` until one of those transitions refreshes it.
+  `com.etendoerp.go` only reads it (list, filter, the open-remittances check). `RemittanceMethodLinkObserver` refuses a remittance-method link on an
+  account without the toggle, Classic included.
+
+Flag, debt and retirement: `docs/feature-flags-and-tenant-upgrade.md` → `sepa-remittances`.
+
 ### 4.7 Preview File Endpoint — retired for preview panels, pending removal (ETP-4315 Phase 9)
 
 **As of 2026-08-18, no window's preview panel uses this endpoint anymore** — every one of them was
@@ -8146,7 +8241,7 @@ mandatory-defaults fallback `false` on every channel, as before ETP-5791.
 
 | Customization | Binding | Behaviour |
 |---|---|---|
-| `BusinessPartnerHandler` | `@Named` / `contacts/businessPartner` | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. On update, a write that changes `businessPartnerCategory` to a different category and carries **neither** `customer` nor `vendor` takes **both** from the new category (parity with the Contacts form, which overwrites its checkboxes on a category change); a write that carries either flag decides the type itself. Same rule on REST PATCH/PUT and MCP `etendo_update` (both hand the pre-hook the body as sent; `/batch` is create-only). Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled; after an update that sets a flag to true (sent or re-inherited), the ETP-4565 backfill adds the missing row. Otherwise existing contacts are never re-derived. MCP: `vendor` carries `MCP_CONFIG.fields.userRequired:false` (§4.12.6), so `view:"create"` lists it as optional. |
+| `BusinessPartnerHandler` | `@NeoExtension` / `contacts/businessPartner` (ETP-6148, was `@Named("businessPartnerHandler")`) | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. On update, a write that changes `businessPartnerCategory` to a different category and carries **neither** `customer` nor `vendor` takes **both** from the new category (parity with the Contacts form, which overwrites its checkboxes on a category change); a write that carries either flag decides the type itself. Same rule on REST PATCH/PUT and MCP `etendo_update` (both hand the pre-hook the body as sent; `/batch` is create-only). Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled; after an update that sets a flag to true (sent or re-inherited), the ETP-4565 backfill adds the missing row. Otherwise existing contacts are never re-derived. MCP: `vendor` carries `MCP_CONFIG.fields.userRequired:false` (§4.12.6), so `view:"create"` lists it as optional. |
 | `BusinessPartnerCategoryHandler` | `@NeoExtension business-partner-category/businessPartnerCategory` | Create/update reject a category with neither flag (`ETGO_BPGroupContactTypeRequired`). |
 | `ContactCustomerTabHandler`, `ContactVendorTabHandler` (base `ContactTypeFlagGuardHandler`) | `@NeoExtension contacts/customer`, `contacts/vendorCreditor` | Same contact rule on updates through those tabs, only when the write sends `customer` or `vendor`. |
 
