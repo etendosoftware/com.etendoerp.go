@@ -6,11 +6,17 @@ name: Full Pipeline Pilot
 # a failed block re-runs alone ("Re-run failed jobs"). This is not a required check: the pilot
 # compares duration and failures per block with Jenkins before anything is replaced.
 #
+# Every job name starts with "Pilot: ". The cut job (auto-cut.mjs in com.etendoerp.jenkins.pipelines)
+# and base-branch-health.yml ignore the checks with that prefix, so a red or still running pilot
+# job neither holds a cut nor turns main red while Jenkins is the gate. Dropping the prefix when
+# Actions replaces Jenkins makes them count.
+#
 # Both test jobs build the environment the way Jenkins builds it (.github/actions/etendo-env:
 # etendo-localenv, its own PostgreSQL, install, the GOClient seeds, smartbuild):
-#   go-tests     the module's Java suite, both halves, and the JaCoCo report. Sonar and the
-#                coverage comparison stay in Jenkins during the pilot: a second analysis of the
-#                same branch would overwrite the one Jenkins publishes.
+#   go-tests     the module's Java suite, both halves, the JaCoCo report, the SonarQube branch
+#                analysis and the coverage comparison with Jenkins' rules. While in shadow the
+#                analysis goes to the Sonar branch "actions/<branch>" (SONAR_BRANCH_PREFIX), so
+#                it does not replace the one Jenkins publishes and compares.
 #   integration  Tomcat, jsreport and E2E_SUITE=integration from schema_forge, the same 57 specs
 #                as Jenkins.
 #   cell-report  after both: the TESTS POR CÉLULA report Jenkins builds (cell-report.mjs, from
@@ -32,7 +38,8 @@ name: Full Pipeline Pilot
 # Secrets: ETENDOBOT_TOKEN reads etendo_core, schema_forge, etendo-localenv, the GitHub modules
 # and the npm packages; NEXUS_USER/NEXUS_PASSWORD resolve dependencies; BITBUCKET_SSH_KEY clones
 # the Bitbucket modules listed in jenkinsExtraModules.txt and com.etendoerp.jenkins.pipelines;
-# DD_API_KEY (optional, EU site) sends the metrics.
+# SONAR_TOKEN/SONAR_HOST_URL publish the Sonar analysis and SONAR_READ_TOKEN (Browse permission on
+# the project) reads its coverage; DD_API_KEY (optional, EU site) sends the metrics.
 
 # Only what reaches main: the daily cut (mergeblock/*), a hotfix (hotfix/*) and the push to main.
 # Feature branches keep the mini pipeline (mini-pipeline.yml) on their PRs into develop.
@@ -41,7 +48,8 @@ on:
     branches: [main]
     types: [opened, reopened, synchronize]
   push:
-    branches: [main]
+    # TEMPORARY (ETP-6180): validates the Sonar steps from its own branch; removed before the PR.
+    branches: [main, feature/ETP-6180]
   workflow_dispatch:
 
 permissions:
@@ -57,10 +65,18 @@ env:
   MODULE_BRANCH: ${{ github.head_ref || github.ref_name }}
   PIPELINES_REPO: git@bitbucket.org:koodu_software/com.etendoerp.jenkins.pipelines.git
   RETENTION_DAYS: 30
+  # The Sonar branch analysis goes to "actions/<branch>" while the pilot runs in shadow: under the
+  # branch's own name it would replace the analysis Jenkins publishes and compares. Empty it at the
+  # switch from Jenkins.
+  SONAR_BRANCH_PREFIX: actions/
+  SONAR_SCANNER_VERSION: 6.2.1.4610
+  # Jenkins' COVERAGE_MINIMUM and COVERAGE_TOLERANCE (go/Jenkinsfile).
+  COVERAGE_MINIMUM: 70
+  COVERAGE_TOLERANCE: 1
 
 jobs:
   go-tests:
-    name: Go tests + coverage
+    name: 'Pilot: Go tests + coverage'
     # branch-merge-policy.yml already rejects any other branch into main; this keeps such a PR
     # from also spending runners before it is closed.
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
@@ -110,6 +126,54 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: etendo_core
         run: ./gradlew jacocoRootReport
+
+      # SonarQube Analysis, as Jenkins runs it: sonar-scanner from the module, with its
+      # sonar-project.properties, the commit and the merged JaCoCo report, only after the tests
+      # passed. It is a branch analysis, as in Jenkins: the scanner runs without the GITHUB_* event
+      # variables, or it would turn itself into a pull request analysis, which the Sonar Build
+      # workflow already does.
+      - name: SonarQube analysis
+        id: sonar
+        working-directory: etendo_core/modules/com.etendoerp.go
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          scanner="sonar-scanner-${SONAR_SCANNER_VERSION}-linux-x64"
+          curl -sSfL -o "$RUNNER_TEMP/scanner.zip" \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip"
+          unzip -q "$RUNNER_TEMP/scanner.zip" -d "$RUNNER_TEMP"
+          env -u GITHUB_EVENT_NAME -u GITHUB_EVENT_PATH -u GITHUB_HEAD_REF -u GITHUB_BASE_REF -u GITHUB_REF \
+            "$RUNNER_TEMP/$scanner/bin/sonar-scanner" \
+              -Dsonar.branch.name="${SONAR_BRANCH_PREFIX}${MODULE_BRANCH}" \
+              -Dsonar.projectVersion="SHA: ${HEAD_SHA}" \
+              -Dsonar.scm.revision="${HEAD_SHA}" \
+              -Dsonar.coverage.jacoco.xmlReportPaths="$GITHUB_WORKSPACE/etendo_core/build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml"
+
+      # Compare Coverage Results, with Jenkins' rules (scripts/sonar-coverage-gate.py): at least
+      # COVERAGE_MINIMUM, and no more than COVERAGE_TOLERANCE points below the base: main for what
+      # goes into main, develop otherwise. A push to the base itself is not compared, as in Jenkins.
+      # It waits for SonarQube's compute task instead of a fixed time.
+      # SONAR_TOKEN (the Sonar Build workflow's) publishes analyses but cannot read measures:
+      # reading the coverage needs a token with Browse permission on the project, SONAR_READ_TOKEN.
+      - name: Compare coverage results
+        if: steps.sonar.outcome == 'success'
+        working-directory: etendo_core/modules/com.etendoerp.go
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_READ_TOKEN || secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          BASE_BRANCH: ${{ (github.base_ref == 'main' || github.ref_name == 'main') && 'main' || 'develop' }}
+        run: |
+          set -o pipefail
+          python3 scripts/sonar-coverage-gate.py wait --report-task .scannerwork/report-task.txt
+          if [ "$MODULE_BRANCH" = "$BASE_BRANCH" ]; then
+            printf '## Coverage\n\nNot compared: %s is the base branch itself.\n' "$MODULE_BRANCH" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 scripts/sonar-coverage-gate.py compare --properties sonar-project.properties \
+            --branch "${SONAR_BRANCH_PREFIX}${MODULE_BRANCH}" --base "$BASE_BRANCH" \
+            --minimum "$COVERAGE_MINIMUM" --tolerance "$COVERAGE_TOLERANCE" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # The figures to set against Jenkins' "Etendo Go Tests" stage: tests by outcome and the line
       # coverage of com.etendoerp.go in the merged report. The failing tests by cell are in the
@@ -173,7 +237,7 @@ jobs:
           if-no-files-found: ignore
 
   integration:
-    name: Integration (Tomcat + Playwright)
+    name: 'Pilot: Integration (Tomcat + Playwright)'
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -348,7 +412,7 @@ jobs:
           if-no-files-found: ignore
 
   cell-report:
-    name: Cell report
+    name: 'Pilot: Cell report'
     needs: [go-tests, integration]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
