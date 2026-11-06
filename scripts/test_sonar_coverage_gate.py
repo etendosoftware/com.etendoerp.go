@@ -117,6 +117,12 @@ class SonarClientTest(unittest.TestCase):
         opener = mock.MagicMock(return_value=self.response({'component': {'measures': []}}))
         self.assertIsNone(gate.Sonar('https://s', 't', opener).coverage('key', 'b'))
 
+    def test_a_forbidden_read_names_the_missing_permission(self):
+        opener = mock.MagicMock(side_effect=gate.urllib.error.HTTPError('u', 403, 'forbidden', {}, io.BytesIO(b'')))
+        with self.assertRaises(gate.SonarError) as raised:
+            gate.Sonar('https://s', 't', opener).coverage('key', 'b')
+        self.assertIn('Browse permission', str(raised.exception))
+
     def test_an_http_error_is_a_sonar_error(self):
         opener = mock.MagicMock(side_effect=gate.urllib.error.HTTPError('u', 404, 'nf', {}, io.BytesIO(b'')))
         with self.assertRaises(gate.SonarError):

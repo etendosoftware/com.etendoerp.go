@@ -67,6 +67,10 @@ class Sonar:
             with self.opener(request, timeout=30) as response:
                 return json.loads(response.read().decode('utf-8'))
         except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                raise SonarError(f'{path}: HTTP {error.code}: the token cannot read the project. Reading '
+                                 'measures needs a token with Browse permission on it; an analysis token '
+                                 'only publishes analyses.') from error
             raise SonarError(f'{path}: HTTP {error.code}') from error
         except (urllib.error.URLError, OSError, ValueError) as error:
             raise SonarError(f'{path}: {error}') from error
