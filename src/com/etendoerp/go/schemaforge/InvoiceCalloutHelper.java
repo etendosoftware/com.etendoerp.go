@@ -304,8 +304,10 @@ final class InvoiceCalloutHelper {
   }
 
   /**
-   * Injects TicketBAI rectificative fields into the callout response when the selected document
-   * type is marked as rectificative ({@code em_etsg_isrectificative = 'Y'}).
+   * Injects {@code isRectificative} plus TicketBAI's and SII's own STRUCTURAL rectificative
+   * fields into the callout response when the selected document type is marked as rectificative
+   * ({@code em_etsg_isrectificative = 'Y'}) — never a "motivo"/code, only the fields that say
+   * "this is a correction" (ETP-5745 CP-15).
    * Fires only when {@code triggerField} is {@code "transactionDocument"}.
    * No-op when {@link RectificativeSupport#isColumnPresent()} is {@code false}.
    *
@@ -370,6 +372,17 @@ final class InvoiceCalloutHelper {
           }
         }
       }
+      // ETP-5745 CP-15: echo the structural flag itself back to the client. The SIF tab's
+      // TicketBAI panel (and, below, SII's own structural auto-set) both gate purely on
+      // `data.isRectificative` — which otherwise only ever arrives via a GET response
+      // (AbstractInvoiceHeaderHandler#enrichIsRectificative), i.e. only after a header save
+      // triggers the window's refetch. Putting it in THIS callout's `updates` — the same
+      // round trip that already carries tbaiIsreverseinvoice — makes it available the instant
+      // the user picks the document type, no save required.
+      JSONObject isRectificativeUpdate = new JSONObject();
+      isRectificativeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative);
+      updates.put("isRectificative", isRectificativeUpdate);
+
       JSONObject isReverseUpdate = new JSONObject();
       isReverseUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "Y" : "N");
       updates.put("tbaiIsreverseinvoice", isReverseUpdate);
@@ -395,6 +408,30 @@ final class InvoiceCalloutHelper {
         JSONObject reverseCodeUpdate = new JSONObject();
         reverseCodeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "");
         updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
+      }
+
+      // ETP-5745 CP-15: SII's own structural fields, via the SAME callout TicketBAI already
+      // uses — so the "Tipo factura" dropdown shows "R" the instant the user picks a
+      // rectificative document type, instead of only after a header save + refetch (the gap
+      // reported against RectificationFiscalCodeGuard's structural correction, which only runs
+      // at completion). Sales-only — see useSifFieldPatcher.js's ETP-5745 CP-10 precedent:
+      // purchase-side corrective support isn't implemented, so purchase invoices stay at 'F1'.
+      // Only ever SETS "R" (never clobbers a partner-specific key by reverting it on the way
+      // back to a normal invoice — that reversion is out of scope here, same as the client
+      // effect this replicates). aeatsiiTipoRectif ("I", "Por diferencias") is purely
+      // structural like tbaiReverseinvoicetype above, so it mirrors that field's clear-on-revert
+      // behavior. aeatsiiMotivoRectif is NEVER touched — see RectificationFiscalCodeGuard and
+      // SalesRectificativeFiscalDefaults' class javadocs for why no "motivo"/code is ever
+      // auto-picked in this module.
+      if (isSalesTransaction && isRectificative) {
+        JSONObject claveTipoUpdate = new JSONObject();
+        claveTipoUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "R");
+        updates.put("aeatsiiClaveTipo", claveTipoUpdate);
+      }
+      if (isSalesTransaction) {
+        JSONObject tipoRectifUpdate = new JSONObject();
+        tipoRectifUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "I" : "");
+        updates.put("aeatsiiTipoRectif", tipoRectifUpdate);
       }
 
       log.debug("[ETP-4783/ETP-5229] applyRectificativeFieldsFromDocType: docType={} isRectificative={} "
