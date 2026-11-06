@@ -698,6 +698,13 @@ public abstract class AbstractInvoiceHeaderHandler {
     if (rectificationBlock != null) {
       return rectificationBlock;
     }
+    // ETP-5745 CP-13: correct/require the SII rectificative fields (aeatsiiClaveTipo,
+    // aeatsiiTipoRectif, aeatsiiMotivoRectif) on the MCP/REST completion path, which never runs
+    // the classic UI's own equivalent logic. See RectificationSiiFieldsGuard for the full rule.
+    NeoResponse siiFieldsBlock = RectificationSiiFieldsGuard.checkAndApply(context);
+    if (siiFieldsBlock != null) {
+      return siiFieldsBlock;
+    }
     return InvoiceCompletionService.completeInvoice(context.getRecordId(), context.getObContext());
   }
 
