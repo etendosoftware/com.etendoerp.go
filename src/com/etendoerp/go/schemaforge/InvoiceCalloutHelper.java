@@ -255,9 +255,15 @@ final class InvoiceCalloutHelper {
     }
   }
 
+  /** The generic AD_Column default for {@code etvfacInvType} (ETP-4390: "Factura"). */
+  private static final String VERIFACTU_INV_TYPE_DEFAULT = "F1";
+
   /**
    * When the user changes the document type ({@code transactionDocument} trigger), injects the
-   * new DocType's {@code em_etvfac_inv_type} value into the callout update map.
+   * new DocType's {@code em_etvfac_inv_type} value into the callout update map — or, when the
+   * new doc type configures none, the generic default ({@code "F1"}), so switching AWAY from a
+   * rectificative doc type that had no explicitly-configured code still clears a stale
+   * {@code R1}-{@code R5} value instead of leaving it stuck (ETP-5745 CP-18).
    * No-op when the trigger is not {@code transactionDocument}.
    *
    * @param triggerField the field that fired the callout
@@ -285,16 +291,16 @@ final class InvoiceCalloutHelper {
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
             String invType = rs.getString(1);
-            if (invType != null && !invType.trim().isEmpty()) {
-              // Updates entries must be { "value": "..." } objects, not raw strings —
-              // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
-              // would give entry.value === undefined and silently skip the update.
-              JSONObject fieldUpdate = new JSONObject();
-              fieldUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, invType.trim());
-              updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, fieldUpdate);
-              log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: injected etvfacInvType={} for docType={}",
-                  invType.trim(), docTypeId);
-            }
+            String effectiveInvType = invType != null && !invType.trim().isEmpty()
+                ? invType.trim() : VERIFACTU_INV_TYPE_DEFAULT;
+            // Updates entries must be { "value": "..." } objects, not raw strings —
+            // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
+            // would give entry.value === undefined and silently skip the update.
+            JSONObject fieldUpdate = new JSONObject();
+            fieldUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, effectiveInvType);
+            updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, fieldUpdate);
+            log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: injected etvfacInvType={} for docType={}",
+                effectiveInvType, docTypeId);
           }
         }
       }
@@ -334,9 +340,15 @@ final class InvoiceCalloutHelper {
    * e.g. {@code "R4"} = "Factura rectificativa: Resto.") are an issued-document (AR) concept — a
    * received (AP) purchase invoice is never TicketBAI-reported by the receiving party.
    *
-   * <p><b>ETP-5745 CP-14:</b> this field is ONLY ever CLEARED here (when the document type stops
-   * being rectificative) — never auto-picked. See the inline comment at the
-   * {@code tbaiReverseinvoicecode} block below for why.</p>
+   * <p><b>ETP-5745 CP-14:</b> {@code tbaiReverseinvoicecode} is ONLY ever CLEARED here (when the
+   * document type stops being rectificative) — never auto-picked. See the inline comment at its
+   * block below for why.</p>
+   *
+   * <p><b>ETP-5745 CP-18:</b> {@code aeatsiiMotivoRectif} gets the same treatment — cleared on
+   * revert, never set. {@code aeatsiiClaveTipo}, unlike the two "motivo"/code fields, IS reverted
+   * to its generic default ({@code "F1"}) on revert (manual testing showed leaving it at
+   * {@code "R"} stranded the form in an inconsistent state within the same unsaved session) — see
+   * the inline comments at the {@code aeatsiiClaveTipo}/{@code aeatsiiMotivoRectif} block below.</p>
    *
    * @param triggerField the callout trigger field name
    * @param requestBody  the callout request body
@@ -410,28 +422,38 @@ final class InvoiceCalloutHelper {
         updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
       }
 
-      // ETP-5745 CP-15: SII's own structural fields, via the SAME callout TicketBAI already
-      // uses — so the "Tipo factura" dropdown shows "R" the instant the user picks a
+      // ETP-5745 CP-15/CP-18: SII's own structural fields, via the SAME callout TicketBAI
+      // already uses — so the "Tipo factura" dropdown shows "R" the instant the user picks a
       // rectificative document type, instead of only after a header save + refetch (the gap
       // reported against RectificationFiscalCodeGuard's structural correction, which only runs
       // at completion). Sales-only — see useSifFieldPatcher.js's ETP-5745 CP-10 precedent:
       // purchase-side corrective support isn't implemented, so purchase invoices stay at 'F1'.
-      // Only ever SETS "R" (never clobbers a partner-specific key by reverting it on the way
-      // back to a normal invoice — that reversion is out of scope here, same as the client
-      // effect this replicates). aeatsiiTipoRectif ("I", "Por diferencias") is purely
-      // structural like tbaiReverseinvoicetype above, so it mirrors that field's clear-on-revert
-      // behavior. aeatsiiMotivoRectif is NEVER touched — see RectificationFiscalCodeGuard and
-      // SalesRectificativeFiscalDefaults' class javadocs for why no "motivo"/code is ever
-      // auto-picked in this module.
-      if (isSalesTransaction && isRectificative) {
-        JSONObject claveTipoUpdate = new JSONObject();
-        claveTipoUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "R");
-        updates.put("aeatsiiClaveTipo", claveTipoUpdate);
-      }
+      //
+      // ETP-5745 CP-18: aeatsiiClaveTipo is now ALSO reverted to the generic AD_Column default
+      // ("F1") when the document type stops being rectificative — confirmed by manual testing
+      // that leaving it at "R" (the earlier CP-15 behavior, deliberately asymmetric) stranded the
+      // invoice with an inconsistent "Tipo factura" after reverting to a normal doc type in the
+      // SAME unsaved form. aeatsiiTipoRectif ("I" / cleared) already mirrored
+      // tbaiReverseinvoicetype's clear-on-revert behavior and needed no change.
+      // aeatsiiMotivoRectif is the new addition here: it is NEVER set to a value (still nobody's
+      // guess to make — see RectificationFiscalCodeGuard and SalesRectificativeFiscalDefaults'
+      // class javadocs), but a value the user typed BY HAND while the document was rectificative
+      // must not stay stuck once it no longer applies — exactly the same "clearing is cleanup,
+      // not a guess" reasoning tbaiReverseinvoicecode already followed below.
       if (isSalesTransaction) {
+        JSONObject claveTipoUpdate = new JSONObject();
+        claveTipoUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "R" : "F1");
+        updates.put("aeatsiiClaveTipo", claveTipoUpdate);
+
         JSONObject tipoRectifUpdate = new JSONObject();
         tipoRectifUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "I" : "");
         updates.put("aeatsiiTipoRectif", tipoRectifUpdate);
+
+        if (!isRectificative) {
+          JSONObject motivoRectifUpdate = new JSONObject();
+          motivoRectifUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "");
+          updates.put("aeatsiiMotivoRectif", motivoRectifUpdate);
+        }
       }
 
       log.debug("[ETP-4783/ETP-5229] applyRectificativeFieldsFromDocType: docType={} isRectificative={} "
