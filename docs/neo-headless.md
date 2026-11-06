@@ -8663,6 +8663,17 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 
 ---
 
+### 8b.1 Report access map (SFMyReportAccess, ETP-6080)
+
+`SFMyReportAccess` (reached as `GET /sws/neo/myreportaccess`, §4.10) answers which Informes reports the current role can open. It resolves tiers through `ReportAccessCatalog.resolveTierMap(Role)`; admin/client-admin get `full` on every catalog row; a request with no role gets an empty map. Reports whose tier is `none` are absent.
+
+```json
+{"reportAccess": {"report-general-ledger": "full", "profit-loss": "read-only"},
+ "governed": ["profit-loss", "report-general-ledger", "report-journal-entries", "..."]}
+```
+
+`governed` (every answer, including the no-role one) is the id list of `ReportAccessCatalog.ROWS`. The report-server (`assertReportAccess` in `schema_forge_core`) refuses `/render` and `/query` with `403 REPORT_ACCESS_DENIED` for a governed report missing from `reportAccess`; a report outside `governed` is not checked. An older module that omits `governed` is not enforced by the report-server. Core reference: `docs/report-query.md` in `schema_forge_core`.
+
 ## 8c. Roles Overview (SFRolesOverview Webhook)
 
 `SFRolesOverview` (`GET /webhooks/SFRolesOverview`, or preferably `GET /sws/neo/rolesoverview` — §4.10) returns, for an admin/client-admin caller only, a cross-role aggregate for the CALLING TENANT's 5 fixed roles (ETP-4513 — "Configuración > Roles"): each role's display name, raw `AD_Role.description`, count of distinct assigned users, an explicit window count, and the list of Etendo GO windows it can reach (`AD_Window_Access`, intersected with the windows Etendo GO actually exposes today) — plus (ETP-4907) a full window × role permission `matrix`, grouped by top-level menu category. The webhook is authored in the same Webhooks module infrastructure as `SFListMenu`/`SFWindowAccessMap`, but the Go SPA (`RolesOverviewPage.jsx`) reaches it through the NEO pseudo-spec bridge (§4.10).
