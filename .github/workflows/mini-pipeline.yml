@@ -10,32 +10,43 @@ name: Mini Pipeline
 # first ran on the daily cut into main, where one broken test held up the whole day's release
 # (etendo-go-tests #2403 failed after ~1h21m on a fixture that this job's database lacks too).
 #
-# On a push to develop it only fills the Gradle cache: a PR can restore its base branch's caches,
-# so even the first run of a new PR skips the ~3.5 min of dependency downloads.
+# ETP-6180: Sonar, as in etendo_schema_forge's test.yml. It runs on every PR (into develop or main)
+# and on every push to develop and main, the tests always run whole, with JaCoCo, and "Sonar Build"
+# publishes the analysis with that coverage. On a PR it also compares the overall coverage with
+# the base branch (scripts/compare-sonar-coverage.py, the rule of Jenkins' "Compare Coverage
+# Results": at least 70 %, no more than 1 point below the base). The pushes are what keep
+# develop's and main's coverage real on Sonar: the former Sonar Build (sonar-scan.yml) analyzed
+# without tests, so both stood at 0 % and the comparison could never fail. This job is now the
+# required "Sonar Build" check; sonar-scan.yml is gone. A push also fills the Gradle cache that the
+# next PRs restore.
 #
 # Secrets: ETENDOBOT_TOKEN reads etendo_core and the GitHub modules; NEXUS_USER/NEXUS_PASSWORD
 # resolve dependencies; BITBUCKET_SSH_KEY (read access to bitbucket.org/koodu_software) clones the
-# Bitbucket modules listed in jenkinsExtraModules.txt, which this module's code imports.
+# Bitbucket modules listed in jenkinsExtraModules.txt, which this module's code imports;
+# SONAR_TOKEN/SONAR_HOST_URL publish the analysis, and SONAR_READ_TOKEN (Browse permission on the
+# project: the analysis token gets 403) reads the coverage for the comparison.
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [develop, main]
     types: [opened, reopened, synchronize, ready_for_review]
   push:
-    branches: [develop]
+    branches: [develop, main]
   workflow_dispatch:
 
 # The checkouts of other repos use ETENDOBOT_TOKEN; the workflow's own token only reads this one.
 permissions:
   contents: read
 
+# A new push to a PR replaces its running check. Each push to develop or main keeps its own run (its
+# own sha group, never cancelled): its analysis is the base the next PRs are compared with.
 concurrency:
-  group: mini-pipeline-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: mini-pipeline-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   go-test:
-    name: ${{ github.event_name == 'push' && 'Warm the Gradle cache' || 'goTest' }}
+    name: goTest
     runs-on: ubuntu-latest
     timeout-minutes: 120
     services:
@@ -54,7 +65,6 @@ jobs:
       # The Jenkins pod starts Postgres with these off; a service container takes no arguments,
       # but all three can be changed on a running server.
       - name: Tune Postgres for a throwaway database
-        if: github.event_name != 'push'
         env:
           PGPASSWORD: syspass
         run: |
@@ -147,15 +157,8 @@ jobs:
           org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
           EOF
 
-      # The first Gradle run of the job downloads the dependencies; setup-java saves them at the end.
-      - name: Warm the Gradle cache
-        if: github.event_name == 'push'
-        working-directory: etendo_core
-        run: ./gradlew prepareConfig
-
       - name: Install
         id: install
-        if: github.event_name != 'push'
         working-directory: etendo_core
         run: |
           ./gradlew prepareConfig
@@ -170,12 +173,25 @@ jobs:
       # root test task matched nothing (it excludes these classes) and cost ~2 min before finalizing
       # into goIsolatedDalTest, which runs them all in one JVM (docs/test-jvm-isolation.md).
       - name: goTestUnit and integration tests
-        if: github.event_name != 'push'
         working-directory: etendo_core
         run: ./gradlew goTestUnit goIsolatedDalTest --continue
 
+      # A Gradle invocation of its own: jacocoRootReport reads every build/jacoco/*.exec without
+      # declaring the test tasks that write them, and Gradle 8 fails a build that runs it next to
+      # them. Only after the tests passed, so Sonar never gets the coverage of a partial run.
+      - name: Coverage report
+        working-directory: etendo_core
+        run: ./gradlew jacocoRootReport
+
+      - name: Upload the coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: etendo_core/build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml
+          retention-days: 7
+
       - name: Upload the test reports
-        if: always() && github.event_name != 'push'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: goTest-reports
@@ -185,3 +201,62 @@ jobs:
             etendo_core/build/reports/tests/goIsolatedDalTest
           retention-days: 7
           if-no-files-found: ignore
+
+  # SonarQube analysis fed with the coverage of the goTest job: a pull request analysis on a PR, a
+  # branch analysis on a push (the scan action tells them apart, as in the former Sonar Build).
+  sonar:
+    name: Sonar Build
+    needs: go-test
+    # PRs always run it (it fails when goTest did not succeed, see the last step); pushes analyze
+    # only with real coverage, so develop's and main's coverage on Sonar is never a partial one.
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.go-test.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # As the former Sonar Build did: without it the scanner treats the module as a Gradle build.
+      - name: Delete build.gradle
+        run: rm -f build.gradle
+
+      - name: Download the coverage report
+        if: needs.go-test.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage
+
+      - uses: sonarsource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_SCANNER_OPTS: "-Xmx4096m"
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: ${{ needs.go-test.result == 'success' && '-Dsonar.coverage.jacoco.xmlReportPaths=coverage/jacocoRootReport.xml' || '' }}
+
+      # Same rule as Jenkins' Compare Coverage Results; fails this check on a drop, or when the
+      # coverage cannot be evaluated (--context ci).
+      - name: Compare coverage with the base branch
+        if: github.event_name == 'pull_request' && needs.go-test.result == 'success'
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_READ_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          set -o pipefail
+          python3 scripts/compare-sonar-coverage.py --context ci --pull-request "$PR_NUMBER" \
+            --base-branch "$BASE_BRANCH" --report-task .scannerwork/report-task.txt | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Fail closed: a PR whose tests failed (or did not finish) must not get a green required
+      # check just because the coverage comparison was skipped.
+      - name: Fail when the tests did not succeed
+        if: github.event_name == 'pull_request' && needs.go-test.result != 'success'
+        env:
+          TEST_RESULT: ${{ needs.go-test.result }}
+        run: |
+          echo "::error title=Coverage gate::goTest ended '$TEST_RESULT', so coverage was not evaluated. Fix the tests and push again."
+          exit 1
