@@ -30,7 +30,10 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.module.sii.data.AEATSIIConfig;
+import org.openbravo.module.sii.utils.SIIUtils;
 
 /**
  * Server-side defaults of the STRUCTURAL TicketBAI and VERI*FACTU rectificative fields of a SALES
@@ -225,6 +228,37 @@ final class SalesRectificativeFiscalDefaults {
    */
   static boolean tbaiConfigActive(String orgId) {
     return configExists(TBAI_ACTIVE_SQL, orgId);
+  }
+
+  /**
+   * Whether the organization is actually enrolled in the SII ({@code aeatsii_config.insiisystem}
+   * via {@code AEATSIIConfig#isAcogidaAlSII}) — ETP-5745 CP-24. Same DAL-based lookup
+   * {@code AbstractInvoiceHeaderHandler}/{@code InvoiceCalloutHelper}'s own SII authorization
+   * callout and {@code NeoBackgroundDefaultsService#isOrganizationInSiiSystem} already use, so SII
+   * stays consistent with itself across the module. Unlike TicketBAI/VERI*FACTU (plain
+   * {@code tbai_config}/{@code etvfac_verifactu_config} tables, queried by raw SQL), SII has no
+   * such row-per-org config table in this module's reach — its config lives in the SII module's
+   * own DAL entity, keyed off the invoice's legal entity, hence the DAL lookup instead of
+   * {@link #configExists}.
+   *
+   * <p>Never throws: a failure to resolve the org or its config answers {@code false} — no SII
+   * default is better than one stamped for an org that was never actually registered.
+   */
+  static boolean siiConfigActive(String orgId) {
+    if (StringUtils.isBlank(orgId)) {
+      return false;
+    }
+    try {
+      Organization org = OBDal.getInstance().get(Organization.class, orgId);
+      if (org == null) {
+        return false;
+      }
+      AEATSIIConfig config = SIIUtils.getSiiConfigFromOrg(org);
+      return config != null && Boolean.TRUE.equals(config.isAcogidaAlSII());
+    } catch (Exception e) {
+      log.debug("[ETP-5745] SII config lookup failed for org {}: {}", orgId, e.getMessage());
+      return false;
+    }
   }
 
   /**

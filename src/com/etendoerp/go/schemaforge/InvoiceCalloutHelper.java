@@ -445,25 +445,36 @@ final class InvoiceCalloutHelper {
         updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
       }
 
-      // ETP-5745 CP-15/CP-18: SII's own structural fields, via the SAME callout TicketBAI
+      // ETP-5745 CP-15/CP-18/CP-24: SII's own structural fields, via the SAME callout TicketBAI
       // already uses — so the "Tipo factura" dropdown shows "R" the instant the user picks a
       // rectificative document type, instead of only after a header save + refetch (the gap
       // reported against RectificationFiscalCodeGuard's structural correction, which only runs
       // at completion). Sales-only — see useSifFieldPatcher.js's ETP-5745 CP-10 precedent:
       // purchase-side corrective support isn't implemented, so purchase invoices stay at 'F1'.
       //
-      // ETP-5745 CP-18: aeatsiiClaveTipo is now ALSO reverted to the generic AD_Column default
-      // ("F1") when the document type stops being rectificative — confirmed by manual testing
-      // that leaving it at "R" (the earlier CP-15 behavior, deliberately asymmetric) stranded the
-      // invoice with an inconsistent "Tipo factura" after reverting to a normal doc type in the
-      // SAME unsaved form. aeatsiiTipoRectif ("I" / cleared) already mirrored
-      // tbaiReverseinvoicetype's clear-on-revert behavior and needed no change.
-      // aeatsiiMotivoRectif is the new addition here: it is NEVER set to a value (still nobody's
+      // ETP-5745 CP-24: additionally gated on the organization actually being enrolled in SII
+      // (SalesRectificativeFiscalDefaults#siiConfigActive) — unlike TicketBAI/VERI*FACTU just
+      // above, these fields used to be touched UNCONDITIONALLY. That was the real bug behind
+      // "Una factura rectificativa debe tener tipo de factura rectificativa y motivo de
+      // rectificación para enviar al SII" firing for an org using ONLY VERI*FACTU (SII never
+      // configured at all): the DB check constraint (EM_AEATSII_C_INV_RECT_CHK) fires on
+      // ClaveTipo='R' alone, with zero awareness of whether the org even uses SII — so stamping
+      // "R" here for such an org guaranteed the save would fail on an empty Motivo nobody was
+      // ever going to be asked for. When SII is not active for this org, aeatsiiClaveTipo/
+      // aeatsiiTipoRectif/aeatsiiMotivoRectif are left completely untouched — including on
+      // revert — exactly as if this block did not run at all.
+      //
+      // ETP-5745 CP-18: when SII IS active, aeatsiiClaveTipo is ALSO reverted to the generic
+      // AD_Column default ("F1") when the document type stops being rectificative — confirmed by
+      // manual testing that leaving it at "R" (the earlier CP-15 behavior, deliberately
+      // asymmetric) stranded the invoice with an inconsistent "Tipo factura" within the same
+      // unsaved session. aeatsiiTipoRectif ("I" / cleared) mirrors tbaiReverseinvoicetype's
+      // clear-on-revert behavior. aeatsiiMotivoRectif is NEVER set to a value (still nobody's
       // guess to make — see RectificationFiscalCodeGuard and SalesRectificativeFiscalDefaults'
       // class javadocs), but a value the user typed BY HAND while the document was rectificative
       // must not stay stuck once it no longer applies — exactly the same "clearing is cleanup,
-      // not a guess" reasoning tbaiReverseinvoicecode already followed below.
-      if (isSalesTransaction) {
+      // not a guess" reasoning tbaiReverseinvoicecode already follows above.
+      if (isSalesTransaction && isCurrentOrgEnrolledInSii()) {
         JSONObject claveTipoUpdate = new JSONObject();
         claveTipoUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "R" : "F1");
         updates.put("aeatsiiClaveTipo", claveTipoUpdate);
@@ -484,6 +495,25 @@ final class InvoiceCalloutHelper {
           docTypeId, isRectificative, isSalesTransaction);
     } catch (Exception e) {
       log.warn("[ETP-4783] applyRectificativeFieldsFromDocType failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Whether the CURRENT session's organization (the callout has no invoice id yet on a brand
+   * new, unsaved record, so there is no {@code Invoice.organization} to read — this mirrors
+   * {@code applySiiAuthorizationCallout}'s own org resolution a few methods above) is actually
+   * enrolled in the SII, via {@link SalesRectificativeFiscalDefaults#siiConfigActive}.
+   *
+   * <p>Never throws: a failure to resolve the context organization answers {@code false}.
+   */
+  private static boolean isCurrentOrgEnrolledInSii() {
+    try {
+      Organization org = OBContext.getOBContext().getCurrentOrganization();
+      return org != null && SalesRectificativeFiscalDefaults.siiConfigActive(org.getId());
+    } catch (Exception e) {
+      log.debug("[ETP-5745] Could not resolve the current organization's SII enrollment: {}",
+          e.getMessage());
+      return false;
     }
   }
 }

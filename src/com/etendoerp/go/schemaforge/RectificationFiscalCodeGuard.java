@@ -165,7 +165,13 @@ final class RectificationFiscalCodeGuard {
       if (!missing.isEmpty()) {
         return reject(missing);
       }
-      boolean changed = correctClaveTipo(invoice) | defaultTipoRectif(invoice);
+      // ETP-5745 CP-24: only correct SII's structural fields when SII actually applies to this
+      // org — see missingSystems' matching gate just below for why (an org that never enrolled
+      // in SII must never have aeatsiiClaveTipo stamped "R": the DB check constraint fires on
+      // ClaveTipo alone, with no awareness of whether the org even uses SII).
+      boolean changed = StringUtils.isNotBlank(orgId)
+          && SalesRectificativeFiscalDefaults.siiConfigActive(orgId)
+          && (correctClaveTipo(invoice) | defaultTipoRectif(invoice));
       if (changed) {
         OBDal.getInstance().save(invoice);
         OBDal.getInstance().flush();
@@ -181,13 +187,21 @@ final class RectificationFiscalCodeGuard {
   /**
    * The fiscal systems, in SII/TicketBAI/VERI*FACTU order, that are active for {@code orgId} and
    * still missing their rectification code/motive on {@code invoice}.
+   *
+   * <p>ETP-5745 CP-24: SII is now gated on {@link SalesRectificativeFiscalDefaults#siiConfigActive}
+   * exactly like TicketBAI/VERI*FACTU already were — it used to be checked unconditionally,
+   * which was the real bug behind the DB check constraint firing for an org that never enrolled
+   * in SII at all (nothing in this guard, nor in the doc-type callout, may stamp a value toward
+   * {@code aeatsiiClaveTipo='R'} for such an org in the first place — see
+   * {@code InvoiceCalloutHelper#applyRectificativeFieldsFromDocType}'s matching fix).
    */
   private static List<String> missingSystems(Invoice invoice, String orgId) {
     List<String> missing = new ArrayList<>();
-    if (StringUtils.isBlank(invoice.getAeatsiiMotivoRectif())) {
-      missing.add(SYSTEM_SII);
-    }
     if (StringUtils.isNotBlank(orgId)) {
+      if (SalesRectificativeFiscalDefaults.siiConfigActive(orgId)
+          && StringUtils.isBlank(invoice.getAeatsiiMotivoRectif())) {
+        missing.add(SYSTEM_SII);
+      }
       if (SalesRectificativeFiscalDefaults.tbaiConfigActive(orgId)
           && StringUtils.isBlank(invoice.getTbaiReverseinvoicecode())) {
         missing.add(SYSTEM_TBAI);
