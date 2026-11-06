@@ -349,6 +349,28 @@ public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
   }
 
   @Test
+  public void aSignupApiAccountOfABookedDemoIsReportedOnItsDeal() throws Exception {
+    // ETP-6082: marketing names the booking's deal when it creates the account.
+    String email = MARKER + "demo-" + UUID.randomUUID() + "@example.test";
+    String account = createAccount("Jana", email);
+    execute("update etgo_account set signup_channel = 'web' where etgo_account_id = '"
+        + account + "'");
+    store.commit();
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    HubSpotOutbox.demoDeal(account, "555");
+    OBDal.getInstance().commitAndClose();
+
+    HubSpotOutbox.demoReady(email, "C9", "Empresa SL", "ES");
+    OBDal.getInstance().commitAndClose();
+
+    assertEquals(HubSpotOutboxStore.STATUS_SENT,
+        store.findStatus(account, HubSpotOutboxStore.DEMO_DEAL));
+    PendingEvent event = pendingOf(account).get(0);
+    assertEquals(HubSpotOutboxStore.DEMO_READY, event.eventType());
+    assertEquals("555", new JSONObject(event.payload()).getString(HubSpotOutbox.FIELD_DEMO_DEAL));
+  }
+
+  @Test
   public void aFailedReportLeavesTheCallersTransactionUsable() {
     String account = createAccount("Juan", null);
     OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
