@@ -198,11 +198,17 @@ final class InvoiceCalloutHelper {
   }
 
   /**
-   * After a non-DocType callout, corrects any stale {@code etvfacVerifacDesc}/{@code etvfacInvType}
-   * values that a cascade may have injected based on the wrong DocType.
-   * Re-reads the values from the DocType the user actually selected ({@code formState.transactionDocument}).
+   * After a non-DocType callout, corrects a stale {@code etvfacVerifacDesc} that a cascade may
+   * have injected based on the wrong DocType. Re-reads the value from the DocType the user
+   * actually selected ({@code formState.transactionDocument}).
    * No-op when the trigger IS {@code transactionDocument} (handled by
    * {@link #applyVerifactuInvTypeFromDocType}) or when no Verifactu field appears in updates.
+   *
+   * <p>ETP-5745 CP-20: this used to ALSO realign {@code etvfacInvType} from the DocType's own
+   * configured code — removed, same reasoning as {@link #applyVerifactuInvTypeFromDocType}: that
+   * field encodes "this is a correction AND why" in one value (R1-R5), so copying ANY
+   * DocType-configured code into it — even one a human set up front, on the DocType, once — is
+   * still picking the user's reason for THIS invoice on their behalf.
    *
    * @param triggerField the field that fired the callout
    * @param formState    the form state snapshot from the callout request
@@ -224,31 +230,22 @@ final class InvoiceCalloutHelper {
       return;
     }
     try {
-      String sql = "SELECT em_etvfac_verifac_desc, em_etvfac_inv_type"
-          + " FROM c_doctype WHERE c_doctype_id = ?";
+      String sql = "SELECT em_etvfac_verifac_desc FROM c_doctype WHERE c_doctype_id = ?";
       Connection conn = OBDal.getReadOnlyInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, docTypeId);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            String desc    = rs.getString(1);
-            String invType = rs.getString(2);
+            String desc = rs.getString(1);
             if (desc != null && !desc.trim().isEmpty()) {
               JSONObject descUpdate = new JSONObject();
               descUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, desc.trim());
               updates.put("etvfacVerifacDesc", descUpdate);
             }
-            // Also realign etvfacInvType if the cascade put a wrong value there
-            if (invType != null && !invType.trim().isEmpty()
-                && updates.has(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE)) {
-              JSONObject invUpdate = new JSONObject();
-              invUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, invType.trim());
-              updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, invUpdate);
-            }
           }
         }
       }
-      log.debug("[ETP-4783] realignVerifactuDescWithFormStateDocType: corrected Verifactu desc/inv for docType={} (trigger={})",
+      log.debug("[ETP-4783] realignVerifactuDescWithFormStateDocType: corrected Verifactu desc for docType={} (trigger={})",
           docTypeId, triggerField);
     } catch (Exception e) {
       log.warn("[ETP-4783] realignVerifactuDescWithFormStateDocType failed (non-fatal): {}", e.getMessage());
@@ -259,12 +256,28 @@ final class InvoiceCalloutHelper {
   private static final String VERIFACTU_INV_TYPE_DEFAULT = "F1";
 
   /**
-   * When the user changes the document type ({@code transactionDocument} trigger), injects the
-   * new DocType's {@code em_etvfac_inv_type} value into the callout update map — or, when the
-   * new doc type configures none, the generic default ({@code "F1"}), so switching AWAY from a
-   * rectificative doc type that had no explicitly-configured code still clears a stale
-   * {@code R1}-{@code R5} value instead of leaving it stuck (ETP-5745 CP-18).
-   * No-op when the trigger is not {@code transactionDocument}.
+   * When the user changes the document type ({@code transactionDocument} trigger), CLEARS a
+   * stale {@code R1}-{@code R5} {@code etvfacInvType} back to the generic default
+   * ({@code "F1"}) when the newly-selected document type is NOT rectificative.
+   *
+   * <p>ETP-5745 CP-20: this method used to copy the NEW DocType's own configured
+   * {@code em_etvfac_inv_type} onto the invoice whenever the document type became rectificative
+   * — reverted, together with the javadoc rationale that survives it: VERI*FACTU folds "this is
+   * a correction" AND "for this reason" into the SAME {@code R1}-{@code R5} value, so copying
+   * ANY code — even one a human configured on the DocType itself, once, for every invoice of
+   * that type — is still picking a reason on behalf of THIS specific invoice, exactly the
+   * fiscal judgement call {@code aeatsiiMotivoRectif}/{@code tbaiReverseinvoicecode} are never
+   * allowed to guess either (see {@code SalesRectificativeFiscalDefaults}' class javadoc). A
+   * rectificative document type now leaves {@code etvfacInvType} completely untouched — the
+   * user must pick an {@code R1}-{@code R5} code manually, and
+   * {@link RectificationFiscalCodeGuard} blocks completion while it is still {@code F*}/blank.
+   *
+   * <p>The CLEARING side is kept and unconditional once more: switching AWAY from a
+   * rectificative doc type still blanks a stale {@code R1}-{@code R5} back to {@code "F1"},
+   * which is cleanup of a now-irrelevant value, not a guess (same reasoning as
+   * {@code tbaiReverseinvoicecode}'s own clear-on-revert).
+   * No-op when the trigger is not {@code transactionDocument}, or when
+   * {@link RectificativeSupport#isColumnPresent()} is {@code false} (no way to tell direction).
    *
    * @param triggerField the field that fired the callout
    * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
@@ -278,29 +291,32 @@ final class InvoiceCalloutHelper {
     if (updates == null) {
       return;
     }
+    if (!RectificativeSupport.isColumnPresent()) {
+      return;
+    }
     try {
       Object rawValue = requestBody != null ? requestBody.opt(AbstractInvoiceHeaderHandler.FIELD_VALUE) : null;
       String docTypeId = rawValue != null ? rawValue.toString().trim() : "";
       if (docTypeId.isEmpty()) {
         return;
       }
-      String sql = "SELECT em_etvfac_inv_type FROM c_doctype WHERE c_doctype_id = ?";
+      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
       Connection conn = OBDal.getReadOnlyInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, docTypeId);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            String invType = rs.getString(1);
-            String effectiveInvType = invType != null && !invType.trim().isEmpty()
-                ? invType.trim() : VERIFACTU_INV_TYPE_DEFAULT;
-            // Updates entries must be { "value": "..." } objects, not raw strings —
-            // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
-            // would give entry.value === undefined and silently skip the update.
-            JSONObject fieldUpdate = new JSONObject();
-            fieldUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, effectiveInvType);
-            updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, fieldUpdate);
-            log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: injected etvfacInvType={} for docType={}",
-                effectiveInvType, docTypeId);
+            boolean isRectificative = "Y".equalsIgnoreCase(rs.getString(1));
+            if (!isRectificative) {
+              // Updates entries must be { "value": "..." } objects, not raw strings —
+              // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
+              // would give entry.value === undefined and silently skip the update.
+              JSONObject fieldUpdate = new JSONObject();
+              fieldUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, VERIFACTU_INV_TYPE_DEFAULT);
+              updates.put(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE, fieldUpdate);
+              log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: cleared etvfacInvType to {} for docType={}",
+                  VERIFACTU_INV_TYPE_DEFAULT, docTypeId);
+            }
           }
         }
       }

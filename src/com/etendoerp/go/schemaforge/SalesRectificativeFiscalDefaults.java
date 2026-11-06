@@ -92,7 +92,6 @@ final class SalesRectificativeFiscalDefaults {
 
   static final String FIELD_TBAI_IS_REVERSE = "tbaiIsreverseinvoice";
   static final String FIELD_TBAI_REVERSE_TYPE = "tbaiReverseinvoicetype";
-  static final String FIELD_VF_INV_TYPE = AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE;
   static final String FIELD_VF_REVERSE_TYPE = "etvfacReverseinvtype";
 
   /** TicketBAI / VERI*FACTU "Por diferencias" reverse type. */
@@ -195,15 +194,18 @@ final class SalesRectificativeFiscalDefaults {
     }
   }
 
+  /**
+   * ETP-5745 CP-20: no longer copies the DocType's own configured {@code em_etvfac_inv_type}
+   * onto the invoice — reverted, same reasoning as {@code InvoiceCalloutHelper
+   * #applyVerifactuInvTypeFromDocType}'s javadoc: VERI*FACTU's {@code R1}-{@code R5} codes fold
+   * "this is a correction" and "for this reason" into one value, so copying ANY code — even a
+   * human-configured per-DocType one — still picks the user's reason for THIS invoice on their
+   * behalf. {@code etvfacInvType} is left completely alone here; only the REVERSE type is
+   * defaulted, and only once the user has ALREADY picked an {@code R1}-{@code R5} code by hand.
+   */
   private static void applyVerifactu(Invoice invoice, DocumentType docType,
       Map<String, Object> applied) {
-    String docInvType = StringUtils.trimToNull(docType.getEtvfacInvType());
     String current = StringUtils.trimToNull(invoice.getEtvfacInvType());
-    if (isRectificativeCode(docInvType) && !isRectificativeCode(current)) {
-      invoice.setEtvfacInvType(docInvType);
-      applied.put(FIELD_VF_INV_TYPE, docInvType);
-      current = docInvType;
-    }
     if (isRectificativeCode(current) && StringUtils.isBlank(invoice.getEtvfacReverseinvtype())) {
       String reverseType = StringUtils.defaultIfBlank(docType.getEtvfacReverseInvType(),
           REVERSE_TYPE_BY_DIFFERENCES);
