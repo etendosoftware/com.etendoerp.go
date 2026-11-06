@@ -81,6 +81,32 @@ final class OrderInvoicePending {
   }
 
   /**
+   * The rule the purchase invoice's order popup computed in the browser before ETP-6099
+   * ({@code invoiceOrderImport.js}, {@code fetchOrderLines}, {@code importVia: 'client'}:
+   * {@code Math.max(0, ordered - invoiced)}), served under {@code pendingBasis: "classic"}: every
+   * active line other than the total-discount line (a line without product included, as the order's
+   * lines GET listed it), at {@code max(0, ordered - invoiced)}. NO draft deduction, and a line with
+   * nothing left is PRESENT at 0 (the popup greyed it), unlike {@link #beforeDrafts}.
+   *
+   * @param order the order
+   * @return {@code orderLineId -> pending (>= 0)}, in the order's line order
+   */
+  static Map<String, BigDecimal> classic(Order order) {
+    Map<String, BigDecimal> pending = new LinkedHashMap<>();
+    for (OrderLine ol : order.getOrderLineList()) {
+      if (!OrderImportListing.isListedLine(ol)) {
+        continue;
+      }
+      BigDecimal ordered = ol.getOrderedQuantity() == null ? BigDecimal.ZERO
+          : ol.getOrderedQuantity();
+      BigDecimal invoiced = ol.getInvoicedQuantity() == null ? BigDecimal.ZERO
+          : ol.getInvoicedQuantity();
+      pending.put(ol.getId(), ordered.subtract(invoiced).max(BigDecimal.ZERO));
+    }
+    return pending;
+  }
+
+  /**
    * {@code base} minus {@code drafts}; a line a draft already covers (or over-covers) drops out.
    *
    * @param base   pending before drafts, from {@link #beforeDrafts}
