@@ -407,6 +407,16 @@ final class InvoiceCalloutHelper {
           }
         }
       }
+      // ETP-5745 CP-25: resolved once and reused for BOTH systems' gates below — same
+      // current-session-organization resolution {@code applySiiAuthorizationCallout} already
+      // uses a few methods above (the callout has no invoice id yet on a brand new, unsaved
+      // record, so there is no {@code Invoice.organization} to read).
+      Organization currentOrg = OBContext.getOBContext().getCurrentOrganization();
+      String currentOrgId = currentOrg != null ? currentOrg.getId() : null;
+      boolean tbaiActive = StringUtils.isNotBlank(currentOrgId)
+          && SalesRectificativeFiscalDefaults.tbaiConfigActive(currentOrgId);
+      boolean siiActive = StringUtils.isNotBlank(currentOrgId)
+          && SalesRectificativeFiscalDefaults.siiConfigActive(currentOrgId);
       // ETP-5745 CP-15: echo the structural flag itself back to the client. The SIF tab's
       // TicketBAI panel (and, below, SII's own structural auto-set) both gate purely on
       // `data.isRectificative` — which otherwise only ever arrives via a GET response
@@ -418,31 +428,43 @@ final class InvoiceCalloutHelper {
       isRectificativeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative);
       updates.put("isRectificative", isRectificativeUpdate);
 
-      JSONObject isReverseUpdate = new JSONObject();
-      isReverseUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "Y" : "N");
-      updates.put("tbaiIsreverseinvoice", isReverseUpdate);
+      // ETP-5745 CP-25: all three TicketBAI fields below are now gated on the organization
+      // actually having an active {@code tbai_config} — aligning them with SII (CP-24) and with
+      // how {@code SalesRectificativeFiscalDefaults} already gates TicketBAI's own after-write
+      // defaults. {@code tbaiReverseinvoicecode} already had an {@code issotrx} guard (still
+      // kept, it is a DIFFERENT structural condition — sales-only), but
+      // {@code tbaiIsreverseinvoice}/{@code tbaiReverseinvoicetype} had none at all: for an org
+      // with NO TicketBAI configuration, this callout used to stamp them anyway. Harmless today
+      // (no DB check constraint enforces these two the way {@code EM_AEATSII_C_INV_RECT_CHK}
+      // enforces SII's), but inconsistent with every other system in this method — aligned for
+      // the same "if the system doesn't apply, don't touch its fields at all" reason.
+      if (tbaiActive) {
+        JSONObject isReverseUpdate = new JSONObject();
+        isReverseUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "Y" : "N");
+        updates.put("tbaiIsreverseinvoice", isReverseUpdate);
 
-      JSONObject reverseTypeUpdate = new JSONObject();
-      // "I" = "Por diferencias" — the TicketBAI default reverse type (AD_REF_LIST VALUE for
-      // reference 6E28A33291454412B2129FDC072B6FD9). Cleared when not rectificative.
-      reverseTypeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "I" : "");
-      updates.put("tbaiReverseinvoicetype", reverseTypeUpdate);
+        JSONObject reverseTypeUpdate = new JSONObject();
+        // "I" = "Por diferencias" — the TicketBAI default reverse type (AD_REF_LIST VALUE for
+        // reference 6E28A33291454412B2129FDC072B6FD9). Cleared when not rectificative.
+        reverseTypeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "I" : "");
+        updates.put("tbaiReverseinvoicetype", reverseTypeUpdate);
 
-      // ETP-5229: tbaiReverseinvoicecode is SALES-ONLY (see javadoc) — never touched for a
-      // purchase (AP) doc type, so it is left exactly as-is on purchase invoices.
-      //
-      // ETP-5745 CP-14: no longer auto-picks "R4" ("Factura rectificativa: Resto.", AD_REF_LIST
-      // 89C6433F71584D23B95140DE86EDC726) when the document type becomes rectificative. This is
-      // the exact kind of fiscal classification choice (why the invoice is being corrected) that
-      // must stay a manual, informed decision — the same reasoning SII's aeatsiiMotivoRectif
-      // already followed (see SalesRectificativeFiscalDefaults' class javadoc). Only the CLEARING
-      // side is kept: switching the document type AWAY from rectificative still blanks a
-      // now-irrelevant code, which is cleanup, not a guess. RectificationFiscalCodeGuard blocks
-      // completion while this field is still blank on a rectificative invoice.
-      if (isSalesTransaction && !isRectificative) {
-        JSONObject reverseCodeUpdate = new JSONObject();
-        reverseCodeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "");
-        updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
+        // ETP-5229: tbaiReverseinvoicecode is SALES-ONLY (see javadoc) — never touched for a
+        // purchase (AP) doc type, so it is left exactly as-is on purchase invoices.
+        //
+        // ETP-5745 CP-14: no longer auto-picks "R4" ("Factura rectificativa: Resto.", AD_REF_LIST
+        // 89C6433F71584D23B95140DE86EDC726) when the document type becomes rectificative. This is
+        // the exact kind of fiscal classification choice (why the invoice is being corrected) that
+        // must stay a manual, informed decision — the same reasoning SII's aeatsiiMotivoRectif
+        // already followed (see SalesRectificativeFiscalDefaults' class javadoc). Only the CLEARING
+        // side is kept: switching the document type AWAY from rectificative still blanks a
+        // now-irrelevant code, which is cleanup, not a guess. RectificationFiscalCodeGuard blocks
+        // completion while this field is still blank on a rectificative invoice.
+        if (isSalesTransaction && !isRectificative) {
+          JSONObject reverseCodeUpdate = new JSONObject();
+          reverseCodeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "");
+          updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
+        }
       }
 
       // ETP-5745 CP-15/CP-18/CP-24: SII's own structural fields, via the SAME callout TicketBAI
@@ -474,7 +496,7 @@ final class InvoiceCalloutHelper {
       // class javadocs), but a value the user typed BY HAND while the document was rectificative
       // must not stay stuck once it no longer applies — exactly the same "clearing is cleanup,
       // not a guess" reasoning tbaiReverseinvoicecode already follows above.
-      if (isSalesTransaction && isCurrentOrgEnrolledInSii()) {
+      if (isSalesTransaction && siiActive) {
         JSONObject claveTipoUpdate = new JSONObject();
         claveTipoUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "R" : "F1");
         updates.put("aeatsiiClaveTipo", claveTipoUpdate);
@@ -495,25 +517,6 @@ final class InvoiceCalloutHelper {
           docTypeId, isRectificative, isSalesTransaction);
     } catch (Exception e) {
       log.warn("[ETP-4783] applyRectificativeFieldsFromDocType failed (non-fatal): {}", e.getMessage());
-    }
-  }
-
-  /**
-   * Whether the CURRENT session's organization (the callout has no invoice id yet on a brand
-   * new, unsaved record, so there is no {@code Invoice.organization} to read — this mirrors
-   * {@code applySiiAuthorizationCallout}'s own org resolution a few methods above) is actually
-   * enrolled in the SII, via {@link SalesRectificativeFiscalDefaults#siiConfigActive}.
-   *
-   * <p>Never throws: a failure to resolve the context organization answers {@code false}.
-   */
-  private static boolean isCurrentOrgEnrolledInSii() {
-    try {
-      Organization org = OBContext.getOBContext().getCurrentOrganization();
-      return org != null && SalesRectificativeFiscalDefaults.siiConfigActive(org.getId());
-    } catch (Exception e) {
-      log.debug("[ETP-5745] Could not resolve the current organization's SII enrollment: {}",
-          e.getMessage());
-      return false;
     }
   }
 }
