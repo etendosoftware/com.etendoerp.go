@@ -68,8 +68,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  * <p>It also SCOPES THE LIST. {@code AD_Sequence} holds ~145 rows per provisioned tenant,
  * almost all of them record-ID and internal counters that mean nothing to a user looking for
- * their invoice numbering — so the list is narrowed to the caller's own client and to the six
- * document series in {@link #VISIBLE_SEQUENCE_NAMES} (ETP-5285, ETP-5364). See
+ * their invoice numbering — so the list is narrowed to the caller's own client and to the seven
+ * document series in {@link #VISIBLE_SEQUENCE_NAMES} (ETP-5285, ETP-5364, ETP-5837). See
  * {@code applyListScope}.
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
@@ -110,10 +110,11 @@ public class DocumentSequenceHandler implements NeoHandler {
    * decisions.json} classifies it {@code readOnly} — because renaming a row here would drop it
    * out of this very allowlist and make it unreachable, silently and permanently.
    *
-   * <p><b>ETP-5285 narrowed this list from seven to five; ETP-5364 completed it at six.</b> The
-   * product defines exactly six document series (purchase order {@code PC}, sales order
-   * {@code PV}, sales invoice {@code FV}, corrective sales invoice {@code FVR}, purchase invoice
-   * {@code FC}, corrective purchase invoice {@code FCR}), and all six are below. {@code AP
+   * <p><b>ETP-5285 narrowed this list from seven to five; ETP-5364 completed it at six;
+   * ETP-5837 added the sales quotation as the seventh.</b> The product defines exactly seven
+   * document series (purchase order {@code PC}, sales order {@code PV}, sales quotation
+   * {@code PR}, sales invoice {@code FV}, corrective sales invoice {@code FVR}, purchase invoice
+   * {@code FC}, corrective purchase invoice {@code FCR}), and all seven are below. {@code AP
    * Payment}, {@code AR Receipt}, {@code MM Shipment} and {@code Secuencia TICKETBAI} were
    * dropped by ETP-5285: they are not document series a tenant configures on this screen.
    * Dropping a name here only hides the row — nothing is deleted, and the numbering those
@@ -153,6 +154,15 @@ public class DocumentSequenceHandler implements NeoHandler {
    * {@code SELECT INTO}, so the copies advance together), but editing ONE of a pair breaks exactly
    * that. Never a reason to expose these names.
    *
+   * <p><b>{@code Quotation} ({@code PR}) was added by ETP-5837.</b> The quotation already had
+   * its own series — the {@code Quotation} doctype ({@code DocSubTypeSO='OB'}) points at a
+   * {@code Quotation} sequence with {@code IsDocNoControlled='Y'} — but it was not configurable
+   * here and shipped without a prefix, so a quotation's number was indistinguishable from an
+   * order's. {@code GOClient/AD_SEQUENCE.xml} now gives it the prefix {@code PR}, which reaches
+   * NEW tenants. Existing tenants are retrofitted by the schema_forge data-fix
+   * {@code R57-quotation-sequence-pr-prefix}: it sets {@code PR} on their {@code Quotation}
+   * sequence and renumbers their existing quotations with it.
+   *
    * <p>What their absence still costs: {@code AP CreditMemo}, {@code MM Receipt}, plus asset and
    * internal-movement numbering have no sequence of their own and stay unreachable from here.
    * See the window's guide.
@@ -160,6 +170,7 @@ public class DocumentSequenceHandler implements NeoHandler {
   static final List<String> VISIBLE_SEQUENCE_NAMES = List.of(
       "Purchase Order",
       "Standard Order",
+      "Quotation",
       "AR Invoice",
       "Factura Rectificativa (Ventas)",
       "AP Invoice",

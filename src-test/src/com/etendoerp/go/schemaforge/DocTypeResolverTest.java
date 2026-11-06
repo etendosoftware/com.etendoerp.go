@@ -46,14 +46,18 @@ import org.mockito.Mockito;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /**
  * Unit tests for {@link DocTypeResolver}.
+ *
+ * @covers com.etendoerp.go.schemaforge.DocTypeResolver
  */
 class DocTypeResolverTest {
 
@@ -633,6 +637,65 @@ class DocTypeResolverTest {
         assertDoesNotThrow(() -> DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab));
         assertFalse(body.has(EFFECTIVE));
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // dropDocTypesOutsideTabFilter — callout endpoint guard
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("dropDocTypesOutsideTabFilter")
+  class DropDocTypesOutsideTabFilter {
+
+    private static final String TABLE_ID = "TABLE_DROP";
+    private static final String ORG_DEFAULT_ID = "ORG_DEFAULT_DOCTYPE";
+
+    @Test
+    @DisplayName("Drops a callout doc type whose sub-type the tab LIKE filter excludes")
+    void dropsDocTypeOutsideLikeFilter() throws Exception {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getId()).thenReturn(TABLE_ID);
+      when(adTab.getHqlwhereclause())
+          .thenReturn("e.salesTransaction=true AND e.transactionDocument.sOSubType LIKE 'OB'");
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getADTab()).thenReturn(adTab);
+      NeoContext ctx = NeoContext.builder().sfEntity(sfEntity).adTab(adTab).build();
+
+      Property targetProp = mock(Property.class);
+      when(targetProp.getName()).thenReturn("transactionDocument");
+      Property typeProp = mock(Property.class);
+      when(typeProp.getName()).thenReturn("documentType");
+      ModelProvider instance = mock(ModelProvider.class);
+      Entity dalEntity = mock(Entity.class);
+      when(instance.getEntityByTableId(TABLE_ID)).thenReturn(dalEntity);
+      when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID")).thenReturn(targetProp);
+      when(dalEntity.getPropertyByColumnName("C_DocType_ID")).thenReturn(typeProp);
+
+      DocumentType orgDefault = mock(DocumentType.class);
+      when(orgDefault.getSOSubType()).thenReturn("SO");
+      when(orgDefault.isReturn()).thenReturn(false);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(DocumentType.class, ORG_DEFAULT_ID)).thenReturn(orgDefault);
+
+      JSONObject updates = new JSONObject()
+          .put("transactionDocument", new JSONObject()
+              .put("value", ORG_DEFAULT_ID).put("_identifier", "Standard Order"))
+          .put("priceList", new JSONObject().put("value", "PL"));
+      JSONObject response = new JSONObject().put("updates", updates);
+
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class)) {
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        od.when(OBDal::getInstance).thenReturn(obDal);
+
+        DocTypeResolver.dropDocTypesOutsideTabFilter(response, adTab, ctx);
+      }
+
+      assertFalse(updates.has("transactionDocument"));
+      assertEquals("PL", updates.getJSONObject("priceList").getString("value"));
     }
   }
 }

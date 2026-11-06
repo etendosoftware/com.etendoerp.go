@@ -47,6 +47,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <p>Split in two: {@code validateSpanishPrefix} is pure and gets the rule matrix, while
  * {@link #handle(NeoContext)}'s guards are covered only up to the point where they stop needing
  * a DAL — everything past the country lookup belongs to an integration test.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.DocumentSequenceHandler
  */
 class DocumentSequenceHandlerTest {
 
@@ -280,7 +282,7 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("narrows a list GET to the six sequence names, as an inSet clause")
+    @DisplayName("narrows a list GET to the seven sequence names, as an inSet clause")
     void narrowsListByName() throws JSONException {
       // A provisioned tenant has ~145 sequences; all but these are record-ID and internal
       // counters. Injected as criteria rather than filtered out of the response so the
@@ -299,7 +301,7 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("carries the exact six names the product asked for")
+    @DisplayName("carries the exact seven names the product asked for")
     void allowlistContentIsTheAgreedList() {
       // Verified against the instance: every one of these exists, by this exact name, in a
       // provisioned client. Renaming or dropping one is a product change, not a refactor.
@@ -307,15 +309,16 @@ class DocumentSequenceHandlerTest {
       // Secuencia TICKETBAI are not document series a tenant configures on this screen.
       // ETP-5364 added the sixth, "AP Invoice" (FC), together with the dataset pair that
       // creates that sequence and points the AP Invoice doctype at it.
+      // ETP-5837 added the seventh, "Quotation" (PR), right after the sales order.
       assertEquals(java.util.List.of(
-          "Purchase Order", "Standard Order", "AR Invoice",
+          "Purchase Order", "Standard Order", "Quotation", "AR Invoice",
           "Factura Rectificativa (Ventas)", "AP Invoice",
           "Factura Rectificativa (Compras)"),
           DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES);
     }
 
     @Test
-    @DisplayName("holds no sequence ETP-5285 removed from the product's six series")
+    @DisplayName("holds no sequence ETP-5285 removed from the product's document series")
     void allowlistExcludesTheNamesEtp5285Dropped() {
       // REGRESSION GUARD. These four were visible before ETP-5285 and were dropped on purpose:
       // they are not document series. Re-adding one is a product change, so it must break here
@@ -337,7 +340,6 @@ class DocumentSequenceHandlerTest {
       // sequence with prefix FC and GOClient/C_DOCTYPE.xml points the doctype at it with
       // IsDocNoControlled='Y'. This name is only useful WITH that dataset pair: dropping
       // either half turns the row into a prefix that governs nothing.
-      assertEquals(6, DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.size());
       assertTrue(DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.contains("AP Invoice"),
           "AP Invoice is numbered by its own FC series since ETP-5364");
     }

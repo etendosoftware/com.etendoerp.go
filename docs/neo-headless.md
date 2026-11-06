@@ -355,6 +355,21 @@ group's callout, as the SPA form shows. Because fallback picks (the first combo 
 protected from the callout cascade, a placeholder document type is now re-applied from the tab filter
 by `DocTypeResolver`.
 
+**Interactive callouts and the tab's doc-type filter (ETP-5837).** The `/callout` endpoint applies
+the same rule to what it returns: `NeoCalloutService#executeCallout` passes every callout response
+through `DocTypeResolver#dropDocTypesOutsideTabFilter`, which removes a proposed
+`C_DocTypeTarget_ID` / `C_DocType_ID` (update or combo) whose `DocSubTypeSO` / `IsReturn` the tab's
+HQL filter excludes. The filter is read with the same parser as `resolveDefaultDocTypeId`. Core's
+BP callouts (`BpDocTypeUtils.resolveDocTypeIdForCallout`) fall back to the organization's
+`IsDefault` doc type, which ignores the tab. On a tab restricted to one sub-type they proposed a doc
+type the tab cannot hold; the interactive cascade then ran the doc-type callout on it and
+re-previewed the number from the other sequence (reference case: a quotation showed `<PV…>` after
+picking the customer). The value is now dropped, so the form keeps its current doc type. A tab with
+no sub-type/return filter, or a proposed doc type the filter allows (e.g. a BP-specific one of an
+allowed sub-type), is left untouched. The defaults and create cascades run their callouts through
+the same method, so they get the same filtering before `reapplyDocTypeFromTabFilter` runs; their
+result is unchanged.
+
 **Placeholders and the entity's pre-hook (ETP-5680).** On `etendo_create` the defaults pass runs
 *before* the entity's pre-hook, on a different `NeoContext`; `McpHookExecutor#forwardFallbackDefaults`
 copies the recorded placeholder keys onto the pre-hook's context, so a customization can tell a
