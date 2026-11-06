@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Modifier;
@@ -650,6 +651,11 @@ class DocTypeResolverTest {
 
     private static final String TABLE_ID = "TABLE_DROP";
     private static final String ORG_DEFAULT_ID = "ORG_DEFAULT_DOCTYPE";
+    private static final String TARGET = "transactionDocument";
+    private static final String EFFECTIVE = "documentType";
+    private static final String PROPOSED_ID = "PROPOSED_DOCTYPE";
+    private static final String SALES_ORDER_WHERE =
+        "e.salesTransaction=true AND e.transactionDocument.sOSubType NOT LIKE 'OB'";
 
     @Test
     @DisplayName("Drops a callout doc type whose sub-type the tab LIKE filter excludes")
@@ -696,6 +702,298 @@ class DocTypeResolverTest {
 
       assertFalse(updates.has("transactionDocument"));
       assertEquals("PL", updates.getJSONObject("priceList").getString("value"));
+    }
+
+    private Tab tabWithWhere(String hqlWhere) {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getId()).thenReturn(TABLE_ID);
+      when(adTab.getHqlwhereclause()).thenReturn(hqlWhere);
+      return adTab;
+    }
+
+    private NeoContext ctxFor(Tab adTab) {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getADTab()).thenReturn(adTab);
+      return NeoContext.builder().sfEntity(sfEntity).adTab(adTab).build();
+    }
+
+    /** A ModelProvider whose entity maps both doc-type columns to their DAL property names. */
+    private ModelProvider modelProviderWithDocTypeColumns() {
+      return modelProviderWithDocTypeColumns(true);
+    }
+
+    /**
+     * A ModelProvider whose entity maps {@code C_DocType_ID} and, when {@code withTarget},
+     * {@code C_DocTypeTarget_ID}. Without it the target lookup returns null, as on M_InOut.
+     */
+    private ModelProvider modelProviderWithDocTypeColumns(boolean withTarget) {
+      Property targetProp = null;
+      if (withTarget) {
+        targetProp = mock(Property.class);
+        when(targetProp.getName()).thenReturn(TARGET);
+      }
+      Property typeProp = mock(Property.class);
+      when(typeProp.getName()).thenReturn(EFFECTIVE);
+      Entity dalEntity = mock(Entity.class);
+      when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID")).thenReturn(targetProp);
+      when(dalEntity.getPropertyByColumnName("C_DocType_ID")).thenReturn(typeProp);
+      ModelProvider instance = mock(ModelProvider.class);
+      when(instance.getEntityByTableId(TABLE_ID)).thenReturn(dalEntity);
+      return instance;
+    }
+
+    private DocumentType docType(String subType, Boolean isReturn) {
+      DocumentType docType = mock(DocumentType.class);
+      when(docType.getSOSubType()).thenReturn(subType);
+      when(docType.isReturn()).thenReturn(isReturn);
+      return docType;
+    }
+
+    private JSONObject valueEntry(String value) throws Exception {
+      return new JSONObject().put("value", value);
+    }
+
+    /**
+     * Truth table of the tab filter, for the rows the end-to-end matrix below does not reach:
+     * null sub-type / return flag, case-insensitive matching and filters combining with AND.
+     * Filters are [subTypeLike, subTypeNotLike, isReturn ("Y"/"N")], as parseSubTypeFilters
+     * returns them.
+     */
+    @ParameterizedTest(name = "[{index}] like={0} notLike={1} return={2} | doc {3}/{4} -> {5}")
+    @CsvSource(delimiter = '|', value = {
+        // null sub-type: a NOT LIKE tab keeps it, a LIKE tab cannot match it (SQL equality)
+        "    | OB |   |    | false | true",
+        "OB  |    |   |    | false | false",
+        // sub-type comparison ignores case
+        "ob  |    |   | OB | false | true",
+        // a null IsReturn reads as false (so a return=true tab drops it)
+        "    |    | N | SO |       | true",
+        "    |    | Y | SO |       | false",
+        // filters combine: allowed sub-type, wrong return flag
+        "    | OB | N | SO | true  | false",
+        // no filter allows anything
+        "    |    |   | OB | true  | true"
+    })
+    @DisplayName("isAllowedByTabFilter mirrors the default doc-type SQL filter")
+    void isAllowedByTabFilterMatrix(String like, String notLike, String isReturnFilter,
+        String subType, Boolean isReturn, boolean expected) {
+      assertEquals(expected, DocTypeResolver.isAllowedByTabFilter(subType, isReturn,
+          new String[] { like, notLike, isReturnFilter }));
+    }
+
+    /**
+     * End to end from the tab HQL: the filter parsed from the where clause decides, for both
+     * {@code C_DocTypeTarget_ID} and {@code C_DocType_ID}, whether the proposed doc type stays.
+     * The allowed rows are the over-dropping guard: a doc type the tab can hold must survive.
+     * Rows with {@code hasTarget=false} are the M_InOut shape: the entity has only
+     * {@code C_DocType_ID}, so the response carries no target entry and the missing target
+     * property must not stop {@code C_DocType_ID} from being checked.
+     */
+    @ParameterizedTest(name = "[{index}] {0} | target col {4} | doc {1}/return {2} -> kept {3}")
+    @CsvSource(delimiter = '|', quoteCharacter = '"', value = {
+        // sales order (NOT LIKE 'OB'): Standard Order stays, a quotation doc type goes
+        "\"e.salesTransaction=true AND e.transactionDocument.sOSubType NOT LIKE 'OB'\" | SO | false | true  | true",
+        "\"e.salesTransaction=true AND e.transactionDocument.sOSubType NOT LIKE 'OB'\" | OB | false | false | true",
+        // quotation (LIKE 'OB'): the quotation doc type stays
+        "\"e.salesTransaction=true AND e.transactionDocument.sOSubType LIKE 'OB'\"     | OB | false | true  | true",
+        // return flag: the matching doc type stays, the opposite one goes
+        "\"e.documentType.return=false\"                                              | SO | false | true  | true",
+        "\"e.documentType.return=false\"                                              | SO | true  | false | true",
+        "\"e.documentType.return=true\"                                               | SO | true  | true  | true",
+        // M_InOut shape (only C_DocType_ID): a return tab keeps a return doc type, drops another
+        "\"e.documentType.return = true\"                                             |    | true  | true  | false",
+        "\"e.documentType.return = true\"                                             |    | false | false | false"
+    })
+    @DisplayName("Keeps doc types the tab HQL allows and drops both columns otherwise")
+    void filtersBothDocTypeColumnsByTabWhereClause(String hqlWhere, String subType,
+        boolean isReturn, boolean kept, boolean hasTarget) throws Exception {
+      Tab adTab = tabWithWhere(hqlWhere);
+      NeoContext ctx = ctxFor(adTab);
+      ModelProvider instance = modelProviderWithDocTypeColumns(hasTarget);
+      DocumentType proposed = docType(subType, isReturn);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(DocumentType.class, PROPOSED_ID)).thenReturn(proposed);
+
+      JSONObject updates = new JSONObject()
+          .put(EFFECTIVE, valueEntry(PROPOSED_ID))
+          .put("priceList", valueEntry("PL"));
+      if (hasTarget) {
+        updates.put(TARGET, valueEntry(PROPOSED_ID));
+      }
+      JSONObject response = new JSONObject().put("updates", updates);
+
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class)) {
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        od.when(OBDal::getInstance).thenReturn(obDal);
+
+        DocTypeResolver.dropDocTypesOutsideTabFilter(response, adTab, ctx);
+      }
+
+      String expectedValue = kept ? PROPOSED_ID : null;
+      JSONObject target = updates.optJSONObject(TARGET);
+      JSONObject effective = updates.optJSONObject(EFFECTIVE);
+      assertEquals(hasTarget ? expectedValue : null,
+          target == null ? null : target.getString("value"));
+      assertEquals(expectedValue, effective == null ? null : effective.getString("value"));
+      assertEquals("PL", updates.getJSONObject("priceList").getString("value"));
+    }
+
+    /**
+     * A callout that clears the doc type (empty or blank string, JSON null) proposes nothing
+     * to check: the entry is left exactly as it came and no doc type is looked up.
+     */
+    @ParameterizedTest(name = "[{index}] {0}.{1} = <{2}>")
+    @CsvSource(delimiter = '|', value = {
+        "updates | value    | ''",
+        "updates | value    | '   '",
+        "updates | value    | NULL",
+        "combos  | selected | ''",
+        "combos  | selected | NULL"
+    })
+    @DisplayName("Leaves an empty or null doc-type value untouched without a lookup")
+    void leavesEmptyOrNullDocTypeValueUntouched(String section, String valueKey, String raw)
+        throws Exception {
+      Tab adTab = tabWithWhere(SALES_ORDER_WHERE);
+      NeoContext ctx = ctxFor(adTab);
+      ModelProvider instance = modelProviderWithDocTypeColumns();
+      Object value = "NULL".equals(raw) ? JSONObject.NULL : raw;
+      JSONObject entries = new JSONObject()
+          .put(TARGET, new JSONObject().put(valueKey, value))
+          .put(EFFECTIVE, new JSONObject().put(valueKey, value));
+      JSONObject response = new JSONObject().put(section, entries);
+      String before = response.toString();
+
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class)) {
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+
+        DocTypeResolver.dropDocTypesOutsideTabFilter(response, adTab, ctx);
+
+        od.verifyNoInteractions();
+      }
+      assertEquals(before, response.toString());
+    }
+
+    @Test
+    @DisplayName("Removes a combo whose selected doc type the tab does not allow")
+    void dropsComboWithDisallowedSelection() throws Exception {
+      Tab adTab = tabWithWhere(SALES_ORDER_WHERE);
+      NeoContext ctx = ctxFor(adTab);
+      ModelProvider instance = modelProviderWithDocTypeColumns();
+      DocumentType quotation = docType("OB", false);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(DocumentType.class, PROPOSED_ID)).thenReturn(quotation);
+
+      JSONObject combos = new JSONObject()
+          .put(TARGET, new JSONObject().put("selected", PROPOSED_ID))
+          .put("priceList", new JSONObject().put("selected", "PL"));
+      JSONObject response = new JSONObject().put("combos", combos);
+
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class)) {
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        od.when(OBDal::getInstance).thenReturn(obDal);
+
+        DocTypeResolver.dropDocTypesOutsideTabFilter(response, adTab, ctx);
+      }
+
+      assertFalse(combos.has(TARGET));
+      assertEquals("PL", combos.getJSONObject("priceList").getString("selected"));
+    }
+
+    @Test
+    @DisplayName("Keeps a doc type id that does not resolve to a document type")
+    void keepsUnknownDocTypeId() throws Exception {
+      Tab adTab = tabWithWhere(SALES_ORDER_WHERE);
+      NeoContext ctx = ctxFor(adTab);
+      ModelProvider instance = modelProviderWithDocTypeColumns();
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(DocumentType.class, PROPOSED_ID)).thenReturn(null);
+
+      JSONObject updates = new JSONObject().put(TARGET, valueEntry(PROPOSED_ID));
+      JSONObject response = new JSONObject().put("updates", updates);
+
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class)) {
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        od.when(OBDal::getInstance).thenReturn(obDal);
+
+        DocTypeResolver.dropDocTypesOutsideTabFilter(response, adTab, ctx);
+      }
+
+      verify(obDal).get(DocumentType.class, PROPOSED_ID);
+      assertEquals(PROPOSED_ID, updates.getJSONObject(TARGET).getString("value"));
+    }
+
+    @Test
+    @DisplayName("Leaves the response intact when the doc type lookup fails")
+    void leavesResponseIntactOnLookupFailure() throws Exception {
+      Tab adTab = tabWithWhere(SALES_ORDER_WHERE);
+      NeoContext ctx = ctxFor(adTab);
+      ModelProvider instance = modelProviderWithDocTypeColumns();
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(DocumentType.class, PROPOSED_ID))
+          .thenThrow(new IllegalStateException("lookup failed"));
+
+      JSONObject response = new JSONObject().put("updates", new JSONObject()
+          .put(TARGET, valueEntry(PROPOSED_ID))
+          .put(EFFECTIVE, valueEntry(PROPOSED_ID)));
+      String before = response.toString();
+
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class)) {
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        od.when(OBDal::getInstance).thenReturn(obDal);
+
+        assertDoesNotThrow(
+            () -> DocTypeResolver.dropDocTypesOutsideTabFilter(response, adTab, ctx));
+      }
+
+      assertEquals(before, response.toString());
+    }
+
+    @Test
+    @DisplayName("A tab without a doc-type filter returns before touching the model or OBDal")
+    void tabWithoutFilterIsNeverChecked() throws Exception {
+      Tab adTab = tabWithWhere("e.salesTransaction=true");
+      NeoContext ctx = ctxFor(adTab);
+      JSONObject response = new JSONObject().put("updates", new JSONObject()
+          .put(TARGET, valueEntry(PROPOSED_ID)));
+      String before = response.toString();
+
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class)) {
+        DocTypeResolver.dropDocTypesOutsideTabFilter(response, adTab, ctx);
+
+        mp.verifyNoInteractions();
+        od.verifyNoInteractions();
+      }
+      assertEquals(before, response.toString());
+    }
+
+    @Test
+    @DisplayName("Null response, null tab or a tab without table is a no-op")
+    void nullInputsAreNoOp() throws Exception {
+      Tab filteredTab = tabWithWhere(SALES_ORDER_WHERE);
+      NeoContext ctx = ctxFor(filteredTab);
+      Tab tabWithoutTable = mock(Tab.class);
+      JSONObject response = new JSONObject().put("updates", new JSONObject()
+          .put(TARGET, valueEntry(PROPOSED_ID)));
+      String before = response.toString();
+
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class)) {
+        DocTypeResolver.dropDocTypesOutsideTabFilter(null, filteredTab, ctx);
+        DocTypeResolver.dropDocTypesOutsideTabFilter(response, null, ctx);
+        DocTypeResolver.dropDocTypesOutsideTabFilter(response, tabWithoutTable, ctx);
+
+        mp.verifyNoInteractions();
+        od.verifyNoInteractions();
+      }
+      assertEquals(before, response.toString());
     }
   }
 }

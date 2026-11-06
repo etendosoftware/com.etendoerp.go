@@ -25,7 +25,6 @@
     "CurrencyOptionsHandler",
     "CustomerAccountingHandler",
     "DocumentActionHandler",
-    "DocumentSequenceHandler",
     "FactAcctHandler",
     "FinancialAccountAccountingHandler",
     "FinancialAccountBankConnectionHandler",

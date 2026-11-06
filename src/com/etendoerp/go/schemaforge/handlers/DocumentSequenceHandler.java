@@ -17,23 +17,21 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Pattern;
 
-import javax.inject.Named;
-
 import org.apache.commons.lang3.StringUtils;
-import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.utility.Sequence;
 
-import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoExtension;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
@@ -66,19 +64,22 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * resolved at all the prefix is accepted: refusing a save because the address is not filled in
  * yet would break the very onboarding step this validation exists to serve.
  *
- * <p>It also SCOPES THE LIST. {@code AD_Sequence} holds ~145 rows per provisioned tenant,
+ * <p>It also SCOPES THE SPEC. {@code AD_Sequence} holds ~145 rows per provisioned tenant,
  * almost all of them record-ID and internal counters that mean nothing to a user looking for
- * their invoice numbering — so the list is narrowed to the caller's own client and to the seven
- * document series in {@link #VISIBLE_SEQUENCE_NAMES} (ETP-5285, ETP-5364, ETP-5837). See
- * {@code applyListScope}.
+ * their invoice numbering — so the spec exposes only the caller's own client's rows among the
+ * seven document series in {@link #VISIBLE_SEQUENCE_NAMES} (ETP-5285, ETP-5364, ETP-5837). The
+ * list is narrowed through {@link #readPredicates} and every read or write by id is refused
+ * outside that set — see {@link #refuseHiddenRecord}. Since ETP-5837 this is access control, not
+ * just a shorter list: the hidden rows include shared fallback counters ({@code DocumentNo_*})
+ * whose prefix would change every doctype without a sequence of its own.
  *
- * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
- * {@code docs/neo-headless-extensibility.md} §2.2: {@code lookupHandler()} reads {@code @Named}
- * off {@code handler.getClass()}, and a normal-scoped bean resolves to a Weld client proxy whose
- * subclass does not carry the (non-{@code @Inherited}) annotation, so the qualifier silently
- * stops being discovered.
+ * <p>Bound by {@link NeoExtension} (ETP-5837 migrated it off the legacy
+ * {@code Java_Qualifier}/{@code @Named("document-sequence")} binding), so every channel —
+ * REST single, batch and MCP — resolves it through {@code NeoExtensionDispatcher}, and
+ * {@link #readPredicates} through {@code NeoReadPredicates}. Never give it a normal CDI scope:
+ * it stays a {@code @Dependent} bean ({@code beans.xml} discovers all classes).
  */
-@Named("document-sequence")
+@NeoExtension(spec = "document-sequence", entity = "sequence")
 public class DocumentSequenceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(DocumentSequenceHandler.class);
@@ -87,14 +88,11 @@ public class DocumentSequenceHandler implements NeoHandler {
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";
 
-  private static final String CRITERIA_PARAM = "criteria";
-  private static final String FIELD_NAME = "fieldName";
-  private static final String OPERATOR = "operator";
-  private static final String VALUE = "value";
+  private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_DELETE = "DELETE";
 
-  /** Contract field names of {@code AD_Sequence.Name} and {@code AD_Client_ID}. */
-  private static final String FIELD_SEQUENCE_NAME = "name";
-  private static final String FIELD_CLIENT = "client";
+  /** Etendo AD ids: 32 hex chars, or the numeric legacy ids. Guards the literal in the HQL. */
+  private static final Pattern AD_ID = Pattern.compile("^(?:[0-9A-Fa-f]{32}|\\d+)$");
 
   /**
    * The only sequences this window shows, by {@code AD_Sequence.Name}.
@@ -206,12 +204,20 @@ public class DocumentSequenceHandler implements NeoHandler {
       "The prefix can only contain uppercase letters, digits and hyphens.";
 
   /**
-   * Pre-hook: validates the submitted prefix on create/update and short-circuits with a
+   * The answer to a read or write by id of a sequence this spec does not expose (ETP-5837).
+   * Deliberately the same 404 a missing record gets: a hidden sequence is not a record of this
+   * spec, and a 403 would confirm that the id exists.
+   */
+  static final String ERR_SEQUENCE_NOT_FOUND = "Document sequence not found.";
+
+  /**
+   * Pre-hook: refuses with a {@code 404} any read or write by id of a sequence outside the
+   * spec's scope, then validates the submitted prefix on create/update and short-circuits with a
    * {@code 400} when a rule is violated.
    *
    * @param context the NEO request context
-   * @return an error {@link NeoResponse} when the prefix is rejected, {@code null} to continue
-   *     with the default CRUD
+   * @return an error {@link NeoResponse} when the record is hidden or the prefix is rejected,
+   *     {@code null} to continue with the default CRUD
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -219,9 +225,9 @@ public class DocumentSequenceHandler implements NeoHandler {
       return null;
     }
     String method = context.getHttpMethod();
-    if (METHOD_GET.equalsIgnoreCase(method)) {
-      applyListScope(context);
-      return null;
+    NeoResponse hidden = refuseHiddenRecord(context);
+    if (hidden != null) {
+      return hidden;
     }
     if (!METHOD_POST.equalsIgnoreCase(method) && !METHOD_PUT.equalsIgnoreCase(method)) {
       return null;
@@ -275,77 +281,124 @@ public class DocumentSequenceHandler implements NeoHandler {
   }
 
   /**
-   * Narrows a list GET to the caller's own client and to {@link #VISIBLE_SEQUENCE_NAMES}, by
-   * appending clauses to the request's own {@code criteria} parameter.
+   * The list scope, as predicates ANDed into the list query of every channel (ETP-5837): the
+   * REST list {@code GET} and its count, export and {@code ?_distinct=} values, and MCP
+   * {@code etendo_list} — see {@code NeoReadPredicates}. Only rows named in
+   * {@link #VISIBLE_SEQUENCE_NAMES}, and only the caller's own client's.
    *
-   * <p>Done by INJECTING criteria rather than by filtering the result: the pre-hook shares its
-   * {@link NeoContext} with the default CRUD that runs after it, so the narrowed query is the
-   * one that executes — which keeps paging, sorting and the total count honest. Filtering the
-   * response instead would have returned "page 1 of 242" and then thrown most of it away, so
-   * the first page could legitimately have come back empty.
+   * <p>It replaces the {@code criteria} injection this handler used to do from {@link #handle}.
+   * That only narrowed the REST list, because MCP {@code etendo_list} builds its query from its
+   * own {@code filters} and never reads a {@code criteria} parameter: an agent listing this spec
+   * got every sequence of the tenant (149 rows on the QA instance). A predicate goes into the
+   * query itself, so paging, sorting and the total count stay honest on every channel, and a
+   * user's own filter is still ANDed on top rather than replaced.
    *
-   * <p>Top-level criteria clauses are ANDed by {@code AdvancedQueryBuilder}, so appending is
-   * enough — a user's own filter still applies, narrowed further rather than replaced.
+   * <p>The client clause is redundant today — the instance has no sequences at client
+   * {@code "0"}, so DAL's readable-clients filter already yields tenant-only rows — but stated
+   * so that a module which later ships System-level sequences cannot leak them into a tenant.
    *
-   * <p>Applies to the LIST only. A GET by id is left alone: these are the tenant's own records
-   * and the point here is a shorter list, not access control, so a deep link into a sequence
-   * that the list does not show still resolves.
+   * <p>Spliced into the HQL text verbatim (there is no bind-parameter mechanism): the names are
+   * server constants, quoted with {@code '} doubled; the client id comes from the session and is
+   * matched against {@link #AD_ID} before use, so no request input reaches the query.
    *
-   * <p>Never throws. A criteria parameter this method cannot parse is left untouched — a
-   * cluttered list is a far better failure than a 500 on a window that has just loaded.
+   * @param context the read context
+   * @return the HQL predicates over the alias {@code e}
    */
-  private void applyListScope(NeoContext context) {
-    if (context.getRecordId() != null) {
-      return;
+  @Override
+  public List<String> readPredicates(NeoContext context) {
+    List<String> predicates = new ArrayList<>();
+    predicates.add("e.name in (" + quotedNames() + ")");
+    String clientId = currentClientId(context);
+    if (clientId == null) {
+      // No session client to scope by: DAL's readable-clients filter still applies.
+      return predicates;
     }
-    Map<String, String> params = context.getQueryParams();
-    if (params == null) {
-      return;
+    if (AD_ID.matcher(clientId).matches()) {
+      predicates.add("e.client.id = '" + clientId + "'");
+    } else {
+      // Fail closed: a session client id that is not an AD id cannot be spliced into the HQL,
+      // and dropping the clause would widen the scope instead of narrowing it.
+      log.warn("DocumentSequenceHandler: session client id '{}' is not an AD id; "
+          + "serving an empty sequence list", clientId);
+      predicates.add("1 = 0");
     }
-    try {
-      JSONArray criteria = readCriteria(params.get(CRITERIA_PARAM));
-      criteria.put(new JSONObject()
-          .put(FIELD_NAME, FIELD_SEQUENCE_NAME)
-          .put(OPERATOR, "inSet")
-          .put(VALUE, new JSONArray(VISIBLE_SEQUENCE_NAMES)));
-      String clientId = currentClientId(context);
-      if (clientId != null) {
-        // The tenant's own sequences only. Redundant today — the instance has no sequences at
-        // client "0", so DAL's readable-clients filter already yields tenant-only rows — but
-        // stated explicitly so a module that later ships System-level sequences cannot leak
-        // them into a tenant's window.
-        criteria.put(new JSONObject()
-            .put(FIELD_NAME, FIELD_CLIENT)
-            .put(OPERATOR, "equals")
-            .put(VALUE, clientId));
-      }
-      params.put(CRITERIA_PARAM, criteria.toString());
-    } catch (JSONException e) {
-      log.warn("DocumentSequenceHandler: could not narrow the sequence list ({}); "
-          + "serving it unfiltered", e.getMessage());
+    return predicates;
+  }
+
+  private static String quotedNames() {
+    List<String> quoted = new ArrayList<>(VISIBLE_SEQUENCE_NAMES.size());
+    for (String name : VISIBLE_SEQUENCE_NAMES) {
+      quoted.add("'" + name.replace("'", "''") + "'");
     }
+    return String.join(", ", quoted);
   }
 
   /**
-   * The request's existing criteria, or a fresh array. A value that is not a JSON array is
-   * discarded rather than merged: {@code NeoCrudHandler} treats an unparseable criteria the same
-   * way, so this stays consistent with it instead of inventing a second interpretation.
+   * Refuses a read or write by id ({@code GET}, {@code PUT}, {@code PATCH}, {@code DELETE}) of
+   * one of the caller's own sequences that the spec does not expose — one whose name is not in
+   * {@link #VISIBLE_SEQUENCE_NAMES} (ETP-5837).
+   *
+   * <p>A read by id is not covered by {@link #readPredicates} — core resolves it with its own
+   * {@code id = :id} query and ignores the where clause — and neither is any write, so this is
+   * where "the spec exposes only these rows" holds for them. Every channel reaches it: REST
+   * single, batch and MCP all dispatch this pre-hook with the record id (MCP {@code etendo_get}
+   * through its read provider, {@code etendo_update} as a {@code PUT}).
+   *
+   * <p>404, for three reasons: it is the NEO convention for a record outside a spec's scope
+   * ({@code McpSpecScope}, ETP-5852 M-51), a 403 would confirm that the id exists, and nothing in
+   * the UI links to a hidden sequence by id — the window is reached only through its own list.
+   *
+   * <p><b>What the answer reveals.</b> The lookup runs in admin mode so it can read the row's
+   * client, but only an OWN-client row is ever answered from here. A row of another client, and
+   * an id that does not exist at all, both return {@code null} and reach the default CRUD, whose
+   * readable-client filter does not see the row — so the caller gets the same generic not-found
+   * for both and cannot tell "exists in another tenant" from "does not exist". The one thing
+   * this method's own 404 reveals is that an id names a sequence of the caller's own tenant
+   * that this spec does not expose; within one's own tenant that is not a disclosure.
+   *
+   * @param context the CRUD request context
+   * @return a {@code 404} when the target is an own-client sequence outside the allowlist,
+   *     {@code null} otherwise (another client's row, a missing id, a list read and a create)
    */
-  private JSONArray readCriteria(String raw) {
-    if (StringUtils.isBlank(raw)) {
-      return new JSONArray();
+  private NeoResponse refuseHiddenRecord(NeoContext context) {
+    String method = context.getHttpMethod();
+    boolean byIdMethod = METHOD_GET.equalsIgnoreCase(method) || METHOD_PUT.equalsIgnoreCase(method)
+        || METHOD_PATCH.equalsIgnoreCase(method) || METHOD_DELETE.equalsIgnoreCase(method);
+    String recordId = StringUtils.trimToNull(context.getReadId());
+    if (!byIdMethod || recordId == null) {
+      return null;
     }
+    Sequence sequence;
+    OBContext.setAdminMode(true);
     try {
-      return BoundedJsonParser.parseArray(raw);
-    } catch (JSONException e) {
-      log.debug("DocumentSequenceHandler: existing criteria is not a JSON array ({}); "
-          + "replacing it with the window's own scope", e.getMessage());
-      return new JSONArray();
+      sequence = OBDal.getInstance().get(Sequence.class, recordId);
+    } finally {
+      OBContext.restorePreviousMode();
     }
+    if (sequence == null) {
+      return null;
+    }
+    String clientId = currentClientId(context);
+    // Every channel (REST single, batch, MCP) builds its context with the session OBContext, so
+    // a null client only happens outside a real request (unit tests): treat the row as the
+    // caller's own and judge it by name alone. Neither branch can reveal another tenant's row:
+    // both either refuse by name or hand over to the default CRUD.
+    boolean ownClient = clientId == null
+        || (sequence.getClient() != null && clientId.equals(sequence.getClient().getId()));
+    if (!ownClient) {
+      // Another tenant's row: indistinguishable from a missing id — let the default CRUD, whose
+      // readable-client filter does not see it, answer its generic not-found.
+      return null;
+    }
+    if (VISIBLE_SEQUENCE_NAMES.contains(sequence.getName())) {
+      return null;
+    }
+    log.debug("DocumentSequenceHandler: refusing {} on hidden sequence {}", method, recordId);
+    return NeoResponse.error(404, ERR_SEQUENCE_NOT_FOUND);
   }
 
   private String currentClientId(NeoContext context) {
-    OBContext obContext = context.getObContext();
+    OBContext obContext = context == null ? null : context.getObContext();
     return obContext == null || obContext.getCurrentClient() == null
         ? null : obContext.getCurrentClient().getId();
   }

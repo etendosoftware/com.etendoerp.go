@@ -19,25 +19,40 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import javax.inject.Named;
 
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.utility.Sequence;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoExtension;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -46,7 +61,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  * <p>Split in two: {@code validateSpanishPrefix} is pure and gets the rule matrix, while
  * {@link #handle(NeoContext)}'s guards are covered only up to the point where they stop needing
- * a DAL — everything past the country lookup belongs to an integration test.
+ * a DAL — everything past the country lookup belongs to an integration test. The spec's scope
+ * (ETP-5837) is covered with the DAL and the country lookup mocked: {@code readPredicates} for
+ * the list, and the by-id refusal in {@code handle} for reads and writes of a single row.
  *
  * @covers com.etendoerp.go.schemaforge.handlers.DocumentSequenceHandler
  */
@@ -202,15 +219,16 @@ class DocumentSequenceHandlerTest {
   class CdiWiring {
 
     @Test
-    @DisplayName("carries @Named matching the spec's Java_Qualifier and no bean scope")
-    void isNamedWithNoScope() {
-      // REGRESSION GUARD (ETP-4244 precedent, documented in neo-headless-extensibility.md
-      // §2.2): lookupHandler() reads @Named off handler.getClass(). Adding a normal scope such
-      // as @ApplicationScoped makes Weld hand back a client proxy whose subclass does not carry
-      // the (non-@Inherited) annotation, and the handler silently stops being discovered — no
-      // error, the prefix rules just quietly stop applying.
-      Named named = DocumentSequenceHandler.class.getAnnotation(Named.class);
-      assertEquals("document-sequence", named == null ? null : named.value());
+    @DisplayName("is bound by @NeoExtension, with no @Named and no bean scope")
+    void isBoundByAnnotationWithNoScope() {
+      // ETP-5837 migrated this pair off the legacy Java_Qualifier/@Named binding. A normal scope
+      // such as @ApplicationScoped would still hide the class behind a Weld client proxy, so it
+      // stays a @Dependent bean.
+      NeoExtension binding = DocumentSequenceHandler.class.getAnnotation(NeoExtension.class);
+      assertNotNull(binding);
+      assertEquals("document-sequence", binding.spec());
+      assertEquals("sequence", binding.entity());
+      assertNull(DocumentSequenceHandler.class.getAnnotation(Named.class));
       for (java.lang.annotation.Annotation annotation
           : DocumentSequenceHandler.class.getAnnotations()) {
         String name = annotation.annotationType().getName();
@@ -248,6 +266,48 @@ class DocumentSequenceHandlerTest {
         .build();
   }
 
+  private static final String OWN_CLIENT_ID = "4028E6C72959682B01295A070852010D";
+  private static final String OTHER_CLIENT_ID = "23C59575B9CF467C9620760EB255B389";
+
+  /** A CRUD context carrying a session, as every real channel builds it. */
+  private static NeoContext sessionContext(String httpMethod, JSONObject requestBody,
+      String recordId, OBContext obContext) {
+    return NeoContext.builder()
+        .specName("document-sequence")
+        .entityName("sequence")
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod(httpMethod)
+        .requestBody(requestBody)
+        .queryParams(new HashMap<>())
+        .recordId(recordId)
+        .obContext(obContext)
+        .build();
+  }
+
+  /** A session whose current client has the given id; {@code null} means no current client. */
+  private static OBContext sessionOf(String clientId) {
+    OBContext obContext = mock(OBContext.class);
+    if (clientId != null) {
+      Client client = clientWithId(clientId);
+      when(obContext.getCurrentClient()).thenReturn(client);
+    }
+    return obContext;
+  }
+
+  private static Client clientWithId(String clientId) {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    return client;
+  }
+
+  private static Sequence sequenceOf(String name, String clientId) {
+    Sequence sequence = mock(Sequence.class);
+    when(sequence.getName()).thenReturn(name);
+    Client client = clientWithId(clientId);
+    when(sequence.getClient()).thenReturn(client);
+    return sequence;
+  }
+
   /** Compile-time guard that the rejection shape stays a 400 the frontend can map. */
   @Test
   @DisplayName("rejection messages are the exact strings backendErrors.js maps")
@@ -266,38 +326,64 @@ class DocumentSequenceHandlerTest {
   }
 
   @Nested
-  @DisplayName("applyListScope — the list is narrowed to what a user came here for")
+  @DisplayName("list scope — readPredicates, honoured by REST, batch and MCP list reads alike")
   class ListScope {
 
-    /** The criteria the handler injected, as clauses keyed by fieldName. */
-    private Map<String, JSONObject> injectedClauses(Map<String, String> params)
-        throws JSONException {
-      JSONArray criteria = new JSONArray(params.get("criteria"));
-      Map<String, JSONObject> byField = new HashMap<>();
-      for (int i = 0; i < criteria.length(); i++) {
-        JSONObject clause = criteria.getJSONObject(i);
-        byField.put(clause.optString("fieldName"), clause);
+    @Test
+    @DisplayName("declares a name predicate over exactly the seven visible sequences")
+    void readPredicatesScopeByName() {
+      // REPRO (ETP-5837): the scope used to be a `criteria` param injected from handle(), which
+      // MCP etendo_list never reads — an agent listing this spec got every sequence of the
+      // tenant. readPredicates is ANDed into the list query of every channel.
+      List<String> predicates = handler.readPredicates(
+          listContext(NeoEndpointType.CRUD, "GET", null, new HashMap<>(), null));
+      String names = predicates.get(0);
+      assertTrue(names.startsWith("e.name in ("), names);
+      for (String name : DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES) {
+        assertTrue(names.contains("'" + name + "'"), name + " missing from " + names);
       }
-      return byField;
+      assertFalse(names.contains("DocumentNo_"), names);
+      // No OBContext: no client to scope by, so the name predicate is the only one.
+      assertEquals(1, predicates.size(), predicates.toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "4028E6C72959682B01295A070852010D", "1000000" })
+    @DisplayName("scopes to the session client by its exact id, UUID or legacy numeric")
+    void readPredicatesScopeToTheSessionClient(String clientId) {
+      List<String> predicates = handler.readPredicates(
+          sessionContext("GET", null, null, sessionOf(clientId)));
+
+      assertEquals(2, predicates.size(), predicates.toString());
+      assertTrue(predicates.get(0).startsWith("e.name in ("), predicates.get(0));
+      assertEquals("e.client.id = '" + clientId + "'", predicates.get(1));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "abc", "' or '1'='1", "4028E6C72959682B01295A070852010G",
+        "4028E6C72959682B01295A070852010D' --" })
+    @DisplayName("fails closed with 1 = 0 when the session client id is not an AD id")
+    void readPredicatesFailClosedOnMalformedClientId(String clientId) {
+      // Dropping the clause would widen the scope to every readable client; splicing the value
+      // would put session text into the HQL. Neither: the list is empty.
+      List<String> predicates = handler.readPredicates(
+          sessionContext("GET", null, null, sessionOf(clientId)));
+
+      assertEquals(2, predicates.size(), predicates.toString());
+      assertTrue(predicates.get(0).startsWith("e.name in ("), predicates.get(0));
+      assertEquals("1 = 0", predicates.get(1));
+      assertFalse(predicates.stream().anyMatch(p -> p.contains("e.client.id")),
+          predicates.toString());
     }
 
     @Test
-    @DisplayName("narrows a list GET to the seven sequence names, as an inSet clause")
-    void narrowsListByName() throws JSONException {
-      // A provisioned tenant has ~145 sequences; all but these are record-ID and internal
-      // counters. Injected as criteria rather than filtered out of the response so the
-      // narrowed query is the one that runs — see the method's javadoc on paging.
-      Map<String, String> params = new HashMap<>();
-      assertNull(handler.handle(listContext(NeoEndpointType.CRUD, "GET", null, params, null)));
+    @DisplayName("declares only the name predicate when the session has no current client")
+    void readPredicatesWithoutSessionClientScopeByNameOnly() {
+      List<String> predicates = handler.readPredicates(
+          sessionContext("GET", null, null, sessionOf(null)));
 
-      JSONObject nameClause = injectedClauses(params).get("name");
-      assertEquals("inSet", nameClause.getString("operator"));
-      JSONArray names = nameClause.getJSONArray("value");
-      assertEquals(DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.size(), names.length());
-      for (int i = 0; i < names.length(); i++) {
-        assertTrue(DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.contains(names.getString(i)),
-            names.getString(i) + " is not in the allowlist");
-      }
+      assertEquals(1, predicates.size(), predicates.toString());
+      assertTrue(predicates.get(0).startsWith("e.name in ("), predicates.get(0));
     }
 
     @Test
@@ -364,58 +450,127 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("keeps a filter the user already applied, narrowing rather than replacing it")
-    void appendsToExistingCriteria() throws JSONException {
-      // Top-level criteria clauses are ANDed, so appending is enough — and it must be an
-      // append: replacing would silently drop the user's own list filter.
-      JSONObject userClause = new JSONObject()
-          .put("fieldName", "prefix").put("operator", "iContains").put("value", "FV");
-      Map<String, String> params = new HashMap<>();
-      params.put("criteria", new JSONArray().put(userClause).toString());
-
-      assertNull(handler.handle(listContext(NeoEndpointType.CRUD, "GET", null, params, null)));
-
-      Map<String, JSONObject> clauses = injectedClauses(params);
-      assertEquals("FV", clauses.get("prefix").getString("value"));
-      assertEquals("inSet", clauses.get("name").getString("operator"));
-    }
-
-    @Test
-    @DisplayName("leaves a GET by id alone")
-    void doesNotScopeGetById() {
-      // These are the tenant's own records and the point is a shorter list, not access
-      // control, so a deep link into a sequence the list does not show still resolves.
-      Map<String, String> params = new HashMap<>();
-      assertNull(handler.handle(
-          listContext(NeoEndpointType.CRUD, "GET", null, params, "SOME_SEQUENCE_ID")));
-      assertNull(params.get("criteria"));
-    }
-
-    @Test
-    @DisplayName("does not touch the criteria on a write")
-    void doesNotScopeWrites() throws JSONException {
-      Map<String, String> params = new HashMap<>();
-      handler.handle(listContext(NeoEndpointType.CRUD, "POST", body("FV-"), params, null));
-      assertNull(params.get("criteria"));
-    }
-
-    @Test
-    @DisplayName("replaces a criteria value it cannot parse instead of failing the request")
-    void survivesUnparseableCriteria() throws JSONException {
-      // A cluttered list is a far better failure than a 500 on a window that just loaded, and
-      // NeoCrudHandler treats an unparseable criteria the same way.
-      Map<String, String> params = new HashMap<>();
-      params.put("criteria", "not json at all");
-
-      assertNull(handler.handle(listContext(NeoEndpointType.CRUD, "GET", null, params, null)));
-      assertEquals("inSet", injectedClauses(params).get("name").getString("operator"));
-    }
-
-    @Test
-    @DisplayName("tolerates a context with no query params to write into")
-    void toleratesMissingQueryParams() {
+    @DisplayName("a list GET reaches the default CRUD untouched")
+    void listGetIsNotShortCircuited() {
       NeoContext context = listContext(NeoEndpointType.CRUD, "GET", null, null, null);
       assertNull(handler.handle(context));
+    }
+  }
+
+  @Nested
+  @DisplayName("by-id scope — a hidden sequence is not a record of this spec")
+  class ByIdScope {
+
+    @Test
+    @DisplayName("refuses an update of a sequence outside the allowlist with a 404")
+    void refusesUpdateOfHiddenSequence() throws JSONException {
+      // REPRO (ETP-5837): an MCP agent could set the prefix of DocumentNo_C_Order, the fallback
+      // counter shared by every doctype without a sequence of its own.
+      Sequence hidden = mock(Sequence.class);
+      when(hidden.getName()).thenReturn("DocumentNo_C_Order");
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(Sequence.class, "HIDDEN_ID")).thenReturn(hidden);
+
+      NeoResponse response;
+      try (MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> oc = Mockito.mockStatic(OBContext.class)) {
+        od.when(OBDal::getInstance).thenReturn(obDal);
+        response = handler.handle(listContext(NeoEndpointType.CRUD, "PUT", body("XX"),
+            new HashMap<>(), "HIDDEN_ID"));
+      }
+
+      assertNotNull(response, "a hidden sequence must be refused, not updated");
+      assertEquals(404, response.getHttpStatus());
+    }
+
+    /**
+     * method, the sequence's name ({@code null}: the id does not exist), the sequence's client,
+     * and whether the handler itself answers 404. Every other row returns {@code null}, handing
+     * over to the default CRUD — which, for another client's row, answers the same generic
+     * not-found as for a missing id.
+     */
+    static Stream<Arguments> byIdMatrix() {
+      return Stream.of(
+          Arguments.of("GET", "AR Invoice", OTHER_CLIENT_ID, false),
+          Arguments.of("GET", "DocumentNo_C_Order", OTHER_CLIENT_ID, false),
+          Arguments.of("PUT", "DocumentNo_C_Order", OTHER_CLIENT_ID, false),
+          Arguments.of("GET", "DocumentNo_C_Order", OWN_CLIENT_ID, true),
+          Arguments.of("PATCH", "DocumentNo_C_Order", OWN_CLIENT_ID, true),
+          Arguments.of("DELETE", "DocumentNo_C_Order", OWN_CLIENT_ID, true),
+          Arguments.of("GET", null, OWN_CLIENT_ID, false),
+          Arguments.of("GET", "AR Invoice", OWN_CLIENT_ID, false));
+    }
+
+    @ParameterizedTest(name = "{0} {1} of client {2} -> own 404: {3}")
+    @MethodSource("byIdMatrix")
+    @DisplayName("answers 404 only for an own-client sequence outside the allowlist")
+    void byIdScopeMatrix(String method, String sequenceName, String sequenceClientId,
+        boolean expect404) {
+      Sequence sequence = sequenceName == null ? null
+          : sequenceOf(sequenceName, sequenceClientId);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(Sequence.class, "SEQ_ID")).thenReturn(sequence);
+      OBContext session = sessionOf(OWN_CLIENT_ID);
+
+      NeoResponse response;
+      try (MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> oc = Mockito.mockStatic(OBContext.class)) {
+        od.when(OBDal::getInstance).thenReturn(obDal);
+        response = handler.handle(sessionContext(method, null, "SEQ_ID", session));
+        // Proves every row reached the lookup: a null below is the verdict, not a short-circuit.
+        verify(obDal).get(Sequence.class, "SEQ_ID");
+        oc.verify(OBContext::restorePreviousMode);
+      }
+
+      if (expect404) {
+        assertNotNull(response, "an own hidden sequence must be refused");
+        assertEquals(404, response.getHttpStatus());
+        assertEquals(DocumentSequenceHandler.ERR_SEQUENCE_NOT_FOUND,
+            response.getBody().optJSONObject("error").optString("message"));
+      } else {
+        assertNull(response, "must hand over to the default CRUD");
+      }
+    }
+
+    static Stream<Arguments> ownVisiblePutPrefixes() {
+      return Stream.of(
+          Arguments.of("fv_", DocumentSequenceHandler.ERR_PREFIX_LOWER_OR_ACCENT),
+          Arguments.of("FV-", null));
+    }
+
+    @ParameterizedTest(name = "prefix \"{0}\"")
+    @MethodSource("ownVisiblePutPrefixes")
+    @DisplayName("a PUT by id of an own visible sequence still runs the prefix rules")
+    void putByIdOfOwnVisibleSequenceStillValidatesThePrefix(String prefix, String expectedError)
+        throws JSONException {
+      // The real UI save: PUT with the record id. The by-id check must let it through to the
+      // prefix rules — an invalid prefix is a 400 with the rule's message, never the 404.
+      Sequence visible = sequenceOf("AR Invoice", OWN_CLIENT_ID);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(Sequence.class, "SEQ_ID")).thenReturn(visible);
+      Organization org = mock(Organization.class);
+      OBContext session = sessionOf(OWN_CLIENT_ID);
+      when(session.getCurrentOrganization()).thenReturn(org);
+
+      NeoResponse response;
+      try (MockedStatic<OBDal> od = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> oc = Mockito.mockStatic(OBContext.class);
+          MockedStatic<OrganizationCountrySupport> country =
+              Mockito.mockStatic(OrganizationCountrySupport.class)) {
+        od.when(OBDal::getInstance).thenReturn(obDal);
+        country.when(() -> OrganizationCountrySupport.isSpain(org)).thenReturn(true);
+        response = handler.handle(sessionContext("PUT", body(prefix), "SEQ_ID", session));
+        country.verify(() -> OrganizationCountrySupport.isSpain(org));
+      }
+
+      if (expectedError == null) {
+        assertNull(response, "a valid prefix continues to the default CRUD");
+      } else {
+        assertNotNull(response);
+        assertEquals(400, response.getHttpStatus());
+        assertEquals(expectedError,
+            response.getBody().optJSONObject("error").optString("message"));
+      }
     }
   }
 }
