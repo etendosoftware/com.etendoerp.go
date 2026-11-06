@@ -328,10 +328,13 @@ final class InvoiceCalloutHelper {
    * {@code tbaiReverseinvoicecode} (this fix) still gets an EXPLICIT {@code issotrx} guard below —
    * belt-and-braces so the backend's intent doesn't silently depend on frontend field config, and
    * so this callout never emits a stray {@code updates} entry for a field structurally absent on the
-   * purchase side. TicketBAI reverse-invoice codes (AD_REF_LIST
-   * 89C6433F71584D23B95140DE86EDC726, e.g. {@code "R4"} = "Factura rectificativa: Resto.") are an
-   * issued-document (AR) concept — a received (AP) purchase invoice is never TicketBAI-reported by
-   * the receiving party.
+   * purchase side. TicketBAI reverse-invoice codes (AD_REF_LIST 89C6433F71584D23B95140DE86EDC726,
+   * e.g. {@code "R4"} = "Factura rectificativa: Resto.") are an issued-document (AR) concept — a
+   * received (AP) purchase invoice is never TicketBAI-reported by the receiving party.
+   *
+   * <p><b>ETP-5745 CP-14:</b> this field is ONLY ever CLEARED here (when the document type stops
+   * being rectificative) — never auto-picked. See the inline comment at the
+   * {@code tbaiReverseinvoicecode} block below for why.</p>
    *
    * @param triggerField the callout trigger field name
    * @param requestBody  the callout request body
@@ -379,11 +382,18 @@ final class InvoiceCalloutHelper {
 
       // ETP-5229: tbaiReverseinvoicecode is SALES-ONLY (see javadoc) — never touched for a
       // purchase (AP) doc type, so it is left exactly as-is on purchase invoices.
-      if (isSalesTransaction) {
+      //
+      // ETP-5745 CP-14: no longer auto-picks "R4" ("Factura rectificativa: Resto.", AD_REF_LIST
+      // 89C6433F71584D23B95140DE86EDC726) when the document type becomes rectificative. This is
+      // the exact kind of fiscal classification choice (why the invoice is being corrected) that
+      // must stay a manual, informed decision — the same reasoning SII's aeatsiiMotivoRectif
+      // already followed (see SalesRectificativeFiscalDefaults' class javadoc). Only the CLEARING
+      // side is kept: switching the document type AWAY from rectificative still blanks a
+      // now-irrelevant code, which is cleanup, not a guess. RectificationFiscalCodeGuard blocks
+      // completion while this field is still blank on a rectificative invoice.
+      if (isSalesTransaction && !isRectificative) {
         JSONObject reverseCodeUpdate = new JSONObject();
-        // "R4" = "Factura rectificativa: Resto." (AD_REF_LIST VALUE for reference
-        // 89C6433F71584D23B95140DE86EDC726). Cleared when not rectificative.
-        reverseCodeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "R4" : "");
+        reverseCodeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, "");
         updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
       }
 
