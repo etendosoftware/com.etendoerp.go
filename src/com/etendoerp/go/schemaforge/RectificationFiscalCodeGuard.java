@@ -207,9 +207,26 @@ final class RectificationFiscalCodeGuard {
    * the system(s) still missing their code, dynamically built from {@code missingSystems} (never a
    * hardcoded "SII y TicketBAI" string).
    */
+  /**
+   * ETP-5745 CP-19: the {@code message} field is English, plain prose — the wire contract for a
+   * channel with no i18n layer of its own (MCP, a script, curl), exactly like every other
+   * guard's refusal in this module (see {@code backendErrors.js}'s own comments: "the Java text
+   * is the wire contract"). The SPA never shows this string: it recognises
+   * {@code messageKeys: [MSG_RECTIFICATION_CODE_REQUIRED]} and renders its OWN localized sentence
+   * from {@code messageParams.systems} — a raw JSON array, deliberately NOT pre-joined into a
+   * string here, so the frontend's {@code joinWithConjunction} can apply the session's own
+   * locale-aware conjunction ("y"/"and") — see
+   * {@code translateRectificationCodeRequired} (backendErrors.js) and the matching
+   * {@code backendError.rectificationCodeRequired} locale entries, mirroring the SAME pattern
+   * already established for {@code InvoiceReactivationGuard}'s
+   * {@code ETGO_InvoiceReactivateFiscalRectified}. Earlier versions of this guard built the
+   * Spanish sentence (join included) here in Java — wrong: it ignored the session's own
+   * language, unlike the DB-constraint message this guard exists to pre-empt, which goes through
+   * {@code AD_MESSAGE}/{@code AD_MESSAGE_TRL} correctly.
+   */
   private static NeoResponse reject(List<String> missingSystems) throws JSONException {
-    String message = "Debe seleccionar un motivo/código de rectificación en la solapa SIF para "
-        + joinSpanish(missingSystems);
+    String message = "Select a rectification reason/code in the SIF tab for "
+        + String.join(", ", missingSystems) + ".";
 
     JSONObject body = new JSONObject();
     body.put("success", false);
@@ -219,15 +236,5 @@ final class RectificationFiscalCodeGuard {
     messageParams.put("systems", new JSONArray(missingSystems));
     body.put("messageParams", messageParams);
     return NeoResponse.error(NeoActionContract.SC_UNPROCESSABLE, body);
-  }
-
-  /** Spanish list join: {@code "SII"}, {@code "SII y TicketBAI"}, {@code "SII, TicketBAI y Verifactu"}. */
-  private static String joinSpanish(List<String> items) {
-    int size = items.size();
-    if (size == 1) {
-      return items.get(0);
-    }
-    String allButLast = String.join(", ", items.subList(0, size - 1));
-    return allButLast + " y " + items.get(size - 1);
   }
 }
