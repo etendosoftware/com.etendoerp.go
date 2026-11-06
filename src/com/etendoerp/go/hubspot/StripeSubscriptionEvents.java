@@ -34,7 +34,9 @@ import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
  * Which Stripe billing events HubSpot hears about, and what it is told.
  *
  * <ul>
- *   <li>{@code invoice.paid}: a payment, every one of them, a zero total included.</li>
+ *   <li>{@code invoice.paid}: a payment. One of zero (a free first month, a full discount) is no
+ *       payment and is left out (ETP-6082). The billing reason tells the first charge from a
+ *       renewal.</li>
  *   <li>{@code invoice.payment_failed}: a failed charge; each attempt Stripe makes is one.</li>
  *   <li>{@code customer.subscription.updated}: only when a cancellation is scheduled or
  *       withdrawn. The date reported is when the owner asked, not when the period ends.</li>
@@ -52,10 +54,15 @@ final class StripeSubscriptionEvents {
   static final String FIELD_AMOUNT = "amount";
   static final String FIELD_CURRENCY = "currency";
   static final String FIELD_INTERVAL = "interval";
+  static final String FIELD_BILLING_REASON = "billingReason";
+
+  /** The billing reason of an invoice a subscription renewal issued. */
+  static final String REASON_RENEWAL = "subscription_cycle";
 
   static final String MONTHLY = "monthly";
   static final String ANNUAL = "annual";
 
+  private static final String AMOUNT_PAID = "amount_paid";
   private static final String CANCEL_AT_PERIOD_END = "cancel_at_period_end";
   private static final String CANCEL_AT = "cancel_at";
   private static final String CANCELED_AT = "canceled_at";
@@ -104,6 +111,9 @@ final class StripeSubscriptionEvents {
     try {
       switch (StringUtils.trimToEmpty(type)) {
         case "invoice.paid":
+          if (isZeroPayment(object)) {
+            return Optional.empty();
+          }
           return Optional.of(new Translated(HubSpotOutboxStore.PAYMENT,
               StringUtils.defaultIfBlank(StripeJson.text(object, "id"), eventId), created,
               invoiceRequestId(object), subscriptionId, paymentPayload(object, subscriptionId,
@@ -166,8 +176,8 @@ final class StripeSubscriptionEvents {
     Instant paidAt = transitions == null ? null : epochSeconds(transitions, "paid_at");
     JSONObject payload = new JSONObject(payload(subscriptionId, firstOf(paidAt, created)));
     // Self-serve plans are sold in two-decimal currencies, so the minor units are cents.
-    if (invoice.has("amount_paid")) {
-      payload.put(FIELD_AMOUNT, BigDecimal.valueOf(invoice.optLong("amount_paid", 0L))
+    if (invoice.has(AMOUNT_PAID)) {
+      payload.put(FIELD_AMOUNT, BigDecimal.valueOf(invoice.optLong(AMOUNT_PAID, 0L))
           .movePointLeft(2).toPlainString());
     }
     String currency = StripeJson.text(invoice, FIELD_CURRENCY);
@@ -178,7 +188,16 @@ final class StripeSubscriptionEvents {
     if (interval != null) {
       payload.put(FIELD_INTERVAL, interval);
     }
+    String reason = StripeJson.text(invoice, "billing_reason");
+    if (StringUtils.isNotBlank(reason)) {
+      payload.put(FIELD_BILLING_REASON, reason);
+    }
     return payload.toString();
+  }
+
+  /** An invoice that states it collected nothing. One that does not say is still a payment. */
+  static boolean isZeroPayment(JSONObject invoice) {
+    return invoice.has(AMOUNT_PAID) && invoice.optLong(AMOUNT_PAID, 0L) <= 0L;
   }
 
   /**
