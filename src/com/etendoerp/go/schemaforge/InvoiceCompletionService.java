@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -222,24 +223,51 @@ final class InvoiceCompletionService {
    *
    * <p>Fields populated (strictly from DocType — no fallback derivation):
    * <ul>
-   *   <li>{@code em_etvfac_inv_type} — invoice type (e.g. F1, R1) — must be set on the DocType</li>
+   *   <li>{@code em_etvfac_inv_type} — invoice type (e.g. F1, R1) — must be set on the DocType,
+   *   <b>EXCEPT on a rectificative invoice</b> (ETP-5745 CP-21 — see below)</li>
    *   <li>{@code em_etvfac_verifac_desc} — operation description — must be set on the DocType</li>
    *   <li>{@code em_etvfac_reverseinvtype} — rectification method I/S (DocType, for R-types)</li>
    *   <li>{@code em_etsg_date_operation} — defaults to {@code dateinvoiced} when null</li>
    * </ul>
    *
+   * <p><b>ETP-5745 CP-21:</b> {@code em_etvfac_inv_type} is NEVER copied from the DocType when
+   * the invoice's own document type is flagged rectificative
+   * ({@link RectificativeSupport#isRectificative}). This was the THIRD place (after
+   * {@code InvoiceCalloutHelper#applyVerifactuInvTypeFromDocType} and
+   * {@code SalesRectificativeFiscalDefaults#applyVerifactu}, both already fixed) found copying a
+   * DocType-configured {@code R1}-{@code R5} code onto a rectificative invoice — and the most
+   * dangerous of the three, because it ran unconditionally at COMPLETION, with no "is VERI*FACTU
+   * active for this org" gate at all: an org that does not even use VERI*FACTU could still have
+   * this silently stamp a motive the user never chose, as long as the DocType happened to carry
+   * one in its configuration. VERI*FACTU folds "this is a correction" and "for this reason" into
+   * ONE value, so copying ANY configured code — even one set up once on the DocType itself — is
+   * still picking the user's reason for THIS invoice on their behalf; see
+   * {@code SalesRectificativeFiscalDefaults}' class javadoc for the fuller rationale. The other
+   * three fields are untouched by this change: they are structural (a fixed description, a
+   * reversal method, an operation date), never a fiscal motive.
+   *
    * <p><b>Developer responsibility:</b> any DocType added to Go for AR invoices MUST have
    * {@code em_etvfac_inv_type} and {@code em_etvfac_verifac_desc} configured in its sampledata
-   * (and {@code em_etvfac_reverseinvtype} for R-types). No automatic derivation is performed —
-   * if those fields are absent the Verifactu hook will reject the invoice at completion.
+   * (and {@code em_etvfac_reverseinvtype} for R-types) — EXCEPT a rectificative DocType's own
+   * {@code em_etvfac_inv_type}, which is deliberately never read here any more; the user supplies
+   * it by hand on the invoice. No automatic derivation is performed otherwise — if those fields
+   * are absent the Verifactu hook will reject the invoice at completion.
    *
    * @param invoiceId the ID of the invoice being completed
    */
   @SuppressWarnings("java:S2077")
   private static void populateVerifactuFieldsFromDocType(String invoiceId) {
+    // ETP-5745 CP-21: when the invoice's own document type is rectificative, em_etvfac_inv_type
+    // is left exactly as it is (the user's own choice or still blank — never the DocType's
+    // configured code). Fails SAFE on any read error: skip the copy rather than risk stamping a
+    // fiscal motive nobody chose for this invoice.
+    boolean skipInvTypeCopy = isTargetDocTypeRectificative(invoiceId);
+    String invTypeAssignment = skipInvTypeCopy
+        ? "i.em_etvfac_inv_type"
+        : "COALESCE(i.em_etvfac_inv_type, dt.em_etvfac_inv_type)";
     String sql =
         "UPDATE c_invoice i"
-        + "   SET em_etvfac_inv_type       = COALESCE(i.em_etvfac_inv_type,       dt.em_etvfac_inv_type),"
+        + "   SET em_etvfac_inv_type       = " + invTypeAssignment + ","
         + "       em_etvfac_verifac_desc   = COALESCE(i.em_etvfac_verifac_desc,   dt.em_etvfac_verifac_desc),"
         + "       em_etvfac_reverseinvtype = COALESCE(i.em_etvfac_reverseinvtype, dt.em_etvfac_reverseinvtype),"
         + "       em_etsg_date_operation   = COALESCE(i.em_etsg_date_operation,   i.dateinvoiced)"
@@ -267,6 +295,45 @@ final class InvoiceCompletionService {
       // and the hook itself will skip processing (shouldSkipSendingToVerifactu returns true).
       log.debug("[INVOICE-COMPLETE] Could not populate Verifactu fields for invoice {}: {}",
           invoiceId, e.getMessage());
+    }
+  }
+
+  /**
+   * Whether the invoice currently targets a rectificative document type
+   * ({@link RectificativeSupport#isRectificative}), read directly via its own target DocType —
+   * {@code populateVerifactuFieldsFromDocType} runs on raw SQL before any DAL entity is loaded,
+   * so this mirrors that same native-SQL style rather than pulling in an {@code Invoice} read.
+   *
+   * <p>No-op (returns {@code true} — see below) when {@code em_etsg_isrectificative} is absent
+   * (SIF General not installed): such an install can never declare a DocType rectificative, so
+   * the column-presence check alone would already answer {@code false} correctly, but a read
+   * failure for ANY reason here deliberately fails to {@code true} (skip the inv-type copy)
+   * rather than {@code false} (copy it) — the entire point of this guard is to never let an
+   * unresolved direction fall back to silently stamping a fiscal motive nobody chose.
+   *
+   * @param invoiceId the invoice being completed
+   * @return {@code true} when the copy must be skipped (rectificative, or undetermined)
+   */
+  @SuppressWarnings("java:S2077")
+  private static boolean isTargetDocTypeRectificative(String invoiceId) {
+    if (!RectificativeSupport.isColumnPresent()) {
+      return false;
+    }
+    String sql = "SELECT dt.em_etsg_isrectificative FROM c_invoice i"
+        + " JOIN c_doctype dt ON dt.c_doctype_id = i.c_doctypetarget_id"
+        + " WHERE i.c_invoice_id = ?";
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, invoiceId);
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next() && "Y".equalsIgnoreCase(rs.getString(1));
+        }
+      }
+    } catch (Exception e) {
+      log.debug("[INVOICE-COMPLETE] Could not resolve the rectificative flag for invoice {}, "
+          + "skipping the Verifactu inv-type copy as a precaution: {}", invoiceId, e.getMessage());
+      return true;
     }
   }
 }
