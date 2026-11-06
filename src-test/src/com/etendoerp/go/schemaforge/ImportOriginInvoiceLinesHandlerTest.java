@@ -826,7 +826,8 @@ public class ImportOriginInvoiceLinesHandlerTest {
   @Test
   public void availableOriginInvoices_detail_addsCreationDateAndTheUnsignedTotalOfEveryLine()
       throws Exception {
-    // {standard precision of the source currency (null: unknown), expected amount}
+    // Each case holds the standard precision of the source currency (null when unknown) and the
+    // expected amount.
     Object[][] cases = { { null, "31.50" }, { 0L, "32" } };
     for (Object[] c : cases) {
       Probe probe = purchase();

@@ -733,7 +733,7 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         : orderLine.getDiscount()));
     if (!returns) {
       boolean[] state = detail.links.getOrDefault(line.getId(), new boolean[2]);
-      row.put("importedHere", state[0]);
+      row.put(REASON_IMPORTED_HERE, state[0]);
       row.put("invoicedElsewhere", state[1]);
       return;
     }
@@ -778,11 +778,8 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       if (isReturn(doc)) {
         return null;
       }
-      Map<String, boolean[]> links = invoiceLinkStates(doc.getId(), invoice.getId());
-      int pendingLines = 0;
-      for (ShipmentInOutLine line : activeLines(doc).values()) {
-        pendingLines += classicPendingOf(line, links).signum() != 0 ? 1 : 0;
-      }
+      int pendingLines = countClassicPendingLines(doc,
+          invoiceLinkStates(doc.getId(), invoice.getId()));
       if (pendingLines == 0 && !request.includeCovered) {
         return null;
       }
@@ -823,6 +820,15 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       rows.put(row);
     }
     return completePage(rows);
+  }
+
+  /** How many active lines of {@code doc} keep a classic pending other than 0. */
+  private static int countClassicPendingLines(ShipmentInOut doc, Map<String, boolean[]> links) {
+    int pendingLines = 0;
+    for (ShipmentInOutLine line : activeLines(doc).values()) {
+      pendingLines += classicPendingOf(line, links).signum() != 0 ? 1 : 0;
+    }
+    return pendingLines;
   }
 
   /** The classic pending of a receipt line: its movement quantity, or 0 when held here. */

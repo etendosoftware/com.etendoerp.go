@@ -233,32 +233,48 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       if (!policy.offered.test(invoice)) {
         return null;
       }
-      List<LineState> lines = classic ? classicLineStates(invoice)
-          : lineStates(target, invoice, policy);
-      int pendingLines = 0;
-      for (LineState line : lines) {
-        pendingLines += line.pending.signum() > 0 ? 1 : 0;
-      }
+      List<LineState> lines = statesOfSourceInvoice(target, invoice, policy, classic);
+      int pendingLines = countPendingLines(lines);
       if (pendingLines == 0 && !(request.includeCovered && !lines.isEmpty())) {
         return null;
       }
-      JSONObject row = documentRow(invoice.getId(), invoice.getDocumentNo(),
-          day(invoice.getInvoiceDate()), partnerId, invoice.getBusinessPartner().getName(),
-          invoice.getCurrency() == null ? null : invoice.getCurrency().getId(), pendingLines);
-      ImportListing.putNullable(row, "order",
-          invoice.getSalesOrder() == null ? null : invoice.getSalesOrder().getId());
-      if (request.detail) {
-        ImportListing.putCreationDate(row, invoice.getCreationDate());
-      }
-      return row;
+      return availableInvoiceRow(invoice, partnerId, pendingLines, request.detail);
     }, request);
+  }
+
+  /** The listed lines of {@code invoice} under the requested pending basis. */
+  private List<LineState> statesOfSourceInvoice(ShipmentInOut target, Invoice invoice,
+      SourcePolicy policy, boolean classic) {
+    return classic ? classicLineStates(invoice) : lineStates(target, invoice, policy);
+  }
+
+  /** How many of {@code lines} keep a pending above 0. */
+  private static int countPendingLines(List<LineState> lines) {
+    int pendingLines = 0;
+    for (LineState line : lines) {
+      pendingLines += line.pending.signum() > 0 ? 1 : 0;
+    }
+    return pendingLines;
+  }
+
+  /** The {@code availableInvoices} row of one offered invoice. */
+  private static JSONObject availableInvoiceRow(Invoice invoice, String partnerId,
+      int pendingLines, boolean detail) throws JSONException {
+    JSONObject row = documentRow(invoice.getId(), invoice.getDocumentNo(),
+        day(invoice.getInvoiceDate()), partnerId, invoice.getBusinessPartner().getName(),
+        invoice.getCurrency() == null ? null : invoice.getCurrency().getId(), pendingLines);
+    ImportListing.putNullable(row, "order",
+        invoice.getSalesOrder() == null ? null : invoice.getSalesOrder().getId());
+    if (detail) {
+      ImportListing.putCreationDate(row, invoice.getCreationDate());
+    }
+    return row;
   }
 
   private NeoResponse availableLines(ShipmentInOut target, Invoice source, SourcePolicy policy,
       boolean includeCovered, boolean classic) throws JSONException {
     JSONArray rows = new JSONArray();
-    for (LineState state : classic ? classicLineStates(source)
-        : lineStates(target, source, policy)) {
+    for (LineState state : statesOfSourceInvoice(target, source, policy, classic)) {
       if (state.pending.signum() <= 0 && !includeCovered) {
         continue;
       }
@@ -310,47 +326,82 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
   /** The listed lines of {@code invoice} with their pending, as the class comment states. */
   List<LineState> lineStates(ShipmentInOut target, Invoice invoice, SourcePolicy policy) {
     List<InvoiceLine> lines = listedLines(invoice);
-    Map<String, OrderLine> byProduct = headerOrderLinesByProduct(invoice);
+    Map<String, OrderLine> orderLineOf = orderLinesOfInvoiceLines(lines,
+        headerOrderLinesByProduct(invoice));
+    Set<String> orderLineIds = new LinkedHashSet<>();
+    orderLineOf.values().forEach(ol -> orderLineIds.add(ol.getId()));
+    DraftTotals drafts = draftTotals(target, orderLineIds, policy);
+    List<LineState> states = new ArrayList<>();
+    for (InvoiceLine line : lines) {
+      OrderLine orderLine = orderLineOf.get(line.getId());
+      BigDecimal pending = pendingOfInvoiceLine(line, orderLine, policy, drafts.held);
+      states.add(new LineState(line, orderLine == null ? null : orderLine.getId(),
+          pending.max(BigDecimal.ZERO), orderLine == null ? Set.of()
+              : drafts.others.getOrDefault(orderLine.getId(), Set.of())));
+    }
+    return states;
+  }
+
+  /** The order line each of {@code lines} resolves to, keyed by invoice line id (none: absent). */
+  private static Map<String, OrderLine> orderLinesOfInvoiceLines(List<InvoiceLine> lines,
+      Map<String, OrderLine> byProduct) {
     Map<String, OrderLine> orderLineOf = new HashMap<>();
     for (InvoiceLine line : lines) {
-      OrderLine orderLine = line.getSalesOrderLine() != null ? line.getSalesOrderLine()
-          : byProduct.get(line.getProduct() == null ? null : line.getProduct().getId());
+      OrderLine orderLine = resolveOrderLine(line, byProduct);
       if (orderLine != null) {
         orderLineOf.put(line.getId(), orderLine);
       }
     }
-    Set<String> orderLineIds = new LinkedHashSet<>();
-    orderLineOf.values().forEach(ol -> orderLineIds.add(ol.getId()));
-    Map<String, BigDecimal> held = new HashMap<>();
-    Map<String, Set<String>> others = new HashMap<>();
+    return orderLineOf;
+  }
+
+  /**
+   * The order line of an invoice line: its own, else the header order's line of the same product
+   * (the popup's map).
+   */
+  private static OrderLine resolveOrderLine(InvoiceLine line, Map<String, OrderLine> byProduct) {
+    if (line.getSalesOrderLine() != null) {
+      return line.getSalesOrderLine();
+    }
+    String productId = line.getProduct() == null ? null : line.getProduct().getId();
+    return byProduct.get(productId);
+  }
+
+  /** What the draft movement lines hold of the order lines, split as lineStates uses it. */
+  private static final class DraftTotals {
+    /** Quantity deducted per order line. */
+    final Map<String, BigDecimal> held = new HashMap<>();
+    /** Document numbers of the OTHER drafts holding each order line. */
+    final Map<String, Set<String>> others = new HashMap<>();
+  }
+
+  private DraftTotals draftTotals(ShipmentInOut target, Set<String> orderLineIds,
+      SourcePolicy policy) {
+    DraftTotals totals = new DraftTotals();
     for (DraftHolding holding : draftHoldings(orderLineIds, isSales(target))) {
       boolean ofTarget = holding.inOutId.equals(target.getId());
       if (!ofTarget || policy.deductsTargetDraft) {
-        held.merge(holding.orderLineId, orZero(holding.quantity), BigDecimal::add);
+        totals.held.merge(holding.orderLineId, orZero(holding.quantity), BigDecimal::add);
       }
       if (!ofTarget) {
-        others.computeIfAbsent(holding.orderLineId, k -> new LinkedHashSet<>())
+        totals.others.computeIfAbsent(holding.orderLineId, k -> new LinkedHashSet<>())
             .add(holding.documentNo);
       }
     }
-    List<LineState> states = new ArrayList<>();
-    for (InvoiceLine line : lines) {
-      OrderLine orderLine = orderLineOf.get(line.getId());
-      BigDecimal quantity = orZero(line.getInvoicedQuantity());
-      BigDecimal pending;
-      if (orderLine != null && (policy.deductsDelivered || line.getGoodsShipmentLine() == null)) {
-        BigDecimal delivered = policy.deductsDelivered ? orZero(orderLine.getDeliveredQuantity())
-            : BigDecimal.ZERO;
-        pending = quantity.subtract(delivered)
-            .subtract(held.getOrDefault(orderLine.getId(), BigDecimal.ZERO));
-      } else {
-        pending = line.getGoodsShipmentLine() != null ? BigDecimal.ZERO : quantity;
-      }
-      states.add(new LineState(line, orderLine == null ? null : orderLine.getId(),
-          pending.max(BigDecimal.ZERO), orderLine == null ? Set.of()
-              : others.getOrDefault(orderLine.getId(), Set.of())));
+    return totals;
+  }
+
+  /** The pending of one invoice line before the floor at 0, as the class comment states. */
+  private static BigDecimal pendingOfInvoiceLine(InvoiceLine line, OrderLine orderLine,
+      SourcePolicy policy, Map<String, BigDecimal> held) {
+    BigDecimal quantity = orZero(line.getInvoicedQuantity());
+    if (orderLine != null && (policy.deductsDelivered || line.getGoodsShipmentLine() == null)) {
+      BigDecimal delivered = policy.deductsDelivered ? orZero(orderLine.getDeliveredQuantity())
+          : BigDecimal.ZERO;
+      return quantity.subtract(delivered)
+          .subtract(held.getOrDefault(orderLine.getId(), BigDecimal.ZERO));
     }
-    return states;
+    return line.getGoodsShipmentLine() != null ? BigDecimal.ZERO : quantity;
   }
 
   /**
@@ -369,8 +420,7 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       if (quantity.signum() <= 0) {
         continue;
       }
-      OrderLine orderLine = line.getSalesOrderLine() != null ? line.getSalesOrderLine()
-          : byProduct.get(line.getProduct() == null ? null : line.getProduct().getId());
+      OrderLine orderLine = resolveOrderLine(line, byProduct);
       states.add(new LineState(line, orderLine == null ? null : orderLine.getId(),
           line.getGoodsShipmentLine() != null ? BigDecimal.ZERO : quantity, Set.of()));
     }

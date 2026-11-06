@@ -85,12 +85,12 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 class NeoExtensionParityTest {
 
   /*
-   * A pair still bound by Java_Qualifier, because this gate polices the qualifier fallback. It was
-   * sales-order/header until ETP-6026 migrated that pair to @NeoExtension, then purchase-order/
-   * header until ETP-6108 did, then goods-receipt/goodsReceipt until ETP-6099 did;
-   * return-to-vendor-shipment/returnToVendorShipment (ReturnToVendorShipmentHeaderHandler, still
-   * {@code @Named} with its row's Java_Qualifier set) is the closest sibling still on the legacy
-   * binding.
+   * A pair still bound by Java_Qualifier, because this gate polices the qualifier fallback. The
+   * pair used here was the sales order header until ETP-6026 migrated it to the NeoExtension
+   * annotation, then the purchase order header until ETP-6108 did the same, then the goods receipt
+   * header until ETP-6099 did. The return to vendor shipment header, whose handler
+   * ReturnToVendorShipmentHeaderHandler is still named by qualifier with the Java_Qualifier of its
+   * row set, is the closest sibling still on the legacy binding.
    */
   private static final String SPEC = "return-to-vendor-shipment";
   private static final String ENTITY = "returnToVendorShipment";

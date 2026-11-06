@@ -368,10 +368,7 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
       }
       // Every line the popup lists, read once; the pending ones are those not imported here.
       List<InvoiceLine> listed = offeredLines(invoice, Set.of());
-      int pendingLines = 0;
-      for (InvoiceLine line : listed) {
-        pendingLines += imported.contains(line.getId()) ? 0 : 1;
-      }
+      int pendingLines = countLinesNotImportedHere(listed, imported);
       // ETP-6099 includeCovered: the popup lists an invoice whose lines are all imported here too.
       if (pendingLines == 0 && !(request.includeCovered && !listed.isEmpty())) {
         return null;
@@ -385,6 +382,15 @@ public class ImportOriginInvoiceLinesHandler extends AbstractInvoiceLineImportHa
       }
       return row;
     }, request);
+  }
+
+  /** How many of {@code listed} are not among the source lines {@code imported} here. */
+  private static int countLinesNotImportedHere(List<InvoiceLine> listed, Set<String> imported) {
+    int pendingLines = 0;
+    for (InvoiceLine line : listed) {
+      pendingLines += imported.contains(line.getId()) ? 0 : 1;
+    }
+    return pendingLines;
   }
 
   /** unitPrice x |quantity| over every listed line of the source, at its currency's precision. */

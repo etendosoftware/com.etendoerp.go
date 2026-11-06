@@ -1547,7 +1547,8 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
    */
   @Test
   public void availableReturns_includeCovered_listsAReturnNotInvoicedInFull() throws Exception {
-    // {invoiceStatus, currency of the return's sales order (null: none), listed}
+    // Each case holds the invoice status, the currency of the return's sales order (null when it
+    // has none) and whether the return is listed.
     Object[][] cases = { { "0", null, true }, { "100", null, false }, { "40", "usd", false } };
     for (Object[] c : cases) {
       Probe probe = customerReturn();
@@ -1700,7 +1701,8 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
    */
   @Test
   public void detailPendingLines_countsOnlyTheSelectableLines_perSide() throws Exception {
-    // {sales side, pending line ids, rl1 link state, rl2 link state, pendingLines (null: not listed)}
+    // Each case holds whether it is the sales side, the ids of the pending lines, the link state of
+    // rl1 and of rl2, and the expected pendingLines (null when the document is not listed).
     Object[][] cases = {
         { true, List.of("rl1"), link(false, true), link(false, false), null },
         { true, List.of("rl1", "rl2"), link(false, false), link(true, false), 1 },
