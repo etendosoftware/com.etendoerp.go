@@ -32,7 +32,8 @@ import com.etendoerp.go.hubspot.StripeSubscriptionEvents.Translated;
 
 /**
  * Which Stripe billing events reach HubSpot, keyed so a redelivery adds nothing, and the dates
- * they carry: a cancellation is dated when it was asked for, not when it takes effect.
+ * they carry: a scheduled cancellation is dated when it was asked for and says when the access
+ * ends; an ended subscription is dated when it ended.
  *
  * @covers com.etendoerp.go.hubspot.StripeSubscriptionEvents
  */
@@ -123,7 +124,7 @@ class StripeSubscriptionEventsTest {
     Translated paid = StripeSubscriptionEvents.translate("invoice.paid",
         event("evt_1", renewal, null)).orElseThrow();
 
-    assertEquals(StripeSubscriptionEvents.REASON_RENEWAL,
+    assertEquals("subscription_cycle",
         payload(paid).getString(StripeSubscriptionEvents.FIELD_BILLING_REASON));
   }
 
@@ -147,6 +148,35 @@ class StripeSubscriptionEventsTest {
     assertEquals("req-1", requested.requestId());
     assertEquals(Instant.ofEpochSecond(CREATED - 30).toString(),
         payload(requested).getString("at"));
+  }
+
+  @Test
+  void aScheduledCancellationSaysWhenTheAccessEnds() throws Exception {
+    // ETP-6082: marketing dates the cancellation with the day the owner loses access.
+    JSONObject subscription = subscription(true).put("cancel_at", CREATED + 20 * DAY)
+        .put("current_period_end", CREATED + 25 * DAY);
+
+    Translated requested = StripeSubscriptionEvents.translate("customer.subscription.updated",
+        event("evt_2", subscription, new JSONObject().put("cancel_at_period_end", false)
+            .put("cancel_at", JSONObject.NULL)))
+        .orElseThrow();
+
+    assertEquals(Instant.ofEpochSecond(CREATED + 20 * DAY).toString(),
+        payload(requested).getString(StripeSubscriptionEvents.FIELD_ACCESS_ENDS));
+  }
+
+  @Test
+  void withoutCancelAtTheAccessEndsWithThePeriod() throws Exception {
+    JSONObject onSubscription = subscription(true).put("current_period_end", CREATED + 25 * DAY);
+    // Newer API versions keep the period on the subscription's items only.
+    JSONObject onItems = subscription(true).put("items", new JSONObject().put("data",
+        new JSONArray().put(new JSONObject().put("current_period_end", CREATED + 26 * DAY))));
+
+    assertEquals(Instant.ofEpochSecond(CREATED + 25 * DAY),
+        StripeSubscriptionEvents.accessEnds(onSubscription));
+    assertEquals(Instant.ofEpochSecond(CREATED + 26 * DAY),
+        StripeSubscriptionEvents.accessEnds(onItems));
+    assertNull(StripeSubscriptionEvents.accessEnds(subscription(true)));
   }
 
   @Test
@@ -187,6 +217,16 @@ class StripeSubscriptionEventsTest {
     assertEquals("sub_1", canceled.eventKey());
     assertEquals(Instant.ofEpochSecond(CREATED - 30).toString(),
         payload(canceled).getString("at"));
+  }
+
+  @Test
+  void anEndedSubscriptionIsDatedWhenItEndedNotWhenItWasAsked() throws Exception {
+    JSONObject ended = subscription(true).put("ended_at", CREATED);
+
+    Translated canceled = StripeSubscriptionEvents.translate("customer.subscription.deleted",
+        event("evt_7", ended, null)).orElseThrow();
+
+    assertEquals(Instant.ofEpochSecond(CREATED).toString(), payload(canceled).getString("at"));
   }
 
   @Test
