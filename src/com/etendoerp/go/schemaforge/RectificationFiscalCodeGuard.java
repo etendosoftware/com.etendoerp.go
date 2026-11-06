@@ -84,11 +84,14 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   fix), and lets the completion proceed.</li>
  * </ol>
  *
- * <p><b>ETP-5745 CP-20 — the reverse direction.</b> When the document type is NOT rectificative,
- * this guard still runs, for exactly one reason: clearing a VERI*FACTU {@code R1}-{@code R5}
- * code stranded from an earlier choice (the invoice was briefly rectificative, then reverted
- * through a channel that skipped the callout's own clear-on-revert, e.g. a direct MCP/REST
- * write) back to the generic default. Never a guess — SII/TicketBAI need no equivalent here:
+ * <p><b>ETP-5745 CP-20/CP-26 — the reverse direction.</b> When the document type is NOT
+ * rectificative, this guard still runs, for exactly one reason: a non-rectificative invoice
+ * whose VERI*FACTU {@code etvfacInvType} is still a stray {@code R1}-{@code R5} (stranded from an
+ * earlier choice — the invoice was briefly rectificative, then reverted through a channel that
+ * skipped the UI callout's own clear-on-revert, e.g. a direct MCP/REST write) BLOCKS completion
+ * (CP-26 — reverted from CP-20's original "silently clear it to F1": this guard is the backstop
+ * for whatever state the user already brought to "Confirm", so correcting it without saying
+ * anything would hide a mistake instead of surfacing it). SII/TicketBAI need no equivalent here:
  * their own structural fields ({@code aeatsiiClaveTipo}/{@code tbaiReverseinvoicecode}) are
  * either corrected only in the rectificative direction (SII, deliberately — see
  * {@code correctClaveTipo}) or never corrected by this guard at all (TicketBAI's code is the
@@ -112,8 +115,6 @@ final class RectificationFiscalCodeGuard {
   private static final String CLAVE_TIPO_RECTIFICATIVA = "R";
   private static final String TIPO_RECTIF_DEFAULT = "I";
   private static final String RECTIFICATIVE_PREFIX = "R";
-  /** The generic AD_Column default for {@code etvfacInvType} (ETP-4390: "Factura"). */
-  private static final String VERIFACTU_INV_TYPE_DEFAULT = "F1";
 
   private static final String SYSTEM_SII = "SII";
   private static final String SYSTEM_TBAI = "TicketBAI";
@@ -121,6 +122,10 @@ final class RectificationFiscalCodeGuard {
 
   /** Stable identity sent in messageKeys — a plain string, not an AD_MESSAGE (ETP-5692 precedent). */
   static final String MSG_RECTIFICATION_CODE_REQUIRED = "ETGO_InvoiceRectificationCodeRequired";
+
+  /** Stable identity sent in messageKeys — a plain string, not an AD_MESSAGE (ETP-5692 precedent). */
+  static final String MSG_VERIFACTU_INV_TYPE_NOT_RECTIFICATIVE =
+      "ETGO_InvoiceVerifactuInvTypeNotRectificative";
 
   private RectificationFiscalCodeGuard() {
   }
@@ -148,15 +153,18 @@ final class RectificationFiscalCodeGuard {
       }
       DocumentType docType = invoice.getTransactionDocument();
       if (!RectificativeSupport.isRectificative(docType)) {
-        // ETP-5745 CP-20: not rectificative — the only thing left to do is clean up a VERI*FACTU
-        // R1-R5 code stranded from an earlier choice (e.g. the invoice was rectificative, then
-        // the document type was reverted through a channel that skipped the callout's own
-        // clear-on-revert, such as a direct MCP/REST write). Never a guess: this only clears an
-        // already-wrong value back to the generic default, the same "cleanup, not a guess"
-        // rule InvoiceCalloutHelper#applyVerifactuInvTypeFromDocType already follows.
-        if (clearStaleVerifactuInvType(invoice)) {
-          OBDal.getInstance().save(invoice);
-          OBDal.getInstance().flush();
+        // ETP-5745 CP-26: not rectificative, but still BLOCKS completion when VERI*FACTU's
+        // etvfacInvType is a stray R1-R5 — reverted from the earlier CP-20 behavior, which
+        // silently corrected it to "F1" instead. That was wrong for a guard whose whole job is
+        // to be the backstop for whatever state the user already brought to "Confirm": silently
+        // overwriting a value the user may have set on purpose (by mistake or not) hides the
+        // problem instead of surfacing it. The UI callout
+        // (InvoiceCalloutHelper#applyVerifactuInvTypeFromDocType) may still auto-clear it the
+        // instant the user reverts the document type in the SAME gesture — that is immediate,
+        // visible feedback, not something hidden from them; this guard runs later, on
+        // already-persisted state, where silence is the wrong call.
+        if (isRectificativeVerifactuCode(invoice.getEtvfacInvType())) {
+          return rejectVerifactuInvTypeNotRectificative();
         }
         return null;
       }
@@ -219,22 +227,6 @@ final class RectificationFiscalCodeGuard {
     return code != null && code.startsWith(RECTIFICATIVE_PREFIX);
   }
 
-  /**
-   * Clears a stranded VERI*FACTU {@code R1}-{@code R5} code back to the generic default
-   * ({@code "F1"}) on a NON-rectificative invoice. {@code etvfacInvType} folds "this is a
-   * correction" and "for this reason" into one value, so a non-rectificative invoice carrying
-   * one is always stale, never a legitimate state to complete with.
-   *
-   * @return {@code true} when the value was changed
-   */
-  private static boolean clearStaleVerifactuInvType(Invoice invoice) {
-    if (!isRectificativeVerifactuCode(invoice.getEtvfacInvType())) {
-      return false;
-    }
-    invoice.setEtvfacInvType(VERIFACTU_INV_TYPE_DEFAULT);
-    return true;
-  }
-
   /** @return {@code true} when the value was changed */
   private static boolean correctClaveTipo(Invoice invoice) {
     if (CLAVE_TIPO_RECTIFICATIVA.equals(invoice.getAeatsiiClaveTipo())) {
@@ -287,6 +279,24 @@ final class RectificationFiscalCodeGuard {
     JSONObject messageParams = new JSONObject();
     messageParams.put("systems", new JSONArray(missingSystems));
     body.put("messageParams", messageParams);
+    return NeoResponse.error(NeoActionContract.SC_UNPROCESSABLE, body);
+  }
+
+  /**
+   * The 422 refusal for a non-rectificative invoice whose VERI*FACTU {@code etvfacInvType} is
+   * still a stray {@code R1}-{@code R5} (ETP-5745 CP-26) — same flat shape as {@link #reject},
+   * no dynamic parts: unlike the missing-systems message, this one names exactly one field on
+   * exactly one system, so the English {@code message} and the frontend's locale entry for
+   * {@code MSG_VERIFACTU_INV_TYPE_NOT_RECTIFICATIVE} are both plain, fixed sentences.
+   */
+  private static NeoResponse rejectVerifactuInvTypeNotRectificative() throws JSONException {
+    String message = "The VERI*FACTU invoice type cannot be a rectification code (R1-R5) on an "
+        + "invoice that is not rectificative. Fix it in the SIF tab before confirming.";
+
+    JSONObject body = new JSONObject();
+    body.put("success", false);
+    body.put("message", message);
+    body.put("messageKeys", new JSONArray(List.of(MSG_VERIFACTU_INV_TYPE_NOT_RECTIFICATIVE)));
     return NeoResponse.error(NeoActionContract.SC_UNPROCESSABLE, body);
   }
 }
