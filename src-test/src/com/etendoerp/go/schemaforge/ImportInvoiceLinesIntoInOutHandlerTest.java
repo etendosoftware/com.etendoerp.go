@@ -625,4 +625,116 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
       assertEquals(0, bd("2").compareTo(held.quantity));
     }
   }
+
+  // ── pendingBasis "classic" (ETP-6099 follow-up) ───────────────────────────
+
+  private static String classicLinesOf(String invoiceId, boolean includeCovered) {
+    return "{\"invoiceId\":\"" + invoiceId + "\",\"pendingBasis\":\"classic\""
+        + (includeCovered ? ",\"includeCovered\":true" : "") + "}";
+  }
+
+  /**
+   * Classic availableInvoiceLines on a goods receipt, the popup's old rule: a linked line at 0, any
+   * other at its invoiced quantity even when another draft receipt holds its order line; a line at
+   * 0 or below is dropped (includeCovered too); no draft is read and inDraftDocuments is empty.
+   */
+  @Test
+  public void classicAvailableInvoiceLines_receipt_linkedAtZero_otherwiseInvoiced_noDraftRead()
+      throws Exception {
+    Probe probe = probe(false);
+    OrderLine bought = orderLine("olA", 10, product("p1", "Agua", true), "10", "6", "8");
+    OrderLine linkedOl = orderLine("olB", 20, product("p2", "Pan", true), "4", "0", "4");
+    invoice(probe, "inv1", false,
+        line("il1", 10, bought.getProduct(), "8", bought, false),
+        line("il2", 20, linkedOl.getProduct(), "4", linkedOl, true),
+        line("il3", 30, product("p4", "Té", false), "3", null, false),
+        line("il4", 40, product("p5", "Cero", false), "0", null, false),
+        line("il5", 50, product("p6", "Abono", false), "-2", null, false));
+    probe.holdings.add(new DraftHolding("olA", "other", "DR-2", bd("5")));
+
+    JSONArray all = rows(run(probe, LINES, classicLinesOf("inv1", true), RECEIPT));
+
+    assertEquals("quantities at or below 0 are dropped", List.of("il1", "il2", "il3"), ids(all));
+    String[][] expected = { { "the other draft's 5 not deducted", "8" },
+        { "linked", "0" }, { "no order line: its quantity", "3" } };
+    for (int i = 0; i < expected.length; i++) {
+      JSONObject row = all.getJSONObject(i);
+      assertEquals(expected[i][0], 0, bd(expected[i][1]).compareTo(pendingOf(row)));
+      assertEquals(expected[i][0], List.of(), strings(row.getJSONArray("inDraftDocuments")));
+    }
+    assertEquals("the order line is still shown", "olA", all.getJSONObject(0).getString("orderLine"));
+    assertNull("no draft holding is read", probe.holdingsSales);
+
+    assertEquals(List.of("il1", "il3"),
+        ids(rows(run(probe, LINES, classicLinesOf("inv1", false), RECEIPT))));
+  }
+
+  /**
+   * Classic availableInvoices counts the classic pending; an invoice whose lines are all linked is
+   * listed only with includeCovered, at 0. The server answer of the same invoices is unchanged.
+   */
+  @Test
+  public void classicAvailableInvoices_receipt_anAllLinkedInvoiceOnlyWithIncludeCovered()
+      throws Exception {
+    Probe probe = probe(false);
+    OrderLine bought = orderLine("olA", 10, product("p1", "Agua", true), "10", "0", "8");
+    Invoice held = invoice(probe, "inv1", false,
+        line("il1", 10, bought.getProduct(), "8", bought, false));
+    Invoice linked = invoice(probe, "inv2", false,
+        line("il2", 10, product("p2", "Pan", false), "4", null, true));
+    probe.candidates = List.of(held, linked);
+    probe.holdings.add(new DraftHolding("olA", "other", "DR-2", bd("8")));
+
+    JSONArray classic = rows(run(probe, INVOICES, "{\"pendingBasis\":\"classic\"}", RECEIPT));
+    assertEquals("the draft holding all of inv1 is not deducted", List.of("inv1"), ids(classic));
+    assertEquals(1, classic.getJSONObject(0).getInt("pendingLines"));
+    assertNull(probe.holdingsSales);
+
+    JSONArray covered = rows(run(probe, INVOICES,
+        "{\"pendingBasis\":\"classic\",\"includeCovered\":true}", RECEIPT));
+    assertEquals(List.of("inv1", "inv2"), ids(covered));
+    assertEquals(0, covered.getJSONObject(1).getInt("pendingLines"));
+
+    assertEquals("server: the other draft holds all of inv1", List.of(),
+        ids(rows(run(probe, INVOICES, "{\"pendingBasis\":\"server\"}", RECEIPT))));
+    assertFalse("the server rule reads the drafts", probe.holdingsSales);
+  }
+
+  /**
+   * "classic" is refused before anything is read on a goods shipment and under the default policy;
+   * absent or "server", the receipt keeps the server rule.
+   */
+  @Test
+  public void classicPendingBasis_refusedWhereNotOffered_serverByDefault() throws Exception {
+    Object[][] refused = { { true, SHIPMENT }, { false, null }, { false, SourcePolicy.DEFAULT } };
+    for (Object[] c : refused) {
+      for (String action : new String[] { INVOICES, LINES }) {
+        Probe probe = probe((Boolean) c[0]);
+        invoice(probe, "inv1", (Boolean) c[0],
+            line("il1", 10, product("p1", "Agua", true), "3", null, false));
+        String label = action + " / " + c[1];
+
+        NeoResponse response = run(probe, action, classicLinesOf("inv1", false),
+            (SourcePolicy) c[1]);
+
+        assertEquals(label, 400, response.getHttpStatus());
+        assertEquals(label, "importInvalidParameter", errorCode(response));
+        assertNull(label + ": no candidate read", probe.lastOffset);
+        assertNull(label + ": no draft read", probe.holdingsSales);
+      }
+    }
+
+    for (String body : new String[] { linesOf("inv1", false),
+        "{\"invoiceId\":\"inv1\",\"pendingBasis\":\"server\"}" }) {
+      Probe probe = probe(false);
+      OrderLine bought = orderLine("olA", 10, product("p1", "Agua", true), "10", "0", "8");
+      invoice(probe, "inv1", false, line("il1", 10, bought.getProduct(), "8", bought, false));
+      probe.holdings.add(new DraftHolding("olA", "other", "DR-2", bd("3")));
+
+      JSONArray lines = rows(run(probe, LINES, body, RECEIPT));
+      assertEquals(body, 0, bd("5").compareTo(pendingOf(lines.getJSONObject(0))));
+      assertEquals(body, List.of("DR-2"),
+          strings(lines.getJSONObject(0).getJSONArray("inDraftDocuments")));
+    }
+  }
 }

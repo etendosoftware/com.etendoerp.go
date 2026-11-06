@@ -1354,6 +1354,8 @@ public class GoodsShipmentHeaderHandlerTest {
     }
     assertTrue(policy.deductsDelivered);
     assertTrue("the shipment's own draft lines count too", policy.deductsTargetDraft);
+    assertFalse("the shipment offers no classic pending basis (ETP-6099 follow-up)",
+        policy.offersClassicPending);
   }
 
   /**

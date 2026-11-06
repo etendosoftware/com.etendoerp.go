@@ -135,6 +135,54 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
     }
   }
 
+  /**
+   * ETP-6099 follow-up: the classic availableReceipts query (pendingBasis "classic") resolves
+   * against the model with and without the currency filter, and a completed receipt WITHOUT an
+   * order stays listed under a currency filter no order matches: the order is LEFT joined, an
+   * implicit {@code io.salesOrder.currency} path would have dropped it.
+   */
+  @Test
+  public void classicReceiptQuery_resolves_andKeepsAReceiptWithoutAnOrder() throws Exception {
+    org.hibernate.Session session = OBDal.getInstance().getSession();
+    for (boolean withCurrency : new boolean[] {false, true}) {
+      session.createQuery(ImportInOutLinesIntoInvoiceHandler.classicCandidateDocumentsHql(
+          withCurrency), ShipmentInOut.class);
+    }
+
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    ShipmentInOut template = (ShipmentInOut) session.createQuery(
+        "from MaterialMgmtShipmentInOut io where io.client.id = :client "
+            + "and io.salesTransaction = false and io.documentStatus = 'CO' and io.active = true "
+            + "order by io.creationDate desc")
+        .setParameter("client", clientId).setMaxResults(1).uniqueResult();
+    assertNotNull("fixture: the demo client needs a completed goods receipt", template);
+    ShipmentInOut copy = (ShipmentInOut) DalUtil.copy(template, false);
+    copy.setDocumentNo("IT6099-GR-" + System.currentTimeMillis());
+    copy.setDocumentStatus("DR");
+    copy.setProcessed(false);
+    copy.setPosted("N");
+    copy.setSalesOrder(null);
+    OBDal.getInstance().save(copy);
+    OBDal.getInstance().flush();
+    String copyId = copy.getId();
+    String partnerId = copy.getBusinessPartner().getId();
+    complete("M_InOut", "M_InOut_ID", copyId);
+    session.clear();
+
+    java.util.List<String> ids = new java.util.ArrayList<>();
+    for (ShipmentInOut io : receiptImport.findClassicCandidateDocuments(partnerId, false,
+        "ETP6099-NO-SUCH-CURRENCY", 0, 1000)) {
+      ids.add(io.getId());
+    }
+    assertTrue("a receipt without an order is never excluded by currency: " + ids,
+        ids.contains(copyId));
+    for (ShipmentInOut io : receiptImport.findClassicCandidateDocuments(partnerId, false,
+        "ETP6099-NO-SUCH-CURRENCY", 0, 1000)) {
+      assertNull("only receipts without an order match an unknown currency: " + io.getId(),
+          io.getSalesOrder());
+    }
+  }
+
   @Test
   public void receiptCoveredByAnotherDraft_importOfTheOrder_isOneLineOfTheRestBoundToTheOrderOnly()
       throws Exception {

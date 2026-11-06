@@ -617,7 +617,15 @@ class McpWindowDeclaredActionsTest {
         "goods-shipment    | availableInvoiceLines  | {}                    | missing:invoiceId",
         "goods-receipt     | availableInvoices      | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
         "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"includeCovered\":true} |",
-        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"orderId\":\"o\"} | orderId" })
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"orderId\":\"o\"} | orderId",
+        // ETP-6099 follow-up: pendingBasis is REST-only (§4.12.9), declared in no contract, so the
+        // MCP refuses it as an unknown parameter and keeps the server rule.
+        "purchase-invoice  | availableOrders        | {\"pendingBasis\":\"classic\"} | pendingBasis",
+        "purchase-invoice  | availableOrderLines    | {\"orderId\":\"o\",\"pendingBasis\":\"classic\"} | pendingBasis",
+        "purchase-invoice  | availableReceipts      | {\"pendingBasis\":\"server\"} | pendingBasis",
+        "purchase-invoice  | availableReceiptLines  | {\"receiptId\":\"r\",\"pendingBasis\":\"classic\"} | pendingBasis",
+        "goods-receipt     | availableInvoices      | {\"pendingBasis\":\"classic\"} | pendingBasis",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"pendingBasis\":\"classic\"} | pendingBasis" })
     void lineImportActionsAreJudgedByTheirDeclaredContracts(String window, String action,
         String body, String refusal) throws Exception {
       Map<String, NeoActionContract> declared;

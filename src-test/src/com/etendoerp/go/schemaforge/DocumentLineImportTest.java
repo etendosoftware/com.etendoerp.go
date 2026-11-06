@@ -540,6 +540,47 @@ public class DocumentLineImportTest {
   }
 
   /**
+   * pendingBasis: absent, null and "server" are the server rule wherever it is asked; "classic" is
+   * honoured only where the action offers it, and a 400 importInvalidParameter elsewhere.
+   */
+  @Test
+  public void classicPending_serverByDefault_classicOnlyWhereOffered() throws Exception {
+    for (boolean offered : new boolean[] { true, false }) {
+      assertFalse(ImportListing.classicPending(null, offered));
+      assertFalse(ImportListing.classicPending(body("{}"), offered));
+      assertFalse(ImportListing.classicPending(body("{\"pendingBasis\":null}"), offered));
+      assertFalse(ImportListing.classicPending(body("{\"pendingBasis\":\"server\"}"), offered));
+    }
+    assertTrue(ImportListing.classicPending(body("{\"pendingBasis\":\"classic\"}"), true));
+    try {
+      ImportListing.classicPending(body("{\"pendingBasis\":\"classic\"}"), false);
+      fail("classic where it is not offered must be refused");
+    } catch (ImportRefusal refusal) {
+      assertEquals(400, refusal.response().getHttpStatus());
+      assertEquals(DocumentLineImport.ERROR_INVALID_PARAMETER, refusal.code());
+      assertEquals("pendingBasis \"classic\" is not available on this action",
+          errorOf(refusal).getString("message"));
+    }
+  }
+
+  /** Any value other than the two names is refused, even where classic is offered. */
+  @Test
+  public void classicPending_anyOtherValue_is400() throws Exception {
+    String[] values = { "\"Classic\"", "\"\"", "true", "1", "\"client\"" };
+    for (String value : values) {
+      try {
+        ImportListing.classicPending(body("{\"pendingBasis\":" + value + "}"), true);
+        fail(value + " must be refused");
+      } catch (ImportRefusal refusal) {
+        assertEquals(value, 400, refusal.response().getHttpStatus());
+        assertEquals(value, DocumentLineImport.ERROR_INVALID_PARAMETER, refusal.code());
+        assertEquals(value, "pendingBasis must be \"server\" or \"classic\"",
+            errorOf(refusal).getString("message"));
+      }
+    }
+  }
+
+  /**
    * parseBoolean is the one boolean parser of the import actions: absent / null answer the given
    * default, a boolean or "true"/"false" in any case is read, and anything else is a 400 carrying
    * the caller's error code — importInvalidParameter for the listing flags, importInvalidLine for

@@ -1011,4 +1011,28 @@ public class ImportOrderLinesIntoInOutHandlerTest {
     Object[] asked = probe.draftDocCalls.get(0);
     assertEquals(Arrays.asList(List.of("ol1", "ol2"), false, "r1"), Arrays.asList(asked));
   }
+
+  /**
+   * ETP-6099 follow-up: this delegate offers no classic pending basis (the base seam's default),
+   * so the goods receipt's «desde pedido» refuses pendingBasis "classic" with a 400 before
+   * anything runs; "server" is the rule it always had.
+   */
+  @Test
+  public void pendingBasisClassic_isRefusedHere_serverIsTheDefault() throws Exception {
+    for (String action : new String[] { "availableOrders", "availableOrderLines",
+        "importOrderLines" }) {
+      Probe probe = purchaseScenario();
+      probe.candidates = List.of(probe.order);
+
+      NeoResponse refused = run(probe, action, "{\"orderId\":\"o1\",\"pendingBasis\":\"classic\"}");
+
+      assertEquals(action, 400, refused.getHttpStatus());
+      assertEquals(action, "importInvalidParameter", errorCode(refused));
+      assertEquals(action, List.of(), probe.calls);
+    }
+    Probe probe = purchaseScenario();
+    probe.candidates = List.of(probe.order);
+    assertEquals(List.of("o1"), ids(page(run(probe, "availableOrders",
+        "{\"pendingBasis\":\"server\"}")).getJSONArray("data")));
+  }
 }

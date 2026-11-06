@@ -320,6 +320,29 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
       return linkStates;
     }
 
+    /** The classic availableReceipts scan (pendingBasis "classic", ETP-6099 follow-up). */
+    List<ShipmentInOut> classicCandidates = new ArrayList<>();
+    int classicReads;
+    Integer classicOffset;
+
+    @Override
+    protected List<ShipmentInOut> findClassicCandidateDocuments(String partnerId, boolean sales,
+        String currencyId, int offset, int scan) {
+      classicReads++;
+      classicOffset = offset;
+      int from = Math.min(offset, classicCandidates.size());
+      return new ArrayList<>(classicCandidates.subList(from,
+          Math.min(classicCandidates.size(), from + scan)));
+    }
+
+    /** A request carrying exactly {@code policy} (null: none stored). */
+    NeoResponse runWith(String action, String body, RectificativeImportPolicy policy)
+        throws Exception {
+      NeoContext context = action(action, "i1", body);
+      context.setAttribute(RectificativeImportPolicy.ATTRIBUTE, policy);
+      return handle(context);
+    }
+
     /** A request carrying the policy the header of this side would store. */
     NeoResponse run(String action, String body) throws Exception {
       NeoContext context = action(action, "i1", body);
@@ -1745,5 +1768,174 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     JSONArray rows = page(noPolicy.handle(action("availableShipments", "i1",
         "{\"detail\":true}"))).getJSONArray("data");
     assertEquals(1, rows.getJSONObject(0).getInt("pendingLines"));
+  }
+
+  // ── pendingBasis "classic" (ETP-6099 follow-up) ───────────────────────────
+
+  /** The purchase invoice header's policy: offers pendingBasis "classic". */
+  private static final RectificativeImportPolicy PURCHASE_POLICY =
+      RectificativeImportPolicy.forHeader(type -> "STANDARD", false);
+  private static final RectificativeImportPolicy SALES_POLICY =
+      RectificativeImportPolicy.forHeader(type -> "STANDARD", true);
+  private static final String CLASSIC = "{\"pendingBasis\":\"classic\"}";
+
+  /**
+   * Classic availableReceipts deducts nothing other invoices hold: a receipt whose lines are all
+   * invoiced elsewhere (completed or draft: the server pending is empty) is listed at its full
+   * count, and the server pending is never read.
+   */
+  @Test
+  public void classicAvailableReceipts_aReceiptInvoicedElsewhere_isListedAtItsFullCount()
+      throws Exception {
+    Probe probe = purchase();
+    probe.pending.clear();
+    probe.linkStates.put("rl1", link(false, true));
+    probe.linkStates.put("rl2", link(false, true));
+    probe.candidates = List.of(probe.source);
+    probe.classicCandidates = List.of(probe.source);
+
+    JSONArray rows = page(probe.runWith("availableReceipts", CLASSIC, PURCHASE_POLICY))
+        .getJSONArray("data");
+
+    assertEquals(List.of("rc1"), ids(rows));
+    assertEquals(2, rows.getJSONObject(0).getInt("pendingLines"));
+    assertFalse("the server pending is not read", probe.calls.contains("pending"));
+    assertEquals("the links of THIS invoice", "i1", probe.linkStatesInvoiceId);
+
+    assertEquals("the server rule leaves it out", 0, page(probe.runWith("availableReceipts",
+        null, PURCHASE_POLICY)).getJSONArray("data").length());
+  }
+
+  /**
+   * A line THIS invoice holds, or one that moved nothing, is not counted; a receipt left with
+   * none is listed only with includeCovered, at 0.
+   */
+  @Test
+  public void classicAvailableReceipts_linesHeldHereAreNotCounted_allHereOnlyWithIncludeCovered()
+      throws Exception {
+    Probe probe = purchase();
+    probe.classicCandidates = List.of(probe.source);
+    probe.linkStates.put("rl1", link(true, false));
+
+    assertEquals(1, page(probe.runWith("availableReceipts", CLASSIC, PURCHASE_POLICY))
+        .getJSONArray("data").getJSONObject(0).getInt("pendingLines"));
+
+    when(probe.lineById.get("rl2").getMovementQuantity()).thenReturn(BigDecimal.ZERO);
+    assertEquals(0, page(probe.runWith("availableReceipts", CLASSIC, PURCHASE_POLICY))
+        .getJSONArray("data").length());
+    JSONArray covered = page(probe.runWith("availableReceipts",
+        "{\"pendingBasis\":\"classic\",\"includeCovered\":true}", PURCHASE_POLICY))
+        .getJSONArray("data");
+    assertEquals(List.of("rc1"), ids(covered));
+    assertEquals(0, covered.getJSONObject(0).getInt("pendingLines"));
+  }
+
+  /** A return is skipped; the classic scan pages from offset and answers nextOffset. */
+  @Test
+  public void classicAvailableReceipts_skipsReturns_andPagesThroughItsScan() throws Exception {
+    Probe probe = purchase();
+    ShipmentInOut aReturn = completedInOut("ret", false,
+        inOutLine("rr1", 10, product("p1", "Agua", true), "3"));
+    when(aReturn.getDocumentType().isReturn()).thenReturn(true);
+    ShipmentInOut second = completedInOut("rc2", false,
+        inOutLine("rl9", 10, product("p9", "Sal", false), "2"));
+    probe.classicCandidates = List.of(aReturn, probe.source, second);
+
+    JSONObject first = page(probe.runWith("availableReceipts",
+        "{\"pendingBasis\":\"classic\",\"limit\":1}", PURCHASE_POLICY));
+    assertEquals(List.of("rc1"), ids(first.getJSONArray("data")));
+    assertEquals(Integer.valueOf(0), probe.classicOffset);
+    assertEquals(2, first.getInt("nextOffset"));
+
+    JSONObject rest = page(probe.runWith("availableReceipts",
+        "{\"pendingBasis\":\"classic\",\"offset\":2}", PURCHASE_POLICY));
+    assertEquals(Integer.valueOf(2), probe.classicOffset);
+    assertEquals(List.of("rc2"), ids(rest.getJSONArray("data")));
+    assertTrue(rest.isNull("nextOffset"));
+    assertEquals("the server scan is never read", 0, probe.pagedReads);
+  }
+
+  /**
+   * Classic availableReceiptLines: the full movement quantity, whatever other invoices hold; a
+   * line THIS invoice holds is at 0 and comes only with includeCovered; detail adds the standard
+   * keys.
+   */
+  @Test
+  public void classicAvailableReceiptLines_fullMovement_heldHereAtZeroOnlyWithIncludeCovered()
+      throws Exception {
+    Probe probe = purchase();
+    probe.pending.put("rl2", bd("1"));
+    probe.linkStates.put("rl1", link(true, false));
+    probe.linkStates.put("rl2", link(false, true));
+
+    JSONArray plain = page(probe.runWith("availableReceiptLines",
+        "{\"receiptId\":\"rc1\",\"pendingBasis\":\"classic\"}", PURCHASE_POLICY))
+        .getJSONArray("data");
+    assertEquals(List.of("rl2"), ids(plain));
+    assertEquals("the full movement, not the server's 1", 5,
+        plain.getJSONObject(0).getInt("pendingQuantity"));
+
+    JSONArray all = page(probe.runWith("availableReceiptLines",
+        "{\"receiptId\":\"rc1\",\"pendingBasis\":\"classic\",\"includeCovered\":true,"
+            + "\"detail\":true}", PURCHASE_POLICY)).getJSONArray("data");
+    assertEquals(List.of("rl1", "rl2"), ids(all));
+    JSONObject agua = all.getJSONObject(0);
+    assertEquals(0, agua.getInt("pendingQuantity"));
+    assertTrue(agua.getBoolean("importedHere"));
+    assertEquals(0, bd("10").compareTo(new BigDecimal(agua.getString("movementQuantity"))));
+    assertTrue(agua.has("orderLine") && agua.has("orderLineDiscount"));
+    assertTrue(all.getJSONObject(1).getBoolean("invoicedElsewhere"));
+    assertFalse(probe.calls.contains("pending"));
+  }
+
+  /** Without pendingBasis, or with "server", the offered actions keep the server rule. */
+  @Test
+  public void serverPendingBasis_isTheDefault_onTheOfferedReceiptActions() throws Exception {
+    for (String basis : new String[] { "", ",\"pendingBasis\":\"server\"" }) {
+      Probe probe = purchase();
+      probe.pending.put("rl1", bd("4"));
+      probe.candidates = List.of(probe.source);
+      probe.classicCandidates = List.of(probe.source);
+
+      JSONArray lines = page(probe.runWith("availableReceiptLines",
+          "{\"receiptId\":\"rc1\"" + basis + "}", PURCHASE_POLICY)).getJSONArray("data");
+      assertEquals(basis, 4, lines.getJSONObject(0).getInt("pendingQuantity"));
+      assertEquals(basis, 1, page(probe.runWith("availableReceipts", "{" + basis.replaceFirst(
+          ",", "") + "}", PURCHASE_POLICY)).getJSONArray("data").length());
+      assertEquals(basis, 0, probe.classicReads);
+    }
+  }
+
+  /**
+   * "classic" is refused (400 importInvalidParameter, nothing read nor created) on every action of
+   * this delegate that does not offer it, and on the offered ones under a header that does not.
+   */
+  @Test
+  public void classicPendingBasis_whereNotOffered_is400AndNothingRuns() throws Exception {
+    Object[][] cases = {
+        { true, "availableShipments", SALES_POLICY },
+        { true, "availableShipmentLines", SALES_POLICY },
+        { false, "importReceiptLines", PURCHASE_POLICY },
+        { false, "availableReturns", PURCHASE_POLICY },
+        { false, "availableReceipts", SALES_POLICY },
+        { false, "availableReceipts", RectificativeImportPolicy.NONE },
+        { false, "availableReceiptLines", null },
+    };
+    for (Object[] c : cases) {
+      Probe probe = (Boolean) c[0] ? sales() : purchase();
+      probe.candidates = List.of(probe.source);
+      probe.classicCandidates = List.of(probe.source);
+      String label = c[1] + " / " + c[2];
+
+      NeoResponse refused = probe.runWith((String) c[1],
+          "{\"receiptId\":\"rc1\",\"shipmentId\":\"rc1\",\"pendingBasis\":\"classic\"}",
+          (RectificativeImportPolicy) c[2]);
+
+      assertEquals(label, 400, refused.getHttpStatus());
+      assertEquals(label, "importInvalidParameter", errorCode(refused));
+      assertEquals(label, List.of(), probe.calls);
+      assertEquals(label, 0, probe.classicReads + probe.pagedReads + probe.linkStateReads);
+      assertNull(label, probe.nativeSelection);
+    }
   }
 }

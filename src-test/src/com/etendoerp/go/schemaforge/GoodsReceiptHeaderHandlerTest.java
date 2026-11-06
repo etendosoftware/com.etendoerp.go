@@ -1281,6 +1281,10 @@ public class GoodsReceiptHeaderHandlerTest {
     }
     assertFalse("delivered is not deducted on a receipt", policy.deductsDelivered);
     assertFalse("only OTHER draft receipts are deducted", policy.deductsTargetDraft);
+    assertTrue("the receipt's popup asks for pendingBasis classic (ETP-6099 follow-up)",
+        policy.offersClassicPending);
+    assertFalse("a caller with no policy is offered no classic basis",
+        ImportInvoiceLinesIntoInOutHandler.SourcePolicy.DEFAULT.offersClassicPending);
   }
 
   /**
