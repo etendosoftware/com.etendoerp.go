@@ -34,9 +34,8 @@ import org.openbravo.base.session.SessionFactoryController;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
-import org.openbravo.model.ad.system.Language;
-import org.openbravo.service.db.CallProcess;
 import org.openbravo.test.base.OBBaseTest;
+import org.openbravo.test.base.SystemLanguageFixture;
 import org.openbravo.test.base.TestConstants.Clients;
 import org.openbravo.test.base.TestConstants.Languages;
 import org.openbravo.test.base.TestConstants.Orgs;
@@ -64,39 +63,19 @@ public class NeoSelectorStatementCountIntegrationTest extends OBBaseTest {
   private static final int SMALL_PAGE = 10;
   private static final int LARGE_PAGE = 100;
 
-  private static boolean restoreSystemLanguage = false;
-
   private Statistics statistics;
+
+  private static final SystemLanguageFixture SPANISH = new SystemLanguageFixture(
+      Languages.ES_ES_LANG_ID);
 
   @BeforeClass
   public static void installSpanish() {
-    try {
-      OBContext.setAdminMode(false);
-      Language spanish = OBDal.getInstance().get(Language.class, Languages.ES_ES_LANG_ID);
-      if (!spanish.isSystemLanguage()) {
-        spanish.setSystemLanguage(true);
-        restoreSystemLanguage = true;
-        CallProcess.getInstance().call("AD_Language_Create", null, null);
-      }
-      OBDal.getInstance().commitAndClose();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    SPANISH.install();
   }
 
   @AfterClass
   public static void restoreSpanish() {
-    try {
-      OBContext.setAdminMode(false);
-      if (restoreSystemLanguage) {
-        Language spanish = OBDal.getInstance().get(Language.class, Languages.ES_ES_LANG_ID);
-        spanish.setSystemLanguage(false);
-        OBDal.getInstance().save(spanish);
-        OBDal.getInstance().commitAndClose();
-      }
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    SPANISH.restore();
   }
 
   @Before
