@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.hubspot;
 
+import java.util.Optional;
+import java.util.Set;
+
 import org.apache.commons.lang3.StringUtils;
 
 import com.etendoerp.go.common.GoRuntimeProperties;
@@ -37,13 +40,41 @@ import com.etendoerp.go.common.GoRuntimeProperties;
  * @param activatedStage    SQL: the owner used the ERP for the first time (a qualification
  *                          milestone)
  * @param cardStage         the owner paid the checkout: the demo became a productive
- * @param firstPaymentStage the subscription renewed for the first time
+ * @param firstPaymentStage the first charge above zero was paid
  * @param expiredStage      the trial ended with no productive environment
  * @param lostStage         the subscription was cancelled
+ * @param demo              the "Demo" pipeline, whose deals marketing creates when a demo is
+ *                          booked and the sync moves once the demo took place (ETP-6082)
  */
 public record HubSpotConfiguration(String token, String apiBaseUrl, String pipelineId,
     String accountStage, String activatedStage, String cardStage, String firstPaymentStage,
-    String expiredStage, String lostStage) {
+    String expiredStage, String lostStage, Pipeline demo) {
+
+  /**
+   * The stages the sync moves in one pipeline. Both pipelines share them from the first
+   * qualification on; only what comes before differs.
+   *
+   * @param id                the pipeline
+   * @param entryStage        the stage a deal waits in for the owner's first real use: MQL in
+   *                          Self-Serve, "Demo realizada" in Demo (marketing moves the deal there)
+   * @param activatedStage    SQL: the first qualification milestone
+   * @param cardStage         the owner paid the checkout
+   * @param firstPaymentStage the first charge above zero
+   * @param expiredStage      the trial ended with no productive environment
+   * @param lostStage         the subscription was cancelled
+   */
+  public record Pipeline(String id, String entryStage, String activatedStage, String cardStage,
+      String firstPaymentStage, String expiredStage, String lostStage) {
+
+    /**
+     * The stages a deal may leave for the first-payment one: any before it, the expiry included.
+     *
+     * @return those stages
+     */
+    public Set<String> beforeFirstPayment() {
+      return Set.of(entryStage, activatedStage, cardStage, expiredStage);
+    }
+  }
 
   static final String TOKEN_PROPERTY = "etendo.go.hubspot.token";
   static final String TOKEN_ENV = "ETGO_HUBSPOT_TOKEN";
@@ -57,6 +88,40 @@ public record HubSpotConfiguration(String token, String apiBaseUrl, String pipel
   static final String DEFAULT_FIRST_PAYMENT_STAGE = "1471504905";
   static final String DEFAULT_EXPIRED_STAGE = "1471504906";
   static final String DEFAULT_LOST_STAGE = "1471504907";
+
+  /** "Demo" pipeline and the stages the sync moves, from marketing's spec of 2026-11-06. */
+  static final String DEFAULT_DEMO_PIPELINE = "952778001";
+  static final String DEFAULT_DEMO_ENTRY_STAGE = "1471455757";
+  static final String DEFAULT_DEMO_ACTIVATED_STAGE = "1471455758";
+  static final String DEFAULT_DEMO_CARD_STAGE = "1471455759";
+  static final String DEFAULT_DEMO_FIRST_PAYMENT_STAGE = "1471455760";
+  static final String DEFAULT_DEMO_EXPIRED_STAGE = "1471455761";
+  static final String DEFAULT_DEMO_LOST_STAGE = "1471455762";
+
+  /** The production Demo pipeline. */
+  static final Pipeline DEFAULT_DEMO = new Pipeline(DEFAULT_DEMO_PIPELINE,
+      DEFAULT_DEMO_ENTRY_STAGE, DEFAULT_DEMO_ACTIVATED_STAGE, DEFAULT_DEMO_CARD_STAGE,
+      DEFAULT_DEMO_FIRST_PAYMENT_STAGE, DEFAULT_DEMO_EXPIRED_STAGE, DEFAULT_DEMO_LOST_STAGE);
+
+  /**
+   * A configuration whose Demo pipeline is production's.
+   *
+   * @param token             the private app token, {@code null} when not configured
+   * @param apiBaseUrl        the API root, without a trailing slash
+   * @param pipelineId        the Self-Serve pipeline
+   * @param accountStage      MQL: the account exists and its address is confirmed
+   * @param activatedStage    SQL: the first qualification milestone
+   * @param cardStage         the owner paid the checkout
+   * @param firstPaymentStage the first charge above zero was paid
+   * @param expiredStage      the trial ended with no productive environment
+   * @param lostStage         the subscription was cancelled
+   */
+  public HubSpotConfiguration(String token, String apiBaseUrl, String pipelineId,
+      String accountStage, String activatedStage, String cardStage, String firstPaymentStage,
+      String expiredStage, String lostStage) {
+    this(token, apiBaseUrl, pipelineId, accountStage, activatedStage, cardStage,
+        firstPaymentStage, expiredStage, lostStage, DEFAULT_DEMO);
+  }
 
   /** Where the settings come from. */
   @FunctionalInterface
@@ -92,7 +157,41 @@ public record HubSpotConfiguration(String token, String apiBaseUrl, String pipel
         read(settings, "stage.first.payment", "STAGE_FIRST_PAYMENT",
             DEFAULT_FIRST_PAYMENT_STAGE),
         read(settings, "stage.expired", "STAGE_EXPIRED", DEFAULT_EXPIRED_STAGE),
-        read(settings, "stage.lost", "STAGE_LOST", DEFAULT_LOST_STAGE));
+        read(settings, "stage.lost", "STAGE_LOST", DEFAULT_LOST_STAGE),
+        new Pipeline(
+            read(settings, "demo.pipeline", "DEMO_PIPELINE", DEFAULT_DEMO_PIPELINE),
+            read(settings, "demo.stage.entry", "DEMO_STAGE_ENTRY", DEFAULT_DEMO_ENTRY_STAGE),
+            read(settings, "demo.stage.activated", "DEMO_STAGE_ACTIVATED",
+                DEFAULT_DEMO_ACTIVATED_STAGE),
+            read(settings, "demo.stage.card", "DEMO_STAGE_CARD", DEFAULT_DEMO_CARD_STAGE),
+            read(settings, "demo.stage.first.payment", "DEMO_STAGE_FIRST_PAYMENT",
+                DEFAULT_DEMO_FIRST_PAYMENT_STAGE),
+            read(settings, "demo.stage.expired", "DEMO_STAGE_EXPIRED",
+                DEFAULT_DEMO_EXPIRED_STAGE),
+            read(settings, "demo.stage.lost", "DEMO_STAGE_LOST", DEFAULT_DEMO_LOST_STAGE)));
+  }
+
+  /**
+   * The Self-Serve pipeline's stages.
+   *
+   * @return them
+   */
+  public Pipeline selfServe() {
+    return new Pipeline(pipelineId, accountStage, activatedStage, cardStage, firstPaymentStage,
+        expiredStage, lostStage);
+  }
+
+  /**
+   * The stages of a pipeline the sync moves deals in.
+   *
+   * @param id a deal's pipeline
+   * @return its stages, or empty for any other pipeline: those deals only get properties
+   */
+  public Optional<Pipeline> pipeline(String id) {
+    if (pipelineId.equals(id)) {
+      return Optional.of(selfServe());
+    }
+    return demo != null && demo.id().equals(id) ? Optional.of(demo) : Optional.empty();
   }
 
   private static String read(Settings settings, String propertySuffix, String envSuffix,
@@ -115,6 +214,7 @@ public record HubSpotConfiguration(String token, String apiBaseUrl, String pipel
   public String toString() {
     // The token is a credential: never let it reach a log line.
     return "HubSpotConfiguration[enabled=" + isEnabled() + ", apiBaseUrl=" + apiBaseUrl
-        + ", pipelineId=" + pipelineId + "]";
+        + ", pipelineId=" + pipelineId + ", demoPipelineId=" + (demo == null ? null : demo.id())
+        + "]";
   }
 }

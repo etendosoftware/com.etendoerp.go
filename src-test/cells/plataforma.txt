@@ -623,7 +623,7 @@ com.etendoerp.go.usageevents.UsageEventTypesTest
 com.etendoerp.go.usageevents.UsageEventWriterJdbcTest
 com.etendoerp.go.usageevents.UsageEventWriterTest
 
-# --- integración (BD) (44)
+# --- integración (BD) (46)
 com.etendoerp.go.hubspot.DalHubSpotOutboxStoreIntegrationTest
 com.etendoerp.go.mcp.NeoWidgetMcpIntegrationTest
 com.etendoerp.go.oauth2.PublicApiKeyStoreIntegrationTest
@@ -659,7 +659,9 @@ com.etendoerp.go.schemaforge.NativeWriteIsolationIntegrationTest
 com.etendoerp.go.schemaforge.NeoQuotaWriteGateIntegrationTest
 com.etendoerp.go.schemaforge.NeoReferenceOwnershipIntegrationTest
 com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest
+com.etendoerp.go.schemaforge.NeoSelectorStatementCountIntegrationTest
 com.etendoerp.go.schemaforge.NeoTenantWriteGuardIntegrationTest
+com.etendoerp.go.schemaforge.SelectorSearchIntegrationTest
 com.etendoerp.go.schemaforge.TenantReadIsolationIntegrationTest
 com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest
 com.etendoerp.go.schemaforge.webhooks.McpFeedbackTriageWebhooksIntegrationTest

@@ -355,6 +355,21 @@ group's callout, as the SPA form shows. Because fallback picks (the first combo 
 protected from the callout cascade, a placeholder document type is now re-applied from the tab filter
 by `DocTypeResolver`.
 
+**Interactive callouts and the tab's doc-type filter (ETP-5837).** The `/callout` endpoint applies
+the same rule to what it returns: `NeoCalloutService#executeCallout` passes every callout response
+through `DocTypeResolver#dropDocTypesOutsideTabFilter`, which removes a proposed
+`C_DocTypeTarget_ID` / `C_DocType_ID` (update or combo) whose `DocSubTypeSO` / `IsReturn` the tab's
+HQL filter excludes. The filter is read with the same parser as `resolveDefaultDocTypeId`. Core's
+BP callouts (`BpDocTypeUtils.resolveDocTypeIdForCallout`) fall back to the organization's
+`IsDefault` doc type, which ignores the tab. On a tab restricted to one sub-type they proposed a doc
+type the tab cannot hold; the interactive cascade then ran the doc-type callout on it and
+re-previewed the number from the other sequence (reference case: a quotation showed `<PV…>` after
+picking the customer). The value is now dropped, so the form keeps its current doc type. A tab with
+no sub-type/return filter, or a proposed doc type the filter allows (e.g. a BP-specific one of an
+allowed sub-type), is left untouched. The defaults and create cascades run their callouts through
+the same method, so they get the same filtering before `reapplyDocTypeFromTabFilter` runs; their
+result is unchanged.
+
 **Placeholders and the entity's pre-hook (ETP-5680).** On `etendo_create` the defaults pass runs
 *before* the entity's pre-hook, on a different `NeoContext`; `McpHookExecutor#forwardFallbackDefaults`
 copies the recorded placeholder keys onto the pre-hook's context, so a customization can tell a
@@ -1475,9 +1490,11 @@ Query parameters:
 
 | Param | Default | Max | Description |
 |-------|---------|-----|-------------|
-| `q` | (none) | -- | Search text. Filters on display property (simple) or all searchable fields (rich). Case-insensitive partial match. |
-| `limit` | 20 | 100 | Page size. |
+| `q` | (none) | -- | Search text. Filters on display property (simple) or all searchable fields (rich). Case-insensitive partial match. Matched as `upper(col) LIKE upper(:search)` (ETP-6103): a plain string column is a bare `upper(col)`, so a trigram index on `upper(col)` (`c_bpartner_name_trgm`) can serve it; other types keep a `cast(... as string)`. Every searchable field is OR-ed, so an unindexed one (e.g. `C_BPartner.description`) keeps the plan sequential. |
+| `limit` | 20 | 1000 | Page size. Raised from 100 (ETP-6103) so the SPA can walk to a committed value in few requests; MCP, FK-by-name and defaults lookups pass their own small limits and are unaffected. |
 | `offset` | 0 | -- | Page offset. |
+
+**Labels of a page translate in one query per entity (ETP-6103).** A label is `BaseOBObject#getIdentifier()`, and for a translatable identifier (an account name, a UoM, a tax) core used to run one `*_Trl` query per object: about 2.8 ms per row in production, 111 statements for a 100-row "Valid Combination" page. `SelectorQueryExecutor` now calls core's `IdentifierProvider#preloadTranslations` (epic `ETP-3504`) before its row loops: the rows themselves, and in rich selectors the objects their grid fields show. It fills the translation memo every `BaseOBObject` already has, so the labels do not change and an object the preload misses still looks itself up as before. Measured locally in `es_ES`: "Valid Combination" 111 to 12 statements at 100 rows, "Product Complete" 62 to 21 at 78 rows (`NeoSelectorStatementCountIntegrationTest`). Not preloaded: a simple selector with a dotted display (the identifier is only a fallback there) and custom-HQL rows. Other `getIdentifier()` users (defaults, callouts, list columns) do not call it yet. A core without the method fails at runtime with `NoSuchMethodError` on every selector, so core must ship first.
 
 Response (simple selector):
 
@@ -1542,7 +1559,7 @@ The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_O
 
 **Searchable-field fallback and `SQLWhereClause` support (ETP-4975).** Two fixes in `SelectorDescriptorResolver` (`com.etendoerp.go.schemaforge.selector.meta`):
 
-- `ensureSearchableFallback()` -- when an OBUISEL selector has no `OBUISEL_Selector_Field` rows configured, the resolver falls back to a small set of candidate searchable properties (identifier/name, `valueProp`, search key). `description` is now always added to that fallback list too, appended after the existing empty-list check so it never short-circuits the earlier candidates. Example: the "IAE Activity Type" selector (`epiae_type`: Key + Description, no explicit search-field config) previously only searched the short Key column -- typing "alquiler" (present only in the description) matched nothing.
+- `ensureSearchableFallback()` -- when an OBUISEL selector has no `OBUISEL_Selector_Field` rows configured, the resolver falls back to a small set of candidate searchable properties (identifier/name, `valueProp`, search key). `description` is added to that fallback list too, after the existing empty-list check so it never short-circuits the earlier candidates, but **only when the label shows it** (ETP-6103): when `description` is one of the entity's identifier properties, or as the last resort when nothing else is searchable (an empty list would drop the search and return every row, which through MCP FK-by-name could resolve a text to the wrong record). Before that last resort, an entity with no name, value or search key searches the text properties of its identifier (e.g. `C_Invoice` by `documentNo`). Every result then matches text the user can see. Example: the "IAE Activity Type" selector (`epiae_type`, identifier Key + Description, no explicit search-field config) previously only searched the short Key column -- typing "alquiler" (present only in the description) matched nothing; it still finds it. A selector that flags `description` with `IsSearchInSuggestionBox = Y` keeps searching it, and plain `TableDir`/`Table` fields are not affected (they search their display field). Through MCP (`McpFkResolver`, which resolves a FK by text through this search and accepts a single match whatever column it matched), a record named only by a description that is not part of its label is no longer found: the agent gets `not_found` instead of that record. In exchange, a description no longer turns a name search into a false `ambiguous`.
 - `resolveRefTable()` -- previously read only `AD_Ref_Table.HQLWhereClause` and silently dropped the filter for any reference configured the classic way, with the clause on `SQLWhereClause` instead. It now falls back to `SQLWhereClause`, translated to HQL via the now-public `SqlToHqlTranslator.convertSqlToHql()` (the same translator `SelectorValidationResolver` already uses for AD validation-rule clauses -- see `resolveValidationFilter` below), whenever `HQLWhereClause` is empty. This fixed the GO tax selector (`C_Tax_ID`, Table ref 18) showing "child" breakdown taxes (`Parent_Tax_ID` not null) that Classic excludes via `C_Tax.Parent_Tax_ID IS NULL`, which lives in `SQLWhereClause` for that reference with `HQLWhereClause` empty.
 
 **`NESTED_SUBQUERY` guard, shared across both SQL-to-HQL paths.** `SelectorValidationResolver` guards AD_Validation clauses against a nested `(SELECT ...` subquery (raw SQL table names the generic translator cannot map to HQL entities) by dropping the whole offending clause instead of emitting broken HQL. The `resolveRefTableWhereClause()` path added above initially had no equivalent guard, and it was hit live: the `M_Warehouse_ID` reference's classic `SQLWhereClause` (`M_Warehouse.AD_Client_ID=@#AD_Client_ID@ AND (select ad.isactive from ad_org ad where ad.ad_org_id = M_Warehouse.AD_Org_ID) = 'Y'`) reached Hibernate as invalid HQL (`QuerySyntaxException: ad_org is not mapped`) the first time the Warehouse selector was actually queried in an E2E integration test, rather than degrading gracefully at config-resolution time the way the validation-clause path already did. The fix moves `NESTED_SUBQUERY` (and a new `dropNestedSubqueryClauses` helper) into `SqlToHqlTranslator` itself -- the class both callers already share -- so `convertSqlToHql()` now splits its input into top-level AND-segments, drops any segment containing a nested `(SELECT ...)`, and translates only what survives (returning `null`, i.e. no filter, when every segment is dropped). `SelectorValidationResolver` was updated to reference `SqlToHqlTranslator.NESTED_SUBQUERY` instead of keeping its own copy of the regex, so any future caller of `convertSqlToHql()` is protected by construction. Covered by `SelectorDescriptorResolverTest#resolveTarget_tableRef_sqlWhereClauseWithNestedSubquery_dropsSubqueryClause` (the C_Tax/C_TaxCategory case) and `#resolveTarget_tableRef_warehouseCorrelatedSubqueryWhereClause_dropsSubqueryClause` (the exact Warehouse regression case) in `src-test/src/com/etendoerp/go/schemaforge/selector/meta/SelectorDescriptorResolverTest.java`.
@@ -1645,6 +1662,29 @@ operation, missing `id`/`spec`/`entity`) answers **400** and never becomes a job
 started a job can read or cancel it (anyone else gets **404**); a finished job cannot be cancelled
 (**409**). The worker runs as the requester (user, role, client, organization, language captured at
 submit) and always releases its context and DAL session.
+
+**Bulk delete: `DELETE` operations (ETP-6143).** An operation with `"method":"DELETE"` and a
+`"recordId"` removes that record instead of creating one:
+
+```json
+{ "async": true, "_onlyReturnIds": true, "operations": [
+  { "id": "del-0", "spec": "product", "entity": "header", "method": "DELETE", "recordId": "<id>" },
+  { "id": "del-1", "spec": "product", "entity": "header", "method": "DELETE", "recordId": "<id>" } ] }
+```
+
+It runs the same checks as `DELETE /sws/neo/{spec}/{entity}/{id}`: spec access for `DELETE`, the
+accounting-entity policy, the entity's `isDelete` method flag, the write preflight
+(`NeoActionRecordGuard`) and the customization hooks (channel `REST_BATCH`). It takes no `body` and no
+`parentRef`; a `DELETE` without `recordId` is a **400** (on `async:true`, before any job is created). A
+successful operation reports `{id, ok:true, method:"DELETE", recordId}`. A refusal carries the
+server's own status and message, so a record that is still referenced comes back per row as
+**409** `record_in_use`. Inside a batch the delete joins the batch's transaction: the two commits core's
+`remove` makes become flushes (`NeoBatchJsonDataService#remove`), so a synchronous batch that mixes
+creates and deletes stays atomic. With `async:true` every delete operation is its own row (it references
+nothing), so each record is deleted in its own transaction, a record in use fails alone, and
+`processedRows` / `totalRows` give the progress. The SPA's grid "Delete selected" uses this path for two
+or more rows (`useBulkRowDelete`): one request instead of one `DELETE` per row, paced by the job workers
+rather than by the browser.
 
 #### Failure body: `message` + `messageKeys` (ETP-5316)
 

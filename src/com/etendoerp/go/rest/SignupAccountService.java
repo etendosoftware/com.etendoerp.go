@@ -35,6 +35,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.onboarding.OnboardingStreamWriter;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -68,9 +69,14 @@ public class SignupAccountService {
   private static ExecutorService sharedExecutor;
   private static EtendoGoJwtServlet sharedProvisioner;
 
-  /** An account to create, already validated by the signup API. */
+  /**
+   * An account to create, already validated by the signup API.
+   *
+   * @param hubspotDealId the deal marketing created when the demo was booked, {@code null} for any
+   *                      other signup (ETP-6082)
+   */
   public record NewAccount(String email, String name, String onboardingDraft, String channel,
-      boolean sendEmails, String source, boolean termsAccepted) {
+      boolean sendEmails, String source, boolean termsAccepted, String hubspotDealId) {
   }
 
   /** What the signup API reports about an account it created. */
@@ -129,13 +135,19 @@ public class SignupAccountService {
   public String create(NewAccount request) {
     String accountId = SystemContext.call(OPERATION, () -> {
       try {
-        return SignupAccountDalHelper.createSignupAccount(request.email(), request.name(),
+        String id = SignupAccountDalHelper.createSignupAccount(request.email(), request.name(),
             request.onboardingDraft(), new SignupAccountDalHelper.SignupData(request.channel(),
                 request.sendEmails(), request.source(),
                 request.termsAccepted() ? new Date() : null,
                 // ETP-6081: the site shows no version of its own; the one in force is recorded.
                 request.termsAccepted() ? termsService.resolveAcceptedVersion(null, null) : null))
             .getId();
+        if (request.hubspotDealId() != null) {
+          // Before the environment exists, so its demo is reported on the booked deal.
+          HubSpotOutbox.demoDeal(id, request.hubspotDealId());
+          OBDal.getInstance().commitAndClose();
+        }
+        return id;
       } catch (RuntimeException e) {
         EtendoGoDalHelper.rollbackDalChanges("signup account creation", e, log);
         throw e;

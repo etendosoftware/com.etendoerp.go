@@ -63,6 +63,33 @@ class HubSpotConfigurationTest {
   }
 
   @Test
+  void theDemoPipelineDefaultsToMarketingsAndIsMovedFromDemoRealizada() {
+    HubSpotConfiguration configuration = configured(Map.of());
+
+    HubSpotConfiguration.Pipeline demo = configuration.pipeline("952778001").orElseThrow();
+    assertEquals("1471455757", demo.entryStage());
+    assertEquals("1471455758", demo.activatedStage());
+    assertEquals("1471455759", demo.cardStage());
+    assertEquals("1471455760", demo.firstPaymentStage());
+    assertEquals("1471455761", demo.expiredStage());
+    assertEquals("1471455762", demo.lostStage());
+    assertEquals(configuration.selfServe(), configuration.pipeline("952774980").orElseThrow());
+    assertTrue(configuration.pipeline("948690590").isEmpty(), "other pipelines are marketing's");
+    assertTrue(configuration.pipeline(null).isEmpty());
+  }
+
+  @Test
+  void aTestPortalOverridesTheDemoPipelineToo() {
+    HubSpotConfiguration configuration = configured(Map.of(
+        "etendo.go.hubspot.demo.pipeline", "77",
+        "etendo.go.hubspot.demo.stage.entry", "78"));
+
+    assertEquals("78", configuration.demo().entryStage());
+    assertEquals(configuration.demo(), configuration.pipeline("77").orElseThrow());
+    assertEquals(HubSpotConfiguration.DEFAULT_DEMO_LOST_STAGE, configuration.demo().lostStage());
+  }
+
+  @Test
   void aTestPortalOverridesWhatItNeeds() {
     HubSpotConfiguration configuration = configured(Map.of(
         HubSpotConfiguration.TOKEN_PROPERTY, " pat-test ",

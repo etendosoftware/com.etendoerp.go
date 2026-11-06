@@ -70,7 +70,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   /** The label of this surface in the commercial-access guard's log line (ETP-5047). */
   static final String ENTRY_POINT = "report-selectors";
   private static final int DEFAULT_LIMIT = 20;
-  private static final int MAX_LIMIT = 100;
+  private static final int MAX_LIMIT = 1000;
   private static final String ORDER_BY_NAME = "ORDER BY name";
   private static final String PARAM_SEARCH = "search";
   private static final String PARAM_CLIENT_ID = "clientId";
