@@ -175,7 +175,7 @@ public class NeoSelectorService {
    * @param column       the AD_Column to query selectors for
    * @param columnName   the DB column name (for error messages)
    * @param search       optional search text
-   * @param limit        page size (default 20, max 100)
+   * @param limit        page size (default 20, max 1000)
    * @param offset       page offset (default 0)
    * @param contextParams context parameters for validation rule resolution
    * @return a {@link NeoResponse} with the paginated selector items, or an error response
@@ -201,7 +201,7 @@ public class NeoSelectorService {
    * @param column        the AD_Column to query selectors for
    * @param columnName    the DB column name (for error messages)
    * @param search        optional search text
-   * @param limit         page size (default 20, max 100)
+   * @param limit         page size (default 20, max 1000)
    * @param offset        page offset (default 0)
    * @param contextParams context parameters for validation rule resolution
    * @return a {@link NeoResponse} with the paginated selector items, or an error response
