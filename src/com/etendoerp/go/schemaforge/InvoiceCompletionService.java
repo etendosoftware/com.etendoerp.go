@@ -304,12 +304,13 @@ final class InvoiceCompletionService {
    * {@code populateVerifactuFieldsFromDocType} runs on raw SQL before any DAL entity is loaded,
    * so this mirrors that same native-SQL style rather than pulling in an {@code Invoice} read.
    *
-   * <p>No-op (returns {@code true} — see below) when {@code em_etsg_isrectificative} is absent
-   * (SIF General not installed): such an install can never declare a DocType rectificative, so
-   * the column-presence check alone would already answer {@code false} correctly, but a read
-   * failure for ANY reason here deliberately fails to {@code true} (skip the inv-type copy)
-   * rather than {@code false} (copy it) — the entire point of this guard is to never let an
-   * unresolved direction fall back to silently stamping a fiscal motive nobody chose.
+   * <p>Returns {@code false} (legacy copy behavior stands) when {@code em_etsg_isrectificative}
+   * is absent (SIF General not installed): such an install can never declare a DocType
+   * rectificative in the first place, so {@code false} is the correct answer, not a fallback. A
+   * READ failure for any other reason, however, deliberately answers {@code true} (skip the
+   * inv-type copy) rather than {@code false} (copy it) — the entire point of this guard is to
+   * never let an unresolved direction fall back to silently stamping a fiscal motive nobody
+   * chose.
    *
    * @param invoiceId the invoice being completed
    * @return {@code true} when the copy must be skipped (rectificative, or undetermined)
