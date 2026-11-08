@@ -284,8 +284,12 @@ final class InvoiceCalloutHelper {
    * <p>The CLEARING-to-{@code "F1"} side (switching AWAY from a rectificative doc type) is
    * unchanged: cleanup of a now-irrelevant {@code R1}-{@code R5} value, not a guess (same
    * reasoning as {@code tbaiReverseinvoicecode}'s own clear-on-revert).
-   * No-op when the trigger is not {@code transactionDocument}, or when
-   * {@link RectificativeSupport#isColumnPresent()} is {@code false} (no way to tell direction).
+   * No-op when the trigger is not {@code transactionDocument}, when
+   * {@link RectificativeSupport#isColumnPresent()} is {@code false} (no way to tell direction), or
+   * when the current organization has no active VERI*FACTU configuration (ETP-5745 Warning 1 —
+   * aligned with {@code applyRectificativeFieldsFromDocType}'s own SII/TicketBAI gates: an org
+   * that does not use VERI*FACTU at all must not have this callout write {@code etvfacInvType} on
+   * every document-type change either).
    *
    * @param triggerField the field that fired the callout
    * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
@@ -300,6 +304,11 @@ final class InvoiceCalloutHelper {
       return;
     }
     if (!RectificativeSupport.isColumnPresent()) {
+      return;
+    }
+    Organization currentOrg = OBContext.getOBContext().getCurrentOrganization();
+    String currentOrgId = currentOrg != null ? currentOrg.getId() : null;
+    if (!SalesRectificativeFiscalDefaults.verifactuConfigActive(currentOrgId)) {
       return;
     }
     try {

@@ -36,9 +36,26 @@ import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.utils.SIIUtils;
 
 /**
- * Server-side defaults of the STRUCTURAL TicketBAI and VERI*FACTU rectificative fields of a SALES
- * invoice, applied after every CRUD write of its header (originally ETP-5747, brought into this
- * branch and adjusted for ETP-5745 CP-13/CP-14 — see "What changed from the original" below).
+ * <h2>MERGE CONFLICT NOTICE — read this before resolving</h2>
+ *
+ * This class also exists on {@code origin/develop} as of ETP-5747 (PR #1555, commit
+ * {@code d07757ea2}), merged there AFTER this branch last pulled develop
+ * ({@code 98564f7d0}). The two versions diverge in a way that is NOT just wording: the
+ * ETP-5747/develop version DOES copy the document type's {@code em_etvfac_inv_type} onto the
+ * invoice in {@code applyVerifactu}; THIS branch's version deliberately stopped doing that
+ * (ETP-5745 CP-20 — see "What it does not do" below for why: copying ANY code, even a
+ * human-configured per-DocType one, silently picks the user's rectification reason for them).
+ *
+ * <p><b>When this conflict appears, keep THIS branch's {@code applyVerifactu} and its class/method
+ * javadoc — the one WITHOUT the DocType-to-invoice {@code etvfacInvType} copy.</b> Discard
+ * develop's copy-from-DocType half of the method. Everything else that is a genuine merge (new
+ * unrelated methods, SII/TicketBAI gating additions from either side, etc.) should merge normally;
+ * only the {@code etvfacInvType} copy itself is the one piece to resolve toward THIS branch's side.
+ *
+ * <h2>Server-side defaults of the STRUCTURAL TicketBAI and VERI*FACTU rectificative fields</h2>
+ *
+ * Applied after every CRUD write of a SALES invoice's header (originally ETP-5747, brought into
+ * this branch and adjusted for ETP-5745 CP-13/CP-14 — see "What it does not do" below).
  *
  * <h2>Why on the server</h2>
  *
@@ -62,12 +79,10 @@ import org.openbravo.module.sii.utils.SIIUtils;
  *   {@code tbaiIsreverseinvoice = Y}, {@code tbaiReverseinvoicetype = I} (Por diferencias) when
  *   blank.</li>
  *   <li><b>VERI*FACTU</b> — only when the legal entity has an active VERI*FACTU config that is in
- *   the system (the same gate as {@code ETVFAC_C_INVOICE_SET_VERIFACTU}, which copies these values
- *   from the document type at completion): {@code etvfacInvType} = the document type's
- *   {@code em_etvfac_inv_type} when the invoice's value is blank or a non-rectificative
- *   {@code F*} code (the AD default {@code F1}); an {@code R*} code the user picked is kept. Then,
- *   when the type is {@code R*} and {@code etvfacReverseinvtype} is blank, the document type's
- *   reverse type, or {@code I} — the value the SIF tab always writes for it.</li>
+ *   the system. {@code etvfacInvType} itself is NEVER written here (ETP-5745 CP-20 — see "What it
+ *   does not do" below). Only once the invoice ALREADY carries an {@code R1}-{@code R5} code the
+ *   user picked by hand, and {@code etvfacReverseinvtype} is blank, is the reverse type defaulted:
+ *   the document type's reverse type, or {@code I} — the value the SIF tab always writes for it.</li>
  * </ul>
  *
  * <h2>What it does not do (ETP-5745 CP-14: no "motivo"/code is ever auto-picked)</h2>
@@ -165,7 +180,7 @@ final class SalesRectificativeFiscalDefaults {
     if (tbaiConfigActive(orgId)) {
       applyTbai(invoice, applied);
     }
-    if (configExists(VERIFACTU_ACTIVE_SQL, orgId)) {
+    if (verifactuConfigActive(orgId)) {
       applyVerifactu(invoice, docType, applied);
     }
     return applied;
@@ -259,6 +274,17 @@ final class SalesRectificativeFiscalDefaults {
       log.debug("[ETP-5745] SII config lookup failed for org {}: {}", orgId, e.getMessage());
       return false;
     }
+  }
+
+  /**
+   * Whether the invoice's legal entity has an active VERI*FACTU configuration in the system
+   * ({@code etvfac_verifactu_config}, via {@code ad_get_org_le_bu}) — ETP-5745 Warning 1. Mirrors
+   * {@link #tbaiConfigActive}/{@link #siiConfigActive} so every per-system gate in this class and
+   * in {@code InvoiceCalloutHelper} resolves "is this fiscal system active for this org" the same
+   * way. Never throws: a failure answers {@code false}.
+   */
+  static boolean verifactuConfigActive(String orgId) {
+    return StringUtils.isNotBlank(orgId) && configExists(VERIFACTU_ACTIVE_SQL, orgId);
   }
 
   /**

@@ -322,6 +322,12 @@ public class InvoiceCalloutHelperTest {
   // VERI*FACTU — ETP-5745 CP-20 / CP-22
   // ---------------------------------------------------------------------------
 
+  private void mockVerifactuConfigActive(
+      MockedStatic<SalesRectificativeFiscalDefaults> defaultsMock, boolean verifactuActive) {
+    defaultsMock.when(() -> SalesRectificativeFiscalDefaults.verifactuConfigActive(ORG_ID))
+        .thenReturn(verifactuActive);
+  }
+
   /**
    * ETP-5745 CP-20: no longer copies the DocType's OWN configured {@code em_etvfac_inv_type}
    * (the original bug — a "Factura rectificativa" DocType configured with "R1" silently stamped
@@ -333,8 +339,13 @@ public class InvoiceCalloutHelperTest {
   public void applyVerifactuInvTypeFromDocType_becomingRectificative_clearsToEmpty()
       throws Exception {
     RectificativeSupport.setColumnPresentForTests(true);
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<SalesRectificativeFiscalDefaults> defaultsMock =
+             Mockito.mockStatic(SalesRectificativeFiscalDefaults.class)) {
       mockDocTypeSingleColumn(dalMock, true);
+      mockCurrentOrg(ctxMock);
+      mockVerifactuConfigActive(defaultsMock, true);
       JSONObject updates = new JSONObject();
 
       InvoiceCalloutHelper.applyVerifactuInvTypeFromDocType(
@@ -348,8 +359,13 @@ public class InvoiceCalloutHelperTest {
   @Test
   public void applyVerifactuInvTypeFromDocType_nonRectificative_resetsToF1() throws Exception {
     RectificativeSupport.setColumnPresentForTests(true);
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<SalesRectificativeFiscalDefaults> defaultsMock =
+             Mockito.mockStatic(SalesRectificativeFiscalDefaults.class)) {
       mockDocTypeSingleColumn(dalMock, false);
+      mockCurrentOrg(ctxMock);
+      mockVerifactuConfigActive(defaultsMock, true);
       JSONObject updates = new JSONObject();
 
       InvoiceCalloutHelper.applyVerifactuInvTypeFromDocType(
@@ -357,6 +373,33 @@ public class InvoiceCalloutHelperTest {
 
       assertEquals("F1", updates.getJSONObject(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE)
           .getString(AbstractInvoiceHeaderHandler.FIELD_VALUE));
+    }
+  }
+
+  /**
+   * ETP-5745 Warning 1 (review fix): an org with NO active VERI*FACTU configuration must not get
+   * {@code etvfacInvType} written on every document-type change either — aligned with
+   * {@code applyRectificativeFieldsFromDocType}'s own SII/TicketBAI gates, which already skip
+   * their fields for an inactive system. Before this fix the method only checked
+   * {@code isColumnPresent()}, never whether the org actually uses VERI*FACTU.
+   */
+  @Test
+  public void applyVerifactuInvTypeFromDocType_verifactuInactive_doesNotTouchUpdates()
+      throws Exception {
+    RectificativeSupport.setColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<SalesRectificativeFiscalDefaults> defaultsMock =
+             Mockito.mockStatic(SalesRectificativeFiscalDefaults.class)) {
+      mockCurrentOrg(ctxMock);
+      mockVerifactuConfigActive(defaultsMock, false);
+      JSONObject updates = new JSONObject();
+
+      InvoiceCalloutHelper.applyVerifactuInvTypeFromDocType(
+          AbstractInvoiceHeaderHandler.FIELD_TRANSACTION_DOCUMENT, requestBodyFor("dt-11"), updates);
+
+      assertFalse(updates.has(AbstractInvoiceHeaderHandler.FIELD_ETVFAC_INV_TYPE));
+      dalMock.verifyNoInteractions();
     }
   }
 }

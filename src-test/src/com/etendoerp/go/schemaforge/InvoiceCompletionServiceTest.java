@@ -451,13 +451,15 @@ public class InvoiceCompletionServiceTest {
   }
 
   /**
-   * Fail-SAFE: when the rectificative flag cannot be resolved (e.g. SIF General not installed —
-   * {@code RectificativeSupport#isColumnPresent} false), the copy is skipped, never performed —
-   * the opposite of the fail-open rule the rest of this module uses, deliberately: the whole
-   * point of this guard is to never let an unresolved direction silently stamp a fiscal motive.
+   * Fail-SAFE control: when the rectificative flag cannot be resolved (e.g. SIF General not
+   * installed — {@code RectificativeSupport#isColumnPresent} false),
+   * {@code isTargetDocTypeRectificative} short-circuits to {@code false} rather than throwing or
+   * guessing, so the legacy COALESCE copy STILL runs — correct, since without the column no
+   * DocType can ever be flagged rectificative in the first place, so there is nothing to skip.
+   * This is the one case in this test class where the copy is NOT skipped.
    */
   @Test
-  public void populateVerifactuFieldsFromDocType_rectificativeColumnAbsent_skipsTheCopy()
+  public void populateVerifactuFieldsFromDocType_rectificativeColumnAbsent_stillCopiesDocTypeInvType()
       throws Exception {
     RectificativeSupport.setColumnPresentForTests(false);
     Method method = InvoiceCompletionService.class

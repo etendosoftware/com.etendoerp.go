@@ -11464,6 +11464,28 @@ misuse the UI should prevent at the source, not a case this guard needs to recon
 both the conversion logic and the per-row entity reads were reverted; the guard is plain aggregate
 SQL end to end again.
 
+**ETP-5745 CP-13/CP-24/CP-25/CP-26 — `RectificationFiscalCodeGuard` blocks completion when a
+rectificativa is missing an active fiscal system's code.** New guard, wired from
+`AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded` next to `RectificationTotalGuard`, so it runs
+on every channel (UI, MCP, batch) the same way. For a rectificative invoice (DocType
+`em_etsg_isrectificative = 'Y'`), completion is refused with a 422
+(`messageKeys:["ETGO_InvoiceRectificationCodeRequired"]`, `messageParams:{systems:[...]}`, a real
+`JSONArray` for the same locale-aware-conjunction reason as CP-9's `fiscalSystems` above — see
+`translateRectificationCodeRequired` in `tools/app-shell/src/lib/backendErrors.js`) when at least
+one fiscal system that is **active for the invoice's organization** still has a blank code: SII
+(`aeatsiiMotivoRectif`, gated on `SalesRectificativeFiscalDefaults.siiConfigActive`), TicketBAI
+(`tbaiReverseinvoicecode`, gated on `tbaiConfigActive`), VERI\*FACTU (`etvfacInvType` not one of
+R1–R5, gated on its own config-active check). A system that is not configured for the org is never
+counted as missing. Separately, a **non**-rectificative invoice that still carries a stray
+VERI\*FACTU rectificative code (R1–R5 left over from a reverted document-type change) is refused
+with `messageKeys:["ETGO_InvoiceVerifactuInvTypeNotRectificative"]` rather than silently corrected
+back to `F1` — consistent with this guard's "block, never silently fix" stance; the top-level
+`message` on both is plain English prose for a caller that ignores `messageParams`. Fails open on
+any read error, mirroring `InvoiceReactivationGuard`/`RectificationTotalGuard`. Same code path on
+every channel, so no divergence to declare. Full user-facing description:
+`etendo_schema_forge`'s `docs/generated-custom-windows/sales-invoice.md` → *Rectificative invoice
+fiscal-code validation*.
+
 **ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
 already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`
 (`rectificationLinks.enrichRectifyingInvoices`, wired next to `rectificationLinks.enrichOriginInvoice` in
