@@ -5882,17 +5882,17 @@ public class NeoDefaultsServiceTest {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // ETP-5745 CP-17 — applyDefaultWithComboFallback is now ALSO gated on the column being
-  // MANDATORY, mirroring NeoMandatoryDefaultsService#tryInjectFirstFromLookup's own identical
-  // gate on the CREATE path (ETP-4274). The /defaults bootstrap path never had that gate, so an
-  // OPTIONAL List-reference column with no declared default and no AD_Ref_List row flagged
-  // IsDefault fell through to "whichever row sorts first" (List references order by SeqNo; a
-  // reference whose rows were never given one falls back to AD_Ref_List_ID, which is arbitrary)
-  // — the root cause of the "R4" ghost default for SII's aeatsiiMotivoRectif (ETP-5745
-  // investigation): that field is nullable (the check constraint only requires it conditionally),
-  // and its AD_Ref_List rows all had a NULL SeqNo, so "first by ID" picked R4 by pure accident.
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5745 CP-17 note: applyDefaultWithComboFallback is now also gated on the column being
+  // mandatory, mirroring the identical gate the tryInjectFirstFromLookup method of
+  // NeoMandatoryDefaultsService already applies on the CREATE path from ETP-4274. The /defaults
+  // bootstrap path never had that gate, so an optional List-reference column with no declared
+  // default and no AD_Ref_List row flagged as the default fell through to whichever row sorts
+  // first. List references order by their sequence number, and a reference whose rows were never
+  // given one falls back to the AD_Ref_List row id, which is an arbitrary ordering. That was the
+  // root cause of the ghost default picking up the fourth rectification reason for SII's own
+  // motivo field during the ETP-5745 investigation: that field is nullable since its check
+  // constraint only requires it conditionally, and its AD_Ref_List rows all had an empty sequence
+  // number, so picking the first row by id landed on that fourth reason purely by accident.
 
   @Test
   public void testApplyDefaultWithComboFallbackSkipsForOptionalColumnWithNoResolvedValue()
