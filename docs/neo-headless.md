@@ -11446,6 +11446,44 @@ a generic comma join — `tools/app-shell/src/lib/backendErrors.js`'s `joinWithC
 the same conjunction join. `rectificativas` stays a plain comma-joined-on-render array throughout. Same
 code path on every channel, so no divergence to declare here.
 
+**MCP path only:** the hook is in `McpToolRouter.route` (`etendo_action` case), not in `handleAction` or `NeoButtonActionHelper`, so the REST action endpoint and the SPA (which
+un-posts on its own and then posts `documentAction RE` to `/sws/neo`) never reach it: a double un-post is impossible. A single call leaves the final commit of the
+reactivation to the request, as every `etendo_action` does; the un-post is committed on its own before it.
+
+**An id that is not a document (ETP-5715, round 5).** A `documentAction` on an id that is no row of the entity's table used to reach the core process, which answered an unrelated *NotCorrectOrgDoctypeInvoice*. `NeoActionRecordGuard.refusalForMissingDocument`, called in `McpToolRouter.handleAction` right after the foreign-record check, now answers the same `404 Record not found` a foreign id gets, so an unknown id and another tenant's id cannot be told apart, in `etendo_action` and per document in `etendo_action_batch`. Only the `DocAction` button (whose id always names a row of the entity's own table) is judged; every other action, whose id may name another table, is untouched. REST and the SPA are unchanged (the check lives in the MCP path only).
+
+**Partial failure, stated plainly.** Each step is its own transaction. *Un-post fails:* that is the document's error, nothing is
+reactivated, the session is rolled back, the next document goes on. *Un-post succeeds, reactivation fails* (or throws): the un-post is
+**already committed and is not undone** — the document stays Completed and un-posted — and the reactivation's own session is rolled
+back. An exception thrown by the reactivation after the un-post is reported the same way, in the batch and in a single `etendo_action` (the single call used to rethrow and lose the news that the un-post had committed). The result is `ok:false`, carries the reactivation's error, `steps:["unpost","documentAction"]` and a `partial` note saying the
+un-post stays. There is no compensating re-post: the SPA leaves the document in the same state, and an automatic re-post would be a
+new accounting write nobody asked for. The note tells the agent to post again if that is wanted.
+
+**Where it still differs from the SPA** (measured in ETP-5715; each left as it is, on purpose):
+
+| | SPA | `etendo_action_batch` | why not aligned |
+|---|---|---|---|
+| Concurrency | per-record requests fired together (`Promise.allSettled`, uncapped) | one document after another | the DAL session is per request: there is nothing to run in parallel on, and a document per transaction in order is easier to read back |
+| `rowFilter` omission | rows that cannot apply (post of an unprocessed row, un-post of an unposted one) are filtered **in the client and never sent** | every id is sent; the core answers per document | availability is advisory (ETP-5714 decision (2)): the server adds no refusal rule of its own, so an omitted row would become a hidden one |
+| Clone | the multi-clone dialog is sequential and **stops at the first failing clone** | continues and reports each | a stop-at-first-failure leaves the rest silently unprocessed; the approved model is a per-document result |
+
+**Further divergences with REST / the SPA, declared (round 5):**
+
+| | REST / SPA | MCP | why |
+|---|---|---|---|
+| Transaction of the un-post in a single `etendo_action` | the SPA sends `unpost` and `documentAction RE` as two requests, each its own transaction | the un-post is committed in a SEPARATE transaction before the reactivation, inside one tool call (if the reactivation then fails the un-post stays, `partial` says so) | the SPA's two requests behave the same; the difference is only that one MCP call carries both |
+| Amortization | the SPA un-posts on Reactivate | the MCP does **not**: the module declares no `unpost` contract for it | inventing one is a separate change; until then a posted amortization must be un-posted with its own SPA action |
+| Which entities un-post | the invoice windows only | the same, by opt-in (`unpostBeforeReactivate`), never by "declares `unpost`" | goods documents, returns and journals declare `unpost` too, and the SPA deliberately leaves them alone |
+| `steps` / `partial` keys | n/a | added to a single answer only when the step ran; a decimal in the body is not re-rendered (the keys are spliced into the rendered text) | additive, so every other answer is byte for byte unchanged |
+| A nonexistent id of a document-action button | REST / the SPA reach the core process and answer its unrelated "not correct organization/doctype" message | MCP answers the same 404 "Record not found" a foreign id gets (`NeoActionRecordGuard.refusalForMissingDocument`, called from `McpToolRouter.handleAction`; `etendo_action` and `etendo_action_batch` alike), only for the `DocAction` button | the old answer hid the real cause and told a caller a foreign id (404) and a missing one (org message) apart, so an id could be probed for existence; the SPA never sends an absent id, so it is left unchanged |
+
+**Tests:** `McpActionBatchTest` (unit, mocked runner and DAL), `McpToolRouterRouteTest` (routing of the tool),
+`ToolRegistryTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`.
+
+#### 4.12.36b Rectificative invoice validation guards and fiscal-code corrections (ETP-5745)
+
+Three completion-time guards and one GET-enrichment field, all channel-agnostic (UI, MCP, batch) because they hook `AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded` or the handler's own GET enrichment, not any MCP-specific tool — unlike the rest of §4.12, which documents MCP server behavior specifically. Full user-facing description: `etendo_schema_forge`'s `docs/generated-custom-windows/sales-invoice.md` → *Rectificative invoice fiscal-code validation — ETP-5745 (CP-13 through CP-26)*.
+
 **ETP-5745 CP-9 — `RectificationTotalGuard` caps a rectificativa's total against its origin.** New guard,
 wired from `AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded` right before the real completion runs
 (the same spot `validateLineQtyBeforeComplete` used to occupy). Completing (`documentAction=CO`) a
@@ -11545,40 +11583,6 @@ crosses a classic-process boundary, so there was no prior instance of this "capt
 classic call" combination to copy; this is a new but minimal, defensible fix, not a deviation from
 an established pattern that was overlooked. If the exact clobbering mechanism is found later,
 this capture-before approach remains correct regardless of root cause.
-**MCP path only:** the hook is in `McpToolRouter.route` (`etendo_action` case), not in `handleAction` or `NeoButtonActionHelper`, so the REST action endpoint and the SPA (which
-un-posts on its own and then posts `documentAction RE` to `/sws/neo`) never reach it: a double un-post is impossible. A single call leaves the final commit of the
-reactivation to the request, as every `etendo_action` does; the un-post is committed on its own before it.
-
-**An id that is not a document (ETP-5715, round 5).** A `documentAction` on an id that is no row of the entity's table used to reach the core process, which answered an unrelated *NotCorrectOrgDoctypeInvoice*. `NeoActionRecordGuard.refusalForMissingDocument`, called in `McpToolRouter.handleAction` right after the foreign-record check, now answers the same `404 Record not found` a foreign id gets, so an unknown id and another tenant's id cannot be told apart, in `etendo_action` and per document in `etendo_action_batch`. Only the `DocAction` button (whose id always names a row of the entity's own table) is judged; every other action, whose id may name another table, is untouched. REST and the SPA are unchanged (the check lives in the MCP path only).
-
-**Partial failure, stated plainly.** Each step is its own transaction. *Un-post fails:* that is the document's error, nothing is
-reactivated, the session is rolled back, the next document goes on. *Un-post succeeds, reactivation fails* (or throws): the un-post is
-**already committed and is not undone** — the document stays Completed and un-posted — and the reactivation's own session is rolled
-back. An exception thrown by the reactivation after the un-post is reported the same way, in the batch and in a single `etendo_action` (the single call used to rethrow and lose the news that the un-post had committed). The result is `ok:false`, carries the reactivation's error, `steps:["unpost","documentAction"]` and a `partial` note saying the
-un-post stays. There is no compensating re-post: the SPA leaves the document in the same state, and an automatic re-post would be a
-new accounting write nobody asked for. The note tells the agent to post again if that is wanted.
-
-**Where it still differs from the SPA** (measured in ETP-5715; each left as it is, on purpose):
-
-| | SPA | `etendo_action_batch` | why not aligned |
-|---|---|---|---|
-| Concurrency | per-record requests fired together (`Promise.allSettled`, uncapped) | one document after another | the DAL session is per request: there is nothing to run in parallel on, and a document per transaction in order is easier to read back |
-| `rowFilter` omission | rows that cannot apply (post of an unprocessed row, un-post of an unposted one) are filtered **in the client and never sent** | every id is sent; the core answers per document | availability is advisory (ETP-5714 decision (2)): the server adds no refusal rule of its own, so an omitted row would become a hidden one |
-| Clone | the multi-clone dialog is sequential and **stops at the first failing clone** | continues and reports each | a stop-at-first-failure leaves the rest silently unprocessed; the approved model is a per-document result |
-
-**Further divergences with REST / the SPA, declared (round 5):**
-
-| | REST / SPA | MCP | why |
-|---|---|---|---|
-| Transaction of the un-post in a single `etendo_action` | the SPA sends `unpost` and `documentAction RE` as two requests, each its own transaction | the un-post is committed in a SEPARATE transaction before the reactivation, inside one tool call (if the reactivation then fails the un-post stays, `partial` says so) | the SPA's two requests behave the same; the difference is only that one MCP call carries both |
-| Amortization | the SPA un-posts on Reactivate | the MCP does **not**: the module declares no `unpost` contract for it | inventing one is a separate change; until then a posted amortization must be un-posted with its own SPA action |
-| Which entities un-post | the invoice windows only | the same, by opt-in (`unpostBeforeReactivate`), never by "declares `unpost`" | goods documents, returns and journals declare `unpost` too, and the SPA deliberately leaves them alone |
-| `steps` / `partial` keys | n/a | added to a single answer only when the step ran; a decimal in the body is not re-rendered (the keys are spliced into the rendered text) | additive, so every other answer is byte for byte unchanged |
-| A nonexistent id of a document-action button | REST / the SPA reach the core process and answer its unrelated "not correct organization/doctype" message | MCP answers the same 404 "Record not found" a foreign id gets (`NeoActionRecordGuard.refusalForMissingDocument`, called from `McpToolRouter.handleAction`; `etendo_action` and `etendo_action_batch` alike), only for the `DocAction` button | the old answer hid the real cause and told a caller a foreign id (404) and a missing one (org message) apart, so an id could be probed for existence; the SPA never sends an absent id, so it is left unchanged |
-
-**Tests:** `McpActionBatchTest` (unit, mocked runner and DAL), `McpToolRouterRouteTest` (routing of the tool),
-`ToolRegistryTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`.
-
 
 #### 4.12.37 Attachments of a document: `etendo_request_attachment_upload`, `etendo_list_attachments`, `etendo_delete_attachment` (ETP-5715)
 
