@@ -165,6 +165,38 @@ public class RectificationFiscalCodeGuardTest {
     assertEquals("Verifactu", systems.getString(0));
   }
 
+  /**
+   * Closes the {@code joinWithConjunction} edge case the pair-only tests above don't reach: with
+   * SII, TicketBAI AND VERI*FACTU all active and all missing their own code/motive at once, the
+   * rejection must name all three, in the fixed SII/TicketBAI/Verifactu order — never just the
+   * first two, and never a different order.
+   */
+  @Test
+  public void rectificativeInvoice_allThreeSystemsActiveAndMissing_rejectsNamingAllThreeInOrder()
+      throws Exception {
+    Invoice invoice = baseInvoice();
+    when(invoice.getAeatsiiMotivoRectif()).thenReturn(null);
+    when(invoice.getTbaiReverseinvoicecode()).thenReturn(null);
+    when(invoice.getEtvfacInvType()).thenReturn("F1");
+
+    NeoResponse response = runGuard(invoice, true, true, true, true);
+
+    assertNotNull(response);
+    assertEquals(422, response.getHttpStatus());
+    JSONObject body = response.getBody();
+    assertFalse(body.getBoolean("success"));
+    JSONArray systems = body.getJSONObject("messageParams").getJSONArray("systems");
+    assertEquals(3, systems.length());
+    assertEquals("SII", systems.getString(0));
+    assertEquals("TicketBAI", systems.getString(1));
+    assertEquals("Verifactu", systems.getString(2));
+    assertTrue(body.getString("message").contains("SII"));
+    assertTrue(body.getString("message").contains("TicketBAI"));
+    assertTrue(body.getString("message").contains("Verifactu"));
+    // Never corrects anything on a rejection.
+    verify(invoice, never()).setAeatsiiClaveTipo(anyString());
+  }
+
   // ---------------------------------------------------------------------------
   // CP-24/CP-25 — gating by "is this system active for the organization"
   // ---------------------------------------------------------------------------
@@ -276,6 +308,30 @@ public class RectificationFiscalCodeGuardTest {
   // ---------------------------------------------------------------------------
   // fail-open — a read error must never block, never throw
   // ---------------------------------------------------------------------------
+
+  /**
+   * A rectificative invoice whose organization cannot be resolved (a bad/missing FK, or the
+   * organization record itself returning a {@code null} id) must never block completion — the
+   * same fail-open intent as a read error, documented explicitly here: {@code missingSystems}
+   * only evaluates a system's configuration when {@code orgId} is non-blank, so a {@code null}
+   * orgId yields an empty missing list regardless of how incomplete the invoice's fiscal fields
+   * are, and the SII structural correction is skipped the same way.
+   */
+  @Test
+  public void rectificativeInvoice_orgIdNull_neverBlocksCompletion() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isSalesTransaction()).thenReturn(true);
+    when(invoice.getTransactionDocument()).thenReturn(mock(DocumentType.class));
+    when(invoice.getOrganization()).thenReturn(null);
+    when(invoice.getAeatsiiMotivoRectif()).thenReturn(null);
+    when(invoice.getTbaiReverseinvoicecode()).thenReturn(null);
+    when(invoice.getEtvfacInvType()).thenReturn(null);
+
+    assertNull(runGuard(invoice, true, true, true, true));
+
+    verify(invoice, never()).setAeatsiiClaveTipo(anyString());
+    verify(invoice, never()).setAeatsiiTipoRectif(anyString());
+  }
 
   @Test
   public void failsOpenWhenTheInvoiceCannotBeRead() throws Exception {
