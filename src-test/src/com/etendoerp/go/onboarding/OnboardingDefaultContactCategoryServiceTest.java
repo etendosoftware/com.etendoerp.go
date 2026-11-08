@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.onboarding;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -39,10 +40,13 @@ import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.usageevents.LogCapture;
 
@@ -57,6 +61,7 @@ import com.etendoerp.go.usageevents.LogCapture;
 class OnboardingDefaultContactCategoryServiceTest {
 
   private static final String CLIENT_ID = "CLIENT-NEW";
+  private static final String ACCOUNT_EMAIL = "owner@example.com";
   private static final String TARGET_ID = "CAT-CLIPROV";
 
   private static final String BY_MAPPING = "FROM ad_ref_data_loaded";
@@ -106,7 +111,7 @@ class OnboardingDefaultContactCategoryServiceTest {
     givenFlag(false);
     givenRows(byMapping, TARGET_ID);
 
-    assertFalse(service.applyIfEnabled(CLIENT_ID));
+    assertFalse(service.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL));
 
     verify(session, never()).createNativeQuery(anyString());
   }
@@ -121,7 +126,7 @@ class OnboardingDefaultContactCategoryServiceTest {
     when(undefault.executeUpdate()).thenReturn(1);
     when(makeDefault.executeUpdate()).thenReturn(1);
 
-    assertTrue(service.applyIfEnabled(CLIENT_ID));
+    assertTrue(service.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL));
 
     verify(byMapping).setParameter("clientId", CLIENT_ID);
     verify(byMapping).setParameter("genericId",
@@ -140,7 +145,7 @@ class OnboardingDefaultContactCategoryServiceTest {
     givenRows(byValue, TARGET_ID);
     when(makeDefault.executeUpdate()).thenReturn(1);
 
-    assertTrue(service.applyIfEnabled(CLIENT_ID));
+    assertTrue(service.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL));
 
     verify(byValue).setParameter("value",
         OnboardingDefaultContactCategoryService.CUSTOMER_VENDOR_CATEGORY_VALUE);
@@ -154,14 +159,14 @@ class OnboardingDefaultContactCategoryServiceTest {
     when(undefault.executeUpdate()).thenReturn(0);
     when(makeDefault.executeUpdate()).thenReturn(0);
 
-    assertFalse(service.applyIfEnabled(CLIENT_ID));
+    assertFalse(service.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL));
   }
 
   /** A tenant without the category keeps its default: a WARN, no write, no exception. */
   @Test
   void missingCategoryIsLoggedAndSkipped() {
     try (LogCapture logs = LogCapture.of(OnboardingDefaultContactCategoryService.class)) {
-      assertFalse(service.applyIfEnabled(CLIENT_ID));
+      assertFalse(service.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL));
 
       assertTrue(logs.messages(Level.WARN).stream().anyMatch(m -> m.contains(CLIENT_ID)),
           logs.messages(Level.WARN).toString());
@@ -170,10 +175,34 @@ class OnboardingDefaultContactCategoryServiceTest {
     verify(makeDefault, never()).executeUpdate();
   }
 
+  /**
+   * The hand-over runs as System, so the flag is read for the account and tenant passed in — not
+   * for the OBContext, whose tenant ("0") and user would target nobody.
+   */
+  @Test
+  void flagIsEvaluatedForTheReceivingAccountAndTenantNotTheOBContext() {
+    Client systemClient = mock(Client.class);
+    when(systemClient.getId()).thenReturn("0");
+    OBContext systemContext = mock(OBContext.class);
+    when(systemContext.getCurrentClient()).thenReturn(systemClient);
+    obContextStatic.when(OBContext::getOBContext).thenReturn(systemContext);
+
+    service.applyIfEnabled(CLIENT_ID, ACCOUNT_EMAIL);
+
+    ArgumentCaptor<FeatureFlagContext> captor = ArgumentCaptor.forClass(FeatureFlagContext.class);
+    flagsStatic.verify(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE), captor.capture()));
+    assertEquals(ACCOUNT_EMAIL, captor.getValue().getTargetingKey());
+    assertEquals(CLIENT_ID,
+        captor.getValue().getAttributes().get(FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
+  }
+
+  /** A null tenant short-circuits before the flag is even read. */
   @Test
   void nullClientDoesNothing() {
-    assertFalse(service.applyIfEnabled(null));
+    assertFalse(service.applyIfEnabled(null, ACCOUNT_EMAIL));
     verify(session, never()).createNativeQuery(anyString());
+    flagsStatic.verify(() -> GoFeatureFlags.isEnabled(anyString(), any()), never());
   }
 
   private void givenFlag(boolean enabled) {

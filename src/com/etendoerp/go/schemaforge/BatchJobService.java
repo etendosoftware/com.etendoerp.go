@@ -104,6 +104,7 @@ public final class BatchJobService {
    * empty {@code persisted}), the one case in which sending it again cannot duplicate a record.
    */
   static final String KEY_SAFE_TO_RESEND = "safeToResend";
+  private static final String KEY_CODE = "code";
 
   /** The one production instance of the service; {@code null} until the first use. */
   private static final AtomicReference<BatchJobService> INSTANCE = new AtomicReference<>();
@@ -314,23 +315,40 @@ public final class BatchJobService {
     }
     Set<String> ids = new HashSet<>();
     for (int i = 0; i < ops.length(); i++) {
-      JSONObject op = ops.optJSONObject(i);
-      if (op == null) {
-        return opPrefix(i) + " must be an object";
+      String invalid = validateOperation(i, ops.optJSONObject(i), ids);
+      if (invalid != null) {
+        return invalid;
       }
-      String id = op.optString("id", null);
-      if (StringUtils.isBlank(id) || StringUtils.isBlank(op.optString("spec", null))
-          || StringUtils.isBlank(op.optString("entity", null))) {
-        return opPrefix(i) + " requires 'id', 'spec', 'entity'";
-      }
-      if (!ids.add(id)) {
-        return opPrefix(i) + ".id duplicates an earlier op";
-      }
-      String parentRef = op.optString("parentRef", null);
-      if (StringUtils.isNotBlank(parentRef) && !ids.contains(parentRef)) {
-        return opPrefix(i) + ".parentRef '" + parentRef
-            + "' does not match any earlier op id";
-      }
+    }
+    return null;
+  }
+
+  /**
+   * One operation of {@link #validate}: well-formed, a fresh id, and every reference it makes
+   * points back to an earlier operation. Adds the operation's id to {@code ids}.
+   *
+   * @return the reason the operation is unacceptable, or {@code null} when it is well-formed
+   */
+  private static String validateOperation(int i, JSONObject op, Set<String> ids) {
+    if (op == null) {
+      return opPrefix(i) + " must be an object";
+    }
+    String id = op.optString("id", null);
+    if (StringUtils.isBlank(id) || StringUtils.isBlank(op.optString("spec", null))
+        || StringUtils.isBlank(op.optString("entity", null))) {
+      return opPrefix(i) + " requires 'id', 'spec', 'entity'";
+    }
+    if (!ids.add(id)) {
+      return opPrefix(i) + ".id duplicates an earlier op";
+    }
+    if (BatchService.isDeleteOperation(op)
+        && StringUtils.isBlank(op.optString(BatchService.FIELD_RECORD_ID, null))) {
+      // ETP-6143: refuse the whole job up front rather than start it and fail this row later.
+      return opPrefix(i) + " DELETE requires 'recordId'";
+    }
+    String parentRef = op.optString("parentRef", null);
+    if (StringUtils.isNotBlank(parentRef) && !ids.contains(parentRef)) {
+      return opPrefix(i) + ".parentRef '" + parentRef + "' does not match any earlier op id";
     }
     return null;
   }
@@ -516,12 +534,15 @@ public final class BatchJobService {
     row.put("ids", ids);
     JSONObject envelope;
     try {
-      envelope = runner.run(rowOps);
+      // ETP-5819: the worker thread does not inherit the request's guard.
+      envelope = NeoTenantWriteGuard.call(() -> runner.run(rowOps));
     } catch (Exception e) { // NOSONAR — a row's failure is its result, never the job's death
       log.error("[BATCH-JOB] row {} threw", rowIndex, e);
       row.put(KEY_COMMITTED, false);
       row.put(KEY_SAFE_TO_RESEND, false);
-      row.put(KEY_ERROR, new JSONObject().put(KEY_STATUS, 500)
+      // A tenant refusal is permanent for this row: report it as such, not as a server failure.
+      int status = e instanceof org.openbravo.base.exception.OBSecurityException ? 403 : 500;
+      row.put(KEY_ERROR, new JSONObject().put(KEY_STATUS, status)
           .put(KEY_MESSAGE, "Batch row failed: " + e.getMessage()));
       return row;
     } finally {
@@ -541,9 +562,29 @@ public final class BatchJobService {
       }
     }
     if (!committed) {
-      row.put(KEY_SAFE_TO_RESEND, provenRollback(envelope));
+      row.put(KEY_SAFE_TO_RESEND, provenRollback(envelope) && !isQuotaExceeded(envelope));
     }
     return row;
+  }
+
+  /**
+   * ETP-5051 — a row refused for being over a plan quota was rolled back, but sending it again
+   * cannot succeed until the quota changes, so it is not safe to resend. {@code QUOTA_CHECK_FAILED}
+   * is not this: nothing was saved and the check itself failed, so a resend is legitimate and may
+   * pass. The code sits at {@code error.code} on MCP (flattened) and at
+   * {@code error.detail.error.code} on REST (the operation's own response).
+   */
+  private static boolean isQuotaExceeded(JSONObject envelope) {
+    JSONObject error = envelope.optJSONObject(KEY_ERROR);
+    if (error == null) {
+      return false;
+    }
+    if (NeoQuotaWriteGate.CODE.equals(error.optString(KEY_CODE, null))) {
+      return true;
+    }
+    JSONObject detail = error.optJSONObject("detail");
+    JSONObject nested = detail == null ? null : detail.optJSONObject(KEY_ERROR);
+    return nested != null && NeoQuotaWriteGate.CODE.equals(nested.optString(KEY_CODE, null));
   }
 
   /**

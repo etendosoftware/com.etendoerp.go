@@ -94,6 +94,8 @@ public class ToolRegistry {
 
     // Always add etendo_discover if user can read
     if (permissions.canRead) {
+      // etendo-ai#53: first, because it is the call an agent should make first.
+      tools.add(McpWhoamiToolDefinition.definition());
       tools.add(buildDiscoverTool());
       tools.add(buildDocsTool());
       // etendo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
@@ -268,7 +270,8 @@ public class ToolRegistry {
           McpNamedFilterCatalog.summary(accessibleWindowSpecs)));
       tools.add(buildGetTool(accessibleWindowSpecs));
       tools.add(buildSelectorsTool(accessibleWindowSpecs));
-      tools.add(buildDefaultsTool(accessibleWindowSpecs));
+      tools.add(buildDefaultsTool(accessibleWindowSpecs,
+          McpDefaultsContextCatalog.summary(accessibleWindowSpecs)));
       tools.add(buildSchemaTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
     if (permissions.canWrite) {
@@ -339,7 +342,8 @@ public class ToolRegistry {
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
     // Static tools (e.g. docs) are not tied to any spec
     if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)
-        || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)) {
+        || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)
+        || McpConstants.TOOL_NEO_WHOAMI.equals(toolName)) {
       return null;
     }
     // IMP-53: etendo_discover's optional 'spec' narrows the catalog, it does not address a spec.
@@ -427,8 +431,11 @@ public class ToolRegistry {
         McpConstants.TOOL_NEO_DISCOVER,
         "List all available Etendo API specs the current user can access. "
             + "Returns spec names, types, entities, and available HTTP methods. "
-            + "Use this first to discover what specs and entities are available. "
-            + "Pass spec to get only that spec's entities, parent links and actions.",
+            + "Call it when you do not know which spec holds what the task needs, or which "
+            + "entities a spec has; when you already know the spec, go straight to it. "
+            + "Pass spec to get only that spec's entities, parent links and actions. "
+            + "The answer is always complete, never paged: count is the number of specs returned. "
+            + "If your client shows it cut, call it again with spec for the one you need.",
         schema);
   }
 
@@ -579,18 +586,38 @@ public class ToolRegistry {
     WIDGET_ENTITY_BY_NAME = java.util.Collections.unmodifiableMap(entities);
 
     Map<String, String> desc = new LinkedHashMap<>();
-    desc.put(McpConstants.WIDGET_KPIS, "Summary KPI cards: revenue this month, pending invoices, and "
-        + "other headline business metrics with trend percentages.");
-    desc.put(McpConstants.WIDGET_REVENUE_TREND, "Monthly revenue series (parallel labels/values arrays) "
-        + "for charting the revenue trend over the last 12 months.");
+    // ETP-5852 (M-24 / M-38): what each figure measures, so figures of different bases are not
+    // compared. The card keys keep their historical names; the period is in response.period.
+    desc.put(McpConstants.WIDGET_KPIS, "Headline KPI cards for the period in response.period "
+        + "(default 'ytd', year to date — the keys revenueThisMonth/expensesThisMonth keep their "
+        + "historical names but cover that period): revenue and expenses = NET amounts without "
+        + "VAT (invoice totallines) of completed/closed sales and purchase invoices dated in the "
+        + "period; netProfit = revenue - expenses; pendingInvoices = completed sales invoices "
+        + "still unpaid, counted now whatever their date. trend = % change against the previous "
+        + "period of the same length. With hasPrevious:false there is no previous period to "
+        + "compare with and trend is 0 as a placeholder, not a change: do not report it.");
+    desc.put(McpConstants.WIDGET_REVENUE_TREND, "Revenue series (parallel labels/values arrays): "
+        + "NET sales without VAT of completed/closed invoices per bucket — months by default (the "
+        + "rolling last 12 months), days for mtd/last30d, weeks for last90d.");
     desc.put(McpConstants.WIDGET_PENDING_TASKS, "Actionable pending tasks and alerts (overdue invoices, "
         + "pending receptions/shipments, collections/payments due).");
     desc.put(McpConstants.WIDGET_ACTIVITY, "Recent activity feed (invoices paid, documents posted, notes).");
-    desc.put(McpConstants.WIDGET_RECENT_INVOICES, "Most recent completed sales invoices (newest first).");
-    desc.put(McpConstants.WIDGET_BEST_PRODUCTS, "Best-performing products by revenue/quantity.");
-    desc.put(McpConstants.WIDGET_BEST_SELLERS, "Best-selling sales reps / sellers ranking.");
-    desc.put(McpConstants.WIDGET_PENDING_AMOUNTS, "Outstanding receivable/payable amounts pending collection.");
-    desc.put(McpConstants.WIDGET_TOP_CLIENTS, "Top clients ranked by revenue.");
+    desc.put(McpConstants.WIDGET_RECENT_INVOICES, "The 5 most recent completed/closed sales "
+        + "invoices (newest first); amount is the total WITH VAT.");
+    // ETP-5852 (M-164): the only sales-by-product figures, as on the dashboard card.
+    desc.put(McpConstants.WIDGET_BEST_PRODUCTS, "Top 10 products ranked by NET sales amount "
+        + "without VAT (invoice line net amounts) of completed/closed sales invoices in the period "
+        + "of params.range. Sales by product for a period are read here (amounts) and in "
+        + "best-sellers (quantities); only the listed ranges exist, as on the dashboard, so a "
+        + "period outside them (one month, a quarter) cannot be read: tell the user.");
+    desc.put(McpConstants.WIDGET_BEST_SELLERS, "Top 10 products ranked by quantity sold "
+        + "(invoiced quantity of completed/closed sales invoices) in the period of params.range, "
+        + "with their unit of measure.");
+    desc.put(McpConstants.WIDGET_PENDING_AMOUNTS, "Open receivables and payables NOW: count and "
+        + "outstanding amount WITH VAT of completed sales/purchase invoices not fully paid. A "
+        + "balance, not a period flow: not comparable with the net revenue of 'kpis'.");
+    desc.put(McpConstants.WIDGET_TOP_CLIENTS, "Top 10 clients ranked by invoiced total WITH VAT "
+        + "of completed/closed sales invoices.");
     WIDGET_DESCRIPTION_BY_NAME = java.util.Collections.unmodifiableMap(desc);
   }
 
@@ -605,6 +632,14 @@ public class ToolRegistry {
     for (Map.Entry<String, String> e : WIDGET_DESCRIPTION_BY_NAME.entrySet()) {
       enumDesc.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
     }
+    // ETP-5852 (M-95): the card a user names when asking about "the dashboard".
+    enumDesc.append("Dashboard card each widget feeds: kpis = Financial summary (Resumen "
+        + "financiero); revenue-trend = Financial trend (Evolución financiera); pending-tasks = "
+        + "Pending tasks (Tareas pendientes); recent-invoices = Recent sales (Ventas recientes); "
+        + "best-products and best-sellers = Top selling products (Productos más vendidos), by "
+        + "amount and by quantity; pending-amounts = Collections & payments (Cobros y pagos); "
+        + "top-clients = Top clients (Clientes destacados). activity has no card of its own, and "
+        + "Quick actions (Accesos rápidos) are links, not data, so no widget serves them.\n");
 
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_WIDGET,
@@ -614,8 +649,9 @@ public class ToolRegistry {
             + "'range' to scope the period. Valid values: 'ytd', 'mtd', 'last30d', "
             + "'last90d', 'lastYear'. Omit for the widget's default window "
             + "(for 'kpis', an omitted range means 'ytd'; for 'revenue-trend' it means "
-            + "the rolling last 12 months, bucketed by month); any other value falls back "
-            + "to the rolling last 12 months."));
+            + "the rolling last 12 months, bucketed by month); any other value is refused with "
+            + "a 422. Every answer carries response.period: the effective range with its from/to "
+            + "dates (or the widget's default window) and asOf, the moment it was computed."));
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_WIDGET,
@@ -672,7 +708,9 @@ public class ToolRegistry {
         "Search indexed business records by semantic similarity using DB Extended. "
             + "Only 'query' is required: with no 'targets' it searches every index the current role "
             + "can read. Targets are authorized against their physical source entity for the "
-            + "current role. Scores are ranking signals, not confidence probabilities.",
+            + "current role. Scores are ranking signals, not confidence probabilities. When "
+            + "semantic search is unavailable or finds nothing, the same targets are searched by "
+            + "text on their indexed fields and the answer says mode:\"lexical\".",
         buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY)));
   }
 
@@ -706,7 +744,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_UPDATE: definition = registry.buildUpdateTool(List.of()); break;
       case McpConstants.TOOL_NEO_DELETE: definition = registry.buildDeleteTool(List.of()); break;
       case McpConstants.TOOL_NEO_SELECTORS: definition = registry.buildSelectorsTool(List.of()); break;
-      case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of()); break;
+      case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of(), null); break;
       case McpConstants.TOOL_NEO_SCHEMA: definition = registry.buildSchemaTool(List.of()); break;
       case McpConstants.TOOL_NEO_DISCOVER: definition = registry.buildDiscoverTool(); break;
       // ETP-5669: a top-level docAction was silently ignored and the call fell through to the
@@ -727,6 +765,8 @@ public class ToolRegistry {
         definition = McpOcrToolDefinitions.requestUpload(List.of()); break;
       case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
         definition = McpOcrToolDefinitions.extract(List.of()); break;
+      // etendo-ai#53: only includePermissions; anything else is refused.
+      case McpConstants.TOOL_NEO_WHOAMI: definition = McpWhoamiToolDefinition.definition(); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -743,13 +783,16 @@ public class ToolRegistry {
   private McpToolDefinition buildListTool(List<String> specNames, String namedFilterSummary) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
-    props.put(McpConstants.PARAM_ENTITY,
-      stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put("filters", objectProp(
-        "Filter criteria. Three shapes, combinable: (1) exact match {\"column\": value}; "
+        "Filter criteria. Five shapes, combinable: (1) exact match {\"column\": value}; "
             + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
             + "{\"column\": {\"between\": [from, to]}} (dates as \"YYYY-MM-DD\"); "
-            + "(3) named business filter {\"status\": \"<name>\"} — a hand-authored business "
+            + "(3) partial text, case-insensitive, text fields only "
+            + "{\"column\": {\"contains\": \"text\"}}; "
+            + "(4) any of several exact values {\"column\": {\"in\": [v1, v2]}} (ids for a "
+            + "reference field); "
+            + "(5) named business filter {\"status\": \"<name>\"} — a hand-authored business "
             + "state; an unknown name returns the valid list with what each one means."
             + (namedFilterSummary == null ? ""
                 : " Configured named filters (spec/entity: name (meaning)):\n" + namedFilterSummary)));
@@ -758,10 +801,16 @@ public class ToolRegistry {
     // scope a list to one parent was a filter on a field name the agent had to work out itself.
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
         "Parent record ID — REQUIRED for a child/line entity (e.g. the order ID when listing that "
-            + "order's lines). A child's records are read through their parent: there is no global "
-            + "list of them. Omit it on a child entity and the call is refused, naming the parent "
-            + "entity to fetch first. Not needed for a spec's top-level entity, and equivalent to "
-            + "filtering on the parent field yourself."));
+            + "order's lines). A child's records are read through their parent. Omit it on a child "
+            + "entity and the call is refused, naming the parent entity to fetch first. Not needed "
+            + "for a spec's top-level entity, and equivalent to filtering on the parent field "
+            + "yourself."));
+    props.put(McpConstants.PARAM_ALL_PARENTS, booleanProp(
+        "Optional, default false. true searches a child entity across EVERY parent instead of "
+            + "one (e.g. the sales order lines of a product, whatever the order) — only on the "
+            + "entities whose etendo_schema shows allParentsAllowed:true; refused elsewhere and "
+            + "together with parentId. The rows stay within this spec (sales-order lines are lines "
+            + "of sales orders only) and each names its parent. Use parentId to read one parent."));
     props.put("limit", numericProp(TYPE_INTEGER, "Maximum number of records to return (default 100)"));
     props.put("offset", numericProp(TYPE_INTEGER, "Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
@@ -770,19 +819,32 @@ public class ToolRegistry {
             + "[\"documentNo\",\"businessPartner\",\"grandTotalAmount\"]). A FK's $_identifier "
             + "label is included automatically. Names this entity cannot return come back in "
             + "\"unknownFields\" alongside \"data\" — check it if a field you expected is missing, "
-            + "including when \"data\" is empty. Omit to return every column."));
+            + "including when \"data\" is empty. Omitted, rows carry the window's list columns and "
+            + "\"otherFields\" names the rest."));
     props.put(McpFieldProjection.PARAM_VIEW, enumProp(
-        "Optional curated view. \"summary\" returns only the spec's business-critical fields — a "
-            + "compact row for compliance-heavy specs. Ignored when `fields` is given; omit for the "
-            + "full row.", List.of(McpFieldProjection.VIEW_SUMMARY)));
+        "Optional view, ignored when `fields` is given. \"summary\" returns only the spec's "
+            + "business-critical fields. \"full\" returns every field of every row (large: prefer "
+            + "naming them in `fields`). Omit for the window's list columns.",
+        List.of(McpFieldProjection.VIEW_SUMMARY, McpFieldProjection.VIEW_FULL)));
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_LIST,
         "List records from an Etendo API spec. "
             + "Supports filtering (exact match, range operators, named document status), "
-            + "pagination, sorting, and field projection (`fields` / view:\"summary\").",
-          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
+            + "pagination, sorting, and field projection (`fields` / view:\"summary\"). "
+            + "`totalRows` is the number of records matching the filters, whatever page you ask for. "
+            + LIST_CODES_NOTE,
+          buildObjectSchema(props, List.of("spec")));
   }
+
+  /**
+   * ETP-5852 (M-184): a list field (documentStatus, …) is read as its code; the label the user
+   * sees is in the schema, which agents did not know.
+   */
+  private static final String LIST_CODES_NOTE = "A field with a fixed list of values "
+      + "(documentStatus, paymentStatus, ...) comes as its code (CO, DR, ...); etendo_schema lists "
+      + "each code with its meaning under that field's options (CO = Booked, VO = Voided) — tell "
+      + "the user the meaning, not the code.";
 
   private McpToolDefinition buildGetTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
@@ -802,10 +864,11 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_GET,
-        "Get a single record by ID from an Etendo API spec. Supports field projection "
-            + "(`fields` / view:\"summary\"). "
+        "Get a single record by ID from an Etendo API spec. The record comes back as an object "
+            + "in `data` ({\"data\": {…}}), not a list. Supports field projection "
+            + "(`fields` / view:\"summary\"). " + LIST_CODES_NOTE + " "
             + McpConstants.RECORD_URL_NOTE,
-          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
+          buildObjectSchema(props, List.of("spec", "id")));
   }
 
   private McpToolDefinition buildCreateTool(List<String> specNames) {
@@ -838,7 +901,8 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_CREATE,
-        "Create a new record in an Etendo API spec. "
+        "Create a new record in an Etendo API spec. The created record comes back as an object in "
+            + "`data` ({\"data\": {…}}), like etendo_get. "
             + "Creating a child/line record? Pass parentId with the parent's id — without it the "
             + "server cannot derive the values it inherits from the parent. "
             + "Recommended: call etendo_defaults first to get the initial/base set of field values "
@@ -856,7 +920,7 @@ public class ToolRegistry {
             + unknownFieldsNote
             + McpConstants.RECORD_URL_NOTE,
         buildObjectSchema(props,
-          List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
+          List.of("spec", McpConstants.PARAM_FIELDS)));
   }
 
   private McpToolDefinition buildUpdateTool(List<String> specNames) {
@@ -883,7 +947,8 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_UPDATE,
-        "Update an existing record in an Etendo API spec. "
+        "Update an existing record in an Etendo API spec. The updated record comes back as an object "
+            + "in `data` ({\"data\": {…}}), like etendo_get. "
             + "Read the record with etendo_get first: its 'updated' value is a required argument and "
             + "guards against overwriting somebody else's concurrent edit. A 409 with "
             + "error 'stale_record' means the record changed since that read — re-read it, reapply "
@@ -892,7 +957,7 @@ public class ToolRegistry {
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
             + unknownFieldsNote,
         buildObjectSchema(props,
-          List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS,
+          List.of("spec", "id", McpConstants.PARAM_FIELDS,
             McpConstants.PARAM_UPDATED)));
   }
 
@@ -905,7 +970,7 @@ public class ToolRegistry {
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_DELETE,
         "Delete a record from an Etendo API spec.",
-          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
+          buildObjectSchema(props, List.of("spec", "id")));
   }
 
   private McpToolDefinition buildSelectorsTool(List<String> specNames) {
@@ -939,13 +1004,13 @@ public class ToolRegistry {
             + "Returns {items:[{id,label}], totalCount, hasMore}, capped at 50 items with no "
             + "paging: when hasMore is true, narrow with query.",
         buildObjectSchema(props,
-          List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN)));
+          List.of("spec", McpConstants.PARAM_COLUMN)));
   }
 
-  private McpToolDefinition buildDefaultsTool(List<String> specNames) {
+  private McpToolDefinition buildDefaultsTool(List<String> specNames, String requiredContextSummary) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
-    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
         "Parent record ID — REQUIRED for a child/line entity (e.g. the order ID when getting "
             + "line defaults, or the inventory header ID when getting inventory-line defaults). "
@@ -959,12 +1024,17 @@ public class ToolRegistry {
             + "(e.g. the amortization header name derived from the asset name and start date)"));
     props.put(McpConstants.PARAM_RECORD_CONTEXT, objectProp(
         "Optional current field values of the record you are drafting, for defaults that depend "
-            + "on them. For example {\"productType\": \"S\"} on product/product returns the "
-            + "defaults of a Service (type and tax category consistent with it). Each scalar entry "
-            + "(string, number, boolean; at most 32 entries of 256 characters) is passed to the "
-            + "entity's defaults customization as a query parameter, exactly like ?key=value on "
-            + "REST /defaults, so send only current field values of the record. parentId, "
-            + "assetId, view, spec and entity cannot be overridden by it."));
+            + "on them: {\"<field>\": <value>}, ids for reference fields. Each one is applied to "
+            + "the record before the dependent defaults are derived, as when the field is set in "
+            + "the UI — e.g. {\"businessPartner\": \"<id>\"} on a document header returns that "
+            + "partner's payment terms, payment method and price list; "
+            + "{\"productType\": \"S\"} on product/product returns the defaults of a Service. "
+            + "Scalar entries only (string, number, boolean; at most 32 entries of 256 "
+            + "characters); a name that is not a field of the entity is ignored. parentId, "
+            + "assetId, view, spec and entity cannot be overridden by it."
+            + (requiredContextSummary == null ? ""
+                : " REQUIRED context per entity — send these or the defaults that depend on them "
+                    + "come back generic (spec/entity: fields — why):\n" + requiredContextSummary)));
     props.put(McpDefaultsView.PARAM_VIEW, enumProp(
         "Optional response shape. Omit (or \"full\") for the historical flat map of every default. "
             + "\"grouped\" splits the result into `confirm` (writable fields you should review or "
@@ -990,13 +1060,14 @@ public class ToolRegistry {
             + "terms, a financial account, ...) is NOT copied into the record unless you send it "
             + "explicitly in fields, even though it showed a value here. Copy across the fields "
             + "from this result you want on the record; do not assume omitting one lets etendo_create "
-            + "fill it in the same way. BUT these values are resolved with no business partner and "
-            + "no record context, so a value here can be superseded the moment you choose one: on "
-            + "sales-order/header this call answers paymentTerms \"30 Días\" and the partner you "
-            + "pick may imply \"Inmediato\". A value you send is treated as deliberate and is "
-            + "protected from the callout that would have corrected it, so re-send a value from "
-            + "here only when the user actually chose it — not as a blanket echo. etendo_create "
-            + "reports anything your value displaced in \"supersededDefaults\"; read it. "
+            + "fill it in the same way. Defaults that depend on another field of the record (the "
+            + "payment terms of a document follow its business partner) are only right when that "
+            + "field is sent in recordContext — the entities that need it are listed under "
+            + "recordContext. Without it they are generic. A value you send to etendo_create is "
+            + "treated as deliberate and is protected from the callout that would have corrected "
+            + "it, so re-send a value from here only when it came from the right context or the "
+            + "user chose it — not as a blanket echo. etendo_create reports anything your value "
+            + "displaced in \"supersededDefaults\"; read it. "
             + "When entity is a child/line tab (not the spec's top-level "
             + "entity), pass parentId with the parent record's id — omitting it does not resolve "
             + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
@@ -1008,7 +1079,7 @@ public class ToolRegistry {
             + "fields you actually confirm. "
             + "Date values come back ISO-8601 ('YYYY-MM-DD', or 'YYYY-MM-DDTHH:MM:SS' for "
             + "datetime fields) and can be passed straight back to etendo_create unchanged.",
-        buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
+        buildObjectSchema(props, List.of("spec")));
   }
 
   // ── Batch tool (cross-spec, sequential — not atomic, see IMP-23) ──────
@@ -1161,8 +1232,7 @@ public class ToolRegistry {
   private McpToolDefinition buildSchemaTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
-    props.put(McpConstants.PARAM_ENTITY,
-      stringProp("Entity name within the spec (e.g. 'header', 'lines'; use the exact names etendo_discover lists)"));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     // IMP-44: REQUIRED, and "full" is now a value you ask for rather than what you get for not
     // choosing. The full dump is 39.5 kB on sales-order/header against 5.4 kB for "create", and
     // the caller used to be told about the cheaper projection by a hint at the bottom of the
@@ -1173,11 +1243,12 @@ public class ToolRegistry {
         "REQUIRED — which projection you want. \"create\": ONLY the fields you may send to "
             + "etendo_create/etendo_update, split into required/optional. This is the one you want "
             + "before a write, and it is by far the smallest (~5 kB on sales-order/header). "
-            + "\"actions\": only the buttons/processes ({name, label, action, processName, "
-            + "processId, ...}) — use it when you need to know what can be triggered on this "
-            + "entity, not every column. Fire only the ones carrying invokeVia:\"etendo_action\"; the "
-            + "rest report invokable:false plus a notInvokableReason, and \"invokableCount\" next "
-            + "to \"actionCount\" tells you the split up front. \"full\": every field, including "
+            + "\"actions\": an index of the actions you can run on this entity — per action its "
+            + "name, a one-line summary and when it applies — and under notOffered the ones you "
+            + "cannot, with the reason or what to use instead. Then pass action:\"<name>\" for that "
+            + "action's parameters and values (etendo_discover lists the names, so you can go "
+            + "straight there). "
+            + "\"full\": every field, including "
             + "read-only and system ones — ~40 kB on sales-order/header and more on "
             + "compliance-heavy windows, where it may not fit your context. Ask for it when you "
             + "are reading, filtering or projecting, not when you are about to write.",
@@ -1190,6 +1261,10 @@ public class ToolRegistry {
             + "(availableValuesNow). Without it you get each action's static availableWhen / "
             + "valuesByStatus only. Advice only: it never blocks a call. Ask for it before "
             + "offering the user an action on a document."));
+    props.put(McpActionsCompact.PARAM_ACTION, stringProp(
+        "Optional, only for view:\"actions\": the name of ONE action (e.g. \"registerPayment\"). "
+            + "Returns that action in full — its parameters, values and description — which the "
+            + "index leaves out. A name that does not exist is refused with the names that do."));
     props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
         "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "
             + "Returns only those descriptors instead of all of them. Names that match nothing come "
@@ -1218,7 +1293,7 @@ public class ToolRegistry {
             + "buttons/processes instead, and view:\"full\" when you are reading or filtering "
             + "and genuinely need every column.",
         buildObjectSchema(props,
-            List.of("spec", "entity", McpActionsView.PARAM_VIEW)));
+            List.of("spec", McpActionsView.PARAM_VIEW)));
   }
 
   // ── Action tool ────────────────────────────────────────────────────────
@@ -1237,7 +1312,9 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "etendo_action",
-        "Fire a type:button action on a record and return the process result. "
+        "Fire a type:button action on a record and return the process result. Every result carries "
+            + "`success` (boolean) and `message` (the outcome, translated); other keys depend on the "
+            + "action. "
             + "Call etendo_schema with view:\"actions\" first: each button field carries 'action' "
             + "(the name to pass "
             + "here), and list-backed buttons also carry 'actionValues' (the values it "
@@ -1257,7 +1334,7 @@ public class ToolRegistry {
             + "Schema for 'parameters' and an 'idDescription' saying what 'id' is; they return "
             + "the handler's own JSON.",
         buildObjectSchema(props,
-            List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
+            List.of("spec", "id", "action")));
   }
 
   // ── Process tool ───────────────────────────────────────────────────────
@@ -1299,6 +1376,12 @@ public class ToolRegistry {
     String desc = String.format("Generate the '%s' report", specName);
     if (spec.getDescription() != null) {
       desc += ". " + spec.getDescription();
+    }
+    // ETP-5852 (M-228): a report's own guidance (what its columns mean, how to combine it with
+    // other data) reaches the agent the way a window's does, from the spec's AGENT_PROMPT.
+    String reportPrompt = spec.getAgentPrompt();
+    if (reportPrompt != null && !reportPrompt.isBlank()) {
+      desc += (desc.endsWith(".") ? " " : ". ") + reportPrompt.trim();
     }
 
     Map<String, Object> paramProps = new LinkedHashMap<>();

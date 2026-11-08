@@ -40,6 +40,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import org.openbravo.base.structure.BaseOBObject;
 
@@ -125,6 +126,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Inject
   private ImportInOutLinesIntoInvoiceHandler importShipmentLinesHandler;
 
+  @Inject
+  private ImportOriginInvoiceLinesHandler importOriginInvoiceLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -151,25 +155,23 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     // ETP-5713: import the pending lines of a completed order / goods shipment into this draft.
     contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(true));
     contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(true));
+    // ETP-5876: a DRAFT rectificative takes its lines from a return or from the invoice it
+    // rectifies instead (the window's "Import from return" / "Import from source invoice").
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.returnContracts(true));
+    contracts.putAll(ImportOriginInvoiceLinesHandler.contracts(true));
     return contracts;
   }
 
   /**
    * {@inheritDoc} Reactivate is ruled out for an invoice {@link InvoiceReactivationGuard} would
-   * refuse to reactivate (ETP-5714).
+   * refuse to reactivate (ETP-5714), and the import actions that do not suit the kind of invoice
+   * it is: the order and goods ones on a rectificative, the return and origin ones on any other
+   * (ETP-5876).
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
-    return InvoiceDocumentAvailability.unavailable(subject);
-  }
-
-  /**
-   * {@inheritDoc} The invoice windows un-post a posted invoice before reactivating it
-   * ({@code preUnpost: true} in the SPA), so the MCP does too (ETP-5715).
-   */
-  @Override
-  public boolean unpostBeforeReactivate() {
-    return true;
+    return InvoiceDocumentAvailability.unavailable(subject,
+        RectificativeImportPolicy.forHeader(this::classifyDocType, true));
   }
 
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
@@ -192,6 +194,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
+    // ETP-5840 (QA CP-12b): an update that changes the invoice date copies it into the accounting
+    // and operation dates, as the UI callout does; before the rate guard, which reads that date.
+    mirrorInvoiceDateOnUpdate(context);
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
     resolveServerCreateFields(context);
     // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
@@ -238,9 +243,23 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (reactivationGuard != null) {
       return reactivationGuard;
     }
+    // ETP-5876: the import actions go with the KIND of invoice, as in the window — order and
+    // shipment on a normal one, return and origin invoice on a rectificative — and the delegates
+    // classify through this header's own rule, handed in on the request.
+    RectificativeImportPolicy importPolicy =
+        RectificativeImportPolicy.forHeader(this::classifyDocType, true);
+    context.setAttribute(RectificativeImportPolicy.ATTRIBUTE, importPolicy);
+    NeoResponse importKindRefusal = RectificativeImportGate.refuse(context, importPolicy);
+    if (importKindRefusal != null) {
+      return importKindRefusal;
+    }
+    NeoResponse unpostRefusal = unpostBeforeReactivation(context, postingService);
+    if (unpostRefusal != null) {
+      return unpostRefusal;
+    }
     return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
         registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, importOrderLinesHandler,
-        importShipmentLinesHandler, followUp.actionHandler());
+        importShipmentLinesHandler, importOriginInvoiceLinesHandler, followUp.actionHandler());
   }
 
   /**
@@ -269,6 +288,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5684: say what ran when the reactivation un-posted the invoice first.
+    ReactivationUnpost.notePartial(context);
     // ETP-5840: a create whose currency or accounting date only the create cascade derived; before
     // the rate-document sync, which must see the resolved rate.
     NeoResponse rateRefusal = currencyRate.afterWrite(context);
@@ -276,25 +297,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return rateRefusal;
     }
     autoCreateOrUpdateConversionRateDocument(context);
-    // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
-    // Mirrors PurchaseInvoiceHeaderHandler#afterHandle (ETP-4737) — the manual
-    // "Import from Source Invoice" flow links a rectificativa back to its source via
-    // C_Invoice_Reverse, same mechanism shared through AbstractInvoiceHeaderHandler.
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-      rectificationLinks.persistOriginInvoice(context);
-      persistSiiAuthorizationno(context);
-      // ETP-5745 CP-14: structural TicketBAI/VERI*FACTU rectificative defaults on every header
-      // write, not just completion — restores the ETP-5747 behavior (never merged into this
-      // long-lived branch), minus the tbaiReverseinvoicecode auto-pick it used to do. See
-      // SalesRectificativeFiscalDefaults' class javadoc for the full rule.
-      SalesRectificativeFiscalDefaults.apply(InvoiceCalloutHelper.resolveInvoiceIdFromContext(context));
-    }
+    // ETP-5745/ETP-5747 merge note: develop already refactored this into afterNonRead() below,
+    // which calls rectificationLinks.persistOriginInvoice/persistSiiAuthorizationno AND
+    // SalesRectificativeFiscalDefaults.apply (ETP-5745 CP-14), then threads the fiscal defaults
+    // into the write response via completeWriteResponse — strictly more complete than this
+    // branch's own inline duplicate (which only called apply() with no response wiring), so the
+    // inline block that used to be here was dropped in favor of afterNonRead().
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      // ETP-4783: the main CRUD write captures its response before afterHandle() runs, so
-      // aeatsiiAuthorizationno (written by persistSiiAuthorizationno()) is absent from the
-      // PATCH response. Inject it so the frontend sees the correct value without a re-fetch.
-      return injectAuthorizationnoIntoSaveResponse(context);
+      return afterNonRead(context);
     }
     NeoResponse prev = context.getPreviousResult();
     if (prev == null || prev.getBody() == null) {
@@ -319,7 +329,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       followUp.annotate(dataArr);
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
-        enrichSourceInvoice(rec, context.getRecordId());
         rectificationLinks.enrichOriginInvoice(rec, context.getRecordId());
         rectificationLinks.enrichRectifyingInvoices(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
@@ -340,6 +349,35 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     }
   }
 
+  /**
+   * The {@link #afterHandle} branch for everything that is not a CRUD read: CRUD writes and the
+   * other endpoint types (ACTION, ...).
+   *
+   * <p>On a CRUD write (POST/PUT/PATCH) it persists the origin-invoice relationship — mirrors
+   * {@code PurchaseInvoiceHeaderHandler#afterHandle} (ETP-4737): the manual "Import from Source
+   * Invoice" flow links a rectificativa back to its source via C_Invoice_Reverse — the SII
+   * authorization number, and the TicketBAI / VERI*FACTU rectificative defaults (ETP-5747), then
+   * completes the write response ({@link #completeWriteResponse}).
+   *
+   * <p>ETP-4783: the main CRUD write captures its response before afterHandle() runs, so
+   * aeatsiiAuthorizationno (written by persistSiiAuthorizationno()) is absent from the PATCH
+   * response; it is injected so the frontend sees the correct value without a re-fetch.
+   */
+  private NeoResponse afterNonRead(NeoContext context) {
+    boolean crudWrite = NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod());
+    Map<String, Object> fiscalDefaults = Collections.emptyMap();
+    if (crudWrite) {
+      rectificationLinks.persistOriginInvoice(context);
+      persistSiiAuthorizationno(context);
+      fiscalDefaults = SalesRectificativeFiscalDefaults.apply(
+          InvoiceCalloutHelper.resolveInvoiceIdFromContext(context));
+    }
+    NeoResponse authorizationResponse = injectAuthorizationnoIntoSaveResponse(context);
+    return crudWrite ? completeWriteResponse(context, authorizationResponse, fiscalDefaults)
+        : authorizationResponse;
+  }
+
   // ---------------------------------------------------------------------------
   // AR-specific subtype resolution
   // ---------------------------------------------------------------------------
@@ -354,14 +392,26 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   protected String classifyDocType(DocumentType dt) {
+    return isRectificativeDocType(dt) ? SUBTYPE_RECTIFICATIVA : SUBTYPE_FAC;
+  }
+
+  /**
+   * The AR rectificative rule behind {@link #classifyDocType}, callable without a handler instance
+   * — {@link SalesInvoiceLineHandler} needs it to decide whether a created line links its invoice
+   * to the one it rectifies (ETP-6002).
+   *
+   * @param dt the document type, may be {@code null}
+   * @return {@code true} for the unified rectificative type and the legacy ARC/ARI_RM categories
+   */
+  static boolean isRectificativeDocType(DocumentType dt) {
+    if (dt == null) {
+      return false;
+    }
     if (RectificativeSupport.isRectificative(dt)) {
-      return SUBTYPE_RECTIFICATIVA;
+      return true;
     }
     String category = dt.getDocumentCategory();
-    if ("ARC".equals(category) || "ARI_RM".equals(category)) {
-      return SUBTYPE_RECTIFICATIVA;
-    }
-    return SUBTYPE_FAC;
+    return "ARC".equals(category) || "ARI_RM".equals(category);
   }
 
   /**
@@ -372,53 +422,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Override
   protected String getInvoiceSubtypeKey() {
     return "arInvoiceSubtype";
-  }
-
-  /**
-   * For return invoices, injects:
-   * - {@code sourceReturnReceipt}: the return receipt that originated this invoice
-   * - {@code sourceInvoice}: the original invoice being reversed
-   * Both are traced via C_InvoiceLine → M_InOutLine chains.
-   * Returns nothing for regular invoices (no Canceled_Inoutline_ID on their lines).
-   */
-  @SuppressWarnings("java:S2077")
-  private void enrichSourceInvoice(JSONObject rec, String invoiceId) {
-    String sql =
-        "SELECT DISTINCT " +
-        "  ret.M_InOut_ID AS ret_id, ret.DocumentNo AS ret_doc, ret.DocStatus AS ret_status, " +
-        "  orig_i.C_Invoice_ID AS inv_id, orig_i.DocumentNo AS inv_doc, orig_i.DateInvoiced " +
-        "FROM C_InvoiceLine il " +
-        "JOIN M_InOutLine ret_line ON ret_line.M_InOutLine_ID = il.M_InOutLine_ID " +
-        "JOIN M_InOut ret ON ret.M_InOut_ID = ret_line.M_InOut_ID " +
-        "LEFT JOIN M_InOutLine orig_line ON orig_line.M_InOutLine_ID = ret_line.Canceled_Inoutline_ID " +
-        "LEFT JOIN C_InvoiceLine orig_il ON orig_il.M_InOutLine_ID = orig_line.M_InOutLine_ID " +
-        "LEFT JOIN C_Invoice orig_i ON orig_i.C_Invoice_ID = orig_il.C_Invoice_ID " +
-        "  AND orig_i.DocStatus != 'VO' " +
-        "WHERE il.C_Invoice_ID = ? AND ret_line.Canceled_Inoutline_ID IS NOT NULL " +
-        "ORDER BY orig_i.DateInvoiced DESC LIMIT 1";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, invoiceId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          JSONObject retReceipt = new JSONObject();
-          retReceipt.put("id", rs.getString("ret_id"));
-          retReceipt.put(FIELD_DOCUMENT_NO, rs.getString("ret_doc"));
-          retReceipt.put("documentStatus", rs.getString("ret_status"));
-          rec.put("sourceReturnReceipt", retReceipt);
-
-          String origInvId = rs.getString("inv_id");
-          if (origInvId != null) {
-            JSONObject sourceInvoice = new JSONObject();
-            sourceInvoice.put("id", origInvId);
-            sourceInvoice.put(FIELD_DOCUMENT_NO, rs.getString("inv_doc"));
-            rec.put("sourceInvoice", sourceInvoice);
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not enrich return invoice relations for {}: {}", invoiceId, e.getMessage());
-    }
   }
 
   @Override
@@ -437,12 +440,100 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
+   * Completes the record a CRUD write (POST/PUT/PATCH) echoes back (ETP-5747).
+   *
+   * <p>The write response used to carry none of the virtual fields the detail GET injects, so a
+   * client that adopts the write response as the record — the SPA does exactly that when it
+   * creates an invoice and moves on (DetailView {@code primeSaved} + {@code justSaved}, which skips
+   * the post-save read) — lost {@code isRectificative} until the next full reload, and with it the
+   * SIF tab's SII "Tipo factura = R" default. Adds the fields that a header write can change and
+   * that drive the form, each one cheap (one indexed query or none):
+   * <ul>
+   *   <li>{@code isRectificative}, the subtype key and {@code docTypeLocked} — follow the document
+   *   type, which a create sets;</li>
+   *   <li>{@code tbaiConfigActive} — the TicketBAI panel's displayLogic;</li>
+   *   <li>the TicketBAI / VERI*FACTU defaults {@link SalesRectificativeFiscalDefaults} just wrote,
+   *   which the response, built before this post-hook, cannot contain.</li>
+   * </ul>
+   * The detail-only enrichments (origin / rectifying invoices, linked shipments and orders, exempt
+   * taxes, SIF attachments, reactivation block) are left out: they are derived from other tables,
+   * cost several queries each, and the SPA keeps their last-known value across a save (it merges a
+   * write response onto the record it holds) and re-reads them on every detail GET.
+   *
+   * <p>Nothing is added to an {@code _onlyReturnIds} batch response (nobody reads it), to a
+   * non-2xx response, or to a body that carries no record id.
+   *
+   * @param context the write context
+   * @param authorizationResponse the response {@link #injectAuthorizationnoIntoSaveResponse}
+   *     built, or {@code null}
+   * @param fiscalDefaults the values {@link SalesRectificativeFiscalDefaults#apply} wrote
+   * @return the completed response, or {@code authorizationResponse} when there is nothing to do
+   */
+  NeoResponse completeWriteResponse(NeoContext context, NeoResponse authorizationResponse,
+      Map<String, Object> fiscalDefaults) {
+    NeoResponse prev = context.getPreviousResult();
+    NeoResponse base = authorizationResponse != null ? authorizationResponse : prev;
+    if (context.isIdsOnlyResponse() || base == null || base.getBody() == null
+        || prev == null || prev.getHttpStatus() < 200 || prev.getHttpStatus() >= 300) {
+      return authorizationResponse;
+    }
+    try {
+      // The authorization response is already a private copy; the captured result is not.
+      JSONObject body = authorizationResponse != null ? base.getBody()
+          : new JSONObject(base.getBody().toString());
+      JSONObject rec = writtenRecord(body);
+      if (rec == null || StringUtils.isBlank(rec.optString("id", null))) {
+        return authorizationResponse;
+      }
+      for (Map.Entry<String, Object> entry : fiscalDefaults.entrySet()) {
+        rec.put(entry.getKey(), entry.getValue());
+      }
+      enrichDocTypeLocked(rec);
+      // Only from a value the response carries: a key computed from an absent one would answer
+      // "not rectificative" / "no TicketBAI" and overwrite the right value the client holds.
+      if (rec.has(FIELD_TRANSACTION_DOCUMENT)) {
+        enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
+        enrichIsRectificative(rec);
+      }
+      if (rec.has("organization")) {
+        enrichTbaiConfigActive(rec);
+      }
+      NeoResponse completed = new NeoResponse(prev.getHttpStatus(), body);
+      for (Map.Entry<String, String> header : prev.getHeaders().entrySet()) {
+        completed = completed.withHeader(header.getKey(), header.getValue());
+      }
+      return completed;
+    } catch (Exception e) {
+      log.warn("[ETP-5747] Could not complete the sales invoice write response: {}", e.getMessage());
+      return authorizationResponse;
+    }
+  }
+
+  /**
+   * The record of a write response: the first element of the {@code response.data} envelope
+   * (array or object), or the body itself when it is flat — the same two shapes
+   * {@link #injectAuthorizationnoIntoSaveResponse} accepts.
+   */
+  static JSONObject writtenRecord(JSONObject body) {
+    JSONObject wrapper = body.optJSONObject("response");
+    if (wrapper == null) {
+      return body;
+    }
+    JSONArray data = wrapper.optJSONArray("data");
+    if (data != null) {
+      return data.length() > 0 ? data.optJSONObject(0) : null;
+    }
+    return wrapper.optJSONObject("data");
+  }
+
+  /**
    * Injects {@code linkedShipments} into the invoice detail record: every sales goods movement
    * (M_InOut) linked to one of the invoice's lines.
    *
    * <p>"Linked" is {@link InOutInvoiceLinks#linkedInOutLineIdsSql}: the
-   * {@code C_InvoiceLine.M_InOutLine_ID} column, the {@code M_MatchSI} match table, and the
-   * pre-existing order-line fallback for invoice lines without a direct link. Before ETP-5576
+   * {@code C_InvoiceLine.M_InOutLine_ID} column and the {@code M_MatchSI} match table — never
+   * the order line (ETP-6002 dropped that fallback on the sales side: it made an invoice show
+   * every shipment of its order, including ones another invoice billed). Before ETP-5576
    * the match table was not read, so the second and later partial shipments of an invoice line —
    * which the column cannot hold — never showed up.
    *
@@ -465,7 +556,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         "  AND io.issotrx = 'Y'";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      InOutInvoiceLinks.bindRepeated(ps, 1, invoiceId, InOutInvoiceLinks.LINKED_INOUT_LINES_PARAMS);
+      InOutInvoiceLinks.bindRepeated(ps, 1, invoiceId,
+          InOutInvoiceLinks.linkedInOutLinesParams(InOutInvoiceLinks.MatchTable.SALES));
       JSONArray shipments = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

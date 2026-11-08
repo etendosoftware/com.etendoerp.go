@@ -120,7 +120,7 @@ public class BillingReconciliationScheduleStartup extends SessionAwareStartup {
   /** Package-visible so tests can decide the flag without a provider. */
   boolean scheduleEnabled() {
     return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_BILLING_RECONCILIATION_SCHEDULE,
-        FeatureFlagContext.forAccount(null));
+        FeatureFlagContext.environment());
   }
 
   /**

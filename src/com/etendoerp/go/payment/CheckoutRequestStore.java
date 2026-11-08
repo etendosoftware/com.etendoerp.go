@@ -53,6 +53,10 @@ import com.etendoerp.go.schemaforge.data.Plan;
  * browser can re-enter the flow on reload, so both are ordinary occurrences rather than errors.
  */
 abstract class CheckoutRequestStoreQuerySupport {
+
+  /** Account-scoped subscription finders: the parameters both bind. */
+  private static final String PARAM_ACCOUNT_ID = "accountId";
+  private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
   protected static final String ZERO_ID = "0";
 
   /** Immutable product/contact selection stored with a purchase. */
@@ -293,6 +297,80 @@ abstract class CheckoutRequestStoreQuerySupport {
   }
 
   protected abstract CheckoutRequest find(String requestId, String accountId, String accountEmail);
+
+  /**
+   * Finds the one purchase that backs the authenticated account's subscription.
+   *
+   * <p>It is the account's newest purchase carrying both a Stripe subscription and a Stripe
+   * customer. The Subscription page and the Customer Portal both resolve through here, so the
+   * subscription shown and the customer whose portal opens always come from the same row, however
+   * many purchases the account has. Both identity predicates are part of the query, and the
+   * provider ids are never taken from a request parameter.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return newest purchase with a nonblank Stripe subscription and customer, or {@code null}
+   */
+  public CheckoutRequest findSubscriptionForAccount(String accountId, String accountEmail) {
+    return runAsSystem(() -> {
+      if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) {
+        return null;
+      }
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and cr.stripeSubscription is not null"
+              + " and length(trim(cr.stripeSubscription)) > 0"
+              + " and cr.stripeCustomer is not null"
+              + " and length(trim(cr.stripeCustomer)) > 0 order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    });
+  }
+
+  /**
+   * ETP-5051 (O-1) — finds the purchase that backs one environment's subscription, for an account
+   * that owns several environments, each with its own Stripe subscription and customer.
+   *
+   * <p>The same billable-row rule as {@link #findSubscriptionForAccount}, narrowed to the purchase
+   * that provisioned (or re-subscribed) {@code clientId}. Both account predicates stay in the
+   * query, so a client id that is not one of the account's own environments finds nothing: it
+   * never resolves to another account's subscription, whoever owns that client. Newest first, so a
+   * re-subscription of a canceled environment wins over the subscription it replaced.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @param clientId {@code AD_CLIENT_ID} of the environment whose subscription is wanted
+   * @return newest billable purchase of that environment by this account, or {@code null}
+   */
+  public CheckoutRequest findSubscriptionForAccountClient(String accountId, String accountEmail,
+      String clientId) {
+    return runAsSystem(() -> {
+      if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)
+          || StringUtils.isBlank(clientId)) {
+        return null;
+      }
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and cr.createdClient.id = :clientId"
+              + " and cr.stripeSubscription is not null"
+              + " and length(trim(cr.stripeSubscription)) > 0"
+              + " and cr.stripeCustomer is not null"
+              + " and length(trim(cr.stripeCustomer)) > 0 order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter("clientId", StringUtils.trimToEmpty(clientId));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    });
+  }
 
   /**
    * Runs {@code body} as the system user ({@code "0","0","0","0"}) with admin mode on, and hands
@@ -759,40 +837,6 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       }
     }
     return unfinished;
-  }
-
-  /**
-   * Finds the one purchase that backs the authenticated account's subscription.
-   *
-   * <p>It is the account's newest purchase carrying both a Stripe subscription and a Stripe
-   * customer. The Subscription page and the Customer Portal both resolve through here, so the
-   * subscription shown and the customer whose portal opens always come from the same row, however
-   * many purchases the account has. Both identity predicates are part of the query, and the
-   * provider ids are never taken from a request parameter.
-   *
-   * @param accountId immutable platform account id
-   * @param accountEmail authenticated platform account email
-   * @return newest purchase with a nonblank Stripe subscription and customer, or {@code null}
-   */
-  public CheckoutRequest findSubscriptionForAccount(String accountId, String accountEmail) {
-    return runAsSystem(() -> {
-      if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) {
-        return null;
-      }
-      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
-          "as cr where cr.etendoGoAccount.id = :accountId"
-              + " and lower(cr.accountEmail) = lower(:accountEmail)"
-              + " and cr.stripeSubscription is not null"
-              + " and length(trim(cr.stripeSubscription)) > 0"
-              + " and cr.stripeCustomer is not null"
-              + " and length(trim(cr.stripeCustomer)) > 0 order by cr.creationDate desc");
-      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
-      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
-      query.setFilterOnReadableClients(false);
-      query.setFilterOnReadableOrganization(false);
-      query.setMaxResult(1);
-      return query.uniqueResult();
-    });
   }
 
   /**

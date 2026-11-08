@@ -29,6 +29,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.usage.IsolatedDalRead;
+import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
 import com.smf.securewebservices.SWSConfig;
 
@@ -46,7 +48,13 @@ import com.smf.securewebservices.SWSConfig;
  * which point directly to AD_Window, AD_Tab, and AD_Column.
  * Hooks are discovered via CDI using the Java_Qualifier on ETGO_SF_Entity.
  */
-@MultipartConfig(maxFileSize = 10L * 1024 * 1024, maxRequestSize = 12L * 1024 * 1024, fileSizeThreshold = 1024 * 1024)
+// maxFileSize is the per-file guard: NeoAttachmentPolicy.MAX_SIZE_MB (10 MB) in bytes.
+// maxRequestSize bounds the whole multipart request: the invoice inbox bulk upload (ETP-6047)
+// carries up to NeoAttachmentPolicy.BULK_MAX_FILES files, so it is that many files plus a 10 MB
+// margin for the multipart framing = 210 MB. It is container-wide, so it applies to ALL multipart
+// NEO endpoints (decided trade-off, see NeoAttachmentPolicy.MAX_REQUEST_BYTES).
+@MultipartConfig(maxFileSize = NeoAttachmentPolicy.MAX_SIZE_MB * 1024L * 1024L,
+    maxRequestSize = NeoAttachmentPolicy.MAX_REQUEST_BYTES, fileSizeThreshold = 1024 * 1024)
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
@@ -100,6 +108,12 @@ public class NeoServlet extends HttpBaseServlet {
   @Override
   public void destroy() {
     try {
+      // ETP-6057: first, so the last minute of public API counts is written before anything stops.
+      PublicApiUsageCounter.getDefault().shutdown();
+    } catch (RuntimeException e) {
+      log.debug("Could not flush the public API usage counter on servlet destroy.", e);
+    }
+    try {
       UsageEventRecorder.shutdown();
     } catch (Exception e) {
       log.debug("Could not stop the usage event writer on servlet destroy.", e);
@@ -109,6 +123,12 @@ public class NeoServlet extends HttpBaseServlet {
       BatchJobService.shutdownInstance();
     } catch (RuntimeException e) {
       log.debug("Could not stop the batch job threads on servlet destroy.", e);
+    }
+    try {
+      // ETP-5051: the isolated quota-report readers are daemon threads of this webapp too.
+      IsolatedDalRead.shutdown();
+    } catch (RuntimeException e) {
+      log.debug("Could not stop the isolated read threads on servlet destroy.", e);
     }
     super.destroy();
   }
@@ -149,6 +169,16 @@ public class NeoServlet extends HttpBaseServlet {
 
   private void processRequest(HttpServletRequest request, HttpServletResponse response,
       String method) throws IOException {
+    try {
+      dispatchRequest(request, response, method);
+    } finally {
+      // ETP-6057: counts the answer of a public API request, whichever path wrote it.
+      NeoPublicApiUsage.getDefault().recordRequest(request, response, method);
+    }
+  }
+
+  private void dispatchRequest(HttpServletRequest request,
+      HttpServletResponse response, String method) throws IOException {
     if (handleUnauthenticatedRoute(request, response, method)) {
       return;
     }
@@ -164,14 +194,11 @@ public class NeoServlet extends HttpBaseServlet {
 
     try {
       OBContext.setAdminMode();
-      if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
-        return;
-      }
-
-      if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
-        return;
-      }
-      requestRouter.handleSpecRequest(pathInfo, method, request, response);
+      // ETP-5819: admin mode skips the DAL's tenant check on writes; the guard restores it.
+      NeoTenantWriteGuard.call(() -> {
+        dispatch(pathInfo, method, request, response);
+        return null;
+      });
     } catch (MalformedJsonException e) {
       // A body or JSON parameter the client sent could not be parsed: its error, not ours.
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
@@ -184,6 +211,17 @@ public class NeoServlet extends HttpBaseServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private void dispatch(NeoPathInfo pathInfo, String method, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
+      return;
+    }
+    if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
+      return;
+    }
+    requestRouter.handleSpecRequest(pathInfo, method, request, response);
   }
 
   /**

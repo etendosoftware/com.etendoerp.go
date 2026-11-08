@@ -290,6 +290,8 @@ final class InOutTargetBuilder {
     }
     NeoCommercialDocumentFactory.ensureInOutDocumentNo(inout, log);
     OBDal.getInstance().flush();
+    // ETP-5051: the plan-quota check of the created movement and its lines, for every follow-up.
+    NeoQuotaCreateCheck.requireAllowedDocument(inout);
     return inout;
   }
 

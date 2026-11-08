@@ -49,9 +49,15 @@ final class McpDocumentEmailToolDefinition {
       + "**Proveedor**: Le enviamos su Pedido de Compra **1000008**.\"), and **double asterisks** "
       + "make a word bold in the message. ALWAYS call it first with preview:true to show the user "
       + "the recipient, subject, message and the PDF, and send only after they agree: preview "
-      + "sends nothing. This tool never generates the PDF: if the document has none yet, or the "
-      + "stored one is older than the document, it answers 409 no_pdf or pdf_stale and sends "
-      + "nothing (the user must open the document's preview in the application). Only an answer "
+      + "sends nothing and also lists the document's past sends (history). When the document's "
+      + "PDF is missing or older than the document, the server "
+      + "generates it first where it can (invoices, orders, quotations, shipments, returns), in "
+      + "the email's language ('language', " + McpDocumentEmailRequest.DEFAULT_LANGUAGE
+      + " by default), so the email and its PDF match; a current stored PDF is sent as it is, "
+      + "whatever its language. When it cannot, it "
+      + "answers 409 no_pdf or pdf_stale and sends nothing (right after completing a document, ask "
+      + "again in a few seconds; only if it persists, ask the user to open the document's preview "
+      + "in the application). Only an answer "
       + "with sent:true was sent: an identical email already sent is refused as a DUPLICATE, and "
       + "the hourly sending limits (per document, recipient, user and company) "
       + "answer THROTTLED; both say sent:false. At most " + EmailMessageEdits.MAX_SUBJECT_LENGTH

@@ -33,9 +33,11 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.doReturn;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,10 +57,14 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -70,7 +76,16 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * the native line creation are seams, replaced here by a recording double that creates one invoice
  * line per entry it is handed.
  *
+ * <p>ETP-5876 adds the return actions of a rectificative invoice ({@code availableReturns},
+ * {@code availableReturnLines}, {@code importReturnLines}): they credit a completed return in
+ * NEGATIVE, against the same pending computation, whichever sign the return stored.
+ *
  * @covers com.etendoerp.go.schemaforge.ImportInOutLinesIntoInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractLineImportHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
+ * @covers com.etendoerp.go.schemaforge.ReturnLineCredit
+ * @covers com.etendoerp.go.schemaforge.ImportListing
+ * @covers com.etendoerp.go.schemaforge.RectificativeImportPolicy
  */
 public class ImportInOutLinesIntoInvoiceHandlerTest {
 
@@ -186,6 +201,155 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
         String cur) {
       return candidates;
     }
+
+    List<ShipmentInOut> returnCandidates = new ArrayList<>();
+    /** What every invoice line of any status holds per return line (the sales modal's sum). */
+    Map<String, BigDecimal> credited = new LinkedHashMap<>();
+    /** Order lines the sales modal treats as already invoiced. */
+    Set<String> blockedOrderLines = new java.util.HashSet<>();
+    /** The window's invoiceStatus of the return, in percent. */
+    BigDecimal invoiceStatus = BigDecimal.ZERO;
+    /** Which window's modal rules the header would pass in. */
+    boolean salesModalRules;
+    /** ETP-6002: the invoices each return line rectifies (by return line id), and the links made. */
+    final Map<String, List<Invoice>> rectifiedByLine = new LinkedHashMap<>();
+    final List<String> links = new ArrayList<>();
+    /** When set, the link seam throws it, as C_INVOICE_REVERSE_TRG would refuse a link. */
+    RuntimeException linkRefusal;
+
+    {
+      // The handler's rectification-link collaborator, with its DAL seams recorded here.
+      rectificationLinks = new RecordingLinks();
+    }
+
+    /** The real link step over recorded seams: lookups from the map, links and flushes logged. */
+    final class RecordingLinks extends ReturnImportRectificationLinks {
+      @Override
+      protected List<Invoice> rectifiedInvoicesOf(ShipmentInOutLine returnLine, String partnerId) {
+        calls.add("rectifiedOf");
+        return rectifiedByLine.getOrDefault(returnLine == null ? null : returnLine.getId(),
+            List.of());
+      }
+
+      @Override
+      protected boolean linkIfMissing(Invoice target, Invoice origin) {
+        if (linkRefusal != null) {
+          throw linkRefusal;
+        }
+        links.add(target.getId() + "->" + origin.getId());
+        return true;
+      }
+
+      @Override
+      protected void flushLinks() {
+        calls.add("flushLinks");
+      }
+    }
+
+    @Override
+    protected List<ShipmentInOut> findCandidateReturns(String partnerId, boolean sales) {
+      return returnCandidates;
+    }
+
+    @Override
+    protected Map<String, BigDecimal> creditedQuantities(String inOutId) {
+      calls.add("credited");
+      return credited;
+    }
+
+    @Override
+    protected Set<String> blockedOrderLines(String inOutId, String invoiceId) {
+      return blockedOrderLines;
+    }
+
+    @Override
+    protected BigDecimal invoiceStatusOf(String inOutId) {
+      return invoiceStatus;
+    }
+
+    // ── ETP-6099 listing seams ────────────────────────────────────────────────
+
+    /** Pending MAGNITUDE per movement line BEFORE drafts (the includeCovered test). */
+    final Map<String, BigDecimal> beforeDrafts = new LinkedHashMap<>();
+    /** Per movement line, {@code [importedHere, invoicedElsewhere]}. */
+    final Map<String, boolean[]> linkStates = new LinkedHashMap<>();
+    int linkStateReads;
+    String linkStatesInvoiceId;
+    /** What the source-documents lookup of a return answers. */
+    String sourceDocs;
+    /** How many times a paged candidate read ran, and with what. */
+    int pagedReads;
+    Integer lastOffset;
+    Integer lastScan;
+
+    @Override
+    protected List<ShipmentInOut> findCandidateDocuments(String partnerId, boolean sales,
+        String cur, int offset, int scan) {
+      return paged(candidates, offset, scan);
+    }
+
+    @Override
+    protected List<ShipmentInOut> findCandidateReturns(String partnerId, boolean sales,
+        int offset, int scan) {
+      return paged(returnCandidates, offset, scan);
+    }
+
+    /** The query's setFirstResult(offset).setMaxResults(scan) over the candidates. */
+    private List<ShipmentInOut> paged(List<ShipmentInOut> all, int offset, int scan) {
+      pagedReads++;
+      lastOffset = offset;
+      lastScan = scan;
+      int from = Math.min(offset, all.size());
+      return new ArrayList<>(all.subList(from, Math.min(all.size(), from + scan)));
+    }
+
+    @Override
+    protected Map<String, BigDecimal> pendingBeforeDrafts(String inOutId) {
+      return beforeDrafts;
+    }
+
+    @Override
+    protected String sourceDocumentNos(String returnId) {
+      return sourceDocs;
+    }
+
+    @Override
+    protected Map<String, boolean[]> invoiceLinkStates(String inOutId, String invoiceId) {
+      linkStateReads++;
+      linkStatesInvoiceId = invoiceId;
+      return linkStates;
+    }
+
+    /** The classic availableReceipts scan (pendingBasis "classic", ETP-6099 follow-up). */
+    List<ShipmentInOut> classicCandidates = new ArrayList<>();
+    int classicReads;
+    Integer classicOffset;
+
+    @Override
+    protected List<ShipmentInOut> findClassicCandidateDocuments(String partnerId, boolean sales,
+        String currencyId, int offset, int scan) {
+      classicReads++;
+      classicOffset = offset;
+      int from = Math.min(offset, classicCandidates.size());
+      return new ArrayList<>(classicCandidates.subList(from,
+          Math.min(classicCandidates.size(), from + scan)));
+    }
+
+    /** A request carrying exactly {@code policy} (null: none stored). */
+    NeoResponse runWith(String action, String body, RectificativeImportPolicy policy)
+        throws Exception {
+      NeoContext context = action(action, "i1", body);
+      context.setAttribute(RectificativeImportPolicy.ATTRIBUTE, policy);
+      return handle(context);
+    }
+
+    /** A request carrying the policy the header of this side would store. */
+    NeoResponse run(String action, String body) throws Exception {
+      NeoContext context = action(action, "i1", body);
+      context.setAttribute(RectificativeImportPolicy.ATTRIBUTE,
+          new RectificativeImportPolicy(inv -> true, salesModalRules));
+      return handle(context);
+    }
   }
 
   /** A purchase draft invoice and a completed receipt: Agua 10 and Pan 5, all of it pending. */
@@ -230,6 +394,30 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
   }
 
   // ── the happy paths ───────────────────────────────────────────────────────
+
+  /**
+   * ETP-5051 — the lines this import added are checked against the plan quotas before the answer
+   * ({@code AbstractLineImportHandler#requireQuotaAllowed}): at a {@code block} limit the
+   * movement-lines import into an invoice answers 403 {@code QUOTA_EXCEEDED} and the whole import is rolled back.
+   */
+  @Test
+  public void importReceiptLines_overABlockQuota_answers403AndRollsBackTheImport() throws Exception {
+    Probe probe = purchase();
+
+    NeoResponse response;
+    try (MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      response = importReceipt(probe, "{\"receiptId\":\"rc1\"}");
+
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowed(
+          org.mockito.ArgumentMatchers.eq(InvoiceLine.ENTITY_NAME),
+          org.mockito.ArgumentMatchers.argThat(ids -> ids != null && ids.size() == 2)));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(response);
+    verify(dal).rollbackAndClose();
+    verify(dal, org.mockito.Mockito.never()).commitAndClose();
+  }
+
 
   /** No lines: everything pending, in full, through the native process with movement lines. */
   @Test
@@ -716,10 +904,1040 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
     probe.rowLimit = 50;
     assertFalse(probe.handle(action("availableReceipts", "i1", null)).getBody()
         .getJSONObject("response").getBoolean("hasMore"));
+    // ETP-6099: the scan reads max(scanLimit, rowLimit), so a scan that hits its limit needs a row
+    // limit no longer than it (as in production: 50 rows over a 200 scan).
+    probe.rowLimit = 2;
     probe.scanLimit = 2;
     assertTrue(probe.handle(action("availableReceipts", "i1", null)).getBody()
         .getJSONObject("response").getBoolean("hasMore"));
     assertFalse(probe.handle(action("availableReceiptLines", "i1", "{\"receiptId\":\"rc1\"}"))
         .getBody().getJSONObject("response").getBoolean("hasMore"));
+  }
+
+  // ── returns into a rectificative (ETP-5876) ───────────────────────────────
+
+  private static NeoResponse importReturn(Probe probe, String body) throws Exception {
+    return probe.run("importReturnLines", body);
+  }
+
+  private static final String RETURN_ID = "{\"returnId\":\"rc1\"}";
+
+  /** A completed return to a vendor: Agua -10 and Pan -5, stored negative as the module does. */
+  private Probe returnToVendor() {
+    Probe probe = purchase();
+    for (ShipmentInOutLine line : probe.source.getMaterialMgmtShipmentInOutLineList()) {
+      BigDecimal flipped = line.getMovementQuantity().negate();
+      when(line.getMovementQuantity()).thenReturn(flipped);
+    }
+    when(probe.source.getDocumentType().isReturn()).thenReturn(true);
+    return probe;
+  }
+
+  /** The sales mirror: a completed customer return into a draft sales rectificative. */
+  private Probe customerReturn() {
+    Probe probe = returnToVendor();
+    when(probe.invoice.isSalesTransaction()).thenReturn(true);
+    when(probe.source.isSalesTransaction()).thenReturn(true);
+    probe.salesModalRules = true;
+    return probe;
+  }
+
+  private static BigDecimal selected(Probe probe, int index) throws Exception {
+    return new BigDecimal(probe.nativeSelection.getJSONObject(index).getString("orderedQuantity"));
+  }
+
+  /**
+   * Repro (ETP-6002): a SALES return import links the rectificative to the invoice the return line
+   * rectifies (C_Invoice_Reverse), deduped, before the lines are created — as the window's line
+   * create does — and answers it as {@code rectifiedInvoices}.
+   */
+  @Test
+  public void importReturnLines_salesLinksTheRectifiedInvoice() throws Exception {
+    Probe probe = customerReturn();
+    Invoice original = mock(Invoice.class);
+    when(original.getId()).thenReturn("orig");
+    when(original.getDocumentNo()).thenReturn("FV1");
+    String firstLineId = probe.source.getMaterialMgmtShipmentInOutLineList().get(0).getId();
+    probe.rectifiedByLine.put(firstLineId, List.of(original));
+
+    NeoResponse response = importReturn(probe, RETURN_ID);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(List.of("i1->orig"), probe.links);
+    assertTrue("a new link is flushed so a trigger refusal surfaces before the lines",
+        probe.calls.contains("flushLinks"));
+    assertTrue("the links are written before the lines are created",
+        probe.calls.indexOf("flushLinks") < probe.calls.indexOf("native"));
+    JSONArray rectified = data(response).getJSONArray("rectifiedInvoices");
+    assertEquals(1, rectified.length());
+    assertEquals("FV1", rectified.getJSONObject(0).getString("documentNo"));
+  }
+
+  /**
+   * A refused link (a C_INVOICE_REVERSE_TRG-style refusal: another partner, a processed invoice) is
+   * answered classified — a 4xx business rule, as on the lines CRUD — and no line is created.
+   */
+  @Test
+  public void importReturnLines_aRefusedLinkIsAClassifiedRefusal_andImportsNothing()
+      throws Exception {
+    Probe probe = customerReturn();
+    Invoice original = mock(Invoice.class);
+    when(original.getId()).thenReturn("orig");
+    String firstLineId = probe.source.getMaterialMgmtShipmentInOutLineList().get(0).getId();
+    probe.rectifiedByLine.put(firstLineId, List.of(original));
+    probe.linkRefusal = new OBException("@NotEqualBPartner@");
+
+    // OBDal is already mocked for every case (mockDal): the refusal's rollback reaches that mock.
+    NeoResponse response;
+    try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+      response = importReturn(probe, RETURN_ID);
+    }
+
+    assertTrue("a classified 4xx, not a 500", response.getHttpStatus() >= 400
+        && response.getHttpStatus() < 500);
+    assertEquals("business_rule", response.getBody().getJSONObject("error").getString("code"));
+    assertFalse("no line is created", probe.calls.contains("native"));
+    assertNull(probe.nativeSelection);
+  }
+
+  /** The purchase side writes no link and does not even look for one (unchanged, ETP-5876). */
+  @Test
+  public void importReturnLines_purchaseWritesNoLink() throws Exception {
+    Probe probe = returnToVendor();
+
+    NeoResponse response = importReturn(probe, RETURN_ID);
+
+    assertEquals(200, response.getHttpStatus());
+    assertTrue(probe.links.isEmpty());
+    assertFalse(probe.calls.contains("rectifiedOf"));
+    assertFalse(data(response).has("rectifiedInvoices"));
+  }
+
+  @Test
+  public void importReturnLines_withoutLines_creditsEverythingOfferedInNegative()
+      throws Exception {
+    Probe probe = returnToVendor();
+
+    NeoResponse response = importReturn(probe, RETURN_ID);
+
+    assertEquals(200, response.getHttpStatus());
+    assertSame(ShipmentInOutLine.class, probe.nativeFrom);
+    assertEquals(2, probe.nativeSelection.length());
+    assertEquals(0, bd("-10").compareTo(selected(probe, 0)));
+    assertEquals(0, bd("-5").compareTo(selected(probe, 1)));
+    JSONObject data = data(response);
+    assertEquals(2, data.getInt("importedCount"));
+    assertEquals("rl1", data.getJSONArray("lines").getJSONObject(0).getString("sourceLineId"));
+    assertEquals(0, bd("-10").compareTo(
+        new BigDecimal(data.getJSONArray("lines").getJSONObject(0).get("quantity").toString())));
+  }
+
+  /**
+   * The native process stores the price list's standard price and limit; the return modal's body
+   * carries neither, so the screen stores 0 in both. Only those two are cleared, only on the new
+   * lines, and the price, list price and amounts are left as the process set them.
+   */
+  @Test
+  public void importReturnLines_storesZeroStandardPriceAndLimit_andLeavesTheAmounts()
+      throws Exception {
+    for (Probe probe : List.of(returnToVendor(), customerReturn())) {
+      InvoiceLine existing = invoiceLine("old", product("p9", "Viejo", false), "1");
+      probe.invoice.getInvoiceLineList().add(existing);
+
+      assertEquals(200, importReturn(probe, RETURN_ID).getHttpStatus());
+
+      for (InvoiceLine line : probe.invoice.getInvoiceLineList()) {
+        if (line == existing) {
+          verify(line, never()).setStandardPrice(any());
+          continue;
+        }
+        verify(line).setStandardPrice(BigDecimal.ZERO);
+        verify(line).setPriceLimit(BigDecimal.ZERO);
+        verify(line, never()).setUnitPrice(any());
+        verify(line, never()).setListPrice(any());
+        verify(line, never()).setLineNetAmount(any());
+        verify(line, never()).setGrossAmount(any());
+      }
+    }
+  }
+
+  /** The order, receipt and shipment imports keep the prices the native process copies. */
+  @Test
+  public void importReceiptLines_keepsTheStandardPriceOfTheNativeProcess() throws Exception {
+    Probe probe = purchase();
+
+    importReceipt(probe, "{\"receiptId\":\"rc1\"}");
+
+    for (InvoiceLine line : probe.invoice.getInvoiceLineList()) {
+      verify(line, never()).setStandardPrice(any());
+    }
+  }
+
+  /** The caller speaks in positive quantities, as the return's own lines do; either sign works. */
+  @Test
+  public void importReturnLines_theQuantityIsAPositiveNumber_andBecomesACredit()
+      throws Exception {
+    Probe probe = returnToVendor();
+    assertEquals(200, importReturn(probe, "{\"returnId\":\"rc1\",\"lines\":"
+        + "[{\"sourceLineId\":\"rl2\",\"quantity\":2}]}").getHttpStatus());
+    assertEquals(1, probe.nativeSelection.length());
+    assertEquals(0, bd("-2").compareTo(selected(probe, 0)));
+
+    Probe negative = returnToVendor();
+    assertEquals(200, importReturn(negative, "{\"returnId\":\"rc1\",\"lines\":"
+        + "[{\"sourceLineId\":\"rl2\",\"quantity\":-2}]}").getHttpStatus());
+    assertEquals(0, bd("-2").compareTo(selected(negative, 0)));
+  }
+
+  /** A return stored positive before ETP-5313 is still credited negative. */
+  @Test
+  public void importReturnLines_aReturnStoredPositive_isStillCreditedNegative() throws Exception {
+    Probe probe = purchase();
+    when(probe.source.getDocumentType().isReturn()).thenReturn(true);
+
+    assertEquals(200, importReturn(probe, RETURN_ID).getHttpStatus());
+
+    assertEquals(0, bd("-10").compareTo(selected(probe, 0)));
+  }
+
+  // -- purchase: ImportFromGoodsReturnModal ----------------------------------
+
+  /**
+   * The purchase modal caps a line at the return line's quantity and blocks it only when THIS
+   * invoice already holds a line for it: what other invoices hold, drafts or completed, is not
+   * counted, and the database is not even asked.
+   */
+  @Test
+  public void purchase_theCapIsTheReturnLineQuantity_otherInvoicesAreNotCounted()
+      throws Exception {
+    Probe probe = returnToVendor();
+    probe.credited.put("rl1", bd("9"));
+    probe.pending.put("rl1", bd("1"));
+
+    assertEquals(200, importReturn(probe, "{\"returnId\":\"rc1\",\"lines\":"
+        + "[{\"sourceLineId\":\"rl1\",\"quantity\":10}]}").getHttpStatus());
+    assertEquals(0, bd("-10").compareTo(selected(probe, 0)));
+    assertFalse("the sum of other invoices is never read", probe.calls.contains("credited"));
+
+    Probe over = returnToVendor();
+    NeoResponse refused = importReturn(over, "{\"returnId\":\"rc1\",\"lines\":"
+        + "[{\"sourceLineId\":\"rl1\",\"quantity\":11}]}");
+    assertEquals("importQuantityExceedsPending", errorCode(refused));
+    JSONObject error = refused.getBody().getJSONObject("error");
+    assertEquals(11, error.getInt("requested"));
+    assertEquals(10, error.getInt("pending"));
+    assertNull(over.nativeSelection);
+  }
+
+  @Test
+  public void purchase_aLineThisInvoiceAlreadyHolds_isNotOfferedAgain_whateverItsQuantity()
+      throws Exception {
+    Probe probe = returnToVendor();
+    ShipmentInOutLine agua = probe.lineById.get("rl1");
+    InvoiceLine mine = invoiceLine("mine", agua.getProduct(), "-3");
+    when(mine.isActive()).thenReturn(true);
+    when(mine.getGoodsShipmentLine()).thenReturn(agua);
+    probe.invoice.getInvoiceLineList().add(mine);
+
+    NeoResponse refused = importReturn(probe, "{\"returnId\":\"rc1\",\"lines\":"
+        + "[{\"sourceLineId\":\"rl1\",\"quantity\":1}]}");
+
+    assertEquals("importQuantityExceedsPending", errorCode(refused));
+    assertEquals(0, refused.getBody().getJSONObject("error").getInt("pending"));
+    JSONArray rows = probe.run("availableReturnLines", RETURN_ID).getBody()
+        .getJSONObject("response").getJSONArray("data");
+    assertEquals(List.of("rl2"), ids(rows));
+  }
+
+  @Test
+  public void purchase_comparesNoCurrency() throws Exception {
+    Probe probe = returnToVendor();
+    doReturn(currency("usd")).when(probe.source).getEtgoCurrency();
+    Order order = mock(Order.class);
+    doReturn(currency("usd")).when(order).getCurrency();
+    when(probe.source.getSalesOrder()).thenReturn(order);
+
+    assertEquals(200, importReturn(probe, RETURN_ID).getHttpStatus());
+  }
+
+  // -- sales: ImportFromReturnShipmentModal ----------------------------------
+
+  /**
+   * The sales modal nets EVERY invoice line linked to the return line, whatever the status of its
+   * invoice, from the return line's quantity.
+   */
+  @Test
+  public void sales_theCapNetsEveryInvoiceLineOfAnyStatus() throws Exception {
+    Probe probe = customerReturn();
+    probe.credited.put("rl1", bd("6"));
+    probe.credited.put("rl2", bd("5"));
+
+    JSONArray rows = probe.run("availableReturnLines", RETURN_ID).getBody()
+        .getJSONObject("response").getJSONArray("data");
+
+    assertEquals(List.of("rl1"), ids(rows));
+    assertEquals(4, rows.getJSONObject(0).getInt("pendingQuantity"));
+    assertEquals(200, importReturn(probe, "{\"returnId\":\"rc1\",\"lines\":"
+        + "[{\"sourceLineId\":\"rl1\",\"quantity\":4}]}").getHttpStatus());
+    assertEquals(0, bd("-4").compareTo(selected(probe, 0)));
+
+    Probe over = customerReturn();
+    over.credited.put("rl1", bd("6"));
+    NeoResponse refused = importReturn(over, "{\"returnId\":\"rc1\",\"lines\":"
+        + "[{\"sourceLineId\":\"rl1\",\"quantity\":5}]}");
+    assertEquals("importQuantityExceedsPending", errorCode(refused));
+    assertEquals(4, refused.getBody().getJSONObject("error").getInt("pending"));
+    assertNull(over.nativeSelection);
+  }
+
+  /** A line whose order line is already taken is not offered at all, as in the modal. */
+  @Test
+  public void sales_aLineWhoseOrderLineIsAlreadyInvoiced_isNotOffered() throws Exception {
+    Probe probe = customerReturn();
+    OrderLine orderLine = mock(OrderLine.class);
+    when(orderLine.getId()).thenReturn("ol9");
+    doReturn(orderLine).when(probe.lineById.get("rl1")).getSalesOrderLine();
+    probe.blockedOrderLines.add("ol9");
+
+    JSONArray rows = probe.run("availableReturnLines", RETURN_ID).getBody()
+        .getJSONObject("response").getJSONArray("data");
+
+    assertEquals(List.of("rl2"), ids(rows));
+  }
+
+  /** The sales modal compares the currency of the return's sales order, when it has one. */
+  @Test
+  public void sales_comparesTheCurrencyOfTheReturnsSalesOrder() throws Exception {
+    Probe noOrder = customerReturn();
+    doReturn(currency("usd")).when(noOrder.source).getEtgoCurrency();
+    assertEquals("a return without a sales order is never excluded", 200,
+        importReturn(noOrder, RETURN_ID).getHttpStatus());
+
+    Probe probe = customerReturn();
+    Order order = mock(Order.class);
+    doReturn(currency("usd")).when(order).getCurrency();
+    when(probe.source.getSalesOrder()).thenReturn(order);
+    probe.returnCandidates = List.of(probe.source);
+
+    assertEquals("importCurrencyMismatch", errorCode(importReturn(probe, RETURN_ID)));
+    assertEquals(0, probe.run("availableReturns", null).getBody().getJSONObject("response")
+        .getJSONArray("data").length());
+  }
+
+  // -- both sides --------------------------------------------------------------
+
+  /** The window lists only returns whose invoiceStatus is below 100. */
+  @Test
+  public void aReturnInvoicedInFull_isNotListedNorImported() throws Exception {
+    for (Probe probe : List.of(returnToVendor(), customerReturn())) {
+      probe.invoiceStatus = bd("100");
+      probe.returnCandidates = List.of(probe.source);
+
+      assertEquals(0, probe.run("availableReturns", null).getBody().getJSONObject("response")
+          .getJSONArray("data").length());
+      assertEquals("importNothingPending", errorCode(importReturn(probe, RETURN_ID)));
+      assertNull(probe.nativeSelection);
+    }
+    Probe partly = returnToVendor();
+    partly.invoiceStatus = bd("40");
+    assertEquals(200, importReturn(partly, RETURN_ID).getHttpStatus());
+  }
+
+  @Test
+  public void importReturnLines_aFullyCoveredReturn_isRefusedAsNothingPending() throws Exception {
+    Probe probe = customerReturn();
+    probe.credited.put("rl1", bd("10"));
+    probe.credited.put("rl2", bd("5"));
+
+    assertEquals("importNothingPending", errorCode(importReturn(probe, RETURN_ID)));
+  }
+
+  @Test
+  public void importReturnLines_aDocumentThatIsNotAReturn_isRefused() throws Exception {
+    Probe probe = purchase();
+
+    NeoResponse response = importReturn(probe, RETURN_ID);
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals("importSourceNotReturn", errorCode(response));
+    assertNull(probe.nativeSelection);
+  }
+
+  /** A normal invoice action still refuses a return, and now says where returns go. */
+  @Test
+  public void importReceiptLines_aReturn_pointsToTheRectificativeActions() throws Exception {
+    Probe probe = returnToVendor();
+
+    NeoResponse response = importReceipt(probe, "{\"receiptId\":\"rc1\"}");
+
+    assertEquals(422, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("importReturnLines"));
+  }
+
+  @Test
+  public void importReturnLines_theDirectionIsTheInvoices_andItsPreconditionsApply()
+      throws Exception {
+    Probe probe = customerReturn();
+    assertEquals(200, importReturn(probe, RETURN_ID).getHttpStatus());
+
+    Probe crossed = returnToVendor();
+    when(crossed.source.isSalesTransaction()).thenReturn(true);
+    assertEquals("importDirectionMismatch", errorCode(importReturn(crossed, RETURN_ID)));
+
+    Probe otherPartner = returnToVendor();
+    doReturn(partner("other")).when(otherPartner.source).getBusinessPartner();
+    assertEquals("importBusinessPartnerMismatch",
+        errorCode(importReturn(otherPartner, RETURN_ID)));
+
+    Probe notCompleted = returnToVendor();
+    when(notCompleted.source.getDocumentStatus()).thenReturn("DR");
+    assertEquals("importSourceNotCompleted", errorCode(importReturn(notCompleted, RETURN_ID)));
+
+    Probe notDraft = returnToVendor();
+    when(notDraft.invoice.getDocumentStatus()).thenReturn("CO");
+    assertEquals("importTargetNotDraft", errorCode(importReturn(notDraft, RETURN_ID)));
+    assertNull(notDraft.nativeSelection);
+  }
+
+  @Test
+  public void availableReturns_listsOnlyReturnsWithSomethingToCredit() throws Exception {
+    Probe probe = returnToVendor();
+    ShipmentInOut plain = completedInOut("rc9", false,
+        inOutLine("rl9", 10, product("p9", "Otro", false), "3"));
+    probe.returnCandidates = List.of(probe.source, plain);
+
+    JSONArray rows = probe.run("availableReturns", null).getBody()
+        .getJSONObject("response").getJSONArray("data");
+
+    assertEquals("a document that is not a return is never offered", List.of("rc1"), ids(rows));
+    assertEquals(2, rows.getJSONObject(0).getInt("pendingLines"));
+
+    Probe drained = customerReturn();
+    drained.credited.put("rl1", bd("10"));
+    drained.credited.put("rl2", bd("5"));
+    drained.returnCandidates = List.of(drained.source);
+    assertEquals(0, drained.run("availableReturns", null).getBody().getJSONObject("response")
+        .getJSONArray("data").length());
+  }
+
+  @Test
+  public void availableReturns_aStandardActionNeverOffersReturns() throws Exception {
+    Probe probe = returnToVendor();
+    probe.candidates = List.of(probe.source);
+
+    assertEquals(0, probe.handle(action("availableReceipts", "i1", null)).getBody()
+        .getJSONObject("response").getJSONArray("data").length());
+  }
+
+  @Test
+  public void returnContracts_speakOfReturns_requireTheReturnId_andNameEachSidesCap()
+      throws Exception {
+    for (boolean sales : new boolean[] {true, false}) {
+      Map<String, NeoActionContract> contracts =
+          ImportInOutLinesIntoInvoiceHandler.returnContracts(sales);
+      assertEquals(List.of("availableReturns", "availableReturnLines", "importReturnLines"),
+          List.copyOf(contracts.keySet()));
+      assertNull(NeoActionContract.validate(contracts, "importReturnLines",
+          new JSONObject().put("returnId", "r1")));
+      assertEquals(422, NeoActionContract.validate(contracts, "importReturnLines",
+          new JSONObject().put("receiptId", "r1")).getHttpStatus());
+    }
+    String text = ImportInOutLinesIntoInvoiceHandler.returnContracts(true)
+        .get("importReturnLines").getDescription();
+    // ETP-6002: the sales return import links the invoices the return lines rectify, and says so.
+    assertTrue(text, text.contains("NEGATIVE") && text.contains("CURRENT price list")
+        && text.contains("createReturnInvoice") && text.contains("links the rectificative")
+        && text.contains("rectifiedInvoices") && !text.contains("does not link")
+        && text.contains("voided ones too"));
+    String purchaseImport = ImportInOutLinesIntoInvoiceHandler.returnContracts(false)
+        .get("importReturnLines").getDescription();
+    assertTrue("the purchase return import still writes no link", purchaseImport.contains(
+        "does not link") && !purchaseImport.contains("rectifiedInvoices"));
+    String purchase = ImportInOutLinesIntoInvoiceHandler.returnContracts(false)
+        .get("availableReturnLines").getDescription();
+    assertTrue(purchase, purchase.contains("NOT deducted")
+        && !purchase.contains("voided ones too"));
+    assertTrue(ImportInOutLinesIntoInvoiceHandler.contracts(true).get("importShipmentLines")
+        .getDescription().contains("importNotAvailableOnRectificative"));
+  }
+
+  @Test
+  public void candidateReturnsHql_isScopedAndHasNoCurrencyFilter() {
+    String hql = ImportInOutLinesIntoInvoiceHandler.candidateReturnsHql();
+    assertTrue(hql, hql.contains("io.documentType.return = true")
+        && hql.contains("io.client.id = :client") && hql.contains("io.organization.id in (:orgs)")
+        && hql.contains("io.active = true")
+        && hql.endsWith("order by io.movementDate desc, io.documentNo desc, io.id desc"));
+    assertFalse(hql.contains("urrency"));
+  }
+
+  // ── listing parameters of the import popups (ETP-6099) ────────────────────
+
+  private static final Set<String> BASE_DOC_KEYS = Set.of("id", "documentNo", "date",
+      "businessPartner", "businessPartner$_identifier", "currency", "pendingLines");
+  private static final Set<String> BASE_LINE_KEYS = Set.of("id", "lineNo", "product",
+      "product$_identifier", "uOM", "pendingQuantity");
+
+  private static Set<String> keysOf(JSONObject object) {
+    Set<String> keys = new java.util.HashSet<>();
+    java.util.Iterator<?> it = object.keys();
+    while (it.hasNext()) {
+      keys.add((String) it.next());
+    }
+    return keys;
+  }
+
+  private static JSONObject page(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("response");
+  }
+
+  private static boolean[] link(boolean importedHere, boolean invoicedElsewhere) {
+    return new boolean[] { importedHere, invoicedElsewhere };
+  }
+
+  /**
+   * Without any of the new parameters every action answers as before (the MCP default): the base
+   * keys only, no offset / nextOffset, the old pendingLines count, the delegate's own scan seam,
+   * and the link-state query never runs.
+   */
+  @Test
+  public void listActions_withoutTheNewParameters_answerExactlyAsBefore() throws Exception {
+    Probe probe = sales();
+    probe.salesModalRules = true;
+    probe.candidates = List.of(probe.source);
+    probe.linkStates.put("rl1", link(false, true));
+
+    JSONObject docs = page(probe.run("availableShipments", null));
+    JSONObject lines = page(probe.run("availableShipmentLines", "{\"shipmentId\":\"rc1\"}"));
+
+    assertEquals(Set.of("data", "hasMore", "limit", "scanLimit"), keysOf(docs));
+    JSONObject doc = docs.getJSONArray("data").getJSONObject(0);
+    assertEquals(BASE_DOC_KEYS, keysOf(doc));
+    assertEquals("every line with something pending, invoiced elsewhere or not", 2,
+        doc.getInt("pendingLines"));
+    assertEquals(BASE_LINE_KEYS, keysOf(lines.getJSONArray("data").getJSONObject(0)));
+    assertEquals(0, probe.linkStateReads);
+    assertEquals(0, probe.pagedReads);
+
+    Probe returns = returnToVendor();
+    returns.returnCandidates = List.of(returns.source);
+    assertEquals(BASE_DOC_KEYS, keysOf(page(returns.run("availableReturns", null))
+        .getJSONArray("data").getJSONObject(0)));
+    assertEquals(BASE_LINE_KEYS, keysOf(page(returns.run("availableReturnLines", RETURN_ID))
+        .getJSONArray("data").getJSONObject(0)));
+  }
+
+  /**
+   * limit / offset page through the scan: the answer echoes offset and gives nextOffset, the scan
+   * position after the last candidate examined, or null once nothing is left. A return list pages
+   * through its own query.
+   */
+  @Test
+  public void listActions_pageThroughTheScan_withOffsetAndNextOffset() throws Exception {
+    Probe probe = purchase();
+    ShipmentInOut second = completedInOut("rc2", false);
+    ShipmentInOut third = completedInOut("rc3", false);
+    probe.candidates = List.of(probe.source, second, third);
+
+    JSONObject first = page(probe.handle(action("availableReceipts", "i1", "{\"limit\":2}")));
+    assertEquals(List.of("rc1", "rc2"), ids(first.getJSONArray("data")));
+    assertTrue(first.getBoolean("hasMore"));
+    assertEquals(0, first.getInt("offset"));
+    assertEquals(2, first.getInt("nextOffset"));
+    assertEquals("never fewer candidates than the default scan", 200, first.getInt("scanLimit"));
+
+    JSONObject last = page(probe.handle(action("availableReceipts", "i1",
+        "{\"limit\":2,\"offset\":2}")));
+    assertEquals(List.of("rc3"), ids(last.getJSONArray("data")));
+    assertFalse(last.getBoolean("hasMore"));
+    assertEquals(2, last.getInt("offset"));
+    assertTrue(last.isNull("nextOffset"));
+    assertEquals(Integer.valueOf(2), probe.lastOffset);
+    assertEquals(Integer.valueOf(200), probe.lastScan);
+
+    Probe returns = returnToVendor();
+    returns.returnCandidates = List.of(returns.source);
+    JSONObject past = page(returns.run("availableReturns", "{\"offset\":1}"));
+    assertEquals(0, past.getJSONArray("data").length());
+    assertEquals(Integer.valueOf(1), returns.lastOffset);
+    assertTrue(past.isNull("nextOffset"));
+  }
+
+  /** A scan that read its whole limit has more, and nextOffset skips everything it examined. */
+  @Test
+  public void availableReceipts_aFullScan_hasMore_andNextOffsetSkipsWhatItExamined()
+      throws Exception {
+    Probe probe = purchase();
+    probe.scanLimit = 2;
+    ShipmentInOut aReturn = completedInOut("ret", false);
+    when(aReturn.getDocumentType().isReturn()).thenReturn(true);
+    probe.candidates = List.of(aReturn, probe.source);
+
+    JSONObject result = page(probe.handle(action("availableReceipts", "i1", "{\"limit\":1}")));
+
+    assertEquals(List.of("rc1"), ids(result.getJSONArray("data")));
+    assertTrue(result.getBoolean("hasMore"));
+    assertEquals(2, result.getInt("nextOffset"));
+  }
+
+  @Test
+  public void listingParameters_outOfRangeOrNotBoolean_are400InvalidParameter() throws Exception {
+    String[] listBodies = { "{\"limit\":0}", "{\"limit\":1001}", "{\"limit\":\"x\"}",
+        "{\"limit\":2.5}", "{\"offset\":-1}", "{\"includeCovered\":\"yes\"}", "{\"detail\":3}" };
+    for (String body : listBodies) {
+      NeoResponse response = purchase().handle(action("availableReceipts", "i1", body));
+      assertEquals(body, 400, response.getHttpStatus());
+      assertEquals(body, "importInvalidParameter", errorCode(response));
+    }
+    for (String extra : new String[] { "\"includeCovered\":\"maybe\"", "\"detail\":1" }) {
+      NeoResponse response = purchase().handle(action("availableReceiptLines", "i1",
+          "{\"receiptId\":\"rc1\"," + extra + "}"));
+      assertEquals(extra, 400, response.getHttpStatus());
+      assertEquals(extra, "importInvalidParameter", errorCode(response));
+    }
+    assertEquals("a boolean spelled as text and the longest page are accepted", 200,
+        purchase().handle(action("availableReceipts", "i1",
+            "{\"detail\":\"false\",\"limit\":1000}")).getHttpStatus());
+  }
+
+  @Test
+  public void contracts_declareTheListingParametersOnEveryListAndLinesAction() throws Exception {
+    for (boolean sales : new boolean[] { true, false }) {
+      Map<String, NeoActionContract> standard = ImportInOutLinesIntoInvoiceHandler.contracts(sales);
+      Map<String, NeoActionContract> returns =
+          ImportInOutLinesIntoInvoiceHandler.returnContracts(sales);
+      JSONObject listing = new JSONObject(
+          "{\"limit\":10,\"offset\":0,\"includeCovered\":true,\"detail\":true}");
+      assertNull(NeoActionContract.validate(standard,
+          sales ? "availableShipments" : "availableReceipts", listing));
+      assertNull(NeoActionContract.validate(returns, "availableReturns", listing));
+      assertNull(NeoActionContract.validate(standard,
+          sales ? "availableShipmentLines" : "availableReceiptLines", new JSONObject()
+              .put(sales ? "shipmentId" : "receiptId", "rc1").put("includeCovered", true)
+              .put("detail", true)));
+      assertNull(NeoActionContract.validate(returns, "availableReturnLines", new JSONObject()
+          .put("returnId", "rc1").put("includeCovered", true).put("detail", true)));
+    }
+  }
+
+  /** includeCovered: a receipt whose pending is all held by drafts is listed at 0, no other. */
+  @Test
+  public void availableReceipts_includeCovered_listsAReceiptHeldByDraftsAtZero() throws Exception {
+    Probe probe = purchase();
+    probe.pending.clear();
+    probe.candidates = List.of(probe.source);
+    String covered = "{\"includeCovered\":true}";
+
+    assertEquals("nothing pending even before drafts: invoiced, not covered", 0,
+        page(probe.handle(action("availableReceipts", "i1", covered))).getJSONArray("data")
+            .length());
+    probe.beforeDrafts.put("rl1", bd("10"));
+    JSONArray rows = page(probe.handle(action("availableReceipts", "i1", covered)))
+        .getJSONArray("data");
+    assertEquals(List.of("rc1"), ids(rows));
+    assertEquals(0, rows.getJSONObject(0).getInt("pendingLines"));
+    assertEquals("without the flag it stays out", 0, page(probe.handle(action(
+        "availableReceipts", "i1", null))).getJSONArray("data").length());
+  }
+
+  /**
+   * includeCovered on a return: one with nothing left to credit is listed at 0 when it is not
+   * invoiced in full and (sales) in the invoice's currency.
+   */
+  @Test
+  public void availableReturns_includeCovered_listsAReturnNotInvoicedInFull() throws Exception {
+    // Each case holds the invoice status, the currency of the return's sales order (null when it
+    // has none) and whether the return is listed.
+    Object[][] cases = { { "0", null, true }, { "100", null, false }, { "40", "usd", false } };
+    for (Object[] c : cases) {
+      Probe probe = customerReturn();
+      probe.credited.put("rl1", bd("10"));
+      probe.credited.put("rl2", bd("5"));
+      probe.invoiceStatus = bd((String) c[0]);
+      if (c[1] != null) {
+        Order order = mock(Order.class);
+        doReturn(currency((String) c[1])).when(order).getCurrency();
+        when(probe.source.getSalesOrder()).thenReturn(order);
+      }
+      probe.returnCandidates = List.of(probe.source);
+
+      JSONArray rows = page(probe.run("availableReturns", "{\"includeCovered\":true}"))
+          .getJSONArray("data");
+
+      boolean listed = Boolean.TRUE.equals(c[2]);
+      assertEquals(java.util.Arrays.toString(c), listed ? List.of("rc1") : List.of(), ids(rows));
+      if (listed) {
+        assertEquals(0, rows.getJSONObject(0).getInt("pendingLines"));
+      }
+    }
+  }
+
+  /** detail on a document row: creationDate (UTC, whole seconds) and the order; never an amount. */
+  @Test
+  public void documentDetail_addsCreationDateAndTheOrder_butNoAmount() throws Exception {
+    Probe probe = purchase();
+    probe.candidates = List.of(probe.source);
+    Order order = mock(Order.class);
+    when(order.getId()).thenReturn("o1");
+    when(order.getDocumentNo()).thenReturn("PO-77");
+    when(probe.source.getSalesOrder()).thenReturn(order);
+    java.util.Date created =
+        java.util.Date.from(java.time.Instant.parse("2026-11-05T09:12:33.789Z"));
+    when(probe.source.getCreationDate()).thenReturn(created);
+    String detail = "{\"detail\":true}";
+
+    JSONObject row = page(probe.handle(action("availableReceipts", "i1", detail)))
+        .getJSONArray("data").getJSONObject(0);
+    assertEquals("2026-11-05T09:12:33Z", row.getString("creationDate"));
+    assertEquals("o1", row.getString("order"));
+    assertEquals("PO-77", row.getString("orderDocumentNo"));
+    assertFalse("no amount on a shipment / receipt row", row.has("amount"));
+
+    when(probe.source.getSalesOrder()).thenReturn(null);
+    when(probe.source.getCreationDate()).thenReturn(null);
+    row = page(probe.handle(action("availableReceipts", "i1", detail))).getJSONArray("data")
+        .getJSONObject(0);
+    assertTrue(row.toString(), row.isNull("creationDate") && row.isNull("order")
+        && row.isNull("orderDocumentNo"));
+
+    Probe returns = returnToVendor();
+    returns.returnCandidates = List.of(returns.source);
+    returns.sourceDocs = "RC-1, RC-2";
+    JSONObject returnRow = page(returns.run("availableReturns", detail)).getJSONArray("data")
+        .getJSONObject(0);
+    assertEquals("RC-1, RC-2", returnRow.getString("sourceDocumentNo"));
+    assertTrue(returnRow.isNull("order") && returnRow.isNull("creationDate"));
+    assertFalse(returnRow.toString(), returnRow.has("orderDocumentNo") || returnRow.has("amount"));
+  }
+
+  @Test
+  public void availableReceiptLines_detail_addsTheMovementTheOrderLineAndTheLinks()
+      throws Exception {
+    Probe probe = purchase();
+    OrderLine orderLine = mock(OrderLine.class);
+    when(orderLine.getId()).thenReturn("ol1");
+    when(orderLine.getDiscount()).thenReturn(bd("10.0000"));
+    doReturn(orderLine).when(probe.lineById.get("rl1")).getSalesOrderLine();
+    probe.linkStates.put("rl1", link(true, false));
+    probe.linkStates.put("rl2", link(false, true));
+
+    JSONArray rows = page(probe.handle(action("availableReceiptLines", "i1",
+        "{\"receiptId\":\"rc1\",\"detail\":true}"))).getJSONArray("data");
+
+    JSONObject agua = rows.getJSONObject(0);
+    assertEquals(0, bd("10").compareTo(new BigDecimal(agua.getString("movementQuantity"))));
+    assertEquals("ol1", agua.getString("orderLine"));
+    assertEquals("10", agua.get("orderLineDiscount").toString());
+    assertTrue(agua.getBoolean("importedHere"));
+    assertFalse(agua.getBoolean("invoicedElsewhere"));
+    assertFalse("blockedReason is a return key", agua.has("blockedReason"));
+    JSONObject pan = rows.getJSONObject(1);
+    assertTrue(pan.isNull("orderLine"));
+    assertEquals("0", pan.get("orderLineDiscount").toString());
+    assertFalse(pan.getBoolean("importedHere"));
+    assertTrue(pan.getBoolean("invoicedElsewhere"));
+    assertEquals("the links of THIS invoice", "i1", probe.linkStatesInvoiceId);
+  }
+
+  /** includeCovered on lines: a line with nothing left comes at 0; a line that moved nothing never. */
+  @Test
+  public void availableReceiptLines_includeCovered_addsTheCoveredLinesAtZero() throws Exception {
+    Probe probe = purchase();
+    probe.pending.remove("rl2");
+    String covered = "{\"receiptId\":\"rc1\",\"includeCovered\":true}";
+
+    JSONArray rows = page(probe.handle(action("availableReceiptLines", "i1", covered)))
+        .getJSONArray("data");
+    assertEquals(List.of("rl1", "rl2"), ids(rows));
+    assertEquals(0, rows.getJSONObject(1).getInt("pendingQuantity"));
+
+    when(probe.lineById.get("rl2").getMovementQuantity()).thenReturn(BigDecimal.ZERO);
+    assertEquals(List.of("rl1"), ids(page(probe.handle(action("availableReceiptLines", "i1",
+        covered))).getJSONArray("data")));
+  }
+
+  /** detail on a return line: the positive movement and why a line is not offered, per side. */
+  @Test
+  public void availableReturnLines_detail_saysWhyALineIsNotOffered() throws Exception {
+    String body = "{\"returnId\":\"rc1\",\"includeCovered\":true,\"detail\":true}";
+    Probe sales = customerReturn();
+    OrderLine taken = mock(OrderLine.class);
+    when(taken.getId()).thenReturn("ol9");
+    doReturn(taken).when(sales.lineById.get("rl1")).getSalesOrderLine();
+    sales.blockedOrderLines.add("ol9");
+    sales.credited.put("rl2", bd("5"));
+
+    JSONArray rows = page(sales.run("availableReturnLines", body)).getJSONArray("data");
+
+    assertEquals(List.of("rl1", "rl2"), ids(rows));
+    JSONObject first = rows.getJSONObject(0);
+    assertEquals("orderLineInvoiced", first.getString("blockedReason"));
+    assertEquals("ol9", first.getString("orderLine"));
+    assertEquals("a positive movement", 0,
+        bd("10").compareTo(new BigDecimal(first.getString("movementQuantity"))));
+    assertEquals("creditedInFull", rows.getJSONObject(1).getString("blockedReason"));
+    assertFalse(first.has("importedHere") || first.has("invoicedElsewhere"));
+
+    Probe purchase = returnToVendor();
+    ShipmentInOutLine agua = purchase.lineById.get("rl1");
+    InvoiceLine mine = invoiceLine("mine", agua.getProduct(), "-3");
+    when(mine.isActive()).thenReturn(true);
+    when(mine.getGoodsShipmentLine()).thenReturn(agua);
+    purchase.invoice.getInvoiceLineList().add(mine);
+
+    rows = page(purchase.run("availableReturnLines", body)).getJSONArray("data");
+
+    assertEquals("importedHere", rows.getJSONObject(0).getString("blockedReason"));
+    assertEquals(0, rows.getJSONObject(0).getInt("pendingQuantity"));
+    assertTrue("an offered line has no reason", rows.getJSONObject(1).isNull("blockedReason"));
+    assertEquals(5, rows.getJSONObject(1).getInt("pendingQuantity"));
+  }
+
+  /**
+   * With detail, pendingLines counts what the popup leaves selectable once expanded: a line with
+   * something pending, not already held by THIS invoice and, on the sales side only, not invoiced
+   * elsewhere. A document left with nothing selectable is not listed.
+   */
+  @Test
+  public void detailPendingLines_countsOnlyTheSelectableLines_perSide() throws Exception {
+    // Each case holds whether it is the sales side, the ids of the pending lines, the link state of
+    // rl1 and of rl2, and the expected pendingLines (null when the document is not listed).
+    Object[][] cases = {
+        { true, List.of("rl1"), link(false, true), link(false, false), null },
+        { true, List.of("rl1", "rl2"), link(false, false), link(true, false), 1 },
+        { false, List.of("rl1"), link(false, true), link(false, false), 1 },
+        { false, List.of("rl1", "rl2"), link(false, true), link(true, false), 1 },
+    };
+    for (Object[] c : cases) {
+      boolean salesSide = Boolean.TRUE.equals(c[0]);
+      Probe probe = salesSide ? sales() : purchase();
+      probe.salesModalRules = salesSide;
+      probe.pending.keySet().retainAll((List<?>) c[1]);
+      probe.linkStates.put("rl1", (boolean[]) c[2]);
+      probe.linkStates.put("rl2", (boolean[]) c[3]);
+      probe.candidates = List.of(probe.source);
+
+      JSONArray rows = page(probe.run(salesSide ? "availableShipments" : "availableReceipts",
+          "{\"detail\":true}")).getJSONArray("data");
+
+      String label = (salesSide ? "sales " : "purchase ") + c[1];
+      if (c[4] == null) {
+        assertEquals(label, 0, rows.length());
+      } else {
+        assertEquals(label, List.of("rc1"), ids(rows));
+        assertEquals(label, ((Integer) c[4]).intValue(),
+            rows.getJSONObject(0).getInt("pendingLines"));
+      }
+      assertEquals(label, 1, probe.linkStateReads);
+    }
+  }
+
+  @Test
+  public void detailPendingLines_aShipmentWithOnlyLinesInvoicedElsewhere_isListedAtZeroWhenCovered()
+      throws Exception {
+    Probe probe = sales();
+    probe.salesModalRules = true;
+    probe.pending.remove("rl2");
+    probe.linkStates.put("rl1", link(false, true));
+    probe.beforeDrafts.put("rl1", bd("10"));
+    probe.candidates = List.of(probe.source);
+
+    JSONArray rows = page(probe.run("availableShipments",
+        "{\"detail\":true,\"includeCovered\":true}")).getJSONArray("data");
+
+    assertEquals(List.of("rc1"), ids(rows));
+    assertEquals(0, rows.getJSONObject(0).getInt("pendingLines"));
+  }
+
+  /**
+   * Only the sales side greys out a line invoiced elsewhere; a request that carries no policy gets
+   * the purchase rule ({@link RectificativeImportPolicy#NONE}) and counts it.
+   */
+  @Test
+  public void excludesLinesInvoicedElsewhere_isTheSalesRule_andTheDefaultIsPurchase()
+      throws Exception {
+    assertTrue(RectificativeImportPolicy.forHeader(type -> null, true)
+        .excludesLinesInvoicedElsewhere());
+    assertFalse(RectificativeImportPolicy.forHeader(type -> null, false)
+        .excludesLinesInvoicedElsewhere());
+    assertFalse(RectificativeImportPolicy.NONE.excludesLinesInvoicedElsewhere());
+
+    Probe noPolicy = sales();
+    noPolicy.pending.remove("rl2");
+    noPolicy.linkStates.put("rl1", link(false, true));
+    noPolicy.candidates = List.of(noPolicy.source);
+    JSONArray rows = page(noPolicy.handle(action("availableShipments", "i1",
+        "{\"detail\":true}"))).getJSONArray("data");
+    assertEquals(1, rows.getJSONObject(0).getInt("pendingLines"));
+  }
+
+  // ── pendingBasis "classic" (ETP-6099 follow-up) ───────────────────────────
+
+  /** The purchase invoice header's policy: offers pendingBasis "classic". */
+  private static final RectificativeImportPolicy PURCHASE_POLICY =
+      RectificativeImportPolicy.forHeader(type -> "STANDARD", false);
+  private static final RectificativeImportPolicy SALES_POLICY =
+      RectificativeImportPolicy.forHeader(type -> "STANDARD", true);
+  private static final String CLASSIC = "{\"pendingBasis\":\"classic\"}";
+
+  /**
+   * Classic availableReceipts deducts nothing other invoices hold: a receipt whose lines are all
+   * invoiced elsewhere (completed or draft: the server pending is empty) is listed at its full
+   * count, and the server pending is never read.
+   */
+  @Test
+  public void classicAvailableReceipts_aReceiptInvoicedElsewhere_isListedAtItsFullCount()
+      throws Exception {
+    Probe probe = purchase();
+    probe.pending.clear();
+    probe.linkStates.put("rl1", link(false, true));
+    probe.linkStates.put("rl2", link(false, true));
+    probe.candidates = List.of(probe.source);
+    probe.classicCandidates = List.of(probe.source);
+
+    JSONArray rows = page(probe.runWith("availableReceipts", CLASSIC, PURCHASE_POLICY))
+        .getJSONArray("data");
+
+    assertEquals(List.of("rc1"), ids(rows));
+    assertEquals(2, rows.getJSONObject(0).getInt("pendingLines"));
+    assertFalse("the server pending is not read", probe.calls.contains("pending"));
+    assertEquals("the links of THIS invoice", "i1", probe.linkStatesInvoiceId);
+
+    assertEquals("the server rule leaves it out", 0, page(probe.runWith("availableReceipts",
+        null, PURCHASE_POLICY)).getJSONArray("data").length());
+  }
+
+  /**
+   * A line THIS invoice holds, or one that moved nothing, is not counted; a receipt left with
+   * none is listed only with includeCovered, at 0.
+   */
+  @Test
+  public void classicAvailableReceipts_linesHeldHereAreNotCounted_allHereOnlyWithIncludeCovered()
+      throws Exception {
+    Probe probe = purchase();
+    probe.classicCandidates = List.of(probe.source);
+    probe.linkStates.put("rl1", link(true, false));
+
+    assertEquals(1, page(probe.runWith("availableReceipts", CLASSIC, PURCHASE_POLICY))
+        .getJSONArray("data").getJSONObject(0).getInt("pendingLines"));
+
+    when(probe.lineById.get("rl2").getMovementQuantity()).thenReturn(BigDecimal.ZERO);
+    assertEquals(0, page(probe.runWith("availableReceipts", CLASSIC, PURCHASE_POLICY))
+        .getJSONArray("data").length());
+    JSONArray covered = page(probe.runWith("availableReceipts",
+        "{\"pendingBasis\":\"classic\",\"includeCovered\":true}", PURCHASE_POLICY))
+        .getJSONArray("data");
+    assertEquals(List.of("rc1"), ids(covered));
+    assertEquals(0, covered.getJSONObject(0).getInt("pendingLines"));
+  }
+
+  /** A return is skipped; the classic scan pages from offset and answers nextOffset. */
+  @Test
+  public void classicAvailableReceipts_skipsReturns_andPagesThroughItsScan() throws Exception {
+    Probe probe = purchase();
+    ShipmentInOut aReturn = completedInOut("ret", false,
+        inOutLine("rr1", 10, product("p1", "Agua", true), "3"));
+    when(aReturn.getDocumentType().isReturn()).thenReturn(true);
+    ShipmentInOut second = completedInOut("rc2", false,
+        inOutLine("rl9", 10, product("p9", "Sal", false), "2"));
+    probe.classicCandidates = List.of(aReturn, probe.source, second);
+
+    JSONObject first = page(probe.runWith("availableReceipts",
+        "{\"pendingBasis\":\"classic\",\"limit\":1}", PURCHASE_POLICY));
+    assertEquals(List.of("rc1"), ids(first.getJSONArray("data")));
+    assertEquals(Integer.valueOf(0), probe.classicOffset);
+    assertEquals(2, first.getInt("nextOffset"));
+
+    JSONObject rest = page(probe.runWith("availableReceipts",
+        "{\"pendingBasis\":\"classic\",\"offset\":2}", PURCHASE_POLICY));
+    assertEquals(Integer.valueOf(2), probe.classicOffset);
+    assertEquals(List.of("rc2"), ids(rest.getJSONArray("data")));
+    assertTrue(rest.isNull("nextOffset"));
+    assertEquals("the server scan is never read", 0, probe.pagedReads);
+  }
+
+  /**
+   * Classic availableReceiptLines: the full movement quantity, whatever other invoices hold; a
+   * line THIS invoice holds is at 0 and comes only with includeCovered; detail adds the standard
+   * keys.
+   */
+  @Test
+  public void classicAvailableReceiptLines_fullMovement_heldHereAtZeroOnlyWithIncludeCovered()
+      throws Exception {
+    Probe probe = purchase();
+    probe.pending.put("rl2", bd("1"));
+    probe.linkStates.put("rl1", link(true, false));
+    probe.linkStates.put("rl2", link(false, true));
+
+    JSONArray plain = page(probe.runWith("availableReceiptLines",
+        "{\"receiptId\":\"rc1\",\"pendingBasis\":\"classic\"}", PURCHASE_POLICY))
+        .getJSONArray("data");
+    assertEquals(List.of("rl2"), ids(plain));
+    assertEquals("the full movement, not the server's 1", 5,
+        plain.getJSONObject(0).getInt("pendingQuantity"));
+
+    JSONArray all = page(probe.runWith("availableReceiptLines",
+        "{\"receiptId\":\"rc1\",\"pendingBasis\":\"classic\",\"includeCovered\":true,"
+            + "\"detail\":true}", PURCHASE_POLICY)).getJSONArray("data");
+    assertEquals(List.of("rl1", "rl2"), ids(all));
+    JSONObject agua = all.getJSONObject(0);
+    assertEquals(0, agua.getInt("pendingQuantity"));
+    assertTrue(agua.getBoolean("importedHere"));
+    assertEquals(0, bd("10").compareTo(new BigDecimal(agua.getString("movementQuantity"))));
+    assertTrue(agua.has("orderLine") && agua.has("orderLineDiscount"));
+    assertTrue(all.getJSONObject(1).getBoolean("invoicedElsewhere"));
+    assertFalse(probe.calls.contains("pending"));
+  }
+
+  /** Without pendingBasis, or with "server", the offered actions keep the server rule. */
+  @Test
+  public void serverPendingBasis_isTheDefault_onTheOfferedReceiptActions() throws Exception {
+    for (String basis : new String[] { "", ",\"pendingBasis\":\"server\"" }) {
+      Probe probe = purchase();
+      probe.pending.put("rl1", bd("4"));
+      probe.candidates = List.of(probe.source);
+      probe.classicCandidates = List.of(probe.source);
+
+      JSONArray lines = page(probe.runWith("availableReceiptLines",
+          "{\"receiptId\":\"rc1\"" + basis + "}", PURCHASE_POLICY)).getJSONArray("data");
+      assertEquals(basis, 4, lines.getJSONObject(0).getInt("pendingQuantity"));
+      assertEquals(basis, 1, page(probe.runWith("availableReceipts", "{" + basis.replaceFirst(
+          ",", "") + "}", PURCHASE_POLICY)).getJSONArray("data").length());
+      assertEquals(basis, 0, probe.classicReads);
+    }
+  }
+
+  /**
+   * "classic" is refused (400 importInvalidParameter, nothing read nor created) on every action of
+   * this delegate that does not offer it, and on the offered ones under a header that does not.
+   */
+  @Test
+  public void classicPendingBasis_whereNotOffered_is400AndNothingRuns() throws Exception {
+    Object[][] cases = {
+        { true, "availableShipments", SALES_POLICY },
+        { true, "availableShipmentLines", SALES_POLICY },
+        { false, "importReceiptLines", PURCHASE_POLICY },
+        { false, "availableReturns", PURCHASE_POLICY },
+        { false, "availableReceipts", SALES_POLICY },
+        { false, "availableReceipts", RectificativeImportPolicy.NONE },
+        { false, "availableReceiptLines", null },
+    };
+    for (Object[] c : cases) {
+      Probe probe = (Boolean) c[0] ? sales() : purchase();
+      probe.candidates = List.of(probe.source);
+      probe.classicCandidates = List.of(probe.source);
+      String label = c[1] + " / " + c[2];
+
+      NeoResponse refused = probe.runWith((String) c[1],
+          "{\"receiptId\":\"rc1\",\"shipmentId\":\"rc1\",\"pendingBasis\":\"classic\"}",
+          (RectificativeImportPolicy) c[2]);
+
+      assertEquals(label, 400, refused.getHttpStatus());
+      assertEquals(label, "importInvalidParameter", errorCode(refused));
+      assertEquals(label, List.of(), probe.calls);
+      assertEquals(label, 0, probe.classicReads + probe.pagedReads + probe.linkStateReads);
+      assertNull(label, probe.nativeSelection);
+    }
   }
 }

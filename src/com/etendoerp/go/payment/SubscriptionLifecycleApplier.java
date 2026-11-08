@@ -32,6 +32,14 @@ public class SubscriptionLifecycleApplier {
   static final String INVOICE_PAID = "invoice.paid";
   static final String INVOICE_PAYMENT_FAILED = "invoice.payment_failed";
   static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
+  /** The provider's scheduled-cancellation flag on a subscription object (display-only). */
+  static final String CANCEL_AT_PERIOD_END = "cancel_at_period_end";
+  /**
+   * ETP-6060 — the provider's scheduled cancellation date. The Customer Portal of recent API
+   * versions schedules "cancel at the end of the period" with this date and leaves
+   * {@code cancel_at_period_end} false, so either one means a cancellation is scheduled.
+   */
+  static final String CANCEL_AT = "cancel_at";
   static final String SUBSCRIPTION_DELETED = "customer.subscription.deleted";
   /** The prefix of every {@code customer.subscription.*} event type. */
   public static final String SUBSCRIPTION_EVENT_PREFIX = "customer.subscription.";
@@ -91,11 +99,13 @@ public class SubscriptionLifecycleApplier {
             EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
             .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
                 subscriptionPeriodBoundary(object, CURRENT_PERIOD_END))
+            .withCancelAtPeriodEnd(cancelAtPeriodEndOf(object))
             .closing(subscriptionEndedAt(object));
       case SUBSCRIPTION_UPDATED:
         return fromSubscriptionStatus(object, current)
             .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
-                subscriptionPeriodBoundary(object, CURRENT_PERIOD_END));
+                subscriptionPeriodBoundary(object, CURRENT_PERIOD_END))
+            .withCancelAtPeriodEnd(cancelAtPeriodEndOf(object));
       default:
         return SubscriptionEventOutcome.ignore("unhandled event type");
     }
@@ -278,6 +288,45 @@ public class SubscriptionLifecycleApplier {
     JSONObject first = data == null ? null : data.optJSONObject(0);
     return first == null ? null : epochSeconds(first, field);
   }
+
+  /**
+   * ETP-5051 (O-1b) — whether the subscription object schedules a cancellation, or
+   * {@link CancelAtPeriodEnd#NOT_REPORTED} when it carries neither field. Display-only (it feeds
+   * {@code renewalAt} on the environment list); {@link #fromSubscriptionStatus} never reads it, so
+   * it cannot change the status mapping.
+   *
+   * <p>ETP-6060 — a {@code cancel_at} date schedules it too, whatever {@code cancel_at_period_end}
+   * says: that is how the Customer Portal of recent API versions cancels at the period end. A
+   * {@code cancel_at} reported as JSON null with no flag means nothing is scheduled.
+   *
+   * @param subscription a Stripe subscription object
+   * @return the state; {@link CancelAtPeriodEnd#NOT_REPORTED} when neither field is usable
+   */
+  static CancelAtPeriodEnd cancelAtPeriodEndOf(JSONObject subscription) {
+    if (subscription == null) {
+      return CancelAtPeriodEnd.NOT_REPORTED;
+    }
+    if (subscription.has(CANCEL_AT) && epochSeconds(subscription, CANCEL_AT) != null) {
+      return CancelAtPeriodEnd.SET;
+    }
+    if (!subscription.has(CANCEL_AT_PERIOD_END) || subscription.isNull(CANCEL_AT_PERIOD_END)) {
+      return subscription.has(CANCEL_AT) ? CancelAtPeriodEnd.CLEARED
+          : CancelAtPeriodEnd.NOT_REPORTED;
+    }
+    Object value = subscription.opt(CANCEL_AT_PERIOD_END);
+    if (value instanceof Boolean) {
+      return CancelAtPeriodEnd.of((Boolean) value);
+    }
+    String text = String.valueOf(value);
+    if ("true".equalsIgnoreCase(text)) {
+      return CancelAtPeriodEnd.SET;
+    }
+    if ("false".equalsIgnoreCase(text)) {
+      return CancelAtPeriodEnd.CLEARED;
+    }
+    return CancelAtPeriodEnd.NOT_REPORTED;
+  }
+
 
   /**
    * Reads the subscription's own status.

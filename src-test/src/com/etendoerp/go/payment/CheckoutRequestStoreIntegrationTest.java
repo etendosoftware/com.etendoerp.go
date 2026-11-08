@@ -114,6 +114,13 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * one applies it; the other waits for that commit and then finds nothing to do. Proven with two
  * threads, each with its own DAL session, against the real row lock; every wait is bounded.
  *
+ * <p><b>Group 9 (ETP-5051) — one environment's own subscription.</b> An account that owns several
+ * environments has one billable purchase per environment, and
+ * {@link CheckoutRequestStore#findSubscriptionForAccountClient} must pick the one of the asked
+ * environment — never the account's newest of another — and must find nothing for an environment
+ * whose purchase belongs to another account. Like {@code find}, its rows sit at client
+ * {@code 0} with the readable filters off, so only the query's own predicates hold this.
+ *
  * @covers com.etendoerp.go.payment.CheckoutRequestStore
  * @covers com.etendoerp.go.payment.CheckoutRequestWrites
  */
@@ -1325,6 +1332,63 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Group 9 — ETP-5051: findSubscriptionForAccountClient, one environment's own subscription
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Two billable purchases of one account, each provisioning its own environment, plus an
+   * unpaid one for the first environment recorded after both: each environment resolves to its own
+   * paid purchase, whichever was recorded last.
+   */
+  @Test
+  public void testClientLookupFindsTheAskedEnvironmentsOwnPurchase() {
+    String[] clients = twoExistingTenantClientIds();
+    String email = newEmail("multi-env");
+    String accountId = createAccount(email);
+    String firstEnvPurchase = createPaidRequest(accountId, email);
+    forceCreatedClient(firstEnvPurchase, clients[0]);
+    String secondEnvPurchase = createPaidRequest(accountId, email);
+    forceCreatedClient(secondEnvPurchase, clients[1]);
+    String unpaid = createRequest(accountId, email);
+    forceCreatedClient(unpaid, clients[0]);
+
+    CheckoutRequest first = store.findSubscriptionForAccountClient(accountId, email, clients[0]);
+    assertNotNull("The first environment's own purchase must be found", first);
+    assertEquals(firstEnvPurchase, first.getRequest());
+    assertEquals("cus_" + firstEnvPurchase, first.getStripeCustomer());
+
+    CheckoutRequest second = store.findSubscriptionForAccountClient(accountId,
+        email.toUpperCase(), clients[1]);
+    assertNotNull("The second environment's own purchase must be found", second);
+    assertEquals(secondEnvPurchase, second.getRequest());
+  }
+
+  /**
+   * A client id that is another account's environment finds nothing, even though that
+   * environment has a billable purchase: the account predicates stay in the query.
+   */
+  @Test
+  public void testClientLookupNeverResolvesAnotherAccountsEnvironment() {
+    String[] clients = twoExistingTenantClientIds();
+    String ownerEmail = newEmail("env-owner");
+    String ownerId = createAccount(ownerEmail);
+    String ownerPurchase = createPaidRequest(ownerId, ownerEmail);
+    forceCreatedClient(ownerPurchase, clients[0]);
+    String otherEmail = newEmail("env-other");
+    String otherId = createAccount(otherEmail);
+    String otherPurchase = createPaidRequest(otherId, otherEmail);
+    forceCreatedClient(otherPurchase, clients[1]);
+
+    assertNull("Another account's environment must resolve to nothing",
+        store.findSubscriptionForAccountClient(otherId, otherEmail, clients[0]));
+    assertNull("The owner's id with another account's e-mail must resolve to nothing",
+        store.findSubscriptionForAccountClient(ownerId, otherEmail, clients[0]));
+    CheckoutRequest own = store.findSubscriptionForAccountClient(ownerId, ownerEmail, clients[0]);
+    assertNotNull("Baseline: the owner resolves its own environment", own);
+    assertEquals(ownerPurchase, own.getRequest());
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Fixtures
   // ---------------------------------------------------------------------------------------------
 
@@ -1503,6 +1567,47 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     try {
       CheckoutRequest request = findCommittedRequest(requestId);
       request.setCheckoutRequestStatus(status);
+      OBDal.getInstance().save(request);
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Two existing tenant clients (never System) to point fixture purchases at. Only referenced by
+   * the purchase's {@code AD_CLIENT_CREATED_ID}, never written, so cleanup leaves them untouched.
+   */
+  private String[] twoExistingTenantClientIds() {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      OBQuery<Client> query = OBDal.getInstance().createQuery(Client.class,
+          "as client where client.id <> :system order by client.id");
+      query.setNamedParameter("system", ZERO);
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setFilterOnActive(false);
+      query.setMaxResult(2);
+      List<Client> clients = query.list();
+      assertEquals("The fixture needs two tenant clients in the database", 2, clients.size());
+      return new String[] { clients.get(0).getId(), clients.get(1).getId() };
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Points a committed request at the environment it provisioned, as onboarding does once the
+   * client exists. Commits and closes for the same reason {@link #forceStatus} does.
+   */
+  private void forceCreatedClient(String requestId, String clientId) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      CheckoutRequest request = findCommittedRequest(requestId);
+      request.setCreatedClient(OBDal.getInstance().get(Client.class, clientId));
       OBDal.getInstance().save(request);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();

@@ -66,6 +66,8 @@ final class ReconciliationAgentActions {
   static final String APPLY_SUGGESTIONS = "applySuggestions";
   static final String PENDING_LINES = "pendingLines";
   static final String CANDIDATES = "candidates";
+  static final String DISCARD_PAIR = BankBouncePairService.ACTION_DISCARD_PAIR;
+  static final String RESTORE_PAIR = BankBouncePairService.ACTION_RESTORE_PAIR;
 
   private static final String P_LINE = ReconciliationHandler.KEY_STATEMENT_LINE_ID;
   private static final String P_TRANSACTION_IDS = "transactionIds";
@@ -101,7 +103,9 @@ final class ReconciliationAgentActions {
           UNDO_RECONCILIATION, ReconciliationHandlerSupport::handleReactivate,
           REMOVE_OPERATION, ReconciliationHandlerSupport::handleRemoveOperation,
           REACTIVATE_SELECTED, ReconciliationHandlerSupport::handleReactivateSelected,
-          APPLY_SUGGESTIONS, ReconciliationHandlerSupport::handleApplySuggestions);
+          APPLY_SUGGESTIONS, ReconciliationHandlerSupport::handleApplySuggestions,
+          DISCARD_PAIR, BankBouncePairService::handleDiscardPair,
+          RESTORE_PAIR, BankBouncePairService::handleRestorePair);
 
   /** MCP parameter name → SPA query-param name, where they differ (read routes only). */
   private static final Map<String, String> QUERY_PARAM_ALIASES =
@@ -179,10 +183,19 @@ final class ReconciliationAgentActions {
             "Lists the account's bank statement lines with their reconciliation state and "
                 + "per-state counts. Start here: every write "
                 + "action needs a statementLineId from this list. Lines of a statement still in "
-                + "draft are not reconcilable and are not listed as pending.",
+                + "draft are not reconcilable and are not listed as pending. The lines come from "
+                + "bank statements imported first (spec bank-statements): an account with no "
+                + "imported statement has nothing to reconcile. The flow is pendingLines -> "
+                + "candidates (for one line) -> reconcileGroup, or autoMatch -> applySuggestions.",
             optional(P_DATE_FROM, NeoActionContract.TYPE_DATE, "Earliest line date (yyyy-MM-dd)."),
             optional(P_DATE_TO, NeoActionContract.TYPE_DATE, "Latest line date (yyyy-MM-dd)."),
-            optional("q", S, "Free-text search on the line description.")),
+            optional("q", S, "Free-text search on the line description."),
+            options(ReconciliationHandler.KEY_STATUS, "With bank rejection suggestions enabled "
+                + "for the account, discarded lists ONLY the discarded lines (left out of every "
+                + "other answer and never reconcilable; counts.discarded says how many there are). "
+                + "Omit it to list the rest. With bank rejection suggestions disabled the value is "
+                + "ignored and discarded lines are ordinary pending lines.",
+                List.of(StatementLineFilter.STATUS_DISCARDED))),
         NeoActionContract.read(CANDIDATES,
             "Lists what a statement line can be reconciled against: existing movements "
                 + "(kind=transactions, default) or unpaid invoices (kind=invoices). Amounts are "
@@ -280,10 +293,34 @@ final class ReconciliationAgentActions {
                 + "autoMatch returned; accept some = send only those; to reject a group simply do "
                 + "not send it (nothing is persisted for it). Invalid groups are reported per "
                 + "group in results[] without blocking the others — including a second group that "
-                + "lands on a line an earlier group of the same call already took.",
+                + "lands on a line an earlier group of the same call already took. A bank "
+                + "rejection pair (autoMatch group with kind bouncePair) is accepted the same way "
+                + "and discards both of its lines instead of reconciling them.",
             array("groups", NeoActionContract.TYPE_OBJECT, true, "One entry per accepted autoMatch "
                 + "group: {statementLineId: group.statementLine.id, operationIds: ids of the "
                 + "group's operations whose isNew is false, createPayment: group.createPayment "
-                + "(only when present)}.")));
+                + "(only when present)}; for a kind bouncePair group: {kind: \"bouncePair\", "
+                + "statementLineId: the original line id (pick one of group.candidates when "
+                + "group.statementLine is null), counterpartLineId: "
+                + "group.counterpartLine.id}.")),
+        NeoActionContract.write(DISCARD_PAIR,
+            "Discards a bank rejection pair: an outgoing (or incoming) bank line and the line that "
+                + "reverses it, same amount and opposite sign. Both lines are marked discarded "
+                + "(they leave the pending list and can no longer be reconciled) and linked to "
+                + "each other; nothing is paid or posted. Only bank-imported (PSD2) lines that are "
+                + "unreconciled, within 60 days of each other and without a payment in the ERP. "
+                + "Only available when bank rejection suggestions are enabled for the account "
+                + "(403 BOUNCE_SUGGESTIONS_OFF otherwise). Undo with restorePair.",
+            required(P_LINE, S, "Id of the original line: group.statementLine.id of an autoMatch "
+                + "bouncePair group, or the chosen one of its candidates."),
+            required(BankBouncePairService.KEY_COUNTERPART_LINE_ID, S, "Id of the line that "
+                + "reverses it: group.counterpartLine.id.")),
+        NeoActionContract.write(RESTORE_PAIR,
+            "Restores a discarded line and the line it was discarded with as a pair, and removes "
+                + "the link between them: both return to the pending list. A line discarded on "
+                + "its own is restored alone. Only available when bank rejection suggestions are "
+                + "enabled for the account (403 BOUNCE_SUGGESTIONS_OFF otherwise).",
+            required(BankBouncePairService.KEY_LINE_ID, S, "Id of either discarded line "
+                + "(pendingLines with status discarded).")));
   }
 }

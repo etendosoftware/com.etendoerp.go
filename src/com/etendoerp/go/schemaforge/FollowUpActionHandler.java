@@ -112,6 +112,8 @@ final class FollowUpActionHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (FollowUpException e) {
       SessionHandler.getInstance().rollback();
       log.warn("Follow-up '{}' rejected for record {}: {} ({})", actionName, recordId,

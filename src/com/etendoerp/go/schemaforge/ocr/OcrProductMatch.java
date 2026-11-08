@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.ocr;
 
+import java.text.Normalizer;
 import java.util.List;
 import java.util.Locale;
 import java.util.stream.Collectors;
@@ -27,8 +28,8 @@ import com.etendoerp.go.schemaforge.ocr.OcrLookups.Candidate;
  * Decides what to do with the products the similarity search proposed for one line — a port of the
  * application's {@code classifyProductMatch} (ETP-5715).
  *
- * <p>Exactly one candidate whose name equals the description (trimmed, case-insensitive) is safe to
- * take as the match. Failing that, the single highest candidate at
+ * <p>Exactly one candidate whose name equals the description (trimmed, case- and accent-insensitive,
+ * n-tilde distinct) is safe to take as the match. Failing that, the single highest candidate at
  * {@link #AUTO_MATCH_MIN_SIMILARITY} or more is taken too (ETP-5654), even if a runner-up is also
  * above the threshold; two or more candidates tied at the highest value are ambiguous. A missing
  * or non-numeric similarity never qualifies. Otherwise the best candidate is only a suggestion the
@@ -93,9 +94,9 @@ final class OcrProductMatch {
     if (usable.isEmpty()) {
       return new OcrProductMatch(State.NONE, null);
     }
-    String wanted = normalize(description);
+    String wanted = normalizeProductName(description);
     List<Candidate> exact = wanted.isEmpty() ? List.of() : usable.stream()
-        .filter(c -> normalize(c.name()).equals(wanted)).collect(Collectors.toList());
+        .filter(c -> normalizeProductName(c.name()).equals(wanted)).collect(Collectors.toList());
     if (exact.size() == 1) {
       return new OcrProductMatch(State.AUTO_MATCHED, exact.get(0));
     }
@@ -148,6 +149,51 @@ final class OcrProductMatch {
     } catch (NumberFormatException e) {
       return Double.NaN;
     }
+  }
+
+  /**
+   * Whether the character is in the whitespace set of ECMAScript {@code String.prototype.trim},
+   * spelled out because neither {@link String#trim()} (control characters) nor
+   * {@link String#strip()} (keeps NBSP) matches it.
+   */
+  private static boolean isEdgeSpace(char c) {
+    return c == '\t' || c == '\n' || c == '\u000B' || c == '\f' || c == '\r' || c == ' '
+        || c == '\u00A0' || c == '\u1680' || (c >= '\u2000' && c <= '\u200A') || c == '\u2028'
+        || c == '\u2029' || c == '\u202F' || c == '\u205F' || c == '\u3000' || c == '\uFEFF';
+  }
+
+  private static String edgeStrip(String value) {
+    int start = 0;
+    int end = value.length();
+    while (start < end && isEdgeSpace(value.charAt(start))) {
+      start++;
+    }
+    while (end > start && isEdgeSpace(value.charAt(end - 1))) {
+      end--;
+    }
+    return value.substring(start, end);
+  }
+
+  /**
+   * Normalizer of the exact-name step (ETP-5654): NFC, trim ({@link #isEdgeSpace}, NBSP
+   * included), lowercase, then diacritics stripped (NFD + removal of combining marks), so "Arnés"
+   * equals "Arnes" like "60M" equals "60m". The n-tilde is kept distinct ("año" is not "ano") by
+   * protecting it while the marks are stripped. The fold also applies to an identical candidate:
+   * if the catalog holds both "Arnés X" and "Arnes X", the description "Arnés X" has two
+   * normalized-exact matches and goes to the user as a suggestion (the first candidate, which may
+   * not be the identical one); the safe direction by design. Parity with
+   * {@code normalizeProductName} of the application; {@link #normalize} is left untouched because
+   * the vendor review uses it.
+   */
+  static String normalizeProductName(String value) {
+    if (value == null) {
+      return "";
+    }
+    String composed = Normalizer.normalize(value, Normalizer.Form.NFC);
+    String folded = edgeStrip(composed)
+        .toLowerCase(Locale.ROOT).replace('ñ', '\u0001');
+    return Normalizer.normalize(folded, Normalizer.Form.NFD).replaceAll("\\p{M}", "")
+        .replace('\u0001', 'ñ');
   }
 
   static String normalize(String value) {

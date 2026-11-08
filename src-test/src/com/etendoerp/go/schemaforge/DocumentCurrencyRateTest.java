@@ -164,7 +164,8 @@ public class DocumentCurrencyRateTest {
    * Table-driven save rules on an order dated 2026-03-01: an org-currency document is never touched;
    * a write that changes the date or the currency without a rate gets the recalculated one (or
    * {@code null} and the 422 when none is configured); an explicit positive rate is honored; a rate
-   * sent empty or zero is refused (the completion refusal when the write completes); a manual rate
+   * sent empty or zero is refused (the completion refusal when the write completes) — as "no rate for
+   * that date" when no range exists, as "cannot be left empty" when one does; a manual rate
    * survives a write that changes neither; a processed document is left alone; a create computes the
    * rate from its reference date, or defers when the body does not say its currency yet.
    */
@@ -176,6 +177,15 @@ public class DocumentCurrencyRateTest {
         // expected refusal code (null: none), expected body rate
         { "org-currency document untouched", DOC_ID, "{\"orderDate\":\"2026-03-15\"}", false,
             "eur", null, false, null, ABSENT },
+        { "back to the org currency resets the rate to 1", DOC_ID, "{\"currency\":\"eur\"}",
+            false, "usd", new BigDecimal("1.47"), false, null, "1" },
+        { "back to the org currency overwrites a sent rate", DOC_ID,
+            "{\"currency\":\"eur\",\"eTGOCurrencyRate\":\"1.47\"}", false,
+            "usd", new BigDecimal("1.47"), false, null, "1" },
+        { "org to foreign currency takes the rate of the date", DOC_ID, "{\"currency\":\"gbp\"}",
+            false, "eur", BigDecimal.ONE, false, null, "0.85" },
+        { "org currency re-sent leaves the rate alone", DOC_ID, "{\"currency\":\"eur\"}",
+            false, "eur", BigDecimal.ONE, false, null, ABSENT },
         { "date change recalculates", DOC_ID, "{\"orderDate\":\"2026-03-15\"}", false,
             "usd", manual, false, null, "1.2" },
         { "currency change recalculates", DOC_ID, "{\"currency\":\"gbp\"}", false,
@@ -189,6 +199,14 @@ public class DocumentCurrencyRateTest {
             "usd", manual, false, DocumentRateMessages.CODE_MISSING_ON_SAVE, NULL },
         { "rate zero is refused", DOC_ID, "{\"eTGOCurrencyRate\":\"0\"}", false,
             "usd", manual, false, DocumentRateMessages.CODE_MISSING_ON_SAVE, "0" },
+        // QA CP-12a: the range exists on the stored date (gbp, 2026-03-01), so clearing the rate is
+        // refused as "cannot be left empty", never as "no rate for that date".
+        { "rate cleared while a range exists is refused as empty", DOC_ID,
+            "{\"eTGOCurrencyRate\":null}", false,
+            "gbp", manual, false, DocumentRateMessages.CODE_EMPTY_ON_SAVE, NULL },
+        { "rate zero while a range exists is refused as empty", DOC_ID,
+            "{\"eTGOCurrencyRate\":\"0\"}", false,
+            "gbp", manual, false, DocumentRateMessages.CODE_EMPTY_ON_SAVE, "0" },
         { "date change without a configured rate is refused", DOC_ID,
             "{\"orderDate\":\"2026-03-25\"}", false,
             "usd", manual, false, DocumentRateMessages.CODE_MISSING_ON_SAVE, NULL },

@@ -59,6 +59,7 @@ import org.openbravo.service.db.DalConnectionProvider;
  * the same pattern used throughout this test suite.
  *
  * @covers com.etendoerp.go.schemaforge.NeoReturnReceiptService
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.CreateReturnReceiptHandler
  * @covers com.etendoerp.go.schemaforge.ReturnFromDocumentSupport
  */
@@ -203,6 +204,7 @@ public class NeoReturnReceiptServiceTest {
   private static final class Run {
     NeoResponse response;
     ShipmentInOut returnDoc;
+    OBDal dal;
     final java.util.List<ShipmentInOutLine> createdLines = new java.util.ArrayList<>();
     boolean headerBuilt;
   }
@@ -248,6 +250,7 @@ public class NeoReturnReceiptServiceTest {
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       ReturnedQuantityTestSupport.stubReturnedQuantities(dal, returned);
+      run.dal = dal;
 
       ShipmentInOut source = ReturnedQuantityTestSupport.completedSource("ship-1", sourceLines);
       when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
@@ -322,6 +325,23 @@ public class NeoReturnReceiptServiceTest {
     assertEquals("L2", lines.getJSONObject(1).getString("sourceLineId"));
     assertEquals("Cerveza", lines.getJSONObject(1).getString("productName"));
     verify(run.returnDoc, never()).setDocumentStatus("CO");
+  }
+
+  /**
+   * ETP-5051 — the created return and its lines are checked against the plan quotas before the
+   * answer: at a {@code block} limit the service answers 403 {@code QUOTA_EXCEEDED}, rolled back.
+   */
+  @Test
+  public void testCreateReturn_overABlockQuota_answers403AndRollsBack() throws Exception {
+    Run run;
+    try (MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      run = runCreateReturn(new JSONObject(), nothingReturned(), line("L1", "Agua", "5"));
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(run.returnDoc));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(run.response);
+    verify(run.dal).rollbackAndClose();
+    verify(run.dal, never()).commitAndClose();
   }
 
   /** Lines given: exactly those, with the linkage in the answer. */

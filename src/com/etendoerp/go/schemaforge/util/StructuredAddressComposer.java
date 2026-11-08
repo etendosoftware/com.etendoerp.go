@@ -38,6 +38,12 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * <p>Used by both {@code ContactsLocationAddressHandler} and {@code WarehouseLocationHandler} so
  * the two entities that wrap a {@code C_Location} compute the exact same lines, on every channel
  * (REST and MCP reach the same handler code, so there is nothing channel-specific to port twice).
+ *
+ * <p><b>Gating is per-account (ETP-5806 staged rollout).</b> {@link #isEnabled(String)} takes the
+ * {@code ETGO_ACCOUNT} email to evaluate the flag for; there is no account-less overload, by
+ * design. Validation, persistence and MCP-schema exposure therefore resolve the flag for the same
+ * account the capability signal the UI reads was resolved for, so a targeted account can never see
+ * the structured fields in the UI while the backend silently drops what it fills in.
  */
 public final class StructuredAddressComposer {
 
@@ -58,14 +64,12 @@ public final class StructuredAddressComposer {
   private static final int BUILDING_NUMBER_MAX_LENGTH = 16;
   private static final int BUILDING_NAME_MAX_LENGTH = 35;
 
-  /** Account-less evaluation context — this flag is environment-level, never per-account. */
-  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
-
   private StructuredAddressComposer() {
   }
 
   /**
-   * Whether the {@code structured-address-for-sepa} backend-only flag (ETP-5806, TTL 2026-11-15) is on.
+   * Whether the {@code structured-address-for-sepa} backend-only flag (ETP-5806, TTL 2026-11-15)
+   * is on <b>for the given account</b>.
    *
    * <p>The 3 call sites below — {@link #missingMandatoryFields}, {@link #fieldsExceedingMaxLength}
    * and {@link #composeAddressLines} — are each only meaningful once the structured fields exist
@@ -75,9 +79,26 @@ public final class StructuredAddressComposer {
    * them. Centralized here rather than duplicated per handler because the composer is already the
    * one place {@code ContactsLocationAddressHandler}, {@code WarehouseLocationHandler} and {@code
    * BpLocationHandler} share for structured-address-for-sepa logic.
+   *
+   * <p><b>The account email is a parameter, not resolved here.</b> Each caller knows where its own
+   * account comes from and nothing else does: a NEO/MCP request resolves the authenticated user's
+   * account with {@code GoAccountResolver.currentAccountEmail()}, while the (pre-tenant)
+   * onboarding path already has the account in hand and runs under an admin execution context
+   * where no caller identity is recoverable. Resolving implicitly inside this method would be
+   * wrong for the second group and would hide a DB lookup behind what reads as a constant. Same
+   * explicit-at-the-call-site shape the capability signal uses ({@code SFWindowAccessMap},
+   * {@code EtendoGoJwtServlet#buildSessionCapabilities}), so the backend's write/read gating and
+   * the signal the UI renders from can never disagree for the same account.
+   *
+   * @param accountEmail the {@code ETGO_ACCOUNT} email to target the evaluation at; {@code null}
+   *     or blank yields an untargeted evaluation ({@link FeatureFlagContext#forAccount(String)}),
+   *     which every provider must treat as "no targeting key", never as "allow"
+   * @return {@code true} when the flag resolves on for that account, {@code false} otherwise —
+   *     including whenever it cannot be resolved at all, since the off state is the safe one
    */
-  public static boolean isEnabled() {
-    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ENVIRONMENT);
+  public static boolean isEnabled(String accountEmail) {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA,
+        FeatureFlagContext.forAccount(accountEmail));
   }
 
   /** The two computed address lines. Either may be {@code null} when empty. */
@@ -135,13 +156,60 @@ public final class StructuredAddressComposer {
         emptyToNull(StringUtils.left(append(number, " - ", name), ADDRESS_LINE_MAX_LENGTH)));
   }
 
+  /** The fallback value used for Building Number when it is blank and Street Name is present. */
+  private static final String EMPTY_BUILDING_NUMBER_FALLBACK = "s/n";
+
   /**
-   * The structured-address-for-sepa mandatory fields (ETP-5806 product decision: Street, Number, City and
-   * Country are mandatory in Etendo Go, stricter than Classic's optional SEPA fields) that are
-   * missing from the given values.
+   * The effective Building Number to validate and persist (ETP-5806 follow-up, QA finding): when
+   * {@code buildingNumber} is blank but {@code streetName} is present, the field is not treated as
+   * missing — it falls back to the literal {@code "s/n"} ("sin número"), the same convention the
+   * frontend ({@code LocationEditorModal.jsx}, onboarding {@code api.js}) already applies before
+   * ever reaching this handler.
+   *
+   * <p>This closes the gap for callers that do NOT go through the frontend — an MCP {@code
+   * etendo_create}/{@code etendo_update} call, or a direct API integration — which previously got
+   * a {@code 400 Missing required field: buildingNumber} even though the product convention is to
+   * accept the omission and fill in {@code "s/n"}. Centralized here, instead of duplicated per
+   * handler, for the same reason the frontend centralized its own copy in one constant rather than
+   * re-implementing the rule at each call site.
+   *
+   * <p>When {@code streetName} itself is blank, no fallback is applied: the raw (likely blank)
+   * {@code buildingNumber} is returned unchanged, so {@link #missingMandatoryFields} still reports
+   * both {@code streetName} and {@code buildingNumber} as missing in that case — there is nothing
+   * to anchor a "no building number" convention to without a street.
    *
    * @param streetName     Street Name ({@code EM_OBSEPA_StrtNm}), may be {@code null}/blank
    * @param buildingNumber Building Number ({@code EM_OBSEPA_BldgNb}), may be {@code null}/blank
+   * @return {@code buildingNumber} trimmed when non-blank; {@code "s/n"} when blank and {@code
+   *     streetName} is non-blank; the original (blank/{@code null}) {@code buildingNumber}
+   *     otherwise
+   */
+  public static String effectiveBuildingNumber(String streetName, String buildingNumber) {
+    if (StringUtils.isNotBlank(buildingNumber)) {
+      return StringUtils.trim(buildingNumber);
+    }
+    if (StringUtils.isNotBlank(streetName)) {
+      return EMPTY_BUILDING_NUMBER_FALLBACK;
+    }
+    return buildingNumber;
+  }
+
+  /**
+   * The structured-address-for-sepa mandatory fields (ETP-5806 product decision: Street, City and
+   * Country are mandatory in Etendo Go, stricter than Classic's optional SEPA fields) that are
+   * missing from the given values.
+   *
+   * <p>Building Number is <b>not</b> independently mandatory: callers MUST pass the result of
+   * {@link #effectiveBuildingNumber} as {@code buildingNumber}, not the raw payload value, so a
+   * blank Building Number with a present Street Name is never reported as missing — it resolves to
+   * the {@code "s/n"} fallback instead (ETP-5806 follow-up). A caller that passes the raw value
+   * would see this method still require an explicit Building Number, which is no longer the rule
+   * on any channel (REST, MCP or UI).
+   *
+   * @param streetName     Street Name ({@code EM_OBSEPA_StrtNm}), may be {@code null}/blank
+   * @param buildingNumber the <b>effective</b> Building Number — see {@link
+   *     #effectiveBuildingNumber} — may be {@code null}/blank only when {@code streetName} is
+   *     itself blank
    * @param cityName       City Name, may be {@code null}/blank
    * @param countryId      Country id, may be {@code null}/blank
    * @return the missing field names (payload keys), in a stable order; empty when none are missing

@@ -19,6 +19,7 @@ package com.etendoerp.go.usageevents;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,6 +36,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -64,6 +66,8 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
  * with it: text is clipped to the real column width, an id is either whole or NULL (a clipped id
  * would be a dangling FK), and a negative or oversized duration never reaches
  * {@code NUMERIC(10,0)}. The column indexes below follow {@link UsageEventWriter#INSERT_SQL}.</p>
+ *
+ * @covers com.etendoerp.go.usageevents.UsageEventWriter
  */
 @SuppressWarnings("java:S2187") // test methods live in the @Nested classes
 class UsageEventWriterJdbcTest {
@@ -94,6 +98,7 @@ class UsageEventWriterJdbcTest {
   private static final int P_OCCURRED_AT = 16;
   private static final int P_APP_VERSION = 17;
   private static final int P_PROPERTIES = 18;
+  private static final int P_COST = 19;
 
   private MockedStatic<SequenceIdData> sequence;
 
@@ -115,19 +120,19 @@ class UsageEventWriterJdbcTest {
         .sessionKey("conv-1").target("sales-order").action("complete")
         .outcome(UsageEvent.OUTCOME_OK).errorCode("E42").durationMs(1234L)
         .occurredAt(Instant.parse("2026-09-23T10:00:00Z")).appVersion("3.1.0")
-        .property("inputTokens", 1200);
+        .property("inputTokens", 1200).costUsd(new BigDecimal("0.00004725"));
   }
 
   private static UsageEvent withOccurredAt(UsageEvent e, Instant at) {
     return new UsageEvent(e.clientId(), e.orgId(), e.userId(), e.roleId(), e.eventType(),
         e.source(), e.sessionKey(), e.target(), e.action(), e.outcome(), e.errorCode(),
-        e.durationMs(), at, e.appVersion(), e.properties());
+        e.durationMs(), at, e.appVersion(), e.properties(), e.costUsd());
   }
 
   private static UsageEvent withProperties(UsageEvent e, String properties) {
     return new UsageEvent(e.clientId(), e.orgId(), e.userId(), e.roleId(), e.eventType(),
         e.source(), e.sessionKey(), e.target(), e.action(), e.outcome(), e.errorCode(),
-        e.durationMs(), e.occurredAt(), e.appVersion(), properties);
+        e.durationMs(), e.occurredAt(), e.appVersion(), properties, e.costUsd());
   }
 
   @Nested
@@ -138,7 +143,7 @@ class UsageEventWriterJdbcTest {
 
     @Test
     void theSqlHasOnePlaceholderPerBoundParameter() {
-      assertEquals(P_PROPERTIES, StringUtils.countMatches(UsageEventWriter.INSERT_SQL, '?'));
+      assertEquals(P_COST, StringUtils.countMatches(UsageEventWriter.INSERT_SQL, '?'));
     }
 
     @Test
@@ -164,6 +169,7 @@ class UsageEventWriterJdbcTest {
       verify(ps).setTimestamp(P_OCCURRED_AT, Timestamp.from(event.occurredAt()));
       verify(ps).setString(P_APP_VERSION, "3.1.0");
       verify(ps).setString(P_PROPERTIES, "{\"inputTokens\":1200}");
+      verify(ps).setBigDecimal(P_COST, new BigDecimal("0.00004725"));
       verify(ps, never()).setNull(anyInt(), anyInt());
     }
 
@@ -205,7 +211,7 @@ class UsageEventWriterJdbcTest {
     void blankOptionalValuesBecomeNull() throws SQLException {
       UsageEvent event = fullEvent()
           .roleId("  ").sessionKey("").target(" ").action(null).outcome("\t").errorCode(null)
-          .appVersion("   ").durationMs(null)
+          .appVersion("   ").durationMs(null).costUsd(null)
           .build();
       UsageEventWriter.bind(ps, withProperties(event, "  "));
 
@@ -218,6 +224,7 @@ class UsageEventWriterJdbcTest {
       verify(ps).setNull(P_APP_VERSION, Types.VARCHAR);
       verify(ps).setNull(P_DURATION, Types.NUMERIC);
       verify(ps).setNull(P_PROPERTIES, Types.VARCHAR);
+      verify(ps).setNull(P_COST, Types.NUMERIC);
     }
 
     @Test
@@ -296,6 +303,23 @@ class UsageEventWriterJdbcTest {
     void nullPropertiesBindNull() throws SQLException {
       UsageEventWriter.bind(ps, withProperties(fullEvent().build(), null));
       verify(ps).setNull(P_PROPERTIES, Types.VARCHAR);
+    }
+
+    @Test
+    void aNegativeCostIsNeverStoredAndZeroIsKept() throws SQLException {
+      // The builder already drops it; a record built directly must not lower a tenant's spend either.
+      UsageEvent built = fullEvent().costUsd(new BigDecimal("-5")).build();
+      assertNull(built.costUsd());
+      UsageEvent direct = new UsageEvent(built.clientId(), built.orgId(), built.userId(),
+          built.roleId(), built.eventType(), built.source(), built.sessionKey(), built.target(),
+          built.action(), built.outcome(), built.errorCode(), built.durationMs(),
+          built.occurredAt(), built.appVersion(), built.properties(), new BigDecimal("-5"));
+      UsageEventWriter.bind(ps, direct);
+      verify(ps).setNull(P_COST, Types.NUMERIC);
+
+      PreparedStatement zero = mock(PreparedStatement.class);
+      UsageEventWriter.bind(zero, fullEvent().costUsd(BigDecimal.ZERO).build());
+      verify(zero).setBigDecimal(P_COST, BigDecimal.ZERO);
     }
   }
 
@@ -430,6 +454,139 @@ class UsageEventWriterJdbcTest {
       assertEquals(0, UsageEventWriter.insertBatch(events(2)));
       verify(ps, never()).executeBatch();
       assertConnectionReturned();
+    }
+  }
+
+  @Nested
+  @DisplayName("insertEach")
+  class InsertEach {
+
+    private MockedStatic<ExternalConnectionPool> poolStatic;
+    private final ExternalConnectionPool pool = mock(ExternalConnectionPool.class);
+    private final Connection connection = mock(Connection.class);
+
+    @BeforeEach
+    void mockPool() throws SQLException {
+      poolStatic = mockStatic(ExternalConnectionPool.class);
+      poolStatic.when(ExternalConnectionPool::getInstance).thenReturn(pool);
+      when(pool.getConnection()).thenReturn(connection);
+      // A live connection: a refused row is a row refusal, not an outage.
+      org.mockito.Mockito.lenient().when(connection.isValid(anyInt())).thenReturn(true);
+    }
+
+    @AfterEach
+    void closePool() {
+      poolStatic.close();
+    }
+
+    private List<UsageEvent> events(int n) {
+      return Collections.nCopies(n, fullEvent().build());
+    }
+
+    @Test
+    void noPoolThrowsAndWritesNothing() {
+      poolStatic.when(ExternalConnectionPool::getInstance).thenReturn(null);
+      assertThrows(IllegalStateException.class, () -> UsageEventWriter.insertEach(events(2)));
+    }
+
+    @Test
+    void aGoodBatchReportsEveryRowWrittenWithOneCommit() throws SQLException {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(connection.prepareStatement(UsageEventWriter.INSERT_SQL)).thenReturn(ps);
+
+      boolean[] result = UsageEventWriter.insertEach(events(3));
+
+      assertEquals(3, result.length);
+      assertTrue(result[0] && result[1] && result[2]);
+      verify(ps, times(3)).addBatch();
+      verify(ps).executeBatch();
+      verify(connection).commit();
+      verify(connection).close();
+    }
+
+    @Test
+    void aFailedBatchRetriesRowByRowAndFlagsOnlyTheRefusedRow() throws SQLException {
+      PreparedStatement batchPs = mock(PreparedStatement.class);
+      PreparedStatement row1 = mock(PreparedStatement.class);
+      PreparedStatement row2 = mock(PreparedStatement.class);
+      PreparedStatement row3 = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(batchPs, row1, row2, row3);
+      when(batchPs.executeBatch()).thenThrow(new SQLException("fk violation"));
+      when(row2.executeUpdate()).thenThrow(new SQLException("poisoned row"));
+
+      boolean[] result = UsageEventWriter.insertEach(events(3));
+
+      assertEquals(3, result.length);
+      assertTrue(result[0]);
+      assertFalse(result[1]);
+      assertTrue(result[2]);
+      verify(connection, times(2)).rollback(); // the failed batch, then the refused row
+      verify(connection).close();
+    }
+
+    @Test
+    void aFailedSingleRowBatchIsReportedAsNotWrittenNotThrown() throws SQLException {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeBatch()).thenThrow(new SQLException("bad row"));
+      when(ps.executeUpdate()).thenThrow(new SQLException("bad row"));
+
+      boolean[] result = UsageEventWriter.insertEach(events(1));
+
+      assertEquals(1, result.length);
+      assertFalse(result[0]);
+    }
+
+    @Test
+    void aRefusedRowThenAnInvalidConnectionIsAnOutageAndThrows() throws SQLException {
+      PreparedStatement batchPs = mock(PreparedStatement.class);
+      PreparedStatement row1 = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(batchPs, row1);
+      when(batchPs.executeBatch()).thenThrow(new SQLException("batch"));
+      when(row1.executeUpdate()).thenThrow(new SQLException("row"));
+      when(connection.isValid(anyInt())).thenReturn(false);
+
+      assertThrows(SQLException.class, () -> UsageEventWriter.insertEach(events(3)));
+      verify(connection).close();
+    }
+
+    @Test
+    void aConnectionCheckThatThrowsIsTreatedAsAnOutage() throws SQLException {
+      PreparedStatement batchPs = mock(PreparedStatement.class);
+      PreparedStatement row1 = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(batchPs, row1);
+      when(batchPs.executeBatch()).thenThrow(new SQLException("batch"));
+      when(row1.executeUpdate()).thenThrow(new SQLException("row"));
+      when(connection.isValid(anyInt())).thenThrow(new SQLException("gone"));
+
+      assertThrows(SQLException.class, () -> UsageEventWriter.insertEach(events(2)));
+    }
+
+    @Test
+    void aFullyRefusedBatchOnAWorkingConnectionReturnsAllFalseWithoutThrowing()
+        throws SQLException {
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeBatch()).thenThrow(new SQLException("batch"));
+      when(ps.executeUpdate()).thenThrow(new SQLException("row"));
+      when(connection.isValid(anyInt())).thenReturn(true);
+
+      boolean[] result = UsageEventWriter.insertEach(events(3));
+
+      assertEquals(3, result.length);
+      assertFalse(result[0] || result[1] || result[2]);
+    }
+
+    @Test
+    void insertBatchStillCountsRowsByRowAfterTheRefactor() throws SQLException {
+      PreparedStatement batchPs = mock(PreparedStatement.class);
+      PreparedStatement row1 = mock(PreparedStatement.class);
+      PreparedStatement row2 = mock(PreparedStatement.class);
+      when(connection.prepareStatement(anyString())).thenReturn(batchPs, row1, row2);
+      when(batchPs.executeBatch()).thenThrow(new SQLException("batch"));
+      when(row1.executeUpdate()).thenThrow(new SQLException("poisoned"));
+
+      assertEquals(1, UsageEventWriter.insertBatch(events(2)));
     }
   }
 }

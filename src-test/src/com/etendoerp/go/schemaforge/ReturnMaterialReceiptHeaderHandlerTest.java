@@ -57,6 +57,7 @@ import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
@@ -70,6 +71,7 @@ import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.invoice.ReversedInvoice;
+import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -96,6 +98,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 public class ReturnMaterialReceiptHeaderHandlerTest {
 
@@ -490,6 +493,48 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       NeoResponse result = handler.handle(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_NOT_FOUND, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * ETP-5051 — the rectificative invoice created from the return receipt is refused by a plan quota
+   * ({@code ReturnInvoiceSupport} checks it before the completion commits): the handler answers
+   * 403 {@code QUOTA_EXCEEDED}, not its generic 500, and the creation is rolled back.
+   */
+  @Test
+  public void testHandleCreateReturnInvoiceOverABlockQuotaAnswers403AndRollsBack()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ReturnShipmentUtils> utils = Mockito.mockStatic(ReturnShipmentUtils.class);
+         MockedStatic<ReturnInvoiceSupport> support =
+             Mockito.mockStatic(ReturnInvoiceSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
+      when(receipt.getDocumentStatus()).thenReturn("CO");
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getProduct()).thenReturn(mock(Product.class));
+      when(receipt.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+      when(receipt.getOrganization()).thenReturn(org);
+      DocumentType docType = mock(DocumentType.class);
+      utils.when(() -> ReturnShipmentUtils.findReturnDocTypeForOrg(any(), eq("org-1"),
+          eq("ARI"), anyBoolean(), anyBoolean(), anyBoolean())).thenReturn(docType);
+      support.when(() -> ReturnInvoiceSupport.createReturnInvoice(any(), anyString(), any(),
+          any(), any(ReturnInvoiceSupport.ReturnInvoiceKind.class), any(), any()))
+          .thenThrow(QuotaRefusalTestSupport.refusal());
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("createReturnInvoice").recordId("rec-1").build());
+
+      QuotaRefusalTestSupport.assertQuotaExceeded(result);
+      Mockito.verify(dal).rollbackAndClose();
+      Mockito.verify(dal, Mockito.never()).commitAndClose();
     }
   }
 
@@ -1153,58 +1198,17 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
   }
 
   /**
-   * ETP-5712: a second rectificative on the same return needs the explicit
-   * {@code allowDuplicate:true} (one per return, like the screen) and is then reported: the answer
-   * lists the non-voided ones the return already had BEFORE this call.
+   * ETP-5712 / ETP-6026: a second call is refused 409 with the sentence the SPA localizes, lists
+   * the existing ones, and creates NOTHING (no save, no flush, no completion) — whatever
+   * {@code allowDuplicate} says: the customer return does not read it (one per return, as on the
+   * screen), so {@code true} no longer creates a second one and a malformed value is not a 422.
    */
   @SuppressWarnings({"unchecked", "rawtypes"})
   @Test
-  public void handleCreateReturnInvoice_secondCallWithAllowDuplicateTrueIsCreatedAndListsPreviousReturnInvoices()
-      throws Exception {
-    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      OBProvider provider = mock(OBProvider.class);
-      providerMock.when(OBProvider::getInstance).thenReturn(provider);
-      stubReturnInvoiceQueries(dal, true, java.util.Arrays.asList("inv-src-1"),
-          java.util.Arrays.asList("inv-src-1"),
-          Collections.singletonList(new String[] {"prev-inv-1", "REC-OLD", "CO", "rec-1"}));
-      mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-2");
-
-      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
-        mockCompletedInvoice(dal, "ret-inv-2", "REC-NEW", "CO");
-
-        NeoResponse result = handler.handle(NeoContext.builder()
-            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-            .fieldName("createReturnInvoice").recordId("rec-1")
-            .requestBody(new JSONObject().put("allowDuplicate", true)).build());
-
-        assertEquals("a duplicate is allowed with the flag", 200, result.getHttpStatus());
-        JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
-        assertEquals("REC-NEW", data.getString("documentNo"));
-        JSONArray previous = data.getJSONArray("previousReturnInvoices");
-        assertEquals(1, previous.length());
-        assertEquals("prev-inv-1", previous.getJSONObject(0).getString("id"));
-        assertEquals("REC-OLD", previous.getJSONObject(0).getString("documentNo"));
-        assertEquals("CO", previous.getJSONObject(0).getString("documentStatus"));
-        Mockito.verify(completion.processInvoiceUtil, Mockito.times(1))
-            .process(eq("ret-inv-2"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
-      }
-    }
-  }
-
-  /**
-   * ETP-5712: a second call without the flag is refused 409 with the sentence the SPA localizes,
-   * lists the existing ones, and creates NOTHING (no save, no flush, no completion). A string
-   * "true" is not the boolean: it is a 422, never a duplicate.
-   */
-  @SuppressWarnings({"unchecked", "rawtypes"})
-  @Test
-  public void handleCreateReturnInvoice_secondCallWithoutTheFlagIs409AndCreatesNothing()
+  public void handleCreateReturnInvoice_secondCallIsAlways409AndCreatesNothing()
       throws Exception {
     for (JSONObject body : new JSONObject[] {null, new JSONObject().put("allowDuplicate", false),
+        new JSONObject().put("allowDuplicate", true),
         new JSONObject().put("allowDuplicate", "true"), new JSONObject().put("allowDuplicate", 1)}) {
       try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
@@ -1225,17 +1229,14 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
           NeoResponse result = handler.handle(body != null ? ctx.requestBody(body).build()
               : ctx.build());
 
-          boolean wrongType = body != null && body.has("allowDuplicate")
-              && !(body.opt("allowDuplicate") instanceof Boolean);
-          assertEquals(String.valueOf(body), wrongType ? 422 : 409, result.getHttpStatus());
-          if (!wrongType) {
-            JSONObject error = result.getBody().getJSONObject("error");
-            assertEquals("A rectificative invoice already exists for this return document.",
-                error.getString("message"));
-            assertEquals("returnInvoiceAlreadyExists", error.getString("code"));
-            assertEquals("prev-inv-1", error.getJSONArray("previousReturnInvoices")
-                .getJSONObject(0).getString("id"));
-          }
+          assertEquals(String.valueOf(body), 409, result.getHttpStatus());
+          JSONObject error = result.getBody().getJSONObject("error");
+          assertEquals("A rectificative invoice already exists for this return document.",
+              error.getString("message"));
+          assertEquals("returnInvoiceAlreadyExists", error.getString("code"));
+          assertFalse(error.getString("hint"), error.getString("hint").contains("allowDuplicate"));
+          assertEquals("prev-inv-1", error.getJSONArray("previousReturnInvoices")
+              .getJSONObject(0).getString("id"));
           Mockito.verify(dal, Mockito.never()).save(any());
           Mockito.verify(dal, Mockito.never()).flush();
           Mockito.verify(provider, Mockito.never()).get(ReversedInvoice.class);
@@ -1246,25 +1247,24 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
     }
   }
 
-  /** ETP-5712: allowDuplicate is a declared optional boolean, so it is not an unknown parameter. */
+  /**
+   * ETP-6026: the customer return's contract does not declare allowDuplicate (agents must not see
+   * it), so the MCP refuses it as an unknown parameter; nor does its description mention it.
+   */
   @Test
-  public void testCreateReturnInvoiceContractDeclaresAllowDuplicateAsOptionalBoolean()
-      throws Exception {
+  public void testCreateReturnInvoiceContractDoesNotDeclareAllowDuplicate() throws Exception {
     NeoActionContract contract = handler.actionContracts().get("createReturnInvoice");
-    NeoActionContract.Param found = null;
     for (NeoActionContract.Param param : contract.getParams()) {
-      if ("allowDuplicate".equals(param.getName())) {
-        found = param;
-      }
+      assertFalse("allowDuplicate must not be declared", "allowDuplicate".equals(param.getName()));
     }
-    assertNotNull("allowDuplicate must be declared", found);
-    assertEquals(NeoActionContract.TYPE_BOOLEAN, found.getType());
-    assertNull("optional: omitting it validates", NeoActionContract.validate(
+    assertNull("omitting it validates", NeoActionContract.validate(
         handler.actionContracts(), "createReturnInvoice", new JSONObject()));
-    assertNull("declared: true validates", NeoActionContract.validate(
-        handler.actionContracts(), "createReturnInvoice",
-        new JSONObject().put("allowDuplicate", true)));
+    NeoResponse unknown = NeoActionContract.validate(handler.actionContracts(),
+        "createReturnInvoice", new JSONObject().put("allowDuplicate", true));
+    assertNotNull("allowDuplicate is an unknown parameter", unknown);
+    assertEquals(422, unknown.getHttpStatus());
     assertTrue(contract.getDescription(), contract.getDescription().contains("409"));
+    assertFalse(contract.getDescription(), contract.getDescription().contains("allowDuplicate"));
     assertFalse(contract.getDescription().contains("is NOT refused"));
   }
 
@@ -1971,6 +1971,48 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
     java.util.Set<String> declared = new ReturnMaterialReceiptHeaderHandler().responseEnrichedFields();
     for (String key : java.util.List.of("sourceShipments", "sourceShipmentDocNo", "returnInvoices", "hasReturnInvoice", "linesCount", "invoiceStatus")) {
       org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
+  }
+
+  /**
+   * ETP-5051 — the return lines importShipmentLines adds are quota-checked before the answer: refused, the
+   * import answers 403 {@code QUOTA_EXCEEDED} and is rolled back.
+   */
+  @Test
+  public void testHandleImportShipmentLinesOverAQuotaIsRefusedAndRolledBack() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+         MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L, (src, excl) -> BigDecimal.ZERO);
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(returnDoc);
+      when(returnDoc.getClient()).thenReturn(mock(Client.class));
+      when(returnDoc.getOrganization()).thenReturn(mock(Organization.class));
+      ShipmentInOutLine sourceLine =
+          ReturnedQuantityTestSupport.sourceLine("src-1", "Agua", "5");
+      when(dal.get(ShipmentInOutLine.class, "src-1")).thenReturn(sourceLine);
+      when(sourceLine.getUOM()).thenReturn(mock(UOM.class));
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      ShipmentInOutLine retLine = mock(ShipmentInOutLine.class);
+      when(retLine.getId()).thenReturn("ret-line-1");
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(retLine);
+
+      JSONObject body = new JSONObject().put("lines", new JSONArray().put(
+          new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", "3")));
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("importShipmentLines").recordId("rec-1").requestBody(body).build());
+
+      QuotaRefusalTestSupport.assertQuotaExceeded(result);
+      Mockito.verify(dal).rollbackAndClose();
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowed(ShipmentInOutLine.ENTITY_NAME,
+          List.of("ret-line-1")));
     }
   }
 

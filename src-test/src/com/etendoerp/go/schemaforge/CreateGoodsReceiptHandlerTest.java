@@ -69,6 +69,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * status column at 0% on purchase invoices.
  *
  * @covers com.etendoerp.go.schemaforge.CreateGoodsReceiptHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.InOutLineFromOrderFactory
  */
 public class CreateGoodsReceiptHandlerTest {
@@ -300,6 +301,50 @@ public class CreateGoodsReceiptHandlerTest {
       verify(provider, Mockito.times(1)).get(ShipmentInOutLine.class);
       verify(line).setStorageBin(null);
       verify(dal).save(receipt);
+    }
+  }
+
+  /**
+   * ETP-5051 — the created receipt and its lines are checked against the plan quotas before the
+   * answer: at a {@code block} limit the action answers 403 {@code QUOTA_EXCEEDED} and is rolled
+   * back, never committed.
+   */
+  @Test
+  public void testHandleOverABlockQuotaAnswers403AndRollsBack() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubInvoiceLineLinkerTail(dal);
+
+      OrderLine serviceLine = mockPendingLine("ol-service", true, "S",
+          new BigDecimal("5"), BigDecimal.ZERO);
+      Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CO");
+      when(order.getOrderLineList()).thenReturn(Collections.singletonList(serviceLine));
+      when(dal.get(Order.class, "order-1")).thenReturn(order);
+      stubReceiptDocTypeLookup(dal, mock(DocumentType.class));
+
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getId()).thenReturn("receipt-1");
+      when(receipt.getDocumentNo()).thenReturn("V/0001");
+      when(provider.get(ShipmentInOut.class)).thenReturn(receipt);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(mock(ShipmentInOutLine.class));
+
+      TestableHandler handler = new TestableHandler();
+      handler.locatorToReturn = mock(Locator.class);
+
+      NeoResponse r = handler.handle(buildActionContext("order-1"));
+
+      QuotaRefusalTestSupport.assertQuotaExceeded(r);
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(receipt));
+      verify(dal).rollbackAndClose();
+      verify(dal, never()).commitAndClose();
     }
   }
 

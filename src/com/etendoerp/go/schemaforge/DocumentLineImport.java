@@ -86,6 +86,8 @@ final class DocumentLineImport {
   static final String ERROR_NOTHING_PENDING = "importNothingPending";
   /** An entry of {@code lines} that cannot be understood. */
   static final String ERROR_INVALID_LINE = "importInvalidLine";
+  /** A request parameter outside its accepted values (ETP-5828: {@code availableOrders.limit}). */
+  static final String ERROR_INVALID_PARAMETER = "importInvalidParameter";
   /** The source or the target does not exist. */
   static final String ERROR_NOT_FOUND = "importDocumentNotFound";
   /** The target has no price list to price the imported lines with. */
@@ -94,6 +96,16 @@ final class DocumentLineImport {
   static final String ERROR_NO_STORAGE_BIN = "importNoStorageBin";
   /** The lines created do not add up to what was planned; everything is rolled back. */
   static final String ERROR_QUANTITY_NOT_HONOURED = "importQuantityNotHonoured";
+  /** An order / goods shipment / goods receipt import asked of a rectificative invoice (ETP-5876). */
+  static final String ERROR_RECTIFICATIVE_TARGET = "importNotAvailableOnRectificative";
+  /** A return / origin invoice import asked of an invoice that is not a rectificative (ETP-5876). */
+  static final String ERROR_NOT_RECTIFICATIVE = "importRequiresRectificative";
+  /** The document named as a return is not one (ETP-5876). */
+  static final String ERROR_SOURCE_NOT_RETURN = "importSourceNotReturn";
+  /** The invoice named as origin is the target itself (ETP-5876). */
+  static final String ERROR_SOURCE_IS_TARGET = "importSourceIsTarget";
+  /** The invoice named as origin is itself a rectificative (ETP-5876). */
+  static final String ERROR_SOURCE_NOT_STANDARD = "importSourceInvoiceNotStandard";
 
   static final int SC_UNPROCESSABLE = 422;
   static final int SC_NOT_FOUND = 404;
@@ -127,6 +139,10 @@ final class DocumentLineImport {
   /** Row lock on one movement line, taken before the pending total is read (see above). */
   private static final String LOCK_INOUT_LINE_SQL =
       "SELECT M_InOutLine_ID FROM M_InOutLine WHERE M_InOutLine_ID = ? FOR NO KEY UPDATE";
+
+  /** Row lock on the target invoice of an import that decides from the lines it holds. */
+  private static final String LOCK_INVOICE_SQL =
+      "SELECT C_Invoice_ID FROM C_Invoice WHERE C_Invoice_ID = ? FOR NO KEY UPDATE";
 
   private DocumentLineImport() {
   }
@@ -384,6 +400,15 @@ final class DocumentLineImport {
     lock(LOCK_ORDER_LINE_SQL, ids);
   }
 
+  /**
+   * Locks one invoice row ({@code FOR NO KEY UPDATE}) before the lines it already holds are read,
+   * so two calls importing into the same draft (a retry included) serialise and the second one
+   * sees what the first one wrote.
+   */
+  static void lockInvoice(String id) throws SQLException {
+    lock(LOCK_INVOICE_SQL, List.of(id));
+  }
+
   /** Same lock on movement (receipt / shipment) lines. */
   static void lockInOutLines(Collection<String> ids) throws SQLException {
     lock(LOCK_INOUT_LINE_SQL, ids);
@@ -488,7 +513,8 @@ final class DocumentLineImport {
 
   /**
    * {@code {response:{data:{importedCount, lines:[{id, sourceLineId, product, productName,
-   * quantity}], headerLinked, salesOrder?}}}} — the envelope of the module's other import actions.
+   * quantity}], headerLinked, salesOrder?, order?}}}} — the envelope of the module's other import
+   * actions. {@code order} repeats {@code salesOrder} under a direction-neutral name.
    *
    * <p>The header link is reported as it is: {@code salesOrder} is the order the header points at
    * NOW (when it has one) and {@code headerLinked} is {@code true} only when an imported line
@@ -497,6 +523,17 @@ final class DocumentLineImport {
    * @param headerOrderId the order the target's header points at after the import, or {@code null}
    */
   static NeoResponse ok(List<ImportedLine> lines, String headerOrderId) throws JSONException {
+    return ok(lines, headerOrderId, Map.of());
+  }
+
+  /**
+   * Same answer with extra keys in {@code data} (the origin invoice import reports the invoices it
+   * linked), written after the standard ones.
+   *
+   * @param extra additional {@code data} entries, in iteration order
+   */
+  static NeoResponse ok(List<ImportedLine> lines, String headerOrderId, Map<String, Object> extra)
+      throws JSONException {
     JSONArray array = new JSONArray();
     boolean linked = false;
     for (ImportedLine line : lines) {
@@ -514,7 +551,14 @@ final class DocumentLineImport {
     data.put(KEY_LINES, array);
     data.put("headerLinked", linked);
     if (headerOrderId != null) {
+      // `salesOrder` is the header's DAL property name (C_Order_ID), the same on purchase
+      // documents, and is kept for the callers that read it; `order` says the same with a
+      // direction-neutral name (ETP-5828).
       data.put("salesOrder", headerOrderId);
+      data.put("order", headerOrderId);
+    }
+    for (Map.Entry<String, Object> entry : extra.entrySet()) {
+      data.put(entry.getKey(), entry.getValue());
     }
     return wrap(data);
   }

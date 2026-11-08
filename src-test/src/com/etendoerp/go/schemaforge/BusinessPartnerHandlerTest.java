@@ -248,6 +248,73 @@ class BusinessPartnerHandlerTest {
     assertEquals("CLAVE_EXISTENTE", body.getString("searchKey"));
   }
 
+  /**
+   * ETP-5852 (M-107): MCP's mandatory pre-check runs before {@code handle()}, so the placeholder
+   * must already be there for a create that sends only a person's name parts.
+   */
+  @Test
+  void aCreateWithoutSearchKeyGetsItsPlaceholderBeforeTheMcpPrecheck() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoFirstname", "Ana");
+    body.put("etgoLastname", "Ruiz");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    handler.resolveServerCreateFields(ctx);
+
+    assertEquals("Ana Ruiz", body.getString("searchKey"));
+    assertTrue(handler.serverResolvedCreateFields().contains("searchKey"));
+  }
+
+  /** ETP-5852 (M-107): a create without any name is left for the pre-check to report. */
+  @Test
+  void aCreateWithoutNameGetsNoPlaceholder() throws Exception {
+    JSONObject body = new JSONObject();
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    handler.resolveServerCreateFields(ctx);
+
+    assertFalse(body.has("searchKey"));
+  }
+
+  /**
+   * ETP-5852 (M-107): over MCP, a searchKey the caller sent and the number replaced is reported;
+   * one the server put itself, or one equal to the number, is not.
+   */
+  @Test
+  void aReplacedSearchKeyIsReportedOnlyWhenTheCallerSentIt() throws Exception {
+    JSONObject sent = new JSONObject().put("name", "X").put("searchKey", "MINE");
+    when(ctx.isMcpOrigin()).thenReturn(true);
+    when(ctx.getRequestBody()).thenReturn(sent);
+    when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name", "searchKey"));
+    JSONObject answer = buildResponseBody();
+    answer.getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .put("searchKey", "1000005");
+
+    assertTrue(ContactSearchKey.noteReplaced(ctx, firstRecordOf(answer), answer));
+    assertTrue(answer.getJSONObject("response")
+        .getString(ContactSearchKey.KEY_SEARCH_KEY_NOTE).contains("'MINE'"));
+
+    when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name"));
+    JSONObject untouched = buildResponseBody();
+    assertFalse(ContactSearchKey.noteReplaced(ctx, firstRecordOf(untouched), untouched));
+
+    when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name", "searchKey"));
+    sent.put("searchKey", "1000005");
+    JSONObject same = buildResponseBody();
+    same.getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .put("searchKey", "1000005");
+    assertFalse(ContactSearchKey.noteReplaced(ctx, firstRecordOf(same), same));
+  }
+
+  private static JSONObject firstRecordOf(JSONObject body) throws Exception {
+    return body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+  }
+
   // ── handle() — PATCH: name derivation from persisted parts ───────────────────
 
   /**
@@ -269,6 +336,47 @@ class BusinessPartnerHandlerTest {
     assertNull(body.optString("priceList", null));
     assertNull(body.optString("priceList$_identifier", null));
     assertNull(body.optString("paymentMethod", null));
+  }
+
+  /**
+   * Over MCP a billing preference the agent itself sent is saved, while one the defaults pass put
+   * in is still cleared, as in the app. It used to be dropped without a word.
+   */
+  @Test
+  void testHandlePostKeepsBillingFieldsTheAgentSentOverMcp() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("paymentTerms", "PT_ID");
+    body.put("paymentTerms$_identifier", "30 días");
+    body.put("priceList", "PRICE_LIST_ID");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.isMcpOrigin()).thenReturn(true);
+    when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name", "paymentTerms"));
+
+    handler.handle(ctx);
+
+    assertEquals("PT_ID", body.optString("paymentTerms", null));
+    assertEquals("30 días", body.optString("paymentTerms$_identifier", null));
+    assertNull(body.optString("priceList", null));
+  }
+
+  /** The same body from the app's REST channel is cleared whole: the form never sends them. */
+  @Test
+  void testHandlePostStripsSentBillingFieldsOutsideMcp() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("paymentTerms", "PT_ID");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.isMcpOrigin()).thenReturn(false);
+    org.mockito.Mockito.lenient().when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS))
+        .thenReturn(java.util.Set.of("name", "paymentTerms"));
+
+    handler.handle(ctx);
+
+    assertNull(body.optString("paymentTerms", null));
   }
 
   // ── handle() — POST: org currency injection (ETP-4649) ───────────────────────

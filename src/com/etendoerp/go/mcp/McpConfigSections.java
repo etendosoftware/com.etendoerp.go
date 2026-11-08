@@ -71,6 +71,8 @@ final class McpConfigSections {
       McpEntityConfig.register(McpActionsSection.declaration());
       McpEntityConfig.register(McpAttachmentsSection.declaration());
       McpEntityConfig.register(McpPdfSection.declaration());
+      McpEntityConfig.register(McpDefaultsSection.declaration());
+      McpEntityConfig.register(McpListSection.declaration());
       REGISTERED.set(true);
     }
   }

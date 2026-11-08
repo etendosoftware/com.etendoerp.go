@@ -526,6 +526,54 @@ class OcrReviewAssemblerTest {
     }
 
     @Test
+    @DisplayName("an accent-only difference is an exact match even at low similarity (CP-7)")
+    void accentInsensitiveExact() throws JSONException {
+      lookups.products = List.of(
+          List.of(candidate("P1", "Arnés escalada QA5654D talla M", "82.3529")),
+          List.of(candidate("P2", "Arnes talla M", "80")),
+          List.of(candidate("P3", "Arnés talla M", "80")),
+          List.of(candidate("P4", "Arnes talla M extra", "97"), candidate("P5", "Arnés talla M", "82")));
+      JSONObject decisions = run(extraction(line("Arnes escalada QA5654D talla M", 1, 1, 21),
+          line("Arnés talla M", 1, 1, 21), line("ARNES talla M", 1, 1, 21),
+          line("Arnes talla M", 1, 1, 21)));
+      String[] winners = {"P1", "P2", "P3", "P5"};
+      for (int i = 0; i < winners.length; i++) {
+        JSONObject product = decision(decisions, "line_" + i + "_product");
+        assertEquals("auto_matched", product.getString("state"));
+        assertEquals(winners[i], product.getJSONObject("match").getString("id"));
+      }
+    }
+
+    @Test
+    @DisplayName("accent-equal duplicates, different words and n-tilde stay suggestions (CP-7)")
+    void accentInsensitiveStillSafe() throws JSONException {
+      lookups.products = List.of(
+          List.of(candidate("P1", "Arnés X", "100"), candidate("P2", "Arnes X", "100")),
+          List.of(candidate("P3", "Arnés talla M", "82")),
+          List.of(candidate("P4", "año", "80")));
+      JSONObject decisions = run(extraction(line("Arnés X", 1, 1, 21), line("Arnes talla N", 1, 1, 21),
+          line("ano", 1, 1, 21)));
+      String[] firsts = {"P1", "P3", "P4"};
+      for (int i = 0; i < firsts.length; i++) {
+        JSONObject product = decision(decisions, "line_" + i + "_product");
+        assertEquals("suggested", product.getString("state"));
+        assertEquals(firsts[i], product.getJSONObject("suggestion").getString("id"));
+      }
+    }
+
+    @Test
+    @DisplayName("the product normalizer folds accents and case but keeps the n-tilde")
+    void productNormalizer() {
+      assertEquals("arnes", OcrProductMatch.normalizeProductName("  ARNÉS "));
+      assertEquals("año", OcrProductMatch.normalizeProductName("AÑO"));
+      assertEquals("año", OcrProductMatch.normalizeProductName("An\u0303o"));
+      assertEquals("", OcrProductMatch.normalizeProductName(null));
+      assertEquals("arnes", OcrProductMatch.normalizeProductName("Arnés\u00A0"));
+      assertEquals("arnes", OcrProductMatch.normalizeProductName("\uFEFF\u2003Arnés\u3000"));
+      assertEquals("arnes", OcrProductMatch.normalizeProductName("Arnés\u2028"));
+    }
+
+    @Test
     @DisplayName("a missing, blank or non-numeric similarity never auto-matches")
     void similarityUnparseable() throws JSONException {
       lookups.products = List.of(List.of(candidate("P1", "Widget B", null)),

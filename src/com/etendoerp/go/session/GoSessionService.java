@@ -78,11 +78,38 @@ public class GoSessionService {
    * @return the issued session (plaintext tokens + persisted record)
    */
   public IssuedGoSession create(String accountId, String authMethod, String userAgent, String ipHash) {
+    return create(accountId, authMethod, userAgent, ipHash, absoluteTimeout, null);
+  }
+
+  /**
+   * ETP-5351 — create a session with its own absolute lifetime and, optionally, an environment
+   * already entered. Used by the support handoff, whose total duration is the one the operator
+   * requested rather than the service default. The idle expiry is the service's idle timeout,
+   * never past the absolute cap; renewal and rotation keep honouring that cap because it is stored
+   * per row.
+   *
+   * @param accountId       the owning platform account id
+   * @param authMethod      {@code "password"}, {@code "sso"} or {@code "support"}
+   * @param userAgent       optional user-agent for binding/audit
+   * @param ipHash          optional hashed client IP for binding/audit
+   * @param absoluteLifetime the maximum lifetime of the session regardless of activity
+   * @param environment     optional record whose user/role/client/org/warehouse and support
+   *                        access id are copied into the new session; {@code null} for none
+   * @return the issued session (plaintext tokens + persisted record)
+   * @throws IllegalArgumentException if {@code absoluteLifetime} is null, zero or negative
+   */
+  public IssuedGoSession create(String accountId, String authMethod, String userAgent,
+      String ipHash, Duration absoluteLifetime, GoSessionRecord environment) {
+    if (absoluteLifetime == null || absoluteLifetime.isZero() || absoluteLifetime.isNegative()) {
+      throw new IllegalArgumentException("The absolute session lifetime must be positive");
+    }
     Instant now = Instant.now();
     String rawToken = OAuth2Utils.generateSecureToken();
     String rawRefresh = OAuth2Utils.generateSecureToken();
     String csrf = OAuth2Utils.generateSecureToken();
 
+    Instant absoluteExpiresAt = now.plus(absoluteLifetime);
+    Instant idleExpiresAt = now.plus(idleTimeout);
     GoSessionRecord sessionRecord = new GoSessionRecord();
     sessionRecord.setId(newId());
     sessionRecord.setAccountId(accountId);
@@ -90,11 +117,20 @@ public class GoSessionService {
     sessionRecord.setRefreshTokenHash(OAuth2Utils.hashToken(rawRefresh));
     sessionRecord.setCsrfToken(csrf);
     sessionRecord.setAuthMethod(authMethod);
-    sessionRecord.setExpiresAt(now.plus(idleTimeout));
-    sessionRecord.setAbsoluteExpiresAt(now.plus(absoluteTimeout));
+    sessionRecord.setExpiresAt(idleExpiresAt.isAfter(absoluteExpiresAt)
+        ? absoluteExpiresAt : idleExpiresAt);
+    sessionRecord.setAbsoluteExpiresAt(absoluteExpiresAt);
     sessionRecord.setRevoked(false);
     sessionRecord.setUserAgent(userAgent);
     sessionRecord.setIpHash(ipHash);
+    if (environment != null) {
+      sessionRecord.setUserId(environment.getUserId());
+      sessionRecord.setRoleId(environment.getRoleId());
+      sessionRecord.setCtxClientId(environment.getCtxClientId());
+      sessionRecord.setCtxOrgId(environment.getCtxOrgId());
+      sessionRecord.setWarehouseId(environment.getWarehouseId());
+      sessionRecord.setSupportAccessId(environment.getSupportAccessId());
+    }
 
     store.save(sessionRecord);
     return new IssuedGoSession(rawToken, rawRefresh, csrf, sessionRecord);
@@ -183,9 +219,13 @@ public class GoSessionService {
     next.setRefreshTokenHash(OAuth2Utils.hashToken(rawRefresh));
     next.setCsrfToken(csrf);
     next.setAuthMethod(current.getAuthMethod());
-    next.setExpiresAt(now.plus(idleTimeout));
-    // Preserve the absolute cap so rotation cannot extend a session indefinitely.
-    next.setAbsoluteExpiresAt(current.getAbsoluteExpiresAt());
+    // Preserve the absolute cap so rotation cannot extend a session indefinitely; the idle expiry
+    // never goes past it either (ETP-5351: a support session's cap can be under the idle window).
+    Instant nextIdleExpiry = now.plus(idleTimeout);
+    Instant absoluteCap = current.getAbsoluteExpiresAt();
+    next.setExpiresAt(absoluteCap != null && nextIdleExpiry.isAfter(absoluteCap)
+        ? absoluteCap : nextIdleExpiry);
+    next.setAbsoluteExpiresAt(absoluteCap);
     next.setRevoked(false);
     next.setRotatedFromId(current.getId());
     next.setUserId(current.getUserId());
@@ -195,6 +235,8 @@ public class GoSessionService {
     next.setWarehouseId(current.getWarehouseId());
     next.setUserAgent(current.getUserAgent());
     next.setIpHash(current.getIpHash());
+    // ETP-5351: losing the mark on rotation would turn a support session into an ordinary one.
+    next.setSupportAccessId(current.getSupportAccessId());
 
     if (!store.rotateAtomically(current, next)) {
       return null;

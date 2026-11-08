@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -325,7 +326,16 @@ public class FinancialAccountHandlerCountryTest {
   /**
    * A Bank create with a valid IBAN and no country is "Country is required" — and no country
    * lookup of any kind happens: not through the handler's seam and not straight against the DAL
-   * (the removed IBAN-prefix derivation used to query Country via OBDal).
+   * (the removed IBAN-prefix derivation used to query Country via OBDal, as
+   * {@code FinancialAccountCountrySupport#findCountryByIbanCode} still does for the organization
+   * default).
+   *
+   * <p>The assertion names the two DAL entry points a Country lookup would have to go through
+   * instead of asserting that OBDal is untouched altogether: since ETP-5473 the refusal text is an
+   * {@code AD_MESSAGE} read through {@link NeoMessageText}, which legitimately takes
+   * {@code OBDal.getInstance().getConnection()} to resolve it. That read is the localization this
+   * test is not about, so the DAL mock is given a connection that fails (there is no database
+   * here) and the refusal falls back to the English catalog text, exactly as in the matrix cases.
    */
   @Test
   public void createBankWithIbanAndNoCountryDoesNotDeriveCountry() throws Exception {
@@ -333,10 +343,16 @@ public class FinancialAccountHandlerCountryTest {
     JSONObject body = createBody("B").put(FIELD_IBAN, ES_IBAN);
     body.remove(FIELD_COUNTRY);
 
+    OBDal dal = mock(OBDal.class);
+    when(dal.getConnection()).thenThrow(new IllegalStateException("no database in this test"));
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
       assertBadRequest("bank + IBAN, no country", MSG_COUNTRY_REQUIRED,
           handler.validateAndEnrichCreate(body));
-      obDal.verifyNoInteractions();
+
+      verify(dal, never()).get(eq(Country.class), any());
+      verify(dal, never()).createCriteria(Country.class);
     }
     verify(handler, never()).loadCountry(any());
     assertFalse(body.has(FIELD_COUNTRY));

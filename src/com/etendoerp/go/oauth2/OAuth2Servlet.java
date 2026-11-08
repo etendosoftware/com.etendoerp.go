@@ -62,6 +62,7 @@ import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * OAuth2 servlet handling token issuance, client CRUD, revocation, and introspection.
@@ -155,6 +156,14 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String PATH_AUTHORIZE = "/authorize";
   private static final String ERROR_INVALID_CLIENT = "invalid_client";
   private static final String ERROR_INVALID_SCOPE = "invalid_scope";
+  /**
+   * ETP-6057 — the generic client CRUD refuses the public API key marker scopes: only the public
+   * API key flow ({@code PublicApiKeyStore}) may mark a client as a public key or name its owner,
+   * because the marker decides usage attribution and the MCP refusal.
+   */
+  private static final String MESSAGE_PUBLIC_API_MARKER =
+      "neo:public-api-* scopes are reserved for public API keys; manage those through the API key "
+          + "endpoints";
   private static final String MESSAGE_SCOPE_EXCEEDS_PERMISSIONS =
       "Requested scope exceeds client permissions";
   private static final String GRANT_TYPE_CLIENT_CREDENTIALS = "client_credentials";
@@ -208,8 +217,21 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- SQL constants ---
 
   private static final String SQL_FIND_CLIENT =
-      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, redirect_uris, ad_client_id, ad_org_id, ad_user_id, ad_role_id "
-      + "FROM etgo_oauth2_client WHERE client_identifier = ? AND isactive = 'Y'";
+      "SELECT c.etgo_oauth2_client_id, c.client_secret_hash, c.scopes, c.redirect_uris, "
+      + "c.ad_client_id, c.ad_org_id, c.ad_user_id, c.ad_role_id, "
+      // ETP-6057: the key's tenant, read in the same query so a refused exchange can be counted
+      // with no I/O of its own: the client of the owner organization named in the key's scopes
+      // (else of the row's organization), and the client of the key's role.
+      // Anchored on a whole scope ((?:^| ) is non-capturing, so substring() answers the org id):
+      // "xneo:public-api-owner-org:…" inside another scope is not an owner marker.
+      // The prefix is PublicApiKeyPolicy.OWNER_ORG_SCOPE_PREFIX, kept literal so the SQL is a
+      // plain constant (Sonar S2077).
+      + "(SELECT o.ad_client_id FROM ad_org o WHERE o.ad_org_id = COALESCE(substring(c.scopes "
+      + "from '(?:^| )neo:public-api-owner-org:([^ ]+)'), c.ad_org_id)) "
+      + "AS owner_org_client_id, "
+      + "(SELECT r.ad_client_id FROM ad_role r WHERE r.ad_role_id = c.ad_role_id) "
+      + "AS role_client_id "
+      + "FROM etgo_oauth2_client c WHERE c.client_identifier = ? AND c.isactive = 'Y'";
 
   private static final String SQL_INSERT_TOKEN =
       "INSERT INTO etgo_oauth2_token "
@@ -491,6 +513,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       log.warn("OAuth2 token request with invalid secret for client_id: {}", clientId);
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
           "Client authentication failed");
+      PublicApiKeyAttribution.countRefusedKeyExchange(clientId, client.scopes, client.ownerOrgId,
+          client.ownerOrgClientId, client.roleClientId, client.adUserId, client.adRoleId);
       return;
     }
 
@@ -525,7 +549,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
     writeJsonResponse(response, HttpServletResponse.SC_OK, result);
     log.info("OAuth2 token issued for client: {}", clientId);
   }
-
 
   // --- Client CRUD (B3) ---
 
@@ -580,6 +603,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       throws IOException {
     try {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      requireNotSupportUser(context);
       JSONObject body = parseJsonBodyOrWriteError(request, response);
       if (body == null) {
         return;
@@ -706,6 +730,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String id) throws IOException {
     try {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      requireNotSupportUser(context);
       OAuth2Client client = publicApiKeyStore.findOwned(id, context);
       if (client == null) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
@@ -873,6 +898,14 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return duplicate ? "An active public API key with this name already exists" : null;
   }
 
+  /**
+   * ETP-5351 (T5): the tenant's "Soporte Etendo" user never mints an API key secret — it would
+   * outlive the support session that created it.
+   */
+  private static void requireNotSupportUser(PublicApiKeyContext context) throws AuthException {
+    OAuth2RequestAuthenticator.requireCredentialMintingAllowed(context.userId, context.clientId);
+  }
+
   private PublicApiKeyContext requirePublicApiKeyContext(HttpServletRequest request)
       throws AuthException {
     // ETP-5455 — the shared environment pipeline under SurfacePolicy.NEO_DATA: it used to decode
@@ -955,6 +988,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
       boolean isActive = body.optBoolean(FIELD_IS_ACTIVE, true);
       String redirectUrisJson = body.optString(FIELD_REDIRECT_URIS_JSON, "[]");
 
+      if (PublicApiKeyPolicy.carriesPublicApiMarker(scopes)) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+            MESSAGE_PUBLIC_API_MARKER);
+        return;
+      }
       if (name == null || name.trim().isEmpty()) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "name is required");
@@ -1044,6 +1082,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
 
       String name = body.optString("name", existing.optString("name", ""));
+      if (body.has(FIELD_SCOPES)
+          && PublicApiKeyPolicy.carriesPublicApiMarker(body.optString(FIELD_SCOPES, null))) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+            MESSAGE_PUBLIC_API_MARKER);
+        return;
+      }
       String scopes = body.optString(FIELD_SCOPES, existing.optString(FIELD_SCOPES, ""));
       String adUserId = body.optString(FIELD_AD_USER_ID, existing.optString(FIELD_AD_USER_ID, ""));
       String adRoleId = body.optString(FIELD_AD_ROLE_ID, existing.optString(FIELD_AD_ROLE_ID, ""));
@@ -1956,6 +2000,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
         }
         client.adUserId = rs.getString(FIELD_DB_AD_USER_ID);
         client.adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
+        client.ownerOrgClientId = rs.getString("owner_org_client_id");
+        client.roleClientId = rs.getString("role_client_id");
         return client;
       }
     }
@@ -2132,6 +2178,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String ownerOrgId;
     String adUserId;
     String adRoleId;
+    /** ETP-6057 — client of the owner organization; read by {@code findClient} only. */
+    String ownerOrgClientId;
+    /** ETP-6057 — client of the key's role; read by {@code findClient} only. */
+    String roleClientId;
   }
 
   /** The identity an API key request runs as, always derived from the authenticated request. */

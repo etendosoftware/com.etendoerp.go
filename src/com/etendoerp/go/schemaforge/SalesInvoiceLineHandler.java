@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Map;
+
 /**
  * Customization of sales-invoice/lines (ETP-5528): everything {@link InvoiceLineHandler} does, plus
  * the discounted price and the amounts of a written line — {@code lineNetAmount} and
@@ -39,6 +41,10 @@ package com.etendoerp.go.schemaforge;
  * both hooks on the one instance its pre-dispatch resolved. {@code purchase-invoice/lines} has its
  * own customization, {@link PurchaseInvoiceLineHandler}, which shares these amount rules and adds
  * the {@code defaultTax} action (ETP-5585).
+ *
+ * <p>On a create into a sales rectificative, writes the {@code C_Invoice_Reverse} link the line
+ * implies (ETP-6002, {@link SalesRectificativeLineLinkSupport}) — sales only: the purchase side
+ * still links through its header PATCH.
  */
 @NeoExtension(spec = "sales-invoice", entity = "lines")
 public class SalesInvoiceLineHandler extends InvoiceLineHandler {
@@ -48,15 +54,49 @@ public class SalesInvoiceLineHandler extends InvoiceLineHandler {
    * derives the amounts of a created line, or recalculates those of an updated one. The order
    * matters: on a return invoice the parent negates the quantity, and the amounts are derived from
    * the negated one.
+   *
+   * <p>Last, once every check has passed, a line created on a rectificative from a source invoice
+   * line or a return line links the invoice to the one it rectifies (ETP-6002, see
+   * {@link SalesRectificativeLineLinkSupport}); a line copied into a rectificative also loses the
+   * source line's order line (ETP-6002, as ETP-5729 does for the return path). Before that, a line created from an order line
+   * is bound to that order line's oldest shipment line still pending to invoice
+   * ({@link SalesInvoiceShipmentLineResolver}, ETP-6002 IMP-1, the shared rule of
+   * {@link OrderLineMovementAllocation}). {@code sourceInvoiceLineId} is read before the parent
+   * runs because the parent removes it from the body.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
+    String sourceInvoiceLineId = SalesRectificativeLineLinkSupport.peekSourceInvoiceLineId(context);
     NeoResponse response = super.handle(context);
     if (response != null) {
       return response;
     }
+    // ETP-6002: a line copied into a rectificative never keeps the source line's order line.
+    SalesRectificativeLineLinkSupport.dropOrderLineOnRectificativeCopy(context, sourceInvoiceLineId);
     // Before the amounts: a line sent without a price takes the price list's (ETP-5881).
     InvoiceLineAmountSupport.setPriceFromPriceListOnCreate(context);
-    return InvoiceLineAmountSupport.deriveAmountsOnWrite(context);
+    response = InvoiceLineAmountSupport.deriveAmountsOnWrite(context);
+    if (response != null) {
+      return response;
+    }
+    SalesInvoiceShipmentLineResolver.bindPendingShipmentLineOnCreate(context, sourceInvoiceLineId);
+    return SalesRectificativeLineLinkSupport.linkOnCreate(context, sourceInvoiceLineId);
+  }
+
+  /**
+   * Publishes {@code sourceInvoiceLineId} to agents ({@code etendo_schema(view:"create")}) and lets
+   * the MCP write verbs accept it without reporting it as an unknown field (ETP-6002). It is not a
+   * spec field: the parent's pre-hook removes it from the body and persists it after the create,
+   * and {@link SalesRectificativeLineLinkSupport} links the rectificative to the source line's
+   * invoice from it.
+   */
+  @Override
+  public Map<String, String> createDirectives() {
+    return Map.of(SalesRectificativeLineLinkSupport.FIELD_SOURCE_INVOICE_LINE_ID,
+        "Optional. The id of the sales invoice line this line copies, when this invoice is a "
+            + "rectificative (factura rectificativa) correcting that one. Recorded on the new line, "
+            + "and links this invoice to the source line's invoice as the invoice it rectifies, so "
+            + "no separate link step is needed. An id that names no invoice line is refused (422 "
+            + "sourceInvoiceLineNotFound). Create only.");
   }
 }

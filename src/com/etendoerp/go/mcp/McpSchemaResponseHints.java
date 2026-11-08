@@ -25,6 +25,7 @@ import java.util.Set;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Tab;
@@ -68,9 +69,14 @@ final class McpSchemaResponseHints {
     }
     String parent = scope.getParentEntity() == null ? "parent"
         : "'" + scope.getParentEntity() + "'";
-    return "This is a child entity: pass parentId (the id of the " + parent + " record) on "
-        + String.join(", ", required)
-        + " \u2014 there is no global list of these records to read without it. ";
+    String head = "This is a child entity: pass parentId (the id of the " + parent + " record) on "
+        + String.join(", ", required);
+    // ETP-5852: where the entity may be searched across every parent, say so instead of "no
+    // global list" — the on-purpose alternative is etendo_list(allParents:true).
+    return scope.allowsAllParents()
+        ? head + ". To search it across every " + parent + " (for example by product), call "
+            + "etendo_list with allParents:true instead of parentId. "
+        : head + " \u2014 there is no global list of these records to read without it. ";
   }
 
   /**
@@ -128,5 +134,69 @@ final class McpSchemaResponseHints {
       }
     }
     return false;
+  }
+
+  /**
+   * ETP-5852: appends one read-only entry per key the entity's customization adds to the records
+   * it reads ({@code NeoHandler#responseEnrichedFields}), unless a field of that name is already
+   * published. Shape: {@code {name, type:"computed", readOnly:true, visibility:"readOnly",
+   * computedOnRead:true, description}}.
+   *
+   * @param fields   the schema's fields; not modified
+   * @param enriched the customization's enriched keys; empty answers {@code fields}
+   * @return the fields plus the enriched entries
+   */
+  static JSONArray withEnrichedReadFields(JSONArray fields, Set<String> enriched)
+      throws JSONException {
+    if (enriched == null || enriched.isEmpty()) {
+      return fields;
+    }
+    Set<String> present = new java.util.HashSet<>();
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject f = fields.optJSONObject(i);
+      if (f != null) {
+        present.add(f.optString("name", ""));
+      }
+    }
+    JSONArray all = new JSONArray(fields.toString());
+    for (String name : new java.util.TreeSet<>(enriched)) {
+      if (!present.contains(name)) {
+        JSONObject f = new JSONObject();
+        f.put("name", name);
+        f.put("type", "computed");
+        f.put(McpSchemaFieldBuilder.KEY_READ_ONLY, true);
+        f.put(McpSchemaFieldBuilder.KEY_VISIBILITY, McpSchemaFieldBuilder.VISIBILITY_READ_ONLY);
+        f.put("computedOnRead", true);
+        f.put(McpConstants.KEY_DESCRIPTION, "Computed by the server when the record is read — not "
+            + "a stored column, so it cannot be sent or used as a filter.");
+        all.put(f);
+      }
+    }
+    return all;
+  }
+
+  /**
+   * ETP-5852 (M-245): puts on each {@code missingFields} entry of a create refusal the label
+   * {@code etendo_schema} shows for the same column — the form's label in the session language —
+   * instead of the {@code AD_Column} name the entry was built with, so "Business Partner" in the
+   * refusal and "Tercero" in the schema stop looking like two fields. An entry whose column has no
+   * form field keeps its label.
+   *
+   * @param missing  the refusal's entries, each with its {@code column}; mutated in place
+   * @param adTab    the entity's tab, whose fields carry the labels
+   * @param langCode the session language
+   */
+  static void localizeLabels(JSONArray missing, Tab adTab, String langCode) throws JSONException {
+    java.util.Map<String, String[]> labels = McpSchemaFieldBuilder.loadFieldLabels(adTab,
+        langCode);
+    for (int i = 0; i < missing.length(); i++) {
+      JSONObject info = missing.optJSONObject(i);
+      String column = info == null ? null : info.optString("column", null);
+      String[] label = column == null ? null
+          : labels.get(column.toUpperCase(java.util.Locale.ROOT));
+      if (label != null && label[0] != null && !label[0].isBlank()) {
+        info.put("label", label[0]);
+      }
+    }
   }
 }

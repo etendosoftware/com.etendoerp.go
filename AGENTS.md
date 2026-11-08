@@ -28,6 +28,8 @@ A test that extends `OBBaseTest` or `WeldBaseTest`, directly or through a base c
 
 Before adding a test class, find the existing ones for the class (`make find-tests FILE=<Class>` from `etendo_schema_forge`) and extend them; a new class needs a justification. Every new or modified test class declares `@covers <fully.qualified.Class>` in its Javadoc and is named by behavior, never by ticket. `.github/workflows/test-hygiene.yml` (`scripts/check-test-hygiene.py`) annotates violations and blocks from 2026-10-10. Full protocol: `docs/testing/test-reuse-policy.md` in `etendo_schema_forge`.
 
+Every test class belongs to exactly one cell, the product team that owns it: add its fully qualified name to `src-test/cells/<cell>.txt` in the same PR (`ventas`, `compras`, `almacenes`, `contabilidad`, `financiero`, `localizacion`, `plataforma`). The second line of each file says what the cell covers; pick the cell of the functional area the test exercises, not of the package, and keep the file sorted, with `*IntegrationTest` classes under the `integración (BD)` section. Logic shared by sales and purchases goes in `src-test/cells/compartidos/ventas-compras.txt`. The per-cell report and the QA Datadog board read these files, so a test of no cell reaches no team when it fails. `.github/workflows/test-cells.yml` (`scripts/check-test-cells.py`, same rules as `./gradlew goCellCheck`) fails the PR when a test class is in no cell, in two, or listed but gone.
+
 ## Commit & Pull Request Guidelines
 Recent history follows `Feature ETP-1234: Short imperative summary`. Keep that format unless the branch already uses a different convention. Pull requests should link the ticket, summarize functional impact, call out any `src-db` or `referencedata` changes, and include test evidence. If the change affects API behavior or onboarding flows, include example requests or screenshots when they help review.
 
@@ -36,3 +38,6 @@ Do not place credentials in `build.gradle`; the file explicitly warns against it
 
 ## Adding a New Etendo GO Webhook
 Default to the NEO pseudo-spec bridge (`NeoGoWebhookBridge`, `NeoServlet`) instead of exposing it only through the Webhooks module's `/webhooks/*` + `SMFWHE_DEFINEDWEBHOOK_ROLE` grant — that table is wiped by `update.database` on every rebuild. See `docs/neo-headless.md` §4.10–4.11 for the pattern and how to wire a new one in.
+
+## Feature Flags: Evaluation Scope
+A flag with backend logic must be evaluated with the right `FeatureFlagContext`. `forAccount(null)` carries no email, so per-user rules in Datadog/ConfigCat never match: the SPA (which sends the email) shows the feature but the backend never runs it. Use `forAccount(<ETGO_ACCOUNT email>)` (see `PortalLinkPolicy#currentAccountEmail`) for any flag that can be rolled out per user, add `ATTRIBUTE_CLIENT_ID` for per-tenant, and use `FeatureFlagContext.environment()` only for operational kill switches and jobs with no user, with a comment saying why. If the request does not say who the flag targets, ask. Details: `docs/feature-flags-and-tenant-upgrade.md` → *Per-account targeting*.

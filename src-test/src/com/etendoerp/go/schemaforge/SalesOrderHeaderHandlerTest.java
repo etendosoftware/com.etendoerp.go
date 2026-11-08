@@ -79,12 +79,14 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * </ul>
  *
  * <p>{@code handle()} is also covered, including the Reactivate refusal on orders with linked
- * documents, and the create pre-hook's partnerAddress/invoiceAddress default (ETP-5703).
+ * documents, the Close refusal on every sales order, and the create pre-hook's
+ * partnerAddress/invoiceAddress default (ETP-5703).
  *
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.CreateShipmentHandler
  * @covers com.etendoerp.go.schemaforge.CreateDraftInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.OrderReactivationGuard
+ * @covers com.etendoerp.go.schemaforge.DocActionRefusalGuard
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  * @covers com.etendoerp.go.schemaforge.DocActionResolution
@@ -627,7 +629,7 @@ public class SalesOrderHeaderHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
-  // ── Reactivate (DocAction RE) refused on orders with linked documents ──────
+  // ── Reactivate (RE) with linked documents, and Close (CL) always, refused ──
 
   /** Sentinel for the stored-DocAction column of the table below: loading the record throws. */
   private static final String STORED_READ_FAILS = "<stored read fails>";
@@ -654,48 +656,77 @@ public class SalesOrderHeaderHandlerTest {
    * is refused with 500, while a record with nothing stored is not an error. An order id that
    * does not exist answers 404 {@code Record not found} whatever DocAction is sent — the same
    * answer {@code NeoActionRecordGuard} gives an unknown id.
+   *
+   * <p>Close ({@code CL}) is refused on every sales order, linked documents or not, with
+   * {@code ETGO_SalesOrderCloseNotOffered}, decided on the same effective DocAction: the root
+   * value wins over {@code fieldValues}, an empty body runs the stored value, and a root value the
+   * DAL refuses to write ({@code "cl"}, {@code " CL"}) runs the stored one. The last column names
+   * which refusal answered, so a Close is never mistaken for the Reactivate refusal.</p>
    */
   @Test
   public void testHandleReactivateIsGuardedByLinkedDocuments_table() throws Exception {
     final String orderId = "order-re-1";
     final String tabId = "tab-order";
     final String entityName = "Order";
+    final String linkedDocs = OrderReactivationGuard.MSG_LINKED_DOCUMENTS;
+    final String linkedDocsCheckFailed = OrderReactivationGuard.MSG_CHECK_FAILED;
+    final String closeRefused = SalesOrderHeaderHandler.MSG_CLOSE_NOT_OFFERED;
+    final String notOffered = SalesOrderHeaderHandler.MSG_ACTION_NOT_OFFERED;
+    final String notFound = NeoActionRecordGuard.MSG_RECORD_NOT_FOUND;
     // Columns: the label, the body sent, the stored DocAction, the property check on the requested
     // value (null when it is accepted), whether linked documents exist (null when the query
-    // throws) and the expected status (null when the request falls through to the router).
+    // throws), the expected status (null when the request falls through to the router) and the
+    // refusal expected (its messageKeys entry, else its error message; null when it falls through).
     Object[][] cases = {
         { "root RE with linked docs is refused",
-            "{\"docAction\":\"RE\"}", "CO", null, Boolean.TRUE, 400 },
+            "{\"docAction\":\"RE\"}", "CO", null, Boolean.TRUE, 400, linkedDocs },
         { "root RE wins over fieldValues CO",
             "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}", "CO", null,
-            Boolean.TRUE, 400 },
+            Boolean.TRUE, 400, linkedDocs },
         { "written root CO wins over fieldValues RE and the stored RE",
             "{\"fieldValues\":{\"documentAction\":\"RE\"},\"docAction\":\"CO\"}", "RE", null,
-            Boolean.TRUE, null },
+            Boolean.TRUE, null, null },
         { "empty body runs the stored RE and is refused",
-            "{}", "RE", null, Boolean.TRUE, 400 },
+            "{}", "RE", null, Boolean.TRUE, 400, linkedDocs },
         { "fieldValues RE without root runs the stored CO",
-            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", null, Boolean.TRUE, null },
+            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", null, Boolean.TRUE, null, null },
         { "root RE without linked docs falls through",
-            "{\"docAction\":\"RE\"}", "CO", null, Boolean.FALSE, null },
+            "{\"docAction\":\"RE\"}", "CO", null, Boolean.FALSE, null, null },
         { "unreadable record fails closed even when docAction is sent",
-            "{\"docAction\":\"RE\"}", STORED_READ_FAILS, null, Boolean.TRUE, 500 },
+            "{\"docAction\":\"RE\"}", STORED_READ_FAILS, null, Boolean.TRUE, 500,
+            linkedDocsCheckFailed },
         { "failed linked-docs lookup fails closed",
-            "{\"docAction\":\"RE\"}", "CO", null, null, 500 },
+            "{\"docAction\":\"RE\"}", "CO", null, null, 500, linkedDocsCheckFailed },
         { "root re outside the list is not written, the stored RE runs and is refused",
-            "{\"docAction\":\"re\"}", "RE", NOT_IN_LIST, Boolean.TRUE, 400 },
+            "{\"docAction\":\"re\"}", "RE", NOT_IN_LIST, Boolean.TRUE, 400, linkedDocs },
         { "root CO on a non-writable property is not written, the stored RE runs and is refused",
-            "{\"docAction\":\"CO\"}", "RE", NOT_WRITABLE, Boolean.TRUE, 400 },
+            "{\"docAction\":\"CO\"}", "RE", NOT_WRITABLE, Boolean.TRUE, 400, linkedDocs },
         { "root RE with no resolvable tab fails closed",
-            "{\"docAction\":\"RE\"}", NO_TAB, null, Boolean.TRUE, 500 },
+            "{\"docAction\":\"RE\"}", NO_TAB, null, Boolean.TRUE, 500, linkedDocsCheckFailed },
         { "root RE on an unknown order id answers 404",
-            "{\"docAction\":\"RE\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404 },
+            "{\"docAction\":\"RE\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404, notFound },
         { "root CO on an unknown order id answers 404, not the router",
-            "{\"docAction\":\"CO\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404 },
+            "{\"docAction\":\"CO\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404, notFound },
         { "root RE on a record whose entity has no DocAction fails closed",
-            "{\"docAction\":\"RE\"}", NO_DOC_ACTION_PROPERTY, null, Boolean.TRUE, 500 },
-        { "empty body on a record with nothing stored falls through",
-            "{}", null, null, Boolean.TRUE, null },
+            "{\"docAction\":\"RE\"}", NO_DOC_ACTION_PROPERTY, null, Boolean.TRUE, 500,
+            linkedDocsCheckFailed },
+        // ETP-6026 allow-list: nothing to run is not let through.
+        { "empty body on a record with nothing stored is refused",
+            "{}", null, null, Boolean.TRUE, 400, notOffered },
+        // Close: refused on every sales order, whatever the linked documents.
+        { "root CL with linked docs is refused as Close, not as Reactivate",
+            "{\"docAction\":\"CL\"}", "CO", null, Boolean.TRUE, 400, closeRefused },
+        { "root CL wins over fieldValues CO and is refused without linked docs",
+            "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"CL\"}", "CO", null,
+            Boolean.FALSE, 400, closeRefused },
+        { "fieldValues CL without root runs the stored CO",
+            "{\"fieldValues\":{\"documentAction\":\"CL\"}}", "CO", null, Boolean.FALSE, null, null },
+        { "empty body runs the stored CL and is refused",
+            "{}", "CL", null, Boolean.FALSE, 400, closeRefused },
+        { "root cl outside the list is not written, the stored CL runs and is refused",
+            "{\"docAction\":\"cl\"}", "CL", NOT_IN_LIST, Boolean.FALSE, 400, closeRefused },
+        { "root ' CL' outside the list is not written, the stored CO runs",
+            "{\"docAction\":\" CL\"}", "CO", NOT_IN_LIST, Boolean.FALSE, null, null },
     };
     for (Object[] c : cases) {
       String label = (String) c[0];
@@ -704,6 +735,7 @@ public class SalesOrderHeaderHandlerTest {
       String propertyCheck = (String) c[3];
       Boolean linked = (Boolean) c[4];
       Integer expectedStatus = (Integer) c[5];
+      String expectedRefusal = (String) c[6];
       boolean noTab = NO_TAB.equals(stored);
 
       NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
@@ -741,6 +773,12 @@ public class SalesOrderHeaderHandlerTest {
         when(dal.get(Tab.class, tabId)).thenReturn(tab);
         when(dal.get(entityName, orderId))
             .thenReturn(RECORD_NOT_FOUND.equals(stored) ? null : order);
+        // ETP-6026: the allow-list reads the stored status; every row here is a booked order,
+        // which accepts CO (no-op) and RE.
+        org.openbravo.model.common.order.Order booked =
+            mock(org.openbravo.model.common.order.Order.class);
+        when(booked.getDocumentStatus()).thenReturn("CO");
+        when(dal.get(org.openbravo.model.common.order.Order.class, orderId)).thenReturn(booked);
       }
       Connection conn = mock(Connection.class);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -758,7 +796,9 @@ public class SalesOrderHeaderHandlerTest {
           MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
           MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
         obDalMock.when(OBDal::getInstance).thenReturn(dal);
-        msgMock.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("refused");
+        // The message text is the key itself, so the response says which refusal answered.
+        msgMock.when(() -> OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
 
         NeoResponse result = handler.handle(ctx);
 
@@ -768,10 +808,133 @@ public class SalesOrderHeaderHandlerTest {
         } else {
           assertNotNull(label, result);
           assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
-          if (expectedStatus == 404) {
-            assertEquals(label, NeoActionRecordGuard.MSG_RECORD_NOT_FOUND,
-                result.getBody().getJSONObject("error").getString("message"));
-          }
+          assertEquals(label, expectedRefusal, refusalOf(result));
+          verify(router, never()).handle(any());
+        }
+      }
+    }
+  }
+
+  /**
+   * Which refusal an error response is: its first {@code error.messageKeys} entry when it carries
+   * one ({@link NeoMessageText#error}), otherwise its {@code error.message}.
+   */
+  private static String refusalOf(NeoResponse result) throws JSONException {
+    JSONObject error = result.getBody().getJSONObject("error");
+    JSONArray keys = error.optJSONArray(NeoProcessService.MESSAGE_KEYS);
+    return keys != null && keys.length() > 0 ? keys.getString(0) : error.getString("message");
+  }
+
+  /**
+   * ETP-6026: the DocAction button is an allow-list on the stored {@code documentStatus} — CO on
+   * a draft or in-progress order, CO (a no-op) and RE on a booked one, nothing elsewhere —
+   * decided on the effective DocAction like Close (whose table above already covers
+   * root-vs-fieldValues resolution). Void answers {@code ETGO_SalesOrderVoidNotOffered} in every
+   * status; any other value the window does not offer ({@code PR}, {@code AP}, {@code CO} on a
+   * closed order, {@code RE} on a closed order, {@code --}) answers
+   * {@code ETGO_SalesOrderActionNotOffered}; {@code RE} on a draft is let through to the
+   * reactivation rule that answered it before; a status that cannot be read fails closed with 500.
+   */
+  @Test
+  public void testHandleDocActionAllowList_table() throws Exception {
+    final String orderId = "order-vo-1";
+    final String tabId = "tab-order";
+    final String voidRefused = SalesOrderHeaderHandler.MSG_VOID_NOT_OFFERED;
+    final String notOffered = SalesOrderHeaderHandler.MSG_ACTION_NOT_OFFERED;
+    final String checkFailed = DocActionRefusalGuard.MSG_CHECK_FAILED;
+    // Columns: label, body, stored DocAction, stored documentStatus (null: the order cannot be
+    // loaded for its status), expected status (null: falls through) and expected refusal key.
+    Object[][] cases = {
+        { "root VO on a draft is refused", "{\"docAction\":\"VO\"}", "CO", "DR", 400,
+            voidRefused },
+        { "root VO on an in-progress order is refused", "{\"docAction\":\"VO\"}", "CO", "IP", 400,
+            voidRefused },
+        { "empty body runs the stored VO of a draft and is refused", "{}", "VO", "DR", 400,
+            voidRefused },
+        { "root VO on a booked order is refused", "{\"docAction\":\"VO\"}", "CO", "CO", 400,
+            voidRefused },
+        { "root VO on a closed order is refused too", "{\"docAction\":\"VO\"}", "--", "CL", 400,
+            voidRefused },
+        { "root PR on a draft is refused (it used to take the order to IP)",
+            "{\"docAction\":\"PR\"}", "CO", "DR", 400, notOffered },
+        { "root AP on an in-progress order is refused", "{\"docAction\":\"AP\"}", "CO", "IP", 400,
+            notOffered },
+        // RE on a draft is left to the rule that answered it before (DocActionReactivationRule's
+        // 422, after this pre-hook); on any other non-booked status the allow-list refuses it.
+        { "root RE on a draft goes on to the existing reactivation rule",
+            "{\"docAction\":\"RE\"}", "CO", "DR", null, null },
+        { "root RE on a closed order is refused", "{\"docAction\":\"RE\"}", "--", "CL", 400,
+            notOffered },
+        { "root CO on a closed order is refused", "{\"docAction\":\"CO\"}", "--", "CL", 400,
+            notOffered },
+        { "empty body running the stored -- is refused", "{}", "--", "CO", 400, notOffered },
+        { "root CO on a draft runs", "{\"docAction\":\"CO\"}", "CO", "DR", null, null },
+        { "the confirm modal's body runs the stored CO of an in-progress order",
+            "{\"action\":\"CO\"}", "CO", "IP", null, null },
+        { "root CO on a booked order runs (the bulk bar's no-op)", "{\"docAction\":\"CO\"}",
+            "--", "CO", null, null },
+        { "a status that cannot be read fails closed", "{\"docAction\":\"VO\"}", "CO", null, 500,
+            checkFailed },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      String status = (String) c[3];
+      Integer expectedStatus = (Integer) c[4];
+
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      SalesOrderHeaderHandler handler = handlerWithMockClone(router);
+      Tab tab = mock(Tab.class);
+      Table table = mock(Table.class);
+      Property property = mock(Property.class);
+      Entity entity = mock(Entity.class);
+      BaseOBObject stored = mock(BaseOBObject.class);
+      when(tab.getId()).thenReturn(tabId);
+      when(tab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("Order");
+      when(entity.hasProperty("documentAction")).thenReturn(true);
+      when(entity.getProperty("documentAction")).thenReturn(property);
+      when(stored.getEntity()).thenReturn(entity);
+      when(stored.get("documentAction")).thenReturn(c[2]);
+      OBDal dal = mock(OBDal.class);
+      when(dal.get(Tab.class, tabId)).thenReturn(tab);
+      when(dal.get("Order", orderId)).thenReturn(stored);
+      // OrderReactivationGuard runs first on RE; nothing is linked.
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+      if (status != null) {
+        org.openbravo.model.common.order.Order order =
+            mock(org.openbravo.model.common.order.Order.class);
+        when(order.getDocumentStatus()).thenReturn(status);
+        when(dal.get(org.openbravo.model.common.order.Order.class, orderId)).thenReturn(order);
+      }
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-order").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("DocAction").recordId(orderId).adTab(tab)
+          .requestBody(new JSONObject((String) c[1]))
+          .build();
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        msgMock.when(() -> OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        NeoResponse result = handler.handle(ctx);
+
+        if (expectedStatus == null) {
+          assertNull(label, result);
+          verify(router).handle(ctx);
+        } else {
+          assertNotNull(label, result);
+          assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
+          assertEquals(label, c[5], refusalOf(result));
           verify(router, never()).handle(any());
         }
       }
@@ -1178,7 +1341,15 @@ public class SalesOrderHeaderHandlerTest {
     String invoice = contracts.get("createDraftInvoice").getDescription();
     assertTrue("must warn that the invoice is completed despite the name",
         invoice.contains("COMPLETES") && invoice.contains("despite the name"));
-    assertEquals(List.of("lines", "allowDuplicate"), contracts.get("createDraftInvoice").getParams().stream()
+    // ETP-5828: allowDuplicate is gone — pending is net of the drafts, there is nothing to allow
+    assertTrue(invoice.contains("DRAFT sales invoices already hold")
+        && invoice.contains(OrderDocumentAvailability.DRAFT_COVERS_INVOICE_SUFFIX));
+    // the one quantity rule, with or without a draft (shipment-scoped, drafts counted)
+    assertTrue(invoice.contains("one rule applies with or without a draft")
+        && invoice.contains("invoiced only for what those shipments still hold")
+        && invoice.contains("including one whose shipped quantity draft invoices already hold"));
+    assertFalse(invoice.contains("as importOrderLines would"));
+    assertEquals(List.of("lines"), contracts.get("createDraftInvoice").getParams().stream()
         .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
   }
 
@@ -1191,11 +1362,9 @@ public class SalesOrderHeaderHandlerTest {
     }
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice", new JSONObject().put("lines",
         new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2")))));
-    // ETP-5714: allowDuplicate is a declared optional boolean; a string is refused before anything runs
-    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice",
-        new JSONObject().put("allowDuplicate", true)));
+    // ETP-5828: allowDuplicate is no longer declared on the sales order, so MCP refuses it as unknown
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
-        "createDraftInvoice", new JSONObject().put("allowDuplicate", "true")).getHttpStatus());
+        "createDraftInvoice", new JSONObject().put("allowDuplicate", true)).getHttpStatus());
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
         "createShipment", new JSONObject().put("warehouseId", "W1")).getHttpStatus());
   }
@@ -1364,5 +1533,53 @@ public class SalesOrderHeaderHandlerTest {
             Mockito.never());
       }
     }
+  }
+
+  // ── ETP-5726: a currency change is saved like the window does ─────────────
+
+  /**
+   * An MCP {@code PUT} that moves a stored DRAFT order (EUR, price list in EUR) to another
+   * currency is not refused: the handler lets it through to the default save, adds nothing to the
+   * body (no price list, no converted amount) and never reads a price list. This is exactly the
+   * case the removed currency-vs-price-list guard refused with a 422.
+   */
+  @Test
+  public void mcpCurrencyChangeIsNotRefusedAndLeavesPriceListAndAmountsAlone() throws Exception {
+    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
+    SalesOrderHeaderHandler handler = handlerWithMockClone(mockClone);
+    OBDal dal = mock(OBDal.class);
+    org.openbravo.model.common.currency.Currency eur =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(eur.getId()).thenReturn("EUR_ID");
+    when(eur.getISOCode()).thenReturn("EUR");
+    org.openbravo.model.pricing.pricelist.PriceList eurList =
+        mock(org.openbravo.model.pricing.pricelist.PriceList.class);
+    when(eurList.getName()).thenReturn("Tarifa EUR");
+    when(eurList.getCurrency()).thenReturn(eur);
+    org.openbravo.model.common.order.Order draft =
+        mock(org.openbravo.model.common.order.Order.class);
+    when(draft.getDocumentStatus()).thenReturn("DR");
+    when(draft.getCurrency()).thenReturn(eur);
+    when(draft.getPriceList()).thenReturn(eurList);
+    when(dal.get(org.openbravo.model.common.order.Order.class, "ORD1")).thenReturn(draft);
+    JSONObject body = new JSONObject().put("currency", "USD_ID");
+    NeoContext ctx = NeoContext.builder().specName("sales-order").entityName("header")
+        .httpMethod("PUT").endpointType(NeoEndpointType.CRUD).recordId("ORD1")
+        .requestBody(body).mcpOrigin(true).build();
+    when(mockClone.handle(ctx)).thenReturn(null);
+
+    try (MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      assertNull(handler.handle(ctx));
+    }
+
+    assertEquals(1, body.length());
+    assertEquals("USD_ID", body.getString("currency"));
+    verify(dal, never()).createCriteria(org.openbravo.model.pricing.pricelist.PriceList.class);
+    verify(dal, never()).get(org.mockito.ArgumentMatchers.eq(
+        org.openbravo.model.pricing.pricelist.PriceList.class), anyString());
+    verify(draft, never()).setPriceList(any());
+    verify(draft, never()).setCurrency(any());
   }
 }

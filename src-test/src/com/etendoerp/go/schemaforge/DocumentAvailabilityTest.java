@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -49,6 +50,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
@@ -65,9 +67,18 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  *
  * @covers com.etendoerp.go.schemaforge.DocumentAvailability
  * @covers com.etendoerp.go.schemaforge.OrderDocumentAvailability
+ * @covers com.etendoerp.go.schemaforge.OrderInvoicePending
  * @covers com.etendoerp.go.schemaforge.InOutInvoiceAvailability
  * @covers com.etendoerp.go.schemaforge.InvoiceDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.ReturnDocumentAvailability
+ * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.OrderDocActionPolicy
+ * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
+ *
+ * <p>ETP-5876 adds, per invoice, the import actions that do not suit its kind (see
+ * {@code RectificativeImportGate}): a normal invoice rules out the return and origin imports, a
+ * rectificative the order and goods ones.
  */
 // Test methods live in the @Nested inner classes below.
 @SuppressWarnings("java:S2187")
@@ -75,6 +86,27 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 class DocumentAvailabilityTest {
 
   private static final String DOCUMENT_ACTION = "documentAction";
+  /** The availability key of Close, as the MCP publishes it (ETP-5704). */
+  private static final String CLOSE = "documentAction:CL";
+  /** The availability key of Reactivate, as the MCP publishes it. */
+  private static final String REACTIVATE = "documentAction:RE";
+  /** The availability key of Void, as the MCP publishes it (ETP-6026). */
+  private static final String VOID = "documentAction:VO";
+  /** The C_Order.DocAction values an agent could send, as the AD list holds them (ETP-6026). */
+  private static final List<String> DOC_ACTION_LIST =
+      List.of("CO", "RE", "VO", "CL", "PR", "AP", "RJ", "PO", "RA", "RC", "XL");
+
+  /** The availability keys of every listed value but {@code allowed} (ETP-6026 allow-list). */
+  private static Set<String> keysExcept(String... allowed) {
+    Set<String> keep = Set.of(allowed);
+    Set<String> keys = new java.util.LinkedHashSet<>();
+    for (String value : DOC_ACTION_LIST) {
+      if (!keep.contains(value)) {
+        keys.add(DOCUMENT_ACTION + ":" + value);
+      }
+    }
+    return keys;
+  }
 
   private static java.util.function.UnaryOperator<String> subject(String status, String posted) {
     return property -> {
@@ -166,14 +198,92 @@ class DocumentAvailabilityTest {
     }
 
     @Test
-    @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing out")
+    @DisplayName("the order reactivation reason names the linked documents, with no trailing sentence")
+    void orderReactivationReasonHasNoTrailingSentence() throws Exception {
+      try (MockedStatic<OBDal> ignored = linkedDocuments(true)) {
+        String reason = OrderDocumentAvailability.unavailable(order("CO")).get("documentAction:RE");
+
+        assertEquals(OrderDocumentAvailability.REASON_LINKED_DOCUMENTS, reason);
+        assertTrue(reason.contains("linked shipments, receipts or invoices"), reason);
+        assertFalse(reason.contains("The other documentAction values still apply"), reason);
+      }
+    }
+
+    @Test
+    @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing "
+        + "out — except, on a sales or purchase order, every documentAction value but CO on a "
+        + "draft or in-progress order")
     void unlinkedDraftOrOtherRulesNothingOut() throws Exception {
       try (MockedStatic<OBDal> ignored = linkedDocuments(false)) {
         assertTrue(OrderDocumentAvailability.unavailable(order("CO")).isEmpty());
       }
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-        assertTrue(new SalesOrderHeaderHandler().unavailableActions(order("DR")).isEmpty());
+        // ETP-5704 / ETP-6026 / ETP-6108: the sales and purchase orders are an allow-list — a
+        // draft or in-progress order takes CO and nothing else.
+        for (String status : new String[] { "DR", "IP" }) {
+          assertEquals(keysExcept("CO"),
+              new SalesOrderHeaderHandler().unavailableActions(order(status)).keySet(), status);
+          assertEquals(keysExcept("CO"),
+              new PurchaseOrderHeaderHandler().unavailableActions(order(status)).keySet(), status);
+        }
         assertTrue(OrderDocumentAvailability.unavailable(mock(Invoice.class)).isEmpty());
+        assertTrue(new SalesOrderHeaderHandler().unavailableActions(mock(Invoice.class)).isEmpty());
+        assertTrue(
+            new SalesQuotationHeaderHandler().unavailableActions(mock(Invoice.class)).isEmpty());
+        obDal.verify(OBDal::getInstance, never());
+      }
+    }
+
+    @Test
+    @DisplayName("a completed sales or purchase order rules Close and Void out, and Reactivate "
+        + "too only with linked documents")
+    void completedSalesOrderRulesOutClose() throws Exception {
+      for (boolean linked : new boolean[] { false, true }) {
+        try (MockedStatic<OBDal> ignored = linkedDocuments(linked)) {
+          Map<String, String> sales = new SalesOrderHeaderHandler().unavailableActions(order("CO"));
+          Map<String, String> purchase =
+              new PurchaseOrderHeaderHandler().unavailableActions(order("CO"));
+
+          String label = linked ? "with linked documents" : "with nothing linked";
+          assertTrue(sales.containsKey(CLOSE), label);
+          // ETP-6026: the app offers only Reactivate on a booked sales order (CO there is a
+          // no-op the pre-hook lets through, so it is not reported either)
+          Set<String> expected = keysExcept("CO", "RE");
+          if (linked) {
+            expected.add(REACTIVATE);
+          }
+          assertEquals(expected, sales.keySet().stream()
+              .filter(k -> k.startsWith(DOCUMENT_ACTION + ":"))
+              .collect(java.util.stream.Collectors.toSet()), label);
+          assertEquals(linked, sales.containsKey(REACTIVATE), label);
+          // ETP-6108: the purchase order is the same allow-list, with its own reasons
+          assertTrue(purchase.containsKey(CLOSE), label);
+          assertTrue(purchase.containsKey(VOID), label);
+          assertEquals(PurchaseOrderHeaderHandler.REASON_CLOSE_NOT_OFFERED, purchase.get(CLOSE),
+              label);
+          assertEquals(PurchaseOrderHeaderHandler.REASON_VOID_NOT_OFFERED, purchase.get(VOID),
+              label);
+          assertEquals(expected, purchase.keySet().stream()
+              .filter(k -> k.startsWith(DOCUMENT_ACTION + ":"))
+              .collect(java.util.stream.Collectors.toSet()), label);
+          assertEquals(linked, purchase.containsKey(REACTIVATE), label);
+        }
+      }
+    }
+
+    @Test
+    @DisplayName("a quotation rules out every documentAction value but CO on a draft and RJ "
+        + "under evaluation; Reactivate, Void and Close in every status, voided included")
+    void quotationRulesOutReactivateVoidAndClose() {
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        // ETP-6026: an allow-list. Core refuses any action on a voided quotation, so nothing is
+        // available once voided, Reactivate included.
+        SalesQuotationHeaderHandler handler = new SalesQuotationHeaderHandler();
+        assertEquals(keysExcept("CO"), handler.unavailableActions(order("DR")).keySet());
+        assertEquals(keysExcept("RJ"), handler.unavailableActions(order("UE")).keySet());
+        for (String status : new String[] { "IP", "CO", "VO", "CA", "CJ" }) {
+          assertEquals(keysExcept(), handler.unavailableActions(order(status)).keySet(), status);
+        }
         obDal.verify(OBDal::getInstance, never());
       }
     }
@@ -208,9 +318,10 @@ class DocumentAvailabilityTest {
     private static final String INVOICE = "createPurchaseInvoice";
 
     private final OrderDocumentAvailability.Flow purchase =
-        new OrderDocumentAvailability.Flow(false, RECEIVE, INVOICE, false);
+        new OrderDocumentAvailability.Flow(false, RECEIVE, INVOICE, false, false);
     private final OrderDocumentAvailability.Flow sales =
-        new OrderDocumentAvailability.Flow(true, "createShipment", "createDraftInvoice", true);
+        new OrderDocumentAvailability.Flow(true, "createShipment", "createDraftInvoice", true,
+            true);
 
     private OrderLine line(String productId, String ordered, String invoiced) {
       OrderLine line = mock(OrderLine.class);
@@ -235,6 +346,15 @@ class DocumentAvailabilityTest {
     private Map<String, String> judge(Order order, OrderDocumentAvailability.Flow flow,
         boolean goodsPending, Set<String> goodsDrafts, List<String> draftInvoices)
         throws Exception {
+      return judge(order, flow, goodsPending, goodsDrafts, draftInvoices, Map.of());
+    }
+
+    /** Same, with what the draft invoices hold per order line (ETP-5828, the net rule). */
+    private Map<String, String> judge(Order order, OrderDocumentAvailability.Flow flow,
+        boolean goodsPending, Set<String> goodsDrafts, List<String> draftInvoices,
+        Map<String, BigDecimal> heldByDrafts) throws Exception {
+      List<Object[]> heldRows = new java.util.ArrayList<>();
+      heldByDrafts.forEach((lineId, quantity) -> heldRows.add(new Object[] { lineId, quantity }));
       try (MockedStatic<InOutLineFromOrderFactory> factory =
           mockStatic(InOutLineFromOrderFactory.class);
           MockedStatic<AbstractOrderHeaderHandler> linked =
@@ -265,6 +385,13 @@ class DocumentAvailabilityTest {
         when(query.setParameter(anyString(), any())).thenReturn(query);
         when(query.setParameterList(anyString(), anyCollection())).thenReturn(query);
         when(query.list()).thenReturn(draftInvoices);
+        @SuppressWarnings("unchecked")
+        Query<Object[]> heldQuery = mock(Query.class);
+        when(session.createQuery(OrderInvoicePending.DRAFT_QUANTITIES_HQL, Object[].class))
+            .thenReturn(heldQuery);
+        when(heldQuery.setParameter(anyString(), any())).thenReturn(heldQuery);
+        when(heldQuery.setParameterList(anyString(), anyCollection())).thenReturn(heldQuery);
+        when(heldQuery.list()).thenReturn(heldRows);
         return OrderDocumentAvailability.unavailable(order, flow);
       }
     }
@@ -288,6 +415,48 @@ class DocumentAvailabilityTest {
       assertTrue(unavailable.get(RECEIVE).contains("draft goods receipt (GR-1)"));
       assertTrue(unavailable.get(RECEIVE).contains("complete or delete it"));
       assertTrue(unavailable.get(INVOICE).contains("draft invoice (INV-D1, INV-D2)"));
+    }
+
+    @Test
+    @DisplayName("sales: a draft invoice rules invoicing out only when it holds everything left")
+    void salesDraftInvoiceRulesOutOnlyWhenItCoversEverything() throws Exception {
+      Object[][] cases = {
+          // name, held by the drafts (null = no draft line of this order), expected reason
+          // fragment (null = available)
+          // linked by C_Invoice.C_Order_ID only: it is a draft of the order, yet holds nothing
+          { "a header-only draft holds no line", null, null },
+          { "a draft holds part", "2", null },
+          { "the drafts hold all", "5", "draft invoice (INV-D1) already covers what is left" },
+          { "the drafts hold more", "7", "draft invoice (INV-D1) already covers what is left" },
+      };
+      for (Object[] c : cases) {
+        OrderLine pending = line("P1", "5", "0");
+        when(pending.getId()).thenReturn("L1");
+        Map<String, BigDecimal> held = c[1] == null ? Map.of()
+            : Map.of("L1", new BigDecimal((String) c[1]));
+        Map<String, String> unavailable = judge(completed(pending), sales, true, Set.of(),
+            List.of("INV-D1"), held);
+        String reason = unavailable.get("createDraftInvoice");
+        if (c[2] == null) {
+          assertNull(reason, (String) c[0]);
+        } else {
+          assertTrue(reason != null && reason.contains((String) c[2]), c[0] + ": " + reason);
+        }
+      }
+      // the purchase flow keeps the ETP-5714 rule: any draft invoice rules it out
+      OrderLine pending = line("P1", "5", "0");
+      when(pending.getId()).thenReturn("L1");
+      assertTrue(judge(completed(pending), purchase, true, Set.of(), List.of("INV-D1"),
+          Map.of("L1", BigDecimal.ONE)).get(INVOICE).contains("already exists for this order"));
+    }
+
+    @Test
+    @DisplayName("draft-covers reason with no readable draft number: the sentence without an empty ()")
+    void draftCoversReasonWithoutNumbersHasNoEmptyParentheses() {
+      String reason = OrderDocumentAvailability.draftCoversInvoiceReason(List.of());
+
+      assertEquals(OrderDocumentAvailability.DRAFT_COVERS_INVOICE_UNNAMED, reason);
+      assertFalse(reason.contains("()"), reason);
     }
 
     @Test
@@ -430,6 +599,17 @@ class DocumentAvailabilityTest {
       return invoice;
     }
 
+    /** The import actions a NORMAL invoice rules out: the rectificative ones. */
+    private final Set<String> importActionsOfANormalInvoice =
+        RectificativeImportGate.RECTIFICATIVE_ACTIONS;
+
+    private Map<String, String> withoutTheImportActions(Map<String, String> unavailable) {
+      Map<String, String> rest = new java.util.LinkedHashMap<>(unavailable);
+      rest.keySet().removeAll(RectificativeImportGate.RECTIFICATIVE_ACTIONS);
+      rest.keySet().removeAll(RectificativeImportGate.STANDARD_ACTIONS);
+      return rest;
+    }
+
     @Test
     @DisplayName("a completed invoice the reactivation guard would refuse rules Reactivate out")
     void guardedInvoiceRulesOutReactivate() {
@@ -440,7 +620,7 @@ class DocumentAvailabilityTest {
         Map<String, String> unavailable = new SalesInvoiceHeaderHandler()
             .unavailableActions(invoice("CO"));
 
-        assertEquals(Set.of("documentAction:RE"), unavailable.keySet());
+        assertEquals(Set.of("documentAction:RE"), withoutTheImportActions(unavailable).keySet());
         assertTrue(unavailable.get("documentAction:RE").contains("SII"));
         assertTrue(unavailable.get("documentAction:RE").contains("R-1, R-2"));
         assertEquals(unavailable, new PurchaseInvoiceHeaderHandler()
@@ -449,16 +629,78 @@ class DocumentAvailabilityTest {
     }
 
     @Test
+    @DisplayName("the reactivation reason is self-contained: it ends at the rectificativas, no trailing sentence")
+    void reactivationReasonHasNoTrailingSentence() {
+      try (MockedStatic<InvoiceReactivationGuard> guard = mockStatic(InvoiceReactivationGuard.class)) {
+        guard.when(() -> InvoiceReactivationGuard.computeBlock("I1")).thenReturn(
+            new InvoiceReactivationGuard.Block(List.of("SII"), List.of("R-1", "R-2")));
+
+        String reason = InvoiceDocumentAvailability.unavailable(invoice("CO"))
+            .get("documentAction:RE");
+
+        assertTrue(reason.startsWith("This invoice cannot be reactivated: it was accepted by "));
+        assertTrue(reason.endsWith("is already rectified by R-1, R-2."), reason);
+        assertFalse(reason.contains("The other documentAction values still apply"), reason);
+      }
+    }
+
+    @Test
     @DisplayName("an unblocked invoice, a draft, another record or a failing guard rule nothing out")
     void otherwiseNothing() {
       try (MockedStatic<InvoiceReactivationGuard> guard = mockStatic(InvoiceReactivationGuard.class)) {
         guard.when(() -> InvoiceReactivationGuard.computeBlock("I1")).thenReturn(null);
-        assertTrue(new SalesInvoiceHeaderHandler().unavailableActions(invoice("CO")).isEmpty());
-        assertTrue(new SalesInvoiceHeaderHandler().unavailableActions(invoice("DR")).isEmpty());
+        assertTrue(withoutTheImportActions(
+            new SalesInvoiceHeaderHandler().unavailableActions(invoice("CO"))).isEmpty());
+        assertTrue(withoutTheImportActions(
+            new SalesInvoiceHeaderHandler().unavailableActions(invoice("DR"))).isEmpty());
         assertTrue(InvoiceDocumentAvailability.unavailable(mock(Order.class)).isEmpty());
         guard.when(() -> InvoiceReactivationGuard.computeBlock("I1"))
             .thenThrow(new IllegalStateException("boom"));
         assertTrue(InvoiceDocumentAvailability.unavailable(invoice("CO")).isEmpty());
+      }
+    }
+
+    @Test
+    @DisplayName("a normal invoice rules out the return and origin imports, with the reason")
+    void aNormalInvoiceRulesOutTheRectificativeImports() {
+      Invoice normal = invoice("DR");
+      when(normal.getDocumentNo()).thenReturn("FV-1");
+
+      for (Map<String, String> unavailable : List.of(
+          new SalesInvoiceHeaderHandler().unavailableActions(normal),
+          new PurchaseInvoiceHeaderHandler().unavailableActions(normal))) {
+        assertEquals(importActionsOfANormalInvoice, unavailable.keySet());
+        assertTrue(unavailable.get("importReturnLines").contains("FV-1"));
+        assertTrue(unavailable.get("importOriginInvoiceLines").contains("is not a rectificative"));
+      }
+    }
+
+    @Test
+    @DisplayName("a rectificative rules out the order and goods imports, whichever side it is on")
+    void aRectificativeRulesOutTheOrderAndGoodsImports() {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+      try {
+        Invoice salesRectificative = invoice("DR");
+        when(salesRectificative.getDocumentNo()).thenReturn("FVR-1");
+        DocumentType arc = mock(DocumentType.class);
+        when(arc.getDocumentCategory()).thenReturn("ARC");
+        when(salesRectificative.getTransactionDocument()).thenReturn(arc);
+        Invoice purchaseRectificative = invoice("DR");
+        DocumentType apc = mock(DocumentType.class);
+        when(apc.getDocumentCategory()).thenReturn("APC");
+        when(purchaseRectificative.getTransactionDocument()).thenReturn(apc);
+
+        Map<String, String> sales = new SalesInvoiceHeaderHandler()
+            .unavailableActions(salesRectificative);
+        Map<String, String> purchase = new PurchaseInvoiceHeaderHandler()
+            .unavailableActions(purchaseRectificative);
+
+        assertEquals(RectificativeImportGate.STANDARD_ACTIONS, sales.keySet());
+        assertEquals(RectificativeImportGate.STANDARD_ACTIONS, purchase.keySet());
+        assertTrue(sales.get("importOrderLines").contains("FVR-1"));
+        assertTrue(sales.get("importShipmentLines").contains("importReturnLines"));
+      } finally {
+        AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
       }
     }
   }
@@ -497,7 +739,13 @@ class DocumentAvailabilityTest {
           assertTrue(unavailable.get("createReturnInvoice").contains("R-1, R-2"));
           assertTrue(unavailable.get("createReturnInvoice")
               .contains("refused with 409 returnInvoiceAlreadyExists and creates nothing"));
-          assertTrue(unavailable.get("createReturnInvoice").contains("allowDuplicate:true"));
+          // ETP-6026: only the return to vendor still offers the way past it; the customer
+          // return keeps one per return, as on the screen.
+          boolean purchase = handler instanceof ReturnToVendorShipmentHeaderHandler;
+          assertEquals(purchase,
+              unavailable.get("createReturnInvoice").contains("allowDuplicate:true"));
+          assertEquals(!purchase,
+              unavailable.get("createReturnInvoice").contains("one per return, as on the screen"));
         }
       }
     }
@@ -508,12 +756,12 @@ class DocumentAvailabilityTest {
       try (MockedStatic<ReturnShipmentUtils> utils = mockStatic(ReturnShipmentUtils.class)) {
         utils.when(() -> ReturnShipmentUtils.fetchPreviousReturnInvoices("R1"))
             .thenReturn(rectificativas());
-        assertTrue(ReturnDocumentAvailability.unavailable(inout("CO")).isEmpty());
-        assertTrue(ReturnDocumentAvailability.unavailable(inout("DR")).isEmpty());
-        assertTrue(ReturnDocumentAvailability.unavailable(mock(Order.class)).isEmpty());
+        assertTrue(ReturnDocumentAvailability.unavailable(inout("CO"), true).isEmpty());
+        assertTrue(ReturnDocumentAvailability.unavailable(inout("DR"), true).isEmpty());
+        assertTrue(ReturnDocumentAvailability.unavailable(mock(Order.class), true).isEmpty());
         utils.when(() -> ReturnShipmentUtils.fetchPreviousReturnInvoices("R1"))
             .thenThrow(new OBException("could not verify"));
-        assertTrue(ReturnDocumentAvailability.unavailable(inout("CO")).isEmpty());
+        assertTrue(ReturnDocumentAvailability.unavailable(inout("CO"), true).isEmpty());
       }
     }
 

@@ -38,10 +38,13 @@ final class McpMessageKeyHints {
 
   /** Recovery hint for a refusal keyed {@code PeriodNotAvailable} (ETP-5577). */
   static final String PERIOD_NOT_AVAILABLE_HINT = "The date falls in an accounting period that is "
-      + "not open (a new company starts with every period never-opened). Do not open it on your "
-      + "own: ask the user first. If they agree, find the period with etendo_list on spec "
-      + "'open-close-period-control', entity 'periodControl', then call etendo_action on it with "
-      + "action 'openClose' and openClose = 'O', and retry.";
+      + "not open (a new company starts with every period never-opened). When the answer carries "
+      + "'period', it names the document's accountingDate and that period (id, name, status), or "
+      + "says exists:false when no period covers the date. Do not open it on your own: ask the "
+      + "user first, or offer a date in an open period. If they agree to open it, call "
+      + "etendo_action on spec 'open-close-period-control', entity 'periodControl', id = period.id "
+      + "(else find it with etendo_list there) with action 'openClose' and openClose = 'O', and "
+      + "retry.";
 
   static final String PERIOD_NOT_AVAILABLE_KEY = "PeriodNotAvailable";
 
@@ -65,6 +68,8 @@ final class McpMessageKeyHints {
 
   static {
     HINT_BY_MESSAGE_KEY.put(PERIOD_NOT_AVAILABLE_KEY, PERIOD_NOT_AVAILABLE_HINT);
+    // ETP-5945 (in ETP-5852): a date with no valid period at all gets the same advice.
+    HINT_BY_MESSAGE_KEY.put("PeriodNotValid", PERIOD_NOT_AVAILABLE_HINT);
     HINT_BY_MESSAGE_KEY.put(DOCUMENT_PROCESSED_KEY, DOCUMENT_PROCESSED_HINT);
   }
 

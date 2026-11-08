@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -47,6 +48,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
@@ -354,6 +356,47 @@ public class AddressVirtualSelectorPolicyTest {
 
       assertEquals(1, resolved.size());
       assertEquals("Address1", resolved.get(0).getDBColumnName());
+    }
+  }
+
+  /**
+   * ETP-5806 follow-up — the MCP schema walk resolves the flag for the REQUESTING ACCOUNT, so a
+   * targeted account's agent is told the 3 columns exist (and can therefore write them) while an
+   * untargeted account in the same environment still sees them omitted. Account-less evaluation
+   * here would have advertised the global default to every account, contradicting the
+   * per-account capability signal the SPA already renders from.
+   */
+  @Test
+  public void wrapperExposesTheStructuredColumnsPerAccount() {
+    Map<String, String> columns = new LinkedHashMap<>();
+    columns.put("EM_OBSEPA_StrtNm", "oBSEPAStreetName");
+    columns.put("EM_OBSEPA_BldgNb", "oBSEPABuildingNumber");
+    columns.put("EM_OBSEPA_BldgNm", "oBSEPABuildingName");
+    columns.put("Address1", "addressLine1");
+
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+         MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class);
+         MockedStatic<GoAccountResolver> accounts = mockStatic(GoAccountResolver.class);
+         MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      stubLocationColumns(dal, models, columns);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+          argThat(ctx -> ctx != null
+              && "localization@etendo.software".equals(ctx.getTargetingKey())))).thenReturn(true);
+
+      accounts.when(GoAccountResolver::currentAccountEmail)
+          .thenReturn("localization@etendo.software");
+      assertEquals(4, AddressVirtualSelectorPolicy.resolveVirtualColumns(
+          entityOnTable(WRAPPER_TABLE)).size());
+
+      accounts.when(GoAccountResolver::currentAccountEmail)
+          .thenReturn("someone.else@example.com");
+      List<Column> untargeted = AddressVirtualSelectorPolicy.resolveVirtualColumns(
+          entityOnTable(WRAPPER_TABLE));
+      assertEquals(1, untargeted.size());
+      assertEquals("Address1", untargeted.get(0).getDBColumnName());
     }
   }
 

@@ -58,6 +58,7 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
+import com.etendoerp.go.schemaforge.InvoiceInboxHeaderHandler;
 import com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler;
 import com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
@@ -604,7 +605,27 @@ class McpWindowDeclaredActionsTest {
         "sales-invoice     | importOrderLines       | {\"orderId\":\"o\"}     |",
         "sales-invoice     | importShipmentLines    | {\"shipmentId\":\"s\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
         "sales-invoice     | importShipmentLines    | {\"receiptId\":\"s\"}   | receiptId",
-        "sales-invoice     | availableShipments     | {}                    |" })
+        "sales-invoice     | availableShipments     | {}                    |",
+        // ETP-6099: the shared listing parameters, and the invoice import of the goods documents
+        "sales-invoice     | availableShipments     | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "sales-invoice     | availableOrders        | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "purchase-invoice  | availableOrders        | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "purchase-invoice  | availableOrderLines    | {\"orderId\":\"o\",\"includeCovered\":true,\"detail\":true} |",
+        "goods-shipment    | availableInvoices      | {}                    |",
+        "goods-shipment    | availableInvoices      | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "goods-shipment    | availableInvoiceLines  | {\"invoiceId\":\"i\",\"includeCovered\":true} |",
+        "goods-shipment    | availableInvoiceLines  | {}                    | missing:invoiceId",
+        "goods-receipt     | availableInvoices      | {\"limit\":10,\"offset\":20,\"includeCovered\":true,\"detail\":true} |",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"includeCovered\":true} |",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"orderId\":\"o\"} | orderId",
+        // ETP-6099 follow-up: pendingBasis is REST-only (§4.12.9), declared in no contract, so the
+        // MCP refuses it as an unknown parameter and keeps the server rule.
+        "purchase-invoice  | availableOrders        | {\"pendingBasis\":\"classic\"} | pendingBasis",
+        "purchase-invoice  | availableOrderLines    | {\"orderId\":\"o\",\"pendingBasis\":\"classic\"} | pendingBasis",
+        "purchase-invoice  | availableReceipts      | {\"pendingBasis\":\"server\"} | pendingBasis",
+        "purchase-invoice  | availableReceiptLines  | {\"receiptId\":\"r\",\"pendingBasis\":\"classic\"} | pendingBasis",
+        "goods-receipt     | availableInvoices      | {\"pendingBasis\":\"classic\"} | pendingBasis",
+        "goods-receipt     | availableInvoiceLines  | {\"invoiceId\":\"i\",\"pendingBasis\":\"classic\"} | pendingBasis" })
     void lineImportActionsAreJudgedByTheirDeclaredContracts(String window, String action,
         String body, String refusal) throws Exception {
       Map<String, NeoActionContract> declared;
@@ -728,6 +749,23 @@ class McpWindowDeclaredActionsTest {
       when(handler.agentExcludedActions()).thenReturn(Set.of("psd2GenerateBankPayment"));
       assertEquals(405, refused(null, "EM_Psd2_Generate_Bank_Payment").toEnvelope()
           .getInt(McpConstants.KEY_STATUS));
+    }
+
+    /**
+     * ETP-6049: the invoice inbox header customization keeps {@code discard} for people. The real
+     * exclusion set is wired in, so removing it from the handler fails this test.
+     */
+    @Test
+    @DisplayName("the invoice inbox discard action is refused 405 as hidden, without any row config")
+    void invoiceInboxDiscardIsRefusedInCode() throws Exception {
+      when(handler.agentExcludedActions())
+          .thenReturn(new InvoiceInboxHeaderHandler().agentExcludedActions());
+
+      JSONObject env = refused(null, "discard").toEnvelope();
+
+      assertEquals(405, env.getInt(McpConstants.KEY_STATUS));
+      assertTrue(env.getString(McpConstants.KEY_DETAIL)
+          .contains("its customization keeps it for people only"), env.toString());
     }
 
     @Test
@@ -1141,6 +1179,45 @@ class McpWindowDeclaredActionsTest {
       assertEquals(Set.of("CO", "PR"), view.allowedValuesOf("documentAction"));
       assertNull(view.allowedValuesOf("aPRMProcessPayment"));
       assertNull(view.allowedValuesOf(null));
+    }
+
+    /** ETP-5848: the VO an agent sends to void an issued invoice must lead to the credit note. */
+    private static final String VO_REASON = "{\"actions\":{\"values\":{\"DocAction\":[\"CO\",\"RE\"]},"
+        + "\"valueReasons\":{\"DocAction\":{\"VO\":\"issue a credit note instead\"}},"
+        + "\"reason\":\"the UI completes or reactivates\"}}";
+
+    @Test
+    @DisplayName("a refused value with a valueReason names its route; others keep the bare list")
+    void refusedValueNamesItsRoute() throws Exception {
+      McpRoutingException vo = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", VO_REASON), "documentAction",
+              new JSONObject("{\"docAction\":\"VO\"}")));
+      String detail = vo.toEnvelope().getString(McpConstants.KEY_DETAIL);
+      assertEquals(422, vo.toEnvelope().getInt(McpConstants.KEY_STATUS));
+      assertTrue(detail.contains("[CO, RE]") && detail.contains("issue a credit note instead"), detail);
+
+      McpRoutingException other = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", VO_REASON), "documentAction",
+              new JSONObject("{\"docAction\":\"CL\"}")));
+      assertFalse(other.toEnvelope().getString(McpConstants.KEY_DETAIL).contains("credit note"));
+      assertNull(McpDeclaredActions.precheck(entity("W", VO_REASON), "documentAction",
+          new JSONObject("{\"docAction\":\"CO\"}")), "an offered value is not refused");
+    }
+
+    @Test
+    @DisplayName("validation: valueReasons name a narrowed button and a value it refuses")
+    void valueReasonsValidation() throws Exception {
+      assertTrue(McpActionsSection.validate(new JSONObject(VO_REASON).getJSONObject("actions"))
+          .isEmpty());
+      for (String bad : List.of(
+          // a button values does not narrow
+          "{\"values\":{\"b\":[\"CO\"]},\"valueReasons\":{\"other\":{\"VO\":\"x\"}},\"reason\":\"r\"}",
+          // a value values offers: its reason could never be read
+          "{\"values\":{\"b\":[\"CO\"]},\"valueReasons\":{\"b\":{\"CO\":\"x\"}},\"reason\":\"r\"}",
+          "{\"values\":{\"b\":[\"CO\"]},\"valueReasons\":{\"b\":{\"VO\":\" \"}},\"reason\":\"r\"}",
+          "{\"values\":{\"b\":[\"CO\"]},\"valueReasons\":{},\"reason\":\"r\"}")) {
+        assertFalse(McpActionsSection.validate(new JSONObject(bad)).isEmpty(), bad);
+      }
     }
 
     @Test
@@ -1597,7 +1674,8 @@ class McpWindowDeclaredActionsTest {
     @DisplayName("etendo_action calls a declared action on the HTTP method its contract names")
     void actionUsesTheDeclaredMethod() {
       String body = method("handleAction");
-      Matcher method = Pattern.compile("(\\w+)\\s*=\\s*\\w+\\s*!=\\s*null\\s*\\?\\s*\\w+\\s*\\."
+      // The contract's method may be read in a ternary or assigned inside the declared branch.
+      Matcher method = Pattern.compile("(\\w+)\\s*=\\s*(?:\\w+\\s*!=\\s*null\\s*\\?\\s*)?\\w+\\s*\\."
           + "\\s*getHttpMethod\\s*\\(\\s*\\)").matcher(body);
       assertTrue(method.find(), "handleAction must read the contract's HTTP method");
       assertTrue(Pattern.compile("buildActionHookContext\\s*\\([^;]*\\b" + method.group(1)

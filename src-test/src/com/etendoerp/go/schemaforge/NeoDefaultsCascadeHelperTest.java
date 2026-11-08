@@ -53,6 +53,7 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoValueEquivalence;
 
 /**
  * Unit tests for {@link NeoDefaultsCascadeHelper}.
@@ -63,6 +64,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *
  * @covers com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelper
  * @covers com.etendoerp.go.schemaforge.NeoCalloutDiscardMemory
+ * @covers com.etendoerp.go.schemaforge.util.NeoValueEquivalence
  */
 public class NeoDefaultsCascadeHelperTest {
 
@@ -3296,5 +3298,45 @@ public class NeoDefaultsCascadeHelperTest {
     constructor.setAccessible(true);
     NeoDefaultsCascadeHelper instance = constructor.newInstance();
     assertNotNull(instance);
+  }
+
+  /**
+   * ETP-5852: a caller's 20 and a callout's "20.00" are the same price — not a superseded default —
+   * while a real difference, or non-numeric text, still is.
+   */
+  @Test
+  public void testSameValueComparesNumbersByValue() {
+    assertTrue(NeoHandlerUtils.sameTextOrNumber(20, "20.00"));
+    assertTrue(NeoHandlerUtils.sameTextOrNumber(new java.math.BigDecimal("5.0"), 5));
+    assertTrue(NeoHandlerUtils.sameTextOrNumber("ABC", "ABC"));
+    assertFalse(NeoHandlerUtils.sameTextOrNumber(20, "18"));
+    assertFalse(NeoHandlerUtils.sameTextOrNumber("ABC", "abc"));
+  }
+  /**
+   * ETP-5680: the caller's {@code false} and a callout's {@code "N"} are one Yes/No flag; a
+   * property that is not boolean never gets that leniency, and a non-flag value never matches.
+   */
+  @Test
+  public void testYesNoEquivalenceIsDecidedByThePropertyType() {
+    assertTrue(NeoValueEquivalence.same(false, "N"));
+    assertTrue(NeoValueEquivalence.same("Y", true));
+    assertTrue(NeoValueEquivalence.same("true", "y"));
+    assertFalse(NeoValueEquivalence.same(true, "N"));
+    assertFalse(NeoValueEquivalence.same("maybe", "Y"));
+    assertFalse(NeoValueEquivalence.same(null, "N"));
+
+    Property flag = mock(Property.class);
+    when(flag.isPrimitive()).thenReturn(true);
+    when(flag.getPrimitiveObjectType()).thenReturn((Class) Boolean.class);
+    Property text = mock(Property.class);
+    when(text.isPrimitive()).thenReturn(true);
+    when(text.getPrimitiveObjectType()).thenReturn((Class) String.class);
+
+    assertTrue("a boolean property: false == N", NeoValueEquivalence.same(false, "N", flag));
+    assertFalse("a text property: Y is not true", NeoValueEquivalence.same("Y", "true", text));
+    assertTrue("text equality still holds for a text property",
+        NeoValueEquivalence.same("Y", "Y", text));
+    assertTrue("no property: the value-based test stands in",
+        NeoValueEquivalence.same("Y", "true", null));
   }
 }

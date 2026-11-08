@@ -36,21 +36,19 @@ import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.utils.SIIUtils;
 
 /**
- * <h2>MERGE CONFLICT NOTICE — read this before resolving</h2>
+ * <h2>Merge history note (ETP-5745 / ETP-5747, resolved 2026-11-07)</h2>
  *
  * This class also exists on {@code origin/develop} as of ETP-5747 (PR #1555, commit
- * {@code d07757ea2}), merged there AFTER this branch last pulled develop
- * ({@code 98564f7d0}). The two versions diverge in a way that is NOT just wording: the
- * ETP-5747/develop version DOES copy the document type's {@code em_etvfac_inv_type} onto the
- * invoice in {@code applyVerifactu}; THIS branch's version deliberately stopped doing that
- * (ETP-5745 CP-20 — see "What it does not do" below for why: copying ANY code, even a
- * human-configured per-DocType one, silently picks the user's rectification reason for them).
- *
- * <p><b>When this conflict appears, keep THIS branch's {@code applyVerifactu} and its class/method
- * javadoc — the one WITHOUT the DocType-to-invoice {@code etvfacInvType} copy.</b> Discard
- * develop's copy-from-DocType half of the method. Everything else that is a genuine merge (new
- * unrelated methods, SII/TicketBAI gating additions from either side, etc.) should merge normally;
- * only the {@code etvfacInvType} copy itself is the one piece to resolve toward THIS branch's side.
+ * {@code d07757ea2}). The two versions diverged in a way that was NOT just wording: the
+ * ETP-5747/develop version copied the document type's {@code em_etvfac_inv_type} onto the invoice
+ * in {@code applyVerifactu} and auto-picked TicketBAI's {@code tbaiReverseinvoicecode} to
+ * {@code R4}; THIS branch's version deliberately stopped doing both (ETP-5745 CP-14/CP-20 — see
+ * "What it does not do" below for why: picking or copying ANY fiscal-reason code on the user's
+ * behalf is exactly the kind of judgement call this guard exists to keep manual). The merge kept
+ * THIS branch's {@code applyTbai}/{@code applyVerifactu} behavior and adopted develop's
+ * {@code tbaiConfigActive} refactor (delegating to the single {@code InvoiceCalloutHelper
+ * #isTbaiConfigActive} lookup instead of a second, duplicate SQL constant here) since that part
+ * was a genuine, behavior-neutral consolidation.
  *
  * <h2>Server-side defaults of the STRUCTURAL TicketBAI and VERI*FACTU rectificative fields</h2>
  *
@@ -118,9 +116,6 @@ final class SalesRectificativeFiscalDefaults {
   private static final String DRAFT = "DR";
   private static final String RECTIFICATIVE_PREFIX = "R";
 
-  static final String TBAI_ACTIVE_SQL =
-      "SELECT 1 FROM tbai_config WHERE ad_org_id = ? AND isactive = 'Y' LIMIT 1";
-
   static final String VERIFACTU_ACTIVE_SQL =
       "SELECT 1 FROM etvfac_verifactu_config WHERE ad_org_id = ad_get_org_le_bu(?, 'LE')"
           + " AND isactive = 'Y' AND in_vfactu_system IS NOT NULL LIMIT 1";
@@ -133,6 +128,8 @@ final class SalesRectificativeFiscalDefaults {
    *
    * <p>Never throws a Java exception: a failure is logged and answered as "nothing applied", so
    * the save the user already made is not turned into an error by a default it did not ask for.
+   * A DB-level failure on the flush (a constraint or a trigger) still aborts the transaction,
+   * exactly as for {@code persistSiiAuthorizationno}: no savepoint is taken.
    *
    * @param invoiceId the sales invoice just written
    * @return the response keys and values that were written (empty when nothing changed)
@@ -237,12 +234,19 @@ final class SalesRectificativeFiscalDefaults {
   }
 
   /**
-   * Whether the organization has an active TicketBAI configuration. Never throws a Java
-   * exception: a failure answers {@code false} (no default is better than a default for a system
-   * the org may not use).
+   * Whether the organization has an active TicketBAI configuration — the shared lookup
+   * {@link InvoiceCalloutHelper#isTbaiConfigActive} (adopted from develop's ETP-5747 refactor so
+   * this class and the callout resolve "is TicketBAI active" through a single SQL constant).
+   * Never throws a Java exception: a failure answers {@code false} (no default is better than a
+   * default for a system the org may not use).
    */
   static boolean tbaiConfigActive(String orgId) {
-    return configExists(TBAI_ACTIVE_SQL, orgId);
+    try {
+      return InvoiceCalloutHelper.isTbaiConfigActive(orgId);
+    } catch (Exception e) {
+      log.debug("[ETP-5745] TicketBAI config lookup failed for org {}: {}", orgId, e.getMessage());
+      return false;
+    }
   }
 
   /**

@@ -184,6 +184,8 @@ class McpDocumentPdfToolTest {
       assertEquals(CLIENT, claims.getClientId());
       assertEquals(SPEC, claims.getSpecName());
       assertEquals(10, result.getInt("linkExpiresInMinutes"));
+      // ETP-6013: a PDF the server renders here is in the MCP default language, the email's default
+      pdfMock.verify(() -> NeoDocumentPdf.renderLanguage("es_ES"));
     }
 
     @Test
@@ -235,9 +237,12 @@ class McpDocumentPdfToolTest {
       assertEquals("no_pdf", result.getString("error"));
       assertEquals("This document has no PDF yet.", result.getString("detail"));
       String hint = result.getString("hint");
+      assertTrue(hint.contains("ask again in a few seconds"), hint);
+      assertTrue(hint.contains("server could not generate it"), "the app comes last: " + hint);
       assertTrue(hint.contains("document's preview in the application"), hint);
-      assertTrue(hint.contains("by email"), "a return receipt's preview stores nothing: " + hint);
-      assertTrue(hint.contains("draft"), "a draft never stores a PDF: " + hint);
+      assertTrue(hint.contains("by email from there"), "a return receipt's preview stores nothing: "
+          + hint);
+      assertTrue(hint.contains("draft"), "a draft never has a PDF: " + hint);
       assertFalse(hint.contains("supplier"), "no supplier talk on a rendered document: " + hint);
     }
 
@@ -279,9 +284,12 @@ class McpDocumentPdfToolTest {
       assertEquals(409, result.getInt("status"));
       assertEquals("pdf_stale", result.getString("error"));
       assertFalse(result.has("downloadUrl"));
-      assertTrue(result.getString("hint").contains("open the document's preview in the application"),
-          result.getString("hint"));
-      assertTrue(result.getString("hint").contains("by email"), result.getString("hint"));
+      assertEquals(McpDocumentPdfTool.STALE_HINT, result.getString("hint"));
+      // ETP-6013: a reactivated document is completed again; the application only as a last resort.
+      assertTrue(result.getString("hint").startsWith("If the document was reactivated, complete it "
+          + "again"), result.getString("hint"));
+      assertTrue(result.getString("hint").contains("server could not generate it: ask the user to "
+          + "open the document's preview in the application"), result.getString("hint"));
     }
 
     @Test
@@ -424,13 +432,19 @@ class McpDocumentPdfToolTest {
       String completed = McpDocumentPdfTool.get(args("id", "C1")).getString("hint");
       String unknown = McpDocumentPdfTool.get(args("id", "U1")).getString("hint");
 
-      assertEquals("This document is a draft and a draft never stores a PDF: complete it first, "
-          + "then open its preview in the application and ask again.", draft);
-      assertTrue(completed.startsWith("Open the document's preview in the application, or send "
-          + "the document by email, and ask again."), completed);
+      // ETP-6013: completing is enough, the server generates the PDF; no detour through the app.
+      assertEquals("This document is a draft and a draft never has a PDF: complete it first, "
+          + "then ask again.", draft);
+      // ETP-6013: a just-completed document gets its PDF from the server; the retry comes first.
+      // A multi-id call queues the documents past its render budget: the retry names that case.
+      assertTrue(completed.contains("this call asked for more than "
+          + NeoDocumentPdf.SYNC_RENDERS_PER_CALL + " documents"), completed);
+      assertTrue(completed.startsWith(McpDocumentPdfTool.RETRY_HINT
+          + "Otherwise the server could not generate it: ask the user to open the document's "
+          + "preview in the application, or to send the document by email from there"), completed);
       assertFalse(completed.contains("draft"), completed);
       assertTrue(completed.contains("a return receipt's preview stores nothing"), completed);
-      assertTrue(unknown.contains("(a draft never stores a PDF: complete it first)"), unknown);
+      assertTrue(unknown.startsWith(McpDocumentPdfTool.UNKNOWN_STATUS_DRAFT_REMARK), unknown);
     }
 
     @Test
@@ -525,14 +539,16 @@ class McpDocumentPdfToolTest {
   // ── the tool definition ──────────────────────────────────────────────────
 
   @Test
-  @DisplayName("the definition takes spec and id or ids, and says it never generates a PDF")
+  @DisplayName("the definition takes spec and id or ids, and says when the server generates the PDF")
   void definitionDescribesTheContract() {
     McpToolDefinition definition = McpDocumentPdfToolDefinition.definition(List.of(SPEC));
 
     assertEquals(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, definition.getName());
     String description = definition.getDescription();
     assertTrue(description.contains("PDF"), description);
-    assertTrue(description.contains("never generates"), description);
+    // ETP-6013 reverses ETP-5715's "never generates": the server renders declared printables.
+    assertFalse(description.contains("never generates"), description);
+    assertTrue(description.contains("ask again in a few seconds"), description);
     assertTrue(description.contains("supplier"), description);
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
     assertTrue(props.toString().contains("ids"), props.toString());

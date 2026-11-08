@@ -476,6 +476,86 @@ public class GoodsReceiptHeaderHandlerTest {
     }
   }
 
+  // ── afterHandle — returnStatus (ETP-6054) ────────────────────────────────────
+
+  /** Runs the single-record enrichment with the return-status query answering {@code rows}. */
+  private static int returnStatusFor(String[][] rows) throws Exception {
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+    JSONObject body = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", "r-1"))));
+    NeoContext ctx = NeoContext.builder().httpMethod("GET").recordId("r-1")
+        .previousResult(new NeoResponse(200, body)).build();
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBDal roInst = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+        PreparedStatement ps = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(ps.executeQuery()).thenReturn(rs);
+        if (GoodsReceiptHeaderHandler.RETURN_STATUS_SQL.equals(inv.getArgument(0))) {
+          int[] i = {-1};
+          when(rs.next()).thenAnswer(x -> ++i[0] < rows.length);
+          when(rs.getBigDecimal(1)).thenAnswer(x -> new BigDecimal(rows[i[0]][0]));
+          when(rs.getBigDecimal(2)).thenAnswer(x -> new BigDecimal(rows[i[0]][1]));
+        } else {
+          when(rs.next()).thenReturn(false);
+        }
+        return ps;
+      });
+      Connection roConn = mock(Connection.class);
+      PreparedStatement roPs = mock(PreparedStatement.class);
+      ResultSet roRs = mock(ResultSet.class);
+      when(roInst.getConnection()).thenReturn(roConn);
+      when(roConn.prepareStatement(any())).thenReturn(roPs);
+      when(roPs.executeQuery()).thenReturn(roRs);
+      when(roRs.next()).thenReturn(false);
+      return handler.afterHandle(ctx).getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0).getInt("returnStatus");
+    }
+  }
+
+  /**
+   * The ticket scenario: 100 + 60 + 112 received, two returns of 20 on the first line (one
+   * completed, one draft) are 40 of 272, which is 15 percent. The pre-fix join repeated the
+   * received quantity once per return and answered 7.
+   */
+  @Test
+  public void returnStatus_severalReturnsOnOneLineAreSummedAndTheReceivedQuantityCountedOnce()
+      throws Exception {
+    assertEquals(15, returnStatusFor(new String[][] {{"100", "40"}, {"60", "0"}, {"112", "0"}}));
+  }
+
+  /** A single return of 20 over the same 272 units is 7 percent (7.35 rounded). */
+  @Test
+  public void returnStatus_roundsToAnIntegerPercentage() throws Exception {
+    assertEquals(7, returnStatusFor(new String[][] {{"100", "20"}, {"60", "0"}, {"112", "0"}}));
+  }
+
+  /** The percentage never goes above 100, and a receipt that received nothing is 0. */
+  @Test
+  public void returnStatus_isCappedAt100AndZeroWhenNothingWasReceived() throws Exception {
+    assertEquals(100, returnStatusFor(new String[][] {{"10", "15"}}));
+    assertEquals(0, returnStatusFor(new String[][] {{"0", "0"}}));
+    assertEquals(0, returnStatusFor(new String[][] {}));
+  }
+
+  /**
+   * The query aggregates the returns per source line in a sub-select (never a row-multiplying
+   * join) and counts them with the rule of {@link ReturnableQuantity}: voided excluded, drafts
+   * included.
+   */
+  @Test
+  public void returnStatusSql_aggregatesPerSourceLineWithTheSharedCountingRule() {
+    String sql = GoodsReceiptHeaderHandler.RETURN_STATUS_SQL;
+    assertTrue(sql, sql.contains("GROUP BY rl.canceled_inoutline_id"));
+    assertTrue(sql, sql.contains(ReturnableQuantity.COUNTED_RETURN_LINES_FILTER));
+    assertTrue(sql, sql.contains(ReturnableQuantity.COUNTED_RETURN_LINES_FROM));
+  }
+
   // ── afterHandle — batch mode, record without id in data ──────────────────────
 
   /**
@@ -976,8 +1056,8 @@ public class GoodsReceiptHeaderHandlerTest {
         new GoodsReceiptHeaderHandler().actionContracts();
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
-            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord", "post",
-            "unpost"),
+            "importOrderLines", "availableInvoices", "availableInvoiceLines",
+            "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
@@ -1154,6 +1234,57 @@ public class GoodsReceiptHeaderHandlerTest {
 
     assertNull(handler.handle(ctx));
     verify(delegate).handle(ctx);
+  }
+
+  // ── invoice import listing (ETP-6099) ─────────────────────────────────────
+
+  /**
+   * availableInvoices / availableInvoiceLines go to the invoice-import delegate, which is handed
+   * the receipt's own policy on the context: nothing else names the purchase-side rules.
+   */
+  @Test
+  public void handle_dispatchesTheInvoiceListingWithTheReceiptPolicy() throws Exception {
+    ImportInvoiceLinesIntoInOutHandler delegate = mock(ImportInvoiceLinesIntoInOutHandler.class);
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsReceiptHeaderHandler.class.getDeclaredField("importInvoiceLinesHandler");
+    field.setAccessible(true);
+    field.set(handler, delegate);
+    for (String action : new String[] { "availableInvoices", "availableInvoiceLines" }) {
+      NeoContext ctx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName(action).recordId("r1").build();
+      NeoResponse expected = NeoResponse.ok(new JSONObject().put("action", action));
+      when(delegate.handle(ctx)).thenReturn(expected);
+
+      assertSame(action, expected, handler.handle(ctx));
+      assertSame(action, GoodsReceiptHeaderHandler.INVOICE_IMPORT_POLICY,
+          ctx.getAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE));
+    }
+  }
+
+  /**
+   * The receipt's popup rules: invoices with a negative grand total are not offered (a missing
+   * total is), and pending deducts neither the delivered quantity nor this receipt's own draft.
+   */
+  @Test
+  public void invoiceImportPolicy_offersNoNegativeTotal_andDeductsOnlyOtherDrafts() {
+    ImportInvoiceLinesIntoInOutHandler.SourcePolicy policy =
+        GoodsReceiptHeaderHandler.INVOICE_IMPORT_POLICY;
+    Object[][] cases = { { "-0.01", false }, { "0", true }, { "120.50", true }, { null, true } };
+    for (Object[] c : cases) {
+      org.openbravo.model.common.invoice.Invoice invoice =
+          mock(org.openbravo.model.common.invoice.Invoice.class);
+      when(invoice.getGrandTotalAmount()).thenReturn(c[0] == null ? null
+          : new BigDecimal((String) c[0]));
+
+      assertEquals(String.valueOf(c[0]), c[1], policy.offered.test(invoice));
+    }
+    assertFalse("delivered is not deducted on a receipt", policy.deductsDelivered);
+    assertFalse("only OTHER draft receipts are deducted", policy.deductsTargetDraft);
+    assertTrue("the receipt's popup asks for pendingBasis classic (ETP-6099 follow-up)",
+        policy.offersClassicPending);
+    assertFalse("a caller with no policy is offered no classic basis",
+        ImportInvoiceLinesIntoInOutHandler.SourcePolicy.DEFAULT.offersClassicPending);
   }
 
   /**

@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -48,6 +49,21 @@ final class InvoiceDocumentAvailability {
   }
 
   /**
+   * Everything that does not apply to this invoice: the {@code documentAction} values of
+   * {@link #unavailable(BaseOBObject)} and the import actions that do not suit the kind of invoice
+   * it is (ETP-5876, {@link RectificativeImportGate#unavailable}).
+   *
+   * @param subject the record the agent asked about
+   * @param policy  the calling header's rule for "rectificative"
+   * @return {@code action[:value] → reason}
+   */
+  static Map<String, String> unavailable(BaseOBObject subject, RectificativeImportPolicy policy) {
+    Map<String, String> unavailable = new LinkedHashMap<>(unavailable(subject));
+    unavailable.putAll(RectificativeImportGate.unavailable(subject, policy));
+    return unavailable;
+  }
+
+  /**
    * The {@code documentAction} values that do not apply to this invoice.
    *
    * @param subject the record the agent asked about
@@ -71,7 +87,7 @@ final class InvoiceDocumentAvailability {
       return Map.of(NeoActionAvailability.valueKey(ACTION_DOCUMENT_ACTION, VALUE_REACTIVATE),
           "This invoice cannot be reactivated: it was accepted by " + block.fiscalSystem
               + " and is already rectified by " + docNos.stream().collect(Collectors.joining(", "))
-              + ". The other documentAction values still apply.");
+              + ".");
     } catch (RuntimeException e) {
       log.debug("Could not evaluate the reactivation of invoice {}: {}", invoice.getId(),
           e.getMessage());

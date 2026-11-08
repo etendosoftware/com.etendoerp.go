@@ -26,6 +26,7 @@ import static org.junit.Assume.assumeNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -315,7 +316,9 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
     AtomicReference<NeoResponse> written = new AtomicReference<>();
     when(servlet.findEntity(spec.getId(), entity.getName())).thenReturn(entity);
     when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
-    when(servlet.handleWithHooks(anyString(), any(NeoContext.class), any(), any()))
+    // ETP-6026: sales-order/header is bound by @NeoExtension, so its Java_Qualifier (the first
+    // argument) is null; anyString() does not match null.
+    when(servlet.handleWithHooks(nullable(String.class), any(NeoContext.class), any(), any()))
         .thenReturn(NeoResponse.ok(new JSONObject().put("reachedCustomization", true)));
     doAnswer(inv -> {
       written.set(inv.getArgument(1));
@@ -332,7 +335,7 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
         new NeoServlet.NeoPathInfo(SALES_ORDER, entity.getName(), id), method,
         request, mock(HttpServletResponse.class));
     verify(servlet, expectCustomization ? times(1) : never())
-        .handleWithHooks(anyString(), any(NeoContext.class), any(), any());
+        .handleWithHooks(nullable(String.class), any(NeoContext.class), any(), any());
     assertNotNull("the REST response must be captured", written.get());
     return written.get();
   }

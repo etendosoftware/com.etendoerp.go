@@ -37,15 +37,21 @@ final class McpDocumentPdfToolDefinition {
   /** Description of {@link McpConstants#TOOL_NEO_GET_DOCUMENT_PDF}; a test pins its key claims. */
   static final String DESCRIPTION =
       "Get the PDF of a document (sales or purchase invoice, order, quotation, shipment, return...) "
-      + "exactly as the application has it stored: the PDF the application generated when someone "
-      + "opened the document's preview, or, for the documents with no printable of their own (a "
-      + "purchase invoice, a goods receipt), the supplier's own document attached as its main "
-      + "attachment. Returns "
+      + "as stored for it: the PDF generated for the document, or, for the documents with no "
+      + "printable of their own (a purchase invoice, a goods receipt), the supplier's own document "
+      + "attached as its main attachment. Returns "
       + "the file name, size, type and last update, and a short-lived signed download link (10 "
-      + "minutes) the user can open — never the file's content. This tool never generates a PDF: if "
-      + "the document has none yet, or the stored one predates the document's last change, it "
-      + "answers a clear 409 saying what to do (open the document's preview in the application, or "
-      + "send the document by email, and ask again). Pass id for one document or ids (at most " + McpDocumentPdfTool.MAX_DOCUMENTS
+      + "minutes) the user can open — never the file's content. For invoices, orders, quotations, "
+      + "shipments and returns the server generates the PDF itself when the document is completed "
+      + "through this MCP, and here when it is missing or out of date; a draft has none, so "
+      + "complete it first (and complete a reactivated document again). When it cannot, it "
+      + "answers a clear 409 saying what to do (right after completing a document, ask again in a "
+      + "few seconds; only if it persists, ask the user to open the document's preview in the "
+      + "application, or to send it by email from there, and ask again). "
+      + "A PDF the server generates is in Spanish (" + McpDocumentEmailRequest.DEFAULT_LANGUAGE
+      + ") by default, the same default as etendo_send_document_email; a current stored PDF is "
+      + "returned as it is, whatever its language. "
+      + "Pass id for one document or ids (at most " + McpDocumentPdfTool.MAX_DOCUMENTS
       + ") for several: one result per document, a failure on one does not stop the others. Not "
       + "available where the application has no Attachments tab (payments, fiscal monitors). "
       + "Requires read access to the document's window.";

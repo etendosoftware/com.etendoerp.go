@@ -42,6 +42,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /** Shared JWT and environment-role helpers used by the Etendo Go servlet. */
 public final class EtendoGoJwtSupport {
@@ -77,6 +78,11 @@ public final class EtendoGoJwtSupport {
     }
     User user = OBDal.getInstance().get(User.class, userId);
     if (user == null || !Boolean.TRUE.equals(user.isActive())) {
+      return false;
+    }
+    // ETP-5351: the support user is never paired with a GO account.
+    if (user.getClient() != null
+        && SupportAccessGuard.isSupportUser(user.getId(), user.getClient().getId())) {
       return false;
     }
     String username = user.getUsername();

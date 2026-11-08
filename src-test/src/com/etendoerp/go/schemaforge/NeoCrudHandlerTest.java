@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
@@ -336,14 +337,16 @@ class NeoCrudHandlerTest {
   class HandleWindowEntityCrud {
 
     /**
-     * ETP-5785: a PUT/PATCH/DELETE first asks {@link NeoActionRecordGuard#writeRefusalFor} whether
-     * the target record may be written, and that guard fails closed (404) without a session. The
-     * routing tests below are about what happens once the write is allowed, so only that target
-     * check is stubbed to allow; the rest of {@link NeoWritePreflight} still runs for real.
+     * ETP-5785: a PUT/PATCH/DELETE first asks {@link NeoActionRecordGuard} whether the target
+     * record may be written ({@code updateRefusalFor} for an update since ETP-6062,
+     * {@code writeRefusalFor} for a delete), and that guard fails closed (404) without a session.
+     * The routing tests below are about what happens once the write is allowed, so only that
+     * target check is stubbed to allow; the rest of {@link NeoWritePreflight} still runs for real.
      */
     private MockedStatic<NeoActionRecordGuard> allowWriteTarget() {
       MockedStatic<NeoActionRecordGuard> guard = Mockito.mockStatic(NeoActionRecordGuard.class);
       guard.when(() -> NeoActionRecordGuard.writeRefusalFor(any(), any())).thenReturn(null);
+      guard.when(() -> NeoActionRecordGuard.updateRefusalFor(any(), any())).thenReturn(null);
       return guard;
     }
 
@@ -490,7 +493,8 @@ class NeoCrudHandlerTest {
 
         verify(servlet).handleWithHooks(eq("assetsHandler"), any(), eq(putRequest), eq(response));
         verify(servlet, never()).writeResponse(eq(response), any());
-        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+        guard.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity),
+            argThat(ctx -> "REC-1".equals(ctx.getRecordId()))));
       }
     }
 
@@ -530,7 +534,8 @@ class NeoCrudHandlerTest {
         handler.handleWindowEntityCrud(spec,
             new NeoServlet.NeoPathInfo("testSpec", "lines", "LINE-1"), method, request, response);
 
-        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "LINE-1"));
+        guard.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity),
+            argThat(ctx -> "LINE-1".equals(ctx.getRecordId()))));
       }
 
       verify(servlet).handleWithHooks(eq("linesHook"), any(), eq(request), eq(response));
@@ -647,7 +652,8 @@ class NeoCrudHandlerTest {
       try (MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         handler.handleWindowEntityCrud(spec, pathInfo, "PUT", request, response);
 
-        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+        guard.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity),
+            argThat(ctx -> "REC-1".equals(ctx.getRecordId()))));
       }
 
       verify(servlet).writeResponse(eq(response), eq(hookResponse));
@@ -680,7 +686,8 @@ class NeoCrudHandlerTest {
       try (MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         handler.handleWindowEntityCrud(spec, pathInfo, "PATCH", request, response);
 
-        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+        guard.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity),
+            argThat(ctx -> "REC-1".equals(ctx.getRecordId()))));
       }
 
       verify(servlet).writeResponse(eq(response), eq(hookResponse));
@@ -877,6 +884,21 @@ class NeoCrudHandlerTest {
 
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("ETP-6062: a waived update that reaches the default write is refused with 404")
+    void waivedUpdateNeverReachesTheDefaultWrite() {
+      Tab adTab = mock(Tab.class);
+      NeoContext context = buildContext("PATCH", "tax-1", adTab,
+          mock(SFEntity.class), null, null);
+      context.setAttribute(NeoActionRecordGuard.ATTR_TARGET_WRITE_DELEGATED, Boolean.TRUE);
+
+      NeoResponse result = handler.handleDefault(context);
+
+      assertNotNull(result);
+      assertEquals(404, result.getHttpStatus());
+      verify(adTab, never()).getTable();
     }
 
     @Test
@@ -1949,6 +1971,39 @@ class NeoCrudHandlerTest {
 
         assertNotNull(result);
         assertEquals(HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
+      }
+    }
+
+    /**
+     * ETP-5953: a captured unique violation keeps core's translated wording in every language.
+     * The text guard only recognises the English "must be unique", so under a Spanish session the
+     * classification used to win and replaced core's sentence with the English
+     * {@code DUPLICATE_KEY_ERROR}, which the SPA cannot map to its friendly duplicate message.
+     */
+    @Test
+    @DisplayName("A captured duplicate keeps core's translated wording, with its code, in any language")
+    void capturedDuplicateKeepsCoreWordingInAnyLanguage() throws Exception {
+      String spanish = "Ya existe un/a Categoría del producto con el mismo (Entidad, Organización,"
+          + " Identificador). (Entidad, Organización, Identificador) debe ser único. Cambie los"
+          + " valores introducidos.";
+      JSONObject classification = new JSONObject().put("status", 409)
+          .put("code", "duplicate_key")
+          .put("message", "A record with this value already exists. This value must be unique.");
+      JSONObject response = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE,
+          new JSONObject().put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_FAILURE)
+              .put(JsonConstants.RESPONSE_ERROR, new JSONObject().put("message", spanish)
+                  .put("neoClassification", classification)));
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+          mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        messages.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        NeoResponse result = invokeCheckResponse(response);
+
+        assertEquals(HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals(spanish, error.getString("message"));
+        assertEquals("duplicate_key", error.getString("code"));
       }
     }
 
@@ -4589,6 +4644,56 @@ class NeoCrudHandlerTest {
         String result = invokeResolveParentFilter(childTab, "X");
         assertNull(result);
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // ETP-5051: the POST create runs inside the plan-quota gate
+  // -------------------------------------------------------------------------
+
+  /**
+   * The REST single and batch create runs its insert inside {@code NeoQuotaWriteGate}: the gate
+   * picks the service, checks the created row after the insert, a refusal is returned, and the
+   * caller goes on with the gate's result (core's error JSON when the gate's own commit failed).
+   * The POST path needs a live DAL and an {@code AD_Tab}, so the wiring is pinned on the source,
+   * anchored on the calls rather than on local variable names.
+   */
+  @Nested
+  @DisplayName("the POST create runs inside the plan-quota gate (ETP-5051)")
+  class QuotaGateWiring {
+
+    /**
+     * Also the ETP-5051 re-review W1 guard: the create ({@code executePostCreate}, callout cascade
+     * and add) is what the handler hands to {@code NeoQuotaWriteGate.run}, so the gate can refuse
+     * before it runs; {@code NeoQuotaWriteGateTest} shows it is never invoked on that refusal. The
+     * gate's {@code begin} is package-private, so no handler can open the gate around a create of
+     * its own.
+     */
+    @Test
+    void theCreateRunsItsInsertInsideTheGate() throws Exception {
+      String source = readSource("com/etendoerp/go/schemaforge/NeoCrudHandler.java")
+          .replaceAll("\\s+", " ");
+
+      int run = source.indexOf("NeoQuotaWriteGate.run(");
+      int insert = source.indexOf("executePostCreate(", run);
+      int refusal = source.indexOf(".refusal()", run);
+      int returned = source.indexOf("return ", refusal);
+      int result = source.indexOf(".result()", returned);
+
+      assertTrue(run >= 0, "NeoCrudHandler no longer runs its create inside the quota gate");
+      assertTrue(insert > run && insert < refusal,
+          "the create is no longer handed to the gate (it must run inside run(...))");
+      assertTrue(returned > refusal, "a quota refusal is no longer returned to the caller");
+      assertTrue(result > returned, "the caller no longer goes on with the gate's result");
+    }
+
+    private String readSource(String relative) throws java.io.IOException {
+      java.nio.file.Path fromRoot = java.nio.file.Paths.get("modules/com.etendoerp.go/src",
+          relative);
+      java.nio.file.Path file = java.nio.file.Files.exists(fromRoot) ? fromRoot
+          : java.nio.file.Paths.get("src", relative);
+      return new String(java.nio.file.Files.readAllBytes(file),
+          java.nio.charset.StandardCharsets.UTF_8);
     }
   }
 }

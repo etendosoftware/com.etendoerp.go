@@ -38,10 +38,12 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import org.openbravo.base.structure.BaseOBObject;
 
@@ -89,6 +91,11 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   private static final Logger log = LogManager.getLogger(PurchaseInvoiceHeaderHandler.class);
 
+  /** Header field of the vendor's contact ({@code C_Invoice.AD_User_ID}). */
+  static final String FIELD_USER_CONTACT = "userContact";
+  /** Header field and {@code /defaults} record-context key of the vendor. */
+  static final String FIELD_BUSINESS_PARTNER = "businessPartner";
+
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
 
@@ -128,6 +135,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private ImportInOutLinesIntoInvoiceHandler importReceiptLinesHandler;
 
+  @Inject
+  private ImportOriginInvoiceLinesHandler importOriginInvoiceLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -154,6 +164,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     // ETP-5713: import the pending lines of a completed order / goods receipt into this draft.
     contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(false));
     contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(false));
+    // ETP-5876: a DRAFT rectificative takes its lines from a return or from the invoice it
+    // rectifies instead (the window's "Import from return" / "Import from source invoice").
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.returnContracts(false));
+    contracts.putAll(ImportOriginInvoiceLinesHandler.contracts(false));
     return contracts;
   }
 
@@ -168,20 +182,14 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   /**
    * {@inheritDoc} Reactivate is ruled out for an invoice {@link InvoiceReactivationGuard} would
-   * refuse to reactivate (ETP-5714).
+   * refuse to reactivate (ETP-5714), and the import actions that do not suit the kind of invoice
+   * it is: the order and goods ones on a rectificative, the return and origin ones on any other
+   * (ETP-5876).
    */
   @Override
   public Map<String, String> unavailableActions(BaseOBObject subject) {
-    return InvoiceDocumentAvailability.unavailable(subject);
-  }
-
-  /**
-   * {@inheritDoc} The invoice windows un-post a posted invoice before reactivating it
-   * ({@code preUnpost: true} in the SPA), so the MCP does too (ETP-5715).
-   */
-  @Override
-  public boolean unpostBeforeReactivate() {
-    return true;
+    return InvoiceDocumentAvailability.unavailable(subject,
+        RectificativeImportPolicy.forHeader(this::classifyDocType, false));
   }
 
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
@@ -204,6 +212,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
+    // ETP-5840 (QA CP-12b): an update that changes the invoice date copies it into the accounting
+    // and operation dates, as the UI callout does; before the rate guard, which reads that date.
+    mirrorInvoiceDateOnUpdate(context);
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
     resolveServerCreateFields(context);
     // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
@@ -250,6 +261,20 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (reactivationGuard != null) {
       return reactivationGuard;
     }
+    // ETP-5876: the import actions go with the KIND of invoice, as in the window — order and
+    // receipt on a normal one, return and origin invoice on a rectificative — and the delegates
+    // classify through this header's own rule, handed in on the request.
+    RectificativeImportPolicy importPolicy =
+        RectificativeImportPolicy.forHeader(this::classifyDocType, false);
+    context.setAttribute(RectificativeImportPolicy.ATTRIBUTE, importPolicy);
+    NeoResponse importKindRefusal = RectificativeImportGate.refuse(context, importPolicy);
+    if (importKindRefusal != null) {
+      return importKindRefusal;
+    }
+    NeoResponse unpostRefusal = unpostBeforeReactivation(context, postingService);
+    if (unpostRefusal != null) {
+      return unpostRefusal;
+    }
     return NeoHeaderActionRouter.dispatch(
         context,
         currencyOptionsHandler,
@@ -259,6 +284,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         tbaiXmlgeneratorHandler,
         importOrderLinesHandler,
         importReceiptLinesHandler,
+        importOriginInvoiceLinesHandler,
         followUp.actionHandler());
   }
 
@@ -297,6 +323,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-6036: a contact default that is not one of the vendor's contacts is not a default.
+    dropForeignContactDefault(context);
+    // ETP-5684: say what ran when the reactivation un-posted the invoice first.
+    ReactivationUnpost.notePartial(context);
     // ETP-5840: a create whose currency or accounting date only the create cascade derived; before
     // the rate-document sync, which must see the resolved rate.
     NeoResponse rateRefusal = currencyRate.afterWrite(context);
@@ -355,6 +385,46 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       log.error("Error enriching purchase invoice", e);
       return null;
     }
+  }
+
+  /**
+   * ETP-6036 — removes {@code userContact} from a {@code /defaults} answer unless it is a contact
+   * of the business partner the caller sent as record context.
+   *
+   * <p>{@code C_Invoice.AD_User_ID} has no AD default, so the generic defaults resolution
+   * preselected the first row of the user combo — {@code Admin}, whoever was logged in — and an
+   * agent copying it into {@code etendo_create} would name Admin as the vendor's contact
+   * (pre-ticket etendo-ai#50). Fixed here, in this window's customization, and not in the shared
+   * combo fallback, which other windows rely on (price lists, payment methods, SII keys). With a
+   * business partner sent, a contact of that partner (what its callout sets) is kept.</p>
+   *
+   * @param context the current request; anything but a {@code DEFAULTS} answer is left untouched
+   */
+  static void dropForeignContactDefault(NeoContext context) {
+    if (context == null || !NeoEndpointType.DEFAULTS.equals(context.getEndpointType())
+        || context.getPreviousResult() == null || context.getPreviousResult().getBody() == null) {
+      return;
+    }
+    JSONObject defaults = context.getPreviousResult().getBody().optJSONObject("defaults");
+    String contactId = defaults == null ? null
+        : StringUtils.trimToNull(defaults.optString(FIELD_USER_CONTACT, null));
+    if (contactId == null) {
+      return;
+    }
+    Map<String, String> params = context.getQueryParams();
+    String partnerId = params == null ? null
+        : StringUtils.trimToNull(params.get(FIELD_BUSINESS_PARTNER));
+    if (partnerId != null && isContactOf(contactId, partnerId)) {
+      return;
+    }
+    defaults.remove(FIELD_USER_CONTACT);
+    defaults.remove(FIELD_USER_CONTACT + "$_identifier");
+  }
+
+  private static boolean isContactOf(String userId, String partnerId) {
+    User user = OBDal.getInstance().get(User.class, userId);
+    return user != null && user.getBusinessPartner() != null
+        && partnerId.equals(user.getBusinessPartner().getId());
   }
 
   @Override

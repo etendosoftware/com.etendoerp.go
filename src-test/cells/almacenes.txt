@@ -3,13 +3,15 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=almacenes [-Pkind=mock|integration|all]
 
-# --- con mocks (25)
+# --- con mocks (29)
 com.etendoerp.go.schemaforge.GoodsMovementLineHandlerTest
 com.etendoerp.go.schemaforge.GoodsMovementProcessGuardTest
 com.etendoerp.go.schemaforge.GoodsMovementsHeaderHandlerTest
 com.etendoerp.go.schemaforge.InternalConsumptionLineHandlerTest
 com.etendoerp.go.schemaforge.InventoryLineHandlerTest
 com.etendoerp.go.schemaforge.InventoryStockReportHandlerTest
+com.etendoerp.go.schemaforge.MovementWindowTest
+com.etendoerp.go.schemaforge.OrderLineMovementAllocationTest
 com.etendoerp.go.schemaforge.PriceListHeaderHandlerTest
 com.etendoerp.go.schemaforge.PriceListVersionHandlerTest
 com.etendoerp.go.schemaforge.PriceListVersionResolverTest
@@ -18,6 +20,7 @@ com.etendoerp.go.schemaforge.ProductCategoryDefaultHandlerTest
 com.etendoerp.go.schemaforge.ProductCostingHandlerTest
 com.etendoerp.go.schemaforge.ProductDefaultsHandlerTest
 com.etendoerp.go.schemaforge.ProductHandlerUtilsTest
+com.etendoerp.go.schemaforge.ProductMovementsPolicyTest
 com.etendoerp.go.schemaforge.ProductPriceHandlerTest
 com.etendoerp.go.schemaforge.ProductStockWarehouseHandlerTest
 com.etendoerp.go.schemaforge.ProductTransactionsHandlerTest
@@ -26,10 +29,10 @@ com.etendoerp.go.schemaforge.handlers.InternalConsumptionHeaderHandlerTest
 com.etendoerp.go.schemaforge.handlers.InventoryHandlerTest
 com.etendoerp.go.schemaforge.handlers.ProductAccountingHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.GoodsMovementProductSelectorPolicyTest
+com.etendoerp.go.schemaforge.selector.policy.ProductPriceSelectorPolicyTest
 com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelperTest
 com.etendoerp.go.schemaforge.util.NeoLocatorSelectorHelperTest
 com.etendoerp.go.schemaforge.webhooks.SFCostingCadenceTest
 
 # --- integración (BD) (1)
 com.etendoerp.go.schemaforge.StorageDetailCostColumnsIntegrationTest
-

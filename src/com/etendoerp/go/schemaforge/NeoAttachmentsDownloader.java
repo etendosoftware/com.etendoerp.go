@@ -93,7 +93,8 @@ public final class NeoAttachmentsDownloader {
       writeError(response, 400, NeoAttachmentsHelper.ATTACHMENTID_REQUIRED);
       return;
     }
-    Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
+    // ETP-5819: another tenant's attachment is answered exactly like a missing one.
+    Attachment attachment = TenantOwnership.loadOwned(Attachment.class, attachmentId);
     if (attachment == null) {
       writeError(response, 404, NeoAttachmentsHelper.ERR_ATTACHMENT_NOT_FOUND);
       return;

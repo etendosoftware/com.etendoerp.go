@@ -341,6 +341,15 @@ class FinancialAccountMovementActionsTest {
     }
 
     @Test
+    @DisplayName("listMovements refuses a limit beyond the int range with 422, not a 500")
+    void listRefusesOversizedLimit() throws Exception {
+      NeoResponse r = actions.handle(ctx("listMovements",
+          new JSONObject().put("limit", "3000000000"), "GET"));
+      assertEquals(422, r.getHttpStatus());
+      assertTrue(calls.isEmpty());
+    }
+
+    @Test
     @DisplayName("movementGlItems is the endpoint's G/L item lookup, search as q")
     void glItems() throws Exception {
       endpointAnswer = NeoResponse.ok(new JSONObject());

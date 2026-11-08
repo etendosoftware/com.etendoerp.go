@@ -50,6 +50,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Criterion;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
@@ -86,13 +87,34 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *       in GET responses for draft invoices that carry a positive {@code etgoTotalDiscount}.</li>
  *   <li>{@code followUpFlows()} — the one goods-shipment follow-up and its sales-side wiring,
  *       and the {@code followUp} annotation written by {@code afterHandle()} (ETP-5576).</li>
+ *   <li>{@code afterHandle()} on a CRUD write — the TicketBAI / VERI*FACTU rectificative defaults
+ *       are applied to the written invoice and echoed in the write response (ETP-5747).</li>
  * </ul>
- *
- * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  *
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  */
 public class SalesInvoiceHeaderHandlerTest {
+
+  /**
+   * ETP-6007: without a DAL, {@code OBContext.setAdminMode(true)} pushes onto its thread-local
+   * stack and only then throws (no session factory). The guards this class drives — {@code
+   * InvoiceReactivationGuard#readInvoice}, {@code CompletedInvoiceWriteFence#read} and {@code
+   * DocumentCurrencyRate} — all call it OUTSIDE their {@code try}, so the {@code finally} that
+   * would restore the frame is never entered, and each guard then swallows the exception ("Could
+   * not evaluate the reactivation guard for invoice …"). The cases pass and the orphan frames are
+   * charged to the next {@code OBBaseTest} class in the same Gradle worker running as a non-admin
+   * user — {@code StorageDetailCostColumnsIntegrationTest} in the merge-block cut. Same symptom and
+   * same remedy as ETP-5953 ({@code NeoDefaultsServiceTest}, {@code NeoProcessServiceTest}).
+   *
+   * <p>The root fix is to make those guards enter through {@code NeoAdminMode#enter}, which already
+   * restores the frame when {@code setAdminMode} throws; that is product code, so it goes in its
+   * own ticket. It is a test-environment leak only: in production an {@code OBContext} always
+   * exists, so {@code setAdminContextLocally()} is never reached and the pairs stay balanced.
+   */
+  @After
+  public void clearAdminModeLeakedWithoutDal() {
+    OBContext.clearAdminModeStack();
+  }
 
   /**
    * Creates a {@link SalesInvoiceHeaderHandler} with its {@code @Inject} fields replaced by the
@@ -175,11 +197,6 @@ public class SalesInvoiceHeaderHandlerTest {
   /**
    * Verifies that handle returns the register-payment response when the payment handler matches.
    */
-  /** ETP-5715: the invoice window opts into un-posting before a reactivation, like its SPA. */
-  @Test
-  public void testUnpostsBeforeReactivation() {
-    assertTrue(new SalesInvoiceHeaderHandler().unpostBeforeReactivate());
-  }
 
   @Test
   public void testHandleDispatchesToRegisterPaymentHandler() throws Exception {
@@ -478,7 +495,7 @@ public class SalesInvoiceHeaderHandlerTest {
     assertEquals(447.10, resultData.getJSONObject(2).getDouble("grandTotalAmount"), 0.005); // adjusted
   }
 
-  // ── enrichSourceInvoice() ──────────────────────────────────────────────────
+  // ── detail GET: no deduced source invoice (ETP-6002) ──────────────────────────────────────────────────
 
   /**
    * Builds a context for detail GET (recordId != null).
@@ -507,35 +524,32 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that enrichSourceInvoice injects both sourceReturnReceipt and sourceInvoice
-   * when the SQL query finds a return receipt linked to an original invoice.
+   * ETP-6002: the detail GET no longer deduces {@code sourceInvoice} / {@code sourceReturnReceipt}
+   * through the return chain (invoice line → return line → cancelled shipment line → invoice).
+   * A sales invoice relates to other invoices only through {@code C_Invoice_Reverse}
+   * ({@code originInvoices} / {@code rectifyingInvoices}), and the return receipt is already
+   * listed by {@code linkedShipments}. Every statement here would answer a row, so a surviving
+   * deduction would show up.
    */
   @Test
-  public void testEnrichSourceInvoiceInjectsBothFieldsWhenReturnReceiptAndInvoiceFound() throws Exception {
+  public void testDetailGetDoesNotDeduceSourceInvoiceFromTheReturnChain() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
-      // ETP-5576: afterHandle now also runs the follow-up lookup (and other enrichers) on the
-      // same connection. Route only enrichSourceInvoice's statement to the stubbed row; every
-      // other statement reads an empty result, so none of them consumes rs.next().
       PreparedStatement otherPs = mock(PreparedStatement.class);
       ResultSet emptyRs = mock(ResultSet.class);
       when(otherPs.executeQuery()).thenReturn(emptyRs);
       when(conn.prepareStatement(anyString())).thenReturn(otherPs);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(contains("Canceled_Inoutline_ID"))).thenReturn(ps);
-      ResultSet rs = mock(ResultSet.class);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString("ret_id")).thenReturn("ret-001");
-      when(rs.getString("ret_doc")).thenReturn("RRET-001");
-      when(rs.getString("ret_status")).thenReturn("CO");
-      when(rs.getString("inv_id")).thenReturn("inv-orig-001");
-      when(rs.getString("inv_doc")).thenReturn("INV-ORIG-001");
+      PreparedStatement chainPs = mock(PreparedStatement.class);
+      when(conn.prepareStatement(contains("Canceled_Inoutline_ID"))).thenReturn(chainPs);
+      ResultSet chainRs = mock(ResultSet.class);
+      when(chainPs.executeQuery()).thenReturn(chainRs);
+      when(chainRs.next()).thenReturn(true, false);
+      when(chainRs.getString("ret_id")).thenReturn("ret-001");
+      when(chainRs.getString("inv_id")).thenReturn("inv-orig-001");
 
       JSONObject body = invoiceBodyNoDiscount("inv-001");
       NeoContext ctx = getDetailCtx("inv-001");
@@ -546,69 +560,17 @@ public class SalesInvoiceHeaderHandlerTest {
       assertNotNull(result);
       JSONObject rec = result.getBody()
           .getJSONObject("response").getJSONArray("data").getJSONObject(0);
-
-      JSONObject retReceipt = rec.getJSONObject("sourceReturnReceipt");
-      assertEquals("ret-001", retReceipt.getString("id"));
-      assertEquals("RRET-001", retReceipt.getString("documentNo"));
-      assertEquals("CO", retReceipt.getString("documentStatus"));
-
-      JSONObject sourceInvoice = rec.getJSONObject("sourceInvoice");
-      assertEquals("inv-orig-001", sourceInvoice.getString("id"));
-      assertEquals("INV-ORIG-001", sourceInvoice.getString("documentNo"));
-    }
-  }
-
-  /**
-   * Verifies that enrichSourceInvoice injects only sourceReturnReceipt (no sourceInvoice key)
-   * when the SQL row has a return receipt but no original invoice (inv_id = null).
-   */
-  @Test
-  public void testEnrichSourceInvoiceInjectsOnlyReturnReceiptWhenNoOriginalInvoice() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-      // ETP-5576: afterHandle now also runs the follow-up lookup (and other enrichers) on the
-      // same connection. Route only enrichSourceInvoice's statement to the stubbed row; every
-      // other statement reads an empty result, so none of them consumes rs.next().
-      PreparedStatement otherPs = mock(PreparedStatement.class);
-      ResultSet emptyRs = mock(ResultSet.class);
-      when(otherPs.executeQuery()).thenReturn(emptyRs);
-      when(conn.prepareStatement(anyString())).thenReturn(otherPs);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(contains("Canceled_Inoutline_ID"))).thenReturn(ps);
-      ResultSet rs = mock(ResultSet.class);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString("ret_id")).thenReturn("ret-002");
-      when(rs.getString("ret_doc")).thenReturn("RRET-002");
-      when(rs.getString("ret_status")).thenReturn("DR");
-      when(rs.getString("inv_id")).thenReturn(null); // no original invoice
-
-      JSONObject body = invoiceBodyNoDiscount("inv-002");
-      NeoContext ctx = getDetailCtx("inv-002");
-      ctx.setPreviousResult(NeoResponse.ok(body));
-
-      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
-
-      assertNotNull(result);
-      JSONObject rec = result.getBody()
-          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
-
-      assertNotNull(rec.optJSONObject("sourceReturnReceipt"));
+      assertFalse(rec.has("sourceReturnReceipt"));
       assertFalse(rec.has("sourceInvoice"));
     }
   }
 
   /**
-   * Verifies that neither sourceReturnReceipt nor sourceInvoice is injected
-   * when the SQL returns no rows (regular invoice, no Canceled_Inoutline_ID).
+   * Verifies that neither sourceReturnReceipt nor sourceInvoice is injected on a detail GET
+   * whose statements return no rows, and that the follow-up annotation still runs.
    */
   @Test
-  public void testEnrichSourceInvoiceInjectsNothingWhenNoRowsFound() throws Exception {
+  public void testDetailGetInjectsNoSourceInvoiceWhenNoRowsFound() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -645,16 +607,15 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that enrichSourceInvoice is NOT called for list GET (recordId == null),
-   * so neither sourceReturnReceipt nor sourceInvoice appears in list results.
+   * Verifies that neither sourceReturnReceipt nor sourceInvoice appears in list results.
    */
   @Test
-  public void testEnrichSourceInvoiceNotCalledForListView() throws Exception {
+  public void testListViewInjectsNoSourceInvoice() throws Exception {
     JSONObject body = invoiceBody(false, 0.0, 100.0, 100.0);
     NeoContext ctx = getCtx(); // recordId = null — list view
     ctx.setPreviousResult(NeoResponse.ok(body));
 
-    // No OBDal mock needed — enrichSourceInvoice should not be reached
+    // No OBDal mock needed — list view runs no detail enrichment
     NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
 
     assertNotNull(result);
@@ -917,6 +878,16 @@ public class SalesInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * The static rule behind {@code classifyDocType} (its true/false cases are covered through
+   * {@code resolveSubtype} above) is also called on an invoice whose document type may be unset —
+   * the sales-invoice line pre-hook reads it off the parent. A missing type is not a rectificative.
+   */
+  @Test
+  public void isRectificativeDocType_nullDocType_isFalse() {
+    assertFalse(SalesInvoiceHeaderHandler.isRectificativeDocType(null));
+  }
+
   @Test
   public void resolveSubtype_ariCategory_returnsFac() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -986,7 +957,7 @@ public class SalesInvoiceHeaderHandlerTest {
   @Test
   public void afterHandle_positiveRectificativaViaArc_keepsPositiveAmounts() throws Exception {
     JSONObject body = invoiceBodyWithDocType("dt-arc", 150.0, 100.0);
-    NeoContext ctx = getCtx(); // list mode — no recordId, no enrichSourceInvoice call
+    NeoContext ctx = getCtx(); // list mode — no recordId, no detail enrichment
     ctx.setPreviousResult(NeoResponse.ok(body));
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -1122,11 +1093,11 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that a SQL exception in enrichSourceInvoice is caught silently —
+   * Verifies that a SQL exception in the detail enrichments is caught silently —
    * afterHandle still returns a valid response without rethrowing.
    */
   @Test
-  public void testEnrichSourceInvoiceSqlExceptionCaughtSilently() throws Exception {
+  public void testDetailEnrichmentSqlExceptionCaughtSilently() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -1723,6 +1694,73 @@ public class SalesInvoiceHeaderHandlerTest {
     assertSame(fromShipments, handler.handle(shipmentCtx));
   }
 
+  @Test
+  public void actionContracts_publishTheReturnAndOriginImports() throws Exception {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesInvoiceHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(List.of("availableReturns", "availableReturnLines",
+        "importReturnLines", "availableOriginInvoices", "availableOriginInvoiceLines",
+        "importOriginInvoiceLines")));
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "importReturnLines", new JSONObject().put("returnId", "r1")));
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "importOriginInvoiceLines", new JSONObject().put("invoiceId", "f1")));
+    assertTrue("the sales origin import keeps the order line",
+        contracts.get("importOriginInvoiceLines").getDescription().contains("order line"));
+  }
+
+  /**
+   * The import actions go with the KIND of invoice (ETP-5876), judged by this header's own rule:
+   * the order import of a rectificative is refused and never reaches its delegate, a return import
+   * on a normal invoice too, and the delegates are handed the same policy on the request.
+   */
+  @Test
+  public void handle_routesTheImportsByTheKindOfInvoice() throws Exception {
+    ImportOrderLinesIntoInvoiceHandler orders = mock(ImportOrderLinesIntoInvoiceHandler.class);
+    ImportInOutLinesIntoInvoiceHandler shipments = mock(ImportInOutLinesIntoInvoiceHandler.class);
+    SalesInvoiceHeaderHandler handler = salesWithImportDelegates(orders, shipments);
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBContext context = mock(OBContext.class);
+      org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+      when(client.getId()).thenReturn("c1");
+      when(context.getCurrentClient()).thenReturn(client);
+      ctxMock.when(OBContext::getOBContext).thenReturn(context);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getClient()).thenReturn(client);
+      when(invoice.getDocumentNo()).thenReturn("FVR1");
+      DocumentType type = mock(DocumentType.class);
+      when(type.getDocumentCategory()).thenReturn("ARC");
+      when(invoice.getTransactionDocument()).thenReturn(type);
+      when(dal.get(Invoice.class, "i1")).thenReturn(invoice);
+
+      NeoContext orderCtx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName("importOrderLines").recordId("i1")
+          .build();
+      NeoResponse refused = handler.handle(orderCtx);
+
+      assertEquals("a rectificative takes no order import", 422, refused.getHttpStatus());
+      assertEquals("importNotAvailableOnRectificative",
+          refused.getBody().getJSONObject("error").getString("code"));
+      Mockito.verify(orders, Mockito.never()).handle(any());
+
+      when(type.getDocumentCategory()).thenReturn("ARI");
+      NeoContext returnCtx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName("importReturnLines").recordId("i1")
+          .build();
+      assertEquals("a normal invoice takes no return import", "importRequiresRectificative",
+          handler.handle(returnCtx).getBody().getJSONObject("error").getString("code"));
+      assertNotNull("the policy travels on the request",
+          returnCtx.getAttribute(RectificativeImportPolicy.ATTRIBUTE));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
   // ── whole-set list totals (ETP-5757) ──────────────────────────────────────
 
   private static NeoContext listTotalsListCtx() {
@@ -1848,5 +1886,281 @@ public class SalesInvoiceHeaderHandlerTest {
       totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
           Mockito.never());
     }
+  }
+
+  // ── ETP-5747: the CRUD write response carries what the form needs ─────────────
+
+  private static final String WRITE_RESPONSE_INVOICE = "inv-write-response";
+  private static final String WRITE_RESPONSE_DOCTYPE = "dt-rectificative";
+
+  private static NeoContext writeResponseCtx(String method, NeoResponse previous) {
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod(method).endpointType(NeoEndpointType.CRUD).recordId(WRITE_RESPONSE_INVOICE)
+        .requestBody(new JSONObject()).build();
+    ctx.setPreviousResult(previous);
+    return ctx;
+  }
+
+  private static JSONObject writtenInvoiceBody() throws JSONException {
+    JSONObject rec = new JSONObject().put("id", WRITE_RESPONSE_INVOICE)
+        .put("transactionDocument", WRITE_RESPONSE_DOCTYPE).put("organization", "org-write-response")
+        .put("aeatsiiClaveTipo", "F1");
+    return new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(rec)));
+  }
+
+  /** Every lookup answers one row whose first column is "Y" (rectificative doc type, TBAI on). */
+  private static void stubRectificativeLookups(MockedStatic<OBDal> dalMock) throws SQLException {
+    OBDal dal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(dal.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString(1)).thenReturn("Y");
+    DocumentType dt = mock(DocumentType.class);
+    when(dt.isEtsgIsRectificative()).thenReturn(true);
+    when(dal.get(DocumentType.class, WRITE_RESPONSE_DOCTYPE)).thenReturn(dt);
+  }
+
+  /**
+   * ETP-5747 repro: a PATCH/POST of a rectificative sales invoice answered a record with no
+   * {@code isRectificative}, so the SPA — which adopts a create's response as the record — never
+   * applied the SII "Tipo factura = R" default until a reload. The write response now carries it,
+   * with the document-type keys, {@code tbaiConfigActive} and the fiscal defaults just written.
+   */
+  @Test
+  public void writeResponseCarriesIsRectificativeAndFiscalDefaults() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      stubRectificativeLookups(dalMock);
+      NeoResponse previous = new NeoResponse(201, writtenInvoiceBody())
+          .withHeader("X-Test", "kept");
+      Map<String, Object> defaults = new HashMap<>();
+      defaults.put("tbaiReverseinvoicecode", "R4");
+      defaults.put("etvfacInvType", "R1");
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
+          writeResponseCtx("POST", previous), null, defaults);
+
+      assertNotNull(result);
+      assertEquals(201, result.getHttpStatus());
+      assertEquals("kept", result.getHeaders().get("X-Test"));
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0);
+      assertTrue(rec.getBoolean("isRectificative"));
+      assertTrue(rec.getBoolean("docTypeLocked"));
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
+      assertEquals("Y", rec.getString("tbaiConfigActive"));
+      assertEquals("R4", rec.getString("tbaiReverseinvoicecode"));
+      assertEquals("R1", rec.getString("etvfacInvType"));
+      // The captured result itself is never mutated.
+      assertFalse(previous.getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0).has("isRectificative"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * The SII authorization number injected by ETP-4783 survives: the completion is applied on top
+   * of that response, not instead of it.
+   */
+  @Test
+  public void writeResponseKeepsTheInjectedAuthorizationNumber() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      stubRectificativeLookups(dalMock);
+      JSONObject withAuthorization = writtenInvoiceBody();
+      withAuthorization.getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .put("aeatsiiAuthorizationno", "AUTH-1");
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
+          writeResponseCtx("PATCH", NeoResponse.ok(writtenInvoiceBody())),
+          NeoResponse.ok(withAuthorization), Collections.emptyMap());
+
+      JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
+      assertEquals("AUTH-1", rec.getString("aeatsiiAuthorizationno"));
+      assertTrue(rec.getBoolean("isRectificative"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * A response that does not carry the document type or the organization never gets a key
+   * computed from the missing value: "false" would overwrite the true value the client holds.
+   */
+  @Test
+  public void writeResponseNeverDerivesKeysFromAbsentValues() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data",
+        new JSONArray().put(new JSONObject().put("id", WRITE_RESPONSE_INVOICE))));
+
+    NeoResponse result = new SalesInvoiceHeaderHandler().completeWriteResponse(
+        writeResponseCtx("PATCH", NeoResponse.ok(body)), null, Collections.emptyMap());
+
+    JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
+    assertFalse(rec.has("isRectificative"));
+    assertFalse(rec.has("arInvoiceSubtype"));
+    assertFalse(rec.has("tbaiConfigActive"));
+    assertTrue(rec.getBoolean("docTypeLocked"));
+  }
+
+  /** An error, an id-less body and an {@code _onlyReturnIds} batch response are left alone. */
+  @Test
+  public void writeResponseLeavesErrorsAndIdsOnlyResponsesAlone() throws Exception {
+    assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
+        writeResponseCtx("PATCH", NeoResponse.error(422, "refused")), null,
+        Collections.emptyMap()));
+    assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
+        writeResponseCtx("PATCH", NeoResponse.ok(new JSONObject().put("response",
+            new JSONObject().put("data", new JSONArray())))), null, Collections.emptyMap()));
+    assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(
+        writeResponseCtx("PATCH", null), null, Collections.emptyMap()));
+
+    NeoContext idsOnly = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).idsOnlyResponse(true)
+        .requestBody(new JSONObject()).build();
+    idsOnly.setPreviousResult(NeoResponse.ok(writtenInvoiceBody()));
+    assertNull(new SalesInvoiceHeaderHandler().completeWriteResponse(idsOnly, null,
+        Collections.emptyMap()));
+  }
+
+  // ── ETP-5747: afterHandle wires the fiscal defaults into every CRUD write ──────
+
+  private static final String CREATED_INVOICE = "inv-created-5747";
+
+  /** A write body with an id only: no key is derived from an absent doc type / organization. */
+  private static JSONObject idOnlyWriteBody(String id) throws JSONException {
+    return new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(new JSONObject().put("id", id))));
+  }
+
+  /**
+   * Runs {@code afterHandle} with a DAL that finds nothing and answers no row, and with
+   * {@link SalesRectificativeFiscalDefaults#apply} replaced by a stub that returns {@code applied}.
+   *
+   * @param appliedIds receives the invoice ids {@code apply} was called with, in call order
+   * @return what {@code afterHandle} answered
+   */
+  private static NeoResponse afterHandleWithStubbedDefaults(NeoContext ctx,
+      Map<String, Object> applied, AtomicReference<List<String>> appliedIds) throws Exception {
+    List<String> ids = new java.util.ArrayList<>();
+    appliedIds.set(ids);
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<SalesRectificativeFiscalDefaults> defaultsMock =
+             Mockito.mockStatic(SalesRectificativeFiscalDefaults.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+      defaultsMock.when(() -> SalesRectificativeFiscalDefaults.apply(Mockito.nullable(String.class)))
+          .thenAnswer(i -> {
+            ids.add(i.getArgument(0));
+            return applied;
+          });
+
+      return new SalesInvoiceHeaderHandler().afterHandle(ctx);
+    }
+  }
+
+  private static Map<String, Object> tbaiDefaults() {
+    Map<String, Object> applied = new java.util.LinkedHashMap<>();
+    applied.put("tbaiIsreverseinvoice", true);
+    applied.put("tbaiReverseinvoicecode", "R4");
+    return applied;
+  }
+
+  /** PATCH: the defaults are applied to the URL record and merged into the echoed record. */
+  @Test
+  public void afterHandlePatchAppliesFiscalDefaultsToTheRecordAndEchoesThem() throws Exception {
+    NeoContext ctx = writeResponseCtx("PATCH",
+        NeoResponse.ok(idOnlyWriteBody(WRITE_RESPONSE_INVOICE)));
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    NeoResponse result = afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertEquals(Collections.singletonList(WRITE_RESPONSE_INVOICE), ids.get());
+    assertNotNull(result);
+    JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
+    assertTrue(rec.getBoolean("tbaiIsreverseinvoice"));
+    assertEquals("R4", rec.getString("tbaiReverseinvoicecode"));
+  }
+
+  /** POST: no URL id, so the defaults go to the id the create answered. */
+  @Test
+  public void afterHandlePostAppliesFiscalDefaultsToTheCreatedInvoice() throws Exception {
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(new JSONObject())
+        .build();
+    ctx.setPreviousResult(new NeoResponse(201, idOnlyWriteBody(CREATED_INVOICE)));
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    NeoResponse result = afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertEquals(Collections.singletonList(CREATED_INVOICE), ids.get());
+    assertNotNull(result);
+    assertEquals(201, result.getHttpStatus());
+    JSONObject rec = SalesInvoiceHeaderHandler.writtenRecord(result.getBody());
+    assertEquals(CREATED_INVOICE, rec.getString("id"));
+    assertEquals("R4", rec.getString("tbaiReverseinvoicecode"));
+  }
+
+  /** Batch import ({@code _onlyReturnIds}): the defaults are still written, the response is not enriched. */
+  @Test
+  public void afterHandleIdsOnlyWriteAppliesDefaultsButLeavesTheResponseAlone() throws Exception {
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).idsOnlyResponse(true)
+        .requestBody(new JSONObject()).build();
+    NeoResponse previous = new NeoResponse(201, idOnlyWriteBody(CREATED_INVOICE));
+    ctx.setPreviousResult(previous);
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    NeoResponse result = afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertEquals(Collections.singletonList(CREATED_INVOICE), ids.get());
+    assertNull(result);
+    assertFalse(SalesInvoiceHeaderHandler.writtenRecord(previous.getBody())
+        .has("tbaiReverseinvoicecode"));
+  }
+
+  /** A read never writes fiscal defaults. */
+  @Test
+  public void afterHandleGetNeverAppliesFiscalDefaults() throws Exception {
+    NeoContext ctx = writeResponseCtx("GET",
+        NeoResponse.ok(idOnlyWriteBody(WRITE_RESPONSE_INVOICE)));
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertTrue(ids.get().isEmpty());
+  }
+
+  /** An ACTION POST (register payment, clone, …) is not a header write: no fiscal defaults. */
+  @Test
+  public void afterHandleActionPostNeverAppliesFiscalDefaults() throws Exception {
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("cloneRecord")
+        .recordId(WRITE_RESPONSE_INVOICE).requestBody(new JSONObject()).build();
+    ctx.setPreviousResult(NeoResponse.ok(idOnlyWriteBody(WRITE_RESPONSE_INVOICE)));
+    AtomicReference<List<String>> ids = new AtomicReference<>();
+
+    NeoResponse result = afterHandleWithStubbedDefaults(ctx, tbaiDefaults(), ids);
+
+    assertTrue(ids.get().isEmpty());
+    assertNull(result);
   }
 }

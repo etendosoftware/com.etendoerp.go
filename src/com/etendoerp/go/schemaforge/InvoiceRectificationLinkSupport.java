@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -79,8 +80,10 @@ class InvoiceRectificationLinkSupport {
    * {@code NeoCrudHandler#executePostCreate}.
    *
    * <p>ETP-4919: {@code originInvoices} (a JSON array of invoice ids) is the current shape sent
-   * by the "Import from Source Invoice" popup — a rectificativa can be linked to more than one
-   * source invoice across separate import runs. {@code originInvoice} (a single id) is kept as a
+   * by the purchase "Import from Source Invoice" popup — a rectificativa can be linked to more
+   * than one source invoice across separate import runs. The sales popup no longer sends it: a
+   * sales rectificative is linked by its line creates (ETP-6002,
+   * {@link SalesRectificativeLineLinkSupport}). {@code originInvoice} (a single id) is kept as a
    * backward-compatible alias: if present, its id is folded into the same captured set. Both
    * keys may be present at once; ids are de-duplicated.
    *
@@ -202,13 +205,33 @@ class InvoiceRectificationLinkSupport {
       log.warn("Cannot create reverse link: invoice={} origin={}", invoiceId, originInvoiceId);
       return;
     }
+    ensureReverseLink(invoice, origin);
+  }
+
+  /**
+   * Saves a {@code C_Invoice_Reverse} row tying {@code invoice} (the rectificative) to
+   * {@code origin} (the invoice it rectifies) unless that exact pair already exists. The one
+   * dedupe-then-create of the link, shared by the header PATCH ({@link #persistOriginInvoice}), the
+   * line create of a sales rectificative ({@link SalesRectificativeLineLinkSupport}, ETP-6002),
+   * the invoice created from a return document
+   * ({@link ReturnInvoiceSupport#linkRectifiedInvoices}) and the origin-invoice import action
+   * ({@link ImportOriginInvoiceLinesHandler}, ETP-5876, which flushes on {@code true} itself).
+   *
+   * <p>Does not flush: the caller decides when {@code C_INVOICE_REVERSE_TRG} runs, and so where its
+   * refusal (processed invoice, different business partner) surfaces.
+   *
+   * @param invoice the rectificative invoice, never {@code null}
+   * @param origin  the invoice it rectifies, never {@code null}
+   * @return {@code true} when a new row was saved, {@code false} when the pair already existed
+   */
+  static boolean ensureReverseLink(Invoice invoice, Invoice origin) {
     List<ReversedInvoice> existing = OBDal.getInstance()
         .createCriteria(ReversedInvoice.class)
         .add(Restrictions.eq(ReversedInvoice.PROPERTY_INVOICE, invoice))
         .add(Restrictions.eq(ReversedInvoice.PROPERTY_REVERSEDINVOICE, origin))
         .list();
     if (!existing.isEmpty()) {
-      return;
+      return false;
     }
     ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
     link.setClient(invoice.getClient());
@@ -216,6 +239,7 @@ class InvoiceRectificationLinkSupport {
     link.setInvoice(invoice);
     link.setReversedInvoice(origin);
     OBDal.getInstance().save(link);
+    return true;
   }
 
   // ---------------------------------------------------------------------------
@@ -278,8 +302,9 @@ class InvoiceRectificationLinkSupport {
   }
 
   /**
-   * Injects {@code rectifyingInvoices} (a JSON array of {@code {id, documentNo}}, one entry per
-   * rectificativa that rectifies THIS invoice) into the record, by querying
+   * Injects {@code rectifyingInvoices} (a JSON array of {@code {id, documentNo, documentStatus,
+   * grandTotalAmount, currency$_identifier}}, one entry per rectificativa that rectifies THIS
+   * invoice) into the record, by querying
    * {@code C_Invoice_Reverse} for ALL active links where this invoice is the REVERSED one
    * (ETP-5745 CP-12) — the mirror image of {@link #enrichOriginInvoice}, which reads the same
    * table in the opposite direction.
@@ -294,9 +319,10 @@ class InvoiceRectificationLinkSupport {
   @SuppressWarnings("java:S2077")
   void enrichRectifyingInvoices(JSONObject rec, String invoiceId) throws Exception {
     String sql =
-        "SELECT inv.c_invoice_id, inv.documentno "
+        "SELECT inv.c_invoice_id, inv.documentno, inv.docstatus, inv.grandtotal, cur.iso_code "
         + "FROM c_invoice_reverse r "
         + "JOIN c_invoice inv ON inv.c_invoice_id = r.c_invoice_id "
+        + "LEFT JOIN c_currency cur ON cur.c_currency_id = inv.c_currency_id "
         + "WHERE r.reversed_c_invoice_id = ? AND r.isactive = 'Y' "
         + "ORDER BY inv.documentno";
     try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
@@ -304,7 +330,17 @@ class InvoiceRectificationLinkSupport {
       try (ResultSet rs = ps.executeQuery()) {
         JSONArray rectifying = new JSONArray();
         while (rs.next()) {
-          rectifying.put(new JSONObject().put("id", rs.getString(1)).put("documentNo", rs.getString(2)));
+          // ETP-6002: the fields every invoice chip renders (amount, currency, status), the same
+          // shape GoodsShipmentHeaderHandler#enrichLinkedInvoices returns — the related-documents
+          // chip of a rectificative used to show its number only. Purely additive keys.
+          BigDecimal total = rs.getBigDecimal(4);
+          String iso = rs.getString(5);
+          rectifying.put(new JSONObject()
+              .put("id", rs.getString(1))
+              .put("documentNo", rs.getString(2))
+              .put("documentStatus", rs.getString(3))
+              .put("grandTotalAmount", total != null ? total : JSONObject.NULL)
+              .put("currency$_identifier", iso != null ? iso : JSONObject.NULL));
         }
         rec.put(AbstractInvoiceHeaderHandler.FIELD_RECTIFYING_INVOICES, rectifying);
       }

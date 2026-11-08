@@ -225,6 +225,11 @@ validate_base_ref() {
     echo "Fetch the target branch or pass a valid commit SHA."
     exit 1
   fi
+
+  # Sonar gets the base as a bare name and reads the local branch of that name before origin's:
+  # a stale local main would count code already in main as new (ETP-6067). Checked here, before
+  # the tests run, so a base that needs fixing by hand stops the run at once.
+  "$SCRIPT_DIR/scripts/sonar-base-branch.sh" "$BASE_REF" || exit 1
 }
 
 load_env_file "$SCRIPT_DIR/.env"

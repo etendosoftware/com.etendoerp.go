@@ -42,6 +42,7 @@ import org.openbravo.client.application.process.BaseProcessActionHandler;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Attachment;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 
 import com.etendoerp.sif.general.data.DigitalCertificate;
@@ -64,6 +65,7 @@ public class NeoCertificateHelper {
   private static final Logger log = LogManager.getLogger(NeoCertificateHelper.class);
   private static final String DATE_FORMAT = "dd/MM/yyyy";
   private static final String PARAM_ORG_ID = "orgId";
+  private static final String KEY_EXISTS = "exists";
 
   // RPJ certs (Representante Persona Jurídica): organizationIdentifier=VATES-A39200019
   // OID 2.5.4.97 — some JDK versions return the OID string instead of the attribute name.
@@ -99,27 +101,41 @@ public class NeoCertificateHelper {
       if (orgId == null || orgId.isBlank()) {
         return NeoResponse.error(400, "Required parameter: orgId");
       }
-      var session = OBDal.getInstance().getSession();
-      @SuppressWarnings("unchecked")
-      var q = session.createNativeQuery(
-          "SELECT expiration_date FROM etsg_certificate" +
-          " WHERE ad_org_id = :orgId AND isactive = 'Y'" +
-          " ORDER BY expiration_date DESC LIMIT 1");
-      q.setParameter(PARAM_ORG_ID, orgId);
-      Object row = q.uniqueResult();
+      if (!isCallersOrg(orgId)) {
+        return NeoResponse.ok(new JSONObject().put(KEY_EXISTS, false));
+      }
+      Object row = activeCertificateExpiry(orgId);
       JSONObject resp = new JSONObject();
       if (row != null) {
-        resp.put("exists", true);
+        resp.put(KEY_EXISTS, true);
         SimpleDateFormat sdf = new SimpleDateFormat(DATE_FORMAT);
         resp.put("validTo", sdf.format(row));
       } else {
-        resp.put("exists", false);
+        resp.put(KEY_EXISTS, false);
       }
       return NeoResponse.ok(resp);
     } catch (Exception e) {
       log.error("Certificate GET failed", e);
       return NeoResponse.error(500, "Internal error retrieving certificate status");
     }
+  }
+
+  /**
+   * The expiry date of the organization's active signing certificate, the latest one when there
+   * are several; {@code null} when it has none. Shared by {@code GET /sws/neo/certificate} and the
+   * agents' read of the same status (ETP-5852).
+   *
+   * @param orgId the organization
+   * @return the expiry date, or {@code null}
+   */
+  public static java.util.Date activeCertificateExpiry(String orgId) {
+    Object row = OBDal.getInstance().getSession().createNativeQuery(
+            "SELECT expiration_date FROM etsg_certificate"
+                + " WHERE ad_org_id = :orgId AND isactive = 'Y'"
+                + " ORDER BY expiration_date DESC LIMIT 1")
+        .setParameter(PARAM_ORG_ID, orgId)
+        .uniqueResult();
+    return row instanceof java.util.Date ? (java.util.Date) row : null;
   }
 
   /**
@@ -135,6 +151,9 @@ public class NeoCertificateHelper {
       String orgId = request.getParameter(PARAM_ORG_ID);
       if (orgId == null || orgId.isBlank()) {
         return NeoResponse.error(400, "Required parameter: orgId");
+      }
+      if (!isCallersOrg(orgId)) {
+        return NeoResponse.ok(new JSONObject().put("deleted", 0));
       }
 
       int deleted = deleteCertificatesForOrg(orgId);
@@ -174,6 +193,9 @@ public class NeoCertificateHelper {
       if (filePart == null || orgId == null || orgId.isBlank()
           || password == null || password.isBlank()) {
         return NeoResponse.error(400, "Required fields: certificate (file), orgId, password");
+      }
+      if (!isCallersOrg(orgId)) {
+        return NeoResponse.error(404, "Organization not found");
       }
 
       String fileName = resolveFileName(filePart);
@@ -322,6 +344,15 @@ public class NeoCertificateHelper {
     for (Attachment attachment : attachCrit.list()) {
       SifGeneralUtils.attachManager.delete(attachment);
     }
+  }
+
+  /**
+   * ETP-5819: {@code orgId} comes from the request and every certificate route writes or reads by it
+   * with native SQL, which neither the DAL's filters nor the write guard see. Another tenant's
+   * organization answers exactly like a missing one.
+   */
+  private static boolean isCallersOrg(String orgId) {
+    return TenantOwnership.loadOwned(Organization.class, orgId) != null;
   }
 
   /**

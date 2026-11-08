@@ -138,6 +138,8 @@ public class NeoCloneRecordHandler implements NeoHandler {
 
         OBDal.getInstance().save(clone);
         OBDal.getInstance().flush();
+        // ETP-5051: the plan-quota check of the clone and the children a hook copied with it.
+        NeoQuotaCreateCheck.requireAllowedDocument(clone);
 
         JSONObject data = new JSONObject();
         data.put("id", clone.getId());
@@ -146,6 +148,8 @@ public class NeoCloneRecordHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (OBException e) {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Error cloning record {}: {}", recordId, e.getMessage());

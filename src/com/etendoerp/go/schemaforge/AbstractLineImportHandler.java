@@ -17,7 +17,9 @@
 package com.etendoerp.go.schemaforge;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
@@ -75,12 +77,16 @@ abstract class AbstractLineImportHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
     try {
+      // ETP-6099 follow-up: a pendingBasis this action does not offer is refused before anything.
+      classicPending(context);
       enterAdminMode();
       try {
         return execute(context, context.getFieldName());
       } finally {
         leaveAdminMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (DocumentLineImport.ImportRefusal refusal) {
       log.info("Import refused ({}): {}", refusal.code(), refusal.getMessage());
       return refusal.response();
@@ -90,6 +96,40 @@ abstract class AbstractLineImportHandler implements NeoHandler {
       rollback();
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERR_INTERNAL);
     }
+  }
+
+  /**
+   * Seam (ETP-6099 follow-up): whether {@code action} accepts {@code pendingBasis: "classic"} on
+   * the header that serves this request. Decided from the per-direction policy that header put on
+   * the context, never from an entity name; nothing offers it by default.
+   */
+  protected boolean classicPendingOffered(NeoContext context, String action) {
+    return false;
+  }
+
+  /**
+   * The {@code pendingBasis} of this request ({@link ImportListing#classicPending}): {@code true}
+   * for {@code "classic"} on an action that offers it; a 400 for it anywhere else.
+   */
+  protected final boolean classicPending(NeoContext context) {
+    return ImportListing.classicPending(context.getRequestBody(),
+        classicPendingOffered(context, context.getFieldName()));
+  }
+
+  /**
+   * ETP-5051: the plan-quota check of the lines this import added to the document, before the
+   * answer is built ({@link NeoQuotaCreateCheck}); a refusal rolls the whole import back.
+   *
+   * @param entityName the DAL entity of the created lines
+   * @param created the lines the import created
+   */
+  protected void requireQuotaAllowed(String entityName,
+      List<DocumentLineImport.ImportedLine> created) {
+    List<String> ids = new ArrayList<>(created.size());
+    for (DocumentLineImport.ImportedLine line : created) {
+      ids.add(line.id);
+    }
+    NeoQuotaCreateCheck.requireAllowed(entityName, ids);
   }
 
   /** Seam: admin mode for the DAL reads and writes of the action. */
@@ -142,6 +182,15 @@ abstract class AbstractLineImportHandler implements NeoHandler {
    */
   protected <T> NeoResponse discover(java.util.List<T> candidates, RowBuilder<T> rowOf)
       throws JSONException {
+    return discover(candidates, rowOf, rowLimit(), scanLimit());
+  }
+
+  /**
+   * {@link #discover(java.util.List, RowBuilder)} with the limits of this one call instead of the
+   * delegate's defaults (ETP-5828: a caller that asked for a longer list).
+   */
+  protected <T> NeoResponse discover(java.util.List<T> candidates, RowBuilder<T> rowOf,
+      int rowLimit, int scanLimit) throws JSONException {
     org.codehaus.jettison.json.JSONArray rows = new org.codehaus.jettison.json.JSONArray();
     boolean stoppedAtRowLimit = false;
     boolean full = false;
@@ -149,13 +198,50 @@ abstract class AbstractLineImportHandler implements NeoHandler {
       JSONObject row = rowOf.build(candidates.get(i));
       if (row != null) {
         rows.put(row);
-        full = rows.length() >= rowLimit();
+        full = rows.length() >= rowLimit;
         stoppedAtRowLimit = full && i + 1 < candidates.size();
       }
     }
-    boolean scanReachedItsLimit = candidates.size() >= scanLimit();
-    return DocumentLineImport.wrapPage(rows, stoppedAtRowLimit || scanReachedItsLimit, rowLimit(),
-        scanLimit());
+    boolean scanReachedItsLimit = candidates.size() >= scanLimit;
+    return DocumentLineImport.wrapPage(rows, stoppedAtRowLimit || scanReachedItsLimit, rowLimit,
+        scanLimit);
+  }
+
+  /**
+   * The listing parameters of a list action (ETP-6099, {@link ImportListing}): absent, the
+   * delegate's own {@link #rowLimit()} and {@link #scanLimit()}.
+   */
+  protected ImportListing.ListRequest listRequest(JSONObject body) {
+    return ImportListing.listRequest(body, rowLimit(), scanLimit());
+  }
+
+  /**
+   * {@link #discover(java.util.List, RowBuilder, int, int)} for candidates read from
+   * {@code request.offset} on (ETP-6099). When the caller paged ({@code limit} or {@code offset}
+   * sent) the answer also carries {@code offset} and {@code nextOffset}: the scan position right
+   * after the last candidate this page examined, or {@code null} when {@code hasMore} is false.
+   */
+  protected <T> NeoResponse discover(java.util.List<T> candidates, RowBuilder<T> rowOf,
+      ImportListing.ListRequest request) throws JSONException {
+    org.codehaus.jettison.json.JSONArray rows = new org.codehaus.jettison.json.JSONArray();
+    int examined = 0;
+    while (examined < candidates.size() && rows.length() < request.limit) {
+      JSONObject row = rowOf.build(candidates.get(examined));
+      examined++;
+      if (row != null) {
+        rows.put(row);
+      }
+    }
+    boolean stoppedAtRowLimit = rows.length() >= request.limit && examined < candidates.size();
+    boolean hasMore = stoppedAtRowLimit || candidates.size() >= request.scan;
+    NeoResponse page = DocumentLineImport.wrapPage(rows, hasMore, request.limit, request.scan);
+    if (request.paged) {
+      JSONObject responseData = page.getBody().getJSONObject("response");
+      responseData.put(ImportListing.PARAM_OFFSET, request.offset);
+      responseData.put("nextOffset", hasMore ? (Object) (request.offset + examined)
+          : JSONObject.NULL);
+    }
+    return page;
   }
 
   /** A page that is complete by construction (the lines of one document). */

@@ -36,6 +36,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
@@ -149,7 +150,7 @@ class NeoSelectorExecutionHelperTest {
     void appendsLikeClauseToEmpty() {
       StringBuilder hql = new StringBuilder();
       NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, "name", "test");
-      assertEquals("lower(e.name) LIKE :search", hql.toString());
+      assertEquals("upper(e.name) LIKE upper(:search)", hql.toString());
     }
 
     @Test
@@ -157,7 +158,49 @@ class NeoSelectorExecutionHelperTest {
     void appendsLikeClauseWithAnd() {
       StringBuilder hql = new StringBuilder("e.active = true");
       NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, "commercialName", "acme");
-      assertEquals("e.active = true AND lower(e.commercialName) LIKE :search", hql.toString());
+      assertEquals("e.active = true AND upper(e.commercialName) LIKE upper(:search)", hql.toString());
+    }
+  }
+
+  // ------------------------------------------------------------------ //
+  // appendSearchWithMatchIds (ETP-5948)
+  // ------------------------------------------------------------------ //
+
+  @Nested
+  @DisplayName("appendSearchWithMatchIds")
+  class AppendSearchWithMatchIdsTests {
+
+    @Test
+    @DisplayName("no search predicate appends nothing, even with ids")
+    void emptyPredicateAppendsNothing() {
+      StringBuilder hql = new StringBuilder("e.active = true");
+      Map<String, Object> params = new HashMap<>();
+      NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, "", Set.of("t1"), params);
+      assertEquals("e.active = true", hql.toString());
+      assertTrue(params.isEmpty());
+    }
+
+    @Test
+    @DisplayName("no ids keeps the plain search predicate")
+    void noIdsKeepsPlainPredicate() {
+      StringBuilder hql = new StringBuilder("e.active = true");
+      Map<String, Object> params = new HashMap<>();
+      NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, "upper(e.name) LIKE upper(:search)",
+          Set.of(), params);
+      assertEquals("e.active = true AND upper(e.name) LIKE upper(:search)", hql.toString());
+      assertTrue(params.isEmpty());
+    }
+
+    @Test
+    @DisplayName("ids widen the search inside parentheses and are bound")
+    void idsWidenTheSearch() {
+      StringBuilder hql = new StringBuilder("e.active = true");
+      Map<String, Object> params = new HashMap<>();
+      NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, "upper(e.name) LIKE upper(:search)",
+          Set.of("t1"), params);
+      assertEquals("e.active = true AND (upper(e.name) LIKE upper(:search) OR e.id IN (:searchMatchIds))",
+          hql.toString());
+      assertEquals(Set.of("t1"), params.get("searchMatchIds"));
     }
   }
 
@@ -193,8 +236,8 @@ class NeoSelectorExecutionHelperTest {
       StringBuilder hql = new StringBuilder();
       NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, "name", "pie", uomTrl);
       assertEquals(
-          "(lower(e.name) LIKE :search OR exists (from UOMTrl t2 where t2.uOM = e "
-              + "and t2.language.language = :searchLang and lower(t2.name) LIKE :search))",
+          "(upper(e.name) LIKE upper(:search) OR exists (from UOMTrl t2 where t2.uOM = e "
+              + "and t2.language.language = :searchLang and upper(t2.name) LIKE upper(:search)))",
           hql.toString());
     }
 
@@ -204,7 +247,7 @@ class NeoSelectorExecutionHelperTest {
       StringBuilder hql = new StringBuilder("e.active = true");
       NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, "name", "pie", uomTrl);
       assertTrue(hql.toString().startsWith(
-          "e.active = true AND (lower(e.name) LIKE :search OR exists (from UOMTrl t2"));
+          "e.active = true AND (upper(e.name) LIKE upper(:search) OR exists (from UOMTrl t2"));
     }
   }
 

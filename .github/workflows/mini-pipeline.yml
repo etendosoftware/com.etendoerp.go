@@ -11,7 +11,8 @@ name: Mini Pipeline
 # (etendo-go-tests #2403 failed after ~1h21m on a fixture that this job's database lacks too).
 #
 # On a push to develop it only fills the Gradle cache: a PR can restore its base branch's caches,
-# so even the first run of a new PR skips the ~3.5 min of dependency downloads.
+# so even the first run of a new PR skips the ~3.5 min of dependency downloads. PRs only read that
+# cache, never save one of their own (ETP-6069).
 #
 # Secrets: ETENDOBOT_TOKEN reads etendo_core and the GitHub modules; NEXUS_USER/NEXUS_PASSWORD
 # resolve dependencies; BITBUCKET_SSH_KEY (read access to bitbucket.org/koodu_software) clones the
@@ -118,13 +119,39 @@ jobs:
             fi
           done
 
-      # The Gradle cache keys on the build files of the core and the cloned modules, so it runs after
-      # the checkouts. Without it prepareConfig spends ~3.5 min downloading dependencies.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
+
+      # The Gradle cache keys on the build files of the core and the cloned modules, so it runs after
+      # the checkouts. Without it prepareConfig spends 3.5-4.7 min downloading dependencies.
+      # ETP-6069: setup-java's `cache: gradle` only restored an exact key, so a PR touching any
+      # *.gradle file downloaded everything and then uploaded its own ~350 MB copy, which only that
+      # PR could use and which pushed develop's out of the repo's 10 GB. Now only a push to develop
+      # saves (actions/cache saves on an exact-key miss only); a PR restores read-only, falling back
+      # to the newest develop entry through restore-keys, so Gradle downloads just what changed.
+      - name: Gradle cache (saved on develop)
+        if: github.event_name == 'push'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('etendo_core/**/*.gradle*', 'etendo_core/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Gradle cache (read-only)
+        if: github.event_name != 'push'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('etendo_core/**/*.gradle*', 'etendo_core/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
 
       - name: Configure gradle.properties
         working-directory: etendo_core
@@ -147,7 +174,7 @@ jobs:
           org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
           EOF
 
-      # The first Gradle run of the job downloads the dependencies; setup-java saves them at the end.
+      # The first Gradle run of the job downloads the dependencies; actions/cache saves them at the end.
       - name: Warm the Gradle cache
         if: github.event_name == 'push'
         working-directory: etendo_core
@@ -162,18 +189,17 @@ jobs:
           ./gradlew setup
           ./gradlew install
 
-      - name: goTestUnit
+      # Both halves in one Gradle invocation: each separate ./gradlew call paid ~2.5 min of
+      # configuration. --continue still runs goIsolatedDalTest when goTestUnit fails, so one run
+      # reports both halves, each under its own build/reports/tests folder. goTestUnit never writes
+      # to the database, so the DAL tests start from the same clean data as on Jenkins.
+      # goIsolatedDalTest is called directly, not through `test --tests '...IntegrationTest'`: that
+      # root test task matched nothing (it excludes these classes) and cost ~2 min before finalizing
+      # into goIsolatedDalTest, which runs them all in one JVM (docs/test-jvm-isolation.md).
+      - name: goTestUnit and integration tests
         if: github.event_name != 'push'
         working-directory: etendo_core
-        run: ./gradlew goTestUnit
-
-      # Runs even when goTestUnit failed, so one run reports both halves. goTestUnit never writes to
-      # the database, so these start from the same clean data as on Jenkins. The root test task
-      # finalizes into goIsolatedDalTest, which runs the classes that need a JVM of their own.
-      - name: Integration tests
-        if: ${{ !cancelled() && github.event_name != 'push' && steps.install.outcome == 'success' }}
-        working-directory: etendo_core
-        run: ./gradlew test --tests 'com.etendoerp.go.*IntegrationTest'
+        run: ./gradlew goTestUnit goIsolatedDalTest --continue
 
       - name: Upload the test reports
         if: always() && github.event_name != 'push'

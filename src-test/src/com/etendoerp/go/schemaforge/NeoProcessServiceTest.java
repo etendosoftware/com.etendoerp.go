@@ -40,6 +40,7 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.InOrder;
 import org.mockito.MockedConstruction;
@@ -70,6 +71,18 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * @covers com.etendoerp.go.schemaforge.NeoProcessService
  */
 public class NeoProcessServiceTest {
+
+  /**
+   * ETP-5953: without a DAL, {@code OBContext.setAdminMode()} pushes onto its thread-local stack
+   * and only then throws (no session factory), so the production {@code try/finally} that would
+   * restore it is never entered. The production code is balanced; the push leaks only here, and a
+   * later DB-backed class in the same worker running as a non-admin user then fails OBBaseTest's
+   * admin-mode check (NeoReferenceOwnershipIntegrationTest in the merge-block cut).
+   */
+  @After
+  public void clearAdminModeLeakedWithoutDal() {
+    OBContext.clearAdminModeStack();
+  }
 
   // ===================== executeProcess =====================
 
@@ -218,6 +231,39 @@ public class NeoProcessServiceTest {
       assertEquals(200, resp.getHttpStatus());
       assertTrue(resp.getBody().getBoolean("alreadyApplied"));
       callProcess.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-6013 — Reactivate on a draft is refused by {@link DocActionReactivationRule} before anything
+   * is written on the record or the procedure runs; the refusal is returned as is. This is the path
+   * the REST action, MCP etendo_action and each etendo_action_batch document share.
+   */
+  @Test
+  public void executeProcessReactivateOnADraftNeverCallsTheProcedure() throws Exception {
+    NeoResponse refused = DocActionReactivationRule.refusalBody(
+        "PC1000015 is Draft: Reactivate only applies to Completed documents.");
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoProcessPreconditionService> preconditions =
+             mockStatic(NeoProcessPreconditionService.class);
+         MockedStatic<DocActionReactivationRule> rule =
+             mockStatic(DocActionReactivationRule.class);
+         MockedStatic<DocActionIdempotency> idempotency = mockStatic(DocActionIdempotency.class);
+         MockedStatic<org.openbravo.service.db.CallProcess> callProcess =
+             mockStatic(org.openbravo.service.db.CallProcess.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);
+      rule.when(() -> DocActionReactivationRule.refusal("tab-1", "rec-1", "RE"))
+          .thenReturn(refused);
+
+      NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
+          docActionParams("RE"));
+
+      assertEquals(422, resp.getHttpStatus());
+      assertEquals("PC1000015 is Draft: Reactivate only applies to Completed documents.",
+          resp.getBody().getString("message"));
+      callProcess.verifyNoInteractions();
+      idempotency.verifyNoInteractions();
     }
   }
 

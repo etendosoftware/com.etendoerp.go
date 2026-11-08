@@ -22,14 +22,11 @@ import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
-import com.etendoerp.go.schemaforge.data.Account;
 
 /**
  * The single gate that decides whether a sales-invoice email carries a portal link, and the builder
@@ -75,42 +72,14 @@ public final class PortalLinkPolicy {
   /**
    * Evaluates the gate: is the portal link switched on for the account sending this invoice.
    *
+   * <p>The account is resolved by {@link GoAccountResolver#currentAccountEmail()}; no account, or
+   * any failure resolving it, answers "no link", never "allow".
+   *
    * @return {@code true} only when the flag positively resolves true for the sending account
    */
   public static boolean isLinkEnabled() {
     return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_BP_PORTAL_LINK,
-        FeatureFlagContext.forAccount(currentAccountEmail()));
-  }
-
-  /**
-   * Resolves the {@code ETGO_ACCOUNT} email of the user sending the invoice, which is the flag's
-   * targeting key.
-   *
-   * <p>Runs in admin mode because {@code ETGO_ACCOUNT} is a platform table the invoice sender's own
-   * role has no reason to be able to read, and the account being looked up is the sender's own.
-   *
-   * @return the account email, or {@code null} when no active account resolves — which the caller
-   *     turns into "no link", never into "allow"
-   */
-  private static String currentAccountEmail() {
-    try {
-      OBContext.setAdminMode(true);
-      OBContext ctx = OBContext.getOBContext();
-      User user = ctx == null ? null : ctx.getUser();
-      if (user == null) {
-        return null;
-      }
-      return GoAccountResolver.findAccountByUsername(user.getUsername())
-          .map(Account::getEmail)
-          .orElse(null);
-    } catch (RuntimeException e) {
-      // Resolving the sender must never fail an invoice send; it is only a reason not to add a link.
-      log.warn("Could not resolve the sending account, treating the portal link as disabled: {}",
-          e.getMessage(), e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+        FeatureFlagContext.forAccount(GoAccountResolver.currentAccountEmail()));
   }
 
   /**

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -330,6 +331,41 @@ public class BatchJobServiceTest {
     assertTrue(status(ALICE, id).getString("hint").contains("safeToResend:true"));
   }
 
+  /**
+   * REPRO (ETP-5051 QA BUG-3): a row refused for being over a plan quota was rolled back, yet
+   * resending it is refused again until the quota changes — not safe to resend, on either the MCP
+   * (flattened {@code error.code}) or the REST shape ({@code error.detail.error.code}). A failed
+   * quota check saved nothing and may pass next time, so it stays safe to resend.
+   */
+  @Test
+  public void aQuotaRefusalIsNeverSafeToResendButAFailedQuotaCheckIs() throws Exception {
+    BatchJobService.RowRunner runner = rowOps -> {
+      String id = rowOps.getJSONObject(0).getString("id");
+      JSONObject row = rejected(id);
+      if ("p0".equals(id)) {
+        row.getJSONObject("error").put("code", NeoQuotaWriteGate.CODE);
+      } else if ("p1".equals(id)) {
+        row.getJSONObject("error").put("detail", NeoQuotaWriteGate.refusalResponse(
+            new com.etendoerp.go.usage.quota.QuotaEvaluation(
+                com.etendoerp.go.usage.quota.QuotaDefinition.builder().resourceKey("DOCS")
+                    .enforcementMode("block").includedQty(1L).build(),
+                "month", null, 1L, com.etendoerp.go.usage.quota.QuotaVerdict.DENY)).getBody());
+      } else {
+        row.getJSONObject("error").put("code", NeoQuotaWriteGate.CHECK_FAILED_CODE);
+      }
+      return row;
+    };
+    String id = submit(ALICE, rows(3), runner);
+
+    executor.runAll();
+
+    JSONArray rowResults = status(ALICE, id).getJSONArray("rows");
+    assertFalse("MCP shape", rowResults.getJSONObject(0).getBoolean("safeToResend"));
+    assertFalse("REST shape", rowResults.getJSONObject(1).getBoolean("safeToResend"));
+    assertTrue("nothing saved, the check may pass", rowResults.getJSONObject(2)
+        .getBoolean("safeToResend"));
+  }
+
   @Test
   public void aRowWhoseRunnerThrewIsNeverMarkedSafeToResend() throws Exception {
     String id = submit(ALICE, rows(1), rowOps -> {
@@ -546,6 +582,18 @@ public class BatchJobServiceTest {
         job.getInt("processedRows"));
     assertEquals("the worker did not carry on committing rows it can no longer report", 2,
         seen.size());
+  }
+
+  @Test
+  public void aDeleteOperationWithoutRecordIdIsRefusedBeforeTheJobIsRecorded() throws Exception {
+    JSONArray ops = new JSONArray()
+        .put(new JSONObject().put("id", "d0").put("spec", "product").put("entity", "product")
+            .put("method", "DELETE").put("recordId", "R0"))
+        .put(new JSONObject().put("id", "d1").put("spec", "product").put("entity", "product")
+            .put("method", "DELETE"));
+
+    assertEquals("operations[1] DELETE requires 'recordId'", BatchJobService.validate(ops));
+    assertNull(BatchJobService.validate(new JSONArray().put(ops.get(0))));
   }
 
   @Test
@@ -796,5 +844,43 @@ public class BatchJobServiceTest {
     public void unbind() {
       unbinds++;
     }
+  }
+
+  /** ETP-5819: a tenant refusal is permanent for its row: 403, not a retryable 500. */
+  @Test
+  public void aRowRefusedByTheTenantWriteGuardIsReported403AndNotSafeToResend() throws Exception {
+    String id = submit(ALICE, rows(1), rowOps -> {
+      throw new org.openbravo.base.exception.OBSecurityException("Write access denied");
+    });
+    executor.runAll();
+    JSONObject row = status(ALICE, id).getJSONArray("rows").getJSONObject(0);
+    assertFalse(row.getBoolean("committed"));
+    assertEquals(403, row.getJSONObject("error").getInt("status"));
+    assertFalse(row.getBoolean("safeToResend"));
+  }
+
+  /** Negative pair: any other exception stays a 500. */
+  @Test
+  public void aRowThatThrewAnythingElseStaysA500() throws Exception {
+    String id = submit(ALICE, rows(1), rowOps -> {
+      throw new IllegalStateException("boom");
+    });
+    executor.runAll();
+    assertEquals(500, status(ALICE, id).getJSONArray("rows").getJSONObject(0)
+        .getJSONObject("error").getInt("status"));
+  }
+
+  /** The worker thread must run the row INSIDE the guard (the guard is thread-local). */
+  @Test
+  public void theRowRunnerExecutesWithTheWriteGuardActive() throws Exception {
+    boolean[] active = new boolean[1];
+    String id = submit(ALICE, rows(1), rowOps -> {
+      active[0] = NeoTenantWriteGuard.isActive();
+      return committing(new ArrayList<>()).run(rowOps);
+    });
+    executor.runAll();
+    assertTrue(active[0]);
+    assertFalse(NeoTenantWriteGuard.isActive());
+    assertEquals("SUCCEEDED", status(ALICE, id).getString("state"));
   }
 }

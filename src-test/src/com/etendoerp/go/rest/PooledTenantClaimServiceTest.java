@@ -51,7 +51,7 @@ public class PooledTenantClaimServiceTest {
 
   private static final PooledTenantClaimService.ClaimRequest SUPPORTED =
       new PooledTenantClaimService.ClaimRequest("owner@acme.test", "Acme", "Ada Lovelace", "EUR",
-          "ES", "es_ES", "Calle Mayor 1", "secret");
+          "ES", "es_ES", "secret");
 
   /**
    * ETP-5548: a claimed tenant showed "POOL-<id> Admin" as its role and kept the placeholder in its
@@ -118,9 +118,9 @@ public class PooledTenantClaimServiceTest {
   public void unsupportedCombinationTakesTheClassicPath() {
     TestClaimService service = new TestClaimService(true);
     PooledTenantClaimService.ClaimRequest usd = new PooledTenantClaimService.ClaimRequest(
-        "owner@acme.test", "Acme", "", "USD", "ES", "es_ES", "", "secret");
+        "owner@acme.test", "Acme", "", "USD", "ES", "es_ES", "secret");
     PooledTenantClaimService.ClaimRequest english = new PooledTenantClaimService.ClaimRequest(
-        "owner@acme.test", "Acme", "", "EUR", "ES", "en_US", "", "secret");
+        "owner@acme.test", "Acme", "", "EUR", "ES", "en_US", "secret");
 
     assertNull(service.claim(new RecordingSink(), usd));
     assertNull(service.claim(new RecordingSink(), english));
@@ -142,7 +142,7 @@ public class PooledTenantClaimServiceTest {
   public void aPlaceholderNameIsNeverServedFromThePool() {
     TestClaimService service = new TestClaimService(true);
     PooledTenantClaimService.ClaimRequest placeholder = new PooledTenantClaimService.ClaimRequest(
-        "owner@acme.test", "POOL-123", "", "EUR", "ES", "es_ES", "", "secret");
+        "owner@acme.test", "POOL-123", "", "EUR", "ES", "es_ES", "secret");
 
     assertNull(service.claim(new RecordingSink(), placeholder));
 

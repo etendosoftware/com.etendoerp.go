@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -31,6 +32,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.base.structure.IdentifierProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
@@ -49,6 +51,7 @@ final class SelectorQueryExecutor {
   private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
   private static final String PARAM_LANGUAGE = "language";
+  private static final String PARAM_SEARCH_MATCH_IDS = NeoSelectorExecutionHelper.PARAM_SEARCH_MATCH_IDS;
   /** Aux out-field suffix carrying the per-locator on-hand quantity of a stock-breakdown selector. */
   private static final String AUX_SUFFIX_QTY = "_QTY";
   /** Aux out-field suffix carrying the per-locator storage bin of a stock-breakdown selector. */
@@ -66,25 +69,35 @@ final class SelectorQueryExecutor {
       String validationFilter, String contextOrganizationId,
       Map<String, Object> extraFilterParams) throws Exception {
     if (meta.isRich) {
+      // shortcut: search-match ids (ETP-5948) only widen simple selectors, the tax policy's case.
+      // Wire them into the rich query builders when a rich selector needs one.
       return executeRichQuery(meta, search, limit, offset, validationFilter, contextOrganizationId,
-          extraFilterParams);
+          withoutKey(extraFilterParams, PARAM_SEARCH_MATCH_IDS));
     }
     return executeQuery(meta, search, limit, offset, validationFilter, contextOrganizationId,
         extraFilterParams);
+  }
+
+  private static Map<String, Object> withoutKey(Map<String, Object> params, String key) {
+    if (params == null || !params.containsKey(key)) {
+      return params;
+    }
+    Map<String, Object> copy = new HashMap<>(params);
+    copy.remove(key);
+    return copy;
   }
 
   private static NeoResponse executeQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
-    // Extract language before binding — it is not an HQL parameter
-    String language = null;
-    Map<String, Object> safeExtraParams = extraFilterParams;
-    if (extraFilterParams != null && extraFilterParams.containsKey(PARAM_LANGUAGE)) {
-      language = (String) extraFilterParams.get(PARAM_LANGUAGE);
-      safeExtraParams = new HashMap<>(extraFilterParams);
-      safeExtraParams.remove(PARAM_LANGUAGE);
-    }
+    // Extract language and the search-match ids before binding — they are not plain HQL parameters
+    String language = extraFilterParams != null ? (String) extraFilterParams.get(PARAM_LANGUAGE) : null;
+    @SuppressWarnings("unchecked")
+    Set<String> searchMatchIds = extraFilterParams != null
+        ? (Set<String>) extraFilterParams.get(PARAM_SEARCH_MATCH_IDS) : null;
+    Map<String, Object> safeExtraParams = withoutKey(withoutKey(extraFilterParams, PARAM_LANGUAGE),
+        PARAM_SEARCH_MATCH_IDS);
 
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
@@ -98,12 +111,15 @@ final class SelectorQueryExecutor {
     String searchLang = resolveEnrichLanguage(language);
     NeoTrl.TrlSearchMeta trlSearch = (StringUtils.isNotBlank(search) && StringUtils.isNotBlank(searchLang))
         ? NeoTrl.resolveSearchMeta(meta.entityName) : null;
+    StringBuilder searchPredicate = new StringBuilder();
     if (trlSearch != null) {
-      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, meta.displayProperty, search, trlSearch);
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(searchPredicate, meta.displayProperty, search,
+          trlSearch);
       queryParams.put(PARAM_SEARCH_LANG, searchLang);
     } else {
-      NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
+      NeoSelectorExecutionHelper.appendSimpleSearchFilter(searchPredicate, meta.displayProperty, search);
     }
+    NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, searchPredicate, searchMatchIds, queryParams);
     if (safeExtraParams != null) {
       queryParams.putAll(safeExtraParams);
     }
@@ -124,7 +140,7 @@ final class SelectorQueryExecutor {
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance().createQuery(meta.entityName, whereStr);
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
-      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
     }
     int totalCount = countQuery.count();
 
@@ -133,7 +149,7 @@ final class SelectorQueryExecutor {
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
-      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
     }
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
@@ -154,6 +170,10 @@ final class SelectorQueryExecutor {
       throws Exception {
     JSONArray items = new JSONArray();
     final boolean hasDottedDisplay = meta.displayProperty != null && meta.displayProperty.contains(".");
+    if (!hasDottedDisplay) {
+      // a dotted display only falls back to the identifier, so preloading would add loads
+      IdentifierProvider.getInstance().preloadTranslations(rows);
+    }
     for (BaseOBObject bob : rows) {
       JSONObject item = new JSONObject();
       item.put("id", SelectorRowMapper.normalizeEntityId(bob.getId().toString()));
@@ -200,7 +220,7 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, extraFilterParams);
     if (hasSearch) {
-      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
     }
     int totalCount = countQuery.count();
 
@@ -211,7 +231,7 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
     if (hasSearch) {
-      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
     }
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
@@ -228,6 +248,7 @@ final class SelectorQueryExecutor {
   static JSONArray buildRichItems(List<BaseOBObject> rows, SelectorMeta meta)
       throws Exception {
     JSONArray items = new JSONArray();
+    preloadIdentifierTranslations(rows, meta.gridFields);
     for (BaseOBObject bob : rows) {
       JSONObject item = new JSONObject();
       item.put("id", resolveRichItemId(bob, meta));
@@ -324,7 +345,7 @@ final class SelectorQueryExecutor {
     if (extraFilterParams != null) {
       fromParams.putAll(extraFilterParams);
     }
-    String searchParam = hasSearch ? "%" + search.toLowerCase() + "%" : null;
+    String searchParam = hasSearch ? "%" + search + "%" : null;
 
     String displayOrder = alias + "." + meta.displayProperty;
     // Decided up front, with no query: no fallback on failure. A failing Hibernate query marks the
@@ -681,20 +702,33 @@ final class SelectorQueryExecutor {
     return SelectorRowMapper.normalizeEntityId(bob.getId().toString());
   }
 
-  private static Object resolvePropertyValue(BaseOBObject bob, String propertyPath) {
-    try {
-      String[] parts = propertyPath.split("\\.");
-      Object current = bob;
-      for (String part : parts) {
-        if (current == null) {
-          return null;
-        }
-        if (current instanceof BaseOBObject) {
-          current = ((BaseOBObject) current).get(part);
-        } else {
-          return current;
+  /**
+   * ETP-6103 — looks up in one query per translation entity the translations that the labels of the
+   * page would otherwise look up one row at a time: the rows' own identifiers and the objects their
+   * grid fields show. A grid path that cannot be walked is skipped here, as its cell shows null.
+   */
+  private static void preloadIdentifierTranslations(List<BaseOBObject> rows,
+      List<RichFieldMeta> gridFields) {
+    List<Object> objects = new ArrayList<>(rows);
+    for (BaseOBObject bob : rows) {
+      for (RichFieldMeta fieldMeta : gridFields) {
+        try {
+          Object leaf = resolvePath(bob, fieldMeta.property);
+          if (leaf instanceof BaseOBObject) {
+            objects.add(leaf);
+          }
+        } catch (Exception e) {
+          log.debug("Could not resolve property {} on {}: {}",
+              fieldMeta.property, bob.getId(), e.getMessage());
         }
       }
+    }
+    IdentifierProvider.getInstance().preloadTranslations(objects);
+  }
+
+  private static Object resolvePropertyValue(BaseOBObject bob, String propertyPath) {
+    try {
+      Object current = resolvePath(bob, propertyPath);
       if (current instanceof BaseOBObject) {
         return ((BaseOBObject) current).getIdentifier();
       }
@@ -704,6 +738,18 @@ final class SelectorQueryExecutor {
           propertyPath, bob.getId(), e.getMessage());
       return null;
     }
+  }
+
+  /** Walks a dotted path, stopping at the first null or non-object hop. */
+  private static Object resolvePath(BaseOBObject bob, String propertyPath) {
+    Object current = bob;
+    for (String part : propertyPath.split("\\.")) {
+      if (!(current instanceof BaseOBObject)) {
+        return current;
+      }
+      current = ((BaseOBObject) current).get(part);
+    }
+    return current;
   }
 
   /**

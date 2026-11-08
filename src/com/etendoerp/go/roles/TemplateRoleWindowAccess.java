@@ -148,6 +148,13 @@ public final class TemplateRoleWindowAccess {
    */
   private static final String INVENTORY_STOCK_REPORT_WINDOW_ID = "6346B88619F948F9A42224BDB0B239FA";
 
+  /**
+   * {@code AD_Window_ID} of the Invoice Inbox window (ETP-6047), granted FULL to Compras and
+   * Financiero. Public so the upload endpoint checks access against this same id; the module script
+   * {@code EnsureSystemRoleTemplatesScript} keeps its own literal copy by design.
+   */
+  public static final String INVOICE_INBOX_WINDOW_ID = "81AC659E93504927B459E0CAE80CE923";
+
   /** One window grant: the window id and whether it is read-only ("R") vs. full ("✓") access. */
   public static final class WindowGrant {
     private final String windowId;
@@ -206,9 +213,10 @@ public final class TemplateRoleWindowAccess {
   }
 
   /**
-   * Purchasing ("Compras") column of the ETP-4878 matrix — 13 grants: 11 from the original
+   * Purchasing ("Compras") column of the ETP-4878 matrix — 14 grants: 11 from the original
    * matrix, plus {@code 107} (Receipt-Invoice Link, added after the original matrix by
-   * ETP-5075), plus {@code
+   * ETP-5075), plus {@code 81AC659E93504927B459E0CAE80CE923} (Invoice Inbox, ETP-6047, shared with
+   * Financiero), plus {@code
    * full("6346B88619F948F9A42224BDB0B239FA")} — Informes de inventario / Inventory Stock Report,
    * granted to Compras/Financiero/Almacén (NOT Ventas) per a still-later ETP-5116 pass, see class
    * javadoc.
@@ -236,11 +244,12 @@ public final class TemplateRoleWindowAccess {
         full("146"),                                          // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
         readOnly("192"),                                       // Categoría de contacto — Business Partner Category
-        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID),              // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(INVOICE_INBOX_WINDOW_ID));                      // Bandeja de facturas — Invoice Inbox (ETP-6047)
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 33 grants: 25 from the original ticket
+   * Finance ("Financiero") column of the ETP-4878 matrix — 34 grants: 25 from the original ticket
    * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
    * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
    * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
@@ -255,7 +264,9 @@ public final class TemplateRoleWindowAccess {
    * Financial Reports ({@code D647D118F5014D00AF47A636B2CD0DD3}, Financiero-only; the Smart Scan
    * grant that pass also added was removed again by ETP-5830), and 1 more grant from a still-later ETP-5116 pass: "Informes de
    * inventario" / Inventory Stock Report ({@code 6346B88619F948F9A42224BDB0B239FA}, shared with
-   * Compras/Almacén, NOT Ventas — see class javadoc).
+   * Compras/Almacén, NOT Ventas — see class javadoc), and 1 more grant from ETP-6047: "Invoice Inbox"
+   * ({@code 81AC659E93504927B459E0CAE80CE923}, shared with Compras), granted FULL because the
+   * inbox upload is a {@code POST} gated by {@code NeoAccessHelper#hasWindowAccess}.
    */
   private static List<WindowGrant> financeGrants() {
     return list(
@@ -291,7 +302,8 @@ public final class TemplateRoleWindowAccess {
         full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
         full("27A453FA86974745977672F1A8DCCEFF"),              // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
         full("D647D118F5014D00AF47A636B2CD0DD3"),              // Informes financieros — Financial Reports (ETP-5116, Financiero-only)
-        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID),              // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(INVOICE_INBOX_WINDOW_ID));                      // Bandeja de facturas — Invoice Inbox (ETP-6047)
   }
 
   /**

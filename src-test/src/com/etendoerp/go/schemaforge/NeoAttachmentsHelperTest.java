@@ -2056,4 +2056,111 @@ public class NeoAttachmentsHelperTest {
       assertEquals(0L, size);
     }
   }
+
+  // ── copyMainAttachmentToTemp (ETP-6048) ─────────────────────────────────────
+
+  /** A table name nobody else resolves, so the helper's table-id cache cannot cross tests. */
+  private static String freshTable() {
+    return "etgo_copy_main_" + System.nanoTime();
+  }
+
+  /** Runs {@code copyMainAttachmentToTemp} with the DAL and the attach manager stubbed. */
+  private static File copyMain(String[] mainIds, Attachment attachment, AttachImplementation handler)
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubTableAndMainLookup(dal, "TBL1", mainIds);
+      if (attachment != null) {
+        when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+      }
+      if (handler != null) {
+        stubAttachManager(weldMock, handler);
+      }
+      return NeoAttachmentsHelper.copyMainAttachmentToTemp(freshTable(), "REC1");
+    }
+  }
+
+  @Test
+  public void copyMainAttachmentToTempCopiesTheBytesIntoAnOwnerOnlyDirectory() throws Exception {
+    File payload = File.createTempFile("neo-main-copy", ".bin");
+    byte[] bytes = "%PDF-1.4 the invoice".getBytes(StandardCharsets.UTF_8);
+    Files.write(payload.toPath(), bytes);
+    AttachImplementation handler = mock(AttachImplementation.class);
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    when(handler.downloadFile(attachment)).thenReturn(payload);
+    when(handler.isTempFile()).thenReturn(false);
+    File copy = null;
+    try {
+      copy = copyMain(new String[] { "ATT1" }, attachment, handler);
+
+      assertTrue(copy != null && copy.exists());
+      assertEquals("invoice.pdf", copy.getName());
+      org.junit.Assert.assertArrayEquals(bytes, Files.readAllBytes(copy.toPath()));
+      assertEquals("the copy sits alone in a directory only its owner can use", "rwx------",
+          java.nio.file.attribute.PosixFilePermissions.toString(
+              Files.getPosixFilePermissions(copy.getParentFile().toPath())));
+      assertTrue("the backend's own file is not the copy", !copy.equals(payload));
+      assertTrue("a non-temp source is left where it was", payload.exists());
+    } finally {
+      NeoAttachmentsHelper.cleanupTempFile(copy);
+      payload.delete();
+    }
+    assertFalse("cleanupTempFile removes the file", copy.exists());
+    assertFalse("and its directory", copy.getParentFile().exists());
+  }
+
+  @Test
+  public void copyMainAttachmentToTempRemovesTheHandlersOwnTemporaryCopy() throws Exception {
+    File payload = File.createTempFile("neo-main-copy-temp", ".bin");
+    Files.write(payload.toPath(), new byte[] { 1, 2, 3 });
+    AttachImplementation handler = mock(AttachImplementation.class);
+    Attachment attachment = stubAttachment("ATT1", "scan.png");
+    when(handler.downloadFile(attachment)).thenReturn(payload);
+    when(handler.isTempFile()).thenReturn(true);
+    File copy = null;
+    try {
+      copy = copyMain(new String[] { "ATT1" }, attachment, handler);
+
+      assertEquals(3L, copy.length());
+      assertFalse("the handler's temporary copy goes", payload.exists());
+    } finally {
+      NeoAttachmentsHelper.cleanupTempFile(copy);
+      payload.delete();
+    }
+  }
+
+  @Test
+  public void copyMainAttachmentToTempIsNullWithoutAMainAttachment() throws Exception {
+    AttachImplementation handler = mock(AttachImplementation.class);
+
+    assertNull(copyMain(new String[] {}, null, handler));
+
+    verify(handler, never()).downloadFile(any());
+  }
+
+  @Test
+  public void copyMainAttachmentToTempIsNullForANamelessAttachment() throws Exception {
+    AttachImplementation handler = mock(AttachImplementation.class);
+    Attachment attachment = stubAttachment("ATT1", " ");
+
+    assertNull(copyMain(new String[] { "ATT1" }, attachment, handler));
+
+    verify(handler, never()).downloadFile(any());
+  }
+
+  @Test
+  public void copyMainAttachmentToTempIsNullWhenTheBytesAreGone() throws Exception {
+    AttachImplementation handler = mock(AttachImplementation.class);
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    File missing = new File(System.getProperty("java.io.tmpdir"), "neo-main-missing-" + System.nanoTime());
+    when(handler.downloadFile(attachment)).thenReturn(missing);
+    when(handler.isTempFile()).thenReturn(false);
+
+    assertNull(copyMain(new String[] { "ATT1" }, attachment, handler));
+
+    when(handler.downloadFile(attachment)).thenReturn(null);
+    assertNull(copyMain(new String[] { "ATT1" }, attachment, handler));
+  }
 }

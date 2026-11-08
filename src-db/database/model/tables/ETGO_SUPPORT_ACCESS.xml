@@ -1,0 +1,146 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_SUPPORT_ACCESS">
+    <table name="ETGO_SUPPORT_ACCESS" primaryKey="ETGO_SUPPORT_ACCESS_KEY">
+      <column name="ETGO_SUPPORT_ACCESS_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="OPERATOR_USER_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TARGET_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SUPPORT_USER_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ROLE_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="REASON" primaryKey="false" required="true" type="VARCHAR" size="2000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="DURATION_MINUTES" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TICKET_HASH" primaryKey="false" required="true" type="VARCHAR" size="64" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TICKET_EXPIRES_AT" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TICKET_USED_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_GO_SESSION_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="STARTED_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ENDED_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="END_REASON" primaryKey="false" required="false" type="VARCHAR" size="20" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ENDED_BY_USER_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="IP_HASH" primaryKey="false" required="false" type="VARCHAR" size="64" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="USER_AGENT" primaryKey="false" required="false" type="VARCHAR" size="500" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SUPACC_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SUPACC_CREATEDBY_FK">
+        <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SUPACC_ENDEDBY_FK">
+        <reference local="ENDED_BY_USER_ID" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SUPACC_OPERATOR_FK">
+        <reference local="OPERATOR_USER_ID" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_SUPACC_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ROLE" name="ETGO_SUPACC_ROLE_FK">
+        <reference local="AD_ROLE_ID" foreign="AD_ROLE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_GO_SESSION" name="ETGO_SUPACC_SESSION_FK">
+        <reference local="ETGO_GO_SESSION_ID" foreign="ETGO_GO_SESSION_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SUPACC_SUPUSER_FK">
+        <reference local="SUPPORT_USER_ID" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SUPACC_TGTCLIENT_FK">
+        <reference local="TARGET_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SUPACC_UPDATEDBY_FK">
+        <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <index name="ETGO_SUPACC_OPEN_UQ" unique="true">
+        <index-column name="TARGET_CLIENT_ID"/>
+        <whereClause><![CDATA[ENDED_AT IS NULL]]></whereClause>
+      </index>
+      <index name="ETGO_SUPACC_TGTCLIENT_IX" unique="false">
+        <index-column name="TARGET_CLIENT_ID"/>
+        <index-column name="ENDED_AT"/>
+      </index>
+      <unique name="ETGO_SUPACC_TICKET_UQ">
+        <unique-column name="TICKET_HASH"/>
+      </unique>
+      <check name="ETGO_SUPACC_DURATION_CHK"><![CDATA[DURATION_MINUTES > 0]]></check>
+      <check name="ETGO_SUPACC_ENDED_CHK"><![CDATA[ENDED_AT IS NULL AND END_REASON IS NULL OR ENDED_AT IS NOT NULL AND END_REASON IS NOT NULL]]></check>
+      <check name="ETGO_SUPACC_ENDREASON_CHK"><![CDATA[END_REASON IN ('logout', 'expired', 'revoked', 'ticket_expired')]]></check>
+      <check name="ETGO_SUPACC_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+    </table>
+  </database>

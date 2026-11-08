@@ -57,6 +57,8 @@ public final class ReconciliationResult {
         "would set %d {subscription|subscriptions} back to current"),
     PRICES_FILLED("%d subscription {price|prices} filled",
         "would fill %d subscription {price|prices}"),
+    CANCEL_FLAGS_SYNCED("%d cancel-at-period-end {flag|flags} synced",
+        "would sync %d cancel-at-period-end {flag|flags}"),
     PAUSE_COLLECTION_ALERTS("%d paused-collection {alert|alerts}",
         "would raise %d paused-collection {alert|alerts}"),
     PAUSED_ALERTS("%d paused {subscription|subscriptions} needing review",

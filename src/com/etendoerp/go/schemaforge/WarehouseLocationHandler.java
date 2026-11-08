@@ -21,6 +21,7 @@ import java.util.List;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -33,6 +34,7 @@ import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
@@ -90,15 +92,22 @@ public class WarehouseLocationHandler implements NeoHandler {
     }
     String method = ctx.getHttpMethod();
     String recordId = ctx.getRecordId();
+    // ETP-5806 — resolved ONCE per request, here, and threaded through every method below that
+    // gates on it: validation, the write mapping and the response shape must all answer for the
+    // same account, and re-resolving per call site would also repeat the account lookup 3 times
+    // on a single create. No ordering trap (see BpLocationHandler#handle): NEO authenticates
+    // before dispatch, so the enclosing admin mode has not replaced the caller.
+    boolean structuredAddressEnabled =
+        StructuredAddressComposer.isEnabled(GoAccountResolver.currentAccountEmail());
     try {
       if ("POST".equals(method) && recordId == null) {
-        return handleCreate(ctx);
+        return handleCreate(ctx, structuredAddressEnabled);
       }
       if ("PUT".equals(method) && recordId != null) {
-        return handleUpdate(ctx);
+        return handleUpdate(ctx, structuredAddressEnabled);
       }
       if ("GET".equals(method) && recordId != null) {
-        return handleGetById(recordId);
+        return handleGetById(recordId, structuredAddressEnabled);
       }
     } catch (Exception e) {
       SessionHandler.getInstance().rollback();
@@ -112,11 +121,13 @@ public class WarehouseLocationHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ create
 
-  private NeoResponse handleCreate(NeoContext ctx) throws Exception {
+  private NeoResponse handleCreate(NeoContext ctx, boolean structuredAddressEnabled)
+      throws Exception {
     JSONObject body = ctx.getRequestBody();
     OBContext obCtx = ctx.getObContext();
 
-    NeoResponse rejected = rejectIncompleteAddressPayload(body, nullIfEmpty(body.optString(FIELD_COUNTRY, null)));
+    NeoResponse rejected = rejectIncompleteAddressPayload(body,
+        nullIfEmpty(body.optString(FIELD_COUNTRY, null)), structuredAddressEnabled);
     if (rejected != null) {
       return rejected;
     }
@@ -129,11 +140,11 @@ public class WarehouseLocationHandler implements NeoHandler {
       geoLoc.setOrganization(OBDal.getInstance().get(
           org.openbravo.model.common.enterprise.Organization.class, obCtx.getCurrentOrganization().getId()));
       geoLoc.setActive(Boolean.TRUE);
-      applyGeoLocFields(body, geoLoc);
+      applyGeoLocFields(body, geoLoc, structuredAddressEnabled);
       OBDal.getInstance().save(geoLoc);
       OBDal.getInstance().flush();
 
-      return wrapRecord(buildRecord(geoLoc), 201);
+      return wrapRecord(buildRecord(geoLoc, structuredAddressEnabled), 201);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -141,26 +152,29 @@ public class WarehouseLocationHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ update
 
-  private NeoResponse handleUpdate(NeoContext ctx) throws Exception {
+  private NeoResponse handleUpdate(NeoContext ctx, boolean structuredAddressEnabled)
+      throws Exception {
     JSONObject body = ctx.getRequestBody();
     String locId = ctx.getRecordId();
 
     OBContext.setAdminMode(true);
     try {
-      Location geoLoc = OBDal.getInstance().get(Location.class, locId);
+      // ETP-5819: another tenant's address is a 404, like a missing one.
+      Location geoLoc = TenantOwnership.loadOwned(Location.class, locId);
       if (geoLoc == null) {
         return NeoResponse.error(404, "Location not found: " + locId);
       }
       String bodyCountryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
       String effectiveCountryId = resolveEffectiveCountryId(bodyCountryId, geoLoc);
-      NeoResponse rejected = rejectIncompleteAddressPayload(body, effectiveCountryId);
+      NeoResponse rejected = rejectIncompleteAddressPayload(body, effectiveCountryId,
+          structuredAddressEnabled);
       if (rejected != null) {
         return rejected;
       }
-      applyGeoLocFields(body, geoLoc);
+      applyGeoLocFields(body, geoLoc, structuredAddressEnabled);
       OBDal.getInstance().flush();
 
-      return wrapRecord(buildRecord(geoLoc), 200);
+      return wrapRecord(buildRecord(geoLoc, structuredAddressEnabled), 200);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -178,14 +192,16 @@ public class WarehouseLocationHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ get by id
 
-  private NeoResponse handleGetById(String locId) throws Exception {
+  private NeoResponse handleGetById(String locId, boolean structuredAddressEnabled)
+      throws Exception {
     OBContext.setAdminMode(true);
     try {
-      Location geoLoc = OBDal.getInstance().get(Location.class, locId);
+      // ETP-5819: another tenant's address is a 404, like a missing one.
+      Location geoLoc = TenantOwnership.loadOwned(Location.class, locId);
       if (geoLoc == null) {
         return NeoResponse.error(404, "Location not found: " + locId);
       }
-      return wrapRecord(buildRecord(geoLoc), 200);
+      return wrapRecord(buildRecord(geoLoc, structuredAddressEnabled), 200);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -194,21 +210,34 @@ public class WarehouseLocationHandler implements NeoHandler {
   // ------------------------------------------------------------------ validation
 
   /**
-   * ETP-5806 — Street, Number, City and Country are mandatory for the Warehouse location, the
-   * same product decision as {@code ContactsLocationAddressHandler} (Etendo Go is stricter than
-   * Classic, where the 3 SEPA fields are optional). This entity is tab-less and has no "reuse an
-   * existing C_Location" mode, so the check applies unconditionally on both create and update.
+   * ETP-5806 — Street, City and Country are mandatory for the Warehouse location, the same product
+   * decision as {@code ContactsLocationAddressHandler} (Etendo Go is stricter than Classic, where
+   * the 3 SEPA fields are optional). Building Number is not independently mandatory — a
+   * blank/omitted value falls back to {@code "s/n"} when Street Name is present (ETP-5806
+   * follow-up); see {@link StructuredAddressComposer#effectiveBuildingNumber}. This entity is
+   * tab-less and has no "reuse an existing C_Location" mode, so the check applies unconditionally
+   * on both create and update.
    */
-  private static NeoResponse rejectIncompleteAddressPayload(JSONObject body, String countryId) {
-    // ETP-5806 — `structured-address-for-sepa` off: nothing to validate for fields that do not
-    // exist on the wire; fall back to the pre-ETP-5806 rule (country only).
-    if (!StructuredAddressComposer.isEnabled()) {
+  private static NeoResponse rejectIncompleteAddressPayload(JSONObject body, String countryId,
+      boolean structuredAddressEnabled) {
+    // ETP-5806 — `structured-address-for-sepa` off FOR THIS ACCOUNT: nothing to validate for
+    // fields that do not exist on the wire; fall back to the pre-ETP-5806 rule (country only).
+    if (!structuredAddressEnabled) {
       return countryId == null
           ? NeoResponse.error(400, "Missing required field: country (C_Country_ID)") : null;
     }
+    // trimToNull, not nullIfEmpty: a streetName/buildingNumber of "   " is visually empty to
+    // whoever typed it, and nullIfEmpty only rejects "". Left untrimmed a value like " Main St"
+    // would pass both the mandatory and max-length checks below with a leading space baked in.
+    String streetName = StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_STREET_NAME, null)));
+    // ETP-5806 follow-up (QA finding) — a blank/omitted Building Number with a present Street Name
+    // is not missing, it falls back to "s/n", matching the frontend convention. See
+    // StructuredAddressComposer#effectiveBuildingNumber.
+    String buildingNumber = StructuredAddressComposer.effectiveBuildingNumber(streetName,
+        StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null))));
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
-        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        streetName,
+        buildingNumber,
         nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
         countryId);
     if (!missing.isEmpty()) {
@@ -218,9 +247,9 @@ public class WarehouseLocationHandler implements NeoHandler {
     // a value longer than the DB column (EM_OBSEPA_StrtNm/BldgNb/BldgNm) reached OBDal.flush() as
     // a raw data-truncation SQL exception, surfaced as an opaque 500 on both create and update.
     List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
-        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
-        nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)));
+        streetName,
+        buildingNumber,
+        StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null))));
     if (!tooLong.isEmpty()) {
       return NeoResponse.error(400, "Field(s) exceed maximum length: " + String.join(", ", tooLong));
     }
@@ -229,16 +258,23 @@ public class WarehouseLocationHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ field mapping
 
-  private static void applyGeoLocFields(JSONObject body, Location geoLoc) {
+  private static void applyGeoLocFields(JSONObject body, Location geoLoc,
+      boolean structuredAddressEnabled) {
     // ETP-5806 — see ContactsLocationAddressHandler#applyGeoLocFields for why the 3 fields are
-    // ignored entirely (not read, not written) while `structured-address-for-sepa` is off.
-    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled();
+    // ignored entirely (not read, not written) while `structured-address-for-sepa` is off for the
+    // requesting account (resolved once in handle(), threaded here).
+    // trimToNull, not nullIfEmpty: see rejectIncompleteAddressPayload above for why these 3
+    // fields are trimmed before being validated and persisted.
     String streetName = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_STREET_NAME, null)) : null;
+        ? StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_STREET_NAME, null))) : null;
+    // ETP-5806 follow-up — same "s/n" fallback applied during validation; persisting the raw
+    // (possibly blank) buildingNumber here would silently disagree with what was just validated.
     String buildingNumber = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)) : null;
+        ? StructuredAddressComposer.effectiveBuildingNumber(streetName,
+            StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null))))
+        : null;
     String buildingName = structuredAddressEnabled
-        ? nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)) : null;
+        ? StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null))) : null;
     if (structuredAddressEnabled) {
       geoLoc.setOBSEPAStreetName(streetName);
       geoLoc.setOBSEPABuildingNumber(buildingNumber);
@@ -273,7 +309,8 @@ public class WarehouseLocationHandler implements NeoHandler {
     }
   }
 
-  private static JSONObject buildRecord(Location geoLoc) throws Exception {
+  private static JSONObject buildRecord(Location geoLoc, boolean structuredAddressEnabled)
+      throws Exception {
     JSONObject json = new JSONObject();
     json.put("id", geoLoc.getId());
     json.put("name", buildDisplayName(geoLoc));
@@ -283,7 +320,7 @@ public class WarehouseLocationHandler implements NeoHandler {
     json.put("postalCode", orNull(geoLoc.getPostalCode()));
     // ETP-5806 — structured SEPA address fields, so the modal can pre-populate them. Omitted
     // entirely (not even as null) while `structured-address-for-sepa` is off.
-    if (StructuredAddressComposer.isEnabled()) {
+    if (structuredAddressEnabled) {
       json.put(FIELD_STREET_NAME, orNull(geoLoc.getOBSEPAStreetName()));
       json.put(FIELD_BUILDING_NUMBER, orNull(geoLoc.getOBSEPABuildingNumber()));
       json.put(FIELD_BUILDING_NAME, orNull(geoLoc.getOBSEPABuildingName()));

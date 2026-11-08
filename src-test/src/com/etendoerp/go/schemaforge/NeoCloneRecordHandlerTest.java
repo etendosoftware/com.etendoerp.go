@@ -59,6 +59,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.NeoCloneRecordHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 public class NeoCloneRecordHandlerTest {
 
@@ -254,6 +255,61 @@ public class NeoCloneRecordHandlerTest {
       assertNotNull(r);
       assertEquals(201, r.getHttpStatus());
       assertEquals("clone-id", r.getBody().getJSONObject("response").getJSONObject("data").getString("id"));
+    }
+  }
+
+  /**
+   * ETP-5051 — the clone (and whatever a hook copied with it) is checked against the plan quotas
+   * before the answer: at a {@code block} limit the action answers 403 {@code QUOTA_EXCEEDED} and
+   * the clone is rolled back.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handle_cloneOverABlockQuota_answers403AndRollsBack() throws Exception {
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getDBTableName()).thenReturn("M_InOut");
+    Instance<CloneRecordHook> cloneHooks = mock(Instance.class);
+    Instance<CloneRecordHook> emptyHooks = mock(Instance.class);
+    when(cloneHooks.select(any(ComponentProvider.Selector.class))).thenReturn(emptyHooks);
+    when(emptyHooks.iterator()).thenReturn(java.util.Collections.emptyIterator());
+    NeoCloneRecordHandler handler = handlerWithMockedHooks(cloneHooks);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(ACTION)
+        .recordId("src-id")
+        .adTab(tab)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<DalUtil> dalUtilMock = Mockito.mockStatic(DalUtil.class);
+         MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      Entity entity = mock(Entity.class);
+      when(entity.getMappingClass()).thenReturn((Class) BaseOBObject.class);
+      when(entity.getName()).thenReturn("ShipmentInOut");
+      ModelProvider mp = mock(ModelProvider.class);
+      mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableName("M_InOut")).thenReturn(entity);
+      BaseOBObject source = mock(BaseOBObject.class);
+      BaseOBObject clone = mock(BaseOBObject.class);
+      when(clone.getId()).thenReturn("clone-id");
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(BaseOBObject.class, "src-id")).thenReturn(source);
+      dalUtilMock.when(() -> DalUtil.copy(source, false)).thenReturn(clone);
+
+      NeoResponse r = handler.handle(ctx);
+
+      QuotaRefusalTestSupport.assertQuotaExceeded(r);
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(clone));
+      Mockito.verify(dal).rollbackAndClose();
+      Mockito.verify(dal, Mockito.never()).commitAndClose();
     }
   }
 

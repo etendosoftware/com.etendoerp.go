@@ -44,14 +44,24 @@ jobs:
           else
             GIT_BRANCH="${GITHUB_REF#refs/heads/}"
           fi
+          # ETP-6016: the main -> develop back-merge PR (back-merge-main.yml) is checked out
+          # at its merge ref, develop with main merged in. Comparing it with the twin's main
+          # flags every window change develop has and main lacks, so build the same
+          # combination on the twin side: its develop with its main merged in.
+          MERGE_MAIN=false
+          if [ "$GIT_BRANCH" = "$MAIN_BRANCH" ] && [ "${{ github.base_ref }}" = "$DEVELOP_BRANCH" ]; then
+            GIT_BRANCH="$DEVELOP_BRANCH"
+            MERGE_MAIN=true
+          fi
           echo "GIT_BRANCH=$GIT_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "MERGE_MAIN=$MERGE_MAIN" >> "$GITHUB_OUTPUT"
 
           case "$GIT_BRANCH" in
             hotfix/*|mergeblock/*)  FALLBACK="$MAIN_BRANCH" ;;
             *)         FALLBACK="$DEVELOP_BRANCH" ;;
           esac
           echo "FALLBACK=$FALLBACK" >> "$GITHUB_OUTPUT"
-          echo "Resolved GIT_BRANCH=$GIT_BRANCH fallback=$FALLBACK"
+          echo "Resolved GIT_BRANCH=$GIT_BRANCH fallback=$FALLBACK merge_main=$MERGE_MAIN"
 
       - name: Wait for sibling repo push to settle
         # Both repos commit in lockstep. If com.etendoerp.go is pushed slightly
@@ -82,6 +92,15 @@ jobs:
           else
             echo "🚨 Neither $BR nor $FB exist in schema_forge" >&2
             exit 1
+          fi
+          if [ "${{ steps.resolve-branch.outputs.MERGE_MAIN }}" = "true" ]; then
+            if git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+                merge --quiet --no-edit "origin/$MAIN_BRANCH"; then
+              echo "✅ schema_forge on $BR with origin/$MAIN_BRANCH merged in, like this back-merge PR"
+            else
+              git merge --abort
+              echo "::warning::origin/$MAIN_BRANCH does not merge cleanly into $BR in schema_forge: comparing with $BR alone"
+            fi
           fi
           git rev-parse --abbrev-ref HEAD
           git log -1 --oneline
@@ -118,7 +137,7 @@ jobs:
           # schema_forge MUST stay clean after regen-check: contract.json,
           # artifacts/*/generated/*.jsx, mockData.js, etc. are committed and
           # should match what the offline pipeline produces from decisions.json
-          # + ad-snapshot.json.
+          # + the grouped cli/cache/ad-snapshot/ files.
           if [ -n "$(git status --porcelain)" ]; then
             echo "::error::UI drift: committed contract.json / generated files do not match offline pipeline output"
             git status

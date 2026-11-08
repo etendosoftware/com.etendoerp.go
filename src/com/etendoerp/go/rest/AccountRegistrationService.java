@@ -30,6 +30,7 @@ import org.apache.logging.log4j.Logger;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * Account rules shared by the app's {@code /sws/go/register} and the public signup API
@@ -44,10 +45,11 @@ public class AccountRegistrationService {
 
   private static final Logger log = LogManager.getLogger(AccountRegistrationService.class);
 
-  // 24h, not the 30 minutes a password reset gets. A reset is a deliberate act the user performs
-  // and immediately waits on; a registration confirmation is often opened the next morning, and an
-  // expired link there means a dead end in the middle of signup.
-  static final long EMAIL_VERIFICATION_TTL_SECONDS = 24 * 60 * 60L;
+  // Not the 30 minutes a password reset gets: a reset is a deliberate act the user performs and
+  // immediately waits on, while a registration mail is often opened days later. ETP-6081: 7 days,
+  // the signup API's login link, because the link is now also how an account registered without a
+  // password gets in from another browser.
+  static final long EMAIL_VERIFICATION_TTL_SECONDS = SignupAccountService.LOGIN_LINK_TTL_SECONDS;
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String HASH_ALGORITHM = "SHA-256";
 
@@ -83,6 +85,10 @@ public class AccountRegistrationService {
    * @return whether the address is free, waiting for its confirmation, or taken
    */
   public EmailStatus emailStatus(String email) {
+    // the support account is hidden from the lookup below, but its address is still taken
+    if (SupportAccessGuard.isSupportEmail(email)) {
+      return EmailStatus.REGISTERED;
+    }
     Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
     if (account == null) {
       return EmailStatus.AVAILABLE;
@@ -108,6 +114,11 @@ public class AccountRegistrationService {
    * registration ({@code welcome} true, the link rides inside the welcome mail) and on an explicit
    * re-send ({@code welcome} false, its own {@code verify-email} message).
    *
+   * <p>ETP-6081: the link mailed is the one-time login link ({@code /onboarding?loginToken=}), not
+   * the confirmation-only one. Following it confirms the address and opens a session, so an account
+   * registered without a password can get in from any browser. The token is stored as both (see
+   * {@link EmailVerificationDalHelper#storeEmailVerifyToken}).
+   *
    * <p><strong>Fails open only when there was nothing to fall back to.</strong> Issuing a token
    * overwrites whatever was pending, so the previous state is captured first and put back when the
    * mail does not go out. That distinction is the whole point: on a first issue at registration
@@ -129,7 +140,7 @@ public class AccountRegistrationService {
     try {
       String verifyToken = generateSecureUrlToken();
       String verifyTokenHash = hashAuthToken(verifyToken);
-      String verifyLink = EtendoGoAuthLinkBuilder.verifyEmailLink(verifyToken);
+      String verifyLink = EtendoGoAuthLinkBuilder.loginLink(verifyToken);
       if (verifyLink == null) {
         log.warn("Email verification skipped because the public app base URL "
             + "({}) is not configured", PublicUrlResolver.APP_BASE_URL_PROPERTY);

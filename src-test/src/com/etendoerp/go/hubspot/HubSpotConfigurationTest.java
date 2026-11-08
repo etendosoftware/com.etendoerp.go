@@ -44,8 +44,49 @@ class HubSpotConfigurationTest {
     assertNull(configuration.token());
     assertEquals("https://api.hubapi.com", configuration.apiBaseUrl());
     assertEquals(HubSpotConfiguration.DEFAULT_PIPELINE, configuration.pipelineId());
-    assertEquals(HubSpotConfiguration.DEFAULT_TRIAL_STAGE, configuration.trialStage());
+    assertEquals(HubSpotConfiguration.DEFAULT_ACCOUNT_STAGE, configuration.accountStage());
     assertEquals(HubSpotConfiguration.DEFAULT_LOST_STAGE, configuration.lostStage());
+  }
+
+  @Test
+  void theDefaultsAreTheSelfServePipelineMarketingCreatedOn20261029() {
+    // ETP-6082: production only sets the token, so a wrong default id is a 400 on every deal.
+    HubSpotConfiguration configuration = configured(Map.of());
+
+    assertEquals("952774980", configuration.pipelineId());
+    assertEquals("1471483196", configuration.accountStage());
+    assertEquals("1471483197", configuration.activatedStage());
+    assertEquals("1471504904", configuration.cardStage());
+    assertEquals("1471504905", configuration.firstPaymentStage());
+    assertEquals("1471504906", configuration.expiredStage());
+    assertEquals("1471504907", configuration.lostStage());
+  }
+
+  @Test
+  void theDemoPipelineDefaultsToMarketingsAndIsMovedFromDemoRealizada() {
+    HubSpotConfiguration configuration = configured(Map.of());
+
+    HubSpotConfiguration.Pipeline demo = configuration.pipeline("952778001").orElseThrow();
+    assertEquals("1471455757", demo.entryStage());
+    assertEquals("1471455758", demo.activatedStage());
+    assertEquals("1471455759", demo.cardStage());
+    assertEquals("1471455760", demo.firstPaymentStage());
+    assertEquals("1471455761", demo.expiredStage());
+    assertEquals("1471455762", demo.lostStage());
+    assertEquals(configuration.selfServe(), configuration.pipeline("952774980").orElseThrow());
+    assertTrue(configuration.pipeline("948690590").isEmpty(), "other pipelines are marketing's");
+    assertTrue(configuration.pipeline(null).isEmpty());
+  }
+
+  @Test
+  void aTestPortalOverridesTheDemoPipelineToo() {
+    HubSpotConfiguration configuration = configured(Map.of(
+        "etendo.go.hubspot.demo.pipeline", "77",
+        "etendo.go.hubspot.demo.stage.entry", "78"));
+
+    assertEquals("78", configuration.demo().entryStage());
+    assertEquals(configuration.demo(), configuration.pipeline("77").orElseThrow());
+    assertEquals(HubSpotConfiguration.DEFAULT_DEMO_LOST_STAGE, configuration.demo().lostStage());
   }
 
   @Test
@@ -53,15 +94,15 @@ class HubSpotConfigurationTest {
     HubSpotConfiguration configuration = configured(Map.of(
         HubSpotConfiguration.TOKEN_PROPERTY, " pat-test ",
         "etendo.go.hubspot.api.base.url", "http://localhost:9999/",
-        "etendo.go.hubspot.stage.won", "123",
+        "etendo.go.hubspot.stage.card", "123",
         "etendo.go.hubspot.stage.lost", "  "));
 
     assertTrue(configuration.isEnabled());
     assertEquals("pat-test", configuration.token());
     assertEquals("http://localhost:9999", configuration.apiBaseUrl());
-    assertEquals("123", configuration.wonStage());
+    assertEquals("123", configuration.cardStage());
     assertEquals(HubSpotConfiguration.DEFAULT_LOST_STAGE, configuration.lostStage());
-    assertEquals(HubSpotConfiguration.DEFAULT_ACTIVE_STAGE, configuration.activeStage());
+    assertEquals(HubSpotConfiguration.DEFAULT_ACTIVATED_STAGE, configuration.activatedStage());
   }
 
   @Test
@@ -75,7 +116,7 @@ class HubSpotConfigurationTest {
   @Test
   void theTokenNeverReachesALogLine() {
     HubSpotConfiguration configuration = new HubSpotConfiguration("pat-secret",
-        "https://api.hubapi.com", "p", "t", "a", "w", "l");
+        "https://api.hubapi.com", "p", "m", "s", "c", "f", "e", "l");
 
     assertFalse(configuration.toString().contains("pat-secret"));
     assertTrue(configuration.toString().contains("enabled=true"));

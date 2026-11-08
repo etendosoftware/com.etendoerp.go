@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -38,6 +39,7 @@ import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.StringReader;
 import java.lang.reflect.Method;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -63,6 +65,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
@@ -72,6 +75,8 @@ import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 
@@ -80,6 +85,7 @@ import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
  * {@link NeoBuiltInEndpointHandler}.
  *
  * @covers com.etendoerp.go.schemaforge.NeoBuiltInEndpointHandler
+ * @covers com.etendoerp.go.schemaforge.NeoGridViewsService
  */
 public class NeoBuiltInEndpointHandlerTest {
 
@@ -98,6 +104,21 @@ public class NeoBuiltInEndpointHandlerTest {
     Method method = NeoBuiltInEndpointHandler.class.getDeclaredMethod(methodName, paramTypes);
     method.setAccessible(true);
     return method.invoke(target, args);
+  }
+
+  private static Object invokePrivateService(String methodName, Class<?>[] paramTypes,
+      Object... args) throws Exception {
+    Method method = NeoGridViewsService.class.getDeclaredMethod(methodName, paramTypes);
+    method.setAccessible(true);
+    return method.invoke(null, args);
+  }
+
+  private NeoAuthenticator installMockAuthenticator() throws Exception {
+    NeoAuthenticator authenticator = mock(NeoAuthenticator.class);
+    Field field = NeoServlet.class.getDeclaredField("authenticator");
+    field.setAccessible(true);
+    field.set(servlet, authenticator);
+    return authenticator;
   }
 
   private String[] parseSegments(String pathInfo) throws Exception {
@@ -533,6 +554,267 @@ public class NeoBuiltInEndpointHandlerTest {
         eq("Filters endpoint only supports GET, PUT and DELETE"));
   }
 
+  /** Rejects unsupported, oversized, duplicate, unknown and malformed view contracts. */
+  @Test
+  public void gridViewContractRejectsInvalidPayloadsAndWidths() {
+    String[] invalidBodies = {
+        "{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"a\",\"visible\":true,\"order\":0,\"width\":-1}]}",
+        "{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"a\",\"visible\":true,\"order\":0,\"width\":1201}]}",
+        "{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"a\",\"visible\":true,\"order\":0,\"width\":80.5}]}",
+        "{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"a\",\"visible\":true,\"order\":0},{\"id\":\"a\",\"visible\":false,\"order\":1}]}",
+        "{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"a\",\"visible\":true,\"order\":0},{\"id\":\"b\",\"visible\":true,\"order\":0}]}",
+        "{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"a\",\"visible\":true,\"order\":0,\"unknown\":true}]}",
+        "{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"a\",\"visible\":true,\"order\":0.5}]}",
+        "{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"a\",\"visible\":true,\"order\":0,\"width\":1.5e309}]}"
+    };
+
+    for (String body : invalidBodies) {
+      try {
+        NeoGridViewsService.saveView("sales-order", "header", body);
+        org.junit.Assert.fail("Expected invalid grid-view contract to be rejected: " + body);
+      } catch (IllegalArgumentException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().toLowerCase().contains("grid view"));
+      }
+    }
+    try {
+      NeoGridViewsService.saveView("sales-order", "header", "x".repeat(65537));
+      org.junit.Assert.fail("Expected oversized grid-view body to be rejected");
+    } catch (IllegalArgumentException expected) {
+      assertTrue(expected.getMessage().contains("too large"));
+    }
+  }
+
+  /** Accepts width boundaries and canonicalizes the requested column order. */
+  @Test
+  public void gridViewContractAcceptsWidthBoundariesAndCanonicalizesOrder() throws Exception {
+    String body = "{\"version\":1,\"surface\":\"list\",\"columns\":["
+        + "{\"id\":\"second\",\"visible\":true,\"order\":1,\"width\":1200},"
+        + "{\"id\":\"first\",\"visible\":false,\"order\":0,\"width\":0}]}";
+    JSONObject canonical = (JSONObject) invokePrivateService("validateAndCanonicalize",
+        new Class<?>[] {String.class}, body);
+    assertEquals("first", canonical.getJSONArray("columns").getJSONObject(0).getString("id"));
+    assertEquals(0, canonical.getJSONArray("columns").getJSONObject(0).getInt("width"));
+    assertEquals("second", canonical.getJSONArray("columns").getJSONObject(1).getString("id"));
+  }
+
+  /** Scoped preference keys separate specs and entities and remain inside the attribute namespace. */
+  @Test
+  public void gridViewPreferenceAttributeIsHashedAndScopeSpecific() throws Exception {
+    String salesHeader = (String) invokePrivateService("attributeFor",
+        new Class<?>[] {String.class, String.class}, "sales-order", "header");
+    String salesLines = (String) invokePrivateService("attributeFor",
+        new Class<?>[] {String.class, String.class}, "sales-order", "lines");
+    String otherSpec = (String) invokePrivateService("attributeFor",
+        new Class<?>[] {String.class, String.class}, "purchase-order", "header");
+
+    assertTrue(salesHeader.startsWith("ETGO_GridViews:"));
+    assertEquals(43, salesHeader.substring("ETGO_GridViews:".length()).length());
+    assertNotEquals(salesHeader, salesLines);
+    assertNotEquals(salesHeader, otherSpec);
+  }
+
+  /** Reads fiscal entity scopes with Unicode letters and parenthetical suffixes. */
+  @Test
+  public void gridViewGetAcceptsFiscalEntityNames() {
+    OBContext context = mock(OBContext.class);
+    Client client = mock(Client.class);
+    User user = mock(User.class);
+    when(context.getCurrentClient()).thenReturn(client);
+    when(context.getUser()).thenReturn(user);
+    when(client.getId()).thenReturn("client-1");
+    when(user.getId()).thenReturn("user-1");
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<Preferences> preferencesMock = mockStatic(Preferences.class)) {
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+      preferencesMock.when(() -> Preferences.getPreferences(anyString(), eq(false), eq("client-1"),
+          isNull(), eq("user-1"), isNull(), isNull())).thenReturn(new ArrayList<>());
+
+      assertNull(NeoGridViewsService.getView("tbai-facturas-enviadas", "sincronización"));
+      assertNull(NeoGridViewsService.getView("sii-monitor", "issuedInvoices(previousPeriod)"));
+      assertNull(NeoGridViewsService.getView("sii-monitor", "receivedInvoices(previousPeriod)"));
+      preferencesMock.verify(() -> Preferences.getPreferences(anyString(), eq(false), eq("client-1"),
+          isNull(), eq("user-1"), isNull(), isNull()), Mockito.times(3));
+    }
+
+    try {
+      NeoGridViewsService.getView("sales-order", "../header");
+      org.junit.Assert.fail("Expected path separators to be rejected from a grid-view entity scope");
+    } catch (IllegalArgumentException expected) {
+      assertTrue(expected.getMessage().contains("scope"));
+    }
+  }
+
+  /** Reads absence as no view and returns a stored canonical view for only the current scope. */
+  @Test
+  public void gridViewGetHandlesMissingAndPresentPreference() throws Exception {
+    OBContext context = mock(OBContext.class);
+    Client client = mock(Client.class);
+    User user = mock(User.class);
+    when(context.getCurrentClient()).thenReturn(client);
+    when(context.getUser()).thenReturn(user);
+    when(client.getId()).thenReturn("client-1");
+    when(user.getId()).thenReturn("user-1");
+    Preference stored = mock(Preference.class);
+    when(stored.getSearchKey()).thenReturn("{\"version\":1,\"surface\":\"list\",\"columns\":[{\"id\":\"name\",\"visible\":true,\"order\":0}]}");
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<Preferences> preferencesMock = mockStatic(Preferences.class)) {
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+      preferencesMock.when(() -> Preferences.getPreferences(anyString(), eq(false), eq("client-1"),
+          isNull(), eq("user-1"), isNull(), isNull())).thenReturn(new ArrayList<>());
+      assertNull(NeoGridViewsService.getView("sales-order", "header"));
+
+      preferencesMock.when(() -> Preferences.getPreferences(anyString(), eq(false), eq("client-1"),
+          isNull(), eq("user-1"), isNull(), isNull())).thenReturn(List.of(stored));
+      JSONObject result = NeoGridViewsService.getView("sales-order", "header");
+
+      assertEquals("name", result.getJSONArray("columns").getJSONObject(0).getString("id"));
+      preferencesMock.verify(() -> Preferences.getPreferences(contains("ETGO_GridViews:"), eq(false),
+          eq("client-1"), isNull(), eq("user-1"), isNull(), isNull()), Mockito.times(2));
+    }
+  }
+
+  /** Saves only the current user's scoped preference and returns the canonical stored value. */
+  @Test
+  public void gridViewSaveUsesUserAndClientScopeAndReturnsCanonicalValue() throws Exception {
+    OBContext context = mock(OBContext.class);
+    Client client = mock(Client.class);
+    User user = mock(User.class);
+    when(context.getCurrentClient()).thenReturn(client);
+    when(context.getUser()).thenReturn(user);
+    when(client.getId()).thenReturn("client-1");
+    when(user.getId()).thenReturn("user-1");
+    String body = "{\"version\":1,\"surface\":\"list\",\"columns\":["
+        + "{\"id\":\"b\",\"visible\":true,\"order\":1},"
+        + "{\"id\":\"a\",\"visible\":false,\"order\":0}]}";
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<Preferences> preferencesMock = mockStatic(Preferences.class)) {
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+      preferencesMock.when(() -> Preferences.getPreferences(anyString(), eq(false), eq("client-1"),
+          isNull(), eq("user-1"), isNull(), isNull())).thenReturn(new ArrayList<>());
+
+      JSONObject saved = NeoGridViewsService.saveView("sales-order", "header", body);
+
+      assertEquals("a", saved.getJSONArray("columns").getJSONObject(0).getString("id"));
+      preferencesMock.verify(() -> Preferences.setPreferenceValue(contains("ETGO_GridViews:"),
+          anyString(), eq(false), eq(client), isNull(), eq(user), isNull(), isNull(), isNull()));
+    }
+  }
+
+  /** Deletes only the preference selected by the current scope, without using request identity. */
+  @Test
+  public void gridViewDeleteRemovesOnlyCurrentScopedPreference() {
+    OBContext context = mock(OBContext.class);
+    Client client = mock(Client.class);
+    User user = mock(User.class);
+    when(context.getCurrentClient()).thenReturn(client);
+    when(context.getUser()).thenReturn(user);
+    when(client.getId()).thenReturn("client-1");
+    when(user.getId()).thenReturn("user-1");
+    Preference preference = mock(Preference.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<Preferences> preferencesMock = mockStatic(Preferences.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      contextMock.when(OBContext::getOBContext).thenReturn(context);
+      preferencesMock.when(() -> Preferences.getPreferences(anyString(), eq(false), eq("client-1"),
+          isNull(), eq("user-1"), isNull(), isNull())).thenReturn(List.of(preference));
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoGridViewsService.deleteView("sales-order", "header");
+
+      verify(dal).remove(preference);
+      preferencesMock.verify(() -> Preferences.getPreferences(contains("ETGO_GridViews:"), eq(false),
+          eq("client-1"), isNull(), eq("user-1"), isNull(), isNull()));
+    }
+  }
+
+  /** Rejects grid views when the authenticated role lacks access to the requested window spec. */
+  @Test
+  public void handleGridViewsChecksSpecAccessBeforeLoadingTheView() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    SFSpec spec = mock(SFSpec.class);
+    NeoAuthenticator authenticator = installMockAuthenticator();
+    when(spec.getSpecType()).thenReturn("W");
+    when(authenticator.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
+    when(request.getPathInfo()).thenReturn("/grid-views/sales-order/header");
+
+    try (MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class);
+        MockedStatic<NeoGridViewsService> viewsMock = mockStatic(NeoGridViewsService.class)) {
+      supportMock.when(() -> NeoServletSupport.findSpec("sales-order")).thenReturn(spec);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("grid-views", "sales-order", "header"),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to spec for current role");
+      viewsMock.verifyNoInteractions();
+    }
+  }
+
+  /** Rejects a grid-view entity that is not present in the requested spec. */
+  @Test
+  public void handleGridViewsRejectsUnknownEntity() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    SFSpec spec = mock(SFSpec.class);
+    NeoAuthenticator authenticator = installMockAuthenticator();
+    when(spec.getSpecType()).thenReturn("W");
+    when(spec.getId()).thenReturn("spec-id");
+    when(authenticator.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+    when(request.getPathInfo()).thenReturn("/grid-views/sales-order/missing");
+
+    try (MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class);
+        MockedStatic<NeoGridViewsService> viewsMock = mockStatic(NeoGridViewsService.class)) {
+      supportMock.when(() -> NeoServletSupport.findSpec("sales-order")).thenReturn(spec);
+      when(servlet.findEntity("spec-id", "missing")).thenReturn(null);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("grid-views", "sales-order", "missing"),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(response, HttpServletResponse.SC_NOT_FOUND, "Entity not found");
+      viewsMock.verifyNoInteractions();
+    }
+  }
+
+  /** A persistence validation failure is reported as 400 and is never written as a success. */
+  @Test
+  public void handleGridViewsDoesNotReportInvalidPutAsSuccessful() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    SFSpec spec = mock(SFSpec.class);
+    SFEntity entity = mock(SFEntity.class);
+    NeoAuthenticator authenticator = installMockAuthenticator();
+    when(spec.getSpecType()).thenReturn("W");
+    when(spec.getId()).thenReturn("spec-id");
+    when(authenticator.hasWindowAccessForSpec(spec, "PUT")).thenReturn(true);
+    when(request.getPathInfo()).thenReturn("/grid-views/sales-order/header");
+    when(request.getInputStream()).thenReturn(toServletInputStream("{\"invalid\":true}"));
+    when(servlet.findEntity("spec-id", "header")).thenReturn(entity);
+
+    try (MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class);
+        MockedStatic<NeoGridViewsService> viewsMock = mockStatic(NeoGridViewsService.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      supportMock.when(() -> NeoServletSupport.findSpec("sales-order")).thenReturn(spec);
+      viewsMock.when(() -> NeoGridViewsService.saveView("sales-order", "header", "{\"invalid\":true}"))
+          .thenThrow(new IllegalArgumentException("Invalid grid view contract"));
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("grid-views", "sales-order", "header"),
+          "PUT", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid grid view contract");
+      verify(servlet, never()).writeResponse(any(), any());
+      dalMock.verifyNoInteractions();
+    }
+  }
+
   /**
    * Verifies successful GET handling for the fiscal models catalog endpoint, with a role that
    * holds the Tax Report window grant (ETP-5546: "Modelos Fiscales" access proxy).
@@ -666,6 +948,48 @@ public class NeoBuiltInEndpointHandlerTest {
       assertTrue(handled);
       verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
           eq("Invalid JSON body"));
+    }
+  }
+
+  /**
+   * ETP-5716 — a PUT the service refuses because the stored catalog cannot be read is a server
+   * fault, not the client's: the {@link IllegalStateException} is not turned into a 400 here, and
+   * nothing is flushed or answered — it propagates to {@code NeoServlet}, which maps it to a 500
+   * (see {@code NeoServletProcessRequestTest}).
+   */
+  @Test
+  public void handleFiscalModelsCatalogPutRefusedByTheServiceIsNotABadRequest() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    OBDal dal = mock(OBDal.class);
+    IllegalStateException refusal = new IllegalStateException(
+        "The stored fiscal models catalog could not be read; nothing was saved");
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoRequestBodyParser> bodyParserMock =
+             Mockito.mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "PUT")).thenReturn(true);
+      bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{\"303\":true}");
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      catalogMock.when(() -> NeoFiscalModelsCatalogService.saveActiveModels("{\"303\":true}"))
+          .thenThrow(refusal);
+
+      try {
+        handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+            "PUT", request, response);
+        throw new AssertionError("expected the refusal to propagate to the servlet");
+      } catch (IllegalStateException propagated) {
+        assertEquals(refusal, propagated);
+      }
+      verify(servlet, never()).sendError(any(), Mockito.anyInt(), any());
+      verify(servlet, never()).writeResponse(any(), any());
+      verify(dal, never()).flush();
     }
   }
 
@@ -1514,6 +1838,57 @@ public class NeoBuiltInEndpointHandlerTest {
       verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
           contains("Invalid JSON body"));
       serviceMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-6047 — {@code POST /invoice-inbox/upload} delegates to the upload endpoint and writes the
+   * answer it returns; the branch itself decides nothing.
+   */
+  @Test
+  public void handleInvoiceInboxUploadPostDelegatesToTheEndpointAndWritesItsResponse()
+      throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse answer = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<InvoiceInboxUploadEndpoint> endpoint =
+        mockStatic(InvoiceInboxUploadEndpoint.class)) {
+      // The route decision lives in the endpoint class (`serves`); only `handle` is faked.
+      endpoint.when(() -> InvoiceInboxUploadEndpoint.serves(any(), any(), any()))
+          .thenCallRealMethod();
+      endpoint.when(() -> InvoiceInboxUploadEndpoint.handle(request)).thenReturn(answer);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "upload", null),
+          "POST", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, answer);
+      endpoint.verify(() -> InvoiceInboxUploadEndpoint.handle(request));
+    }
+  }
+
+  /**
+   * ETP-6047 — the branch is exact: another verb on the upload path, or another entity of the
+   * invoice-inbox spec, is not the upload endpoint's and falls through to the regular router.
+   */
+  @Test
+  public void handleInvoiceInboxOtherVerbOrEntityDoesNotTakeTheUploadBranch() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<InvoiceInboxUploadEndpoint> endpoint =
+        mockStatic(InvoiceInboxUploadEndpoint.class)) {
+      endpoint.when(() -> InvoiceInboxUploadEndpoint.serves(any(), any(), any()))
+          .thenCallRealMethod();
+
+      assertFalse(handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "upload", null),
+          "GET", request, response));
+      assertFalse(handler.handle(new NeoServlet.NeoPathInfo("invoice-inbox", "header", null),
+          "POST", request, response));
+
+      endpoint.verify(() -> InvoiceInboxUploadEndpoint.handle(any()), never());
+      verify(servlet, never()).writeResponse(any(), any());
     }
   }
 }

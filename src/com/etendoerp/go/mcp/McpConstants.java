@@ -40,6 +40,8 @@ final class McpConstants {
   /** Requested output format of a {@code generate_*} report tool (ETP-4793 / IMP-19). */
   static final String PARAM_FORMAT = "format";
   static final String PARAM_PARENT_ID = "parentId";
+  /** ETP-5852: etendo_list across every parent, asked for on purpose. */
+  static final String PARAM_ALL_PARENTS = "allParents";
   /** The record id a tool acts on or, for {@code etendo_schema(view:"actions")}, judges. */
   static final String PARAM_ID = "id";
   static final String PARAM_ASSET_ID = "assetId";
@@ -326,12 +328,14 @@ final class McpConstants {
   /** HTTP-style status for a validation failure on a write (IMP-5). */
   static final int STATUS_UNPROCESSABLE = 422;
   /**
-   * Machine-detectable error code for a write the current data refuses — a duplicate business key
-   * (ETP-4793 / IMP-17). Distinct from {@link #ERROR_VALIDATION}: the request is well-formed, so
-   * re-sending corrected values is not necessarily the remedy; the agent may need a different record.
+   * Machine-detectable error code for an operation the current data refuses: a duplicate business
+   * key (ETP-4793 / IMP-17), or a record whose current state refuses the operation — e.g. emailing a
+   * document that is not in a sendable status (ETP-6013). Distinct from {@link #ERROR_VALIDATION}:
+   * the request is well-formed, so re-sending corrected values is not necessarily the remedy; the
+   * agent may need a different record, or the record must change state first.
    */
   static final String ERROR_CONFLICT = "conflict";
-  /** HTTP-style status for a duplicate-key conflict (ETP-4793 / IMP-17). */
+  /** HTTP-style status for a {@link #ERROR_CONFLICT} answer (ETP-4793 / IMP-17, ETP-6013). */
   static final int STATUS_CONFLICT = 409;
   /**
    * Machine-detectable error code for a write refused because the record changed underneath the
@@ -390,6 +394,8 @@ final class McpConstants {
           + "who build this API find out what it is like to use.";
   /** Tool an agent calls to report friction in its own words (B3). */
   static final String TOOL_NEO_FEEDBACK = "etendo_feedback";
+  /** Tool that tells the agent the user, role, client and organization of its connection (G17). */
+  static final String TOOL_NEO_WHOAMI = "etendo_whoami";
   /**
    * Told to the agent by etendo_get and etendo_create so it knows a ready-made link is in the response
    * and never has to invent one (ETP-5200). Emitted only for header records, and only when the
@@ -438,9 +444,15 @@ final class McpConstants {
   static final String KEY_FIELD_VALUES = "fieldValues";
 
   static final String LABEL_SPEC_NAME = "Spec name";
-  static final String LABEL_ENTITY_NAME = "Entity name within the spec";
-  static final String LABEL_ENTITY_NAME_WITH_EXAMPLE =
-      "Entity name within the spec (e.g. 'header', 'lines')";
+  /**
+   * ETP-5848: an omitted entity is the spec's primary entity, and the old example ('header') named
+   * the primary entity of some specs only — agents copied it onto specs whose main record is called
+   * otherwise (contacts → businessPartner) and missed.
+   */
+  static final String LABEL_ENTITY_NAME = "Optional. Omit it to work on the spec's main record "
+      + "(its primaryEntity in etendo_discover: an invoice, an order, a contact, a product). Name "
+      + "an entity only for a child record such as the lines, with the exact name etendo_discover "
+      + "lists.";
 
   /** Tool name for the amortization plan generation tool. */
   static final String TOOL_GENERATE_AMORTIZATION_PLAN = "etendo_generate_amortization_plan";

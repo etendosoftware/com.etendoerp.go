@@ -43,6 +43,7 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
@@ -90,7 +91,8 @@ final class McpDeclaredActions {
         offered.put(e.getKey(), e.getValue());
       }
     }
-    return offered;
+    // ETP-5684: a role without showAccountingFields is not offered post/unpost at all.
+    return NeoAccountingAccessPolicy.withoutPostingActions(offered);
   }
 
   /**
@@ -137,7 +139,8 @@ final class McpDeclaredActions {
    * {@code action} (what classic processes read); sending neither keeps the button's default.
    */
   private static void requireAllowedValue(String specName, String entityName, String action,
-      Set<String> allowed, JSONObject parameters) throws JSONException {
+      McpActionsSection.View config, String button, JSONObject parameters) throws JSONException {
+    Set<String> allowed = config.allowedValuesOf(button);
     if (allowed == null || parameters == null) {
       return;
     }
@@ -145,8 +148,12 @@ final class McpDeclaredActions {
       String value = parameters.isNull(key) ? null : parameters.optString(key, null);
       if (StringUtils.isNotBlank(value) && !allowed.contains(value)) {
         JSONObject error = new JSONObject();
+        // ETP-5848: a refused value may have another route; the bare list of allowed values led an
+        // agent asked to void an invoice to reactivate it instead.
+        String route = config.valueReasonOf(button, value);
         error.put("message", "Value '" + value + "' of '" + key + "' is not offered for action '"
-            + action + "' through MCP; send one of " + allowed + ", or none for the default.");
+            + action + "' through MCP; send one of " + allowed + ", or none for the default."
+            + (route == null ? "" : " " + route));
         error.put("allowedValues", new JSONArray(allowed));
         throw McpRoutingException.actionParametersInvalid(specName, entityName, action, error);
       }
@@ -267,7 +274,7 @@ final class McpDeclaredActions {
       throw McpRoutingException.actionRedirected(specName, entityName, action, redirect,
           config.redirectReasonOf(name));
     }
-    requireAllowedValue(specName, entityName, action, config.allowedValuesOf(name), parameters);
+    requireAllowedValue(specName, entityName, action, config, name, parameters);
   }
 
   /** Refuses the call (422) when its parameters do not satisfy the declared contract. */
@@ -409,24 +416,6 @@ final class McpDeclaredActions {
       }
     }
     return names;
-  }
-
-  /**
-   * Whether the entity's customization un-posts a posted record before reactivating it
-   * ({@link NeoHandler#unpostBeforeReactivate}); quiet, a customization that throws opts out.
-   *
-   * @param entity the SchemaForge entity
-   * @return {@code true} only when the customization opts in
-   */
-  static boolean unpostsBeforeReactivation(SFEntity entity) {
-    NeoHandler handler = NeoHandlerLookup.forEntityQuietly(entity);
-    try {
-      return handler != null && handler.unpostBeforeReactivate();
-    } catch (RuntimeException e) {
-      log.warn("Could not read unpostBeforeReactivate of {}: {}", handler.getClass().getName(),
-          e.getMessage());
-      return false;
-    }
   }
 
   /** Looked up quietly: a failing customization must not break discovery for the entity. */

@@ -36,6 +36,23 @@ Current constants:
 - `backend_write_operation_completed`
 - `backend_contact_created` (ETP-5791)
 - `backend_contact_type_changed` (ETP-5791)
+- `backend_bank_bounce_pair_decided` (ETP-5581)
+- `backend_bank_bounce_pair_restored` (ETP-5581)
+- `backend_bank_bounce_suggestions_applied` (ETP-5581)
+
+### Added to every event by the Mixpanel sink (ETP-5581)
+
+`MixpanelNeoTelemetrySink` adds two properties to **every** backend event it submits, after the
+caller's properties (neither key is on the allowlist, so a caller can never set or spoof them):
+
+| Property | Value |
+|---|---|
+| `environment` | the deployment: `etendo.go.mixpanel.environment` / `ETGO_MIXPANEL_ENVIRONMENT` when set, else the deployment's `DD_ENV` (Datadog agent property `dd.env`; the ECS tasks already declare `production`, `experimental`, `staging`), else `unknown`. Lower-cased, with Datadog's aliases folded (`prod` → `production`, `stage` → `staging`), so a KPI collector can filter `environment = production` |
+| `$insert_id` | a random 32-hex id per emission (`NeoTelemetryEvent.getInsertId()`), which Mixpanel uses to drop a duplicate submission of the same event. It identifies the emission, never a record |
+
+The log sink does not print them. Platform's agreement of 2026-11-02 (`etgo_account_id`,
+`tenant_type`, `ad_user_id`, `ad_client_id` on every event) is **not** implemented in the backend
+yet: backend events still name the tenant as `account_id` only.
 
 `backend_write_operation_completed` is emitted by NEO CRUD for write methods
 only: `POST`, `PUT`, `PATCH`, and `DELETE`. `GET` requests are not emitted to
@@ -53,6 +70,9 @@ Allowed low-cardinality keys:
 - `change_origin`
 - `change_trigger`
 - `channel`
+- `confidence` (ETP-5581)
+- `decision` (ETP-5581)
+- `detection_signal` (ETP-5581)
 - `entity`
 - `entityType`
 - `flow`
@@ -62,16 +82,22 @@ Allowed low-cardinality keys:
 - `source`
 - `specName`
 - `status`
+- `surface` (ETP-5581)
 - `type`
 - `types_source`
 
 Allowed boolean keys (a non-boolean value is dropped):
 
+- `adjacent` (ETP-5581)
+- `ambiguous` (ETP-5581)
+- `chosen_among_alternatives` (ETP-5581)
 - `critical`
 - `flag_enabled`
 - `is_customer`
 - `is_vendor`
 - `previous_is_customer`
+- `preselected` (ETP-5581)
+- `preselection_changed` (ETP-5581)
 - `previous_is_vendor`
 - `supportRequested`
 
@@ -82,10 +108,13 @@ Allowed numeric keys:
 - `count`
 - `correctCount`
 - `days_since_created` (0–36500)
+- `days_since_decided` (0–36500, ETP-5581)
 - `durationMs`
 - `httpStatus`
+- `pairs_shown`, `pairs_discarded`, `pairs_unchecked`, `pairs_sent_to_panel` (0–1000000, ETP-5581)
 - `position`
 - `score`
+- `signals_count` (0–3, ETP-5581)
 - `step`
 - `total`
 - `value`
@@ -157,8 +186,9 @@ only after the batch / row commits, so a failed import row sends nothing. A reje
 reaches the post-hook. Sending runs on one bounded background thread (`contact-kpi-telemetry`,
 queue 1000, drop when full) so a save never waits on Mixpanel.
 
-**No retries, no de-duplication.** `NeoTelemetryService` sends each event once, has no event id
-(`$insert_id`) and swallows sink failures; none is added here.
+**No retries.** `NeoTelemetryService` sends each event once and swallows sink failures. Since
+ETP-5581 the Mixpanel sink adds a random `$insert_id` to every event (see *Added to every event by
+the Mixpanel sink*), so a duplicate submission is dropped by Mixpanel; there is still no retry.
 
 `backend_contact_created` — a contact create was committed.
 
@@ -191,6 +221,116 @@ included, not distinguishable from each other), `mcp_batch` (`etendo_batch`, syn
 UI from document vs OCR apart would need a client-sent marker; none exists today.
 
 Contacts created outside NEO CRUD (demo-data transfer, onboarding sample data) emit nothing.
+
+## Bank Bounce-Pair KPIs (ETP-5581)
+
+`BankBounceKpiTelemetry` (`schemaforge`) emits the events of the bounce-pair KPI (issue #15: the
+acceptance rate of the bounce suggestions). **Flag-owned**: only reached with
+`bank-bounce-suggestions` on (each action evaluates `BankBounceSuggestionsFlag` once; with it off the
+actions answer 403 or skip the bounce groups and nothing here runs), so every event carries
+`flag_enabled: true`. Best effort: building an event never throws into the action, and sending runs
+on one bounded background thread (`bank-bounce-kpi-telemetry`, queue 1000, drop when full), so a
+telemetry failure can never fail, slow or roll back a discard. A successful decision is handed to
+`NeoBatchScope.runAfterCommit` once the discard is flushed (sent at once outside a batch, after the
+batch commits inside one); a refused action rolls back and emits no `discarded`. `failed` and the
+panel's `unchecked` describe no write and are sent at once.
+
+**Legal rule.** No line id, amount, counterparty or statement text: the only identifier is
+`account_id` (the account's `AD_Client_ID`).
+
+**What was proposed** comes from the action's own detection (`BankBouncePairService.Detection`,
+the same detection `autoMatch` and `pendingLines` run), never from the client: a pair the request
+names is matched to the detected pair whose bounce is one of its lines and whose original, or one
+of whose candidates, is the other.
+
+`backend_bank_bounce_pair_decided` — one decision on one pair.
+
+| Property | Value |
+|---|---|
+| `account_id` | tenant `AD_Client_ID` |
+| `detection_signal` | primary signal as detected: `pis_link` > `return_text` > `counterparty` (the chosen candidate's for an ambiguous pair, the preferred candidate's while none is chosen); absent for a pair with none |
+| `signals_count` | how many of the three signals the pair met |
+| `confidence` | `high` / `review` **as proposed** (an ambiguous pair, and any pair detection did not propose, is `review`) |
+| `ambiguous` | detection left the original for the user to choose |
+| `adjacent` | statement adjacency chose the original (or the two candidates) |
+| `preselected` | the pair came checked (proposed `high`) |
+| `decision` | `discarded`, `unchecked`, `sent_to_panel`, `failed` |
+| `surface` | `modal` (`applySuggestions`, also when an agent calls it) / `panel` (`discardPair`, `dismissPair`) |
+| `chosen_among_alternatives` | the user discarded one candidate of an ambiguous pair (`discardPair`, or `dismissPair` naming the candidate) |
+| `channel` | `mcp` for an MCP tool call or MCP batch, else `ui` (the server cannot tell the SPA from another REST client) |
+| `flag_enabled` | always `true` |
+
+When it is emitted:
+
+- **`applySuggestions` (surface `modal`)**, once the call succeeded: one per `bouncePair` group —
+  `discarded`, or `failed` when its discard was refused with a 409 (a line already reconciled,
+  discarded or taken by an earlier group of the call...; a malformed group emits nothing) — then
+  one per entry of the optional body key `bounceDecisions: [{groupKey, decision}]`
+  (`unchecked` / `sent_to_panel`): the SPA's report of the pairs it SHOWED and did not apply.
+  `groupKey` is the `autoMatch` group's; it is resolved through the call's detection, read before
+  the transaction groups take their lines. An unknown key, an unknown decision, a repeated key or
+  the key of a pair applied in the same call is ignored, never an error. An agent (MCP) cannot
+  send `bounceDecisions` (it is not in the agent contract). Instead, **when its call applied at
+  least one `bouncePair` group**, every detected **preselected** pair (`high`, never ambiguous) it
+  left out — not among its groups, and with no line taken by any group of the same call, transaction
+  groups included — is an `unchecked` decision (surface `modal`, channel `mcp`), counted in the
+  summary (`pairs_shown`, `pairs_unchecked`, `preselection_changed`). An MCP call that applied no
+  bounce-pair group did not look at the bounces and sends no bounce event at all. The SPA path does
+  not infer anything: it reports what it showed in `bounceDecisions`.
+- **`discardPair` (surface `panel`, UI or MCP)**: `discarded` after the discard; `failed` on a 409.
+- **One rule for `failed`, modal and panel:** every 409 refusal of a pair is `failed`; it carries
+  the proposal properties (`detection_signal` … `chosen_among_alternatives`) when the action's
+  detection sees the pair, and only `account_id`, `channel`, `flag_enabled`, `decision`, `surface`
+  when it does not (e.g. a line reconciled meanwhile). A malformed request (400 / 404) emits
+  nothing. `failed` never counts in the KPI.
+- **`dismissPair` (surface `panel`, UI only)**: `unchecked` — the panel's *No es un rebote*. Nothing
+  is written, so the pair is proposed again next time and each dismissal counts.
+
+A pair discarded that detection did not propose (sent through the API or the MCP) still emits
+`discarded`, with the signals of its two lines, `review`, `preselected: false` and
+`ambiguous: false`: every discard that `restorePair` can undo has its decision.
+
+`backend_bank_bounce_pair_restored` — `restorePair` restored a **linked pair** (a line whose
+`EM_ETGO_Bounce_Pair_Line_ID` points to a counterpart that points back). A line restored alone
+(discarded on its own in Classic, or a one-sided link) emits nothing.
+
+| Property | Value |
+|---|---|
+| `account_id` | tenant `AD_Client_ID` |
+| `detection_signal` | stored `EM_ETGO_Bounce_Signal` (absent when null) |
+| `confidence` | stored `EM_ETGO_Bounce_Confidence` (`high` only for a pair detection proposed exactly as high) |
+| `preselected` | `confidence == "high"`: the pair came preselected, so the KPI can subtract it from the preselected discards |
+| `days_since_decided` | **UTC calendar days** between `EM_ETGO_Bounce_Discarded` and the restore (a discard at 23:59 UTC restored at 00:01 UTC is 1), computed in the backend; the collector subtracts it from the restore's UTC day to get the decision's UTC day. Never negative |
+| `channel`, `flag_enabled` | as above |
+
+`backend_bank_bounce_suggestions_applied` — once per `applySuggestions` that decided at least one
+bounce pair (applied or reported in `bounceDecisions`).
+
+| Property | Value |
+|---|---|
+| `pairs_shown` | pairs decided in the call (every decision event above, `failed` included) |
+| `pairs_discarded`, `pairs_unchecked`, `pairs_sent_to_panel` | per decision (`failed` = shown − the three) |
+| `preselection_changed` | a preselected pair was unchecked or sent to the panel, or a non-preselected pair was applied |
+| `account_id`, `channel`, `flag_enabled` | as above |
+
+**Known gap — a discard saved before a later failure of the same call.** `applySuggestions`
+discards its bounce pairs first, then matches the transaction groups; Core's matching services
+commit mid-flow. If the final `processReconciliation` then fails, the call answers an error and
+`finish` is never reached, so the bounce discards already committed get **no** `decided` event
+(and no summary). Rare; a later `restorePair` of such a pair then sends a `restored` with no
+matching decision, which can only lower the KPI's `P_discarded − P_restored` for that day.
+
+Example (`backend_bank_bounce_pair_decided` as submitted to Mixpanel):
+
+```json
+{"event": "backend_bank_bounce_pair_decided", "properties": {
+  "token": "…", "distinct_id": "neo-backend", "time": 1793700000,
+  "account_id": "4028E6C72959682B01295A070852010D", "channel": "ui", "flag_enabled": true,
+  "detection_signal": "pis_link", "signals_count": 2, "confidence": "high", "ambiguous": false,
+  "adjacent": false, "preselected": true, "chosen_among_alternatives": false,
+  "decision": "discarded", "surface": "modal",
+  "environment": "production", "$insert_id": "3f0c2b9e8d7a4c1b9e6f5a4d3c2b1a09"}}
+```
 
 ## Adding Authoritative Backend KPIs
 

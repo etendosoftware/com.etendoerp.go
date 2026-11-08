@@ -18,9 +18,11 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,7 +31,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -56,12 +57,30 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code createPurchaseInvoice} → {@link CreatePurchaseInvoiceHandler}</li>
  *   <li>{@code createPurchaseReturn} → {@link CreatePurchaseReturnHandler}</li>
+ *   <li>{@code availableInvoices} / {@code availableInvoiceLines} →
+ *       {@link ImportInvoiceLinesIntoInOutHandler} (ETP-6099)</li>
  * </ul>
+ *
+ * <p><b>Binding (ETP-6099).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code goodsReceiptHeaderHandler}) and the class's {@code @Named} were
+ * removed in the same change (neo-extension-migration).
  */
-@Named("goodsReceiptHeaderHandler")
+@NeoExtension(spec = "goods-receipt", entity = "goodsReceipt")
 public class GoodsReceiptHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsReceiptHeaderHandler.class);
+  /**
+   * The invoices this receipt's "Import from invoice" popup offers (ETP-6099): the ones whose grand
+   * total is not negative, as the popup always filtered them. Pending keeps the popup's rule (ETP-6099
+   * product decision): a linked line 0, any other its quantity minus what OTHER draft receipts hold
+   * of its order line; the delivered quantity is NOT deducted. Its popup asks for
+   * {@code pendingBasis: "classic"} (ETP-6099 follow-up), offered here only: a linked line 0, any
+   * other its invoiced quantity, no draft deducted, exactly as before ETP-6099.
+   */
+  static final ImportInvoiceLinesIntoInOutHandler.SourcePolicy INVOICE_IMPORT_POLICY =
+      new ImportInvoiceLinesIntoInOutHandler.SourcePolicy(
+          invoice -> invoice.getGrandTotalAmount() == null
+              || invoice.getGrandTotalAmount().signum() >= 0, false, false, true);
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
@@ -94,6 +113,10 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   @Inject
   private ImportOrderLinesIntoInOutHandler importOrderLinesHandler;
 
+  /** {@code availableInvoices} / {@code availableInvoiceLines} (ETP-6099). */
+  @Inject
+  private ImportInvoiceLinesIntoInOutHandler importInvoiceLinesHandler;
+
   @Inject
   private DocumentPostingService postingService;
 
@@ -111,6 +134,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
     contracts.putAll(ImportOrderLinesIntoInOutHandler.contracts(false));
+    contracts.putAll(ImportInvoiceLinesIntoInOutHandler.contracts(false));
     contracts.put(CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT.getName(),
         CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT);
     contracts.put(CreatePurchaseReturnHandler.CONTRACT.getName(),
@@ -182,9 +206,10 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
       return null; // let NEO native process handle completion
     }
+    context.setAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE, INVOICE_IMPORT_POLICY);
     return NeoHeaderActionRouter.dispatch(context,
-        cloneRecordHandler, importOrderLinesHandler, createPurchaseInvoiceHandler,
-        createPurchaseReturnHandler);
+        cloneRecordHandler, importOrderLinesHandler, importInvoiceLinesHandler,
+        createPurchaseInvoiceHandler, createPurchaseReturnHandler);
   }
 
   /**
@@ -275,6 +300,11 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
           if (id != null) {
             rec.put(FIELD_INVOICE_STATUS, statusMap.getOrDefault(id, 0));
           }
+        }
+        if (context.isMcpOrigin()) {
+          // ETP-5852: as on goods-shipment — the page's invoices in one query, MCP only.
+          InOutInvoiceLinks.putLinkedInvoices(dataArr, InOutInvoiceLinks.linkedInvoicesByInOut(
+              InOutInvoiceLinks.MatchTable.PURCHASE, ids));
         }
       }
       return NeoResponse.ok(body);
@@ -418,29 +448,60 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     }
   }
 
+  /**
+   * One row per active receipt line: what it received and what the returns hold of it. The
+   * returned quantity is aggregated per source line in a sub-select, so the received quantity of
+   * a line with several returns is read once (a plain JOIN would repeat the line once per return
+   * and inflate the denominator, ETP-6054). The returns counted are exactly those of
+   * {@link ReturnableQuantity} (non-voided, drafts included), the same question the picker asks.
+   */
+  static final String RETURN_STATUS_SQL =
+      "SELECT ABS(iol.movementqty), COALESCE(ret.returned_qty, 0) "
+      + "FROM m_inoutline iol "
+      + "LEFT JOIN (SELECT rl.canceled_inoutline_id AS source_line_id, "
+      + "    SUM(ABS(rl.movementqty)) AS returned_qty "
+      + "  FROM " + ReturnableQuantity.COUNTED_RETURN_LINES_FROM + " "
+      + "  WHERE rl.canceled_inoutline_id IS NOT NULL AND "
+      + ReturnableQuantity.COUNTED_RETURN_LINES_FILTER + " "
+      + "  GROUP BY rl.canceled_inoutline_id) ret "
+      + "  ON ret.source_line_id = iol.m_inoutline_id "
+      + "WHERE iol.m_inout_id = ? AND iol.isactive = 'Y'";
+
   private int computeReturnStatus(String receiptId) {
-    String sql =
-        "SELECT CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 "
-        + "ELSE LEAST(100, ROUND("
-        + "  COALESCE(SUM(ABS(ril.movementqty)), 0) / SUM(ABS(iol.movementqty)) * 100"
-        + ")) END "
-        + "FROM m_inoutline iol "
-        + "LEFT JOIN m_inoutline ril ON ril.canceled_inoutline_id = iol.m_inoutline_id "
-        + "  AND ril.isactive = 'Y' "
-        + "  AND EXISTS ("
-        + "    SELECT 1 FROM m_inout rio WHERE rio.m_inout_id = ril.m_inout_id"
-        + "    AND rio.docstatus NOT IN ('VO','DR') AND rio.isactive = 'Y'"
-        + "  ) "
-        + "WHERE iol.m_inout_id = ? AND iol.isactive = 'Y'";
-    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
+    try (PreparedStatement ps =
+        OBDal.getInstance().getConnection().prepareStatement(RETURN_STATUS_SQL)) {
       ps.setString(1, receiptId);
       try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getInt(1) : 0;
+        return returnPercent(rs);
       }
     } catch (Exception e) {
       log.error("DB error computing return status for receipt {}", receiptId, e);
       return 0;
     }
+  }
+
+  /**
+   * Units returned over units received, summed across every line (so it mixes the units of
+   * different products), as an integer percentage capped at 100.
+   *
+   * @param rs rows of {@link #RETURN_STATUS_SQL}: received quantity, returned quantity
+   * @return the percentage, 0 when nothing was received
+   * @throws SQLException when a row cannot be read
+   */
+  static int returnPercent(ResultSet rs) throws SQLException {
+    BigDecimal received = BigDecimal.ZERO;
+    BigDecimal returned = BigDecimal.ZERO;
+    while (rs.next()) {
+      BigDecimal rec = rs.getBigDecimal(1);
+      BigDecimal ret = rs.getBigDecimal(2);
+      received = received.add(rec == null ? BigDecimal.ZERO : rec);
+      returned = returned.add(ret == null ? BigDecimal.ZERO : ret);
+    }
+    if (received.signum() == 0) {
+      return 0;
+    }
+    return returned.multiply(BigDecimal.valueOf(100))
+        .divide(received, 0, RoundingMode.HALF_UP).min(BigDecimal.valueOf(100)).intValue();
   }
 
   @SuppressWarnings("java:S2077")

@@ -46,6 +46,11 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * instance via OBBaseTest. These tests cover the pure-logic, no-DAL parts
  * plus the authorization guard and exception-wrapping logic of {@code route()}.
  *
+ * <p>ETP-5051: {@code etendo_create} runs its insert inside the plan-quota gate. The router method
+ * needs a live DAL and an {@code AD_Tab}, so that wiring is pinned with {@link McpSourceScanner}
+ * (as the other MCP call-site guards are); the gate's behaviour is covered by
+ * {@code NeoQuotaWriteGateTest} and the refusal's MCP translation by {@code McpHookExecutorTest}.
+ *
  * @covers com.etendoerp.go.mcp.McpToolRouter
  * @covers com.etendoerp.go.mcp.McpToolResponses
  * @covers com.etendoerp.go.mcp.McpResponseSanitizer
@@ -1507,6 +1512,38 @@ public class McpToolRouterTest {
     assertFalse(body.startsWith("Error executing"));
   }
 
+  /**
+   * ETP-5051 — the quota gate wraps the insert of {@code etendo_create}: the add is the create
+   * handed to {@code NeoQuotaWriteGate.run} (which picks its service, refuses before the write when
+   * the client's quotas cannot be read, and checks the created row right after it), and a refusal
+   * leaves the router through the MCP error translation before anything reads the add result.
+   */
+  @Test
+  public void testCreateRunsItsInsertInsideTheQuotaGate() {
+    String body = McpSourceScanner.stripComments(McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate"));
+
+    // Anchored on the calls, never on local variable names, and each searched after the one
+    // before it, so a rename does not break it and an earlier unrelated call cannot satisfy it.
+    int run = indexOf(body, "NeoQuotaWriteGate.run(", 0);
+    int add = indexOf(body, ".add(", run);
+    int refusal = indexOf(body, "neoResponseToMcpResult(", add);
+    int successRead = indexOf(body, "new JSONObject(", refusal);
+
+    assertTrue("the add is the create handed to the gate (never run before it)", run < add);
+    assertTrue("a refusal returns before the add result is read as a success",
+        add < refusal && refusal < successRead);
+    assertEquals("etendo_create inserts exactly once", 1,
+        body.split("\\.\\s*add\\s*\\(", -1).length - 1);
+  }
+
+  private static int indexOf(String body, String code, int from) {
+    int at = body.replaceAll("\\s+", " ").indexOf(code, from);
+    assertTrue("handleCreate no longer contains `" + code + "`: the ETP-5051 quota gate was"
+        + " dropped from etendo_create, or refactored and this guard needs updating", at >= 0);
+    return at;
+  }
+
   // ── handleCreate: what the pre-hook can tell about the agent's choices ─
 
   /**
@@ -1641,5 +1678,199 @@ public class McpToolRouterTest {
         + "_" + entity + ") refered to but not present in the import set");
     JSONObject inner = new JSONObject().put("status", -4).put("errors", errors);
     return new JSONObject().put("response", inner);
+  }
+
+  // ── ETP-5684: accounting status never reaches a role without showAccountingFields ──
+
+  private static String contentText(JSONObject result) throws Exception {
+    return result.getJSONArray("content").getJSONObject(0).getString("text");
+  }
+
+  private static JSONObject recordWithAccounting() throws Exception {
+    JSONObject row = new JSONObject().put("id", "INV-1").put("posted", "Y")
+        .put("posted$_identifier", "Posted").put("etblkpAccountingstatus", "Y")
+        .put("documentNo", "FV1000003");
+    return new JSONObject().put("data", new JSONArray().put(row));
+  }
+
+  /** Tests that every accounting property is removed, at any depth, for a role without access. */
+  @Test
+  public void testAccountingPropertiesStrippedWithoutTheCapability() throws Exception {
+    try (MockedStatic<com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy> policy =
+        mockStatic(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy.class,
+            org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      policy.when(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy::currentRoleSeesAccounting)
+          .thenReturn(false);
+      JSONObject row = new JSONObject(contentText(McpToolRouter.wrapAsTextContent(recordWithAccounting())))
+          .getJSONArray("data").getJSONObject(0);
+      assertFalse(row.has("posted"));
+      assertFalse(row.has("posted$_identifier"));
+      assertFalse(row.has("etblkpAccountingstatus"));
+      assertEquals("FV1000003", row.getString("documentNo"));
+    }
+  }
+
+  /** Tests that a role with access keeps the accounting properties. */
+  @Test
+  public void testAccountingPropertiesKeptWithTheCapability() throws Exception {
+    try (MockedStatic<com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy> policy =
+        mockStatic(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy.class,
+            org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      policy.when(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy::currentRoleSeesAccounting)
+          .thenReturn(true);
+      JSONObject row = new JSONObject(contentText(McpToolRouter.wrapAsTextContent(recordWithAccounting())))
+          .getJSONArray("data").getJSONObject(0);
+      assertEquals("Y", row.getString("posted"));
+      assertEquals("Y", row.getString("etblkpAccountingstatus"));
+    }
+  }
+
+  /** Tests that a body with no accounting property never reads the role flag. */
+  @Test
+  public void testNoAccountingPropertyNeverReadsTheRole() throws Exception {
+    try (MockedStatic<com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy> policy =
+        mockStatic(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy.class,
+            org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      McpToolRouter.wrapAsTextContent(new JSONObject().put("documentNo", "FV1"));
+      policy.verify(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy::currentRoleSeesAccounting,
+          org.mockito.Mockito.never());
+    }
+  }
+
+  // ── handleUpdate: product change re-derives uOM (QA CP-15, AD message 20111) ──
+
+  /**
+   * {@code etendo_update} on a line that changes {@code product} must re-derive {@code uOM} from
+   * the NEW product, as the REST update does. The agent cannot send uOM (read-only), so without
+   * this the line hits the C_OrderLine trigger with the old unit and is refused (20111).
+   *
+   * <p>Wiring is asserted on the source, as the neighbouring {@code handleCreate} guards are:
+   * reaching it needs {@code DefaultJsonDataService}, {@code ModelProvider} and an AD_Tab. The
+   * derivation itself is specified in {@code NeoCommercialLinePolicyTest}.</p>
+   */
+  @Test
+  public void testUpdateRederivesUomRightAfterTheAgentPriceAndNeverDefersToAClientValue() {
+    String body = McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleUpdate")
+        .replaceAll("\\s+", "");
+
+    int price = indexOrFail(body, "McpLinePriceInjector.applyAgentPriceOnUpdate(");
+    int uom = indexOrFail(body, "injectLineUomIfApplicable(filteredBody,dalEntity,false);");
+    int mandatory = indexOrFail(body, "McpWriteRequestSupport.rejectClearedMandatoryFields(");
+    int write = indexOrFail(body, "NeoExtensionDispatcher.dispatch(");
+
+    assertTrue("uOM is re-derived after the agent price and before the write is dispatched",
+        price < uom && uom < mandatory && mandatory < write);
+    assertEquals("handleUpdate derives uOM exactly once, never deferring to a sent value", 1,
+        body.split("injectLineUomIfApplicable\\(", -1).length - 1);
+  }
+
+  private static void invokeInjectLineUom(JSONObject body,
+      org.openbravo.base.model.Entity entity) throws Exception {
+    java.lang.reflect.Method m = McpToolRouter.class.getDeclaredMethod(
+        "injectLineUomIfApplicable", JSONObject.class, org.openbravo.base.model.Entity.class,
+        boolean.class);
+    m.setAccessible(true);
+    m.invoke(new McpToolRouter(), body, entity, false);
+  }
+
+  private static org.openbravo.base.model.Entity lineEntity(boolean declaresUom,
+      boolean transactional) {
+    org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+    when(entity.hasProperty("uOM")).thenReturn(declaresUom);
+    when(entity.hasProperty("orderedQuantity")).thenReturn(transactional);
+    return entity;
+  }
+
+  private static org.openbravo.model.common.plm.Product productWithUom(String uomId) {
+    org.openbravo.model.common.uom.UOM uom = mock(org.openbravo.model.common.uom.UOM.class);
+    when(uom.getId()).thenReturn(uomId);
+    org.openbravo.model.common.plm.Product product =
+        mock(org.openbravo.model.common.plm.Product.class);
+    when(product.getUOM()).thenReturn(uom);
+    return product;
+  }
+
+  /** A changed product writes the NEW product's uOM, replacing whatever the body held. */
+  @Test
+  public void testUpdateLineUomIsTheNewProductsAndReplacesAnyClientValue() throws Exception {
+    JSONObject body = new JSONObject().put("product", "P-NEW").put("uOM", "STALE-UOM");
+    org.openbravo.model.common.plm.Product product = productWithUom("UOM-NEW");
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-NEW")).thenReturn(product);
+
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertEquals("UOM-NEW", body.getString("uOM"));
+    }
+  }
+
+  /** A price- or quantity-only update (no product key) is left untouched and never reads the DAL. */
+  @Test
+  public void testUpdateWithoutProductAddsNoUom() throws Exception {
+    JSONObject body = new JSONObject().put("unitPrice", 12);
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertFalse(body.has("uOM"));
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** Entities that do not declare uOM, or are not transactional lines, are untouched. */
+  @Test
+  public void testUpdateOnEntityWithoutUomOrNotATransactionalLineIsUntouched() throws Exception {
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      JSONObject noUom = new JSONObject().put("product", "P-NEW");
+      invokeInjectLineUom(noUom, lineEntity(false, true));
+      assertFalse(noUom.has("uOM"));
+
+      JSONObject notALine = new JSONObject().put("product", "P-NEW");
+      invokeInjectLineUom(notALine, lineEntity(true, false));
+      assertFalse(notALine.has("uOM"));
+
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** A {@code $ref:} product is a batch placeholder, not an id: nothing is resolved or written. */
+  @Test
+  public void testUpdateWithRefPrefixedProductAddsNoUom() throws Exception {
+    JSONObject body = new JSONObject().put("product", "$ref:line1.product");
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertFalse(body.has("uOM"));
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** Unknown product, or one without a UOM: no uOM injected and no exception (the trigger decides). */
+  @Test
+  public void testUpdateWithUnresolvableProductOrUomInjectsNothingAndDoesNotThrow()
+      throws Exception {
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.plm.Product noUom =
+          mock(org.openbravo.model.common.plm.Product.class);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-MISSING")).thenReturn(null);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-NOUOM")).thenReturn(noUom);
+
+      JSONObject missing = new JSONObject().put("product", "P-MISSING");
+      invokeInjectLineUom(missing, lineEntity(true, true));
+      assertFalse(missing.has("uOM"));
+
+      JSONObject withoutUom = new JSONObject().put("product", "P-NOUOM");
+      invokeInjectLineUom(withoutUom, lineEntity(true, true));
+      assertFalse(withoutUom.has("uOM"));
+    }
   }
 }

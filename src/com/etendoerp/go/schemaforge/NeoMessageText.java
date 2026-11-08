@@ -59,7 +59,7 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * ETP-5175 structured identity), so a client renders its own wording by key instead of matching
  * the prose, which now changes with the request language.
  */
-final class NeoMessageText {
+public final class NeoMessageText {
 
   private static final Logger log = LogManager.getLogger(NeoMessageText.class);
   private static final String ENGLISH = "en";
@@ -67,16 +67,29 @@ final class NeoMessageText {
   private NeoMessageText() {
   }
 
-  /** {@link #text(String, String, Object...)} in the request language. */
-  static String text(String key, Object... args) {
+  /**
+   * {@link #text(String, String, Object...)} in the request language. Public since ETP-6053, so a
+   * customization outside this package words its refusals the same way.
+   *
+   * @param key  the {@code AD_MESSAGE} value
+   * @param args the placeholder values, in order
+   * @return the message text
+   */
+  public static String text(String key, Object... args) {
     return text(key, currentLanguage(), args);
   }
 
   /**
    * The text of {@code key} in {@code language}, resolved in the order the class documents.
    * Total: never throws.
+   *
+   * @param key      the {@code AD_MESSAGE} value
+   * @param language the AD language code, for example {@code es_ES}
+   * @param args     the placeholder values, in order
+   * @return the message text with the placeholders substituted, or the key itself when no source
+   *         has it
    */
-  static String text(String key, String language, Object... args) {
+  public static String text(String key, String language, Object... args) {
     String translated = translatedRow(key, language);
     if (translated != null) {
       return substitute(translated, args);
@@ -104,7 +117,7 @@ final class NeoMessageText {
    * @param args   the placeholder values, in order
    * @return the error response
    */
-  static NeoResponse error(int status, String key, Object... args) {
+  public static NeoResponse error(int status, String key, Object... args) {
     NeoResponse response = NeoResponse.error(status, text(key, args));
     JSONObject body = response.getBody();
     if (body != null) {
@@ -116,6 +129,21 @@ final class NeoMessageText {
       }
     }
     return response;
+  }
+
+  /**
+   * Appends a {@code warning} message with the text of {@code key} in the request language to a
+   * write response body, at the level the channel reads it (see {@link NeoHints}). Total: never
+   * throws. The public entry point to {@link NeoHints} for customizations outside this package
+   * (ETP-6053).
+   *
+   * @param body      the response body, mutated in place
+   * @param mcpOrigin whether the request came through the MCP layer
+   * @param key       the {@code AD_MESSAGE} value
+   * @param args      the placeholder values, in order
+   */
+  public static void addWarning(JSONObject body, boolean mcpOrigin, String key, Object... args) {
+    NeoHints.addMessage(body, mcpOrigin, NeoHints.TYPE_WARNING, text(key, args));
   }
 
   /** The request language, or {@code null} when there is no usable context. */

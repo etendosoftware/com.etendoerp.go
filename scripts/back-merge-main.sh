@@ -13,9 +13,10 @@
 # approves the PR when develop requires a review: GitHub never lets the PR's author approve it.
 #
 # The PR is assigned to the GitHub user of main's last commit (after a cut or a hotfix, its merge
-# commit: whoever merged it). Without conflicts it gets the approval and auto-merge, so GitHub
-# merges it once the required checks pass; with conflicts it gets neither and waits for its
-# assignee. An already open PR gets whatever of that it lacks.
+# commit: whoever merged it), or, when etendobot merged it as it does with an automatic cut
+# (ETP-6040), to the assignee of the PR it merged. Without conflicts it gets the approval and
+# auto-merge, so GitHub merges it once the required checks pass; with conflicts it gets neither and
+# waits for its assignee. An already open PR gets whatever of that it lacks.
 #
 # Exit: 0 PR opened or updated, or nothing to bring back · other: a git or gh failure
 
@@ -37,16 +38,22 @@ MERGE_RC=$?
 set -e
 [ "$MERGE_RC" -le 1 ] || exit "$MERGE_RC"
 
-# Who moved main: the author of its last commit, else whoever merged that commit's PR. Never the
-# bot that opens the PR. Empty when neither resolves (a failed lookup leaves the PR unassigned).
+# Who moved main: the author of its last commit, else whoever merged that commit's PR, else that
+# PR's assignee. The last one covers an automatic cut (ETP-6040): the merge block job merges it as
+# etendobot, and its owner is the PR's assignee. Never the bot that opens the PR. Empty when none
+# resolves (a failed lookup leaves the PR unassigned).
 MAIN_SHA="$(git rev-parse "origin/$HEAD")"
 MERGED_NUMBER="$(gh api "repos/{owner}/{repo}/commits/$MAIN_SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true)"
+BOT="$(gh api user --jq .login 2>/dev/null || true)"
+person() { [ -n "$1" ] && [ "$1" != "$BOT" ]; }
 ASSIGNEE="$(gh api "repos/{owner}/{repo}/commits/$MAIN_SHA" --jq '.author.login // empty' 2>/dev/null || true)"
-if [ -z "$ASSIGNEE" ] && [ -n "$MERGED_NUMBER" ]; then
+if ! person "$ASSIGNEE" && [ -n "$MERGED_NUMBER" ]; then
   ASSIGNEE="$(gh pr view "$MERGED_NUMBER" --json mergedBy --jq '.mergedBy.login // empty' 2>/dev/null || true)"
 fi
-BOT="$(gh api user --jq .login 2>/dev/null || true)"
-[ "$ASSIGNEE" != "$BOT" ] || ASSIGNEE=""
+if ! person "$ASSIGNEE" && [ -n "$MERGED_NUMBER" ]; then
+  ASSIGNEE="$(gh pr view "$MERGED_NUMBER" --json assignees --jq '.assignees[0].login // empty' 2>/dev/null || true)"
+fi
+person "$ASSIGNEE" || ASSIGNEE=""
 
 URL="$(gh pr list --base "$BASE" --head "$HEAD" --state open --json url --jq '.[0].url // empty')"
 if [ -n "$URL" ]; then

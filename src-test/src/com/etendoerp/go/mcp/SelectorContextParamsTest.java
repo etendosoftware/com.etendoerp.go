@@ -197,6 +197,27 @@ public class SelectorContextParamsTest {
 
   // ── buildSelectorContextParams — isSOTrx derivation from Tab ──────────
 
+  /**
+   * ETP-5852 (M-57): a payment's direction reaches core's rule (@Isreceipt@, spelled that way):
+   * from the record when sent, else from the window — payments out are the purchase side.
+   */
+  @Test
+  public void testPaymentDirectionReachesTheRule() throws Exception {
+    Tab purchaseTab = Mockito.mock(Tab.class);
+    Window purchaseWindow = Mockito.mock(Window.class);
+    when(purchaseTab.getWindow()).thenReturn(purchaseWindow);
+    when(purchaseWindow.isSalesTransaction()).thenReturn(false);
+
+    Map<String, String> derived =
+        McpSelectorContextHelper.buildSelectorContextParams(new JSONObject(), purchaseTab);
+    assertEquals("N", derived.get("Isreceipt"));
+    assertEquals("N", derived.get("IsReceipt"));
+
+    JSONObject args = new JSONObject().put("recordContext", new JSONObject().put("receipt", true));
+    Map<String, String> sent = McpSelectorContextHelper.buildSelectorContextParams(args, purchaseTab);
+    assertEquals("the record's own direction wins", "Y", sent.get("Isreceipt"));
+  }
+
   @Test
   public void testBuildSelectorContextParamsDerivesIsSOTrxFromSalesTab() throws Exception {
     Tab salesTab = Mockito.mock(Tab.class);

@@ -360,7 +360,7 @@ public class DocumentPostingService {
         PostResult notPostable = AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())
             ? notPostableFailure(acct.tableName, recordId, conn)
             : null;
-        return notPostable != null ? notPostable : failureOf(acct);
+        return notPostable != null ? notPostable : failureOf(acct, recordId, conn);
       }
       conn.releaseCommitConnection(con);
       return new PostResult(true, "Document posted");
@@ -537,6 +537,18 @@ public class DocumentPostingService {
     String recordId = context.getRecordId();
     PostResult result =
         "post".equals(action) ? post(adTableId, recordId) : unpost(adTableId, recordId);
+    return toResponse(result, recordId);
+  }
+
+  /**
+   * The action-endpoint answer for a post/unpost result: 200 on success, 422 (or the costing
+   * stall answers) on failure, always the flat {@code success/message[/messageKeys]} body.
+   *
+   * @param result   the post/unpost outcome
+   * @param recordId the record, for the log only
+   * @return the response to send
+   */
+  public NeoResponse toResponse(PostResult result, String recordId) {
     try {
       JSONObject body = new JSONObject();
       body.put("success", result.ok());
@@ -554,7 +566,7 @@ public class DocumentPostingService {
       // every NEO client that only reads a top-level `message` field (ETP-4706).
       return result.ok() ? NeoResponse.ok(body) : NeoResponse.error(422, body);
     } catch (Exception e) {
-      log.error("Posting action error for record {}", context.getRecordId(), e);
+      log.error("Posting action error for record {}", recordId, e);
       return NeoResponse.error(500, "Posting action error");
     }
   }
@@ -772,8 +784,11 @@ public class DocumentPostingService {
    *
    * <p>When the Business Partner cannot be resolved the keys are just {@code ["InvalidAccount"]}
    * with no params, and the message is the bare base text, as before.</p>
+   *
+   * <p>{@code STATUS_DocumentDisabled} (outside Goods Movements) names the reason
+   * {@link DocumentDisabledReason} can confirm, or the generic {@code DocumentDisabled} (ETP-5591).</p>
    */
-  private static PostResult failureOf(AcctServer acct) {
+  private static PostResult failureOf(AcctServer acct, String recordId, ConnectionProvider conn) {
     String message = errorMessageOf(acct);
     if (AcctServer.STATUS_NotCalculatedCost.equals(acct.getStatus())) {
       if (CostingStall.isQueueStalled(acct)) {
@@ -790,6 +805,17 @@ public class DocumentPostingService {
     }
     if (AcctServer.STATUS_PeriodClosed.equals(acct.getStatus())) {
       return new PostResult(false, message, List.of(MSG_PERIOD_NOT_AVAILABLE));
+    }
+    if (AcctServer.STATUS_DocumentDisabled.equals(acct.getStatus())
+        && !TABLE_M_MOVEMENT.equals(acct.tableName)) {
+      // ETP-5591: core's text comes in the classic session language; name the reason in the GO one.
+      DocumentDisabledReason.Reason reason = DocumentDisabledReason.of(acct);
+      if (reason.accountMissing()) {
+        DocumentDisabledReason.markInvalidAccount(recordId, conn);
+      }
+      String text = localizedMessage(reason.messageKey());
+      return new PostResult(false, StringUtils.isNotBlank(text) ? reason.render(text) : message,
+          List.of(reason.messageKey()), reason.messageParams());
     }
     if (!AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
       return new PostResult(false, message);

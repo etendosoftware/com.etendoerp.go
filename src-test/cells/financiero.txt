@@ -3,10 +3,15 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=financiero [-Pkind=mock|integration|all]
 
-# --- con mocks (87)
+# --- con mocks (100)
 com.etendoerp.go.schemaforge.AddPaymentServiceTest
 com.etendoerp.go.schemaforge.AutoMatchSupportRuleDimensionsTest
 com.etendoerp.go.schemaforge.AutoMatchSupportTest
+com.etendoerp.go.schemaforge.BankBounceDetectorTest
+com.etendoerp.go.schemaforge.BankBounceLineTextTest
+com.etendoerp.go.schemaforge.BankBouncePairServiceTest
+com.etendoerp.go.schemaforge.BankBouncePaymentGuardTest
+com.etendoerp.go.schemaforge.BankBounceSuggestionsFlagTest
 com.etendoerp.go.schemaforge.BankStatementAgentActionsContractTest
 com.etendoerp.go.schemaforge.BankStatementAgentActionsTest
 com.etendoerp.go.schemaforge.BankStatementAgentValidationTest
@@ -16,13 +21,18 @@ com.etendoerp.go.schemaforge.BankStatementHeaderStatusHandlerTest
 com.etendoerp.go.schemaforge.BankStatementLineAggregateHandlerTest
 com.etendoerp.go.schemaforge.BankStatementLinePendingAmountHandlerTest
 com.etendoerp.go.schemaforge.BankStatementLinePrunerTest
+com.etendoerp.go.schemaforge.BankStatementLineSetTest
 com.etendoerp.go.schemaforge.BankStatementsHandlerTest
 com.etendoerp.go.schemaforge.BankStatementsSupportTest
 com.etendoerp.go.schemaforge.CandidatesSupportTest
 com.etendoerp.go.schemaforge.CashCloseHandlerTest
 com.etendoerp.go.schemaforge.ConversionRateDocumentSyncTest
 com.etendoerp.go.schemaforge.CurrencyOptionsHandlerTest
+com.etendoerp.go.schemaforge.DocumentCurrencyRateTest
+com.etendoerp.go.schemaforge.DocumentRateMessagesTest
 com.etendoerp.go.schemaforge.FinancialAccountAccountingHandlerTest
+com.etendoerp.go.schemaforge.FinancialAccountBankConnectionActionsTest
+com.etendoerp.go.schemaforge.FinancialAccountBankConnectionEndpointTest
 com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandlerConnectTest
 com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandlerDisconnectTest
 com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandlerLinkTest
@@ -76,6 +86,7 @@ com.etendoerp.go.schemaforge.ReconciliationConversionSupportTest
 com.etendoerp.go.schemaforge.ReconciliationDifferenceSupportTest
 com.etendoerp.go.schemaforge.ReconciliationDraftGuardTest
 com.etendoerp.go.schemaforge.ReconciliationFlowSupportForeignInvoiceTest
+com.etendoerp.go.schemaforge.ReconciliationHandlerBounceSuggestionsTest
 com.etendoerp.go.schemaforge.ReconciliationHandlerRuleDimensionsTest
 com.etendoerp.go.schemaforge.ReconciliationHandlerSupportTest
 com.etendoerp.go.schemaforge.ReconciliationHandlerTest
@@ -84,9 +95,11 @@ com.etendoerp.go.schemaforge.ReconciliationLineTargetSupportTest
 com.etendoerp.go.schemaforge.ReconciliationRefusedWriteTest
 com.etendoerp.go.schemaforge.ReconciliationSupportTest
 com.etendoerp.go.schemaforge.ReconciliationWriteoffSupportTest
+com.etendoerp.go.schemaforge.StatementLineFilterTest
 com.etendoerp.go.schemaforge.TransactionTypeHandlerTest
 com.etendoerp.go.schemaforge.handlers.DocumentActionHandlerTest
 com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupportTest
+com.etendoerp.go.schemaforge.handlers.PaymentListSummaryTest
 com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupportTest
 com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.CurrencyIsoAllowlistSelectorPolicyTest
@@ -96,4 +109,3 @@ com.etendoerp.go.schemaforge.selector.policy.FinancialAccountPaymentMethodSelect
 com.etendoerp.go.schemaforge.ConversionRateDocumentSavepointIntegrationTest
 com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandlerDraftRemoveIntegrationTest
 com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandlerRemoveIntegrationTest
-

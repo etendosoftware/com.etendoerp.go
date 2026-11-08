@@ -49,6 +49,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.weld.WeldUtils;
@@ -81,6 +83,7 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  *   <li>{@code completeInvoiceIfNeeded} (ETP-4388 — Verifactu/ProcessInvoiceHook dispatch fix)</li>
  *   <li>{@code isStandardInvoiceDocType} (ETP-5576 — follow-up eligibility, fails closed)</li>
  *   <li>{@code enrichLinkedOrders} (ETP-5828 — every order reached through the invoice lines)</li>
+ *   <li>{@code mirrorInvoiceDateOnUpdate} (ETP-5840 — the invoice-date callout on an API update)</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
@@ -977,6 +980,10 @@ public class AbstractInvoiceHeaderHandlerTest {
       when(rs.next()).thenReturn(true, true, false);
       when(rs.getString(1)).thenReturn("rect-a", "rect-b");
       when(rs.getString(2)).thenReturn("FVR-A", "FVR-B");
+      // ETP-6002: the chip fields every invoice chip renders.
+      when(rs.getString(3)).thenReturn("CO", "DR");
+      when(rs.getBigDecimal(4)).thenReturn(new java.math.BigDecimal("-12.10"), null);
+      when(rs.getString(5)).thenReturn("EUR", "EUR");
 
       handler.callEnrichRectifyingInvoices(rec, "inv-original");
 
@@ -986,6 +993,11 @@ public class AbstractInvoiceHeaderHandlerTest {
       assertEquals("FVR-A", rectifying.getJSONObject(0).getString("documentNo"));
       assertEquals("rect-b", rectifying.getJSONObject(1).getString("id"));
       assertEquals("FVR-B", rectifying.getJSONObject(1).getString("documentNo"));
+      // ETP-6002: amount, currency and status reach the chip, as for every other invoice chip.
+      assertEquals("CO", rectifying.getJSONObject(0).getString("documentStatus"));
+      assertEquals(-12.10, rectifying.getJSONObject(0).getDouble("grandTotalAmount"), 0.001);
+      assertEquals("EUR", rectifying.getJSONObject(0).getString("currency$_identifier"));
+      assertTrue(rectifying.getJSONObject(1).isNull("grandTotalAmount"));
     }
   }
 
@@ -3380,7 +3392,8 @@ public class AbstractInvoiceHeaderHandlerTest {
   // record (or the user's own edit) already carries untouched, even if invoiceDate also
   // changed in the same request. That forward sync on update is instead the job of the
   // classic Etendo callout executed server-side by NeoCalloutService (see
-  // AbstractInvoiceHeaderHandler#handleInvoiceAfterCallout).
+  // AbstractInvoiceHeaderHandler#handleInvoiceAfterCallout) and, for an API update that runs no
+  // callout, of AbstractInvoiceHeaderHandler#mirrorInvoiceDateOnUpdate (ETP-5840, tested below).
 
   @Test
   public void mirrorAccountingDateOnCreate_postCrudNoExplicitValue_copiesInvoiceDate()
@@ -3523,6 +3536,77 @@ public class AbstractInvoiceHeaderHandlerTest {
     NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
+  }
+
+  // ── ETP-5840 (QA CP-12b): mirrorInvoiceDateOnUpdate replays the invoice-date callout ─
+
+  /**
+   * Table-driven, stored invoice dated 2026-10-15. In the UI, changing the invoice date fires
+   * {@code SifInvoiceOperationDateCallout} (extends {@code SE_Invoice_AccountingDate}), which
+   * overwrites the accounting and operation dates; an API update runs no callout, so the pre-hook
+   * copies the new invoice date into each of them the body does not send itself. An update that does
+   * not change the invoice date mirrors nothing (ETP-5273: the accounting date stays independent);
+   * the operation date is only mirrored when the {@code Invoice} entity declares it; a create is left
+   * to {@code mirrorAccountingDateOnCreate}.
+   */
+  @Test
+  public void mirrorInvoiceDateOnUpdate_replaysTheInvoiceDateCallout() throws Exception {
+    final String absent = "<absent>";
+    Object[][] cases = {
+        // name, method, body, entity declares etsgDateOperation, expected accountingDate,
+        // expected etsgDateOperation
+        { "new invoice date copied into both dates", "PATCH",
+            "{\"invoiceDate\":\"2026-10-08\"}", true, "2026-10-08", "2026-10-08" },
+        { "PUT behaves as PATCH", "PUT",
+            "{\"invoiceDate\":\"2026-10-08\"}", true, "2026-10-08", "2026-10-08" },
+        { "an accounting date sent by the caller is kept", "PATCH",
+            "{\"invoiceDate\":\"2026-10-08\",\"accountingDate\":\"2026-10-20\"}", true,
+            "2026-10-20", "2026-10-08" },
+        { "an operation date sent by the caller is kept", "PATCH",
+            "{\"invoiceDate\":\"2026-10-08\",\"etsgDateOperation\":\"2026-10-01\"}", true,
+            "2026-10-08", "2026-10-01" },
+        { "an accounting date sent null is filled", "PATCH",
+            "{\"invoiceDate\":\"2026-10-08\",\"accountingDate\":null}", true,
+            "2026-10-08", "2026-10-08" },
+        { "unchanged invoice date mirrors nothing", "PATCH",
+            "{\"invoiceDate\":\"2026-10-15\"}", true, absent, absent },
+        { "no invoice date mirrors nothing", "PATCH",
+            "{\"description\":\"x\"}", true, absent, absent },
+        { "operation date skipped when the entity lacks it", "PATCH",
+            "{\"invoiceDate\":\"2026-10-08\"}", false, "2026-10-08", absent },
+        { "a create is not this hook's job", "POST",
+            "{\"invoiceDate\":\"2026-10-08\"}", true, absent, absent },
+    };
+    Invoice stored = mock(Invoice.class);
+    when(stored.getInvoiceDate()).thenReturn(java.sql.Date.valueOf("2026-10-15"));
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Invoice.class, "inv-1")).thenReturn(stored);
+    Entity entity = mock(Entity.class);
+    ModelProvider modelProvider =
+        mock(ModelProvider.class);
+    when(modelProvider.getEntity(Invoice.ENTITY_NAME)).thenReturn(entity);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ModelProvider> mpMock =
+             Mockito.mockStatic(ModelProvider.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      for (Object[] c : cases) {
+        String name = (String) c[0];
+        when(entity.hasProperty("etsgDateOperation")).thenReturn((Boolean) c[3]);
+        JSONObject body = new JSONObject((String) c[2]);
+        NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CRUD)
+            .httpMethod((String) c[1]).recordId("POST".equals(c[1]) ? null : "inv-1")
+            .requestBody(body).build();
+
+        handler.mirrorInvoiceDateOnUpdate(ctx);
+
+        assertEquals(name, c[4], body.has("accountingDate") ? body.optString("accountingDate")
+            : absent);
+        assertEquals(name, c[5], body.has("etsgDateOperation")
+            ? body.optString("etsgDateOperation") : absent);
+      }
+    }
   }
 
   // ── isStandardInvoiceDocType (ETP-5576): gates a WRITE, so it fails CLOSED ──

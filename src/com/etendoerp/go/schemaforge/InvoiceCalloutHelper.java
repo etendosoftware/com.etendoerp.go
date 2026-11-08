@@ -49,6 +49,36 @@ final class InvoiceCalloutHelper {
   }
 
   // ---------------------------------------------------------------------------
+  // Fiscal configuration lookups
+  // ---------------------------------------------------------------------------
+
+  /** An active TicketBAI configuration for exactly this organization. */
+  static final String TBAI_ACTIVE_SQL =
+      "SELECT 1 FROM tbai_config WHERE ad_org_id = ? AND isactive = 'Y' LIMIT 1";
+
+  /**
+   * Whether the organization has an active TicketBAI configuration ({@link #TBAI_ACTIVE_SQL}).
+   * The single lookup behind {@code tbaiConfigActive} on the invoice detail and write responses
+   * and behind the TicketBAI rectificative defaults (ETP-5747).
+   *
+   * @param orgId the organization id; blank answers {@code false}
+   * @return {@code true} when a row exists
+   * @throws java.sql.SQLException when the query fails — each caller decides its own fallback
+   */
+  static boolean isTbaiConfigActive(String orgId) throws java.sql.SQLException {
+    if (StringUtils.isBlank(orgId)) {
+      return false;
+    }
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(TBAI_ACTIVE_SQL)) {
+      ps.setString(1, orgId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Context utilities
   // ---------------------------------------------------------------------------
 

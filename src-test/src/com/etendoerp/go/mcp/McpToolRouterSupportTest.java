@@ -62,10 +62,15 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.NeoActionSurface;
+import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
+import com.etendoerp.go.usage.quota.QuotaDefinition;
+import com.etendoerp.go.usage.quota.QuotaEvaluation;
+import com.etendoerp.go.usage.quota.QuotaVerdict;
 
 /**
  * Unit tests for {@link McpToolRouterSupport}.
@@ -2249,6 +2254,35 @@ class McpToolRouterSupportTest {
       return body;
     }
 
+    /**
+     * ETP-5945 (in ETP-5852): a keyed refusal (REST's 400 with {@code error.messageKeys}, here a
+     * date with no valid period) reaches the agent as etendo_create answers it: 422, code
+     * business_rule, the keys and the period hint — not REST's bare 400 "rejected by server".
+     */
+    @Test
+    @DisplayName("answers a keyed refusal as etendo_create does")
+    void keyedRefusalMatchesCreate() throws Exception {
+      JSONObject keyed = new JSONObject();
+      keyed.put("message", "Periodo no válido para esta fecha de contabilidad");
+      keyed.put("messageKeys", new JSONArray().put("PeriodNotValid"));
+      JSONObject error = new JSONObject();
+      error.put("status", 400);
+      error.put("message", "Operation 'j' rejected by server");
+      error.put("detail", new JSONObject().put("error", keyed));
+      JSONObject body = new JSONObject();
+      body.put("committed", false);
+      body.put("failedAt", new JSONObject().put("index", 0).put("id", "j"));
+      body.put("error", error);
+
+      JSONObject out = McpBatchEnvelope.toMcpBatchFailure(body).getJSONObject("error");
+
+      assertEquals(422, out.getInt("status"));
+      assertEquals("business_rule", out.getString("code"));
+      assertEquals("Periodo no válido para esta fecha de contabilidad", out.getString("detail"));
+      assertEquals("PeriodNotValid", out.getJSONArray("messageKeys").getString(0));
+      assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, out.getString("hint"));
+    }
+
     @Test
     @DisplayName("replaces the raw DAL detail with the IMP-5 envelope, keeping the failedAt pointer")
     void rewritesTheFailure() throws Exception {
@@ -2367,6 +2401,66 @@ class McpToolRouterSupportTest {
       assertTrue(hint.contains("retry the whole batch"), hint);
     }
 
+    /** The batch body {@code BatchService} returns for an operation refused by the quota gate. */
+    private JSONObject quotaFailure(NeoResponse refusal) throws Exception {
+      JSONObject error = new JSONObject();
+      error.put("status", refusal.getHttpStatus());
+      error.put("message", "Operation 'h1' rejected by server");
+      error.put("detail", refusal.getBody());
+      JSONObject body = new JSONObject();
+      body.put("committed", false);
+      body.put("failedAt", new JSONObject().put("index", 0).put("id", "h1"));
+      body.put("error", error);
+      return body;
+    }
+
+    /**
+     * REPRO (ETP-5051 QA BUG-3): an MCP batch rebuilt a quota refusal as a validation_error with
+     * prose, losing {@code QUOTA_EXCEEDED} and the {@code QuotaItem}. It must arrive in the same
+     * flattened shape {@code etendo_create} answers with.
+     */
+    @Test
+    @DisplayName("a quota refusal keeps its code and QuotaItem, flattened as etendo_create does")
+    void keepsAQuotaRefusalMachineReadable() throws Exception {
+      QuotaDefinition quota =
+          QuotaDefinition.builder().resourceId("RES-DOCS")
+              .resourceKey("POSTED_SALES_INVOICES").resourceName("Posted sales invoices")
+              .unitLabel("Inv").enforcementMode("block").includedQty(100L).build();
+      NeoResponse refusal = NeoQuotaWriteGate.refusalResponse(
+          new QuotaEvaluation(quota, "month", null, 100L,
+              QuotaVerdict.DENY));
+
+      JSONObject result = McpBatchEnvelope.toMcpBatchFailure(quotaFailure(refusal));
+
+      JSONObject error = result.getJSONObject("error");
+      JSONObject single = new JSONObject(McpHookExecutor.neoResponseToMcpResult(
+          NeoQuotaWriteGate.refusalResponse(
+              new QuotaEvaluation(quota, "month", null, 100L,
+                  QuotaVerdict.DENY)))
+          .getJSONArray("content").getJSONObject(0).getString("text"));
+      assertEquals(403, error.getInt("status"));
+      assertEquals("QUOTA_EXCEEDED", error.getString("code"));
+      assertEquals(single.getString("error"), error.getString("error"));
+      assertEquals("Quota exceeded: Posted sales invoices (100/100 Inv)",
+          error.getString("detail"));
+      assertEquals("POSTED_SALES_INVOICES",
+          error.getJSONObject("quota").getString("resourceKey"));
+      assertEquals(100L, error.getJSONObject("quota").getLong("consumed"));
+      assertEquals("h1", result.getJSONObject("failedAt").getString("id"));
+    }
+
+    @Test
+    @DisplayName("a failed quota check keeps QUOTA_CHECK_FAILED")
+    void keepsAFailedQuotaCheckMachineReadable() throws Exception {
+      JSONObject result = McpBatchEnvelope.toMcpBatchFailure(quotaFailure(
+          NeoQuotaWriteGate.checkFailedResponse()));
+
+      JSONObject error = result.getJSONObject("error");
+      assertEquals(500, error.getInt("status"));
+      assertEquals("QUOTA_CHECK_FAILED", error.getString("code"));
+      assertFalse(error.has("quota"));
+    }
+
     @Test
     @DisplayName("a committed batch and a body with no error object pass through untouched")
     void passesThroughNonFailures() throws Exception {
@@ -2385,9 +2479,22 @@ class McpToolRouterSupportTest {
     void mapsStatusesToCodes() {
       assertEquals("not_found", McpSupportInternals.errorCodeForStatus(404));
       assertEquals("method_not_allowed", McpSupportInternals.errorCodeForStatus(405));
+      assertEquals("forbidden", McpSupportInternals.errorCodeForStatus(403));
       assertEquals("validation_error", McpSupportInternals.errorCodeForStatus(400));
       assertEquals("validation_error", McpSupportInternals.errorCodeForStatus(422));
       assertEquals("server_error", McpSupportInternals.errorCodeForStatus(500));
+    }
+
+    @Test
+    @DisplayName("a handler's 403 refusal reads forbidden, not validation_error")
+    void handlerAccessDeniedIsForbidden() throws Exception {
+      JSONObject body = new JSONObject().put("error",
+          new JSONObject().put("message", "Access denied").put("status", 403));
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(body, 403);
+
+      assertEquals("forbidden", envelope.getString("error"));
+      assertEquals(403, envelope.getInt("status"));
     }
 
     @Test

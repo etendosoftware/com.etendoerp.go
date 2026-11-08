@@ -472,6 +472,29 @@ class McpWriteGateTest {
     }
 
     /**
+     * A field row that is editable for the SPA but locked for agents by its own {@code MCP_CONFIG}
+     * — the shipped sii-config {@code acogidaAlSII} payload — is refused on {@code etendo_update}.
+     */
+    @Test
+    @DisplayName("a field locked by its shipped MCP_CONFIG answers 422 read_only_field")
+    void aFieldLockedByItsOwnMcpConfigIsRefused() throws Exception {
+      declareProperty("acogidaAlSII", "Insiisystem");
+      curate("Insiisystem", Boolean.TRUE, Boolean.FALSE, null, null);
+      SFField row = curatedRows.get(curatedRows.size() - 1);
+      when(row.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(McpConfigSourcedataTest
+          .fieldPayloadOf("0986492D5E984AB6870671B29CDFDD52").toString());
+
+      McpRoutingException thrown = assertThrows(McpRoutingException.class,
+          () -> write(fields("acogidaAlSII", "N"), specEntity()));
+
+      JSONObject envelope = thrown.toEnvelope();
+      assertEquals(422, envelope.getInt(McpConstants.KEY_STATUS));
+      assertEquals(McpConstants.ERROR_READ_ONLY_FIELD,
+          envelope.getString(McpConstants.KEY_ERROR));
+      assertEquals("acogidaAlSII", envelope.getString(McpConstants.PARAM_FIELD));
+    }
+
+    /**
      * Naming the reason costs nothing here and is the whole difference from
      * {@code field_not_allowed}: {@code etendo_schema} already published this field with
      * {@code readOnly: true}, so the refusal repeats what the caller was told.
@@ -595,7 +618,9 @@ class McpWriteGateTest {
      * own {@code fields} argument and the pre-hook fires downstream, so every key is the caller's
      * by construction. Keeping the exemption left the gate firing on under two fifths of the
      * surface, and a live probe caught {@code etendo_update} on {@code sales-order/header} —
-     * qualifier {@code salesOrderHeaderHandler} — accepting {@code documentNo} with a 200.
+     * then bound by a qualifier — accepting {@code documentNo} with a 200. That pair moved to
+     * {@code @NeoExtension} in ETP-6026, so the fixture uses a pair still bound by qualifier,
+     * {@code purchase-order/header} ({@code purchaseOrderHeaderHandler}).
      */
     @Test
     @DisplayName("an entity with a Java_Qualifier is NOT exempt from the read-only gate")
@@ -603,7 +628,7 @@ class McpWriteGateTest {
       declareProperty("documentNo", "DocumentNo");
       curate("DocumentNo", Boolean.TRUE, Boolean.TRUE, null, null);
       SFEntity sfEntity = specEntity();
-      when(sfEntity.getJavaQualifier()).thenReturn("salesOrderHeaderHandler");
+      when(sfEntity.getJavaQualifier()).thenReturn("purchaseOrderHeaderHandler");
 
       McpRoutingException thrown = assertThrows(McpRoutingException.class,
           () -> write(fields("documentNo", "SO-9999"), sfEntity));

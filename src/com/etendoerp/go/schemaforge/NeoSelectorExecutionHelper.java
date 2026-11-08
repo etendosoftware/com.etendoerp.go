@@ -2,6 +2,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -16,6 +17,8 @@ import org.openbravo.dal.service.OBQuery;
  * to keep the service focused on selector orchestration.
  */
 class NeoSelectorExecutionHelper {
+
+  static final String PARAM_SEARCH_MATCH_IDS = "searchMatchIds";
 
   private NeoSelectorExecutionHelper() {
   }
@@ -76,7 +79,9 @@ class NeoSelectorExecutionHelper {
       return;
     }
     appendAndIfNeeded(hql);
-    hql.append("lower(e.").append(displayProperty).append(") LIKE :search");
+    // upper() on both sides is case-insensitive like lower(), and a trigram index on upper(col) can
+    // serve it; only tables that have one speed up (locally just c_bpartner).
+    hql.append("upper(e.").append(displayProperty).append(") LIKE upper(:search)");
   }
 
   /**
@@ -91,10 +96,30 @@ class NeoSelectorExecutionHelper {
       return;
     }
     appendAndIfNeeded(hql);
-    hql.append("(lower(e.").append(displayProperty).append(") LIKE :search OR exists (from ")
+    hql.append("(upper(e.").append(displayProperty).append(") LIKE upper(:search) OR exists (from ")
         .append(trl.trlEntityName).append(" t2 where t2.").append(trl.backRefProperty)
-        .append(" = e and t2.language.language = :searchLang and lower(t2.")
-        .append(trl.nameProperty).append(") LIKE :search))");
+        .append(" = e and t2.language.language = :searchLang and upper(t2.")
+        .append(trl.nameProperty).append(") LIKE upper(:search)))");
+  }
+
+  /**
+   * Appends the search predicate, widened with {@code OR e.id IN (:searchMatchIds)} when a
+   * selector search policy matched records the display column cannot (ETP-5948: a tax by its
+   * rate). Nothing is appended for an empty predicate, so the ids never act without a search.
+   */
+  static void appendSearchWithMatchIds(StringBuilder hql, CharSequence searchPredicate,
+      Set<String> searchMatchIds, Map<String, Object> queryParams) {
+    if (searchPredicate.length() == 0) {
+      return;
+    }
+    appendAndIfNeeded(hql);
+    if (searchMatchIds == null || searchMatchIds.isEmpty()) {
+      hql.append(searchPredicate);
+      return;
+    }
+    hql.append('(').append(searchPredicate).append(" OR e.id IN (:").append(PARAM_SEARCH_MATCH_IDS)
+        .append("))");
+    queryParams.put(PARAM_SEARCH_MATCH_IDS, searchMatchIds);
   }
 
   static String buildSimpleWhereClause(StringBuilder hql) {

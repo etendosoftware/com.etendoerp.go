@@ -1413,6 +1413,210 @@ class McpToolRouterRouteTest {
     }
   }
 
+  /**
+   * ETP-6062: the target-row guard of {@code etendo_update} (a System row shared by every client
+   * is not writable by a tenant) can be waived by the entity's customization when it declares the
+   * update consumed into tenant-owned rows ({@code NeoHandler#consumesTargetWrite}).
+   *
+   * <p>The guard's own decision tree is covered by {@code NeoActionRecordGuardTest}; here it is
+   * stubbed to the answer each case needs (the waiver sets the same context attribute the real one
+   * sets), and what is asserted is the router's reaction: whether the update reaches the
+   * customization's pre-hook, whether a declining pre-hook is refused, and whether the write
+   * service is ever called.</p>
+   */
+  @Nested
+  @DisplayName("route — etendo_update target guard (ETP-6062)")
+  class UpdateTargetGuardTests {
+
+    private static final String RECORD_ID = "rec-1";
+    /** Context attribute {@code NeoActionRecordGuard#updateRefusalFor} sets when it waives. */
+    private static final String DELEGATED_ATTR = "neo.targetWriteDelegated";
+
+    private MockedStatic<NeoActionRecordGuard> guardMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcherMock;
+    private MockedStatic<McpWriteRequestSupport> writeSupportMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.NeoFieldFilter> filterMock;
+    private MockedStatic<org.openbravo.base.model.ModelProvider> modelMock;
+    private MockedStatic<McpImageFieldSupport> imageMock;
+    private MockedStatic<McpFkResolver> fkMock;
+    private MockedStatic<McpSelectorContextHelper> selectorCtxMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.util.NeoRecordVersion> versionMock;
+    private MockedStatic<com.etendoerp.go.schemaforge.util.NeoLanguage> languageMock;
+
+    private SFEntity entity;
+
+    @BeforeEach
+    void setUpUpdatePath() throws Exception {
+      guardMock = mockStatic(NeoActionRecordGuard.class);
+      dispatcherMock = mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class);
+      writeSupportMock = mockStatic(McpWriteRequestSupport.class);
+      batchMock = mockStatic(com.etendoerp.go.schemaforge.BatchService.class);
+      filterMock = mockStatic(com.etendoerp.go.schemaforge.NeoFieldFilter.class);
+      modelMock = mockStatic(org.openbravo.base.model.ModelProvider.class);
+      imageMock = mockStatic(McpImageFieldSupport.class);
+      fkMock = mockStatic(McpFkResolver.class);
+      selectorCtxMock = mockStatic(McpSelectorContextHelper.class);
+      versionMock = mockStatic(com.etendoerp.go.schemaforge.util.NeoRecordVersion.class);
+      languageMock = mockStatic(com.etendoerp.go.schemaforge.util.NeoLanguage.class);
+
+      modelMock.when(org.openbravo.base.model.ModelProvider::getInstance)
+          .thenReturn(mock(org.openbravo.base.model.ModelProvider.class));
+
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      entity = mockEntity();
+      Tab tab = mockTab();
+      setupEntityLookup(entity, tab);
+
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+      supportMock.when(() -> McpToolRouterSupport.wrapForSmartclient(any(), anyString(),
+          anyString(), any())).thenReturn("{}");
+      supportMock.when(() -> McpToolRouterSupport.flattenCoreResponse(any()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+
+      writeSupportMock.when(() -> McpWriteRequestSupport.getAdTabOrThrow(any(), anyString()))
+          .thenReturn(tab);
+      writeSupportMock.when(() -> McpWriteRequestSupport.buildBaseParams(any(), anyString()))
+          .thenAnswer(invocation -> new java.util.HashMap<String, String>());
+      writeSupportMock.when(() -> McpWriteRequestSupport.mapFieldsToDalProperties(any(), any(),
+          any(), any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
+      writeSupportMock.when(() -> McpWriteRequestSupport.coerceFieldTypes(any(), any(), any(),
+          any())).thenReturn(new JSONArray());
+
+      // DefaultJsonDataService cannot be mocked here (its static initialiser needs a servlet
+      // container, see this class's javadoc), so the write service is never handed out: every case
+      // either stops before it or at the stale-record check, which sits right in front of it.
+      filterMock.when(() -> com.etendoerp.go.schemaforge.NeoFieldFilter.forEntity(any(),
+          anyString())).thenReturn(mock(com.etendoerp.go.schemaforge.NeoFieldFilter.class));
+      versionMock.when(() -> com.etendoerp.go.schemaforge.util.NeoRecordVersion.isStale(
+          anyString(), anyString(), anyString(), any())).thenReturn(false);
+
+      // refusalForUndeliveredDelegation is the router's second guard call: keep the real answer,
+      // which reads the attribute the (stubbed) waiver sets on the probe context.
+      guardMock.when(() -> NeoActionRecordGuard.refusalForUndeliveredDelegation(any()))
+          .thenCallRealMethod();
+    }
+
+    @AfterEach
+    void closeUpdatePath() {
+      for (MockedStatic<?> mock : java.util.Arrays.asList(guardMock, dispatcherMock, writeSupportMock, batchMock,
+          filterMock, modelMock, imageMock, fkMock, selectorCtxMock, versionMock, languageMock)) {
+        if (mock != null) {
+          mock.close();
+        }
+      }
+    }
+
+    private JSONObject updateArgs(JSONObject fields) throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", RECORD_ID);
+      args.put("fields", fields);
+      args.put("updated", STALE_SAFE_VERSION);
+      return args;
+    }
+
+    /** The guard waives the target row, as it does when the customization consumes the update. */
+    private void guardWaives() {
+      guardMock.when(() -> NeoActionRecordGuard.updateRefusalFor(any(SFEntity.class),
+          any(NeoContext.class))).thenAnswer(invocation -> {
+            invocation.<NeoContext>getArgument(1).setAttribute(DELEGATED_ATTR, Boolean.TRUE);
+            return null;
+          });
+    }
+
+    private com.etendoerp.go.schemaforge.NeoExtensionResult dispatchResult(NeoHandler customization,
+        NeoResponse response) {
+      return new com.etendoerp.go.schemaforge.NeoExtensionResult(customization, response, null);
+    }
+
+    @Test
+    @DisplayName("a consumed update reaches the pre-hook and returns the hook's response")
+    void consumedUpdateReturnsThePreHookResponse() throws Exception {
+      guardWaives();
+      JSONObject hookBody = new JSONObject().put("stored", "override");
+      dispatcherMock.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenReturn(dispatchResult(mock(NeoHandler.class), NeoResponse.ok(hookBody)));
+
+      JSONObject result = router.route("etendo_update",
+          updateArgs(new JSONObject().put("sif", "x")), WRITE_SCOPES);
+
+      assertFalse(result.has("isError") && result.getBoolean("isError"), result.toString());
+      assertEquals("override", new JSONObject(contentText(result)).getString("stored"));
+      // The probe the guard was asked about carries the agent's fields on a PUT of the record.
+      ArgumentCaptor<NeoContext> probe = ArgumentCaptor.forClass(NeoContext.class);
+      guardMock.verify(() -> NeoActionRecordGuard.updateRefusalFor(eq(entity), probe.capture()));
+      assertEquals("PUT", probe.getValue().getHttpMethod());
+      assertEquals(RECORD_ID, probe.getValue().getRecordId());
+      assertEquals("x", probe.getValue().getRequestBody().getString("sif"));
+      // The stale-record check sits right in front of the write: never reaching it means no write.
+      versionMock.verify(() -> com.etendoerp.go.schemaforge.util.NeoRecordVersion.isStale(
+          anyString(), anyString(), anyString(), any()), never());
+    }
+
+    @Test
+    @DisplayName("a pre-hook that declines after the opt-in is refused with 404 and writes nothing")
+    void decliningPreHookAfterOptInIsRefused() throws Exception {
+      guardWaives();
+      dispatcherMock.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenReturn(dispatchResult(mock(NeoHandler.class), null));
+
+      JSONObject result = router.route("etendo_update",
+          updateArgs(new JSONObject().put("sif", "x")), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      assertEquals(404, new JSONObject(contentText(result)).getJSONObject("error").getInt("status"));
+      // The stale-record check sits right in front of the write: never reaching it means no write.
+      versionMock.verify(() -> com.etendoerp.go.schemaforge.util.NeoRecordVersion.isStale(
+          anyString(), anyString(), anyString(), any()), never());
+    }
+
+    @Test
+    @DisplayName("a mixed body on a System row is refused before any field mapping or hook")
+    void mixedBodyIsRefusedBeforeAnyWork() throws Exception {
+      guardMock.when(() -> NeoActionRecordGuard.updateRefusalFor(any(SFEntity.class),
+          any(NeoContext.class))).thenReturn(NeoResponse.error(404, "Record not found"));
+
+      JSONObject result = router.route("etendo_update",
+          updateArgs(new JSONObject().put("sif", "x").put("name", "y")), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      assertEquals(404, new JSONObject(contentText(result)).getJSONObject("error").getInt("status"));
+      writeSupportMock.verify(() -> McpWriteRequestSupport.mapFieldsToDalProperties(any(), any(),
+          any(), any(), any()), never());
+      dispatcherMock.verifyNoInteractions();
+      batchMock.verify(com.etendoerp.go.schemaforge.BatchService::currentJsonService, never());
+    }
+
+    /**
+     * The row is tenant-owned, so the guard has no waiver to grant and the update goes the normal
+     * way: past the (empty) pre-hook dispatch and the undelivered-delegation check, up to the
+     * stale-record check that precedes the write. That check is made to refuse, which is the
+     * observable proof the request got that far, and the refusal is not the guard's 404.
+     */
+    @Test
+    @DisplayName("a tenant-owned row still updates through the normal path")
+    void tenantOwnedRowUpdatesNormally() throws Exception {
+      guardMock.when(() -> NeoActionRecordGuard.updateRefusalFor(any(SFEntity.class),
+          any(NeoContext.class))).thenReturn(null);
+      dispatcherMock.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenReturn(dispatchResult(null, null));
+      versionMock.when(() -> com.etendoerp.go.schemaforge.util.NeoRecordVersion.isStale(
+          anyString(), anyString(), anyString(), any())).thenReturn(true);
+      writeSupportMock.when(McpWriteRequestSupport::buildStaleRecordError)
+          .thenReturn(new JSONObject().put("status", 409).put("error", "stale_record"));
+
+      JSONObject result = router.route("etendo_update",
+          updateArgs(new JSONObject().put("name", "y")), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      assertEquals(409, new JSONObject(contentText(result)).getInt("status"));
+      dispatcherMock.verify(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(
+          any()));
+    }
+  }
+
   // ── etendo_delete ────────────────────────────────────────────────────────
 
   @Nested
@@ -2718,6 +2922,33 @@ class McpToolRouterRouteTest {
     }
 
     @Test
+    @DisplayName("ETP-5684: a typed name that resolves to a posting action is refused on the resolved name")
+    void postingGateJudgesTheResolvedActionName() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+      NeoResponse forbidden = NeoResponse.error(403, "Access denied to accounting");
+
+      try (MockedStatic<McpDeclaredActions> declaredMock = mockStatic(McpDeclaredActions.class);
+          MockedStatic<NeoAccountingAccessPolicy> policyMock =
+              mockStatic(NeoAccountingAccessPolicy.class)) {
+        declaredMock.when(() -> McpDeclaredActions.customizationNameOf(entity, ACTION_NAME))
+            .thenReturn("unpost");
+        policyMock.when(() -> NeoAccountingAccessPolicy.refusalForPostingAction(entity, "unpost"))
+            .thenReturn(forbidden);
+
+        JSONObject result = router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        policyMock.verify(() -> NeoAccountingAccessPolicy.refusalForPostingAction(entity, ACTION_NAME));
+      }
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), any(), any(), any()), never());
+    }
+
+    @Test
     @DisplayName("etendo_action surfaces processResult:error for error NeoResponse")
     void actionErrorSurfacesProcessResultError() throws Exception {
       SFSpec spec = mockSpec();
@@ -3114,11 +3345,11 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── etendo_action on ONE posted document: un-post, then reactivate (ETP-5715 round 3) ──
+  // ── etendo_action on the document-action button: an id that is no row (ETP-5715 W1) ──
 
   @Nested
-  @DisplayName("route — etendo_action reactivating a posted document")
-  class SingleReactivationUnpostTests {
+  @DisplayName("route — etendo_action on the document-action button")
+  class DocumentActionButtonTests {
 
     private static final String INVOICE_ID = "inv-001";
     private static final String DAL_ENTITY = "Invoice";
@@ -3160,7 +3391,6 @@ class McpToolRouterRouteTest {
           .thenAnswer(inv -> "unpost".equals(inv.getArgument(1)) ? unpostContract : null);
       declaredMock.when(() -> McpDeclaredActions.customizationNameOf(any(), anyString()))
           .thenAnswer(inv -> inv.getArgument(1));
-      declaredMock.when(() -> McpDeclaredActions.unpostsBeforeReactivation(any())).thenReturn(true);
 
       org.openbravo.base.model.Entity dal = mock(org.openbravo.base.model.Entity.class);
       when(dal.getName()).thenReturn(DAL_ENTITY);
@@ -3215,114 +3445,6 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("a posted invoice is un-posted, committed, then reactivated")
-    void postedInvoiceIsUnpostedFirst() throws Exception {
-      processAnswers(null);
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(result.has("isError"));
-      JSONObject body = new JSONObject(contentText(result));
-      assertEquals("success", body.getString("processResult"));
-      assertEquals("unpost", body.getJSONArray("steps").getString(0));
-      assertEquals("documentAction", body.getJSONArray("steps").getString(1));
-      assertEquals(List.of("run:unpost", "commit", "run:documentAction"), events);
-    }
-
-    @Test
-    @DisplayName("an invoice that is not posted is reactivated with no extra step")
-    void notPostedHasNoExtraStep() throws Exception {
-      posted = false;
-      processAnswers(null);
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(new JSONObject(contentText(result)).has("steps"));
-      assertEquals(List.of("run:documentAction"), events);
-    }
-
-    @Test
-    @DisplayName("a failed un-post is the answer and nothing is reactivated")
-    void failedUnpostStopsTheReactivation() throws Exception {
-      processAnswers("unpost");
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertTrue(result.getBoolean("isError"));
-      JSONObject body = new JSONObject(contentText(result));
-      assertEquals("unpost refused", body.getString("processMessage"));
-      assertEquals(1, body.getJSONArray("steps").length());
-      assertFalse(body.has("partial"));
-      assertEquals(List.of("run:unpost", "rollback"), events);
-    }
-
-    @Test
-    @DisplayName("a refused reactivation after a committed un-post says the un-post stays")
-    void refusedReactivationReportsPartial() throws Exception {
-      processAnswers("documentAction");
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertTrue(result.getBoolean("isError"));
-      JSONObject body = new JSONObject(contentText(result));
-      assertEquals("documentAction refused", body.getString("processMessage"));
-      assertEquals(2, body.getJSONArray("steps").length());
-      assertTrue(body.getString("partial").contains("not undone"), body.toString());
-      assertEquals(List.of("run:unpost", "commit", "run:documentAction", "rollback"), events);
-    }
-
-    @Test
-    @DisplayName("a reactivation the customization rules out is not un-posted first")
-    void ruledOutReactivationUnpostsNothing() throws Exception {
-      declaredMock.when(() -> McpDeclaredActions.unavailableFor(any(), any()))
-          .thenReturn(java.util.Map.of("documentAction:RE", "accepted and rectified"));
-      processAnswers("documentAction");
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(new JSONObject(contentText(result)).has("steps"));
-      assertEquals(List.of("run:documentAction"), events);
-    }
-
-    @Test
-    @DisplayName("completing or voiding a posted invoice never un-posts")
-    void otherDocActionsAreUnchanged() throws Exception {
-      processAnswers(null);
-
-      for (String docAction : new String[] {"CO", "VO"}) {
-        events.clear();
-        JSONObject result = router.route("etendo_action", reactivateArgs(docAction), WRITE_SCOPES);
-        assertFalse(new JSONObject(contentText(result)).has("steps"), docAction);
-        assertEquals(List.of("run:documentAction"), events, docAction);
-      }
-    }
-
-    @Test
-    @DisplayName("B2: a posted goods document or journal declares unpost but does not opt in: no un-post")
-    void entityThatDoesNotOptInIsUnchanged() throws Exception {
-      declaredMock.when(() -> McpDeclaredActions.unpostsBeforeReactivation(any())).thenReturn(false);
-      processAnswers(null);
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(new JSONObject(contentText(result)).has("steps"));
-      assertEquals(List.of("run:documentAction"), events);
-    }
-
-    @Test
-    @DisplayName("an entity that declares no unpost (an order) reactivates unchanged")
-    void entityWithoutUnpostIsUnchanged() throws Exception {
-      declaredMock.when(() -> McpDeclaredActions.precheck(any(), anyString(), any()))
-          .thenReturn(null);
-      processAnswers(null);
-
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
-
-      assertFalse(new JSONObject(contentText(result)).has("steps"));
-      assertEquals(List.of("run:documentAction"), events);
-    }
-
-    @Test
     @DisplayName("W1: a DocAction on an id that is not a row answers the same 404 as a foreign id")
     void missingDocumentIsARecordNotFound() throws Exception {
       processAnswers(null);
@@ -3373,23 +3495,40 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("W2: an exception after a committed un-post is reported with steps and partial")
     void exceptionAfterCommittedUnpostIsReported() throws Exception {
+      // ETP-5684: the un-post runs server-side, inside the customization, before the button. Drive
+      // the real ReactivationUnpost.unpostFirst on the action's own context, then let the button throw.
+      com.etendoerp.go.schemaforge.handlers.DocumentPostingService posting =
+          mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+      when(posting.unpost(anyString(), anyString())).thenAnswer(inv -> {
+        events.add("unpost");
+        return new com.etendoerp.go.schemaforge.handlers.DocumentPostingService.PostResult(
+            true, "Unposted", null, null);
+      });
       buttonActionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
           any(SFEntity.class), anyString(), anyString(), any())).thenAnswer(inv -> {
-            String action = inv.getArgument(2);
-            events.add("run:" + action);
-            if ("documentAction".equals(action)) {
-              throw new IllegalStateException("boom");
-            }
-            return NeoResponse.ok(new JSONObject().put("status", "success").put("message", "ok"));
+            events.add("run:" + inv.getArgument(2));
+            throw new IllegalStateException("boom");
           });
 
-      JSONObject result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+      JSONObject result;
+      try (MockedStatic<McpHookExecutor> hooks =
+          mockStatic(McpHookExecutor.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+        hooks.when(() -> McpHookExecutor.buildActionHookContext(anyString(), anyString(),
+            anyString(), anyString(), any(), any(), any(), anyString())).thenAnswer(inv -> {
+              com.etendoerp.go.schemaforge.NeoContext ctx =
+                  (com.etendoerp.go.schemaforge.NeoContext) inv.callRealMethod();
+              assertNull(com.etendoerp.go.schemaforge.handlers.ReactivationUnpost
+                  .unpostFirst(ctx, posting));
+              return ctx;
+            });
+        result = router.route("etendo_action", reactivateArgs("RE"), WRITE_SCOPES);
+      }
 
       assertTrue(result.getBoolean("isError"));
       JSONObject body = new JSONObject(contentText(result));
-      assertEquals(2, body.getJSONArray("steps").length());
+      assertEquals("[\"unpost\"]", body.getJSONArray("steps").toString());
       assertTrue(body.getString("partial").contains("not undone"), body.toString());
-      assertEquals("rollback", events.get(events.size() - 1));
+      assertEquals(List.of("unpost", "run:documentAction", "rollback"), events);
     }
 
     @Test
@@ -3750,7 +3889,7 @@ class McpToolRouterRouteTest {
         // ETP-5415 (D13): the tab-less read is served by runReadProvider, which runs the read's
         // PRE phase before the tab is demanded. ETP-5405 reached the same behaviour through
         // the entity's handler + runPreHook; the seam moved, the assertion below did not.
-        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any()))
+        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(handled);
         hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
 
@@ -3785,7 +3924,7 @@ class McpToolRouterRouteTest {
         // ETP-5415 (D13): the tab-less read is served by runReadProvider, which runs the read's
         // PRE phase before the tab is demanded. ETP-5405 reached the same behaviour through
         // the entity's handler + runPreHook; the seam moved, the assertion below did not.
-        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any()))
+        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(handled);
         hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
 
@@ -3796,7 +3935,7 @@ class McpToolRouterRouteTest {
         // The seam the router now calls is runReadProvider (ETP-5415, D13); the earlier assertion on
         // buildReadHookContext could not hold once the whole McpHookExecutor is stubbed.
         hookMock.verify(() -> McpHookExecutor.runReadProvider(eq(SPEC_NAME), eq(ENTITY_NAME),
-            eq("rec-1"), eq(entity), any()));
+            eq("rec-1"), eq(entity), any(), any(), any(), any()));
       }
     }
 

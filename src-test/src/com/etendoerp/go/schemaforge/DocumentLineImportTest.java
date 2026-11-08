@@ -44,6 +44,7 @@ import com.etendoerp.go.schemaforge.DocumentLineImport.ImportedLine;
  * of the answers. The delegates' own tests cover each path end to end; these pin the rules.
  *
  * @covers com.etendoerp.go.schemaforge.DocumentLineImport
+ * @covers com.etendoerp.go.schemaforge.ImportListing
  */
 public class DocumentLineImportTest {
 
@@ -381,6 +382,7 @@ public class DocumentLineImportTest {
     assertEquals(2, data.getInt("importedCount"));
     assertTrue(data.getBoolean("headerLinked"));
     assertEquals("o1", data.getString("salesOrder"));
+    assertEquals("the direction-neutral name repeats it", "o1", data.getString("order"));
     JSONArray lines = data.getJSONArray("lines");
     assertEquals(2, lines.length());
     JSONObject first = lines.getJSONObject(0);
@@ -399,6 +401,7 @@ public class DocumentLineImportTest {
     JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
     assertFalse(data.getBoolean("headerLinked"));
     assertFalse(data.has("salesOrder"));
+    assertFalse(data.has("order"));
   }
 
   @Test
@@ -449,6 +452,196 @@ public class DocumentLineImportTest {
     assertTrue(response.getBoolean("hasMore"));
     assertEquals(50, response.getInt("limit"));
     assertEquals(200, response.getInt("scanLimit"));
+  }
+
+  // ── the listing parameters (ImportListing) ────────────────────────────────
+
+  /**
+   * Without any listing parameter a list action keeps its own limits and reports no paging, so an
+   * MCP caller that never sends them gets exactly the answer it got before.
+   */
+  @Test
+  public void listRequest_absentParameters_keepTheDelegateLimitsAndDoNotPage() throws Exception {
+    for (JSONObject absent : new JSONObject[] { null, body("{}"),
+        body("{\"limit\":null,\"offset\":null,\"includeCovered\":null,\"detail\":null}") }) {
+      ImportListing.ListRequest request = ImportListing.listRequest(absent, 50, 200);
+
+      assertEquals(50, request.limit);
+      assertEquals(0, request.offset);
+      assertEquals(200, request.scan);
+      assertFalse(request.paged);
+      assertFalse(request.includeCovered);
+      assertFalse(request.detail);
+      assertTrue(request.isDefault(200));
+    }
+  }
+
+  /** limit widens the scan (never below the default), offset alone also pages; flags parse. */
+  @Test
+  public void listRequest_readsLimitOffsetAndFlags() throws Exception {
+    ImportListing.ListRequest wide = ImportListing.listRequest(
+        body("{\"limit\":1000,\"includeCovered\":\"TRUE\",\"detail\":true}"), 50, 200);
+    assertEquals(1000, wide.limit);
+    assertEquals(1000, wide.scan);
+    assertTrue(wide.paged);
+    assertTrue(wide.includeCovered);
+    assertTrue(wide.detail);
+    assertFalse(wide.isDefault(200));
+
+    ImportListing.ListRequest narrow = ImportListing.listRequest(body("{\"limit\":\"3\"}"), 50, 200);
+    assertEquals(3, narrow.limit);
+    assertEquals("the scan never reads fewer than the default", 200, narrow.scan);
+
+    ImportListing.ListRequest offset = ImportListing.listRequest(
+        body("{\"offset\":40,\"detail\":\"false\"}"), 50, 200);
+    assertEquals(40, offset.offset);
+    assertEquals(50, offset.limit);
+    assertTrue("offset alone reports paging", offset.paged);
+    assertFalse(offset.detail);
+    assertFalse(offset.isDefault(200));
+  }
+
+  /** Every out-of-range or ill-typed value is a 400 importInvalidParameter naming the key. */
+  @Test
+  public void listRequest_aBadValue_is400NamingTheParameter() throws Exception {
+    String[][] cases = {
+        { "{\"limit\":0}", "limit" }, { "{\"limit\":1001}", "limit" },
+        { "{\"limit\":\"x\"}", "limit" }, { "{\"limit\":2.5}", "limit" },
+        { "{\"offset\":-1}", "offset" }, { "{\"offset\":\"later\"}", "offset" },
+        { "{\"includeCovered\":\"yes\"}", "includeCovered" },
+        { "{\"includeCovered\":1}", "includeCovered" }, { "{\"detail\":\"on\"}", "detail" },
+    };
+    for (String[] c : cases) {
+      try {
+        ImportListing.listRequest(body(c[0]), 50, 200);
+        fail(c[0] + " must be refused");
+      } catch (ImportRefusal refusal) {
+        assertEquals(c[0], 400, refusal.response().getHttpStatus());
+        JSONObject error = errorOf(refusal);
+        assertEquals(c[0], "importInvalidParameter", error.getString("code"));
+        assertTrue(c[0], error.getString("message").startsWith(c[1] + " must be"));
+      }
+    }
+  }
+
+  /** The lines actions read the same two flags, with the same 400 on a non-boolean. */
+  @Test
+  public void linesFlags_absentIsFalse_aNonBooleanIs400() throws Exception {
+    assertFalse(ImportListing.includeCovered(body("{\"orderId\":\"o1\"}")));
+    assertFalse(ImportListing.detail(null));
+    assertTrue(ImportListing.includeCovered(body("{\"includeCovered\":true}")));
+    assertTrue(ImportListing.detail(body("{\"detail\":\"true\"}")));
+    try {
+      ImportListing.detail(body("{\"detail\":\"1\"}"));
+      fail("detail \"1\" must be refused");
+    } catch (ImportRefusal refusal) {
+      assertEquals("importInvalidParameter", refusal.code());
+    }
+  }
+
+  /**
+   * pendingBasis: absent, null and "server" are the server rule wherever it is asked; "classic" is
+   * honoured only where the action offers it, and a 400 importInvalidParameter elsewhere.
+   */
+  @Test
+  public void classicPending_serverByDefault_classicOnlyWhereOffered() throws Exception {
+    for (boolean offered : new boolean[] { true, false }) {
+      assertFalse(ImportListing.classicPending(null, offered));
+      assertFalse(ImportListing.classicPending(body("{}"), offered));
+      assertFalse(ImportListing.classicPending(body("{\"pendingBasis\":null}"), offered));
+      assertFalse(ImportListing.classicPending(body("{\"pendingBasis\":\"server\"}"), offered));
+    }
+    assertTrue(ImportListing.classicPending(body("{\"pendingBasis\":\"classic\"}"), true));
+    try {
+      ImportListing.classicPending(body("{\"pendingBasis\":\"classic\"}"), false);
+      fail("classic where it is not offered must be refused");
+    } catch (ImportRefusal refusal) {
+      assertEquals(400, refusal.response().getHttpStatus());
+      assertEquals(DocumentLineImport.ERROR_INVALID_PARAMETER, refusal.code());
+      assertEquals("pendingBasis \"classic\" is not available on this action",
+          errorOf(refusal).getString("message"));
+    }
+  }
+
+  /** Any value other than the two names is refused, even where classic is offered. */
+  @Test
+  public void classicPending_anyOtherValue_is400() throws Exception {
+    String[] values = { "\"Classic\"", "\"\"", "true", "1", "\"client\"" };
+    for (String value : values) {
+      try {
+        ImportListing.classicPending(body("{\"pendingBasis\":" + value + "}"), true);
+        fail(value + " must be refused");
+      } catch (ImportRefusal refusal) {
+        assertEquals(value, 400, refusal.response().getHttpStatus());
+        assertEquals(value, DocumentLineImport.ERROR_INVALID_PARAMETER, refusal.code());
+        assertEquals(value, "pendingBasis must be \"server\" or \"classic\"",
+            errorOf(refusal).getString("message"));
+      }
+    }
+  }
+
+  /**
+   * parseBoolean is the one boolean parser of the import actions: absent / null answer the given
+   * default, a boolean or "true"/"false" in any case is read, and anything else is a 400 carrying
+   * the caller's error code — importInvalidParameter for the listing flags, importInvalidLine for
+   * OrderImportRequest's.
+   */
+  @Test
+  public void parseBoolean_honoursTheDefault_andRefusesWithTheCallersCode() throws Exception {
+    for (boolean whenAbsent : new boolean[] { true, false }) {
+      assertEquals(whenAbsent, ImportListing.parseBoolean(null, "k", whenAbsent, "x"));
+      assertEquals(whenAbsent, ImportListing.parseBoolean(body("{}"), "k", whenAbsent, "x"));
+      assertEquals(whenAbsent,
+          ImportListing.parseBoolean(body("{\"k\":null}"), "k", whenAbsent, "x"));
+    }
+    assertTrue(ImportListing.parseBoolean(body("{\"k\":true}"), "k", false, "x"));
+    assertFalse(ImportListing.parseBoolean(body("{\"k\":\" FaLsE \"}"), "k", true, "x"));
+    for (String code : new String[] { DocumentLineImport.ERROR_INVALID_PARAMETER,
+        DocumentLineImport.ERROR_INVALID_LINE }) {
+      try {
+        ImportListing.parseBoolean(body("{\"k\":\"yes\"}"), "k", false, code);
+        fail(code + ": \"yes\" must be refused");
+      } catch (ImportRefusal refusal) {
+        assertEquals(code, 400, refusal.response().getHttpStatus());
+        assertEquals(code, refusal.code());
+        assertEquals("k must be true or false", errorOf(refusal).getString("message"));
+      }
+    }
+  }
+
+  /** creationDate is an ISO-8601 instant in UTC truncated to the second, or JSON null. */
+  @Test
+  public void putCreationDate_isAnIsoUtcInstant_orNull() throws Exception {
+    JSONObject row = new JSONObject();
+    ImportListing.putCreationDate(row, java.util.Date.from(
+        java.time.Instant.parse("2026-11-05T09:12:33.789Z")));
+    assertEquals("2026-11-05T09:12:33Z", row.getString("creationDate"));
+
+    JSONObject missing = new JSONObject();
+    ImportListing.putCreationDate(missing, null);
+    assertTrue(missing.has("creationDate"));
+    assertTrue(missing.isNull("creationDate"));
+  }
+
+  /** The declared parameters: detail only when the action has document detail keys. */
+  @Test
+  public void listParams_declareDetailOnlyWithDetailKeys() {
+    List<String> withDetail = new java.util.ArrayList<>();
+    for (com.etendoerp.go.schemaforge.util.NeoActionContract.Param p
+        : ImportListing.listParams(50, "creationDate")) {
+      withDetail.add(p.getName());
+    }
+    assertEquals(List.of("limit", "offset", "includeCovered", "detail"), withDetail);
+    assertEquals(3, ImportListing.listParams(50, null).length);
+
+    List<String> lines = new java.util.ArrayList<>();
+    for (com.etendoerp.go.schemaforge.util.NeoActionContract.Param p : ImportListing.linesParams(
+        null, com.etendoerp.go.schemaforge.util.NeoActionContract.Param.optional("invoiceId",
+            com.etendoerp.go.schemaforge.util.NeoActionContract.TYPE_STRING, "id"))) {
+      lines.add(p.getName());
+    }
+    assertEquals("own parameters first, no detail without keys",
+        List.of("invoiceId", "includeCovered"), lines);
   }
 
   /**

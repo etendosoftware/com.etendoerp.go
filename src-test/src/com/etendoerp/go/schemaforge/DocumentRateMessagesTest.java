@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.startsWith;
@@ -31,6 +32,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDate;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -48,7 +50,9 @@ import org.openbravo.model.ad.system.Language;
  * <p>The two message queries are answered by mocked JDBC statements; the catalog is the real one.
  *
  * <p>The resolution itself lives in {@link NeoMessageText} (shared with the ETP-5473
- * financial-account refusals); this class exercises it through both entry points.
+ * financial-account refusals); this class exercises it through both entry points, plus
+ * {@link NeoMessageText#addWarning}, which words a write-response warning the same way and puts it
+ * where the channel reads it.
  *
  * @covers com.etendoerp.go.schemaforge.DocumentRateMessages
  * @covers com.etendoerp.go.schemaforge.NeoMessageText
@@ -187,5 +191,82 @@ public class DocumentRateMessagesTest {
     assertEquals("El pa\u00eds es obligatorio", error.getString("message"));
     assertEquals("ETGO_FinAccCountryRequired",
         error.getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
+  }
+
+  /** A REST warning goes in the top-level {@code messages}, worded in the request language. */
+  @Test
+  public void addWarningOnRestAppendsATranslatedWarningAtTheTop() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject())
+        .put("messages", new JSONArray().put(new JSONObject().put("type", "info")));
+
+    withMessageRows(null, null, "es_ES", trl -> {
+      NeoMessageText.addWarning(body, false, "ETGO_FiscalSifNoCertificate");
+      return null;
+    });
+
+    JSONArray messages = body.getJSONArray("messages");
+    assertEquals("appended, not replaced", 2, messages.length());
+    JSONObject warning = messages.getJSONObject(1);
+    assertEquals("warning", warning.getString("type"));
+    assertTrue(warning.getString("text"),
+        warning.getString("text").startsWith("La organizaci"));
+    assertFalse(body.getJSONObject("response").has("messages"));
+  }
+
+  /** An MCP warning goes inside {@code response}, where the agent reads the write result. */
+  @Test
+  public void addWarningOnMcpGoesInsideTheResponse() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+
+    withMessageRows(null, null, "en_US", trl -> {
+      NeoMessageText.addWarning(body, true, "ETGO_FiscalSifNoCertificate");
+      return null;
+    });
+
+    JSONObject warning = body.getJSONObject("response").getJSONArray("messages").getJSONObject(0);
+    assertEquals("warning", warning.getString("type"));
+    assertTrue(warning.getString("text"),
+        warning.getString("text").startsWith("The organization has no digital certificate"));
+    assertFalse(body.has("messages"));
+  }
+
+  /** Without an inner {@code response} an MCP warning falls back to the top level. */
+  @Test
+  public void addWarningOnMcpWithoutAResponseStaysAtTheTop() throws Exception {
+    JSONObject body = new JSONObject();
+
+    withMessageRows(null, null, "en_US", trl -> {
+      NeoMessageText.addWarning(body, true, "ETGO_FiscalSifNoCertificate");
+      return null;
+    });
+
+    assertEquals("warning",
+        body.getJSONArray("messages").getJSONObject(0).getString("type"));
+  }
+
+  /** A translated {@code AD_MESSAGE_TRL} row wins, with its placeholders substituted. */
+  @Test
+  public void addWarningUsesTheTranslatedRowAndItsArguments() throws Exception {
+    JSONObject body = new JSONObject();
+
+    withMessageRows("Aviso para %0", null, "es_ES", trl -> {
+      NeoMessageText.addWarning(body, false, "ETGO_FiscalSifNoCertificate", "ORG-1");
+      return null;
+    });
+
+    assertEquals("Aviso para ORG-1",
+        body.getJSONArray("messages").getJSONObject(0).getString("text"));
+  }
+
+  /** Total: a {@code null} body is ignored, there is nothing to warn in. */
+  @Test
+  public void addWarningIgnoresANullBody() throws Exception {
+    Boolean done = withMessageRows(null, null, "en_US", trl -> {
+      NeoMessageText.addWarning(null, false, "ETGO_FiscalSifNoCertificate");
+      return Boolean.TRUE;
+    });
+
+    assertTrue(done);
   }
 }

@@ -113,7 +113,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           + "order that already has a DRAFT invoice is refused with 409 draftInvoiceExists, "
           + "creating nothing (one draft per order, as on the screen, which hides the button): "
           + "the refusal lists the draft numbers in existingDraftInvoices, and "
-          + "allowDuplicate:true creates the invoice anyway and lists the drafts the order had.",
+          + "allowDuplicate:true creates the invoice anyway and lists the drafts the order had. "
+          + "The order's global discount (etgoTotalDiscount, always a %) "
+          + "is carried to the new invoice's total discount as the same %, never as an amount.",
       OrderInvoiceDuplicateGuard.allowDuplicateParam())
       .withIdDescription("the id of the purchase order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
@@ -248,6 +250,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (DocumentCurrencyRate.MissingRateException e) {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
@@ -302,6 +306,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
     OBDal.getInstance().getSession().refresh(invoice);
     ensureDocumentNo(invoice);
+    // ETP-5051: the plan-quota check of the generated invoice, BEFORE the completion commits it.
+    NeoQuotaCreateCheck.requireAllowedDocument(invoice);
 
     // ETP-5381: create and confirm atomically — see CreateDraftInvoiceHandler.handleCreate for
     // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits

@@ -194,12 +194,6 @@ public class PurchaseInvoiceHeaderHandlerTest {
     });
   }
 
-  /** ETP-5715: the invoice window opts into un-posting before a reactivation, like its SPA. */
-  @Test
-  public void testUnpostsBeforeReactivation() {
-    org.junit.Assert.assertTrue(new PurchaseInvoiceHeaderHandler().unpostBeforeReactivate());
-  }
-
   @Test
   public void testAfterHandleDoesNotSyncConversionRateOnRegisterPaymentAction() throws Exception {
     assertActionDoesNotSyncConversionRate("registerPayment");
@@ -1791,6 +1785,75 @@ public class PurchaseInvoiceHeaderHandlerTest {
     assertSame(fromReceipts, header.handle(receiptCtx));
   }
 
+  @Test
+  public void actionContracts_publishTheReturnAndOriginImports() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new PurchaseInvoiceHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(java.util.List.of("availableReturns", "availableReturnLines",
+        "importReturnLines", "availableOriginInvoices", "availableOriginInvoiceLines",
+        "importOriginInvoiceLines")));
+    assertNull(NeoActionContract.validate(contracts,
+        "importReturnLines", new JSONObject().put("returnId", "r1")));
+    assertNull(NeoActionContract.validate(contracts,
+        "importOriginInvoiceLines", new JSONObject().put("invoiceId", "f1")));
+    // ETP-6002: neither side keeps the source line's order line, and the contract says so.
+    assertTrue("the purchase origin import does not keep the order line",
+        contracts.get("importOriginInvoiceLines").getDescription()
+            .contains("never its order line"));
+  }
+
+  /**
+   * The import actions go with the KIND of invoice (ETP-5876), judged by this header's own rule:
+   * the order import of a rectificative is refused and never reaches its delegate, a return import
+   * on a normal invoice too, and the delegates are handed the same policy on the request.
+   */
+  @Test
+  public void handle_routesTheImportsByTheKindOfInvoice() throws Exception {
+    ImportOrderLinesIntoInvoiceHandler orders = mock(ImportOrderLinesIntoInvoiceHandler.class);
+    ImportInOutLinesIntoInvoiceHandler receipts = mock(ImportInOutLinesIntoInvoiceHandler.class);
+    PurchaseInvoiceHeaderHandler purchaseHeader = purchaseWithImportDelegates(orders, receipts);
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBContext context = mock(OBContext.class);
+      org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+      when(client.getId()).thenReturn("c1");
+      when(context.getCurrentClient()).thenReturn(client);
+      ctxMock.when(OBContext::getOBContext).thenReturn(context);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getClient()).thenReturn(client);
+      when(invoice.getDocumentNo()).thenReturn("FCR1");
+      DocumentType type = mock(DocumentType.class);
+      when(type.getDocumentCategory()).thenReturn("APC");
+      when(invoice.getTransactionDocument()).thenReturn(type);
+      when(dal.get(Invoice.class, "i1")).thenReturn(invoice);
+
+      NeoContext orderCtx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName("importOrderLines").recordId("i1")
+          .build();
+      NeoResponse refused = purchaseHeader.handle(orderCtx);
+
+      assertEquals("a rectificative takes no order import", 422, refused.getHttpStatus());
+      assertEquals("importNotAvailableOnRectificative",
+          refused.getBody().getJSONObject("error").getString("code"));
+      Mockito.verify(orders, Mockito.never()).handle(any());
+
+      when(type.getDocumentCategory()).thenReturn("API");
+      NeoContext returnCtx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName("importReturnLines").recordId("i1")
+          .build();
+      assertEquals("a normal invoice takes no return import", "importRequiresRectificative",
+          purchaseHeader.handle(returnCtx).getBody().getJSONObject("error").getString("code"));
+      assertNotNull("the policy travels on the request",
+          returnCtx.getAttribute(RectificativeImportPolicy.ATTRIBUTE));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
   // ── whole-set list totals (ETP-5757) ──────────────────────────────────────
 
   private static NeoContext listTotalsListCtx() {
@@ -1953,5 +2016,79 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(rs.next()).thenReturn(false);
       return call.call();
     }
+  }
+
+  // ── ETP-6036: userContact default must be a contact of the vendor ─────────────────────────────
+
+  private static JSONObject defaultsBody(String contactId) throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("userContact", contactId);
+    defaults.put("userContact$_identifier", "Admin");
+    defaults.put("documentStatus", "DR");
+    return new JSONObject().put("defaults", defaults);
+  }
+
+  private static NeoContext defaultsContext(JSONObject body, String partnerId) {
+    Map<String, String> params = new HashMap<>();
+    if (partnerId != null) {
+      params.put("businessPartner", partnerId);
+    }
+    return NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+        .queryParams(params).previousResult(new NeoResponse(200, body)).build();
+  }
+
+  private static org.openbravo.model.ad.access.User contactOf(String partnerId) {
+    org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+    org.openbravo.model.common.businesspartner.BusinessPartner partner =
+        mock(org.openbravo.model.common.businesspartner.BusinessPartner.class);
+    when(partner.getId()).thenReturn(partnerId);
+    when(user.getBusinessPartner()).thenReturn(partner);
+    return user;
+  }
+
+  /** Without a vendor, the first user of the combo (Admin) is nobody's choice: no default. */
+  @Test
+  public void defaultsDropTheContactWhenNoVendorIsSent() throws Exception {
+    JSONObject body = defaultsBody("100");
+
+    PurchaseInvoiceHeaderHandler.dropForeignContactDefault(defaultsContext(body, null));
+
+    JSONObject defaults = body.getJSONObject("defaults");
+    assertFalse(defaults.has("userContact"));
+    assertFalse(defaults.has("userContact$_identifier"));
+    assertEquals("DR", defaults.getString("documentStatus"));
+  }
+
+  /** With a vendor, its own contact (what the callout sets) stays; another user does not. */
+  @Test
+  public void defaultsKeepOnlyAContactOfTheSentVendor() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    org.openbravo.model.ad.access.User vendorContact = contactOf("BP-1");
+    org.openbravo.model.ad.access.User otherUser = contactOf("BP-2");
+    when(dal.get(org.openbravo.model.ad.access.User.class, "U-VENDOR")).thenReturn(vendorContact);
+    when(dal.get(org.openbravo.model.ad.access.User.class, "U-OTHER")).thenReturn(otherUser);
+    JSONObject kept = defaultsBody("U-VENDOR");
+    JSONObject dropped = defaultsBody("U-OTHER");
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      PurchaseInvoiceHeaderHandler.dropForeignContactDefault(defaultsContext(kept, "BP-1"));
+      PurchaseInvoiceHeaderHandler.dropForeignContactDefault(defaultsContext(dropped, "BP-1"));
+    }
+
+    assertEquals("U-VENDOR", kept.getJSONObject("defaults").getString("userContact"));
+    assertFalse(dropped.getJSONObject("defaults").has("userContact"));
+  }
+
+  /** Only a defaults answer is touched: a read of a saved invoice keeps whatever contact it has. */
+  @Test
+  public void contactIsLeftAloneOutsideDefaults() throws Exception {
+    JSONObject body = defaultsBody("100");
+    NeoContext crud = NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .previousResult(new NeoResponse(200, body)).build();
+
+    PurchaseInvoiceHeaderHandler.dropForeignContactDefault(crud);
+
+    assertEquals("100", body.getJSONObject("defaults").getString("userContact"));
   }
 }

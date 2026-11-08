@@ -22,8 +22,10 @@ import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.schemaforge.data.Account;
 
@@ -93,6 +95,41 @@ public final class GoAccountResolver {
       log.warn("Could not resolve the platform account for username {}: {}",
           maskUsername(normalized), e.getMessage(), e);
       return Optional.empty();
+    }
+  }
+
+  /**
+   * Resolves the {@code ETGO_ACCOUNT} email of the user bound to the current {@link OBContext} —
+   * the identity a per-account feature flag targets on. Every channel (REST single, REST batch,
+   * MCP) binds the authenticated AD user to the OBContext, so every channel resolves the same
+   * account for the same person.
+   *
+   * <p>Runs in admin mode because {@code ETGO_ACCOUNT} is a platform table the caller's own role
+   * has no reason to be able to read; the account looked up is the caller's own.
+   *
+   * <p>Never throws: no context, no user, no account behind the user (a hand-created ERP user, a
+   * system user) or any failure resolving it all answer {@code null}, which a flag evaluation turns
+   * into "not this account", never into "everyone".
+   *
+   * @return the account email, or {@code null} when no active account resolves
+   */
+  public static String currentAccountEmail() {
+    if (OBContext.getOBContext() == null) {
+      return null;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      OBContext ctx = OBContext.getOBContext();
+      User user = ctx == null ? null : ctx.getUser();
+      if (user == null) {
+        return null;
+      }
+      return findAccountByUsername(user.getUsername()).map(Account::getEmail).orElse(null);
+    } catch (RuntimeException e) {
+      log.warn("Could not resolve the platform account of the current user: {}", e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 

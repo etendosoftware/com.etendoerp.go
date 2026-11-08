@@ -66,6 +66,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * left in draft and the response that lets an agent report the linkage.
  *
  * @covers com.etendoerp.go.schemaforge.CreatePurchaseReturnHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.ReturnFromDocumentSupport
  */
 public class CreatePurchaseReturnHandlerTest {
@@ -75,6 +76,7 @@ public class CreatePurchaseReturnHandlerTest {
     NeoResponse response;
     ShipmentInOut returnReceipt;
     Currency originalCurrency;
+    OBDal dal;
     final List<ShipmentInOutLine> createdLines = new ArrayList<>();
     boolean headerBuilt;
   }
@@ -138,6 +140,7 @@ public class CreatePurchaseReturnHandlerTest {
 
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      run.dal = dal;
       ReturnedQuantityTestSupport.stubReturnedQuantities(dal, returned);
 
       Organization org = mock(Organization.class);
@@ -230,6 +233,24 @@ public class CreatePurchaseReturnHandlerTest {
     assertNotNull(run.response);
     assertEquals(201, run.response.getHttpStatus());
     verify(run.returnReceipt).setEtgoCurrency(run.originalCurrency);
+  }
+
+  /**
+   * ETP-5051 — the created return and its lines are checked against the plan quotas before the
+   * answer: at a {@code block} limit the action answers 403 {@code QUOTA_EXCEEDED}, rolled back.
+   */
+  @Test
+  public void testHandleOverABlockQuotaAnswers403AndRollsBack() throws Exception {
+    Run run;
+    try (MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      run = run(body(entry("L1", "2")), nothingReturned(),
+          ReturnedQuantityTestSupport.sourceLine("L1", "Agua", "5"));
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(run.returnReceipt));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(run.response);
+    verify(run.dal).rollbackAndClose();
+    verify(run.dal, never()).commitAndClose();
   }
 
   /** The return is ALWAYS left in draft: it is never completed by the action. */

@@ -56,6 +56,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.roles.SystemRoleTemplates;
 import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * Unit tests for {@link SFRolesOverview}.
@@ -662,6 +663,40 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONObject adminRole = result.getJSONArray("roles").getJSONObject(0);
         assertEquals(2, adminRole.getInt("userCount"));
+    }
+
+    /**
+     * ETP-5351 (T6) — the tenant's "Soporte Etendo" user holds a real, active, same-client
+     * {@code AD_User_Roles} row on the admin role, so no query restriction tells it apart; it is
+     * dropped from the assignee set before counting. Only the owner counts.
+     */
+    @Test
+    @DisplayName("Admin role user count excludes the tenant's support user")
+    void testAdminRoleCountExcludesSupportUser() throws Exception {
+        givenSystemAdminCallerRole();
+
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(Collections.emptyList());
+        stubTenantRoles(standardTenantRoles());
+
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
+
+        String supportUserId = SupportAccessGuard.supportUserIdFor(CLIENT_ID);
+        List<UserRoles> adminRoleRows = Arrays.asList(mockUserRolesRow("owner-1"),
+                mockUserRolesRow(supportUserId));
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(
+                adminRoleRows,
+                Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList());
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject adminRole = result.getJSONArray("roles").getJSONObject(0);
+        assertEquals(1, adminRole.getInt("userCount"));
     }
 
     // ── ETP-5065 Fix 2: hybrid-state template-overlap union ─────────────

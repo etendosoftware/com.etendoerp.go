@@ -17,6 +17,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
@@ -28,6 +29,7 @@ public class DocTypeResolver {
 
   private static final Logger log = LogManager.getLogger(DocTypeResolver.class);
   private static final String COL_DOC_TYPE_TARGET_ID = "C_DocTypeTarget_ID";
+  private static final String COL_DOC_TYPE_ID = "C_DocType_ID";
 
   private static final Pattern PAT_SUBTYPE_NOT_LIKE =
       Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'", Pattern.CASE_INSENSITIVE);
@@ -105,7 +107,7 @@ public class DocTypeResolver {
         return;
       }
       Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
-      Property typeProp = dalEntity.getPropertyByColumnName("C_DocType_ID");
+      Property typeProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_ID);
       if (targetProp == null || typeProp == null) {
         return;
       }
@@ -150,6 +152,102 @@ public class DocTypeResolver {
   }
 
   /**
+   * Removes from an interactive callout response every doc-type value that the tab's own
+   * document-type filter would not allow (ETP-5837).
+   *
+   * <p>Core's business-partner callouts resolve the doc type as "BP doc type, else the
+   * organization default, else the current form value". The organization default is chosen
+   * per DocBaseType and knows nothing about the tab, so on a tab restricted to one sub-type
+   * (or excluding one) it proposes a doc type the tab cannot hold. Applying it would switch
+   * the document (and, through the chained doc-type callout, its number preview) to another
+   * sequence. The create and defaults paths already correct this with
+   * {@link #reapplyDocTypeFromTabFilter}; this is the same rule for the callout endpoint:
+   * the offending value is dropped so the form keeps its current, valid doc type.
+   *
+   * <p>The filter is read from the tab's HQL where clause exactly as
+   * {@link #resolveDefaultDocTypeId} reads it (sub-type LIKE / NOT LIKE, return flag). A tab
+   * without such a filter is never touched, and a proposed doc type that satisfies the filter
+   * (e.g. a business-partner specific doc type of an allowed sub-type) is kept. Best-effort:
+   * any failure leaves the response unchanged.
+   *
+   * @param calloutResponse the REST callout response ({@code updates} / {@code combos}),
+   *                        modified in place
+   * @param adTab           the AD tab whose table holds the doc-type columns
+   * @param ctx             the NEO context whose entity tab carries the HQL filter
+   */
+  public static void dropDocTypesOutsideTabFilter(JSONObject calloutResponse, Tab adTab,
+      NeoContext ctx) {
+    if (calloutResponse == null || adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    try {
+      String[] filters = parseSubTypeFilters(ctx);
+      if (filters[0] == null && filters[1] == null && filters[2] == null) {
+        return;
+      }
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) {
+        return;
+      }
+      for (String columnName : new String[] { COL_DOC_TYPE_TARGET_ID, COL_DOC_TYPE_ID }) {
+        Property prop = dalEntity.getPropertyByColumnName(columnName);
+        if (prop != null) {
+          dropIfOutsideFilter(calloutResponse.optJSONObject("updates"), prop.getName(),
+              "value", filters);
+          dropIfOutsideFilter(calloutResponse.optJSONObject("combos"), prop.getName(),
+              "selected", filters);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not check callout doc types against the tab filter: {}", e.getMessage());
+    }
+  }
+
+  private static void dropIfOutsideFilter(JSONObject section, String propertyName,
+      String valueKey, String[] filters) {
+    if (section == null) {
+      return;
+    }
+    JSONObject entry = section.optJSONObject(propertyName);
+    if (entry == null || entry.isNull(valueKey)) {
+      return;
+    }
+    String docTypeId = entry.optString(valueKey, null);
+    if (docTypeId == null || docTypeId.trim().isEmpty()) {
+      return;
+    }
+    DocumentType docType = OBDal.getInstance().get(DocumentType.class, docTypeId);
+    if (docType == null) {
+      return;
+    }
+    if (!isAllowedByTabFilter(docType.getSOSubType(), docType.isReturn(), filters)) {
+      section.remove(propertyName);
+      log.debug("Dropped callout {}={} — not allowed by the tab doc-type filter", propertyName,
+          docTypeId);
+    }
+  }
+
+  /**
+   * Whether a doc type with the given sub-type and return flag satisfies the filters parsed
+   * by {@link #parseSubTypeFilters}. Mirrors the SQL of {@link #queryDefaultDocType}: an exact
+   * sub-type match for LIKE, a null or different sub-type for NOT LIKE, an equal return flag.
+   *
+   * @param subType  the doc type's DocSubTypeSO, may be null
+   * @param isReturn the doc type's IsReturn flag, may be null (read as false)
+   * @param filters  [subTypeFilter, subTypeExclude, isReturn ("Y"/"N")], any may be null
+   * @return true when the doc type passes every filter present
+   */
+  static boolean isAllowedByTabFilter(String subType, Boolean isReturn, String[] filters) {
+    if (filters[0] != null && !filters[0].equalsIgnoreCase(subType)) {
+      return false;
+    }
+    if (filters[1] != null && filters[1].equalsIgnoreCase(subType)) {
+      return false;
+    }
+    return filters[2] == null || "Y".equals(filters[2]) == Boolean.TRUE.equals(isReturn);
+  }
+
+  /**
    * Overload for callers without client-fields context — existing behavior preserved.
    *
    * @param body  the JSON request body to apply the resolved doc type to
@@ -183,7 +281,7 @@ public class DocTypeResolver {
       return;
     }
     Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
-    Property typeProp = dalEntity.getPropertyByColumnName("C_DocType_ID");
+    Property typeProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_ID);
     if (targetProp != null) {
       body.put(targetProp.getName(), docTypeId);
       log.debug("Reapplied transactionDocument={}", docTypeId);

@@ -46,9 +46,21 @@ public final class UsageQueryComposer {
   public static final String PARAM_DAY_END = "dayEnd";
   /** Named parameter for the tenant, used only by the per-tenant form. */
   public static final String PARAM_CLIENT_ID = "clientId";
+  /** Named parameter for the row id, used only by the row-match forms. */
+  public static final String PARAM_RECORD_ID = "recordId";
+  /** Named parameter for the ids left out of {@link #composePerTenantCountExcluding}. */
+  public static final String PARAM_EXCLUDED_IDS = "excludedIds";
+  /** Named parameter for the value a status change leaves, used only by the row-match-as form. */
+  public static final String PARAM_TARGET_VALUE = "targetValue";
 
   private static final String ALIAS_OUTER = "outer_";
   private static final String AND = " and ";
+  private static final String FROM = " from ";
+  private static final String WHERE = " where ";
+  private static final String SELECT = "select ";
+  private static final String CLIENT_ID = ".client.id";
+  private static final String ARG_ENTITY_NAME = "entityName";
+  private static final String ARG_DATE_PROPERTY = "dateProperty";
   private static final String ALIAS_FRAGMENT = "e";
   private static final char QUOTE = '\'';
 
@@ -66,20 +78,21 @@ public final class UsageQueryComposer {
    */
   public static String composeGroupedCount(String entityName, String dateProperty,
       String restriction) {
-    requireIdentifier(entityName, "entityName");
-    requireIdentifier(dateProperty, "dateProperty");
+    requireIdentifier(entityName, ARG_ENTITY_NAME);
+    requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
     StringBuilder hql = new StringBuilder(256);
-    hql.append("select ").append(ALIAS_OUTER).append(".client.id, count(*)")
-        .append(" from ").append(entityName).append(' ').append(ALIAS_OUTER)
-        .append(" where ").append(dayBounds(dateProperty));
+    hql.append(SELECT).append(ALIAS_OUTER).append(CLIENT_ID).append(", count(*)")
+        .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
+        .append(WHERE).append(dayBounds(dateProperty));
     appendRestriction(hql, entityName, restriction);
-    hql.append(" group by ").append(ALIAS_OUTER).append(".client.id");
+    hql.append(" group by ").append(ALIAS_OUTER).append(CLIENT_ID);
     return hql.toString();
   }
 
   /**
    * Counts one day for a single tenant. Used by the single-tenant backfill and by the
-   * save-time validation probe.
+   * save-time validation probe, and (ETP-5051) by the live quota count, which binds the whole
+   * period as the range rather than a single day.
    *
    * @param entityName the entity to count rows of
    * @param dateProperty the date property that places a row on a day
@@ -89,13 +102,164 @@ public final class UsageQueryComposer {
    */
   public static String composePerTenantCount(String entityName, String dateProperty,
       String restriction) {
-    requireIdentifier(entityName, "entityName");
-    requireIdentifier(dateProperty, "dateProperty");
+    return perTenantCount(entityName, dateProperty, restriction, false);
+  }
+
+  /**
+   * ETP-5051 — {@link #composePerTenantCount} leaving some rows out: the NEO write check counts the
+   * consumption <em>before</em> a create by leaving out the rows that create just inserted, so the
+   * answer does not depend on whether those rows fall in the counted range.
+   *
+   * @param entityName the entity to count rows of
+   * @param dateProperty the date property that places a row on a day
+   * @param restriction optional HQL fragment narrowing the rows; validated before use
+   * @return HQL selecting a single count; bind {@link #PARAM_CLIENT_ID}, {@link #PARAM_DAY_START},
+   *     {@link #PARAM_DAY_END} and {@link #PARAM_EXCLUDED_IDS} (a non-empty collection)
+   */
+  public static String composePerTenantCountExcluding(String entityName, String dateProperty,
+      String restriction) {
+    return perTenantCount(entityName, dateProperty, restriction, true);
+  }
+
+  private static String perTenantCount(String entityName, String dateProperty,
+      String restriction, boolean excluding) {
+    requireIdentifier(entityName, ARG_ENTITY_NAME);
+    requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
     StringBuilder hql = new StringBuilder(256);
-    hql.append("select count(*)")
-        .append(" from ").append(entityName).append(' ').append(ALIAS_OUTER)
-        .append(" where ").append(ALIAS_OUTER).append(".client.id = :").append(PARAM_CLIENT_ID)
+    hql.append(SELECT).append("count(*)")
+        .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
+        .append(WHERE).append(ALIAS_OUTER).append(CLIENT_ID).append(" = :").append(PARAM_CLIENT_ID)
         .append(AND).append(dayBounds(dateProperty));
+    if (excluding) {
+      hql.append(AND).append(ALIAS_OUTER).append(".id not in (:").append(PARAM_EXCLUDED_IDS)
+          .append(')');
+    }
+    appendRestriction(hql, entityName, restriction);
+    return hql.toString();
+  }
+
+  /**
+   * ETP-5051 — tests whether one row belongs to a declarative resource, and names its tenant. The
+   * NEO write check runs it on a row it has just inserted, inside the same transaction, to decide
+   * whether the row consumes the resource at all.
+   *
+   * <p>No date bound: the question is "is this the kind of row the resource counts", not "does it
+   * fall in a period". The restriction is composed by the same {@link #appendRestriction} as the
+   * counts, so the containment guarantee covers this query too.
+   *
+   * @param entityName the entity the row belongs to
+   * @param restriction optional HQL fragment narrowing the rows; validated before use
+   * @return HQL selecting the row's {@code client.id} when it matches, nothing otherwise; bind
+   *     {@link #PARAM_RECORD_ID}
+   */
+  public static String composeRowMatch(String entityName, String restriction) {
+    return rowMatch(entityName, null, restriction);
+  }
+
+  /**
+   * ETP-5051 — {@link #composeRowMatch} narrowed to a date range: whether one row is counted by a
+   * declarative resource <em>in</em> a period. The NEO write check charges a created row to the
+   * current period only when its date property falls inside the counted window.
+   *
+   * @param entityName the entity the row belongs to
+   * @param dateProperty the date property that places a row on a day
+   * @param restriction optional HQL fragment narrowing the rows; validated before use
+   * @return HQL selecting the row's {@code client.id} when it matches inside the range, nothing
+   *     otherwise; bind {@link #PARAM_RECORD_ID}, {@link #PARAM_DAY_START} and
+   *     {@link #PARAM_DAY_END}
+   */
+  public static String composeRowMatchInRange(String entityName, String dateProperty,
+      String restriction) {
+    requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
+    return rowMatch(entityName, dateProperty, restriction);
+  }
+
+  /**
+   * ETP-6060 — {@link #composeRowMatchInRange} for the row as a status change <em>will</em> leave
+   * it: every reference of the restriction to {@code e.<property>} reads
+   * {@link #PARAM_TARGET_VALUE} instead of the stored value. The NEO quota check of a completion
+   * runs it before the completion, when nothing irreversible has happened yet, to ask "will this
+   * row count once completed". The rewritten restriction is validated and contained like any other
+   * ({@link #appendRestriction}); only references outside string literals are rewritten.
+   *
+   * @param entityName the entity the row belongs to
+   * @param dateProperty the date property that places a row on a day
+   * @param restriction the resource's HQL fragment; it should reference {@code e.<property>}
+   *     ({@link #referencesRootProperty}), otherwise the change does not affect the match
+   * @param property the changed property, as the fragment names it after {@code e.}
+   * @return HQL selecting the row's {@code client.id} when it would match inside the range; bind
+   *     {@link #PARAM_RECORD_ID}, {@link #PARAM_DAY_START}, {@link #PARAM_DAY_END} and, when the
+   *     restriction references the property, {@link #PARAM_TARGET_VALUE}
+   */
+  public static String composeRowMatchInRangeAs(String entityName, String dateProperty,
+      String restriction, String property) {
+    requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
+    requireIdentifier(property, "property");
+    return rowMatch(entityName, dateProperty,
+        replaceRootProperty(restriction, property, ':' + PARAM_TARGET_VALUE));
+  }
+
+  /**
+   * ETP-6060 — whether a restriction reads {@code e.<property>} outside a string literal: whether a
+   * change of that property can change which rows the resource counts.
+   *
+   * @param restriction the HQL fragment; blank references nothing
+   * @param property the property name after {@code e.}
+   * @return true when the fragment references the property on the root alias
+   */
+  public static boolean referencesRootProperty(String restriction, String property) {
+    return StringUtils.isNotBlank(restriction) && StringUtils.isNotBlank(property)
+        && !restriction.equals(replaceRootProperty(restriction, property, "?"));
+  }
+
+  /**
+   * Replaces {@code e.<property>} — the root alias, not {@code x.e.<property>} nor
+   * {@code e.<property>Other} — outside string literals.
+   */
+  private static String replaceRootProperty(String restriction, String property,
+      String replacement) {
+    if (StringUtils.isBlank(restriction)) {
+      return restriction;
+    }
+    String reference = ALIAS_FRAGMENT + '.' + property;
+    StringBuilder out = new StringBuilder(restriction.length());
+    boolean inLiteral = false;
+    int i = 0;
+    while (i < restriction.length()) {
+      char c = restriction.charAt(i);
+      if (c == QUOTE) {
+        inLiteral = !inLiteral;
+      } else if (!inLiteral && restriction.startsWith(reference, i)
+          && !isPathChar(restriction, i - 1)
+          && !isPathChar(restriction, i + reference.length())) {
+        out.append(replacement);
+        i += reference.length();
+        continue;
+      }
+      out.append(c);
+      i++;
+    }
+    return out.toString();
+  }
+
+  /** Whether the character at {@code i} would continue an HQL path: a letter, digit, _ or dot. */
+  private static boolean isPathChar(String text, int i) {
+    if (i < 0 || i >= text.length()) {
+      return false;
+    }
+    char c = text.charAt(i);
+    return Character.isLetterOrDigit(c) || c == '_' || c == '.';
+  }
+
+  private static String rowMatch(String entityName, String dateProperty, String restriction) {
+    requireIdentifier(entityName, ARG_ENTITY_NAME);
+    StringBuilder hql = new StringBuilder(256);
+    hql.append(SELECT).append(ALIAS_OUTER).append(CLIENT_ID)
+        .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
+        .append(WHERE).append(ALIAS_OUTER).append(".id = :").append(PARAM_RECORD_ID);
+    if (dateProperty != null) {
+      hql.append(AND).append(dayBounds(dateProperty));
+    }
     appendRestriction(hql, entityName, restriction);
     return hql.toString();
   }

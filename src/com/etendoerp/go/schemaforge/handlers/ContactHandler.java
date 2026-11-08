@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -28,7 +29,10 @@ import org.openbravo.base.exception.OBException;
 
 import com.etendoerp.go.schemaforge.AbstractPersonNameHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * Pre-save hook for the {@code contact} entity ({@code AD_User}) of the contacts spec.
@@ -110,6 +114,18 @@ public class ContactHandler extends AbstractPersonNameHandler {
     return MAX_LENGTH;
   }
 
+  /**
+   * ETP-5351 (T6) — a contact list read without a parent business partner would list every
+   * {@code AD_User} of the tenant; the tenant's "Soporte Etendo" user is never one of them.
+   *
+   * @param context the read context
+   * @return the support-user exclusion, or nothing when the request has no client
+   */
+  @Override
+  public List<String> readPredicates(NeoContext context) {
+    return SupportUserExclusion.userReadPredicates(context != null ? context.getObContext() : null);
+  }
+
   @Override
   public Set<String> protectedCreateCalloutFields(NeoContext context) {
     return Collections.singleton("username");
@@ -117,12 +133,27 @@ public class ContactHandler extends AbstractPersonNameHandler {
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
+    if (ctx.getEndpointType() == NeoEndpointType.ACTION
+        && SupportAccessGuard.isActingSupportUser(ctx.getObContext())) {
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
     String method = ctx.getHttpMethod();
+    // ETP-5351 (Vigia M1): deleting an AD_User (owner or admin included) is never a support action.
+    if ("DELETE".equals(method) && SupportAccessGuard.isActingSupportUser(ctx.getObContext())) {
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
     boolean isWrite = METHOD_POST.equals(method) || "PATCH".equals(method) || "PUT".equals(method);
     if (!isWrite) {
       return null;
     }
+    // ETP-5351 (Vigia H1): a contact is an AD_User row; a support session may not create one nor
+    // change access fields on any (email, username, roles, password, active/locked/owner flags).
+    // Other fields stay.
     JSONObject body = ctx.getRequestBody();
+    if (SupportAccessGuard.isActingSupportUser(ctx.getObContext())
+        && (METHOD_POST.equals(method) || SupportAccessGuard.changesAccessFields(body, ctx.getRecordId()))) {
+      return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+    }
     if (body == null) {
       return null;
     }

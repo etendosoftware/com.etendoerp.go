@@ -34,7 +34,8 @@ import com.etendoerp.go.schemaforge.handlers.ContactTypeRules;
  * one created before it. The switch is applied here, after the onboarding commit, on the one path
  * both a classic tenant and a tenant claimed from the pool (ETP-5389) go through: the flag is read
  * when the tenant is handed to the user, never when the pool was filled, so a tenant built with the
- * flag off and claimed with it on still gets the new default.</p>
+ * flag off and claimed with it on still gets the new default. It is read for the account the tenant
+ * is handed to (the flag is per account), not for the System user the onboarding runs as.</p>
  *
  * <p><b>How the categories are found.</b> By the GOClient record id through the import's
  * {@code AD_REF_DATA_LOADED} mapping (generic id → the tenant's id), falling back to the category's
@@ -87,14 +88,20 @@ public class OnboardingDefaultContactCategoryService {
       + " WHERE c_bp_group_id = :" + PARAM_TARGET_ID + " AND isdefault <> 'Y'";
 
   /**
-   * Applies the new default when the flag is on.
+   * Applies the new default when the flag is on for the account the tenant is handed to.
+   *
+   * <p>The flag is per account, and the hand-over runs as System, not as the account owner, so the
+   * account is passed in explicitly rather than read from the {@link OBContext}: evaluating it for
+   * the current user would match no per-account rule and leave every targeted account on
+   * "Cliente" (only an everyone-on flag would still apply).
    *
    * @param clientId the tenant just committed
+   * @param accountEmail the {@code ETGO_ACCOUNT} email of the account receiving the tenant
    * @return {@code true} when a row was written (the caller commits), {@code false} when there was
    *     nothing to do: flag off, target category missing, or already the only default
    */
-  public boolean applyIfEnabled(String clientId) {
-    if (clientId == null || !isFlagEnabled()) {
+  public boolean applyIfEnabled(String clientId, String accountEmail) {
+    if (clientId == null || !isFlagEnabled(clientId, accountEmail)) {
       return false;
     }
     OBContext.setAdminMode(true);
@@ -118,9 +125,12 @@ public class OnboardingDefaultContactCategoryService {
     }
   }
 
-  /** Seam for tests: the flag read, the same environment-level read the contact rules use. */
-  protected boolean isFlagEnabled() {
-    return ContactTypeRules.isEnabled();
+  /**
+   * Seam for tests: the flag read, the same per-account read the contact rules use, targeted at
+   * the receiving account and the tenant being handed over.
+   */
+  protected boolean isFlagEnabled(String clientId, String accountEmail) {
+    return ContactTypeRules.isEnabled(accountEmail, clientId);
   }
 
   /** The tenant's "Cliente/Proveedor" category: by import mapping, else by value. */

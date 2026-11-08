@@ -454,7 +454,7 @@ class EtendoGoJwtServletBlockedTenantPayPathTest {
     dalHelper.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(ACCOUNT_EMAIL))
         .thenReturn(Collections.singletonList(environmentUser));
     dalHelper.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(eq(tenant), any(),
-        eq(environmentUser), any())).thenReturn(new JSONObject());
+        eq(environmentUser), any(), any())).thenReturn(new JSONObject());
     // A canceled subscription: the tenant's plan answers from the row, never the DB fallback.
     Subscription canceled = mock(Subscription.class);
     when(canceled.getSubscriptionStatus()).thenReturn(SubscriptionService.STATUS_CANCELED);
@@ -489,6 +489,10 @@ class EtendoGoJwtServletBlockedTenantPayPathTest {
     when(requestStore.findForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
         .thenReturn(Collections.singletonList(purchase));
     when(requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL)).thenReturn(purchase);
+    // ETP-5051 (O-1) — the session has entered the blocked tenant, so the account page and the
+    // portal resolve THAT tenant's own subscription.
+    when(requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_ID))
+        .thenReturn(purchase);
     when(portalService.retrieveSubscription("sub_1"))
         .thenReturn(mock(StripeCustomerPortalService.SubscriptionDetail.class));
     when(portalService.createSession(CUSTOMER_ID))

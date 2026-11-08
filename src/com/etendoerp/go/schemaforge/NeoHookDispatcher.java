@@ -24,6 +24,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
 
 /**
@@ -96,7 +97,12 @@ class NeoHookDispatcher {
 
     // ETP-5558: before the customization or the AD button sees the record, whatever the entity.
     if (endpointType == NeoEndpointType.ACTION && actionParams != null) {
-      NeoResponse refusal = NeoActionRecordGuard.refusalFor(entity, actionParams.recordId);
+      // ETP-5684: posting needs the showAccountingFields capability, whatever the entity; judged
+      // first, as on MCP, so no other refusal reveals the record.
+      NeoResponse refusal = NeoAccountingAccessPolicy.refusalForPostingAction(entity, fieldName);
+      if (refusal == null) {
+        refusal = NeoActionRecordGuard.refusalFor(entity, actionParams.recordId);
+      }
       if (refusal != null) {
         return refusal;
       }

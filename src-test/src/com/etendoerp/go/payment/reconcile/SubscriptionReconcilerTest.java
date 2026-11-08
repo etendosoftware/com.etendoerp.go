@@ -42,6 +42,7 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.payment.BillingEventStore;
+import com.etendoerp.go.payment.CancelAtPeriodEnd;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.SubscriptionStatus;
@@ -81,6 +82,9 @@ import com.etendoerp.go.schemaforge.email.InternalAlertService;
  *       foreign and never touched.</li>
  *   <li>The preference route resolves through {@code targetForTenant} with the subscription id
  *       the creating request recorded.</li>
+ *   <li>ETP-5051 (O-1b) — the display-only {@code CANCEL_AT_PERIOD_END} of a consistent paying
+ *       row follows the provider every run (counted, no audit row); a status repair carries it on
+ *       the applied outcome instead; a close, a past-due row and a dry run write nothing.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.payment.reconcile.SubscriptionReconciler
@@ -113,6 +117,8 @@ public class SubscriptionReconcilerTest {
   /** When set, the answer of the list endpoint instead of the page built from {@link #listed}. */
   private StripeResponse listAnswer;
   private TestLogCapture auditLog;
+  /** The DAL of the last {@link #run}, so a spec can check what it saved. */
+  private OBDal dal;
 
   @Before
   public void setUp() throws Exception {
@@ -144,7 +150,7 @@ public class SubscriptionReconcilerTest {
     }
     when(stripe.get(LIST_PATH)).thenReturn(listAnswer != null ? listAnswer
         : new StripeResponse(200, "{\"has_more\":false,\"data\":[" + data + "]}"));
-    OBDal dal = mock(OBDal.class);
+    dal = mock(OBDal.class);
     when(dal.createQuery(eq(Subscription.class), anyString()))
         .thenAnswer(call -> query(rows));
     when(dal.createQuery(eq(CheckoutRequest.class), anyString()))
@@ -212,6 +218,13 @@ public class SubscriptionReconcilerTest {
 
   private void list(String id, String status) {
     listed.put(id, subscription(id, status, true));
+  }
+
+  /** Lists one of our subscriptions carrying the provider's {@code cancel_at_period_end}. */
+  private void listCancelling(String id, String status, boolean cancel) {
+    String json = subscription(id, status, true);
+    listed.put(id, json.substring(0, json.length() - 1) + ",\"cancel_at_period_end\":" + cancel
+        + "}");
   }
 
   private void absent(String id) throws Exception {
@@ -349,6 +362,113 @@ public class SubscriptionReconcilerTest {
         eq("reconciliation.subscription-current"), eq("req-sub_r"),
         eq(BillingEventStore.RESULT_APPLIED), any(), any());
     assertEquals(1, result.get(Counter.SUBSCRIPTIONS_CURRENT));
+  }
+
+  // ── cancel_at_period_end (ETP-5051 O-1b) ───────────────────────────────────────────────
+
+  @Test
+  public void aConsistentPayingRowTakesTheProviderCancelFlagAndIsCounted() throws Exception {
+    Subscription row = activeRow("sub_k", "req-sub_k", "cs_test_k", CURRENT);
+    when(row.isCancelAtPeriodEnd()).thenReturn(false);
+    listCancelling("sub_k", "active", true);
+
+    ReconciliationResult result = run(false);
+
+    verify(row).setCancelAtPeriodEnd(true);
+    verify(dal).save(row);
+    assertEquals(1, result.get(Counter.CANCEL_FLAGS_SYNCED));
+    // Display-only: no status correction, no audit row.
+    verifyNothingApplied();
+    assertEquals(0, result.get(Counter.SUBSCRIPTIONS_CURRENT));
+  }
+
+  @Test
+  public void aClearedProviderFlagIsSyncedBackToN() throws Exception {
+    Subscription row = activeRow("sub_k", "req-sub_k", "cs_test_k", CURRENT);
+    when(row.isCancelAtPeriodEnd()).thenReturn(true);
+    listCancelling("sub_k", "trialing", false);
+
+    ReconciliationResult result = run(false);
+
+    verify(row).setCancelAtPeriodEnd(false);
+    assertEquals(1, result.get(Counter.CANCEL_FLAGS_SYNCED));
+  }
+
+  @Test
+  public void anEqualOrUnreportedCancelFlagIsANoOp() throws Exception {
+    Subscription same = activeRow("sub_s", "req-sub_s", "cs_test_s", CURRENT);
+    when(same.isCancelAtPeriodEnd()).thenReturn(true);
+    listCancelling("sub_s", "active", true);
+    Subscription unreported = activeRow("sub_u", "req-sub_u", "cs_test_u", CURRENT);
+    when(unreported.isCancelAtPeriodEnd()).thenReturn(false);
+    list("sub_u", "active");
+
+    ReconciliationResult result = run(false);
+
+    verify(same, never()).setCancelAtPeriodEnd(any());
+    verify(unreported, never()).setCancelAtPeriodEnd(any());
+    verify(dal, never()).save(any());
+    assertEquals(0, result.get(Counter.CANCEL_FLAGS_SYNCED));
+  }
+
+  @Test
+  public void aDryRunCountsTheCancelFlagSyncButWritesNothing() throws Exception {
+    Subscription row = activeRow("sub_d", "req-sub_d", "cs_test_d", CURRENT);
+    when(row.isCancelAtPeriodEnd()).thenReturn(false);
+    listCancelling("sub_d", "active", true);
+
+    ReconciliationResult result = run(true);
+
+    assertEquals(1, result.get(Counter.CANCEL_FLAGS_SYNCED));
+    verify(row, never()).setCancelAtPeriodEnd(any());
+    verify(dal, never()).save(any());
+  }
+
+  /** A status repair carries the flag on the outcome it applies; the sync is not run on top. */
+  @Test
+  public void aStatusRepairCarriesTheCancelFlagThroughTheAppliedOutcome() throws Exception {
+    Subscription row = activeRow("sub_r", "req-sub_r", "cs_test_r",
+        new StoredState(SubscriptionStatus.PAST_DUE, NOW.minusSeconds(86400), null));
+    when(row.isCancelAtPeriodEnd()).thenReturn(false);
+    listCancelling("sub_r", "active", true);
+
+    ReconciliationResult result = run(false);
+
+    SubscriptionEventOutcome outcome =
+        appliedOutcome(lifecycle.targetForSubscription("sub_r"), null);
+    assertEquals(SubscriptionStatus.CURRENT, outcome.status());
+    assertEquals(CancelAtPeriodEnd.SET, outcome.cancelAtPeriodEnd());
+    assertEquals(1, result.get(Counter.SUBSCRIPTIONS_CURRENT));
+    assertEquals(0, result.get(Counter.CANCEL_FLAGS_SYNCED));
+    verify(row, never()).setCancelAtPeriodEnd(any());
+  }
+
+  @Test
+  public void aClosingOutcomeIsNotSyncedByTheReconciler() throws Exception {
+    Subscription row = activeRow("sub_c", "req-sub_c", "cs_test_c", CURRENT);
+    when(row.isCancelAtPeriodEnd()).thenReturn(false);
+    listCancelling("sub_c", "canceled", true);
+
+    ReconciliationResult result = run(false);
+
+    assertTrue(appliedOutcome(lifecycle.targetForSubscription("sub_c"), ENDED)
+        .closesSubscription());
+    assertEquals(1, result.get(Counter.SUBSCRIPTIONS_CLOSED));
+    assertEquals(0, result.get(Counter.CANCEL_FLAGS_SYNCED));
+    verify(row, never()).setCancelAtPeriodEnd(any());
+  }
+
+  @Test
+  public void aPastDueRowIsNotSyncedItIsTheGraceLogics() throws Exception {
+    Subscription row = activeRow("sub_p", "req-sub_p", "cs_test_p", CURRENT);
+    when(row.isCancelAtPeriodEnd()).thenReturn(false);
+    listCancelling("sub_p", "past_due", true);
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(0, result.get(Counter.CANCEL_FLAGS_SYNCED));
+    verify(row, never()).setCancelAtPeriodEnd(any());
+    verifyNothingApplied();
   }
 
   // ── Foreign subscriptions ────────────────────────────────────────────────────────────────

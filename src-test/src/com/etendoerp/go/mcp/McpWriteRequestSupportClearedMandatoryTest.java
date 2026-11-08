@@ -118,6 +118,11 @@ class McpWriteRequestSupportClearedMandatoryTest {
         new HashSet<>(), sfEntity, LANG);
   }
 
+  private JSONObject reject(JSONObject body, String lang) throws Exception {
+    return McpWriteRequestSupport.rejectClearedMandatoryFields(body, adTab, entity,
+        new HashSet<>(), new HashSet<>(), sfEntity, lang);
+  }
+
   private JSONObject reject(JSONObject body) throws Exception {
     return reject(body, new HashSet<>());
   }
@@ -235,6 +240,58 @@ class McpWriteRequestSupportClearedMandatoryTest {
         new HashSet<>(), new HashSet<>(), sfEntity, LANG));
   }
 
+  @Test
+  @DisplayName("OBS-1: the detail and the hint come from the message catalog in the user's language")
+  void messagesFollowTheLanguage() throws Exception {
+    column("DateX", "dateX", true, true, "Date X");
+    labels.put("DATEX", new String[] { "Fecha X", "desc" });
+    JSONObject body = new JSONObject().put("dateX", JSONObject.NULL);
+
+    JSONObject es = reject(body, "es_ES");
+    assertEquals("No se pueden vaciar los campos obligatorios: dateX (Fecha X)",
+        es.getString("detail"));
+    assertTrue(es.getString("hint").startsWith("Estos campos son obligatorios"));
+
+    JSONObject ar = reject(body, "es_AR");
+    assertEquals(es.getString("detail"), ar.getString("detail"));
+
+    JSONObject en = reject(body, "en_US");
+    assertEquals("Required fields cannot be cleared: dateX (Fecha X)", en.getString("detail"));
+    assertTrue(en.getString("hint").startsWith("These fields are required"));
+  }
+
+  @Test
+  @DisplayName("OBS-1: the envelope keeps its status, error code and cleared-field list")
+  void envelopeShapeIsUnchanged() throws Exception {
+    column("DateX", "dateX", true, true, "Date X");
+    column("DateY", "dateY", true, true, "Date Y");
+    JSONObject error = reject(new JSONObject().put("dateX", JSONObject.NULL).put("dateY", ""),
+        "es_ES");
+    assertEquals(McpConstants.STATUS_UNPROCESSABLE, error.getInt(McpConstants.KEY_STATUS));
+    assertEquals(McpConstants.ERROR_VALIDATION, error.getString(McpConstants.KEY_ERROR));
+    assertEquals(2, error.getJSONArray(McpConstants.KEY_MISSING_FIELDS).length());
+    assertTrue(error.getString("detail").contains("dateX")
+        && error.getString("detail").contains("dateY"));
+  }
+
+  @Test
+  @DisplayName("OBS-1: both messages are AD_MESSAGE rows whose text matches the English catalog")
+  void messagesAreDeclaredInSourcedata() throws Exception {
+    String xml = new String(java.nio.file.Files.readAllBytes(
+        McpConfigSourcedataTest.sourcedataDir().resolve("AD_MESSAGE.xml")),
+        java.nio.charset.StandardCharsets.UTF_8);
+    for (String key : List.of(McpWriteRequestSupport.MSG_REQUIRED_CLEARED,
+        McpWriteRequestSupport.MSG_REQUIRED_CLEARED_HINT)) {
+      assertTrue(xml.contains("<VALUE><![CDATA[" + key + "]]></VALUE>"), key);
+    }
+    assertTrue(xml.contains("<![CDATA[Required fields cannot be cleared: %0]]>"));
+    // Hermetic: the catalog is read directly, no database read involved.
+    assertEquals("Required fields cannot be cleared: %0",
+        ResourceBundleReader.english("ETGO_RequiredFieldsCleared").replace("{0}", "%0"));
+    assertTrue(xml.contains("<![CDATA[" + ResourceBundleReader.english(
+        "ETGO_RequiredFieldsClearedHint") + "]]>"));
+  }
+
   // ── wiring: MCP update only ──────────────────────────────────────────────
 
   private static final String ROUTER = "com/etendoerp/go/mcp/McpToolRouter.java";
@@ -260,6 +317,16 @@ class McpWriteRequestSupportClearedMandatoryTest {
     for (String rest : List.of("com/etendoerp/go/schemaforge/NeoCrudHandler.java",
         "com/etendoerp/go/schemaforge/BatchService.java")) {
       assertTrue(!McpSourceScanner.read(rest).contains("rejectClearedMandatoryFields"), rest);
+    }
+  }
+
+  /** Reads the English message catalog straight from the bundle (no database, no fallback). */
+  private static final class ResourceBundleReader {
+    static String english(String key) {
+      return java.util.ResourceBundle.getBundle(
+          "com.etendoerp.go.schemaforge.messages.neo_hints", java.util.Locale.ENGLISH,
+          java.util.ResourceBundle.Control.getNoFallbackControl(
+              java.util.ResourceBundle.Control.FORMAT_PROPERTIES)).getString(key);
     }
   }
 }

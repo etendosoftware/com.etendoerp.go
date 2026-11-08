@@ -16,12 +16,17 @@
  */
 package com.etendoerp.go.mcp;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
  * Builds Etendo Go application links for records reached through the MCP (ETP-5200, resolved in
@@ -160,5 +165,88 @@ public final class McpRecordUrls {
     }
     JSONObject first = data.optJSONObject(0);
     return first == null ? null : StringUtils.trimToNull(first.optString(KEY_ID, null));
+  }
+
+  /**
+   * ETP-5852: {@code etendo_get} answers one record as an object, {@code {"data":{…}}}, not the
+   * one-element array the core read produces. Agents asked whether more than one record could come
+   * back for one id. Only a one-element array is unwrapped; any other shape is returned as is.
+   * Called after {@link #extractRecordId} and the url, which read the array form.
+   *
+   * @param flat the flattened single-record result; mutated in place
+   * @return {@code flat}
+   */
+  static JSONObject unwrapSingleRecord(JSONObject flat) throws JSONException {
+    if (flat == null) {
+      return null;
+    }
+    JSONArray data = flat.optJSONArray(KEY_DATA);
+    if (data != null && data.length() == 1 && data.optJSONObject(0) != null) {
+      flat.put(KEY_DATA, data.getJSONObject(0));
+    }
+    return flat;
+  }
+
+  /**
+   * ETP-5945 (in ETP-5852): adds the record {@code url} to each committed create of an
+   * {@code etendo_batch} envelope ({@code operations:[{id, ok, recordId}]}), as
+   * {@code etendo_create} answers it — only for an op on its spec's primary entity, and only when
+   * the app base URL is configured. The spec and entity of each op are read from the request.
+   *
+   * @param envelope the batch outcome, mutated in place; {@code null} is tolerated
+   * @param requested the operations as sent ({@code id}, {@code spec}, {@code entity})
+   */
+  static void addBatchUrls(JSONObject envelope, JSONArray requested) throws JSONException {
+    JSONArray done = envelope == null ? null : envelope.optJSONArray("operations");
+    if (done == null || requested == null
+        || StringUtils.isBlank(PublicUrlResolver.resolveConfiguredAppBaseUrl())) {
+      return;
+    }
+    Map<String, JSONObject> byId = indexById(requested);
+    Map<String, Boolean> primary = new HashMap<>();
+    for (int i = 0; i < done.length(); i++) {
+      JSONObject result = done.optJSONObject(i);
+      JSONObject op = result == null ? null : byId.get(result.optString(KEY_ID));
+      String recordId = result == null ? null : result.optString("recordId", null);
+      if (op != null && StringUtils.isNotBlank(recordId)) {
+        addBatchUrl(result, op, recordId, primary);
+      }
+    }
+  }
+
+  private static Map<String, JSONObject> indexById(JSONArray requested) {
+    Map<String, JSONObject> byId = new HashMap<>();
+    for (int i = 0; i < requested.length(); i++) {
+      JSONObject op = requested.optJSONObject(i);
+      if (op != null) {
+        byId.put(op.optString(KEY_ID), op);
+      }
+    }
+    return byId;
+  }
+
+  /** Puts the url on one committed op when its entity is the spec's primary one. */
+  private static void addBatchUrl(JSONObject result, JSONObject op, String recordId,
+      Map<String, Boolean> primary) throws JSONException {
+    String spec = op.optString("spec");
+    String entity = op.optString("entity");
+    if (!Boolean.TRUE.equals(
+        primary.computeIfAbsent(spec + "/" + entity, k -> isPrimary(spec, entity)))) {
+      return;
+    }
+    String url = buildRecordUrl(spec, recordId);
+    if (url != null) {
+      result.put(KEY_URL, url);
+    }
+  }
+
+  private static boolean isPrimary(String specName, String entityName) {
+    try {
+      SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+      SFEntity entity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+      return McpToolRouterSupport.isPrimaryTab(entity.getADTab());
+    } catch (RuntimeException e) {
+      return false;
+    }
   }
 }

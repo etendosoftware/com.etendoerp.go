@@ -24,7 +24,13 @@ import org.junit.Test;
  *   <li>A half or reversed period is never carried: it would overwrite a whole one.</li>
  *   <li>{@code customer.subscription.deleted} and an update to {@code canceled} close the row at
  *       {@code ended_at}, else {@code canceled_at}, else "now" (null).</li>
+ *   <li>ETP-5051 (O-1b) — the display-only {@code cancel_at_period_end} rides on the outcome
+ *       through {@code withPeriod} and {@code closing} alike, and is read leniently: a boolean or
+ *       its string form, anything else is "not reported" (null).</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.payment.SubscriptionLifecycleApplier
+ * @covers com.etendoerp.go.payment.SubscriptionEventOutcome
  */
 public class SubscriptionLifecycleApplierPeriodTest {
 
@@ -241,5 +247,94 @@ public class SubscriptionLifecycleApplierPeriodTest {
     assertEquals(at(DEC), closed.periodEnd());
     assertTrue(closed.closesSubscription());
     assertEquals(at(DEC), closed.endedAt());
+  }
+
+  // ===================== cancel_at_period_end (ETP-5051 O-1b) =====================
+
+  @Test
+  public void theCancelFlagSurvivesWithPeriodAndClosingInEitherOrder() {
+    SubscriptionEventOutcome expired =
+        SubscriptionEventOutcome.apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null);
+
+    SubscriptionEventOutcome flagFirst = expired.withCancelAtPeriodEnd(CancelAtPeriodEnd.SET)
+        .withPeriod(at(NOV), at(DEC)).closing(at(DEC));
+    SubscriptionEventOutcome flagLast = expired.withPeriod(at(NOV), at(DEC)).closing(at(DEC))
+        .withCancelAtPeriodEnd(CancelAtPeriodEnd.SET);
+    SubscriptionEventOutcome flagBetween = expired.withPeriod(at(NOV), at(DEC))
+        .withCancelAtPeriodEnd(CancelAtPeriodEnd.CLEARED).closing(at(DEC));
+
+    for (SubscriptionEventOutcome outcome : new SubscriptionEventOutcome[] { flagFirst,
+        flagLast }) {
+      assertEquals(CancelAtPeriodEnd.SET, outcome.cancelAtPeriodEnd());
+      assertEquals(at(NOV), outcome.periodStart());
+      assertEquals(at(DEC), outcome.periodEnd());
+      assertTrue(outcome.closesSubscription());
+      assertEquals(at(DEC), outcome.endedAt());
+      assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, outcome.status());
+    }
+    assertEquals(CancelAtPeriodEnd.CLEARED, flagBetween.cancelAtPeriodEnd());
+    assertTrue(flagBetween.closesSubscription());
+  }
+
+  @Test
+  public void theCancelFlagChangesNeitherTheStatusNorTheGraceAnchor() {
+    SubscriptionEventOutcome pastDue = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, at(NOV));
+
+    SubscriptionEventOutcome flagged = pastDue.withCancelAtPeriodEnd(CancelAtPeriodEnd.SET);
+
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, flagged.status());
+    assertEquals(at(NOV), flagged.dueAt());
+    assertFalse(flagged.closesSubscription());
+    assertEquals("an unflagged outcome reports nothing", CancelAtPeriodEnd.NOT_REPORTED,
+        pastDue.cancelAtPeriodEnd());
+  }
+
+  @Test
+  public void aNullCancelFlagOrAnIgnoredOutcomeReturnsTheSameInstance() {
+    SubscriptionEventOutcome current = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null)
+        .withPeriod(at(NOV), at(DEC));
+    SubscriptionEventOutcome ignored = SubscriptionEventOutcome.ignore("stale event");
+
+    assertSame(current, current.withCancelAtPeriodEnd(null));
+    assertSame(current, current.withCancelAtPeriodEnd(CancelAtPeriodEnd.NOT_REPORTED));
+    assertSame(ignored, ignored.withCancelAtPeriodEnd(CancelAtPeriodEnd.SET));
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED, ignored.cancelAtPeriodEnd());
+  }
+
+  @Test
+  public void cancelAtPeriodEndOfReadsABooleanOrItsStringForm() throws Exception {
+    assertEquals(CancelAtPeriodEnd.SET, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+        new JSONObject("{\"cancel_at_period_end\":true}")));
+    assertEquals(CancelAtPeriodEnd.CLEARED, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+        new JSONObject("{\"cancel_at_period_end\":false}")));
+    assertEquals(CancelAtPeriodEnd.SET, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+        new JSONObject("{\"cancel_at_period_end\":\"true\"}")));
+    assertEquals(CancelAtPeriodEnd.CLEARED, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+        new JSONObject("{\"cancel_at_period_end\":\"FALSE\"}")));
+  }
+
+  @Test
+  public void cancelAtPeriodEndOfReportsNothingForAbsentNullOrJunk() throws Exception {
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED,
+        SubscriptionLifecycleApplier.cancelAtPeriodEndOf(null));
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED,
+        SubscriptionLifecycleApplier.cancelAtPeriodEndOf(new JSONObject("{}")));
+    for (String junk : new String[] { "null", "\"yes\"", "1", "0", "\"\"", "{}", "[]" }) {
+      assertEquals(junk, CancelAtPeriodEnd.NOT_REPORTED, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+          new JSONObject("{\"cancel_at_period_end\":" + junk + "}")));
+    }
+  }
+
+  @Test
+  public void aSubscriptionDeletedEventCarriesTheCancelFlagOnItsClose() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("customer.subscription.deleted",
+        new JSONObject("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"canceled\","
+            + "\"ended_at\":" + DEC + ",\"cancel_at_period_end\":true}}}"));
+
+    assertTrue(outcome.closesSubscription());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, outcome.status());
+    assertEquals(CancelAtPeriodEnd.SET, outcome.cancelAtPeriodEnd());
   }
 }

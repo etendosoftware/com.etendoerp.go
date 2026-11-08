@@ -26,10 +26,13 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
+import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -38,6 +41,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -65,6 +70,23 @@ import org.openbravo.dal.service.OBDal;
 class ProductTransactionsHandlerTest {
 
   private static final ProductTransactionsHandler HANDLER = new ProductTransactionsHandler();
+
+  /**
+   * The Product "Movements" tab's flag (ETP-5889), on by default so the tests of the extra work see it;
+   * a test that needs it off stubs {@code false}. The Warehouse spec never consults it.
+   */
+  private MockedStatic<ProductMovementsPolicy> policy;
+
+  @BeforeEach
+  void flagIsOn() {
+    policy = Mockito.mockStatic(ProductMovementsPolicy.class);
+    policy.when(ProductMovementsPolicy::isEnabled).thenReturn(true);
+  }
+
+  @AfterEach
+  void closeFlag() {
+    policy.close();
+  }
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -600,5 +622,619 @@ class ProductTransactionsHandlerTest {
       assertEquals("internal-consumption", row.getString("etgoDocWindow"));
       assertEquals("IC-0001", row.getString("etgoDocLabel"));
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle() — etgoStockAfter (ETP-5889, Product "Movements" tab)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Mocks two native queries on the session: any SQL answers {@code documentRows} (the document
+   * targets) and the stock-after SQL answers {@code stockRows}. The later, more specific stubbing
+   * wins for the stock SQL.
+   */
+  @SuppressWarnings("unchecked")
+  private static NativeQuery<Object[]> mockDocumentAndStockQueries(Session session, List<Object[]> documentRows,
+      NativeQuery<Object[]> stockQuery) {
+    NativeQuery<Object[]> documentQuery = mockNativeQuery(session, documentRows);
+    when(session.createNativeQuery(contains("stock_after"))).thenReturn(stockQuery);
+    return documentQuery;
+  }
+
+  /** The native queries only see what the session can read: its readable organizations are bound. */
+  private static void stubReadableOrganizations(MockedStatic<OBContext> obCtx) {
+    OBContext context = mock(OBContext.class);
+    when(context.getReadableOrganizations()).thenReturn(new String[]{ "0", "ORG-1" });
+    obCtx.when(OBContext::getOBContext).thenReturn(context);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static NativeQuery<Object[]> stockQuery(List<Object[]> rows) {
+    NativeQuery<Object[]> query = mock(NativeQuery.class);
+    when(query.setParameterList(eq("ids"), anyList())).thenReturn(query);
+    when(query.setParameterList(eq("orgs"), anyList())).thenReturn(query);
+    when(query.list()).thenReturn(rows);
+    return query;
+  }
+
+  /**
+   * Each row that the stock query resolves carries the stock left after its movement, negative
+   * values included (a product can be sold before it is received); a row the query does not
+   * resolve carries nothing.
+   */
+  @Test
+  void afterHandle_addsStockAfter_toEveryRowTheQueryResolves() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")).put(txRow("TX-002")).put(txRow("TX-003")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stockQuery(Arrays.asList(
+          new Object[]{ "TX-001", new BigDecimal("-12.00"), new BigDecimal("-12.00") },
+          new Object[]{ "TX-002", "563", "563" })));
+
+      NeoContext ctx = productCtx(null);
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      JSONArray rows = HANDLER.afterHandle(ctx).getBody().getJSONObject("response").getJSONArray("data");
+
+      assertEquals(-12.0, rows.getJSONObject(0).getDouble("etgoStockAfter"), 0.0001);
+      assertEquals(563.0, rows.getJSONObject(1).getDouble("etgoStockAfter"), 0.0001);
+      assertFalse(rows.getJSONObject(2).has("etgoStockAfter"), "a row the query did not resolve must carry no stock");
+    }
+  }
+
+  /**
+   * A failure while resolving the stock must not cost the rows their document fields: they keep
+   * etgoDocHeaderId/etgoDocWindow/etgoDocLabel and simply carry no etgoStockAfter.
+   */
+  @Test
+  void afterHandle_stockQueryFailure_keepsTheDocumentFieldsAndOmitsTheStock() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      NativeQuery<Object[]> failing = stockQuery(Collections.emptyList());
+      when(failing.list()).thenThrow(new RuntimeException("simulated stock failure"));
+      mockDocumentAndStockQueries(session,
+          Collections.singletonList(new Object[]{ "TX-001", "HDR-1", "goods-receipt", "1000001" }), failing);
+
+      NeoContext ctx = productCtx(null);
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = assertDoesNotThrow(() -> HANDLER.afterHandle(ctx));
+
+      JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("HDR-1", row.getString("etgoDocHeaderId"));
+      assertEquals("goods-receipt", row.getString("etgoDocWindow"));
+      assertEquals("1000001", row.getString("etgoDocLabel"));
+      assertFalse(row.has("etgoStockAfter"), "a failed stock query must leave the field out");
+    }
+  }
+
+  /**
+   * A null or unreadable stock is left out, never turned into 0: the tab shows a dash for it, and a
+   * zero would read as "the product ran out here".
+   */
+  @Test
+  void afterHandle_nullOrUnreadableStock_isOmittedNotZero() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")).put(txRow("TX-002")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stockQuery(Arrays.asList(
+          new Object[]{ "TX-001", null, null },
+          new Object[]{ "TX-002", "not-a-number", "not-a-number" })));
+
+      NeoContext ctx = productCtx(null);
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      JSONArray rows = HANDLER.afterHandle(ctx).getBody().getJSONObject("response").getJSONArray("data");
+
+      assertFalse(rows.getJSONObject(0).has("etgoStockAfter"));
+      assertFalse(rows.getJSONObject(1).has("etgoStockAfter"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle() — shared helpers and the readable-organizations binding
+  // ---------------------------------------------------------------------------
+
+  private static NeoContext productCtx(java.util.Map<String, String> queryParams) {
+    return NeoContext.builder().specName("product").entityName("transactions").httpMethod("GET").endpointType(
+        NeoEndpointType.CRUD).queryParams(queryParams).build();
+  }
+
+  /**
+   * A native query bypasses the DAL read restrictions, so the stock query is bound to the
+   * organizations the session can read, never to every organization.
+   */
+  @Test
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  void afterHandle_stockQuery_isBoundToTheReadableOrganizations() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      NativeQuery<Object[]> stock = stockQuery(Collections.emptyList());
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stock);
+
+      NeoContext ctx = productCtx(java.util.Map.of("parentId", "P1"));
+      ctx.setPreviousResult(NeoResponse.ok(body));
+      HANDLER.afterHandle(ctx);
+
+      Mockito.verify(stock).setParameterList("orgs", Arrays.asList("0", "ORG-1"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle() — the flag (ProductMovementsPolicy) gates the extra work
+  // ---------------------------------------------------------------------------
+
+  /**
+   * With the flag off for the account, a Product request gets the document fields only, as before
+   * ETP-5889: no stock query, no extra fields.
+   */
+  @Test
+  void afterHandle_flagOff_addsNoStockAndRunsNoStockQuery() throws Exception {
+    policy.when(ProductMovementsPolicy::isEnabled).thenReturn(false);
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      mockNativeQuery(session, Collections.singletonList(new Object[]{ "TX-001", "HDR-1", "goods-receipt", "1000001" }));
+
+      NeoContext ctx = productCtx(java.util.Map.of("parentId", "P1"));
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      JSONObject response = HANDLER.afterHandle(ctx).getBody().getJSONObject("response");
+
+      JSONObject row = response.getJSONArray("data").getJSONObject(0);
+      assertEquals("HDR-1", row.getString("etgoDocHeaderId"), "the document fields are unaffected by the flag");
+      assertFalse(row.has("etgoStockAfter"));
+      Mockito.verify(session, Mockito.never()).createNativeQuery(contains("stock_after"));
+    }
+  }
+
+  /** The Warehouse window shares this handler and has no use for the extra work: the flag is never read. */
+  @Test
+  void afterHandle_warehouseSpec_neverConsultsTheFlag() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      mockNativeQuery(session, Collections.emptyList());
+
+      NeoContext ctx = getCtx();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      HANDLER.afterHandle(ctx);
+
+      policy.verifyNoInteractions();
+      Mockito.verify(session, Mockito.never()).createNativeQuery(contains("stock_after"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle() — stock resolution on a normal page
+  // ---------------------------------------------------------------------------
+
+  /** Runs afterHandle on a product request; returns the stock query mock for verification. */
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static NativeQuery<Object[]> runProductRequest(java.util.Map<String, String> params, Session session,
+      JSONObject body, JSONObject[] responseOut) throws Exception {
+    NativeQuery<Object[]> stock = stockQuery(Collections.singletonList(new Object[]{ "TX-001", new BigDecimal("7"), new BigDecimal("7") }));
+    mockDocumentAndStockQueries(session, Collections.singletonList(new Object[]{ "TX-001", "HDR-1", "goods-receipt", "1000001" }), stock);
+
+    NeoContext ctx = productCtx(params);
+    ctx.setPreviousResult(NeoResponse.ok(body));
+    responseOut[0] = HANDLER.afterHandle(ctx).getBody().getJSONObject("response");
+    return stock;
+  }
+
+  /** A normal page (_endRow=49) still resolves the stock after each movement. */
+  @Test
+  void afterHandle_normalPage_stillResolvesStockAfter() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      JSONObject[] out = new JSONObject[1];
+
+      runProductRequest(java.util.Map.of("parentId", "P1", "_startRow", "0", "_endRow", "49"), session, body, out);
+
+      assertEquals(new BigDecimal("7"), new BigDecimal(out[0].getJSONArray("data").getJSONObject(0).get("etgoStockAfter").toString()));
+      Mockito.verify(session).createNativeQuery(contains("stock_after"));
+    }
+  }
+
+  /** Without _endRow the request is a normal page: the stock is resolved. */
+  @Test
+  void afterHandle_missingEndRow_isANormalPage() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      JSONObject[] out = new JSONObject[1];
+
+      runProductRequest(java.util.Map.of("parentId", "P1"), session, body, out);
+
+      assertTrue(out[0].getJSONArray("data").getJSONObject(0).has("etgoStockAfter"));
+    }
+  }
+
+  /** Null query params: the stock is resolved. */
+  @Test
+  @SuppressWarnings("unchecked")
+  void afterHandle_nullQueryParams_isANormalPage() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      NativeQuery<Object[]> stock = stockQuery(Collections.singletonList(new Object[]{ "TX-001", new BigDecimal("3"), new BigDecimal("3") }));
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stock);
+
+      NeoContext ctx = productCtx(null);
+      ctx.setPreviousResult(NeoResponse.ok(body));
+      JSONObject response = HANDLER.afterHandle(ctx).getBody().getJSONObject("response");
+
+      assertTrue(response.getJSONArray("data").getJSONObject(0).has("etgoStockAfter"));
+    }
+  }
+
+  /**
+   * The stock SQL is bounded by the newest movement date of the page, and still binds both the ids
+   * and the readable organizations.
+   */
+  @Test
+  void afterHandle_stockSql_isBoundedByPageDateAndBindsIdsAndOrgs() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      NativeQuery<Object[]> stock = stockQuery(Collections.emptyList());
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stock);
+
+      NeoContext ctx = productCtx(java.util.Map.of("parentId", "P1", "_endRow", "49"));
+      ctx.setPreviousResult(NeoResponse.ok(body));
+      HANDLER.afterHandle(ctx);
+
+      org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+      Mockito.verify(session, Mockito.atLeastOnce()).createNativeQuery(sql.capture());
+      String stockSql = sql.getAllValues().stream().filter(q -> q.contains("stock_after")).findFirst().orElseThrow();
+      assertTrue(stockSql.contains("t.movementdate <= (SELECT MAX(q.movementdate)"));
+      assertTrue(stockSql.contains("q.m_transaction_id IN (:ids)"));
+      Mockito.verify(stock).setParameterList("ids", Collections.singletonList("TX-001"));
+      Mockito.verify(stock).setParameterList("orgs", Arrays.asList("0", "ORG-1"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle() — etgoStockAfter: product stock vs. warehouse stock (warehouse filter)
+  // ---------------------------------------------------------------------------
+
+  private static final String WAREHOUSE_CRITERION =
+      "{\"fieldName\":\"etgoWarehouse\",\"operator\":\"equals\",\"value\":\"WH-1\"}";
+
+  /**
+   * Runs a Product request whose stock query answers one row per tx: column 1 (product stock) = 100,
+   * column 2 (warehouse stock) = 40, so the column the handler read is told by the value. Returns the
+   * etgoStockAfter of the row, or null when the field is absent.
+   */
+  private static BigDecimal stockAfterFor(java.util.Map<String, String> params, Object productStock,
+      Object warehouseStock) throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      NativeQuery<Object[]> stock = stockQuery(
+          Collections.singletonList(new Object[]{ "TX-001", productStock, warehouseStock }));
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stock);
+
+      NeoContext ctx = productCtx(params);
+      ctx.setPreviousResult(NeoResponse.ok(body));
+      JSONObject row = HANDLER.afterHandle(ctx).getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0);
+      return row.has("etgoStockAfter") ? new BigDecimal(row.get("etgoStockAfter").toString()) : null;
+    }
+  }
+
+  private static java.util.Map<String, String> criteria(String json) {
+    return java.util.Map.of("parentId", "P1", "_endRow", "49", "criteria", json);
+  }
+
+  private static final BigDecimal PRODUCT_STOCK = new BigDecimal("100");
+  private static final BigDecimal WAREHOUSE_STOCK = new BigDecimal("40");
+
+  @Test
+  void afterHandle_noCriteria_usesTheProductStock() throws Exception {
+    assertEquals(PRODUCT_STOCK, stockAfterFor(java.util.Map.of("parentId", "P1", "_endRow", "49"),
+        PRODUCT_STOCK, WAREHOUSE_STOCK));
+  }
+
+  @Test
+  void afterHandle_warehouseCriterion_usesTheWarehouseStock() throws Exception {
+    assertEquals(WAREHOUSE_STOCK,
+        stockAfterFor(criteria("[" + WAREHOUSE_CRITERION + "]"), PRODUCT_STOCK, WAREHOUSE_STOCK));
+  }
+
+  @Test
+  void afterHandle_dateAndDirectionCriteriaOnly_useTheProductStock() throws Exception {
+    String json = "[{\"fieldName\":\"movementDate\",\"operator\":\"greaterOrEqual\",\"value\":\"2026-01-01\"},"
+        + "{\"fieldName\":\"movementQuantity\",\"operator\":\"greaterThan\",\"value\":\"0\"}]";
+    assertEquals(PRODUCT_STOCK, stockAfterFor(criteria(json), PRODUCT_STOCK, WAREHOUSE_STOCK));
+  }
+
+  @Test
+  void afterHandle_warehouseCriterionAmongOthers_usesTheWarehouseStock() throws Exception {
+    String json = "[{\"fieldName\":\"movementDate\",\"operator\":\"greaterOrEqual\",\"value\":\"2026-01-01\"},"
+        + WAREHOUSE_CRITERION + ",{\"fieldName\":\"movementQuantity\",\"operator\":\"lessThan\",\"value\":\"0\"}]";
+    assertEquals(WAREHOUSE_STOCK, stockAfterFor(criteria(json), PRODUCT_STOCK, WAREHOUSE_STOCK));
+  }
+
+  /** Anything that is not that warehouse equality means "not filtered": the stock of the product, no failure. */
+  @Test
+  void afterHandle_unreadableOrNonMatchingCriteria_fallBackToTheProductStock() throws Exception {
+    String[] notFiltered = {
+        "{not json", "", "   ", "{\"fieldName\":\"etgoWarehouse\",\"operator\":\"equals\",\"value\":\"WH-1\"}",
+        "[]", "[null]", "[\"etgoWarehouse\"]",
+        "[{\"fieldName\":\"etgoWarehouse\",\"operator\":\"notEqual\",\"value\":\"WH-1\"}]",
+        "[{\"fieldName\":\"etgoWarehouse\",\"operator\":\"iContains\",\"value\":\"WH-1\"}]",
+        "[{\"fieldName\":\"warehouse\",\"operator\":\"equals\",\"value\":\"WH-1\"}]",
+        "[{\"fieldName\":\"etgoWarehouse\",\"operator\":\"equals\",\"value\":\"\"}]",
+        "[{\"fieldName\":\"etgoWarehouse\",\"operator\":\"equals\",\"value\":\"  \"}]",
+        "[{\"fieldName\":\"etgoWarehouse\",\"operator\":\"equals\"}]",
+        "[{\"fieldName\":\"etgoWarehouse\",\"value\":\"WH-1\"}]" };
+    for (String json : notFiltered) {
+      assertEquals(PRODUCT_STOCK, assertDoesNotThrow(() -> stockAfterFor(criteria(json), PRODUCT_STOCK, WAREHOUSE_STOCK)),
+          "criteria '" + json + "' must read the product stock");
+    }
+  }
+
+  /** The chosen column is null: the stock is omitted, never 0, even if the other column has a value. */
+  @Test
+  void afterHandle_nullInTheChosenColumn_omitsTheStockEvenIfTheOtherHasOne() throws Exception {
+    assertNull(stockAfterFor(java.util.Map.of("parentId", "P1", "_endRow", "49"), null, WAREHOUSE_STOCK));
+    assertNull(stockAfterFor(criteria("[" + WAREHOUSE_CRITERION + "]"), PRODUCT_STOCK, null));
+  }
+
+  /** Runs a Product request whose stock query answers one row per entry; returns the resulting rows. */
+  private JSONArray productRowsFor(java.util.Map<String, String> params, List<Object[]> stockRows,
+      JSONArray inputRows, boolean flagOn) throws Exception {
+    policy.when(ProductMovementsPolicy::isEnabled).thenReturn(flagOn);
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stockQuery(stockRows));
+      NeoContext ctx = productCtx(params);
+      ctx.setPreviousResult(NeoResponse.ok(wrapData(inputRows)));
+      JSONArray rows = HANDLER.afterHandle(ctx).getBody().getJSONObject("response").getJSONArray("data");
+      if (!flagOn) {
+        Mockito.verify(session, Mockito.never()).createNativeQuery(contains("stock_after"));
+      }
+      return rows;
+    }
+  }
+
+  /** The wall clock is exposed as is, zero padded, fractions dropped, with no time-zone shift. */
+  @Test
+  void afterHandle_processTime_isTheWallClockAsIsoLocalDateTime() throws Exception {
+    JSONArray rows = productRowsFor(null, Arrays.asList(
+        new Object[]{ "TX-001", new BigDecimal("5"), new BigDecimal("5"), Timestamp.valueOf("2026-11-03 16:21:43.372") },
+        new Object[]{ "TX-002", new BigDecimal("6"), new BigDecimal("6"), Timestamp.valueOf("2026-01-02 09:05:07") }),
+        new JSONArray().put(txRow("TX-001")).put(txRow("TX-002")), true);
+
+    assertEquals("2026-11-03T16:21:43", rows.getJSONObject(0).getString("etgoProcessTime"));
+    assertEquals("2026-01-02T09:05:07", rows.getJSONObject(1).getString("etgoProcessTime"));
+  }
+
+  /** No process date: the field is omitted (never an empty string); the stock stays. */
+  @Test
+  void afterHandle_nullProcessTime_isOmittedAndKeepsTheStock() throws Exception {
+    JSONArray rows = productRowsFor(null, Collections.singletonList(
+        new Object[]{ "TX-001", new BigDecimal("5"), new BigDecimal("5"), null }),
+        new JSONArray().put(txRow("TX-001")), true);
+
+    assertFalse(rows.getJSONObject(0).has("etgoProcessTime"));
+    assertEquals(5.0, rows.getJSONObject(0).getDouble("etgoStockAfter"), 0.0001);
+  }
+
+  /** A three-column row (no process date column) and an unreadable value are tolerated, not fatal. */
+  @Test
+  void afterHandle_missingOrUnreadableProcessTime_isOmitted() throws Exception {
+    JSONArray rows = productRowsFor(null, Arrays.asList(
+        new Object[]{ "TX-001", new BigDecimal("5"), new BigDecimal("5") },
+        new Object[]{ "TX-002", new BigDecimal("6"), new BigDecimal("6"), "not a timestamp" }),
+        new JSONArray().put(txRow("TX-001")).put(txRow("TX-002")), true);
+
+    assertFalse(rows.getJSONObject(0).has("etgoProcessTime"));
+    assertFalse(rows.getJSONObject(1).has("etgoProcessTime"));
+    assertEquals(6.0, rows.getJSONObject(1).getDouble("etgoStockAfter"), 0.0001);
+  }
+
+  /** Flag off: no field and no stock query at all (the time rides on that query). */
+  @Test
+  void afterHandle_flagOff_addsNoProcessTime() throws Exception {
+    JSONArray rows = productRowsFor(java.util.Map.of("parentId", "P1"), Collections.singletonList(
+        new Object[]{ "TX-001", new BigDecimal("5"), new BigDecimal("5"), Timestamp.valueOf("2026-11-03 16:21:43") }),
+        new JSONArray().put(txRow("TX-001")), false);
+
+    assertFalse(rows.getJSONObject(0).has("etgoProcessTime"));
+  }
+
+  /** The warehouse filter only picks the stock column: the time is the same either way. */
+  @Test
+  void afterHandle_processTime_isUnaffectedByTheWarehouseFilter() throws Exception {
+    List<Object[]> stockRows = Collections.singletonList(
+        new Object[]{ "TX-001", PRODUCT_STOCK, WAREHOUSE_STOCK, Timestamp.valueOf("2026-11-03 09:05:07") });
+    JSONArray plain = productRowsFor(java.util.Map.of("parentId", "P1", "_endRow", "49"), stockRows,
+        new JSONArray().put(txRow("TX-001")), true);
+    JSONArray filtered = productRowsFor(criteria("[" + WAREHOUSE_CRITERION + "]"), stockRows,
+        new JSONArray().put(txRow("TX-001")), true);
+
+    assertEquals("2026-11-03T09:05:07", plain.getJSONObject(0).getString("etgoProcessTime"));
+    assertEquals("2026-11-03T09:05:07", filtered.getJSONObject(0).getString("etgoProcessTime"));
+    assertEquals(100.0, plain.getJSONObject(0).getDouble("etgoStockAfter"), 0.0001);
+    assertEquals(40.0, filtered.getJSONObject(0).getDouble("etgoStockAfter"), 0.0001);
+  }
+
+  /** The SQL returns the process time from the same statement and the order key is untouched. */
+  @Test
+  void afterHandle_stockSql_returnsTheProcessTimeWithoutChangingTheOrder() throws Exception {
+    org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stockQuery(Collections.emptyList()));
+      NeoContext ctx = productCtx(null);
+      ctx.setPreviousResult(NeoResponse.ok(wrapData(new JSONArray().put(txRow("TX-001")))));
+      HANDLER.afterHandle(ctx);
+      Mockito.verify(session, Mockito.atLeastOnce()).createNativeQuery(sql.capture());
+    }
+    String stockSql = sql.getAllValues().stream().filter(q -> q.contains("stock_after")).findFirst().orElseThrow();
+    assertTrue(stockSql.contains("s.trxprocessdate AS process_time"));
+    assertTrue(stockSql.contains("SELECT t.m_transaction_id, t.trxprocessdate,"));
+    assertTrue(stockSql.contains("ORDER BY t.movementdate, t.trxprocessdate, t.m_transaction_id"));
+  }
+
+  /** Both windows run in one statement: the per-warehouse partition is in the SQL and ids/orgs stay bound. */
+  @Test
+  void afterHandle_stockSql_partitionsByProductAndWarehouse() throws Exception {
+    JSONObject body = wrapData(new JSONArray().put(txRow("TX-001")));
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+      NativeQuery<Object[]> stock = stockQuery(Collections.emptyList());
+      mockDocumentAndStockQueries(session, Collections.emptyList(), stock);
+
+      NeoContext ctx = productCtx(criteria("[" + WAREHOUSE_CRITERION + "]"));
+      ctx.setPreviousResult(NeoResponse.ok(body));
+      HANDLER.afterHandle(ctx);
+
+      org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+      Mockito.verify(session, Mockito.atLeastOnce()).createNativeQuery(sql.capture());
+      String stockSql = sql.getAllValues().stream().filter(q -> q.contains("stock_after")).findFirst().orElseThrow();
+      assertTrue(stockSql.contains("PARTITION BY t.m_product_id, t.em_etgo_warehouse_id"));
+      assertTrue(stockSql.matches("(?s).*PARTITION BY t\\.m_product_id\\s+ORDER BY.*"), "the product-wide sum must remain");
+      assertTrue(stockSql.contains("stock_after_warehouse"));
+      assertTrue(stockSql.contains("t.ad_org_id IN (:orgs)"));
+      Mockito.verify(stock).setParameterList("ids", Collections.singletonList("TX-001"));
+      Mockito.verify(stock).setParameterList("orgs", Arrays.asList("0", "ORG-1"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle() — guards run before any native count query (LOW-2)
+  // ---------------------------------------------------------------------------
+
+  private static void assertNoNativeQuery(NeoContext ctx) {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      stubReadableOrganizations(obCtx);
+
+      assertNull(HANDLER.afterHandle(ctx));
+
+      Mockito.verify(session, Mockito.never()).createNativeQuery(anyString());
+    }
+  }
+
+  /** No previous result: null and no native query (no count) for the product spec. */
+  @Test
+  void afterHandle_productSpecNoPreviousResult_returnsNullAndRunsNoQuery() {
+    assertNoNativeQuery(productCtx(java.util.Map.of("parentId", "P1")));
+  }
+
+  /** An error response carries no data array: null and no count query. */
+  @Test
+  void afterHandle_productSpecErrorBody_returnsNullAndRunsNoQuery() throws Exception {
+    NeoContext ctx = productCtx(java.util.Map.of("parentId", "P1"));
+    ctx.setPreviousResult(new NeoResponse(500,
+        new JSONObject().put("response", new JSONObject().put("status", -1).put("error", "boom"))));
+    assertNoNativeQuery(ctx);
+  }
+
+  /** A previous result with a null body: null and no count query. */
+  @Test
+  void afterHandle_productSpecNullBody_returnsNullAndRunsNoQuery() {
+    NeoContext ctx = productCtx(java.util.Map.of("parentId", "P1"));
+    ctx.setPreviousResult(new NeoResponse(200, null));
+    assertNoNativeQuery(ctx);
+  }
+
+  /** An empty data array (no rows) never triggers the count either. */
+  @Test
+  void afterHandle_productSpecEmptyData_returnsNullAndRunsNoQuery() throws Exception {
+    NeoContext ctx = productCtx(java.util.Map.of("parentId", "P1"));
+    ctx.setPreviousResult(NeoResponse.ok(wrapData(new JSONArray())));
+    assertNoNativeQuery(ctx);
   }
 }

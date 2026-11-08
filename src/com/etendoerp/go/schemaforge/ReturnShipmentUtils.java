@@ -91,6 +91,13 @@ final class ReturnShipmentUtils {
   static final String HINT_RETURN_INVOICE_ALREADY_EXISTS = "Pass allowDuplicate:true only if a "
       + "second rectificative invoice for this return is really intended (for example one per "
       + "origin invoice). Nothing was created.";
+  /**
+   * {@code error.hint} of that 409 for a return whose customization does not accept
+   * {@code allowDuplicate} (ETP-6026): there is no way past it, as on the screen.
+   */
+  static final String HINT_RETURN_INVOICE_ONE_PER_RETURN = "A return has at most one non-voided "
+      + "rectificative invoice, as on the screen: use the existing one (previousReturnInvoices), "
+      + "or void it first to create another. Nothing was created.";
   /** The 422 message of an {@code allowDuplicate} that is not a JSON boolean. */
   static final String MSG_ALLOW_DUPLICATE_NOT_BOOLEAN =
       "'allowDuplicate' must be the JSON boolean true or false. Nothing was created.";
@@ -413,12 +420,13 @@ final class ReturnShipmentUtils {
    * can pass the user-facing POSITIVE quantity and get the same stored NEGATIVE sign. The
    * normalisation is idempotent, so a caller that already negated is not flipped back.
    */
-  static void buildAndSaveReturnLine(ShipmentInOut doc, ShipmentInOutLine sourceLine,
-      long lineNo, BigDecimal qty) {
+  static ShipmentInOutLine buildAndSaveReturnLine(ShipmentInOut doc,
+      ShipmentInOutLine sourceLine, long lineNo, BigDecimal qty) {
     ShipmentInOutLine retLine =
         NeoReturnReceiptService.createReturnLineShell(doc, sourceLine, lineNo);
     retLine.setMovementQuantity(ReturnLineQuantityPolicy.toStoredQuantity(qty));
     OBDal.getInstance().save(retLine);
+    return retLine;
   }
 
   /** One usable entry of an import request: the source line and the quantity to return. */
@@ -467,13 +475,18 @@ final class ReturnShipmentUtils {
     if (refusal != null) {
       return refusal;
     }
+    List<String> createdIds = new ArrayList<>(entries.size());
     for (ImportEntry entry : entries) {
       // ETP-5313: the stored sign is owned by ReturnLineQuantityPolicy, applied inside
       // buildAndSaveReturnLine — pass the user-facing POSITIVE quantity.
-      buildAndSaveReturnLine(returnDoc, entry.sourceLine, nextLineNo, entry.quantity);
+      createdIds.add(buildAndSaveReturnLine(returnDoc, entry.sourceLine, nextLineNo,
+          entry.quantity).getId());
       nextLineNo += 10;
     }
     OBDal.getInstance().flush();
+    // ETP-5051: the plan-quota check of the return lines this import added to the existing return
+    // (importShipmentLines / importReceiptLines), before the answer; the handlers answer a refusal.
+    NeoQuotaCreateCheck.requireAllowed(ShipmentInOutLine.ENTITY_NAME, createdIds);
     JSONObject data = new JSONObject();
     data.put("importedCount", entries.size());
     return wrapOkData(data);

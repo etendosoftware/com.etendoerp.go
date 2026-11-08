@@ -54,18 +54,53 @@ public final class UsageEventTypes {
   public static final String AI_SUPPORT_MESSAGE = "ai.support.message";
 
   /**
+   * One Copilot tool call that used a model (the document OCR), recorded by the backend with the
+   * token usage and cost ({@link CopilotToolUsageRecorder}). {@code target} is the tool name.
+   */
+  public static final String AI_TOOL_EXECUTE = "ai.tool.execute";
+
+  /**
    * One successful entry into an environment, recorded by the backend once the environment's
    * credential is issued ({@link SessionLoginUsage}). {@code action} tells the two paths apart.
    */
   public static final String SESSION_LOGIN = "session.login";
 
+  /**
+   * ETP-6057 — the requests one public API key made in one minute, aggregated by
+   * {@link PublicApiUsageCounter}: one row per tenant, key, spec, entity, HTTP method and status,
+   * with the number of requests in {@code properties.count}. Never one row per request.
+   */
+  public static final String PUBLIC_API_REQUEST = "publicapi.request";
+
   /** Every accepted event type. Keep in sync with the constants above. */
   private static final Set<String> KNOWN = Set.of(
       AI_AGENT_MESSAGE,
       AI_SUPPORT_MESSAGE,
-      SESSION_LOGIN);
+      AI_TOOL_EXECUTE,
+      SESSION_LOGIN,
+      PUBLIC_API_REQUEST);
+
+  /**
+   * ETP-6057 — the types only the backend itself may record. The UI ingest endpoint
+   * ({@code NeoUsageEventEndpoint}, {@code POST /sws/neo/usage}) drops them, because a row of one of
+   * these types is read as a fact about the tenant: a login, or public API requests that are billed.
+   * Each must also be in {@link #KNOWN}.
+   */
+  private static final Set<String> SERVER_ONLY = Set.of(
+      SESSION_LOGIN,
+      PUBLIC_API_REQUEST);
 
   private UsageEventTypes() {
+  }
+
+  /**
+   * Tell whether only the backend may record an event type, so a client-facing endpoint must drop it.
+   *
+   * @param eventType candidate event type, possibly null
+   * @return true when {@code eventType} is a server-only type
+   */
+  public static boolean isServerOnly(String eventType) {
+    return eventType != null && SERVER_ONLY.contains(eventType);
   }
 
   /**

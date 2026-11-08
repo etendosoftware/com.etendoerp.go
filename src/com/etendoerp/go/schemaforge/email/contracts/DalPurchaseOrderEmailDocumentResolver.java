@@ -80,7 +80,8 @@ final class DalPurchaseOrderEmailDocumentResolver implements EmailDocumentRecord
         DalEmailContractDataResolver.formatAmount(order.getGrandTotalAmount(),
             order.getCurrency()),
         order.getClient().getId(),
-        buildDetails(order)));
+        buildDetails(order))
+        .withDocumentStatus(order.getDocumentStatus()));
   }
 
   /**

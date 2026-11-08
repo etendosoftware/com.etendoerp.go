@@ -57,6 +57,7 @@
 <!--051AFABD08C64E17B6E0E764262091B5-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--051AFABD08C64E17B6E0E764262091B5-->  <JAVA_QUALIFIER><![CDATA[goodsShipmentLineHandler]]></JAVA_QUALIFIER>
 <!--051AFABD08C64E17B6E0E764262091B5-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--051AFABD08C64E17B6E0E764262091B5-->  <AGENT_PROMPT><![CDATA[Lots, serial numbers and expiry dates are not handled in Etendo GO yet: a shipment line cannot carry them. Tell the user they cannot be recorded here.]]></AGENT_PROMPT>
 <!--051AFABD08C64E17B6E0E764262091B5--></ETGO_SF_ENTITY>
 
 <!--0571ECCC0B7B4044BFA5FB6A8B26501D--><ETGO_SF_ENTITY>
@@ -325,7 +326,7 @@
 <!--0D654005B02741A29A0491FD5AFEA6E8-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--0D654005B02741A29A0491FD5AFEA6E8-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--0D654005B02741A29A0491FD5AFEA6E8-->  <NAMED_FILTERS><![CDATA[[{"name":"completed","where":"e.paymentComplete = true","label":"Paid","description":"Fully paid invoices (payment complete)."},{"name":"pending","where":"e.paymentComplete = false and abs(e.outstandingAmount) >= abs(e.grandTotalAmount)","label":"Unpaid","description":"Unpaid invoices with nothing paid yet (outstanding equals the total). Excludes partially paid invoices; use 'outstanding' for every invoice that still owes a balance."},{"name":"partial","where":"e.paymentComplete = false and abs(e.outstandingAmount) > 0 and abs(e.outstandingAmount) < abs(e.grandTotalAmount)","label":"Partially paid","description":"Invoices with a partial payment: some amount paid but a balance remains."},{"name":"outstanding","where":"e.paymentComplete = false and abs(e.outstandingAmount) > 0","label":"Pending payment","description":"Every invoice that still owes a balance: unpaid plus partially paid. Use this for 'what is still owed'; 'pending' alone excludes partially paid invoices."}]]]></NAMED_FILTERS>
-<!--0D654005B02741A29A0491FD5AFEA6E8-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["pisSupplierAccounts","pisTemplates","pisPaymentStatus","cancelPisPayment","retryPisPayment","psd2GenerateBankPayment","posted","etblkpBulkposting"],"redirect":{"aPRMAddpayment":"registerPayment","Createfromorders":"importOrderLines","Createfrominouts":"importReceiptLines","CreateFrom":"importOrderLines"},"values":{"DocAction":["CO","RE"]},"reason":"Bank-initiated (PIS) payments need a person to authorize them at the bank (SCA), so they are excluded from MCP","redirectReason":"The classic Add Payment button is not the Etendo payment flow; use registerPayment, which is what the invoice payment panel calls","reasons":{"posted":"The posted button is a blind post/unpost toggle the invoice window never shows; book the invoice with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions. The posted field itself stays readable","Createfromorders":"The classic Create From Orders process is a pick-and-edit window an agent cannot run; importOrderLines adds the pending lines of a completed purchase order to this draft invoice, with availableOrders and availableOrderLines listing what can be imported","Createfrominouts":"The classic Create From Receipts process is a pick-and-edit window an agent cannot run; importReceiptLines adds the pending lines of a completed goods receipt to this draft invoice, with availableReceipts and availableReceiptLines listing what can be imported","CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed purchase order to this draft invoice, and importReceiptLines does the same from a goods receipt","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"},"valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO"],"IP":["CO"],"CO":["RE"],"VO":[]}}}},"pdf":{"source":"supplier","reason":"a purchase invoice has no printable: its PDF is the supplier document the user uploads as the main attachment"}}]]></MCP_CONFIG>
+<!--0D654005B02741A29A0491FD5AFEA6E8-->  <MCP_CONFIG><![CDATA[{"pdf": {"reason": "a purchase invoice has no printable: its PDF is the supplier document the user uploads as the main attachment", "source": "supplier"}, "actions": {"hidden": ["pisSupplierAccounts", "pisTemplates", "pisPaymentStatus", "cancelPisPayment", "retryPisPayment", "psd2GenerateBankPayment", "posted", "etblkpBulkposting"], "reason": "Bank-initiated (PIS) payments need a person to authorize them at the bank (SCA), so they are excluded from MCP", "values": {"DocAction": ["CO", "RE"]}, "reasons": {"posted": "The posted button is a blind post/unpost toggle the invoice window never shows; book the invoice with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions. The posted field itself stays readable", "CreateFrom": "The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed purchase order to this draft invoice, and importReceiptLines does the same from a goods receipt On a rectificative invoice it does not apply: it takes its lines from a return (importReturnLines) or from the invoice it rectifies (importOriginInvoiceLines)", "Createfrominouts": "The classic Create From Receipts process is a pick-and-edit window an agent cannot run; importReceiptLines adds the pending lines of a completed goods receipt to this draft invoice, with availableReceipts and availableReceiptLines listing what can be imported On a rectificative invoice it does not apply: it takes its lines from a return (importReturnLines) or from the invoice it rectifies (importOriginInvoiceLines)", "Createfromorders": "The classic Create From Orders process is a pick-and-edit window an agent cannot run; importOrderLines adds the pending lines of a completed purchase order to this draft invoice, with availableOrders and availableOrderLines listing what can be imported On a rectificative invoice it does not apply: it takes its lines from a return (importReturnLines) or from the invoice it rectifies (importOriginInvoiceLines)", "etblkpBulkposting": "The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}, "redirect": {"CreateFrom": "importOrderLines", "aPRMAddpayment": "registerPayment", "Createfrominouts": "importReceiptLines", "Createfromorders": "importOrderLines"}, "valueReasons": {"DocAction": {"VO": "An issued invoice is not voided, and reactivating it (RE) does not void it either: it only reopens it as a draft. To void or cancel a supplier invoice, record its credit note (factura rectificativa) for the full amount: create a purchase-invoice whose transactionDocument is the corrective document type (find it with etendo_selectors on transactionDocument), take the original's lines with availableOriginInvoiceLines and importOriginInvoiceLines, then complete it with docAction CO."}}, "redirectReason": "The classic Add Payment button is not the Etendo payment flow; use registerPayment, which is what the invoice payment panel calls", "valuesByStatus": {"documentAction": {"values": {"CO": ["RE"], "DR": ["CO"], "IP": ["CO"], "VO": []}, "property": "documentStatus"}}}, "defaults": {"reason": "Payment terms, payment method and price list come from the business partner. To invoice an existing purchase order or goods receipt, call createPurchaseInvoice on it instead: it copies its terms, prices and pending lines.", "context": ["businessPartner"]}}]]></MCP_CONFIG>
 <!--0D654005B02741A29A0491FD5AFEA6E8--></ETGO_SF_ENTITY>
 
 <!--1091071B50744FC6855B5304D60D0AB8--><ETGO_SF_ENTITY>
@@ -402,6 +403,7 @@
 <!--119BA0E891D944B8B19E2C557E1914C6-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--119BA0E891D944B8B19E2C557E1914C6-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--119BA0E891D944B8B19E2C557E1914C6-->  <SEQNO><![CDATA[30]]></SEQNO>
+<!--119BA0E891D944B8B19E2C557E1914C6-->  <AGENT_PROMPT><![CDATA[Prices of one price list version (parentId = the version). There is no bulk update, in the app either: to change many prices, list them here (paged, totalRows is the real count), show the user the new prices, and after the user confirms update them one by one with etendo_update.]]></AGENT_PROMPT>
 <!--119BA0E891D944B8B19E2C557E1914C6--></ETGO_SF_ENTITY>
 
 <!--1211A620DEB64FCEBCDB32FDE7E956CB--><ETGO_SF_ENTITY>
@@ -461,7 +463,7 @@
 <!--1343B4002EE14A9896594655770261ED-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--1343B4002EE14A9896594655770261ED-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--1343B4002EE14A9896594655770261ED-->  <SEQNO><![CDATA[80]]></SEQNO>
-<!--1343B4002EE14A9896594655770261ED-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
+<!--1343B4002EE14A9896594655770261ED-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"},"parent":{"allParents":true,"reason":"Agents look for installments by due date across invoices (what falls due this week, what is overdue); allParents keeps them to installments of purchase invoices, one row per installment with its invoice."}}]]></MCP_CONFIG>
 <!--1343B4002EE14A9896594655770261ED--></ETGO_SF_ENTITY>
 
 <!--13A91DF2974D4D1FB24E6E026C04BB66--><ETGO_SF_ENTITY>
@@ -473,14 +475,16 @@
 <!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ETGO_SF_SPEC_ID><![CDATA[E0AD89F210BD4687AF397206F0735FB5]]></ETGO_SF_SPEC_ID>
 <!--13A91DF2974D4D1FB24E6E026C04BB66-->  <AD_TAB_ID><![CDATA[A399D7976DD74832A0D56586E46D149A]]></AD_TAB_ID>
 <!--13A91DF2974D4D1FB24E6E026C04BB66-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
-<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISINCLUDED><![CDATA[N]]></ISINCLUDED>
+<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISGET><![CDATA[Y]]></ISGET>
 <!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
-<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISPOST><![CDATA[Y]]></ISPOST>
-<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISPUT><![CDATA[Y]]></ISPUT>
-<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
-<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISPOST><![CDATA[N]]></ISPOST>
+<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <JAVA_QUALIFIER><![CDATA[factAcctHandler]]></JAVA_QUALIFIER>
 <!--13A91DF2974D4D1FB24E6E026C04BB66-->  <SEQNO><![CDATA[120]]></SEQNO>
+<!--13A91DF2974D4D1FB24E6E026C04BB66-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"Fact_Acct addresses its document through the polymorphic Record_ID + AD_Table_ID pair, which is not a DAL property, so no parent filter can be expressed. Read-only accounting entries."}}]]></MCP_CONFIG>
 <!--13A91DF2974D4D1FB24E6E026C04BB66--></ETGO_SF_ENTITY>
 
 <!--14DBF90CEE0E47DBA740E2AB6F0817FF--><ETGO_SF_ENTITY>
@@ -911,7 +915,7 @@
 <!--28A6378134714F1E8D3C0869C1C77438-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--28A6378134714F1E8D3C0869C1C77438-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--28A6378134714F1E8D3C0869C1C77438-->  <SEQNO><![CDATA[80]]></SEQNO>
-<!--28A6378134714F1E8D3C0869C1C77438-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
+<!--28A6378134714F1E8D3C0869C1C77438-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"},"parent":{"allParents":true,"reason":"Agents look for installments by due date across invoices (what falls due this week, what is overdue); allParents keeps them to installments of sales invoices, one row per installment with its invoice."}}]]></MCP_CONFIG>
 <!--28A6378134714F1E8D3C0869C1C77438--></ETGO_SF_ENTITY>
 
 <!--28F9B00E6D8F4E489D5EF594423072C8--><ETGO_SF_ENTITY>
@@ -951,6 +955,7 @@
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <JAVA_QUALIFIER><![CDATA[productStockWarehouseHandler]]></JAVA_QUALIFIER>
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <SEQNO><![CDATA[170]]></SEQNO>
+<!--296EE5752DA54E7880FECB13F5C7B40D-->  <AGENT_PROMPT><![CDATA[Stock per product, warehouse and storage bin. Lots, serial numbers and expiry dates are not handled in Etendo GO, so a row says nothing about them and no product is lot-tracked here.]]></AGENT_PROMPT>
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"product","reason":"M_Storage_Detail's only isparent column is M_RefInventory_ID, which points at the referenced inventory, not at the M_Product parent tab. Auto-resolution would have picked the wrong column."}}]]></MCP_CONFIG>
 <!--296EE5752DA54E7880FECB13F5C7B40D--></ETGO_SF_ENTITY>
 
@@ -1086,6 +1091,7 @@
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--2FB4EB163355420D8DD676D5F92C546E-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--2FB4EB163355420D8DD676D5F92C546E-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The digital certificate is uploaded, replaced and removed only in the app (Configuración fiscal), which validates the PKCS#12 file and its password; agents only read its status","instead":"etendo_action(spec:'organization', entity:'organization', id:'<organizationId>', action:'certificate')"}}]]></MCP_CONFIG>
 <!--2FB4EB163355420D8DD676D5F92C546E--></ETGO_SF_ENTITY>
 
 <!--30DB5085A7D54F728F9445FC36591F40--><ETGO_SF_ENTITY>
@@ -1147,6 +1153,7 @@
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <JAVA_QUALIFIER><![CDATA[businessPartnerHandler]]></JAVA_QUALIFIER>
 <!--34EBCCEE2E9643BF962CDF84379232C4-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--34EBCCEE2E9643BF962CDF84379232C4-->  <AGENT_PROMPT><![CDATA[A new contact has no billing preferences of its own: price list, payment terms, payment method, financial account and blocking, for sales and for purchases. The ones you send on create are saved; the others stay empty until you set them with etendo_update, as in the app.]]></AGENT_PROMPT>
 <!--34EBCCEE2E9643BF962CDF84379232C4--></ETGO_SF_ENTITY>
 
 <!--36A012B00ABF40708D723756DD6AAC00--><ETGO_SF_ENTITY>
@@ -1185,9 +1192,8 @@
 <!--3B006BDF3E704510B38D814A703AD8A1-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--3B006BDF3E704510B38D814A703AD8A1-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--3B006BDF3E704510B38D814A703AD8A1-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--3B006BDF3E704510B38D814A703AD8A1-->  <JAVA_QUALIFIER><![CDATA[salesOrderHeaderHandler]]></JAVA_QUALIFIER>
 <!--3B006BDF3E704510B38D814A703AD8A1-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--3B006BDF3E704510B38D814A703AD8A1-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["Cancelandreplace","Confirmcancelandreplace","Create_POLines","RM_Pickfromreceipt"],"reasons":{"Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity","RM_Pickfromreceipt":"Pick from Receipt is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"reason":"Classic sales-order buttons that have no MCP equivalent are not agent paths","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO","VO","PR"],"IP":["CO","VO"],"CO":["CL","RE"],"VO":[],"CL":[]}}}}}]]></MCP_CONFIG>
+<!--3B006BDF3E704510B38D814A703AD8A1-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["Cancelandreplace","Confirmcancelandreplace","Create_POLines","RM_Pickfromreceipt"],"reasons":{"Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity","RM_Pickfromreceipt":"Pick from Receipt is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"reason":"Classic sales-order buttons that have no MCP equivalent are not agent paths","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO"],"IP":["CO"],"CO":["RE"],"VO":[],"CL":[]}}}},"defaults":{"context":["businessPartner"],"reason":"Payment terms, payment method and price list come from the business partner."},"pdf":{"source":"rendered","print":{"document":"sales-order"},"reason":"the sales-order printable (DOCUMENT_TEMPLATE) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--3B006BDF3E704510B38D814A703AD8A1--></ETGO_SF_ENTITY>
 
 <!--3B04D16EDC3444A1B8738B0656C04E62--><ETGO_SF_ENTITY>
@@ -1304,7 +1310,7 @@
 <!--40D5EE72A0F24464BABD21886059F3D8-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--40D5EE72A0F24464BABD21886059F3D8-->  <JAVA_QUALIFIER><![CDATA[returnToVendorShipmentHeaderHandler]]></JAVA_QUALIFIER>
 <!--40D5EE72A0F24464BABD21886059F3D8-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--40D5EE72A0F24464BABD21886059F3D8-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"RM_Shipment_Pickedit":"importReceiptLines","GenerateTo":"createReturnInvoice","Invoicefromshipment":"createReturnInvoice"},"reasons":{"GenerateTo":"Classic Generate Invoice from Shipment is not the path for a return; createReturnInvoice creates and confirms the factura rectificativa of this completed return","Invoicefromshipment":"Classic invoice-from-shipment button has no process connected for the agent; createReturnInvoice creates and confirms the factura rectificativa of this completed return","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"},"redirectReason":"The classic Pick/Edit Lines button has no process connected for the agent; importReceiptLines adds lines from goods receipts of the same vendor with the over-return cap the app applies","reason":"Classic Pick/Edit Lines is not an agent path; use importReceiptLines (or createPurchaseReturn on the goods receipt)"}}]]></MCP_CONFIG>
+<!--40D5EE72A0F24464BABD21886059F3D8-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"RM_Shipment_Pickedit":"importReceiptLines","GenerateTo":"createReturnInvoice","Invoicefromshipment":"createReturnInvoice"},"reasons":{"GenerateTo":"Classic Generate Invoice from Shipment is not the path for a return; createReturnInvoice creates and confirms the factura rectificativa of this completed return","Invoicefromshipment":"Classic invoice-from-shipment button has no process connected for the agent; createReturnInvoice creates and confirms the factura rectificativa of this completed return","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"},"redirectReason":"The classic Pick/Edit Lines button has no process connected for the agent; importReceiptLines adds lines from goods receipts of the same vendor with the over-return cap the app applies","reason":"Classic Pick/Edit Lines is not an agent path; use importReceiptLines (or createPurchaseReturn on the goods receipt)"},"pdf":{"source":"rendered","print":{"document":"return-to-vendor-shipment"},"reason":"the return-to-vendor-shipment printable (movement template) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--40D5EE72A0F24464BABD21886059F3D8--></ETGO_SF_ENTITY>
 
 <!--41A35A9AC111442F86CE1A6296997DCD--><ETGO_SF_ENTITY>
@@ -1323,9 +1329,8 @@
 <!--41A35A9AC111442F86CE1A6296997DCD-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--41A35A9AC111442F86CE1A6296997DCD-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--41A35A9AC111442F86CE1A6296997DCD-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--41A35A9AC111442F86CE1A6296997DCD-->  <JAVA_QUALIFIER><![CDATA[salesQuotationHeaderHandler]]></JAVA_QUALIFIER>
 <!--41A35A9AC111442F86CE1A6296997DCD-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--41A35A9AC111442F86CE1A6296997DCD-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["Create_POLines","RM_Pickfromreceipt","Cancelandreplace","Confirmcancelandreplace"],"reasons":{"Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a quotation, edit it while it is a draft","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a quotation, edit it while it is a draft","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity","RM_Pickfromreceipt":"Pick from Receipt is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"reason":"Classic quotation buttons that have no Etendo GO screen equivalent are not agent paths"}}]]></MCP_CONFIG>
+<!--41A35A9AC111442F86CE1A6296997DCD-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["Create_POLines","RM_Pickfromreceipt","Cancelandreplace","Confirmcancelandreplace","RM_AddOrphanLine","EM_APRM_AddPayment","EM_Etpr_Remove_Payment","EM_Psd2_Generate_Bank_Payment"],"reasons":{"Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a quotation, edit it while it is a draft","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a quotation, edit it while it is a draft","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity","RM_Pickfromreceipt":"Pick from Receipt is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity","RM_AddOrphanLine":"Add Orphan Line is a classic return-material button the quotation window does not offer; add lines with etendo_create on the lines entity","EM_APRM_AddPayment":"Add Payment is a classic payment button the quotation window does not offer: a quotation is not paid. Payments are registered on the sales invoice","EM_Etpr_Remove_Payment":"Remove Payment is a classic payment button the quotation window does not offer: a quotation carries no payments","EM_Psd2_Generate_Bank_Payment":"Generate Bank Payment (PSD2) is a bank-initiated payment button the quotation window does not offer: a quotation is not paid"},"reason":"Classic quotation buttons that have no Etendo GO screen equivalent are not agent paths","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO"],"UE":["RJ"],"IP":[],"VO":[],"CA":[],"CJ":[],"CL":[],"ETGO_CI":[]}}}},"pdf":{"source":"rendered","print":{"document":"sales-quotation"},"reason":"the sales-quotation printable (DOCUMENT_TEMPLATE) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--41A35A9AC111442F86CE1A6296997DCD--></ETGO_SF_ENTITY>
 
 <!--4201284FF88A4D9CB84DCDA86ABEFE7C--><ETGO_SF_ENTITY>
@@ -1731,8 +1736,9 @@
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <JAVA_QUALIFIER><![CDATA[taxSifOverrideHandler]]></JAVA_QUALIFIER>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <AGENT_PROMPT><![CDATA[The catalogue of every tax rate of the tenant, including inactive and future ones and the variants with surcharge or for specific business partner tax categories. To know which tax applies to an order or invoice line, do not pick from here: omit tax on the line and the server resolves it, or call etendo_selectors for 'tax' on that line entity with recordContext {product, businessPartner, date}.]]></AGENT_PROMPT>
+<!--4B4555F9C7A444258CDBBFE5B427D0F4-->  <MCP_CONFIG><![CDATA[{"attachments":{"readOnly":true,"reason":"Product decision: a tax is reference data and cannot be modified through the MCP, attachments included; listing stays available","messageKey":"ETGO_TaxNotModifiable"}}]]></MCP_CONFIG>
 <!--4B4555F9C7A444258CDBBFE5B427D0F4--></ETGO_SF_ENTITY>
 
 <!--4BBCDE8093FF45F0B7A7CF07538A8CC0--><ETGO_SF_ENTITY>
@@ -1848,9 +1854,8 @@
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--52E6AF2963894C128EE72E0A10D5F01B-->  <JAVA_QUALIFIER><![CDATA[tbai-config-sequence-handler]]></JAVA_QUALIFIER>
 <!--52E6AF2963894C128EE72E0A10D5F01B-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--52E6AF2963894C128EE72E0A10D5F01B-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--52E6AF2963894C128EE72E0A10D5F01B-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--52E6AF2963894C128EE72E0A10D5F01B--></ETGO_SF_ENTITY>
 
 <!--5380CF0F9D53450D8B153F099104AC46--><ETGO_SF_ENTITY>
@@ -1946,9 +1951,8 @@
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--57DE601DBE42468BA9963E81DA56BB1C-->  <JAVA_QUALIFIER><![CDATA[sii-config-deactivate-handler]]></JAVA_QUALIFIER>
 <!--57DE601DBE42468BA9963E81DA56BB1C-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--57DE601DBE42468BA9963E81DA56BB1C-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--57DE601DBE42468BA9963E81DA56BB1C-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--57DE601DBE42468BA9963E81DA56BB1C--></ETGO_SF_ENTITY>
 
 <!--59B96B75153149EF993CD7FD3CE9439F--><ETGO_SF_ENTITY>
@@ -2006,9 +2010,8 @@
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <JAVA_QUALIFIER><![CDATA[verifactu-config-ready-handler]]></JAVA_QUALIFIER>
 <!--5AAAB7DE44364794AE70BB19C9D66F90-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"}}]]></MCP_CONFIG>
+<!--5AAAB7DE44364794AE70BB19C9D66F90-->  <MCP_CONFIG><![CDATA[{"attachments":{"enabled":false,"reason":"The application shows no Attachments tab on this window"},"verbs":{"create":false,"delete":false,"reason":"A billing system (SIF) is activated only through configureFiscalSystem, which derives every territory value and allows one active SIF per organization (SII + TicketBAI aside); a configuration is retired only by Cambiar SIF in the app, which deletes it when no invoice was ever sent through it and otherwise deactivates it as a trace","instead":"etendo_action(spec:'sii-config', entity:'siiConfiguration', id:'<organizationId>', action:'configureFiscalSystem')"}}]]></MCP_CONFIG>
 <!--5AAAB7DE44364794AE70BB19C9D66F90--></ETGO_SF_ENTITY>
 
 <!--5B942E443D7D4E4BA63F863F88CEF4D7--><ETGO_SF_ENTITY>
@@ -2162,9 +2165,8 @@
 <!--6102D47FD12A4162858D948885F80544-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--6102D47FD12A4162858D948885F80544-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--6102D47FD12A4162858D948885F80544-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--6102D47FD12A4162858D948885F80544-->  <JAVA_QUALIFIER><![CDATA[goodsReceiptHeaderHandler]]></JAVA_QUALIFIER>
 <!--6102D47FD12A4162858D948885F80544-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--6102D47FD12A4162858D948885F80544-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"invoicefromshipment":"createPurchaseInvoice","CreateFrom":"importOrderLines"},"redirectReason":"The classic invoice-from-receipt process creates a SALES invoice from a purchase receipt, does not mark the receipt as invoiced and can report success without creating anything; createPurchaseInvoice creates a completed purchase invoice from this receipt","reason":"Classic invoicefromshipment is not the purchase flow; use createPurchaseInvoice","reasons":{"CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed purchase order to this draft goods receipt, with availableOrders and availableOrderLines listing what can be imported","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}},"pdf":{"source":"supplier","reason":"the receipt has no printable (hidePrint) and its preview shows the supplier delivery note the user uploads as the main attachment"}}]]></MCP_CONFIG>
+<!--6102D47FD12A4162858D948885F80544-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"invoicefromshipment":"createPurchaseInvoice","CreateFrom":"importOrderLines"},"redirectReason":"The classic invoice-from-receipt process creates a SALES invoice from a purchase receipt, does not mark the receipt as invoiced and can report success without creating anything; createPurchaseInvoice creates a completed purchase invoice from this receipt","reason":"Classic invoicefromshipment is not the purchase flow; use createPurchaseInvoice","reasons":{"CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed purchase order to this draft goods receipt, with availableOrders and availableOrderLines listing what can be imported","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}},"pdf":{"source":"supplier","reason":"the receipt has no printable (hidePrint) and its preview shows the supplier delivery note the user uploads as the main attachment"},"defaults":{"context":["businessPartner"],"reason":"The partner address comes from the business partner."}}]]></MCP_CONFIG>
 <!--6102D47FD12A4162858D948885F80544--></ETGO_SF_ENTITY>
 
 <!--612D7AA586DC4B5BA58C1D960B3DB333--><ETGO_SF_ENTITY>
@@ -2416,9 +2418,9 @@
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--6882D245E7964685A14DCF0ACD66FB13-->  <JAVA_QUALIFIER><![CDATA[goodsShipmentHeaderHandler]]></JAVA_QUALIFIER>
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--6882D245E7964685A14DCF0ACD66FB13-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"Invoicefromshipment":"createDraftInvoice","CreateFrom":"importOrderLines"},"redirectReason":"The classic invoice-from-shipment process is not the path the app uses and bypasses its checks (nothing-left-to-invoice refusal, partial quantities); createDraftInvoice creates and completes the sales invoice from this shipment","reason":"Classic Invoicefromshipment is not the supported agent path; use createDraftInvoice","reasons":{"CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed sales order to this draft goods shipment, with availableOrders and availableOrderLines listing what can be imported","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}}}]]></MCP_CONFIG>
+<!--6882D245E7964685A14DCF0ACD66FB13-->  <AGENT_PROMPT><![CDATA[A goods shipment carries quantities only, no amounts, as in the app. Its value is each line's movementQuantity times the unit price of the sales order line it delivers (salesOrderLine, read in sales-order/lines); once invoiced, the invoice created from it has the amounts.]]></AGENT_PROMPT>
+<!--6882D245E7964685A14DCF0ACD66FB13-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"Invoicefromshipment":"createDraftInvoice","CreateFrom":"importOrderLines"},"redirectReason":"The classic invoice-from-shipment process is not the path the app uses and bypasses its checks (nothing-left-to-invoice refusal, partial quantities); createDraftInvoice creates and completes the sales invoice from this shipment","reason":"Classic Invoicefromshipment is not the supported agent path; use createDraftInvoice","reasons":{"CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed sales order to this draft goods shipment, with availableOrders and availableOrderLines listing what can be imported","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}},"defaults":{"context":["businessPartner"],"reason":"The partner address comes from the business partner."},"pdf":{"source":"rendered","print":{"document":"goods-shipment"},"reason":"the goods-shipment printable (movement template) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--6882D245E7964685A14DCF0ACD66FB13--></ETGO_SF_ENTITY>
 
 <!--68D42504C89B4EF9945814E3B31C917C--><ETGO_SF_ENTITY>
@@ -2553,7 +2555,6 @@
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--6B27214820954CE1A69B092D349E0E34-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--6B27214820954CE1A69B092D349E0E34-->  <JAVA_QUALIFIER><![CDATA[bankReconciliation]]></JAVA_QUALIFIER>
 <!--6B27214820954CE1A69B092D349E0E34-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--6B27214820954CE1A69B092D349E0E34--></ETGO_SF_ENTITY>
 
@@ -2592,6 +2593,7 @@
 <!--6B95037D284B4A54B319FEE155968CA4-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--6B95037D284B4A54B319FEE155968CA4-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--6B95037D284B4A54B319FEE155968CA4-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--6B95037D284B4A54B319FEE155968CA4-->  <JAVA_QUALIFIER><![CDATA[productTransactionsHandler]]></JAVA_QUALIFIER>
 <!--6B95037D284B4A54B319FEE155968CA4-->  <SEQNO><![CDATA[100]]></SEQNO>
 <!--6B95037D284B4A54B319FEE155968CA4--></ETGO_SF_ENTITY>
 
@@ -2748,7 +2750,7 @@
 <!--7240CAF07810439B85DE61E70BE8DC0B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--7240CAF07810439B85DE61E70BE8DC0B-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--7240CAF07810439B85DE61E70BE8DC0B-->  <NAMED_FILTERS><![CDATA[[{"name":"completed","where":"e.paymentComplete = true","label":"Paid","description":"Fully paid invoices (payment complete)."},{"name":"pending","where":"e.paymentComplete = false and abs(e.outstandingAmount) >= abs(e.grandTotalAmount)","label":"Unpaid","description":"Unpaid invoices with nothing collected yet (outstanding equals the total). Excludes partially paid invoices; use 'outstanding' for every invoice that still owes a balance."},{"name":"partial","where":"e.paymentComplete = false and abs(e.outstandingAmount) > 0 and abs(e.outstandingAmount) < abs(e.grandTotalAmount)","label":"Partially paid","description":"Invoices with a partial payment: some amount collected but a balance remains."},{"name":"outstanding","where":"e.paymentComplete = false and abs(e.outstandingAmount) > 0","label":"Pending payment","description":"Every invoice that still owes a balance: unpaid plus partially paid. Use this for 'what is still owed'; 'pending' alone excludes partially paid invoices."}]]]></NAMED_FILTERS>
-<!--7240CAF07810439B85DE61E70BE8DC0B-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["pisSupplierAccounts","pisTemplates","pisPaymentStatus","cancelPisPayment","retryPisPayment","psd2GenerateBankPayment","posted","etblkpBulkposting"],"redirect":{"aPRMAddpayment":"registerPayment","Createfromorders":"importOrderLines","Createfrominouts":"importShipmentLines","CreateFrom":"importOrderLines"},"values":{"DocAction":["CO","RE"]},"reason":"Bank-initiated (PIS) payments need a person to authorize them at the bank (SCA), so they are excluded from MCP","redirectReason":"The classic Add Payment button is not the Etendo payment flow; use registerPayment, which is what the invoice payment panel calls","reasons":{"posted":"The posted button is a blind post/unpost toggle the invoice window never shows; book the invoice with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions. The posted field itself stays readable","Createfromorders":"The classic Create From Orders process is a pick-and-edit window an agent cannot run; importOrderLines adds the pending lines of a completed sales order to this draft invoice, with availableOrders and availableOrderLines listing what can be imported","Createfrominouts":"The classic Create From Shipments process is a pick-and-edit window an agent cannot run; importShipmentLines adds the pending lines of a completed goods shipment to this draft invoice, with availableShipments and availableShipmentLines listing what can be imported","CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed sales order to this draft invoice, and importShipmentLines does the same from a goods shipment","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"},"valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO"],"IP":["CO"],"CO":["RE"],"VO":[]}}}}}]]></MCP_CONFIG>
+<!--7240CAF07810439B85DE61E70BE8DC0B-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["pisSupplierAccounts","pisTemplates","pisPaymentStatus","cancelPisPayment","retryPisPayment","psd2GenerateBankPayment","posted","etblkpBulkposting"],"redirect":{"aPRMAddpayment":"registerPayment","Createfromorders":"importOrderLines","Createfrominouts":"importShipmentLines","CreateFrom":"importOrderLines"},"values":{"DocAction":["CO","RE"]},"reason":"Bank-initiated (PIS) payments need a person to authorize them at the bank (SCA), so they are excluded from MCP","redirectReason":"The classic Add Payment button is not the Etendo payment flow; use registerPayment, which is what the invoice payment panel calls","reasons":{"posted":"The posted button is a blind post/unpost toggle the invoice window never shows; book the invoice with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions. The posted field itself stays readable","Createfromorders":"The classic Create From Orders process is a pick-and-edit window an agent cannot run; importOrderLines adds the pending lines of a completed sales order to this draft invoice, with availableOrders and availableOrderLines listing what can be imported On a rectificative invoice it does not apply: it takes its lines from a return (importReturnLines) or from the invoice it rectifies (importOriginInvoiceLines)","Createfrominouts":"The classic Create From Shipments process is a pick-and-edit window an agent cannot run; importShipmentLines adds the pending lines of a completed goods shipment to this draft invoice, with availableShipments and availableShipmentLines listing what can be imported On a rectificative invoice it does not apply: it takes its lines from a return (importReturnLines) or from the invoice it rectifies (importOriginInvoiceLines)","CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed sales order to this draft invoice, and importShipmentLines does the same from a goods shipment On a rectificative invoice it does not apply: it takes its lines from a return (importReturnLines) or from the invoice it rectifies (importOriginInvoiceLines)","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"},"valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO"],"IP":["CO"],"CO":["RE"],"VO":[]}}},"valueReasons":{"DocAction":{"VO":"An issued invoice is not voided, and reactivating it (RE) does not void it either: it only reopens it as a draft. To void or cancel an issued invoice, issue a credit note (factura rectificativa) for its full amount: create a sales-invoice whose transactionDocument is the corrective document type (find it with etendo_selectors on transactionDocument), take the original's lines with availableOriginInvoiceLines and importOriginInvoiceLines, then complete it with docAction CO."}}},"defaults":{"context":["businessPartner"],"reason":"Payment terms, payment method and price list come from the business partner. To invoice an existing sales order or goods shipment, call createDraftInvoice on it instead: it copies its terms, prices and pending lines."},"pdf":{"source":"rendered","print":{"document":"sales-invoice"},"reason":"the invoice printable (DOCUMENT_TEMPLATE) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--7240CAF07810439B85DE61E70BE8DC0B--></ETGO_SF_ENTITY>
 
 <!--7335BB3D92A0469E8CE1A340D276AF2E--><ETGO_SF_ENTITY>
@@ -2943,6 +2945,8 @@
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <JAVA_QUALIFIER><![CDATA[productDefaultsHandler]]></JAVA_QUALIFIER>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--7973D68DD39E4F4C8D759A3007A27D56-->  <AGENT_PROMPT><![CDATA[A product's name is not unique: two products can share it. Identify one by its searchKey (code) or id. When several match what the user said, do not pick one: show them (name, searchKey, prices) and ask. If the user cannot tell, suggest — for them to confirm — the one used in that contact's most recent order or invoice (etendo_list on sales-order/header filtered by businessPartner, newest first, then its lines).]]></AGENT_PROMPT>
+<!--7973D68DD39E4F4C8D759A3007A27D56-->  <MCP_CONFIG><![CDATA[{"defaults":{"context":["productType"],"reason":"The tax category and the stocked and returnable flags follow the product type."}}]]></MCP_CONFIG>
 <!--7973D68DD39E4F4C8D759A3007A27D56--></ETGO_SF_ENTITY>
 
 <!--7ACF14A002FC4C66B993576581225D63--><ETGO_SF_ENTITY>
@@ -3403,9 +3407,8 @@
 <!--963A22BC87B144E18470530BA256FA78-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--963A22BC87B144E18470530BA256FA78-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--963A22BC87B144E18470530BA256FA78-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--963A22BC87B144E18470530BA256FA78-->  <JAVA_QUALIFIER><![CDATA[returnMaterialReceiptHeaderHandler]]></JAVA_QUALIFIER>
 <!--963A22BC87B144E18470530BA256FA78-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--963A22BC87B144E18470530BA256FA78-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"RM_Receipt_PickEdit":"importShipmentLines","GenerateTo":"createReturnInvoice","Invoicefromshipment":"createReturnInvoice"},"reasons":{"GenerateTo":"Classic Generate Invoice from Shipment is not the path for a return; createReturnInvoice creates and confirms the factura rectificativa of this completed return","Invoicefromshipment":"Classic invoice-from-shipment button has no process connected for the agent; createReturnInvoice creates and confirms the factura rectificativa of this completed return","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"},"redirectReason":"The classic Pick/Edit Lines button has no process connected for the agent; importShipmentLines adds lines from goods shipments of the same customer with the over-return cap the app applies","reason":"Classic Pick/Edit Lines is not an agent path; use importShipmentLines (or createReturn on the goods shipment)"}}]]></MCP_CONFIG>
+<!--963A22BC87B144E18470530BA256FA78-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"RM_Receipt_PickEdit":"importShipmentLines","GenerateTo":"createReturnInvoice","Invoicefromshipment":"createReturnInvoice"},"reasons":{"GenerateTo":"Classic Generate Invoice from Shipment is not the path for a return; createReturnInvoice creates and confirms the factura rectificativa of this completed return","Invoicefromshipment":"Classic invoice-from-shipment button has no process connected for the agent; createReturnInvoice creates and confirms the factura rectificativa of this completed return","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"},"redirectReason":"The classic Pick/Edit Lines button has no process connected for the agent; importShipmentLines adds lines from goods shipments of the same customer with the over-return cap the app applies","reason":"Classic Pick/Edit Lines is not an agent path; use importShipmentLines (or createReturn on the goods shipment)"},"pdf":{"source":"rendered","print":{"document":"return-material-receipt"},"reason":"the return-material-receipt printable (movement template) is rendered by the server for MCP completions and MCP requests; it never replaces a main attachment that is not an Etendo-generated PDF (ETP-6013)"}}]]></MCP_CONFIG>
 <!--963A22BC87B144E18470530BA256FA78--></ETGO_SF_ENTITY>
 
 <!--96CFF0B7112346BB83C9FA9A5CB6E33B--><ETGO_SF_ENTITY>
@@ -3831,7 +3834,6 @@
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISPUT><![CDATA[N]]></ISPUT>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <JAVA_QUALIFIER><![CDATA[bank-statements]]></JAVA_QUALIFIER>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7--></ETGO_SF_ENTITY>
 
@@ -4009,6 +4011,8 @@
 <!--B845C674D49D48BF950AE2389C56C49F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--B845C674D49D48BF950AE2389C56C49F-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no shipment or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked shipments or invoices, the order can be neither reactivated nor closed (the app offers neither, and documentAction is refused with 400), so the order stays as it is and any correction goes through the linked documents.]]></AGENT_PROMPT>
+<!--B845C674D49D48BF950AE2389C56C49F-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search sales order lines by product or category across orders (which orders sold X); allParents keeps them to lines of sales orders, never purchase or quotation lines."}}]]></MCP_CONFIG>
 <!--B845C674D49D48BF950AE2389C56C49F--></ETGO_SF_ENTITY>
 
 <!--B898797B8C184821BFE6FD8B1304E943--><ETGO_SF_ENTITY>
@@ -4027,7 +4031,6 @@
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--B898797B8C184821BFE6FD8B1304E943-->  <JAVA_QUALIFIER><![CDATA[document-sequence]]></JAVA_QUALIFIER>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--B898797B8C184821BFE6FD8B1304E943--></ETGO_SF_ENTITY>
 
@@ -4174,6 +4177,25 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--C0FB5CD0063142659C78CBE42B85891E-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--C0FB5CD0063142659C78CBE42B85891E--></ETGO_SF_ENTITY>
 
+<!--C24AEA2FDC3C460DB477EA58C8C5A864--><ETGO_SF_ENTITY>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ETGO_SF_ENTITY_ID><![CDATA[C24AEA2FDC3C460DB477EA58C8C5A864]]></ETGO_SF_ENTITY_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <NAME><![CDATA[header]]></NAME>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ETGO_SF_SPEC_ID><![CDATA[7A63B6AA5CE44D77A52E41790BD8094A]]></ETGO_SF_SPEC_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_TAB_ID><![CDATA[AB6E71CD965B41B1913B44BE660456FA]]></AD_TAB_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPOST><![CDATA[N]]></ISPOST>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864--></ETGO_SF_ENTITY>
+
 <!--C339170F5740439186792CD2023D45A6--><ETGO_SF_ENTITY>
 <!--C339170F5740439186792CD2023D45A6-->  <ETGO_SF_ENTITY_ID><![CDATA[C339170F5740439186792CD2023D45A6]]></ETGO_SF_ENTITY_ID>
 <!--C339170F5740439186792CD2023D45A6-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -4229,6 +4251,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--C439DB1E3B314678A363E9118CAF00D9-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--C439DB1E3B314678A363E9118CAF00D9-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--C439DB1E3B314678A363E9118CAF00D9-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--C439DB1E3B314678A363E9118CAF00D9-->  <AGENT_PROMPT><![CDATA[A journal line has no description of its own, as in the app: write the note in the journal header's description (gLJournal.description), which covers the whole entry.]]></AGENT_PROMPT>
 <!--C439DB1E3B314678A363E9118CAF00D9--></ETGO_SF_ENTITY>
 
 <!--C4AE262E225D42649E4BD5E60A4BD303--><ETGO_SF_ENTITY>
@@ -4307,6 +4330,8 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--C5BDD6D41A824D1084B413900DF8919B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--C5BDD6D41A824D1084B413900DF8919B-->  <JAVA_QUALIFIER><![CDATA[chart-of-accounts]]></JAVA_QUALIFIER>
 <!--C5BDD6D41A824D1084B413900DF8919B-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--C5BDD6D41A824D1084B413900DF8919B-->  <AGENT_PROMPT><![CDATA[The client's chart of accounts. List and read it without parentId: the client has one chart, as in the app. To create an account pass parentId = the accountingElement every listed account carries (not the row's parentId, which is its place in the tree). A new account is a subaccount: send searchKey = 8 digits starting with the 4-digit code of the account it goes under (43000099 goes under 4300; the app's New subaccount does the same, there is no parent field), name and accountType; it is created active. An account with postings or combinations cannot be deleted: set active to false instead.]]></AGENT_PROMPT>
+<!--C5BDD6D41A824D1084B413900DF8919B-->  <MCP_CONFIG><![CDATA[{"parent":{"optionalFor":["list","get"],"reason":"accountingElement is the client's chart of accounts, a per-client singleton that no spec publishes: every account and the accounts of the only chart are the same set, and the app reads them without naming it."}}]]></MCP_CONFIG>
 <!--C5BDD6D41A824D1084B413900DF8919B--></ETGO_SF_ENTITY>
 
 <!--C699CB9178774674AD6B79E282AC2638--><ETGO_SF_ENTITY>
@@ -5194,6 +5219,8 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <JAVA_QUALIFIER><![CDATA[year-close]]></JAVA_QUALIFIER>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <AGENT_PROMPT><![CDATA[To know whether a date falls in an open period, do not walk the calendar: call etendo_list on spec 'open-close-period-control', entity 'periodControl', with filters {startingDate:{lte:<date>}, endingDate:{gte:<date>}}; its status says whether the period is open (O).]]></AGENT_PROMPT>
+<!--E868F4B584D14B1BBB4EC4DAFA1D5E67-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents list the fiscal years to check a date or a year-close, and the calendar entity is excluded, so there is no parent id to pass; allParents keeps them to years of fiscal calendars."}}]]></MCP_CONFIG>
 <!--E868F4B584D14B1BBB4EC4DAFA1D5E67--></ETGO_SF_ENTITY>
 
 <!--E891228C65744C9CBBABE36F715D0E4E--><ETGO_SF_ENTITY>
@@ -5212,7 +5239,6 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--E891228C65744C9CBBABE36F715D0E4E-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--E891228C65744C9CBBABE36F715D0E4E-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--E891228C65744C9CBBABE36F715D0E4E-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--E891228C65744C9CBBABE36F715D0E4E-->  <JAVA_QUALIFIER><![CDATA[user]]></JAVA_QUALIFIER>
 <!--E891228C65744C9CBBABE36F715D0E4E-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--E891228C65744C9CBBABE36F715D0E4E--></ETGO_SF_ENTITY>
 
@@ -5407,9 +5433,8 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--F1775FF66155444992AC0B1E38CFA3BB-->  <JAVA_QUALIFIER><![CDATA[purchaseOrderHeaderHandler]]></JAVA_QUALIFIER>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--F1775FF66155444992AC0B1E38CFA3BB-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["RM_Pickfromreceipt","Cancelandreplace","Confirmcancelandreplace","Create_POLines"],"redirect":{"RM_ReceiveMaterials":"createGoodsReceipt","RM_CreateInvoice":"createPurchaseInvoice"},"reasons":{"RM_ReceiveMaterials":"Classic button with no process connected for the agent; createGoodsReceipt creates a draft goods receipt from this order","RM_CreateInvoice":"Classic button, undocumented for the agent; createPurchaseInvoice creates a completed purchase invoice from this order","RM_Pickfromreceipt":"The classic Pick from Receipt button opens a pick-and-edit window that has no process an agent can run, and it has no MCP equivalent: receive goods with createGoodsReceipt, or invoice a receipt with createPurchaseInvoice on the goods receipt","Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"redirectReason":"Classic purchase-order buttons are not the supported agent path","reason":"Classic purchase-order buttons are not the supported agent path; use createGoodsReceipt / createPurchaseInvoice","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO","VO","PR"],"IP":["CO","VO"],"CO":["CL","RE"],"VO":[],"CL":[]}}}}}]]></MCP_CONFIG>
+<!--F1775FF66155444992AC0B1E38CFA3BB-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["RM_Pickfromreceipt","Cancelandreplace","Confirmcancelandreplace","Create_POLines"],"redirect":{"RM_ReceiveMaterials":"createGoodsReceipt","RM_CreateInvoice":"createPurchaseInvoice"},"reasons":{"RM_ReceiveMaterials":"Classic button with no process connected for the agent; createGoodsReceipt creates a draft goods receipt from this order","RM_CreateInvoice":"Classic button, undocumented for the agent; createPurchaseInvoice creates a completed purchase invoice from this order","RM_Pickfromreceipt":"The classic Pick from Receipt button opens a pick-and-edit window that has no process an agent can run, and it has no MCP equivalent: receive goods with createGoodsReceipt, or invoice a receipt with createPurchaseInvoice on the goods receipt","Cancelandreplace":"Cancel and Replace is a classic multi-step flow that creates a replacement order and reverses the documents of the original; it has no MCP equivalent. To change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Confirmcancelandreplace":"Confirm Cancel and Replace is the second step of the classic Cancel and Replace flow, which has no MCP equivalent; to change a completed order, reactivate it (documentAction RE, only while it has no linked documents), edit it and complete it again","Create_POLines":"Create Lines From is a classic pick-and-edit button with no Etendo GO screen equivalent, so it is not run through MCP; add the lines directly with etendo_create on the lines entity"},"redirectReason":"Classic purchase-order buttons are not the supported agent path","reason":"Classic purchase-order buttons are not the supported agent path; use createGoodsReceipt / createPurchaseInvoice","valuesByStatus":{"documentAction":{"property":"documentStatus","values":{"DR":["CO"],"IP":["CO"],"CO":["RE"],"VO":[],"CL":[]}}}},"defaults":{"context":["businessPartner"],"reason":"Payment terms, payment method and price list come from the business partner."},"pdf":{"source":"rendered","print":{"document":"purchase-order"},"reason":"the purchase-order printable (DOCUMENT_TEMPLATE) is rendered by the server too, after a Complete and on request, so the MCP can return and email it (ETP-6013)"}}]]></MCP_CONFIG>
 <!--F1775FF66155444992AC0B1E38CFA3BB--></ETGO_SF_ENTITY>
 
 <!--F25F57EA043045CD8E34377220D5BF36--><ETGO_SF_ENTITY>
@@ -5430,6 +5455,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F25F57EA043045CD8E34377220D5BF36-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F25F57EA043045CD8E34377220D5BF36-->  <JAVA_QUALIFIER><![CDATA[goodsReceiptLineHandler]]></JAVA_QUALIFIER>
 <!--F25F57EA043045CD8E34377220D5BF36-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--F25F57EA043045CD8E34377220D5BF36-->  <AGENT_PROMPT><![CDATA[Lots, serial numbers and expiry dates are not handled in Etendo GO yet: a receipt line cannot carry them. Tell the user they cannot be recorded here.]]></AGENT_PROMPT>
 <!--F25F57EA043045CD8E34377220D5BF36--></ETGO_SF_ENTITY>
 
 <!--F3599546C06B4ECAAC2063F34243BA6C--><ETGO_SF_ENTITY>
@@ -5488,6 +5514,8 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <JAVA_QUALIFIER><![CDATA[orderLineHandler]]></JAVA_QUALIFIER>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--F391AE6AB4D742DB8A38A8801BE6D513-->  <AGENT_PROMPT><![CDATA[A single line of a booked order cannot be cancelled, as in the app. While the order has no receipt or invoice: reactivate it (documentAction RE), delete or change the line, and book it again (CO). Once it has linked receipts or invoices, the order can be neither reactivated nor closed (the app offers neither, and documentAction is refused with 400), so the order stays as it is and any correction goes through the linked documents.]]></AGENT_PROMPT>
+<!--F391AE6AB4D742DB8A38A8801BE6D513-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents search purchase order lines by product across orders (which orders bought X); allParents keeps them to lines of purchase orders, never sales or return lines."}}]]></MCP_CONFIG>
 <!--F391AE6AB4D742DB8A38A8801BE6D513--></ETGO_SF_ENTITY>
 
 <!--F4A813BF19194F849D6FFEDB15823D12--><ETGO_SF_ENTITY>
@@ -5624,6 +5652,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--FC1B38FFA12545A0B10D3485276F9F9F-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--FC1B38FFA12545A0B10D3485276F9F9F-->  <JAVA_QUALIFIER><![CDATA[goodsMovementLineHandler]]></JAVA_QUALIFIER>
 <!--FC1B38FFA12545A0B10D3485276F9F9F-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--FC1B38FFA12545A0B10D3485276F9F9F-->  <MCP_CONFIG><![CDATA[{"parent":{"allParents":true,"reason":"Agents read a product's movement history across goods movements; allParents keeps them to lines of goods movements."}}]]></MCP_CONFIG>
 <!--FC1B38FFA12545A0B10D3485276F9F9F--></ETGO_SF_ENTITY>
 
 <!--FC23E187207A4AB5A3C67E0F03A88856--><ETGO_SF_ENTITY>

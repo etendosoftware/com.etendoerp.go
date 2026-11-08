@@ -24,10 +24,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -44,6 +46,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -70,6 +73,7 @@ import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -923,7 +927,7 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all twelve fields are populated")
+    @DisplayName("all fifteen fields are populated")
     void allTwelveFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
@@ -937,11 +941,169 @@ class EtendoGoJwtDalHelperTest {
           EnvironmentPlanCache.empty());
 
       // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046), the
-      // relationship marker, the ownership flag (ETP-5743) and the demo-association flag
-      // (ETP-5548). Lifecycle fields are conditional and absent here.
-      assertEquals(12, result.length());
+      // relationship marker, the ownership flag (ETP-5743), the demo-association flag
+      // (ETP-5548), accessEnforced, quotas and renewalAt (ETP-5051). Lifecycle fields are
+      // conditional and absent here.
+      assertEquals(15, result.length());
+      // No subscription, so nothing renews: present, and JSON null.
+      assertTrue(result.isNull("renewalAt"), result.toString());
+      // The four-argument form evaluates no quota: quotas is always present, and empty.
+      assertEquals(0, result.getJSONArray("quotas").length());
       // graceEndsAt (ETP-5049) travels with the lifecycle fields: absent without lifecycle.
       assertFalse(result.has("graceEndsAt"), result.toString());
+    }
+
+    /** A report holding a DENY and an ALLOW item for C-Q, built by the real report builder. */
+    private com.etendoerp.go.usage.quota.EnvironmentQuotaReport reportWithADenyFor(
+        String clientId) {
+      com.etendoerp.go.schemaforge.data.Plan plan =
+          mock(com.etendoerp.go.schemaforge.data.Plan.class);
+      when(plan.getId()).thenReturn("PLAN-Q");
+      Subscription subscription = mock(Subscription.class);
+      when(subscription.getPlan()).thenReturn(plan);
+      when(subscription.getCurrentPeriodStart())
+          .thenReturn(Date.from(java.time.Instant.parse("2026-10-17T09:30:00Z")));
+      when(subscription.getCurrentPeriodEnd())
+          .thenReturn(Date.from(java.time.Instant.parse("2026-11-17T09:30:00Z")));
+      com.etendoerp.go.usage.quota.ConsumptionReader reader =
+          mock(com.etendoerp.go.usage.quota.ConsumptionReader.class);
+      when(reader.read(any(), eq(clientId), any())).thenAnswer(call ->
+          ((com.etendoerp.go.usage.quota.QuotaDefinition) call.getArgument(0))
+              .getResourceKey().equals("DOCS") ? 100L : 1L);
+      com.etendoerp.go.usage.quota.QuotaEvaluator evaluator =
+          new com.etendoerp.go.usage.quota.QuotaEvaluator(
+              mock(com.etendoerp.go.usage.quota.QuotaLookup.class), reader,
+              java.time.Clock.fixed(java.time.Instant.parse("2026-10-24T12:00:00Z"),
+                  java.time.ZoneOffset.UTC));
+      List<com.etendoerp.go.usage.quota.QuotaDefinition> rows = List.of(
+          com.etendoerp.go.usage.quota.QuotaDefinition.of(planQuota("DOCS")),
+          com.etendoerp.go.usage.quota.QuotaDefinition.of(planQuota("USERS")));
+      return com.etendoerp.go.usage.quota.EnvironmentQuotaReport.build(
+          Map.of(clientId, subscription), evaluator, planIds -> Map.of("PLAN-Q", rows));
+    }
+
+    private com.etendoerp.go.schemaforge.data.PlanQuota planQuota(String key) {
+      com.etendoerp.go.schemaforge.data.BillingResource resource =
+          mock(com.etendoerp.go.schemaforge.data.BillingResource.class);
+      when(resource.getSearchKey()).thenReturn(key);
+      when(resource.getName()).thenReturn("Name of " + key);
+      com.etendoerp.go.schemaforge.data.PlanQuota quota =
+          mock(com.etendoerp.go.schemaforge.data.PlanQuota.class);
+      when(quota.getBillingResource()).thenReturn(resource);
+      when(quota.getEnforcementMode()).thenReturn("block");
+      when(quota.getIncludedQty()).thenReturn(100L);
+      // A Long mock getter answers 0, which would be a 0% threshold: say "none" explicitly.
+      when(quota.getWarningThreshold()).thenReturn(null);
+      return quota;
+    }
+
+    @Test
+    @DisplayName("ETP-5051: an environment carries its own WARN/DENY quotas from the report")
+    void carriesTheReportedQuotasOfItsTenant() throws Exception {
+      when(client.getId()).thenReturn("C-Q");
+      when(client.getName()).thenReturn("Quota Client");
+      when(environmentUser.getId()).thenReturn("U-Q");
+
+      com.etendoerp.go.usage.quota.EnvironmentQuotaReport report = reportWithADenyFor("C-Q");
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null,
+          environmentUser, EnvironmentPlanCache.empty(), report);
+
+      org.codehaus.jettison.json.JSONArray quotas = result.getJSONArray("quotas");
+      assertEquals(1, quotas.length(), quotas.toString());
+      assertEquals("DOCS", quotas.getJSONObject(0).getString("resourceKey"));
+      assertEquals("DENY", quotas.getJSONObject(0).getString("verdict"));
+      assertEquals(100L, quotas.getJSONObject(0).getLong("consumed"));
+    }
+
+    @Test
+    @DisplayName("ETP-5051: another tenant's quotas never reach this environment")
+    void doesNotCarryAnotherTenantsQuotas() throws Exception {
+      when(client.getId()).thenReturn("C-OTHER");
+      when(client.getName()).thenReturn("Other Client");
+      when(environmentUser.getId()).thenReturn("U-O");
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null,
+          environmentUser, EnvironmentPlanCache.empty(), reportWithADenyFor("C-Q"));
+
+      assertEquals(0, result.getJSONArray("quotas").length());
+    }
+
+    @Test
+    @DisplayName("ETP-5051 O-1b: renewalAt is the environment's own period end while renewing")
+    void carriesTheRenewalDateOfItsOwnSubscription() throws Exception {
+      when(client.getId()).thenReturn("C-R");
+      when(client.getName()).thenReturn("Renewing Client");
+      when(environmentUser.getId()).thenReturn("U-R");
+      Subscription renewing = mock(Subscription.class);
+      when(renewing.getSubscriptionStatus()).thenReturn("active");
+      when(renewing.getCurrentPeriodEnd())
+          .thenReturn(Date.from(java.time.Instant.parse("2026-11-23T14:09:48Z")));
+      Subscription other = mock(Subscription.class);
+      when(other.getSubscriptionStatus()).thenReturn("active");
+      when(other.getCurrentPeriodEnd())
+          .thenReturn(Date.from(java.time.Instant.parse("2026-11-30T00:00:00Z")));
+      Map<String, Subscription> rows = new java.util.LinkedHashMap<>();
+      rows.put("C-R", renewing);
+      rows.put("C-OTHER", other);
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null,
+          environmentUser, EnvironmentPlanCache.of(rows));
+
+      assertEquals("2026-11-23T14:09:48Z", result.getString("renewalAt"));
+    }
+
+    @Test
+    @DisplayName("ETP-5051: accessEnforced is false while the kill switch is on for the tenant")
+    void accessEnforcedFollowsTheKillSwitch() throws Exception {
+      when(client.getId()).thenReturn("C-K");
+      when(client.getName()).thenReturn("Kill Switch Client");
+      when(environmentUser.getId()).thenReturn("U-K");
+
+      JSONObject switchedOff;
+      JSONObject enforced;
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff("C-K")).thenReturn(true);
+        switchedOff = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+            EnvironmentPlanCache.empty());
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff("C-K")).thenReturn(false);
+        enforced = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+            EnvironmentPlanCache.empty());
+      }
+
+      assertFalse(switchedOff.getBoolean("accessEnforced"));
+      assertTrue(enforced.getBoolean("accessEnforced"));
+    }
+
+    @Test
+    @DisplayName("ETP-5051: a quota report that cannot be built reports [] instead of failing")
+    void aQuotaReportFailureReportsNothing() {
+      @SuppressWarnings("unchecked")
+      Map<String, Subscription> broken = mock(Map.class);
+      when(broken.isEmpty()).thenReturn(false);
+      when(broken.values()).thenThrow(new IllegalStateException("broken subscriptions"));
+
+      com.etendoerp.go.usage.quota.EnvironmentQuotaReport report =
+          EtendoGoJwtDalHelper.quotaReport(broken);
+
+      assertTrue(report == com.etendoerp.go.usage.quota.EnvironmentQuotaReport.empty());
+      assertEquals(0, report.quotasJsonFor("C-1").length());
+    }
+
+    @Test
+    @DisplayName("ETP-5051: tenants without a plan run no quota query at all")
+    void tenantsWithoutAPlanRunNoQuotaQuery() {
+      Map<String, Subscription> subscriptions = new java.util.HashMap<>();
+      subscriptions.put("C-1", null);
+
+      com.etendoerp.go.usage.quota.EnvironmentQuotaReport report =
+          EtendoGoJwtDalHelper.quotaReport(subscriptions);
+
+      assertTrue(report == com.etendoerp.go.usage.quota.EnvironmentQuotaReport.empty());
+      verify(obDal, never()).createQuery(eq(com.etendoerp.go.schemaforge.data.PlanQuota.class),
+          anyString());
     }
 
     @Test
@@ -1130,13 +1292,18 @@ class EtendoGoJwtDalHelperTest {
             .isEnforcementSwitchedOff(clientId)).thenReturn(switchedOff);
         JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null,
             environmentUser);
+        // atLeastOnce: accessState consults the switch for a refusal, and accessEnforced
+        // (ETP-5051) reads it for every environment.
         flag.verify(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
-            .isEnforcementSwitchedOff(clientId));
+            .isEnforcementSwitchedOff(clientId), atLeastOnce());
         return result;
       }
     }
 
-    /** Every key but accessState must be the same fact whatever the switch says. */
+    /**
+     * Every key but accessState must be the same fact whatever the switch says; accessEnforced
+     * (ETP-5051) is the switch itself, so it differs by design.
+     */
     private void assertOnlyAccessStateDiffers(JSONObject enforced, JSONObject switchedOff)
         throws Exception {
       java.util.Set<String> enforcedKeys = new java.util.TreeSet<>();
@@ -1145,7 +1312,7 @@ class EtendoGoJwtDalHelperTest {
       switchedOff.keys().forEachRemaining(key -> switchedKeys.add((String) key));
       assertEquals(enforcedKeys, switchedKeys);
       for (String key : enforcedKeys) {
-        if (!"accessState".equals(key)) {
+        if (!"accessState".equals(key) && !"accessEnforced".equals(key)) {
           assertEquals(String.valueOf(enforced.get(key)), String.valueOf(switchedOff.get(key)),
               key);
         }
@@ -1187,6 +1354,48 @@ class EtendoGoJwtDalHelperTest {
           TenantEnvironmentLifecycleService.DEFAULT_GRACE_DAYS)).toString(),
           result.getString("graceEndsAt"));
       assertEquals(anchor.toString(), result.getString("renewalDueAt"));
+    }
+
+    @Test
+    @DisplayName("ETP-5051 QA: a past-due tenant set to cancel at period end reports no "
+        + "renewalAt and the same grace, due date and access as without the flag")
+    void aPastDueTenantSetToCancelKeepsItsGraceAndAccess() throws Exception {
+      String clientId = givenTenant();
+      java.time.Instant anchor = givenPastDueTenantOutOfGrace();
+
+      JSONObject flagged = buildWithPlanRow(clientId, true, anchor);
+      JSONObject unflagged = buildWithPlanRow(clientId, false, anchor);
+
+      assertTrue(flagged.has("renewalAt"), flagged.toString());
+      assertTrue(flagged.isNull("renewalAt"), flagged.toString());
+      assertEquals(anchor.plus(java.time.Duration.ofDays(
+          TenantEnvironmentLifecycleService.DEFAULT_GRACE_DAYS)).toString(),
+          flagged.getString("graceEndsAt"));
+      assertEquals(anchor.toString(), flagged.getString("renewalDueAt"));
+      assertEquals("PAST_DUE", flagged.getString("subscriptionStatus"));
+      assertEquals("SUBSCRIPTION_REQUIRED", flagged.getString("accessState"));
+      assertEquals(String.valueOf(unflagged), String.valueOf(flagged));
+    }
+
+    /**
+     * The environment entry with the plan cache built from the tenant's own past-due row, whose
+     * {@code CANCEL_AT_PERIOD_END} is {@code cancelling}; enforcement on.
+     */
+    private JSONObject buildWithPlanRow(String clientId, boolean cancelling,
+        java.time.Instant anchor) throws Exception {
+      Subscription row = mock(Subscription.class);
+      when(row.getSubscriptionStatus()).thenReturn("past_due");
+      when(row.getGraceAnchor()).thenReturn(Date.from(anchor));
+      when(row.getCurrentPeriodEnd())
+          .thenReturn(Date.from(anchor.plus(java.time.Duration.ofDays(30))));
+      when(row.isCancelAtPeriodEnd()).thenReturn(cancelling);
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(anyString())).thenReturn(false);
+        return EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+            EnvironmentPlanCache.of(Map.of(clientId, row)));
+      }
     }
 
     @Test
@@ -1312,8 +1521,9 @@ class EtendoGoJwtDalHelperTest {
       try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
           mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
         result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
-        // No refusal to switch off: the flag is never read.
-        flag.verifyNoInteractions();
+        // No refusal to switch off: the flag is read once, for accessEnforced (ETP-5051) only.
+        flag.verify(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(clientId), times(1));
       }
 
       assertFalse(result.has("accessState"), result.toString());
@@ -1444,6 +1654,21 @@ class EtendoGoJwtDalHelperTest {
       UserRoles result = EtendoGoJwtDalHelper.findClientAdminUserRole("CLIENT-2");
 
       assertNull(result);
+    }
+
+    @Test
+    @DisplayName("never returns the tenant's support user (ETP-5351)")
+    void excludesTheSupportUser() {
+      when(obDal.createQuery(eq(UserRoles.class), anyString())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      EtendoGoJwtDalHelper.findClientAdminUserRole("CLIENT-1");
+
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(obDal).createQuery(eq(UserRoles.class), hql.capture());
+      assertTrue(hql.getValue().contains("userrole.userContact.id <> :etgoSupportUserId"));
+      verify(query).setNamedParameter("etgoSupportUserId",
+          SupportAccessGuard.supportUserIdFor("CLIENT-1"));
     }
   }
 

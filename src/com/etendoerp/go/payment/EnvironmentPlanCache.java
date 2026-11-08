@@ -5,6 +5,7 @@
  */
 package com.etendoerp.go.payment;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -13,6 +14,8 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.Subscription;
@@ -37,6 +40,8 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * chain cannot change what an earlier frame already read.
  */
 public final class EnvironmentPlanCache {
+
+  private static final Logger log = LogManager.getLogger(EnvironmentPlanCache.class);
 
   private static final EnvironmentPlanCache EMPTY =
       new EnvironmentPlanCache(Collections.emptyMap());
@@ -164,7 +169,35 @@ public final class EnvironmentPlanCache {
     // ETP-5047 — a closed (canceled) row reads as canceled, whatever STATUS still says.
     String status = StringUtils.trimToNull(SubscriptionService.effectiveStatusOf(subscription));
     return new PlanView(plan == null ? null : StringUtils.trimToNull(plan.getSearchKey()), status,
-        TenantPlanService.legacyPlanForStatus(status));
+        TenantPlanService.legacyPlanForStatus(status), renewalAtOf(subscription, status));
+  }
+
+  /**
+   * ETP-5051 (O-1b) — when the tenant's subscription next renews, from local state only: the
+   * row's {@code CURRENT_PERIOD_END}, and only while it is renewing, i.e. its effective status is
+   * {@value SubscriptionService#STATUS_ACTIVE} (Stripe {@code active} and {@code trialing} are
+   * both stored so) and the provider has not scheduled it to cancel at the period end
+   * ({@code CANCEL_AT_PERIOD_END = 'Y'}, display-only, written by the lifecycle webhooks and the
+   * billing reconciliation). Past due, canceled, closed or cancelling: null.
+   *
+   * <p>Never throws: a row that cannot be read reports no renewal, never a failed list.
+   */
+  private static Instant renewalAtOf(Subscription subscription, String effectiveStatus) {
+    if (!SubscriptionService.STATUS_ACTIVE.equalsIgnoreCase(
+        StringUtils.trimToEmpty(effectiveStatus))) {
+      return null;
+    }
+    try {
+      if (Boolean.TRUE.equals(subscription.isCancelAtPeriodEnd())) {
+        return null;
+      }
+      return subscription.getCurrentPeriodEnd() == null ? null
+          : subscription.getCurrentPeriodEnd().toInstant();
+    } catch (RuntimeException e) {
+      log.warn("Could not read the renewal date of subscription {}; reporting none",
+          subscription.getId(), e);
+      return null;
+    }
   }
 
   /**
@@ -231,11 +264,26 @@ public final class EnvironmentPlanCache {
     private final String planKey;
     private final String status;
     private final String legacyPlan;
+    private final Instant renewalAt;
 
     PlanView(String planKey, String status, String legacyPlan) {
+      this(planKey, status, legacyPlan, null);
+    }
+
+    PlanView(String planKey, String status, String legacyPlan, Instant renewalAt) {
       this.planKey = planKey;
       this.status = status;
       this.legacyPlan = legacyPlan;
+      this.renewalAt = renewalAt;
+    }
+
+    /**
+     * ETP-5051 (O-1b) — when the subscription next renews, read from local state.
+     *
+     * @return the current period end while the subscription is renewing, else null
+     */
+    public Instant renewalAt() {
+      return renewalAt;
     }
 
     /**

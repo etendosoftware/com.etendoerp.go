@@ -47,7 +47,9 @@ import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
+import com.etendoerp.go.schemaforge.NeoPrintAfterComplete;
 import com.etendoerp.go.schemaforge.NeoWriteChannel;
+import com.etendoerp.go.schemaforge.NeoTenantWriteGuard;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -216,7 +218,10 @@ public class McpServlet extends HttpServlet {
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     // ETP-5791: label the writes this call makes as MCP (telemetry only). Restored in the finally.
     String previousChannel = NeoWriteChannel.enter(NeoWriteChannel.MCP);
+    NeoPrintAfterComplete.Deferral printRenders = null;
     try {
+      // ETP-6013: server-side PDF renders queued by this call wait until its work is done.
+      printRenders = NeoPrintAfterComplete.deferUntilEnd();
       method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
       callParams = rpcMessage.optJSONObject("params");
@@ -251,9 +256,14 @@ public class McpServlet extends HttpServlet {
       String rendered = rpcResponse.toString();
       response.setStatus(HttpServletResponse.SC_OK);
       response.getWriter().write(rendered);
+      // The call's writes are all flushed: a queued render now waits (FOR SHARE) for its final
+      // commit, not for a commit made in the middle of the call.
+      printRenders.release();
 
-      // AFTER the business transaction has been committed and closed by McpSessionManager, and
-      // after the caller already has its answer: nothing below can affect either.
+      // AFTER the caller already has its answer, and after McpSessionManager flushed the call's
+      // writes. The business transaction is NOT committed yet: DalRequestFilter commits it once
+      // doPost returns (the released print renders wait for exactly that commit). Nothing below
+      // writes to it, so nothing below can affect the answer or the transaction.
       recordToolCall(identity, new McpCallObservation(McpUsageTelemetry.currentSessionKey(), body,
           rendered, startedAtNanos), toolName, callParams, result, null);
 
@@ -275,6 +285,14 @@ public class McpServlet extends HttpServlet {
       McpUsageTelemetry.clearCurrentClient();
       McpUsageTelemetry.clearCurrentTenant();
       NeoWriteChannel.restore(previousChannel);
+      closeQuietly(printRenders);
+    }
+  }
+
+  /** Ends this call's deferral of server-side PDF renders (ETP-6013); null when it never opened. */
+  private static void closeQuietly(NeoPrintAfterComplete.Deferral printRenders) {
+    if (printRenders != null) {
+      printRenders.close();
     }
   }
 
@@ -474,8 +492,9 @@ public class McpServlet extends HttpServlet {
    * Hand one {@code tools/call} to {@link McpUsageLogger}, which writes it on its own thread, on its
    * own connection, in its own transaction.
    * <p>
-   * Called only once the response has been written, so the user's answer is already out and the
-   * business transaction is already committed and closed. The whole body is wrapped in a
+   * Called only once the response has been written, so the user's answer is already out; the
+   * business transaction is flushed but committed later, by {@code DalRequestFilter}, after
+   * {@code doPost} returns — the logger's own connection keeps it out of that transaction. The whole body is wrapped in a
    * {@code catch (Throwable)} for the same reason the logger is: a defect in telemetry must not turn
    * a successful tool call into a failed HTTP request.
    *
@@ -646,6 +665,15 @@ public class McpServlet extends HttpServlet {
 
     // Try OAuth2 token first
     Map<String, String> tokenIdentity = OAuth2Filter.validateToken(bearerToken);
+    if (tokenIdentity != null
+        && Boolean.parseBoolean(tokenIdentity.get(OAuth2Filter.ATTR_PUBLIC_API_KEY))) {
+      // ETP-6057 — a public API key is for the public API only (counted and limited there); the
+      // same refusal OAuth2Filter answers on the filtered mappings.
+      log.warn("Refused MCP request made with a public API key token");
+      sendJsonError(request, response, HttpServletResponse.SC_FORBIDDEN,
+          OAuth2Filter.MSG_PUBLIC_KEY_NOT_FOR_MCP);
+      return null;
+    }
     if (tokenIdentity != null) {
       return new AuthIdentity(
           tokenIdentity.get(OAuth2Filter.ATTR_USER_ID),
@@ -917,17 +945,27 @@ public class McpServlet extends HttpServlet {
     log.info("MCP tools/call: tool={}, user={}, role={}, client={}, org={}",
         toolName, identity.userId, identity.roleId, identity.clientId, identity.orgId);
 
-    return McpSessionManager.executeInContext(
-        identity.userId, identity.roleId, identity.clientId,
-        identity.orgId, null, () -> {
-          OBContext.setAdminMode(true);
-          try {
-            McpToolRouter router = new McpToolRouter();
-            return router.route(toolName, arguments, parseScopes(identity.scopes));
-          } finally {
-            OBContext.restorePreviousMode();
-          }
-        });
+    // ETP-5819: outside executeInContext so its closing flush, and its rollback, are guarded too.
+    try {
+      return NeoTenantWriteGuard.call(() -> McpSessionManager.executeInContext(
+          identity.userId, identity.roleId, identity.clientId,
+          identity.orgId, null, () -> {
+            OBContext.setAdminMode(true);
+            try {
+              McpToolRouter router = new McpToolRouter();
+              return router.route(toolName, arguments, parseScopes(identity.scopes));
+            } finally {
+              OBContext.restorePreviousMode();
+            }
+          }));
+    } catch (org.openbravo.base.exception.OBSecurityException e) {
+      // A write refused at the closing flush, after the router already answered: still a
+      // permanent refusal, so forbidden like the router's own, not a retryable server error.
+      log.warn("MCP tool '{}' write refused for the current tenant: {} session={}", toolName,
+          e.getMessage(), McpUsageTelemetry.sessionForLog());
+      return McpToolRouter.wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName,
+          e.getMessage()));
+    }
   }
 
   // ── Handler: resources/list ─────────────────────────────────────────────

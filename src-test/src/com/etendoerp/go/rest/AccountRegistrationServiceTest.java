@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * The account rules shared by {@code /register} and the signup API (ETP-5847): the address states
@@ -38,7 +39,7 @@ import com.etendoerp.go.schemaforge.data.Account;
 class AccountRegistrationServiceTest {
 
   private static final String EMAIL = "ana@empresa.es";
-  private static final String VERIFY_LINK = "https://app.example.test/onboarding?verifyToken=t";
+  private static final String VERIFY_LINK = "https://app.example.test/onboarding?loginToken=t";
 
   private final TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
   private final AccountRegistrationService service = new AccountRegistrationService(emailSender);
@@ -53,7 +54,7 @@ class AccountRegistrationServiceTest {
     dal = mockStatic(EtendoGoJwtDalHelper.class);
     verification = mockStatic(EmailVerificationDalHelper.class);
     links = mockStatic(EtendoGoAuthLinkBuilder.class);
-    links.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString())).thenReturn(VERIFY_LINK);
+    links.when(() -> EtendoGoAuthLinkBuilder.loginLink(anyString())).thenReturn(VERIFY_LINK);
   }
 
   @AfterEach
@@ -83,6 +84,12 @@ class AccountRegistrationServiceTest {
     dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(account);
 
     assertEquals(AccountRegistrationService.EmailStatus.REGISTERED, service.emailStatus(EMAIL));
+  }
+
+  @Test
+  void theSupportAddressIsRegisteredEvenThoughItsAccountIsHidden() {
+    assertEquals(AccountRegistrationService.EmailStatus.REGISTERED,
+        service.emailStatus(SupportAccessGuard.SUPPORT_ACCOUNT_EMAIL));
   }
 
   @Test

@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -37,6 +38,9 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import javax.enterprise.inject.spi.Bean;
+import javax.enterprise.inject.spi.BeanManager;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -49,23 +53,32 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.mockito.invocation.InvocationOnMock;
+import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.BankStatementsHandler;
+import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.ReconciliationHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
+import com.etendoerp.go.schemaforge.util.NeoExtensionIndex;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * ETP-5468 (CA1/CA7) — how the MCP layer publishes the named actions a handler declares:
  * <ul>
- *   <li>{@code etendo_schema}: {@link McpActionsView#buildDeclaredResponse} renders the nine
+ *   <li>{@code etendo_schema}: {@link McpActionsView#buildDeclaredResponse} renders the eleven
  *       bank-reconciliation contracts;</li>
  *   <li>{@code etendo_discover}: {@link McpToolRouterSupport#buildDiscoverSpec}'s three-way report
  *       branch (callable report / actions_only / not configured);</li>
@@ -79,6 +92,12 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * @covers com.etendoerp.go.mcp.McpDeclaredActions
  * @covers com.etendoerp.go.mcp.McpActionsView
  * @covers com.etendoerp.go.mcp.McpRoutingException
+ * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpToolRouterSupport
+ * @covers com.etendoerp.go.mcp.McpReportActionsSchema
+ * @covers com.etendoerp.go.mcp.ToolRegistryActionSpecs
+ * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
+ * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("MCP declared actions (ETP-5468)")
@@ -86,9 +105,9 @@ class McpDeclaredActionsTest {
 
   private static final String BANK_REC = "bank-reconciliation";
   private static final String QUALIFIER = "bank-reconciliation";
-  private static final List<String> NINE_ACTIONS = List.of("pendingLines", "candidates",
-      "autoMatch", "reconcileGroup", "reconcileDifference", "undoReconciliation",
-      "removeOperation", "reactivateSelected", "applySuggestions");
+  private static final List<String> RECONCILIATION_ACTIONS = List.of("pendingLines",
+      "candidates", "autoMatch", "reconcileGroup", "reconcileDifference", "undoReconciliation",
+      "removeOperation", "reactivateSelected", "applySuggestions", "discardPair", "restorePair");
 
   private static final Map<String, NeoActionContract> CONTRACTS =
       new ReconciliationHandler().actionContracts();
@@ -133,13 +152,13 @@ class McpDeclaredActionsTest {
   class DeclaredResponse {
 
     @Test
-    @DisplayName("lists the nine actions, all invokable, in declaration order")
+    @DisplayName("lists the eleven actions, all invokable, in declaration order")
     void nineActions() throws Exception {
       JSONObject response = McpActionsView.buildDeclaredResponse(BANK_REC, BANK_REC, CONTRACTS);
       assertEquals(BANK_REC, response.getString("spec"));
       assertEquals(BANK_REC, response.getString("entity"));
-      assertEquals(9, response.getInt("actionCount"));
-      assertEquals(9, response.getInt("invokableCount"));
+      assertEquals(11, response.getInt("actionCount"));
+      assertEquals(11, response.getInt("invokableCount"));
       JSONArray actions = response.getJSONArray("actions");
       List<String> names = new ArrayList<>();
       for (int i = 0; i < actions.length(); i++) {
@@ -149,7 +168,7 @@ class McpDeclaredActionsTest {
         assertTrue(a.getString("idDescription").contains("financial account id"));
         assertFalse(a.getJSONObject("parameters").getBoolean("additionalProperties"));
       }
-      assertEquals(NINE_ACTIONS, names);
+      assertEquals(RECONCILIATION_ACTIONS, names);
       assertTrue(response.getString("hint").contains("etendo_action"));
       assertTrue(response.getString("hint").contains("422"));
     }
@@ -159,16 +178,19 @@ class McpDeclaredActionsTest {
     void requiredLists() throws Exception {
       JSONArray actions = McpActionsView.buildDeclaredResponse(BANK_REC, BANK_REC, CONTRACTS)
           .getJSONArray("actions");
-      Map<String, List<String>> expected = Map.of(
-          "pendingLines", List.of(),
-          "candidates", List.of("statementLineId"),
-          "autoMatch", List.of(),
-          "reconcileGroup", List.of("statementLineId"),
-          "reconcileDifference", List.of("statementLineId"),
-          "undoReconciliation", List.of("statementLineId"),
-          "removeOperation", List.of("statementLineId", "transactionIds"),
-          "reactivateSelected", List.of("statementLineId", "transactionIds"),
-          "applySuggestions", List.of("groups"));
+      Map<String, List<String>> expected = Map.ofEntries(
+          Map.entry("pendingLines", List.of()),
+          Map.entry("candidates", List.of("statementLineId")),
+          Map.entry("autoMatch", List.of()),
+          Map.entry("reconcileGroup", List.of("statementLineId")),
+          Map.entry("reconcileDifference", List.of("statementLineId")),
+          Map.entry("undoReconciliation", List.of("statementLineId")),
+          Map.entry("removeOperation", List.of("statementLineId", "transactionIds")),
+          Map.entry("reactivateSelected", List.of("statementLineId", "transactionIds")),
+          Map.entry("applySuggestions", List.of("groups")),
+          Map.entry("discardPair", List.of("statementLineId", "counterpartLineId")),
+          Map.entry("restorePair", List.of("lineId")));
+      assertEquals(expected.size(), actions.length(), "one expected list per rendered action");
       for (int i = 0; i < actions.length(); i++) {
         JSONObject a = actions.getJSONObject(i);
         assertEquals(expected.get(a.getString("action")),
@@ -332,41 +354,6 @@ class McpDeclaredActionsTest {
         assertTrue(McpDeclaredActions.unavailableFor(entity, subject).isEmpty());
       }
     }
-
-    @Test
-    @DisplayName("ETP-5715: only a customization that opts in un-posts before a reactivation")
-    void unpostBeforeReactivateIsOptIn() {
-      SFEntity entity = recEntity();
-      try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
-          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class,
-              Mockito.CALLS_REAL_METHODS)) {
-        com.etendoerp.go.schemaforge.NeoHandler plain = context -> null;
-        com.etendoerp.go.schemaforge.NeoHandler optsIn = new com.etendoerp.go.schemaforge.NeoHandler() {
-          @Override
-          public com.etendoerp.go.schemaforge.NeoResponse handle(
-              com.etendoerp.go.schemaforge.NeoContext context) {
-            return null;
-          }
-
-          @Override
-          public boolean unpostBeforeReactivate() {
-            return true;
-          }
-        };
-        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
-            .byQualifierQuietly(QUALIFIER)).thenReturn(plain);
-        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(entity));
-
-        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
-            .byQualifierQuietly(QUALIFIER)).thenReturn(optsIn);
-        assertTrue(McpDeclaredActions.unpostsBeforeReactivation(entity));
-
-        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
-            .byQualifierQuietly(QUALIFIER)).thenReturn(null);
-        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(entity));
-        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(null));
-      }
-    }
   }
 
   // ── etendo_discover ───────────────────────────────────────────────────────
@@ -403,7 +390,7 @@ class McpDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("a declared-actions spec → callable:false, status actions_only, the 9 actions")
+    @DisplayName("a declared-actions spec → callable:false, status actions_only, the 11 actions")
     void actionsOnly() throws Exception {
       callability.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
       entityCriteria(dal, List.of(recEntity()));
@@ -419,7 +406,7 @@ class McpDeclaredActionsTest {
       assertEquals("Not a report generator; 'bank-reconciliation' serves named actions through "
           + "etendo_action (entity bank-reconciliation).", out.getString("message"));
       assertEquals(BANK_REC, out.getString("actionEntity"));
-      assertEquals(NINE_ACTIONS, strings(out.getJSONArray("actions")));
+      assertEquals(RECONCILIATION_ACTIONS, strings(out.getJSONArray("actions")));
       assertTrue(out.getString("actionsHint").contains("etendo_action"));
       assertTrue(out.getString("actionsHint").contains("view:\"actions\""));
       assertFalse(out.has("reportTool"));
@@ -616,6 +603,320 @@ class McpDeclaredActionsTest {
       List<McpToolDefinition> tools = tools();
       assertFalse(specEnumOf(tools, "etendo_action").contains(BANK_REC));
       assertTrue(specEnumOf(tools, "etendo_list").contains("sales-order"));
+    }
+  }
+
+  // ── ETP-5581: the MCP readers of the bank report pairs, under both bindings ──
+
+  /** How a report pair is bound in one test. */
+  enum BoundBy {
+    /** The row has no qualifier; the class's {@code @NeoExtension} is the only binding. */
+    ANNOTATION_ONLY,
+    /** The row keeps its former qualifier and no deployed class claims the pair by annotation. */
+    QUALIFIER_ONLY
+  }
+
+  /**
+   * One migrated report pair: its handler class, the spec (= entity) name, the qualifier its row
+   * carried before ETP-5581, the agent-actions class its {@code handle} hands ACTION contexts to,
+   * and one declared action that takes no required parameter.
+   */
+  record ReportPair(Class<? extends NeoHandler> type, String spec, String formerQualifier,
+      String agentActionsClass, String readAction) {
+    /**
+     * The spec name, so the parameterized case names read well.
+     *
+     * @return the spec
+     */
+    @Override
+    public String toString() {
+      return spec;
+    }
+  }
+
+  /**
+   * The two report specs migrated to {@code @NeoExtension} by ETP-5581, each bound once by its
+   * annotation and once by its former qualifier only.
+   *
+   * @return one {@code (pair, binding)} argument set per case
+   */
+  static Stream<Arguments> reportPairs() {
+    ReportPair rec = new ReportPair(ReconciliationHandler.class, BANK_REC, "bankReconciliation",
+        "com.etendoerp.go.schemaforge.ReconciliationAgentActions", "pendingLines");
+    ReportPair statements = new ReportPair(BankStatementsHandler.class, "bank-statements",
+        "bank-statements", "com.etendoerp.go.schemaforge.BankStatementAgentActions",
+        "listStatements");
+    return Stream.of(rec, statements).flatMap(pair -> Stream.of(
+        Arguments.of(pair, BoundBy.ANNOTATION_ONLY), Arguments.of(pair, BoundBy.QUALIFIER_ONLY)));
+  }
+
+  /**
+   * ETP-5581 moved {@code bank-reconciliation} and {@code bank-statements} from
+   * {@code Java_Qualifier} to {@code @NeoExtension}. Every MCP reader of those pairs is asserted
+   * twice: with the row's qualifier cleared and only the annotation binding (what ships), and with
+   * the former qualifier and no annotated bean (the fallback a legacy deployment keeps). The
+   * {@code NeoExtensionIndex} is built for real from a mocked bean manager; the handler is a spy
+   * of the real class, so what each reader resolves is compared by identity.
+   */
+  @Nested
+  @DisplayName("ETP-5581 — MCP readers resolve the bank report pairs by annotation or by qualifier")
+  class BindingModes {
+
+    /** McpDeclaredActions.of: the handler's whole declaration. */
+    @ParameterizedTest(name = "{0} / {1}")
+    @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
+    @DisplayName("McpDeclaredActions.of: the handler's whole declaration")
+    void declaredActionsOfTheEntity(ReportPair pair, BoundBy mode) {
+      try (PairFixture f = new PairFixture(pair, mode)) {
+        assertEquals(new ArrayList<>(f.handler.actionContracts().keySet()),
+            new ArrayList<>(McpDeclaredActions.of(f.entity).keySet()));
+        f.assertQualifierAsked();
+      }
+    }
+
+    /**
+     * {@code etendo_discover}: the spec is {@code actions_only} and names the entity whose actions
+     * it lists ({@code NeoActionContract.resolve}), however the handler is bound.
+     *
+     * @param pair the report spec under test
+     * @param mode how its handler is bound
+     * @throws Exception when the discovery fails
+     */
+    @ParameterizedTest(name = "{0} / {1}")
+    @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
+    @DisplayName("etendo_discover: actions_only with the actions and their entity (NeoActionContract"
+        + ".resolve)")
+    void discoverListsTheActions(ReportPair pair, BoundBy mode) throws Exception {
+      try (PairFixture f = new PairFixture(pair, mode)) {
+        JSONObject out = McpToolRouterSupport.buildDiscoverSpec(f.spec, "R", null, null, null);
+
+        assertFalse(out.getBoolean("callable"));
+        assertEquals(McpToolRouterSupport.STATUS_ACTIONS_ONLY, out.getString("status"));
+        assertEquals(pair.spec(), out.getString("actionEntity"));
+        assertEquals(new ArrayList<>(f.handler.actionContracts().keySet()),
+            strings(out.getJSONArray("actions")));
+        f.assertQualifierAsked();
+      }
+    }
+
+    /** {@code tools/list}: the spec is an action report spec (ToolRegistryActionSpecs). */
+    @ParameterizedTest(name = "{0} / {1}")
+    @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
+    @DisplayName("tools/list: the spec is an action report spec (ToolRegistryActionSpecs)")
+    void isAnActionReportSpec(ReportPair pair, BoundBy mode) {
+      try (PairFixture f = new PairFixture(pair, mode);
+          MockedStatic<NeoAccessUtils> access = mockStatic(NeoAccessUtils.class)) {
+        access.when(() -> NeoAccessUtils.hasReportSpecAccess(f.spec, "GET")).thenReturn(true);
+
+        assertTrue(ToolRegistryActionSpecs.isActionReportSpec(f.spec));
+        f.assertQualifierAsked();
+      }
+    }
+
+    /** {@code etendo_schema}: McpReportActionsSchema answers the entity's catalog. */
+    @ParameterizedTest(name = "{0} / {1}")
+    @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
+    @DisplayName("etendo_schema: McpReportActionsSchema answers the entity's catalog")
+    void schemaAnswersTheCatalog(ReportPair pair, BoundBy mode) throws Exception {
+      try (PairFixture f = new PairFixture(pair, mode)) {
+        JSONObject result = McpReportActionsSchema.reportSpecActionsSchema(pair.spec(),
+            new JSONObject().put("entity", pair.spec()));
+
+        assertNotNull(result, "the catalog, not the generic path");
+        JSONObject body = new JSONObject(
+            result.getJSONArray("content").getJSONObject(0).getString("text"));
+        assertEquals(pair.spec(), body.getString("entity"));
+        assertEquals(f.handler.actionContracts().size(), body.getInt("actionCount"));
+        f.assertQualifierAsked();
+      }
+    }
+
+    /** {@code etendo_action}: the dispatcher's ACTION surface reaches the agent-actions class. */
+    @ParameterizedTest(name = "{0} / {1}")
+    @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
+    @DisplayName("etendo_action: the dispatcher's ACTION surface reaches the agent-actions class")
+    void actionReachesTheAgentActions(ReportPair pair, BoundBy mode) throws Exception {
+      List<Object[]> dispatched = new ArrayList<>();
+      NeoResponse answer = NeoResponse.ok(new JSONObject().put("answeredBy", pair.spec()));
+      try (PairFixture f = new PairFixture(pair, mode);
+          MockedStatic<?> agentActions = mockStatic(Class.forName(pair.agentActionsClass()),
+              inv -> {
+                if ("dispatch".equals(inv.getMethod().getName())) {
+                  dispatched.add(inv.getArguments());
+                  return answer;
+                }
+                return inv.callRealMethod();
+              });
+          MockedStatic<McpHookExecutor> executor = mockStatic(McpHookExecutor.class,
+              Mockito.CALLS_REAL_METHODS);
+          MockedStatic<McpSpecScope> scope = mockStatic(McpSpecScope.class);
+          MockedStatic<NeoAccountingAccessPolicy> posting =
+              mockStatic(NeoAccountingAccessPolicy.class, Mockito.CALLS_REAL_METHODS)) {
+        // The record and posting refusals read AD rows and are not what is under test here.
+        executor.when(() -> McpHookExecutor.actionRecordRefusal(any(), any(), any()))
+            .thenReturn(null);
+        posting.when(() -> NeoAccountingAccessPolicy.refusalForPostingAction(any(), any()))
+            .thenReturn(null);
+        JSONObject args = new JSONObject().put("entity", pair.spec()).put("id", "ACC-1")
+            .put("action", pair.readAction());
+
+        JSONObject result = new McpToolRouter().handleAction(pair.spec(), args);
+
+        assertEquals(1, dispatched.size(), "the handler hands the ACTION context over once");
+        assertSame(f.handler, dispatched.get(0)[0], "dispatched on the resolved handler");
+        NeoContext context = (NeoContext) dispatched.get(0)[1];
+        assertEquals(pair.readAction(), context.getFieldName());
+        assertEquals("ACC-1", context.getRecordId());
+        assertTrue(result.toString().contains("answeredBy"), result.toString());
+        f.assertQualifierAsked();
+      }
+    }
+
+    /** {@code etendo_report}: resolves the handler (resolveOnly) and answers not configured. */
+    @ParameterizedTest(name = "{0} / {1}")
+    @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#reportPairs")
+    @DisplayName("etendo_report: resolves the handler (resolveOnly) and answers not configured")
+    void reportResolvesAndAnswersNotConfigured(ReportPair pair, BoundBy mode) throws Exception {
+      try (PairFixture f = new PairFixture(pair, mode);
+          MockedStatic<NeoReportCallability> callability =
+              mockStatic(NeoReportCallability.class, Mockito.CALLS_REAL_METHODS)) {
+        java.lang.reflect.Method handleReport = McpToolRouter.class
+            .getDeclaredMethod("handleReport", String.class, JSONObject.class);
+        handleReport.setAccessible(true);
+
+        JSONObject result = (JSONObject) handleReport.invoke(new McpToolRouter(), pair.spec(),
+            new JSONObject());
+
+        JSONObject body = new JSONObject(
+            result.getJSONArray("content").getJSONObject(0).getString("text"));
+        assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, body.getString("status"));
+        String name = mode == BoundBy.ANNOTATION_ONLY ? pair.type().getSimpleName()
+            : pair.formerQualifier();
+        callability.verify(() -> NeoReportCallability.contractOf(Mockito.same(f.handler),
+            Mockito.eq(name)));
+        Mockito.verify(f.handler, never()).handle(any());
+        f.assertQualifierAsked();
+      }
+    }
+  }
+
+  /**
+   * The report spec, its one entity row and a spy of the real handler, deployed per
+   * {@link BoundBy}. The qualifier resolvers answer the spy for the former qualifier only and
+   * record what they are asked.
+   */
+  static final class PairFixture implements AutoCloseable {
+    final ReportPair pair;
+    final BoundBy mode;
+    final NeoHandler handler;
+    final SFSpec spec;
+    final SFEntity entity;
+    /** Every qualifier the MCP resolver was asked for. */
+    private final List<String> asked = new ArrayList<>();
+    private final MockedStatic<WeldUtils> weld;
+    private final MockedStatic<NeoHandlerLookup> lookup;
+    private final MockedStatic<McpToolRouterSupport> support;
+    private final MockedStatic<OBDal> obDal;
+    private final MockedStatic<OBContext> obContext;
+
+    /**
+     * Builds the fixture: a spied handler of the pair's type and the static mocks that resolve it
+     * by annotation or by its former qualifier only.
+     *
+     * @param pair the report spec under test
+     * @param mode how its handler is bound
+     */
+    @SuppressWarnings("unchecked")
+    PairFixture(ReportPair pair, BoundBy mode) {
+      this.pair = pair;
+      this.mode = mode;
+      NeoExtensionIndex.invalidate();
+      McpConfigCache.invalidateAll();
+      try {
+        handler = Mockito.spy(pair.type().getDeclaredConstructor().newInstance());
+      } catch (ReflectiveOperationException e) {
+        throw new IllegalStateException(e);
+      }
+      spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("spec-" + pair.spec());
+      when(spec.getName()).thenReturn(pair.spec());
+      when(spec.getSpecType()).thenReturn("R");
+      entity = mock(SFEntity.class);
+      when(entity.getId()).thenReturn("entity-" + pair.spec());
+      when(entity.getETGOSFSpec()).thenReturn(spec);
+      when(entity.getName()).thenReturn(pair.spec());
+      when(entity.getJavaQualifier())
+          .thenReturn(mode == BoundBy.QUALIFIER_ONLY ? pair.formerQualifier() : null);
+
+      BeanManager bm = mock(BeanManager.class);
+      Set<Bean<?>> beans = new HashSet<>();
+      if (mode == BoundBy.ANNOTATION_ONLY) {
+        Bean<NeoHandler> bean = mock(Bean.class);
+        Mockito.doReturn(pair.type()).when(bean).getBeanClass();
+        Mockito.doReturn(handler).when(bm).getReference(Mockito.same(bean),
+            Mockito.eq(NeoHandler.class), any());
+        beans.add(bean);
+      }
+      when(bm.getBeans(NeoHandler.class, WeldUtils.ANY_LITERAL)).thenReturn(beans);
+      weld = mockStatic(WeldUtils.class);
+      weld.when(WeldUtils::getStaticInstanceBeanManager).thenReturn(bm);
+
+      lookup = mockStatic(NeoHandlerLookup.class, Mockito.CALLS_REAL_METHODS);
+      lookup.when(() -> NeoHandlerLookup.byQualifier(any())).thenAnswer(this::byQualifier);
+      lookup.when(() -> NeoHandlerLookup.byQualifierQuietly(any())).thenAnswer(this::byQualifier);
+
+      support = mockStatic(McpToolRouterSupport.class, Mockito.CALLS_REAL_METHODS);
+      support.when(() -> McpToolRouterSupport.findActiveSpecByName(pair.spec())).thenReturn(spec);
+      support.when(() -> McpToolRouterSupport.findIncludedEntity(spec.getId(), pair.spec()))
+          .thenReturn(entity);
+      support.when(() -> McpToolRouterSupport.listIncludedEntities(spec.getId()))
+          .thenReturn(List.of(entity));
+
+      OBDal dal = mock(OBDal.class);
+      entityCriteria(dal, List.of(entity));
+      obDal = mockStatic(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBContext context = mock(OBContext.class);
+      when(context.getRole()).thenReturn(mock(Role.class));
+      obContext = mockStatic(OBContext.class);
+      obContext.when(OBContext::getOBContext).thenReturn(context);
+      // Stubbing a CALLS_REAL_METHODS static runs the real method once; only the readers count.
+      asked.clear();
+    }
+
+    /**
+     * Answers the qualifier lookup: the spied handler for the pair's former qualifier when the
+     * fixture binds by qualifier only, else nothing. Every asked qualifier is recorded.
+     *
+     * @param invocation the lookup call
+     * @return the handler, or {@code null}
+     */
+    private NeoHandler byQualifier(InvocationOnMock invocation) {
+      String qualifier = invocation.getArgument(0);
+      asked.add(qualifier);
+      return mode == BoundBy.QUALIFIER_ONLY && pair.formerQualifier().equals(qualifier)
+          ? handler : null;
+    }
+
+    /** Annotation-only: no qualifier resolver asked. Qualifier-only: asked for the former one. */
+    void assertQualifierAsked() {
+      if (mode == BoundBy.ANNOTATION_ONLY) {
+        assertTrue(asked.isEmpty(), "no qualifier to fall back on, yet asked: " + asked);
+      } else {
+        assertTrue(asked.contains(pair.formerQualifier()), "asked: " + asked);
+      }
+    }
+
+    /** Closes every static mock and drops the caches the fixture invalidated. */
+    @Override
+    public void close() {
+      obContext.close();
+      obDal.close();
+      support.close();
+      lookup.close();
+      weld.close();
+      NeoExtensionIndex.invalidate();
+      McpConfigCache.invalidateAll();
     }
   }
 

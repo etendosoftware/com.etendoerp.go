@@ -19,20 +19,23 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
-import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -43,7 +46,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * Dispatches custom ACTION requests:
  * <ul>
- *   <li>{@code Convertquotation} → calls {@link ConvertQuotationIntoOrder#convertQuotationIntoSalesOrder}
+ *   <li>{@code Convertquotation} (also reached as {@code createOrder}, the button's property name,
+ *       on every MCP call — see {@link #isConvertQuotationAction}) → calls {@link ConvertQuotationIntoOrder#convertQuotationIntoSalesOrder}
  *       with {@code recalculatePrices=false} so that unit prices agreed in the quotation are
  *       preserved in the new sales order (default Etendo behaviour would re-fetch prices from
  *       the active price list, overwriting the quoted amounts), then reactivates the order so it
@@ -72,18 +76,92 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * <p>Currency / price-list / exchange-rate behaviors are inherited from
  * {@link AbstractOrderHeaderHandler#afterCallout}.
+ *
+ * <p>ETP-5704 (QA CP-17) / ETP-6026: Reactivate ({@code RE}), Void ({@code VO}) and Close
+ * ({@code CL}) are refused on every quotation, whatever its status — the window offers none of
+ * them (its generated process list is empty, so {@code processOverrides.Reactivate}/{@code Void}
+ * never render; a draft offers Delete and Confirm, one Under evaluation Confirm and Reject). Over
+ * MCP a quotation Under evaluation went back to Draft (RE), a draft was voided and one Under
+ * evaluation closed. ETP-5704 still let RE through on a voided quotation, but core's
+ * {@code C_Order_Post} refuses any action on a {@code VO}/{@code CL} document
+ * ({@code @AlreadyPosted@}), so that path only ended in a technical error.
+ *
+ * <p>ETP-6026: the {@code DocAction} button is an ALLOW-list of what the window offers: Confirm
+ * ({@code CO}) on a draft only ({@link #ALLOWED_BY_STATUS}) — what {@code SendToEvaluationModal},
+ * the row Confirmar and the bulk bar (drafts only) send. {@code RJ} never reaches it: it is routed
+ * to the reject flow first. Every other effective value — Prepare ({@code PR}, which took a draft
+ * to {@code IP} over MCP), {@code AP}, {@code CO} outside a draft, {@code --}, nothing at all — is
+ * refused with 400 ({@code DocActionRefusalGuard#refuseUnlessAllowed}; RE, VO and CL keep their own
+ * messages). An {@code IP} quotation accepts nothing: its Confirmar opens no modal. Same resolution
+ * and fail-closed rules as the sales order ({@link DocActionRefusalGuard}); advertised by
+ * {@link #unavailableActions}. It does not touch
+ * {@code Convertquotation} (another button; the new order is reactivated through
+ * {@link OrderDocActionSupport}, not through this pre-hook) or the DR→UE {@code DocAction} of
+ * {@code SendToEvaluationModal} (it runs CO).
+ *
+ * <p><b>Binding (ETP-6002).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code salesQuotationHeaderHandler}) and the class's {@code @Named} were
+ * removed in the same change (neo-extension-migration).
  */
-@Named("salesQuotationHeaderHandler")
+@NeoExtension(spec = "sales-quotation", entity = "quotation")
 public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String DOC_STATUS_COMPLETED = "CO";
   private static final String DOC_ACTION_REJECT = "RJ";
+  /** Reactivate, a {@code documentAction} value the quotation window never offers (ETP-6026). */
+  static final String DOC_ACTION_REACTIVATE = "RE";
+  /** The 400 a Reactivate on a quotation answers with (ETP-5704, every status since ETP-6026). */
+  static final String MSG_REACTIVATE_NOT_OFFERED = "ETGO_QuotationReactivateNotOffered";
+  /** Why {@code documentAction:RE} is unavailable on every quotation (ETP-6026). */
+  static final String REASON_REACTIVATE_NOT_OFFERED = "The app does not offer Reactivate on a "
+      + "quotation, so documentAction RE is refused on every quotation. A quotation Under "
+      + "evaluation (UE) is accepted with Convertquotation or rejected with rejectQuotation; to "
+      + "quote again after a voided or rejected one, create a new quotation.";
+  /** Void, a {@code documentAction} value the quotation window never offers (ETP-6026). */
+  static final String DOC_ACTION_VOID = "VO";
+  /** Close, a {@code documentAction} value the quotation window never offers (ETP-6026). */
+  static final String DOC_ACTION_CLOSE = "CL";
+  /** The 400 a Void on a quotation answers with (ETP-6026). */
+  static final String MSG_VOID_NOT_OFFERED = "ETGO_QuotationVoidNotOffered";
+  /** The 400 a Close on a quotation answers with (ETP-6026). */
+  static final String MSG_CLOSE_NOT_OFFERED = "ETGO_QuotationCloseNotOffered";
+  /** Why {@code documentAction:VO} is unavailable on every quotation (ETP-6026). */
+  static final String REASON_VOID_NOT_OFFERED = "The app does not offer Void on a quotation, so "
+      + "documentAction VO is refused on every quotation. A draft quotation (DR) is deleted with "
+      + "etendo_delete; one Under evaluation (UE) is rejected with rejectQuotation.";
+  /** Why {@code documentAction:CL} is unavailable on every quotation (ETP-6026). */
+  static final String REASON_CLOSE_NOT_OFFERED = "The app does not offer Close on a quotation, "
+      + "so documentAction CL is refused on every quotation. A quotation Under evaluation (UE) is "
+      + "accepted with Convertquotation or rejected with rejectQuotation.";
+  /** The 400 for any other value the window does not offer in the quotation's status (ETP-6026). */
+  static final String MSG_ACTION_NOT_OFFERED = "ETGO_QuotationActionNotOffered";
+  /**
+   * The {@code DocAction} values the pre-hook lets run, per stored {@code documentStatus}
+   * (ETP-6026). A status that is not a key accepts nothing.
+   */
+  static final Map<String, Set<String>> ALLOWED_BY_STATUS = Map.of("DR", Set.of("CO"));
+  /**
+   * The values advertised per status: the allow-list plus {@code RJ} Under evaluation, which the
+   * pre-hook routes to the reject flow before the allow-list (ETP-6026).
+   */
+  static final Map<String, Set<String>> ADVERTISED_BY_STATUS =
+      Map.of("DR", Set.of("CO"), "UE", Set.of(DOC_ACTION_REJECT));
+  /** The values of the {@code C_Order.DocAction} list an agent could send, for the advice. */
+  static final List<String> DOC_ACTION_VALUES =
+      List.of("CO", "RE", "VO", "CL", "PR", "AP", "RJ", "PO", "RA", "RC", "XL");
   /** The button's column name, what the SPA posts. */
   private static final String ACTION_CONVERT_COLUMN = "Convertquotation";
-  /** The button's field name, what an MCP {@code etendo_action} call reaches the handler under (ETP-5710). */
+  /** A lower-case spelling of the column name, matched since ETP-5710; kept for any caller using it. */
   private static final String ACTION_CONVERT_FIELD = "convertquotation";
+  /**
+   * The button's DAL property name, {@code createOrder} (column {@code Convertquotation}): what
+   * every MCP {@code etendo_action} call reaches the handler under, whichever name the agent typed
+   * — {@code McpDeclaredActions.customizationNameOf} resolves the button to its property name
+   * (ETP-5704; ETP-5710 had assumed {@code convertquotation}, so MCP never got here).
+   */
+  private static final String ACTION_CONVERT_PROPERTY = Order.PROPERTY_CREATEORDER;
 
   /** The named actions published to agents, in presentation order (ETP-5535). */
   private static final Map<String, NeoActionContract> ACTION_CONTRACTS = buildActionContracts();
@@ -105,6 +183,39 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Inject
   private TotalDiscountService totalDiscountService;
+
+  /**
+   * The order-header post-hook, plus, on the detail GET, the quotation's goods movements
+   * ({@code linkedShipments}, ETP-6002 IMP-3: shipments whose lines point at this quotation's lines)
+   * so its related documents list them — see {@link QuotationShipmentLinks}.
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    NeoResponse result = super.afterHandle(context);
+    if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() == null) {
+      return result;
+    }
+    NeoResponse effective = result != null ? result : context.getPreviousResult();
+    if (effective == null || effective.getBody() == null || effective.getHttpStatus() >= 400) {
+      return result;
+    }
+    JSONObject wrapper = effective.getBody().optJSONObject("response");
+    org.codehaus.jettison.json.JSONArray data = wrapper == null ? null : wrapper.optJSONArray("data");
+    JSONObject rec = data == null || data.length() == 0 ? null : data.optJSONObject(0);
+    if (rec == null) {
+      return result;
+    }
+    QuotationShipmentLinks.enrich(rec, context.getRecordId());
+    return NeoResponse.ok(effective.getBody());
+  }
+
+  /** {@code linkedShipments} is injected on every detail record (ETP-6002). */
+  @Override
+  public java.util.Set<String> responseEnrichedFields() {
+    java.util.Set<String> fields = new java.util.LinkedHashSet<>(super.responseEnrichedFields());
+    fields.add(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS);
+    return fields;
+  }
 
   @Inject
   private ConvertQuotationIntoOrder convertQuotationProcess;
@@ -131,19 +242,16 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
-    // ETP-5703: a create that names a business partner but no address (an agent; the SPA always
-    // sends one) gets the partner's only ship-to location — the AD rule of
-    // C_Order.C_BPartner_Location_ID is "C_BPartner Location - Ship To" — and, only then, a bill-to
-    // for BillTo_ID ("C_BPartner Location - Bill To") that is never left empty (see
-    // PartnerLocationDefaults#alignBillTo). REST single and batch; etendo_create keeps its 422
-    // (declared divergence, neo-headless.md §4.12.9).
-    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
-        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
-        Location.PROPERTY_INVOICETOADDRESS);
+    // ETP-5703: the partner's only ship-to (and its bill-to) on a create without an address.
+    PartnerLocationDefaults.fillOrderLocations(context);
     // ETP-5535: ahead of the total-discount sync, which recalculates on every DocAction — a
     // rejection does not touch the lines, exactly as the UI's rejectQuotation does not.
     if (isRejectDocAction(context)) {
       return rejectQuotationHandler.reject(context);
+    }
+    NeoResponse docActionRefusal = refuseDocActionNotOffered(context);
+    if (docActionRefusal != null) {
+      return docActionRefusal;
     }
     // ETP-5840: exchange rate — recalculation, save and confirmation validation — before the
     // total-discount sync and the actions run.
@@ -172,6 +280,100 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
         rejectQuotationHandler,
         createRejectReasonHandler,
         createDraftInvoiceHandler);
+  }
+
+  /**
+   * The refusal of a {@code DocAction} value the quotation window does not offer in the
+   * quotation's status, or {@code null} (ETP-5704, ETP-6026): an allow-list
+   * ({@link #ALLOWED_BY_STATUS}) decided on the value that will actually run, with
+   * {@link DocActionRefusalGuard}'s fail-closed rules.
+   *
+   * @param context the request reaching the pre-hook
+   * @return the error response, or {@code null} when the request may continue
+   */
+  private static NeoResponse refuseDocActionNotOffered(NeoContext context) {
+    return DocActionRefusalGuard.refuseUnlessAllowed(context,
+        SalesQuotationHeaderHandler::allowedDocActions, SalesQuotationHeaderHandler::refusalKeyOf);
+  }
+
+  /** The refusal key for a value the pre-hook does not allow (ETP-6026). */
+  static String refusalKeyOf(String value) {
+    if (DOC_ACTION_REACTIVATE.equals(value)) {
+      return MSG_REACTIVATE_NOT_OFFERED;
+    }
+    if (DOC_ACTION_VOID.equals(value)) {
+      return MSG_VOID_NOT_OFFERED;
+    }
+    if (DOC_ACTION_CLOSE.equals(value)) {
+      return MSG_CLOSE_NOT_OFFERED;
+    }
+    return MSG_ACTION_NOT_OFFERED;
+  }
+
+  /**
+   * The {@code DocAction} values the quotation accepts, from its stored {@code documentStatus}
+   * (ETP-6026). Read under admin mode, as the DocAction resolution reads the record.
+   *
+   * @param quotationId the quotation the button runs on
+   * @return the accepted values
+   * @throws IllegalStateException when the quotation cannot be loaded — the guard then fails closed
+   */
+  static Set<String> allowedDocActions(String quotationId) {
+    OBContext.setAdminMode(true);
+    try {
+      Order quotation = OBDal.getInstance().get(Order.class, quotationId);
+      if (quotation == null) {
+        throw new IllegalStateException("Quotation " + quotationId + " cannot be loaded");
+      }
+      String status = quotation.getDocumentStatus();
+      return status == null ? Set.of() : ALLOWED_BY_STATUS.getOrDefault(status, Set.of());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * {@inheritDoc} Every {@code documentAction} value the window does not offer in the record's
+   * status ({@link #ADVERTISED_BY_STATUS}) is ruled out, with Reactivate's, Void's and Close's own
+   * reasons and a generic one for the rest (ETP-5704, ETP-6026).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    if (!(subject instanceof Order)) {
+      return Collections.emptyMap();
+    }
+    String status = ((Order) subject).getDocumentStatus();
+    Set<String> advertised =
+        status == null ? Set.of() : ADVERTISED_BY_STATUS.getOrDefault(status, Set.of());
+    Map<String, String> unavailable = new LinkedHashMap<>();
+    for (String value : DOC_ACTION_VALUES) {
+      if (!advertised.contains(value)) {
+        unavailable.put(documentActionKey(value), reasonNotOffered(value));
+      }
+    }
+    return unavailable;
+  }
+
+  /** Why {@code value} is unavailable: RE's, VO's and CL's own reason, else the generic one. */
+  static String reasonNotOffered(String value) {
+    if (DOC_ACTION_REACTIVATE.equals(value)) {
+      return REASON_REACTIVATE_NOT_OFFERED;
+    }
+    if (DOC_ACTION_VOID.equals(value)) {
+      return REASON_VOID_NOT_OFFERED;
+    }
+    if (DOC_ACTION_CLOSE.equals(value)) {
+      return REASON_CLOSE_NOT_OFFERED;
+    }
+    return "The app does not offer documentAction " + value + " on a quotation in this status: "
+        + "it sends a draft to evaluation (CO) and rejects one Under evaluation (RJ, or "
+        + "rejectQuotation); acceptance is the Convertquotation action.";
+  }
+
+  /** The availability key of one {@code documentAction} value, e.g. {@code documentAction:VO}. */
+  private static String documentActionKey(String docAction) {
+    return NeoActionAvailability.valueKey(OrderDocumentAvailability.ACTION_DOCUMENT_ACTION,
+        docAction);
   }
 
   /**
@@ -219,8 +421,15 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     return DocActionRequestSupport.requests(context, DOC_ACTION_REJECT);
   }
 
-  private static boolean isConvertQuotationAction(String action) {
-    return ACTION_CONVERT_COLUMN.equals(action) || ACTION_CONVERT_FIELD.equals(action);
+  /**
+   * Whether the ACTION names the {@code Convertquotation} button under any of the names a channel
+   * reaches this handler with: the column name (the SPA's REST post), the DAL property name
+   * {@code createOrder} (every MCP call, single or batch, and a REST post using it — ETP-5704), or
+   * the lower-case column spelling (ETP-5710).
+   */
+  static boolean isConvertQuotationAction(String action) {
+    return ACTION_CONVERT_COLUMN.equals(action) || ACTION_CONVERT_PROPERTY.equals(action)
+        || ACTION_CONVERT_FIELD.equals(action);
   }
 
   /**
@@ -243,6 +452,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * call is guarded by {@code documentStatus === 'CO'}, so against an order that is already Draft
    * it simply does not fire — no double reactivation.
    *
+   * <p><b>ETP-5704 — MCP did not actually reach this.</b> MCP hands the customization the button's
+   * property name ({@code createOrder}), which was not matched, so an MCP conversion ran core's
+   * classic process: order left Completed and its prices recalculated from the price list. Matching
+   * {@code createOrder} too brings every MCP call (single and batch) here.
+   *
    * <p>Best-effort only for failures the procedure REPORTS (an {@code AD_PInstance} result other
    * than 1, or no access to {@code C_Order_Post}): the conversion is kept, the order stays
    * Completed, the failure is logged and {@code documentStatus} in the response says which state the
@@ -259,10 +473,15 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
           newOrder.getDocumentNo(), quotationId);
       reactivateConvertedOrder(newOrder);
       recomputeConvertedOrderRate(newOrder);
+      // ETP-5051: the plan-quota check of the order created from the quotation and its lines.
+      // Nothing is committed before this point, so a refusal rolls the conversion back whole.
+      NeoQuotaCreateCheck.requireAllowedDocument(newOrder);
       JSONObject result = new JSONObject();
       result.put("salesOrderId", newOrder.getId());
       result.put(FIELD_DOCUMENT_STATUS, newOrder.getDocumentStatus());
       return NeoResponse.ok(result);
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (Exception e) {
       log.error("[ETP-4027] handleConvertQuotation failed for quotation {}: {}",
           quotationId, e.getMessage(), e);

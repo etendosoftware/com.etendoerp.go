@@ -33,6 +33,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.client.kernel.KernelUtils;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
@@ -168,6 +169,12 @@ final class McpParentScope {
     private final String reason;
     private final String problem;
     private final String agentProblem;
+    /**
+     * The id, not the {@link Tab}: the parent tab comes from {@code parentTabOf}'s cache, loaded
+     * in an earlier request's session, so its lazy {@code table} could not be read in a later one
+     * (ETP-6036: {@code LazyInitializationException} on the second {@code allParents} read).
+     */
+    private final String allParentsTabId;
 
     private Scope(Kind kind, String parentField, String parentEntity, Set<String> optionalVerbs,
         String reason, String problem) {
@@ -184,6 +191,36 @@ final class McpParentScope {
       this.reason = reason;
       this.problem = problem;
       this.agentProblem = agentProblem;
+      this.allParentsTabId = null;
+    }
+
+    private Scope(Scope base, String allParentsTabId) {
+      this.kind = base.kind;
+      this.parentField = base.parentField;
+      this.parentEntity = base.parentEntity;
+      this.optionalVerbs = base.optionalVerbs;
+      this.reason = base.reason;
+      this.problem = base.problem;
+      this.agentProblem = base.agentProblem;
+      this.allParentsTabId = allParentsTabId;
+    }
+
+    /** This scope, also listable across every parent on request (ETP-5852). */
+    Scope allowingAllParents(Tab parentTab) {
+      return parentTab == null ? this : new Scope(this, parentTab.getId());
+    }
+
+    /** @return whether {@code etendo_list} may read this child across every parent on request */
+    boolean allowsAllParents() {
+      return allParentsTabId != null;
+    }
+
+    /**
+     * @return the parent tab whose filter scopes a read across parents, loaded in the current
+     *         session, or {@code null}
+     */
+    Tab getAllParentsTab() {
+      return allParentsTabId == null ? null : OBDal.getInstance().get(Tab.class, allParentsTabId);
     }
 
     Kind getKind() {
@@ -310,6 +347,12 @@ final class McpParentScope {
       if (problem != null) {
         item.put("parentProblem", problem);
       }
+      if (allowsAllParents()) {
+        item.put("allParentsAllowed", true);
+        if (reason != null) {
+          item.put("allParentsReason", reason);
+        }
+      }
       return Optional.of(item);
     }
   }
@@ -344,7 +387,12 @@ final class McpParentScope {
       return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), null, resolved.describeProblems(),
           "its MCP configuration is invalid");
     }
-    return resolveChild(entity, tab, resolved.section(McpParentSection.NAME).orElse(null));
+    JSONObject section = resolved.section(McpParentSection.NAME).orElse(null);
+    Scope scope = resolveChild(entity, tab, section);
+    // ETP-5852: only a child gated by a real parent link can be widened on request.
+    return scope.kind == Kind.RESOLVED && McpParentSection.allowsAllParents(section)
+        ? scope.allowingAllParents(parentTabOf(tab))
+        : scope;
   }
 
   /**

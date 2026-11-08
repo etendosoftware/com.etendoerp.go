@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -42,6 +43,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -49,11 +51,15 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.criterion.Criterion;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
+import org.openbravo.base.validation.ValidationException;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -61,6 +67,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
@@ -86,12 +93,41 @@ import org.openbravo.model.common.order.Order;
  * <p>ETP-5840: {@code Convertquotation} is refused for a foreign quotation without a rate, and the
  * created order's rate is recomputed from its own date instead of copied.
  *
+ * <p>ETP-5704 / ETP-6026: {@code DocAction} {@code RE}, {@code VO} and {@code CL} are refused on
+ * every quotation, through {@link DocActionRefusalGuard}; the DocAction cases resolve the
+ * effective action against a mocked DAL, so they reach the sync and the router for the right
+ * reason.
+ *
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
+ * @covers com.etendoerp.go.schemaforge.DocActionRefusalGuard
+ * @covers com.etendoerp.go.schemaforge.QuotationShipmentLinks
  */
 public class SalesQuotationHeaderHandlerTest {
 
   private static final String QUOTATION_ID = "quotation-abc-123";
+
+  /**
+   * ETP-6007: without a DAL, {@code OBContext.setAdminMode(true)} pushes onto its thread-local
+   * stack and only then throws (no session factory). {@code DocumentCurrencyRate} and the
+   * {@code handleConvertQuotation} path call it OUTSIDE their {@code try}, so the {@code finally}
+   * that would restore the frame is never entered, and both then swallow or log the exception
+   * ("[ETP-5840] Could not evaluate the exchange rate of Order …", "[ETP-4027]
+   * handleConvertQuotation failed …"). The cases pass and the orphan frames are charged to the next
+   * {@code OBBaseTest} class in the same Gradle worker running as a non-admin user —
+   * {@code StorageDetailCostColumnsIntegrationTest} in the merge-block cut. Same symptom and same
+   * remedy as ETP-5953 ({@code NeoDefaultsServiceTest}, {@code NeoProcessServiceTest}).
+   *
+   * <p>The root fix is to make those sites enter through {@code NeoAdminMode#enter}, which already
+   * restores the frame when {@code setAdminMode} throws; that is product code, so it goes in its
+   * own ticket. It is a test-environment leak only: in production an {@code OBContext} always
+   * exists, so {@code setAdminContextLocally()} is never reached and the pairs stay balanced.
+   */
+  @After
+  public void clearAdminModeLeakedWithoutDal() {
+    OBContext.clearAdminModeStack();
+  }
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -160,41 +196,233 @@ public class SalesQuotationHeaderHandlerTest {
   // ── syncTotalDiscountOnDocAction wiring ───────────────────────────────────
 
   /**
-   * ACTION DocAction fires recalculate via syncTotalDiscountOnDocAction
-   * (mirrors the SendToEvaluationModal DR→UE path).
+   * ACTION DocAction fires recalculate via syncTotalDiscountOnDocAction — the SendToEvaluationModal
+   * DR→UE path: {@code fieldValues: {}} on a draft whose stored DocAction is {@code CO}. The
+   * Reactivate refusal (ETP-5704) resolves that action, finds CO and lets the request through to
+   * the sync and the router.
    */
   @Test
   public void testHandle_actionDocAction_triggersRecalculate() throws Exception {
     TotalDiscountService svc = mock(TotalDiscountService.class);
     NeoCloneRecordHandler clone = mock(NeoCloneRecordHandler.class);
-    when(clone.handle(any())).thenReturn(null);
+    Tab tab = mock(Tab.class);
+    OBDal dal = quotationDal(tab, "CO", "DR");
+    NeoContext ctx = docActionCtx("DocAction", "{\"fieldValues\":{}}", tab);
 
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("DocAction")
-        .recordId(QUOTATION_ID).build();
+    NeoResponse result = handleWithDal(handlerWith(svc, clone), ctx, dal);
 
-    handlerWith(svc, clone).handle(ctx);
-
+    assertNull(result);
     verify(svc).recalculate(QUOTATION_ID, false);
+    verify(clone).handle(ctx);
   }
 
   /**
-   * ACTION documentAction with empty body → neither path fires recalculate.
+   * ACTION documentAction with empty body → neither path fires recalculate: the body asks for no
+   * completion and, outside the MCP, the field-name spelling is not the sync's button name. The
+   * stored CO resolves, so the request reaches the router instead of failing closed.
    */
   @Test
   public void testHandle_actionDocumentActionNoBody_noRecalculate() throws Exception {
     TotalDiscountService svc = mock(TotalDiscountService.class);
     NeoCloneRecordHandler clone = mock(NeoCloneRecordHandler.class);
-    when(clone.handle(any())).thenReturn(null);
+    Tab tab = mock(Tab.class);
+    OBDal dal = quotationDal(tab, "CO", "DR");
+    NeoContext ctx = docActionCtx("documentAction", "{}", tab);
 
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("documentAction")
-        .recordId(QUOTATION_ID).requestBody(new JSONObject())
-        .build();
+    NeoResponse result = handleWithDal(handlerWith(svc, clone), ctx, dal);
 
-    handlerWith(svc, clone).handle(ctx);
-
+    assertNull(result);
+    verify(clone).handle(ctx);
     verify(svc, never()).recalculate(anyString(), anyBoolean());
+  }
+
+  // ── Reactivate (DocAction RE) refused unless the quotation is voided ──────
+
+  private static final String TAB_ID = "tab-quotation";
+  /** Stored-DocAction sentinel: the context carries no tab, so the action cannot be resolved. */
+  private static final String NO_TAB = "<no tab>";
+  /** Stored-DocAction sentinel: the tab resolves, no quotation has this id. */
+  private static final String RECORD_NOT_FOUND = "<record not found>";
+  /** Status sentinel: the DocAction resolves, but the quotation cannot be loaded for its status. */
+  private static final String STATUS_UNREADABLE = "<status unreadable>";
+  /** The DocAction list the stubbed property accepts, exact case, as the AD list does. */
+  private static final Set<String> DOC_ACTION_LIST =
+      Set.of("CO", "RE", "RJ", "CL", "VO", "PR", "AP", "--");
+
+  /** A POST of the DocAction button (named {@code fieldName}) on the quotation, through {@code tab}. */
+  private static NeoContext docActionCtx(String fieldName, String body, Tab tab) throws Exception {
+    return NeoContext.builder()
+        .specName("sales-quotation").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName(fieldName).recordId(QUOTATION_ID).adTab(tab)
+        .requestBody(new JSONObject(body))
+        .build();
+  }
+
+  /**
+   * A DAL that resolves the quotation the way {@code DocActionResolution} reads it, plus the
+   * typed {@code Order} lookup other code paths use: {@code tab} → its table → the quotation,
+   * whose stored DocAction is {@code stored} and whose status is {@code status}. A root
+   * {@code docAction} is written only when it is in {@link #DOC_ACTION_LIST}. Configures
+   * {@code tab}; call it on its own line, never inside a {@code thenReturn}.
+   */
+  private static OBDal quotationDal(Tab tab, String stored, String status) {
+    OBDal dal = mock(OBDal.class);
+    Table table = mock(Table.class);
+    Property documentAction = mock(Property.class);
+    Entity entity = mock(Entity.class);
+    Order quotation = mock(Order.class);
+    when(tab.getId()).thenReturn(TAB_ID);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getName()).thenReturn("Order");
+    doAnswer(invocation -> {
+      if (!DOC_ACTION_LIST.contains(invocation.getArgument(0))) {
+        throw new ValidationException();
+      }
+      return null;
+    }).when(documentAction).checkIsValidValue(any());
+    when(entity.hasProperty("documentAction")).thenReturn(true);
+    when(entity.getProperty("documentAction")).thenReturn(documentAction);
+    when(quotation.getEntity()).thenReturn(entity);
+    when(quotation.get("documentAction")).thenReturn(stored);
+    when(quotation.getDocumentStatus()).thenReturn(status);
+    when(dal.get(Tab.class, TAB_ID)).thenReturn(tab);
+    if (!RECORD_NOT_FOUND.equals(stored)) {
+      when(dal.get("Order", QUOTATION_ID)).thenReturn(quotation);
+    }
+    if (!STATUS_UNREADABLE.equals(status)) {
+      when(dal.get(Order.class, QUOTATION_ID)).thenReturn(quotation);
+    }
+    return dal;
+  }
+
+  /** Runs {@code handler.handle(ctx)} with {@code dal} as the DAL and admin mode a no-op. */
+  private static NeoResponse handleWithDal(SalesQuotationHeaderHandler handler, NeoContext ctx,
+      OBDal dal) {
+    try (MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      return handler.handle(ctx);
+    }
+  }
+
+  /**
+   * DocAction allow-list through {@code handle()} (ETP-6026): only {@code CO} on a draft runs,
+   * decided on the DocAction that will actually run (root {@code docAction} when the DAL accepts
+   * it, else the stored value — never {@code fieldValues}) and the stored {@code documentStatus}.
+   * {@code RE} answers {@code ETGO_QuotationReactivateNotOffered} in every status, voided included
+   * (the app never offers it, and core refuses any action on a voided quotation); any other value
+   * the window does not offer answers {@code ETGO_QuotationActionNotOffered}. An unknown id answers
+   * 404 whatever the action; an action or status that cannot be read fails closed with 500
+   * {@code ETGO_DocActionCheckFailed}. A refusal reaches neither the total-discount sync nor the
+   * router. {@code RJ} keeps going to the reject flow, also from {@code fieldValues} on a quotation
+   * whose stored action is RE. ETP-6026: {@code VO} and {@code CL} are refused on every quotation
+   * ({@code ETGO_QuotationVoidNotOffered} / {@code ETGO_QuotationCloseNotOffered}).
+   */
+  @Test
+  public void testHandle_docActionAllowList_table() throws Exception {
+    final String reject = "<reject flow>";
+    final String routed = "<router>";
+    final String notOffered = SalesQuotationHeaderHandler.MSG_REACTIVATE_NOT_OFFERED;
+    final String checkFailed = DocActionRefusalGuard.MSG_CHECK_FAILED;
+    final String voidRefused = SalesQuotationHeaderHandler.MSG_VOID_NOT_OFFERED;
+    final String closeRefused = SalesQuotationHeaderHandler.MSG_CLOSE_NOT_OFFERED;
+    final String actionRefused = SalesQuotationHeaderHandler.MSG_ACTION_NOT_OFFERED;
+    // Columns: the label, the button name, the body, the stored DocAction, the stored status, the
+    // expected status (null when it is not refused) and the expected outcome: the refusal's
+    // messageKeys entry (else its error message), or the flow that answered.
+    Object[][] cases = {
+        { "root RE on a quotation under evaluation is refused",
+            "DocAction", "{\"docAction\":\"RE\"}", "CO", "UE", 400, notOffered },
+        { "root RE on a voided quotation is refused too",
+            "DocAction", "{\"docAction\":\"RE\"}", "RE", "VO", 400, notOffered },
+        { "empty body runs the stored RE of a draft and is refused",
+            "DocAction", "{}", "RE", "DR", 400, notOffered },
+        { "root RE wins over fieldValues CO",
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}",
+            "CO", "UE", 400, notOffered },
+        { "fieldValues RE without root runs the stored CO of a draft",
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", "DR", null,
+            routed },
+        { "root re outside the list is not written, the stored RE runs and is refused",
+            "DocAction", "{\"docAction\":\"re\"}", "RE", "UE", 400, notOffered },
+        { "the button named by its field name is guarded too",
+            "documentAction", "{\"docAction\":\"RE\"}", "CO", "UE", 400, notOffered },
+        { "an unknown quotation id answers 404 whatever the action",
+            "DocAction", "{\"docAction\":\"CO\"}", RECORD_NOT_FOUND, "UE", 404,
+            NeoActionRecordGuard.MSG_RECORD_NOT_FOUND },
+        { "an action that cannot be resolved fails closed",
+            "DocAction", "{\"docAction\":\"RE\"}", NO_TAB, "UE", 500, checkFailed },
+        { "a status that cannot be read fails closed",
+            "DocAction", "{\"docAction\":\"RE\"}", "RE", STATUS_UNREADABLE, 500, checkFailed },
+        { "fieldValues RJ with a stored RE still goes to the reject flow",
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"RJ\"}}", "RE", "UE", null,
+            reject },
+        // ETP-6026: Void and Close are refused on every quotation, whatever its status.
+        { "root VO on a draft quotation is refused",
+            "DocAction", "{\"docAction\":\"VO\"}", "CO", "DR", 400, voidRefused },
+        { "root VO on a quotation under evaluation is refused",
+            "DocAction", "{\"docAction\":\"VO\"}", "CO", "UE", 400, voidRefused },
+        { "root CL on a quotation under evaluation is refused",
+            "DocAction", "{\"docAction\":\"CL\"}", "CO", "UE", 400, closeRefused },
+        { "empty body runs the stored CL and is refused",
+            "DocAction", "{}", "CL", "UE", 400, closeRefused },
+        // ETP-6026 allow-list: only CO on a draft runs; everything else is refused.
+        { "SendToEvaluationModal's empty body runs the stored CO of a draft",
+            "DocAction", "{\"fieldValues\":{}}", "CO", "DR", null, routed },
+        { "root PR on a draft is refused (it used to take the quotation to IP)",
+            "DocAction", "{\"docAction\":\"PR\"}", "CO", "DR", 400, actionRefused },
+        { "root AP on an in-progress quotation is refused",
+            "DocAction", "{\"docAction\":\"AP\"}", "AP", "IP", 400, actionRefused },
+        { "root CO on an in-progress quotation is refused",
+            "DocAction", "{\"docAction\":\"CO\"}", "AP", "IP", 400, actionRefused },
+        { "root CO on a quotation under evaluation is refused",
+            "DocAction", "{\"docAction\":\"CO\"}", "CO", "UE", 400, actionRefused },
+        { "empty body running the stored -- is refused",
+            "DocAction", "{}", "--", "UE", 400, actionRefused },
+        { "root VO by field name on a voided quotation is still refused",
+            "documentAction", "{\"docAction\":\"VO\"}", "RE", "VO", 400, voidRefused },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      String stored = (String) c[3];
+      Integer expectedStatus = (Integer) c[5];
+      String expected = (String) c[6];
+
+      TotalDiscountService svc = mock(TotalDiscountService.class);
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      RejectQuotationHandler rejectHandler = mock(RejectQuotationHandler.class);
+      SalesQuotationHeaderHandler handler = fullyWiredHandler(svc, router,
+          mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class), rejectHandler,
+          mock(CreateRejectReasonHandler.class));
+      Tab tab = mock(Tab.class);
+      OBDal dal = quotationDal(tab, stored, (String) c[4]);
+      NeoContext ctx = docActionCtx((String) c[1], (String) c[2],
+          NO_TAB.equals(stored) ? null : tab);
+      NeoResponse rejected = NeoResponse.ok(new JSONObject().put("documentStatus", "CJ"));
+      when(rejectHandler.reject(ctx)).thenReturn(rejected);
+
+      NeoResponse result = handleWithDal(handler, ctx, dal);
+
+      if (reject.equals(expected)) {
+        assertSame(label, rejected, result);
+        verify(router, never()).handle(any());
+      } else if (routed.equals(expected)) {
+        assertNull(label, result);
+        verify(rejectHandler, never()).reject(any());
+        verify(router).handle(ctx);
+      } else {
+        assertNotNull(label, result);
+        assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        JSONArray keys = error.optJSONArray(NeoProcessService.MESSAGE_KEYS);
+        assertEquals(label, expected,
+            keys != null && keys.length() > 0 ? keys.getString(0) : error.getString("message"));
+        verify(rejectHandler, never()).reject(any());
+        verify(router, never()).handle(any());
+        Mockito.verifyNoInteractions(svc);
+      }
+    }
   }
 
   // ── clone dispatch ────────────────────────────────────────────────────────
@@ -479,64 +707,67 @@ public class SalesQuotationHeaderHandlerTest {
    * <p>Passing {@code false} ensures the prices agreed in the quotation are kept in the
    * new sales order. The default behaviour ({@code true}) would re-fetch prices from the
    * active price list.
+   *
+   * <p>The button is reached under three names: its column ({@code Convertquotation}, the SPA),
+   * its field name ({@code convertquotation}, ETP-5710) and its DAL property name
+   * ({@code createOrder}), which is what every MCP call carries (ETP-5704 — until then it fell
+   * through to core's classic process, which recalculates prices and leaves the order Completed).
+   * None of them reaches the generic router, and none is taken for the DocAction button by the
+   * Reactivate refusal: no DAL is mocked here, so a DocAction resolution would fail closed.
    */
   @Test
   public void testHandle_convertQuotationAction_preservesQuotationPrices() throws Exception {
-    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
-    Order order = mock(Order.class);
-    when(order.getId()).thenReturn("order-001");
-    when(order.getDocumentNo()).thenReturn("SO-001");
-    when(process.convertQuotationIntoSalesOrder(eq(false), eq("q-001"))).thenReturn(order);
+    for (String action : new String[] { "Convertquotation", "convertquotation", "createOrder" }) {
+      ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      Order order = mock(Order.class);
+      when(order.getId()).thenReturn("order-001");
+      when(order.getDocumentNo()).thenReturn("SO-001");
+      when(process.convertQuotationIntoSalesOrder(eq(false), eq("q-001"))).thenReturn(order);
 
-    SalesQuotationHeaderHandler handler = fullyWiredHandler(
-        mock(TotalDiscountService.class),
-        mock(NeoCloneRecordHandler.class),
-        mock(CurrencyOptionsHandler.class),
-        mock(CreateDraftInvoiceHandler.class),
-        mock(RejectQuotationHandler.class),
-        mock(CreateRejectReasonHandler.class));
-    setField(handler, "convertQuotationProcess", process);
+      SalesQuotationHeaderHandler handler = fullyWiredHandler(
+          mock(TotalDiscountService.class),
+          router,
+          mock(CurrencyOptionsHandler.class),
+          mock(CreateDraftInvoiceHandler.class),
+          mock(RejectQuotationHandler.class),
+          mock(CreateRejectReasonHandler.class));
+      setField(handler, "convertQuotationProcess", process);
 
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-        .fieldName("Convertquotation").recordId("q-001").build();
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName(action).recordId("q-001").build();
 
-    NeoResponse result = handler.handle(ctx);
+      NeoResponse result = handler.handle(ctx);
 
-    // Non-null proves handle() short-circuited the default button handler.
-    assertNotNull(result);
-    // recalculatePrices=false is the critical invariant — quotation prices must be kept.
-    verify(process).convertQuotationIntoSalesOrder(false, "q-001");
+      // Non-null proves handle() short-circuited the default button handler.
+      assertNotNull(action, result);
+      // recalculatePrices=false is the critical invariant — quotation prices must be kept.
+      verify(process).convertQuotationIntoSalesOrder(false, "q-001");
+      verify(router, never()).handle(any());
+    }
   }
 
-  /** ETP-5710: an MCP etendo_action call reaches the handler under the button's field name. */
+  /**
+   * Which action names are the conversion button: its column, its DAL property name and its field
+   * name, exactly as spelled — never another casing, another button, a blank or a missing name.
+   */
   @Test
-  public void testHandle_convertQuotationByFieldName_preservesQuotationPrices() throws Exception {
-    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
-    Order order = mock(Order.class);
-    when(order.getId()).thenReturn("order-001");
-    when(order.getDocumentNo()).thenReturn("SO-001");
-    when(process.convertQuotationIntoSalesOrder(eq(false), eq("q-001"))).thenReturn(order);
-
-    SalesQuotationHeaderHandler handler = fullyWiredHandler(
-        mock(TotalDiscountService.class),
-        mock(NeoCloneRecordHandler.class),
-        mock(CurrencyOptionsHandler.class),
-        mock(CreateDraftInvoiceHandler.class),
-        mock(RejectQuotationHandler.class),
-        mock(CreateRejectReasonHandler.class));
-    setField(handler, "convertQuotationProcess", process);
-
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-        .fieldName("convertquotation").recordId("q-001").build();
-
-    NeoResponse result = handler.handle(ctx);
-
-    // Non-null proves handle() short-circuited the default button handler.
-    assertNotNull(result);
-    // recalculatePrices=false is the critical invariant — quotation prices must be kept.
-    verify(process).convertQuotationIntoSalesOrder(false, "q-001");
+  public void testIsConvertQuotationAction_table() {
+    Object[][] cases = {
+        { "Convertquotation", true },
+        { "createOrder", true },
+        { "convertquotation", true },
+        { "CreateOrder", false },
+        { "createorder", false },
+        { "DocAction", false },
+        { "", false },
+        { null, false },
+    };
+    for (Object[] c : cases) {
+      assertEquals(String.valueOf(c[0]), c[1],
+          SalesQuotationHeaderHandler.isConvertQuotationAction((String) c[0]));
+    }
   }
 
   // ── ETP-5528: the converted order is reactivated to Draft ─────────────────
@@ -546,16 +777,28 @@ public class SalesQuotationHeaderHandlerTest {
    * {@link OrderDocActionSupport} statically mocked by the caller.
    */
   private static NeoResponse convertQuotation(Order order) throws Exception {
-    return convertQuotation(order, (rates, session) -> { });
+    return convertQuotation("Convertquotation", order, (rates, session) -> { });
+  }
+
+  /** {@link #convertQuotation(Order)} reached under the action name {@code action}. */
+  private static NeoResponse convertQuotation(String action, Order order) throws Exception {
+    return convertQuotation(action, order, (rates, session) -> { });
+  }
+
+  /** {@link #convertQuotation(String, Order, java.util.function.BiConsumer)} as Convertquotation. */
+  private static NeoResponse convertQuotation(Order order,
+      java.util.function.BiConsumer<List<DocumentCurrencyRate>, Session> verifier)
+      throws Exception {
+    return convertQuotation("Convertquotation", order, verifier);
   }
 
   /**
-   * {@link #convertQuotation(Order)} with the DAL mocked (the quotation itself is not found, so the
-   * pre-conversion rate check lets it through) and every {@link DocumentCurrencyRate} built during
-   * the conversion mocked; {@code verifier} receives those and the session the order is refreshed
-   * on.
+   * {@link #convertQuotation(Order)} under the action name {@code action}, with the DAL mocked (the
+   * quotation itself is not found, so the pre-conversion rate check lets it through) and every
+   * {@link DocumentCurrencyRate} built during the conversion mocked; {@code verifier} receives
+   * those and the session the order is refreshed on.
    */
-  private static NeoResponse convertQuotation(Order order,
+  private static NeoResponse convertQuotation(String action, Order order,
       java.util.function.BiConsumer<List<DocumentCurrencyRate>, Session> verifier)
       throws Exception {
     ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
@@ -575,7 +818,7 @@ public class SalesQuotationHeaderHandlerTest {
       dalStatic.when(OBDal::getInstance).thenReturn(dal);
       NeoResponse result = handler.handle(NeoContext.builder()
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("Convertquotation").recordId("q-5528").build());
+          .fieldName(action).recordId("q-5528").build());
       verifier.accept(rates.constructed(), session);
       return result;
     }
@@ -592,22 +835,68 @@ public class SalesQuotationHeaderHandlerTest {
 
   /**
    * Core completes the order it creates: a CO order is reactivated through C_Order_Post 'RE' and
-   * the response reports the Draft status the procedure left.
+   * the response reports the Draft status the procedure left — also when the MCP reaches the
+   * button as {@code createOrder}, its property name (ETP-5704).
    */
   @Test
   public void testConvertQuotation_completedOrder_isReactivatedToDraft() throws Exception {
+    for (String action : new String[] { "Convertquotation", "createOrder" }) {
+      Order order = orderWithStatus("CO", "DR");
+      try (MockedStatic<OrderDocActionSupport> docAction =
+               Mockito.mockStatic(OrderDocActionSupport.class)) {
+        docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
+
+        NeoResponse result = convertQuotation(action, order);
+
+        docAction.verify(() -> OrderDocActionSupport.runDocAction(order, "RE"));
+        assertEquals(action, 200, result.getHttpStatus());
+        assertEquals(action, "order-5528", result.getBody().getString("salesOrderId"));
+        assertEquals(action, "DR", result.getBody().getString("documentStatus"));
+      }
+    }
+  }
+
+  /**
+   * ETP-5051 — the order created from the quotation and its lines are checked against the plan
+   * quotas after the conversion and its reactivation, before the answer. Nothing has been committed
+   * yet, so a refusal rolls the WHOLE conversion back: 403 {@code QUOTA_EXCEEDED}, a rollback, no
+   * commit, and no {@code salesOrderId} handed to the client.
+   */
+  @Test
+  public void testConvertQuotation_overABlockQuota_rollsTheWholeConversionBack() throws Exception {
     Order order = orderWithStatus("CO", "DR");
-    try (MockedStatic<OrderDocActionSupport> docAction =
-             Mockito.mockStatic(OrderDocActionSupport.class)) {
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    when(process.convertQuotationIntoSalesOrder(false, "q-5528")).thenReturn(order);
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class), mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class), mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+    OBDal dal = mock(OBDal.class);
+    when(dal.getSession()).thenReturn(mock(Session.class));
+
+    NeoResponse result;
+    try (MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class);
+         MockedConstruction<DocumentCurrencyRate> rates =
+             Mockito.mockConstruction(DocumentCurrencyRate.class);
+         MockedStatic<OrderDocActionSupport> docAction =
+             Mockito.mockStatic(OrderDocActionSupport.class);
+         MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
       docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
 
-      NeoResponse result = convertQuotation(order);
+      result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("Convertquotation").recordId("q-5528").build());
 
-      docAction.verify(() -> OrderDocActionSupport.runDocAction(order, "RE"));
-      assertEquals(200, result.getHttpStatus());
-      assertEquals("order-5528", result.getBody().getString("salesOrderId"));
-      assertEquals("DR", result.getBody().getString("documentStatus"));
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowedDocument(order));
     }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(result);
+    assertFalse(result.getBody().has("salesOrderId"));
+    verify(dal).rollbackAndClose();
+    verify(dal, never()).commitAndClose();
   }
 
   /**
@@ -693,7 +982,8 @@ public class SalesQuotationHeaderHandlerTest {
   /**
    * A foreign-currency quotation without a rate is not converted: the request answers the 422
    * completion refusal (organization and document ISO codes as params) and the conversion process
-   * is never called — on every channel, since both REST and MCP reach this pre-hook.
+   * is never called — on every channel, since both REST and MCP reach this pre-hook, the MCP under
+   * the button's property name {@code createOrder} (ETP-5704).
    */
   @Test
   public void testConvertQuotation_foreignQuotationWithoutRate_isRefused() throws Exception {
@@ -721,24 +1011,28 @@ public class SalesQuotationHeaderHandlerTest {
       dalStatic.when(OBDal::getInstance).thenReturn(dal);
       currencies.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
 
-      NeoResponse result = handler.handle(NeoContext.builder()
-          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("Convertquotation").recordId("q-fx").build());
+      for (String action : new String[] { "Convertquotation", "createOrder" }) {
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName(action).recordId("q-fx").build());
 
-      assertEquals(422, result.getHttpStatus());
-      JSONObject error = result.getBody().getJSONObject("error");
-      assertEquals(DocumentRateMessages.CODE_MISSING_ON_COMPLETE, error.getString("code"));
-      JSONObject params = error.getJSONObject(NeoProcessService.MESSAGE_PARAMS);
-      assertEquals("eur-id", params.getString("orgCurrency"));
-      assertEquals("usd-id", params.getString("documentCurrency"));
+        assertEquals(action, 422, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals(action, DocumentRateMessages.CODE_MISSING_ON_COMPLETE,
+            error.getString("code"));
+        JSONObject params = error.getJSONObject(NeoProcessService.MESSAGE_PARAMS);
+        assertEquals(action, "eur-id", params.getString("orgCurrency"));
+        assertEquals(action, "usd-id", params.getString("documentCurrency"));
+      }
       verify(process, never()).convertQuotationIntoSalesOrder(anyBoolean(), anyString());
     }
   }
 
   // ── afterHandle GET — total discount adjustment (ETP-4029 follow-up) ─────
   //
-  // Exercised through the inherited AbstractOrderHeaderHandler#afterHandle GET path — this
-  // handler no longer overrides afterHandle (ETP-5840 removed the Convertquotation rate transfer).
+  // Exercised through the inherited AbstractOrderHeaderHandler#afterHandle GET path, which this
+  // handler's override runs first (ETP-6002 only adds linkedShipments on the detail GET; the
+  // reader's failure on these unstubbed read-only connections is logged and leaves the key out).
 
   private static SalesQuotationHeaderHandler handlerWithTotalDiscountMock(
       TotalDiscountService svc) throws Exception {
@@ -856,6 +1150,87 @@ public class SalesQuotationHeaderHandlerTest {
           .getDouble("grandTotalAmount");
       assertEquals(198.99, grand, 0.005);
     }
+  }
+
+  // ── afterHandle GET — linkedShipments (QuotationShipmentLinks) ────────────
+
+  /**
+   * {@code linkedShipments} — the shipments whose header or lines point at the quotation — is read
+   * on the detail GET only: never on the list, and a failed read leaves the key out without
+   * failing the GET. One row per case: {@code label, recordId, readFails, expectedShipments}
+   * ({@code -1} = key absent).
+   */
+  @Test
+  public void testAfterHandle_linkedShipmentsOnDetailGetOnly() throws Exception {
+    Object[][] cases = {
+        { "detail GET", "quot-ship-1", false, 1 },
+        { "list GET", null, false, -1 },
+        { "detail GET with a failed read", "quot-ship-1", true, -1 },
+    };
+    for (Object[] row : cases) {
+      String label = (String) row[0];
+      String recordId = (String) row[1];
+      boolean readFails = (Boolean) row[2];
+      int expected = (Integer) row[3];
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        stubNoLinkedDocuments(obDalMock);
+        ResultSet emptyRs = mock(ResultSet.class);
+        when(emptyRs.next()).thenReturn(false);
+        PreparedStatement otherPs = mock(PreparedStatement.class);
+        when(otherPs.executeQuery()).thenReturn(emptyRs);
+        ResultSet shipmentsRs = mock(ResultSet.class);
+        when(shipmentsRs.next()).thenReturn(true, false);
+        when(shipmentsRs.getString(1)).thenReturn("ship-1");
+        when(shipmentsRs.getString(2)).thenReturn("SH-1");
+        when(shipmentsRs.getString(3)).thenReturn("CO");
+        when(shipmentsRs.getString(4)).thenReturn("N");
+        PreparedStatement shipmentsPs = mock(PreparedStatement.class);
+        when(shipmentsPs.executeQuery()).thenReturn(shipmentsRs);
+        Connection readOnlyConn = mock(Connection.class);
+        when(readOnlyConn.prepareStatement(anyString())).thenReturn(otherPs);
+        if (readFails) {
+          when(readOnlyConn.prepareStatement(QuotationShipmentLinks.SQL))
+              .thenThrow(new java.sql.SQLException("read failed"));
+        } else {
+          when(readOnlyConn.prepareStatement(QuotationShipmentLinks.SQL)).thenReturn(shipmentsPs);
+        }
+        OBDal readOnlyDal = mock(OBDal.class);
+        when(readOnlyDal.getConnection()).thenReturn(readOnlyConn);
+        obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+
+        JSONObject body = new JSONObject().put("response", new JSONObject().put("data",
+            new JSONArray().put(quotationRecordWithDiscount(true, 0.0, 100.0))));
+        NeoContext ctx = getCtx(recordId);
+        ctx.setPreviousResult(NeoResponse.ok(body));
+
+        NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+        JSONObject rec = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+        if (expected < 0) {
+          assertFalse(label, rec.has(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS));
+        } else {
+          assertNotNull(label, result);
+          JSONArray shipments = result.getBody().getJSONObject("response").getJSONArray("data")
+              .getJSONObject(0).getJSONArray(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS);
+          assertEquals(label, expected, shipments.length());
+          assertEquals(label, "ship-1", shipments.getJSONObject(0).getString("id"));
+          assertEquals(label, "SH-1", shipments.getJSONObject(0).getString("documentNo"));
+          assertFalse(label, shipments.getJSONObject(0).getBoolean("isReturn"));
+        }
+        if (recordId == null) {
+          verify(readOnlyConn, never()).prepareStatement(QuotationShipmentLinks.SQL);
+        } else if (readFails) {
+          assertNotNull(label + ": a failed read must not fail the GET", result);
+        }
+      }
+    }
+  }
+
+  /** The injected key is declared, so the response field filter keeps it. */
+  @Test
+  public void testResponseEnrichedFields_declaresLinkedShipments() {
+    assertTrue(new SalesQuotationHeaderHandler().responseEnrichedFields()
+        .contains(QuotationShipmentLinks.FIELD_LINKED_SHIPMENTS));
   }
 
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────

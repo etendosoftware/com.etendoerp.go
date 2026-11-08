@@ -25,6 +25,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
+
 /**
  * Removes keys that an MCP client may not receive, from the body of a tool result (ETP-5306).
  *
@@ -51,6 +53,13 @@ import org.codehaus.jettison.json.JSONObject;
  * {@code _entityName} and {@code id}. The construction rule is now declared once — in
  * {@code etendo_schema}'s hint and in the {@code docs} preamble — instead of being paid for on every
  * row of every response, which is also why this is an Agent Context Economy win, not just a fix.
+ *
+ * <p><b>Accounting data (ETP-5684).</b> For a role without {@code showAccountingFields}, the
+ * accounting properties ({@code NeoAccountingAccessPolicy#isAccountingProperty}: the accounting
+ * status and the posting button) are removed too, at any depth, so no tool — read, write echo,
+ * batch, search, resource — hands them to the agent. The REST API keeps them on purpose: the SPA
+ * derives the read-only state of a posted document from {@code posted}; declared in
+ * {@code neo-headless.md} §4.12.9.</p>
  *
  * <p><b>MCP surface only.</b> The stripping happens in the MCP content wrappers
  * ({@code McpToolRouter#wrapAsTextContent} / {@code wrapAsErrorContent}), not in the shared
@@ -141,6 +150,11 @@ final class McpResponseSanitizer {
       return "{}";
     }
     strip(body);
+    // ETP-5684: a role without showAccountingFields reads no accounting status through the MCP,
+    // whatever tool produced the body. The role flag is read only when there is one to remove.
+    if (containsAccountingKey(body) && !NeoAccountingAccessPolicy.currentRoleSeesAccounting()) {
+      stripAccounting(body);
+    }
     return serialize(body);
   }
 
@@ -180,6 +194,64 @@ final class McpResponseSanitizer {
     for (int i = 0; i < array.length(); i++) {
       stripValue(array.get(i));
     }
+  }
+
+  /**
+   * Whether {@code value} holds an accounting property at any depth.
+   *
+   * @param value a JSON value
+   * @return {@code true} when an accounting key is present
+   */
+  static boolean containsAccountingKey(Object value) throws JSONException {
+    if (value instanceof JSONObject) {
+      JSONObject object = (JSONObject) value;
+      for (String key : keysOf(object)) {
+        if (NeoAccountingAccessPolicy.isAccountingProperty(key)
+            || containsAccountingKey(object.get(key))) {
+          return true;
+        }
+      }
+    } else if (value instanceof JSONArray) {
+      JSONArray array = (JSONArray) value;
+      for (int i = 0; i < array.length(); i++) {
+        if (containsAccountingKey(array.get(i))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Remove every accounting property from {@code value} in place, at any depth.
+   *
+   * @param value a JSON value
+   */
+  static void stripAccounting(Object value) throws JSONException {
+    if (value instanceof JSONObject) {
+      JSONObject object = (JSONObject) value;
+      for (String key : keysOf(object)) {
+        if (NeoAccountingAccessPolicy.isAccountingProperty(key)) {
+          object.remove(key);
+        } else {
+          stripAccounting(object.get(key));
+        }
+      }
+    } else if (value instanceof JSONArray) {
+      JSONArray array = (JSONArray) value;
+      for (int i = 0; i < array.length(); i++) {
+        stripAccounting(array.get(i));
+      }
+    }
+  }
+
+  /** A snapshot of the keys, so the object can be changed while they are walked. */
+  private static List<String> keysOf(JSONObject object) {
+    List<String> keys = new ArrayList<>();
+    for (Iterator<?> it = object.keys(); it.hasNext();) {
+      keys.add(String.valueOf(it.next()));
+    }
+    return keys;
   }
 
   /** Dispatch on the runtime type of a JSON value; scalars are left alone. */

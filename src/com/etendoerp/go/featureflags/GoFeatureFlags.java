@@ -248,11 +248,16 @@ public final class GoFeatureFlags {
    * {@code EM_Etgo_Isvendor} columns, their AD metadata, the {@code ETGO_SF_FIELD} rows and the
    * reference/sample data ship unconditionally; with the flag off nothing enforces or reads them.
    *
-   * <p><b>Environment level and backend-only.</b> Evaluated with an account-less context by
-   * {@code ContactTypeRules#isEnabled()}, the only place it is read (the onboarding's
-   * {@code OnboardingDefaultContactCategoryService} goes through it too); nothing in the browser reads it, so
-   * never add it to the web client's {@code flag-keys.js}. Locally
-   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}.
+   * <p><b>Per account, read on both ends.</b> The backend evaluates it only through
+   * {@code ContactTypeRules#isEnabled()} — targeted at the {@code ETGO_ACCOUNT} email of the user
+   * making the request, plus {@value FeatureFlagContext#ATTRIBUTE_CLIENT_ID} — and the onboarding's
+   * {@code OnboardingDefaultContactCategoryService} through {@code ContactTypeRules#isEnabled(String,
+   * String)}, targeted at the account the tenant is handed to (the hand-over runs as System). The
+   * web client reads it too ({@code CONTACT_CATEGORY_TYPE} in {@code flag-keys.js}) and publishes
+   * the same account email as its {@code email} attribute, so a targeting rule must be written on
+   * the email for both ends to agree. Per-account targeting needs a hosted arm (Datadog, or
+   * ConfigCat while it is the fallback); locally {@code etendo.go.flags.contact-category-type} /
+   * {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE} stays a plain per-environment boolean.
    */
   public static final String FLAG_CONTACT_CATEGORY_TYPE = "contact-category-type";
 
@@ -275,6 +280,22 @@ public final class GoFeatureFlags {
       "billing-reconciliation-schedule";
 
   /**
+   * ETP-5051 — whether the usage aggregation is scheduled ({@code open-and-notable-topics.md}
+   * §5.15). The same shape as {@link #FLAG_BILLING_RECONCILIATION_SCHEDULE}: strictly off by
+   * default (and off on every failure of this class); while it is off
+   * {@code UsageAggregationScheduleStartup} plants no process request, so turning it on takes effect
+   * at the next restart. The process checks it on every scheduled run (a process request with
+   * timing {@code S}), whoever created the request, so turning it off stops all scheduled work
+   * without a restart: a scheduled run with the flag off does nothing and ends as ERROR in Process
+   * Monitor. A run started from the Classic menu or once from a Process Request is not gated.
+   * Environment level, evaluated with an empty context; locally
+   * {@code etendo.go.flags.usage-aggregation-schedule} /
+   * {@code ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE}. Backend-only. Its callers are
+   * {@code UsageAggregationScheduleStartup} and {@code UsageAggregationProcess}.
+   */
+  public static final String FLAG_USAGE_AGGREGATION_SCHEDULE = "usage-aggregation-schedule";
+
+  /**
    * ETP-5806 — whether the structured address fields (Street/Number/Building Name) are visible,
    * writable and validated across the 4 address popups (Contacts, Warehouse, Business Partner
    * location, onboarding's Company step), MCP, and the onboarding mandatory-address check.
@@ -295,20 +316,153 @@ public final class GoFeatureFlags {
    * onboarding session bootstrap, and never imports a flag key of its own. See
    * {@code docs/neo-headless.md} §8c and the ETP-5806 plan for the full architecture.
    *
-   * <p><b>Environment level for now</b> (plain boolean, no per-account targeting) — the TTL is a
-   * hard global deadline, not a staged per-tenant rollout; revisit if that changes.
+   * <p><b>Per-account targeting, staged rollout (ETP-5806 follow-up).</b> <b>Every</b> call site
+   * evaluates it against {@link FeatureFlagContext#forAccount(String)} with a real
+   * {@code ETGO_ACCOUNT} email, never {@code null}, mirroring {@link #FLAG_BP_PORTAL_LINK}'s
+   * pattern. This lets a Datadog targeting rule (e.g. "email is one of [...]") stage the rollout —
+   * localization team first, then the rest of Etendo, then everyone — instead of switching on for
+   * every tenant at once. With no targeting rule configured the answer is still the plain
+   * per-environment boolean default, so the TTL remains a hard global deadline regardless of how
+   * the rollout is staged.
    * Locally {@code etendo.go.flags.structured-address-for-sepa} / {@code ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA}.
    * Must also be created as a boolean setting in the ConfigCat dashboard before it can be toggled
    * in any environment with an SDK key configured — an undeclared ConfigCat setting resolves to
    * this class's code default ({@code false}) regardless of local configuration.
    *
-   * <p>Callers: {@code SFWindowAccessMap} (capability), {@code ContactsLocationAddressHandler},
-   * {@code WarehouseLocationHandler}, {@code BpLocationHandler} (NEO read/write gating),
-   * {@code AddressVirtualSelectorPolicy}/{@code McpSchemaFieldBuilder} (MCP schema gating),
-   * {@code StructuredAddressComposer} and {@code EtendoGoJwtServlet} (mandatory-field
-   * validation).
+   * <p><b>Where each call site gets the email.</b> Two shapes, because the account is knowable in
+   * two different ways and resolving it implicitly would be wrong for the second:
+   * <ul>
+   *   <li><b>Authenticated request</b> — {@code GoAccountResolver#currentAccountEmail()} at
+   *       the call site: {@code SFWindowAccessMap} (capability),
+   *       {@code ContactsLocationAddressHandler}/{@code WarehouseLocationHandler}/
+   *       {@code BpLocationHandler} (NEO read/write gating),
+   *       {@code AddressVirtualSelectorPolicy}/{@code McpSchemaFieldBuilder} (MCP schema gating).
+   *       Resolved once per request and threaded through the handler's own helpers, never
+   *       re-resolved per check. Where the call site later switches to admin mode, the email is
+   *       resolved <em>before</em> that switch (the {@code SFWindowAccessMap} ordering trap).</li>
+   *   <li><b>Onboarding</b> — the account is already in hand and provisioning runs under an admin
+   *       execution context with no caller identity to recover, so it is passed down explicitly:
+   *       {@code EtendoGoJwtServlet#buildSessionCapabilities} and the two
+   *       {@code validateStructuredAddress*} checks take it as a parameter, and it rides
+   *       {@code OrgInfoInput} to
+   *       {@code OnboardingOrgInfoService#createLocation}, which persists the fields.</li>
+   * </ul>
+   * {@code StructuredAddressComposer#isEnabled(String)} is the one evaluator they all share and
+   * it has <b>no account-less overload</b>, by design: validation, persistence and MCP-schema
+   * exposure therefore resolve for the same account the capability signal did, so a targeted
+   * account can never see the fields in the UI and have the backend silently drop what it fills
+   * in (the gap this follow-up closed).
    */
   public static final String FLAG_STRUCTURED_ADDRESS_FOR_SEPA = "structured-address-for-sepa";
+
+  /**
+   * ETP-5716 — whether Modelo 390 (the annual VAT summary) is available in the Fiscal Models
+   * catalog. Positive polarity: {@code true} = available; the default ({@code false}, and every
+   * failure of this class) hides it. TTL 2027-01-01.
+   *
+   * <p><b>Backend-only, read through one gate.</b> Only {@code FiscalModel390Flag} evaluates it,
+   * and only {@code NeoFiscalModelsCatalogService} calls that gate: off, the catalog answer drops
+   * model {@code 390} and lists it under {@code _unavailable}, and a catalog save can neither
+   * switch it on nor erase the value stored before the flag was turned off. Every SPA surface
+   * (catalog drawer, declarations list, new declaration, the Organization window's Modelo 390
+   * section) reacts to that answer; nothing in the browser reads this key, so never add it to
+   * the web client's {@code flag-keys.js}.
+   *
+   * <p><b>A visual gate, not authorization.</b> The {@code /fiscal390/*} and
+   * legal-representative endpoints keep answering whatever the flag says; they stay protected
+   * by the role's window access.
+   *
+   * <p><b>Targeted per user and per tenant</b> on the hosted arms: the context carries the
+   * authenticated account email (targeting key, {@code Email} and lowercase {@code email}) and
+   * {@code clientId}; with no resolvable account, {@code clientId} only. A Datadog rule matches the
+   * lowercase {@code email} attribute against a lowercase value. The local arm is a plain
+   * per-environment boolean: {@code etendo.go.flags.fiscal-model-390} /
+   * {@code ETGO_FLAG_FISCAL_MODEL_390}.
+   */
+  public static final String FLAG_FISCAL_MODEL_390 = "fiscal-model-390";
+
+  /**
+   * ETP-6047 (epic ETP-6046, "Invoice Inbox") — gates the <b>behaviour</b> of the incoming-invoice
+   * inbox, never its schema. Positive polarity: {@code true} = the inbox is enabled. Strictly off
+   * by default: an unconfigured flag, an unreachable control plane and any evaluation error all
+   * read as {@code false}.
+   *
+   * <p><b>What it gates.</b> The upload endpoint of the inbox must refuse the request when the flag
+   * is off, <em>before</em> any OCR work is enqueued. The {@code ETGO_INCOMING_DOCUMENT} table and
+   * the {@code Invoice Inbox} window ship unconditionally: the flag gates behaviour, not schema.
+   *
+   * <p><b>One reader.</b> Only {@code InvoiceInboxFlag} reads this key. It is evaluated at
+   * <b>request entry</b>, where the request user is the account owner. The asynchronous OCR worker
+   * has no {@code OBContext} user, so it must never re-evaluate the flag: a targeted user would
+   * look "off" there. Off-request callers use {@code InvoiceInboxFlag.isEnabled(email, clientId)}
+   * with the values captured at request entry.
+   *
+   * <p><b>Targeted per account</b> on the hosted arms: the context carries the authenticated
+   * account email (targeting key, {@code Email} and lowercase {@code email}) and {@code clientId};
+   * with no resolvable account, {@code clientId} only. A Datadog rule must be written on the
+   * lowercase {@code email} attribute alone, matched against a lowercase value. The local arm is a
+   * plain per-environment boolean: {@code etendo.go.flags.invoice-inbox} /
+   * {@code ETGO_FLAG_INVOICE_INBOX}.
+   *
+   * <p><b>Backend-only for now.</b> The web client has no key for it; story ETP-6049 adds one when
+   * the inbox gets a UI. TTL 2027-01-31, provisional until confirmed with product.
+   */
+  public static final String FLAG_INVOICE_INBOX = "invoice-inbox";
+
+  /**
+   * ETP-5889 — whether the Product window's "Movements" tab (the history of stock movements of a
+   * product) is switched on for an account. Gates behaviour only: the two stored computed columns of
+   * {@code M_Transaction} ({@code EM_Etgo_Warehouse_ID}, {@code EM_Etgo_Doc_Kind}), their triggers, the
+   * AD metadata and the NEO configuration ship unconditionally, like the columns of
+   * {@link #FLAG_CONTACT_CATEGORY_TYPE}.
+   *
+   * <p>Backend-only; never add it to {@code flag-keys.js}. The frontend reads
+   * {@code capabilities.productMovements} off {@code SFWindowAccessMap}'s response and never evaluates the
+   * flag itself: the tab hides, requests nothing and emits no telemetry while it is false. Off, the
+   * {@code ProductTransactionsHandler} also skips the extra work it does for that tab (the resulting
+   * stock of each movement and the exact total), which would otherwise run on every request the side
+   * panel already makes.
+   *
+   * <p><b>Evaluated per account</b>, with the account email of the session user as targeting key (same
+   * resolution as {@link #FLAG_BP_PORTAL_LINK}, in {@code ProductMovementsPolicy}): a targeting rule on the
+   * hosted control plane (Datadog Feature Flags, ConfigCat as the fallback) names the accounts. Positive
+   * polarity: {@code true} = the tab is on; the default ({@code false}, and every failure to resolve the
+   * account) is "hidden", which is the required pre-launch state. Locally
+   * {@code etendo.go.flags.product-movements-tab} / {@code ETGO_FLAG_PRODUCT_MOVEMENTS_TAB}, a plain boolean
+   * for everyone. Must also be created as a boolean setting on the hosted control plane before an account
+   * can be targeted: an undeclared setting resolves to this class's code default.
+   *
+   * <p>Callers: {@code ProductMovementsPolicy} (the only evaluator), used by {@code SFWindowAccessMap}
+   * (capability) and {@code ProductTransactionsHandler} (data).
+   */
+  public static final String FLAG_PRODUCT_MOVEMENTS_TAB = "product-movements-tab";
+
+  /**
+   * ETP-5581 — the automatic <b>bounce-pair suggestions</b> of the bank reconciliation of
+   * PSD2-synced financial accounts. A bounce is an outgoing bank-statement line plus the line that
+   * reverses it (same amount, opposite sign). Positive polarity: {@code true} = suggestions on;
+   * the default and every failure read {@code false}.
+   *
+   * <p><b>What it gates.</b> The bounce pairs in the {@code autoMatch} answer (and the {@code bounce}
+   * state and pair annotations of {@code pendingLines}), the {@code discardPair} and
+   * {@code restorePair} actions, the {@code bouncePair} groups of {@code applySuggestions}, and
+   * whether discarded lines are honoured at all (their exclusion, the {@code LINE_DISCARDED}
+   * refusal, {@code counts.discarded}, {@code status=discarded}, the {@code discarded} marker and
+   * {@code discardedCount}). With the flag off Etendo behaves as before ETP-5581 and the undo path
+   * of a discarded line is Classic's PSD2 Restore button. <b>Not gated:</b> the stored counters
+   * computed in SQL or in persistence events ({@code EM_ETGO_Pending_Count},
+   * {@code EM_ETGO_Discarded_Count}, {@code EM_ETGO_Status}).
+   *
+   * <p><b>One reader.</b> Only {@code BankBounceSuggestionsFlag} reads this key, evaluated per
+   * request and never cached. <b>Targeted per account</b>: the {@code ETGO_ACCOUNT} email of the
+   * request user, resolved as {@link #FLAG_BP_PORTAL_LINK} does; no account, no email or a failed
+   * lookup reads off. Locally {@code etendo.go.flags.bank-bounce-suggestions} /
+   * {@code ETGO_FLAG_BANK_BOUNCE_SUGGESTIONS}.
+   *
+   * <p><b>Backend-only</b>: never add it to {@code flag-keys.js}; the web client renders only what
+   * the answers carry. TTL 2026-12-31 (placeholder).
+   */
+  public static final String FLAG_BANK_BOUNCE_SUGGESTIONS = "bank-bounce-suggestions";
 
   /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset

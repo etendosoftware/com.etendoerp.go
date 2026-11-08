@@ -34,18 +34,24 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.schemaforge.InvoiceInboxFlag;
+import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
@@ -64,6 +70,10 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  * Also the {@code structuredAddressForSepa} capability (ETP-5806) — mirrors
  * {@link GoFeatureFlags#FLAG_STRUCTURED_ADDRESS_FOR_SEPA} identically in both branches, stubbed
  * directly so the assertions are independent of the local {@code Openbravo.properties} toggle.
+ *
+ * <p>Also the {@code invoiceInbox} capability (ETP-6049): per account, same value in both branches.
+ *
+ * @covers com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFWindowAccessMapTest {
@@ -562,6 +572,182 @@ class SFWindowAccessMapTest {
         }
     }
 
+
+    // ── productMovements capability (ETP-5889) ──────────────────────────────
+
+    /** The tab's capability follows the flag for a restricted role, on and off. */
+    @Test
+    @DisplayName("Restricted role resolves productMovements from the flag, on and off")
+    void testProductMovementsFollowsTheFlagForRestrictedRole() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenRestrictedRole("role-movements-" + on);
+            stubWindowAccessRows(Collections.emptyList());
+            stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+            try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+                flags.when(() -> GoFeatureFlags.isEnabled(
+                        eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), any())).thenReturn(on);
+
+                webhook.get(parameters, responseVars);
+
+                assertNull(responseVars.get(ERROR));
+                JSONObject result = new JSONObject(responseVars.get(RESULT));
+                assertEquals(on, result.getJSONObject("capabilities").getBoolean("productMovements"));
+            }
+        }
+    }
+
+    /**
+     * The flag is evaluated for the account resolved for this request, with its tenant: the same
+     * account the {@code structuredAddressForSepa} capability is targeted on.
+     */
+    @Test
+    @DisplayName("productMovements is evaluated for the account resolved for the request")
+    void testProductMovementsIsTargetedOnTheRequestAccount() throws Exception {
+        givenRestrictedRole("role-movements-target");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+             MockedStatic<GoAccountResolver> resolver = mockStatic(GoAccountResolver.class)) {
+            resolver.when(GoAccountResolver::currentAccountEmail).thenReturn("Owner@Example.com");
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), any())).thenReturn(true);
+
+            webhook.get(parameters, responseVars);
+
+            ArgumentCaptor<FeatureFlagContext> context = ArgumentCaptor.forClass(FeatureFlagContext.class);
+            flags.verify(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), context.capture()));
+            assertEquals("Owner@Example.com", context.getValue().getTargetingKey());
+            assertEquals("owner@example.com",
+                    context.getValue().getAttributes().get(FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE));
+        }
+    }
+
+    /** Admin bypass: productMovements still follows the flag (it is not folded into the blanket trues). */
+    @Test
+    @DisplayName("Admin bypass resolves productMovements from the flag, on and off")
+    void testProductMovementsFollowsTheFlagForAdminBypass() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenSystemAdminRole();
+            stubSpecRows(Collections.emptyList());
+            stubWindowAccessRows(Collections.emptyList());
+
+            try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+                flags.when(() -> GoFeatureFlags.isEnabled(
+                        eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), any())).thenReturn(on);
+
+                webhook.get(parameters, responseVars);
+
+                assertNull(responseVars.get(ERROR));
+                JSONObject capabilities = new JSONObject(responseVars.get(RESULT)).getJSONObject("capabilities");
+                assertEquals(on, capabilities.getBoolean("productMovements"));
+                assertTrue(capabilities.getBoolean("isAdminOrClientAdmin"));
+            }
+        }
+    }
+
+    /** No account resolves for the user: the flag is evaluated account-less (no targeting key, no email). */
+    @Test
+    @DisplayName("productMovements is evaluated account-less when no account resolves for the user")
+    void testProductMovementsWithNoAccountIsEvaluatedAccountLess() throws Exception {
+        givenRestrictedRole("role-movements-no-account");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+             MockedStatic<GoAccountResolver> resolver = mockStatic(GoAccountResolver.class)) {
+            resolver.when(GoAccountResolver::currentAccountEmail).thenReturn(null);
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB), any())).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertFalse(result.getJSONObject("capabilities").getBoolean("productMovements"));
+            flags.verify(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_PRODUCT_MOVEMENTS_TAB),
+                    argThat(ctx -> ctx.getTargetingKey() == null
+                            && !ctx.getAttributes().containsKey(FeatureFlagContext.ATTRIBUTE_EMAIL))));
+        }
+    }
+
+    // ── invoiceInbox capability (ETP-6049) ───────────────────────────────────
+
+    /** Runs the webhook with {@code InvoiceInboxFlag.isEnabledFor(email)} stubbed; returns capabilities. */
+    private JSONObject capabilitiesWithInvoiceInbox(String accountEmail, boolean on) throws Exception {
+        try (MockedStatic<InvoiceInboxFlag> inbox = mockStatic(InvoiceInboxFlag.class);
+             MockedStatic<GoAccountResolver> resolver = mockStatic(GoAccountResolver.class)) {
+            resolver.when(GoAccountResolver::currentAccountEmail).thenReturn(accountEmail);
+            inbox.when(() -> InvoiceInboxFlag.isEnabledFor(accountEmail)).thenReturn(on);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            inbox.verify(() -> InvoiceInboxFlag.isEnabledFor(accountEmail));
+            return new JSONObject(responseVars.get(RESULT)).getJSONObject("capabilities");
+        }
+    }
+
+    @Test
+    @DisplayName("Restricted role resolves invoiceInbox from the flag, on and off")
+    void testInvoiceInboxFollowsTheFlagForRestrictedRole() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenRestrictedRole("role-inbox-" + on);
+            stubWindowAccessRows(Collections.emptyList());
+            stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+            JSONObject capabilities = capabilitiesWithInvoiceInbox("Owner@Example.com", on);
+
+            assertTrue(capabilities.has("invoiceInbox"));
+            assertEquals(on, capabilities.getBoolean("invoiceInbox"));
+        }
+    }
+
+    /** Admin bypass: the flag is not folded into the blanket trues; an admin is not exempt. */
+    @Test
+    @DisplayName("Admin bypass resolves invoiceInbox from the flag, not a fixed true")
+    void testInvoiceInboxFollowsTheFlagForAdminBypass() throws Exception {
+        for (boolean on : new boolean[] {true, false}) {
+            givenSystemAdminRole();
+            stubSpecRows(Collections.emptyList());
+            stubWindowAccessRows(Collections.emptyList());
+
+            JSONObject capabilities = capabilitiesWithInvoiceInbox("Owner@Example.com", on);
+
+            assertTrue(capabilities.has("invoiceInbox"));
+            assertEquals(on, capabilities.getBoolean("invoiceInbox"));
+            assertTrue(capabilities.getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+    @Test
+    @DisplayName("invoiceInbox is evaluated for the account resolved for the request, unchanged")
+    void testInvoiceInboxIsTargetedOnTheRequestAccount() throws Exception {
+        givenRestrictedRole("role-inbox-target");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        // capabilitiesWithInvoiceInbox verifies the exact email reached isEnabledFor.
+        JSONObject capabilities = capabilitiesWithInvoiceInbox("Owner@Example.com", true);
+
+        assertTrue(capabilities.getBoolean("invoiceInbox"));
+    }
+
+    @Test
+    @DisplayName("invoiceInbox with no account resolved is evaluated with a null email and does not fail")
+    void testInvoiceInboxWithNoAccountIsOffAndDoesNotFailTheRequest() throws Exception {
+        givenRestrictedRole("role-inbox-no-account");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        JSONObject capabilities = capabilitiesWithInvoiceInbox(null, false);
+
+        assertFalse(capabilities.getBoolean("invoiceInbox"));
+    }
+
     // ── structuredAddressForSepa capability (ETP-5806) ──────────────────────
 
     /** Restricted role: the capability reflects the flag when it resolves {@code true}. */
@@ -647,6 +833,72 @@ class SFWindowAccessMapTest {
             JSONObject result = new JSONObject(responseVars.get(RESULT));
             assertFalse(result.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
             assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+    /**
+     * ETP-5806 follow-up — {@code structuredAddressForSepa} is now evaluated against the real
+     * requesting account's email (not an account-less context), the same per-account pattern
+     * {@code bp-portal-link}/{@code PortalLinkPolicy} already uses, so a Datadog targeting rule
+     * can stage the rollout to that account.
+     */
+    @Test
+    @DisplayName("structuredAddressForSepa is evaluated with the real account email as targeting key")
+    void testStructuredAddressForSepaTargetsTheRealAccountEmail() throws Exception {
+        givenRestrictedRole("role-sepa-targeting");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        User user = mock(User.class);
+        when(user.getUsername()).thenReturn("lola@example.com");
+        when(mockContext.getUser()).thenReturn(user);
+
+        Account account = mock(Account.class);
+        when(account.getEmail()).thenReturn("lola@example.com");
+        @SuppressWarnings("unchecked")
+        OBQuery<Account> accountQuery = mock(OBQuery.class);
+        when(mockDal.createQuery(eq(Account.class), anyString())).thenReturn(accountQuery);
+        when(accountQuery.setNamedParameter(anyString(), anyString())).thenReturn(accountQuery);
+        when(accountQuery.uniqueResult()).thenReturn(account);
+        obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(mockDal);
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            flags.verify(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+                    argThat(ctx -> "lola@example.com".equals(ctx.getTargetingKey()))));
+        }
+    }
+
+    /**
+     * No resolvable account for the current user degrades to an untargeted evaluation rather than
+     * throwing — the module's "never block, never fail, default false" flag contract.
+     */
+    @Test
+    @DisplayName("structuredAddressForSepa degrades gracefully when no account resolves for the current user")
+    void testStructuredAddressForSepaDegradesGracefullyWithNoAccount() throws Exception {
+        givenRestrictedRole("role-sepa-no-account");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+        // mockContext.getUser() is unstubbed → null, so GoAccountResolver.currentAccountEmail()
+        // short-circuits to null without ever touching the DAL.
+
+        try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+            flags.when(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertFalse(result.getJSONObject("capabilities").getBoolean("structuredAddressForSepa"));
+            flags.verify(() -> GoFeatureFlags.isEnabled(
+                    eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA),
+                    argThat(ctx -> ctx.getTargetingKey() == null)));
         }
     }
 

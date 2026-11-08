@@ -46,6 +46,8 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 import com.etendoerp.go.schemaforge.NeoErrorResponses;
+import com.etendoerp.go.schemaforge.NeoMessageText;
+import com.etendoerp.go.schemaforge.NeoReferenceActiveness;
 import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -424,45 +426,6 @@ final class McpWriteRequestSupport {
   }
 
   /**
-   * Attach the callout-vs-caller divergences a create left behind (IMP-45).
-   *
-   * <p>{@code etendo_defaults} tells an agent to use its result as the starting point for
-   * {@code etendo_create}, and {@code etendo_create} repeats the advice. Follow it literally and every
-   * value handed over becomes a value the caller sent, which ETP-4784 protects from being
-   * recomputed by a callout that knows the record's real context. The measured case:
-   * {@code etendo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
-   * business partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} —
-   * an agent that echoed the default has pinned the wrong one, and the 201 says nothing.</p>
-   *
-   * <p>The value the caller sent still wins. Overriding it would be worse: on this path the server
-   * cannot tell an echoed default from a value a human deliberately chose, and silently replacing
-   * the second is a harder failure than reporting the first. So this reports, as IMP-18 does for
-   * unrecognised names — the write succeeded, and now the caller can see what its own value
-   * displaced.</p>
-   *
-   * @param body       the flattened response body handed to the agent, mutated in place
-   * @param superseded field → {sent, callout}, or {@code null}/empty when nothing diverged
-   */
-  static void reportSupersededDefaults(JSONObject body, JSONObject superseded) {
-    if (body == null || superseded == null || superseded.length() == 0) {
-      return;
-    }
-    try {
-      body.put("supersededDefaults", superseded);
-      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept; "
-          + "\"callout\" is only what a callout would have set from this record's own context. "
-          + "You can ignore it when the callout value is 0 or empty, or when the field is governed "
-          + "by another rule. If you copied the value from "
-          + "etendo_defaults and it differs from a meaningful callout value, it was a generic "
-          + "default resolved before this record had its context: send the callout value instead, "
-          + "or confirm the one you sent was deliberate.");
-    } catch (JSONException ignored) {
-      // Same reasoning as reportUnknownFields: the record is written and correct as far as the
-      // caller asked; losing a diagnostic must never turn a successful create into a failure.
-    }
-  }
-
-  /**
    * Reports the server-owned fields this write discarded, when the value differed from the
    * session's own.
    *
@@ -604,11 +567,16 @@ final class McpWriteRequestSupport {
             e.getMessage());
       }
     }
-    return cleared.length() == 0 ? null : buildClearedMandatoryError(cleared);
+    return cleared.length() == 0 ? null : buildClearedMandatoryError(cleared, langCode);
   }
 
+  /** {@code AD_MESSAGE} values of the cleared-required-field refusal (ETP-5726, OBS-1). */
+  static final String MSG_REQUIRED_CLEARED = "ETGO_RequiredFieldsCleared";
+  static final String MSG_REQUIRED_CLEARED_HINT = "ETGO_RequiredFieldsClearedHint";
+
   /** The 422 for {@link #rejectClearedMandatoryFields}: same envelope as the create pre-check. */
-  private static JSONObject buildClearedMandatoryError(JSONArray cleared) throws JSONException {
+  private static JSONObject buildClearedMandatoryError(JSONArray cleared, String langCode)
+      throws JSONException {
     StringBuilder names = new StringBuilder();
     for (int i = 0; i < cleared.length(); i++) {
       JSONObject item = cleared.getJSONObject(i);
@@ -624,10 +592,10 @@ final class McpWriteRequestSupport {
     JSONObject error = new JSONObject();
     error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
     error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-    error.put(McpConstants.KEY_DETAIL, "Required fields cannot be cleared: " + names);
+    error.put(McpConstants.KEY_DETAIL,
+        NeoMessageText.text(MSG_REQUIRED_CLEARED, langCode, names.toString()));
     error.put(McpConstants.KEY_MISSING_FIELDS, cleared);
-    error.put(McpConstants.KEY_HINT, "These fields are required: send a value for them, or leave them out of "
-        + "the update to keep the stored one");
+    error.put(McpConstants.KEY_HINT, NeoMessageText.text(MSG_REQUIRED_CLEARED_HINT, langCode));
     error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     return error;
   }
@@ -919,6 +887,38 @@ final class McpWriteRequestSupport {
     return refusal == null ? null
         : checkJsonServiceError(new JSONObject(refusal), McpConstants.SEE_ALSO_WRITING,
             callerProvidedFields);
+  }
+
+  /**
+   * Refuse a write whose request SETS a reference/FK field to a value whose target row is
+   * inactive (ETP-5802).
+   *
+   * <p>The check itself is {@link NeoReferenceActiveness}, shared with the REST CRUD path
+   * ({@code NeoWritePreflight}). Must run after {@link #refuseUnownedReferences}, which already
+   * establishes the reference resolves to a row of the caller's tenant — and, like it, after
+   * FK-by-name resolution: {@code fields} must already carry ids, not search strings.
+   *
+   * @param adTab  the tab being written
+   * @param fields the body keyed by DAL property name, holding only what the caller sent
+   * @return the 422 envelope, or {@code null} when every reference the request sets is active
+   */
+  static JSONObject refuseInactiveReference(Tab adTab, JSONObject fields) throws JSONException {
+    NeoReferenceActiveness.InactiveReference inactive =
+        NeoReferenceActiveness.findInactiveReference(adTab, fields);
+    if (inactive == null) {
+      return null;
+    }
+    JSONObject error = new JSONObject();
+    error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+    error.put(McpConstants.KEY_ERROR, "INACTIVE_REFERENCE_VALUE");
+    error.put(McpConstants.KEY_DETAIL, "Field '" + inactive.fieldName() + "' was set to a record of"
+        + " '" + inactive.targetEntityName() + "' that is inactive; the write was rejected rather"
+        + " than silently accepted.");
+    error.put("field", inactive.fieldName());
+    error.put(McpConstants.KEY_HINT, "Choose an active record for '" + inactive.fieldName()
+        + "' — list or search the entity again; the inactive id is no longer a valid selection.");
+    error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return error;
   }
 
   /**
