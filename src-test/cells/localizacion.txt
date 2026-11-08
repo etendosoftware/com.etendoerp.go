@@ -29,6 +29,7 @@ com.etendoerp.go.schemaforge.FiscalSubmittedSnapshotSupportTest
 com.etendoerp.go.schemaforge.LineCalloutTaxRateHelperTest
 com.etendoerp.go.schemaforge.MarkSubsanationHandlerTest
 com.etendoerp.go.schemaforge.NeoFiscalModelsCatalogServiceTest
+com.etendoerp.go.schemaforge.RectificationFiscalCodeGuardTest
 com.etendoerp.go.schemaforge.RectificationTotalGuardTest
 com.etendoerp.go.schemaforge.RectificativeImportGateTest
 com.etendoerp.go.schemaforge.RectificativeSupportTest
