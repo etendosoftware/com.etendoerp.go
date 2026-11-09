@@ -88,6 +88,27 @@ class SignupRequestTest {
   }
 
   @Test
+  void aBookedDemoNamesItsHubSpotDeal() throws Exception {
+    // ETP-6082: a number or its text, as long as it is a HubSpot id.
+    assertEquals("555", SignupRequest.parse(validBody().put("hubspotDealId", 555))
+        .toNewAccount("web").hubspotDealId());
+    assertEquals("555", SignupRequest.parse(validBody().put("hubspotDealId", " 555 "))
+        .toNewAccount("web").hubspotDealId());
+    assertNull(SignupRequest.parse(validBody()).toNewAccount("web").hubspotDealId());
+    assertNull(SignupRequest.parse(validBody().put("hubspotDealId", JSONObject.NULL))
+        .toNewAccount("web").hubspotDealId());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "deal-555", "12 34", "1234567890123456789012345678901" })
+  void aHubSpotDealIdThatIsNoIdIsRefused(String value) throws Exception {
+    SignupException refusal = refusal(validBody().put("hubspotDealId", value));
+
+    assertEquals("INVALID_HUBSPOT_DEAL_ID", refusal.code());
+    assertEquals("hubspotDealId", refusal.field());
+  }
+
+  @Test
   void noSourceIsStoredAsNothing() throws Exception {
     assertNull(SignupRequest.parse(validBody()).toNewAccount("web").source());
   }

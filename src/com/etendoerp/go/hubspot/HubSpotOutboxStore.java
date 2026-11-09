@@ -70,6 +70,11 @@ interface HubSpotOutboxStore {
    * {@code SENT} with the deal's id once the sync has decided it.
    */
   String PRODUCTIVE_DEAL = "PRODUCTIVE_DEAL";
+  /**
+   * The deal marketing created for a booked demo, named by the signup API call that created the
+   * account (ETP-6082). Written already sent: the record that the account is a demo's.
+   */
+  String DEMO_DEAL = "DEMO_DEAL";
 
   /** The key of an event that happens at most once per account. */
   String ONCE = "-";

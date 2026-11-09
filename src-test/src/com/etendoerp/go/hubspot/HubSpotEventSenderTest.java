@@ -109,7 +109,7 @@ class HubSpotEventSenderTest {
   }
 
   @Test
-  void aNewAccountBecomesASelfServeLead() throws Exception {
+  void aNewAccountBecomesASelfServeContactWithoutALifecycleStage() throws Exception {
     Outcome outcome = sender.send(event(HubSpotOutboxStore.ACCOUNT_CREATED, null), NOW);
 
     assertEquals(Outcome.Kind.SENT, outcome.kind());
@@ -118,7 +118,8 @@ class HubSpotEventSenderTest {
     assertEquals("email", input.getString("idProperty"));
     assertEquals("ana@empresa.es", input.getString("id"));
     JSONObject properties = input.getJSONObject("properties");
-    assertEquals("lead", properties.getString("lifecyclestage"));
+    // ETP-6082: HubSpot derives the contact's lifecycle stage from its deal's.
+    assertFalse(properties.has("lifecyclestage"));
     assertEquals("self_serve", properties.getString("etendo_camino_entrada"));
     assertEquals("Ana", properties.getString("firstname"));
     assertEquals("García López", properties.getString("lastname"));
@@ -211,7 +212,7 @@ class HubSpotEventSenderTest {
     assertEquals("2026-10-15", contact.getString("etendo_inicio_prueba"));
     assertEquals("2026-10-29", contact.getString("etendo_fin_prueba"));
     assertEquals("Spain", contact.getString("country"));
-    assertFalse(contact.has("lifecyclestage"), "lifecycle stage is set once, at sign-up");
+    assertFalse(contact.has("lifecyclestage"), "HubSpot derives it from the deal");
 
     JSONObject company = call("POST", "/crm/v3/objects/companies").properties();
     assertEquals("Empresa SL", company.getString("name"));
@@ -544,7 +545,6 @@ class HubSpotEventSenderTest {
     assertEquals("2026-10-20", deal.getString("etendo_fecha_ultimo_pago"));
     assertEquals("22.00", deal.getString("amount"));
     assertEquals("monthly", deal.getString("etendo_periodicidad"));
-    assertFalse(deal.has("dealstage"), "the checkout's invoice is the card stage's, not this");
     assertEquals("core", deal.getString("etendo_plan"));
   }
 
@@ -573,12 +573,24 @@ class HubSpotEventSenderTest {
   }
 
   @Test
-  void theFirstInvoiceOfAMonthlyPlanLeavesTheCardStage() throws Exception {
+  void theFirstChargeAboveZeroIsTheFirstPaymentEvenAtTheCheckout() throws Exception {
+    // ETP-6082: marketing's first payment is the first charge above zero, whichever invoice it is.
     productiveWithKnownDeal("deal-1", true);
+    answers = dealIn("pipe", "card");
 
     sender.send(billing(HubSpotOutboxStore.PAYMENT,
         "\"amount\":\"25.00\",\"interval\":\"monthly\","
             + "\"billingReason\":\"subscription_create\""), NOW);
+
+    assertEquals("first", call("PATCH", "/deals/deal-1").properties().getString("dealstage"));
+  }
+
+  @Test
+  void aPaymentNeverTakesADealBackFromTheFirstPaymentStage() throws Exception {
+    productiveWithKnownDeal("deal-1", true);
+    answers = dealIn("pipe", "first");
+
+    sender.send(billing(HubSpotOutboxStore.PAYMENT, "\"amount\":\"25.00\""), NOW);
 
     assertFalse(call("PATCH", "/deals/deal-1").properties().has("dealstage"));
   }
@@ -610,7 +622,7 @@ class HubSpotEventSenderTest {
             + "\"billingReason\":\"subscription_create\""), NOW);
 
     JSONObject deal = call("PATCH", "/deals/deal-1").properties();
-    assertEquals("card", deal.getString("dealstage"));
+    assertEquals("first", deal.getString("dealstage"), "a lost customer who pays is one again");
     assertEquals("true", deal.getString("etendo_es_reactivacion"));
     assertEquals("active", deal.getString("etendo_estado_suscripcion"));
   }
@@ -699,7 +711,8 @@ class HubSpotEventSenderTest {
     assertEquals("deal-2", outcome.hubSpotObjectId());
     Call created = call("POST", "/crm/v3/objects/deals");
     assertEquals("Segunda SL — Self-serve", created.properties().getString("dealname"));
-    assertEquals("card", created.properties().getString("dealstage"));
+    assertEquals("first", created.properties().getString("dealstage"),
+        "only a charge above zero is reported, so a payment is the first one");
     assertEquals("pro", created.properties().getString("etendo_plan"));
     assertFalse(created.properties().has("etendo_account_id"),
         "HubSpot keeps the account id unique, and the first deal holds it");
@@ -803,32 +816,59 @@ class HubSpotEventSenderTest {
   }
 
   @Test
-  void aScheduledCancellationIsDatedTheDayItWasAskedAndStaysActive() throws Exception {
+  void aScheduledCancellationIsCancelledAtOnceAndDatedWhenTheAccessEnds() throws Exception {
+    // ETP-6082: marketing's spec.
     productiveWithKnownDeal("deal-1", true);
 
-    sender.send(billing(HubSpotOutboxStore.CANCEL_REQUESTED, null), NOW);
+    sender.send(billing(HubSpotOutboxStore.CANCEL_REQUESTED,
+        "\"accessEndsAt\":\"2026-11-19T23:59:59Z\""), NOW);
 
     JSONObject deal = call("PATCH", "/deals/deal-1").properties();
-    assertEquals("2026-10-20", deal.getString("etendo_fecha_baja"));
-    assertFalse(deal.has("etendo_estado_suscripcion"), "the owner keeps access until the end");
+    assertEquals("cancelled", deal.getString("etendo_estado_suscripcion"));
+    assertEquals("2026-11-19", deal.getString("etendo_fecha_baja"));
+    assertFalse(deal.has("dealstage"), "lost only when the subscription ends");
+  }
+
+  @Test
+  void aCancellationWithoutItsAccessEndIsDatedTheDayItWasAsked() throws Exception {
+    productiveWithKnownDeal("deal-1", true);
+
+    sender.send(billing(HubSpotOutboxStore.CANCEL_REQUESTED, "\"accessEndsAt\":\"later\""),
+        NOW);
+
+    assertEquals("2026-10-20", call("PATCH", "/deals/deal-1").properties()
+        .getString("etendo_fecha_baja"));
   }
 
   @Test
   void aWithdrawnCancellationReactivatesAndClearsTheDate() throws Exception {
     productiveWithKnownDeal("deal-1", true);
+    answers = dealIn("pipe", "first");
 
     sender.send(billing(HubSpotOutboxStore.CANCEL_REVERTED, null), NOW);
 
     JSONObject deal = call("PATCH", "/deals/deal-1").properties();
     assertEquals("active", deal.getString("etendo_estado_suscripcion"));
     assertEquals("", deal.getString("etendo_fecha_baja"));
+    assertFalse(deal.has("dealstage"));
+  }
+
+  @Test
+  void aWithdrawnCancellationOfALostDealMakesItACustomerAgain() throws Exception {
+    productiveWithKnownDeal("deal-1", true);
+    answers = dealIn("pipe", "lost");
+
+    sender.send(billing(HubSpotOutboxStore.CANCEL_REVERTED, null), NOW);
+
+    assertEquals("first", call("PATCH", "/deals/deal-1").properties().getString("dealstage"));
   }
 
   @Test
   void anEndedSubscriptionKeepsTheDateTheCancellationWasAskedFor() throws Exception {
     productiveWithKnownDeal("deal-1", true);
     answers = call -> call.method().equals("GET")
-        ? new Response(200, "{\"properties\":{\"etendo_fecha_baja\":\"2026-10-01\"}}")
+        ? new Response(200, "{\"properties\":{\"pipeline\":\"pipe\",\"dealstage\":\"first\","
+            + "\"etendo_fecha_baja\":\"2026-10-01\"}}")
         : ok(call);
 
     sender.send(billing(HubSpotOutboxStore.CANCELED, null), NOW);
@@ -853,4 +893,92 @@ class HubSpotEventSenderTest {
         .getString("etendo_fecha_baja"));
   }
 
+  // --- A booked demo: marketing's deal in the Demo pipeline (ETP-6082) ---
+
+  private static final String DEMO_PIPELINE = HubSpotConfiguration.DEFAULT_DEMO_PIPELINE;
+
+  @Test
+  void aBookedDemoClaimsMarketingsDealInsteadOfCreatingOne() throws Exception {
+    Outcome outcome = sender.send(event(HubSpotOutboxStore.DEMO_READY,
+        "{\"companyName\":\"Empresa SL\",\"country\":\"España\",\"countryCode\":\"ES\","
+            + "\"hubspotDealId\":\"555\"}"), NOW);
+
+    assertEquals(Outcome.Kind.SENT, outcome.kind());
+    assertEquals("555", outcome.hubSpotObjectId());
+    call("GET", "/deals/555?properties=pipeline");
+    JSONObject deal = call("PATCH", "/deals/555").properties();
+    assertEquals(ACCOUNT, deal.getString("etendo_account_id"));
+    assertEquals(1, deal.length(), "name, company and stage are marketing's");
+    assertTrue(calls.stream().noneMatch(c -> c.method().equals("POST")
+        && (c.path().endsWith("/deals") || c.path().endsWith("/companies"))));
+    JSONObject contact = call("POST", "/batch/upsert").body().getJSONArray("inputs")
+        .getJSONObject(0).getJSONObject("properties");
+    assertFalse(contact.has("etendo_camino_entrada"), "a booked demo's way in is marketing's");
+    assertEquals("España", contact.getString("country"));
+  }
+
+  @Test
+  void aBookedDealThatDoesNotExistIsRefused() {
+    answers = call -> call.method().equals("GET")
+        ? new Response(404, "{\"message\":\"not found\"}") : ok(call);
+
+    Outcome outcome = sender.send(event(HubSpotOutboxStore.DEMO_READY,
+        "{\"companyName\":\"Empresa SL\",\"hubspotDealId\":\"999\"}"), NOW);
+
+    assertEquals(Outcome.Kind.FAILED, outcome.kind());
+    assertTrue(calls.stream().noneMatch(c -> c.method().equals("PATCH")));
+  }
+
+  @Test
+  void theFirstMilestoneOfADemoAfterItTookPlaceMovesItToTheDemoSql() throws Exception {
+    when(store.findDealId(ACCOUNT)).thenReturn("555");
+    answers = dealIn(DEMO_PIPELINE, HubSpotConfiguration.DEFAULT_DEMO_ENTRY_STAGE);
+
+    sender.send(event(HubSpotOutboxStore.MILESTONE, "{\"milestone\":\"invoice\"}"), NOW);
+
+    assertEquals(HubSpotConfiguration.DEFAULT_DEMO_ACTIVATED_STAGE,
+        call("PATCH", "/deals/555").properties().getString("dealstage"));
+  }
+
+  @Test
+  void aMilestoneBeforeTheDemoTookPlaceLeavesItsStageToMarketing() throws Exception {
+    // Vico uses the environment during the demo; only marketing moves it to "Demo realizada".
+    when(store.findDealId(ACCOUNT)).thenReturn("555");
+    answers = dealIn(DEMO_PIPELINE, "1471455756");
+
+    sender.send(event(HubSpotOutboxStore.MILESTONE, "{\"milestone\":\"invoice\"}"), NOW);
+
+    assertFalse(call("PATCH", "/deals/555").properties().has("dealstage"));
+  }
+
+  @Test
+  void aDemosPaymentMovesItWithTheDemoPipelinesStages() throws Exception {
+    productiveWithKnownDeal("555", true);
+    answers = dealIn(DEMO_PIPELINE, HubSpotConfiguration.DEFAULT_DEMO_CARD_STAGE);
+
+    sender.send(billing(HubSpotOutboxStore.PAYMENT, "\"amount\":\"25.00\""), NOW);
+
+    assertEquals(HubSpotConfiguration.DEFAULT_DEMO_FIRST_PAYMENT_STAGE,
+        call("PATCH", "/deals/555").properties().getString("dealstage"));
+  }
+
+  @Test
+  void aDemosFurtherProductiveGetsItsDealInTheDemoPipeline() throws Exception {
+    when(store.findSubscriptionEnvironment(SUBSCRIPTION)).thenReturn(Optional.of(
+        new SubscriptionEnvironment(PRODUCTIVE, "Segunda SL", "pro")));
+    when(store.findEnvironmentDeal(ACCOUNT, PRODUCTIVE)).thenReturn(Optional.empty());
+    when(store.findDealId(ACCOUNT)).thenReturn("555");
+    when(store.countEnvironmentDeals(ACCOUNT)).thenReturn(1);
+    Function<Call, Response> demoDeal = dealIn(DEMO_PIPELINE,
+        HubSpotConfiguration.DEFAULT_DEMO_FIRST_PAYMENT_STAGE);
+    answers = call -> call.path().equals("/crm/v3/objects/deals")
+        ? new Response(201, "{\"id\":\"deal-2\"}") : demoDeal.apply(call);
+
+    sender.send(billing(HubSpotOutboxStore.PAYMENT_FAILED, null), NOW);
+
+    JSONObject created = call("POST", "/crm/v3/objects/deals").properties();
+    assertEquals(DEMO_PIPELINE, created.getString("pipeline"));
+    assertEquals(HubSpotConfiguration.DEFAULT_DEMO_CARD_STAGE, created.getString("dealstage"));
+    assertFalse(created.has("etendo_camino_entrada_deal"));
+  }
 }
