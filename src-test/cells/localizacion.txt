@@ -48,6 +48,7 @@ com.etendoerp.go.schemaforge.handlers.TaxSifOverrideHandlerTest
 com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.InvoiceLineTaxSifSelectorPolicyTest
 
-# --- integración (BD) (2)
+# --- integración (BD) (3)
+com.etendoerp.go.schemaforge.ClassicMessageRemapCatalogIntegrationTest
 com.etendoerp.go.schemaforge.EtgoGetDeliveryStatusFunctionIntegrationTest
 com.etendoerp.go.schemaforge.EtgoGetTbaiStatusFunctionIntegrationTest

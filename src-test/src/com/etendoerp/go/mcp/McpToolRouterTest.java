@@ -241,6 +241,70 @@ public class McpToolRouterTest {
     assertEquals("Something failed", block.getString("text"));
   }
 
+  /**
+   * ETP-6158: an exception message passed as plain text can carry a Classic fiscal message; it
+   * leaves the MCP reworded for GO, in the language captured for the request (here the current
+   * {@code OBContext} language, nothing having been captured). The SII sentence and the raw
+   * {@code @KEY@} token need no AD_MESSAGE row, so no database is involved.
+   */
+  @Test
+  public void testWrapAsErrorContentRemapsAClassicMessageInThePlainText() throws Exception {
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      JSONObject result = McpToolRouter.wrapAsErrorContent("Process execution failed: "
+          + "La factura debe contener información en el campo Clave tipo factura.");
+
+      assertTrue(result.getBoolean(FIELD_IS_ERROR));
+      assertEquals("Process execution failed: La factura debe contener información en el campo "
+          + "Tipo factura.", result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
+    }
+    try (MockedStatic<OBContext> ctx = contextInLanguage("en_US")) {
+      JSONObject result = McpToolRouter.wrapAsErrorContent("Error: @TBAI_ConfigNotFound@");
+
+      assertEquals("Error: There is no active TicketBAI configuration for this organization. "
+          + "Check it in Fiscal configuration (TicketBAI tab).",
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
+    }
+  }
+
+  /**
+   * ETP-6158: every JSON tool result rendered by {@link McpResponseSanitizer#render} has its
+   * Classic fiscal messages reworded, at any depth; a plain (non-error) result gets no root
+   * {@code messageKeys}, only the {@code error} object inside it does.
+   */
+  @Test
+  public void testRenderRemapsClassicMessagesAtAnyDepth() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("message", "Error: @TBAI_ConfigNotFound@")
+        .put("results", new JSONArray().put(new JSONObject().put("error", new JSONObject()
+            .put("message", "@TBAI_ConfigNotFound@ (organización 2)"))));
+
+    String rendered;
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      rendered = McpResponseSanitizer.render(body);
+    }
+
+    JSONObject parsed = new JSONObject(rendered);
+    String go = "No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI).";
+    assertEquals("Error: " + go, parsed.getString("message"));
+    assertFalse(parsed.has("messageKeys"));
+    JSONObject error = parsed.getJSONArray("results").getJSONObject(0).getJSONObject("error");
+    assertEquals(go + " (organización 2)", error.getString("message"));
+    assertEquals("TBAI_ConfigNotFound", error.getJSONArray("messageKeys").getString(0));
+  }
+
+  /** A static OBContext whose language is {@code code}; the caller closes it. */
+  private static MockedStatic<OBContext> contextInLanguage(String code) {
+    org.openbravo.model.ad.system.Language language =
+        mock(org.openbravo.model.ad.system.Language.class);
+    when(language.getLanguage()).thenReturn(code);
+    OBContext context = mock(OBContext.class);
+    when(context.getLanguage()).thenReturn(language);
+    MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+    ctx.when(OBContext::getOBContext).thenReturn(context);
+    return ctx;
+  }
+
   /** Tests that wrapAsErrorContent handles an empty error message. */
   @Test
   public void testWrapAsErrorContentEmptyMessage() throws Exception {

@@ -19,22 +19,44 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.exception.GenericJDBCException;
+import org.hibernate.query.Query;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 
 /**
  * The Classic message remap (ETP-6158): a catalogued Classic fiscal message that reaches NEO
  * already resolved, in any language and in any shape Classic produces it, leaves NEO as the GO
  * text in the request language. The AD_MESSAGE texts are injected (the real ones are read from the
- * database), copied from the rows the Classic modules ship.
+ * database), copied from the rows the Classic modules ship; the database read itself is covered
+ * with a mocked Hibernate session (one load, the 30 s backoff, an aborted transaction).
  *
  * @covers com.etendoerp.go.schemaforge.ClassicMessageRemap
  */
@@ -63,6 +85,16 @@ public class ClassicMessageRemapTest {
       + "fichero XML no son válidos. Puede establecer a \"N\" el parámetro \"Validación estricta "
       + "contra el esquema XSD\" dentro del grupo \"Validación\" en la configuración de este "
       + "Modelo para evitar esta validación y forzar la generación del fichero.";
+  private static final String CERT_GO_ES = "No se ha encontrado ningún certificado válido. Sube "
+      + "el certificado de la organización en la sección Certificado digital de Configuración "
+      + "fiscal.";
+  private static final String CONFIG_ES = "No existe configuración de TBAI alcanzable. Revise la "
+      + "ventana de configuración.";
+  private static final String CONFIG_GO_ES = "No hay ninguna configuración de TicketBAI activa "
+      + "para esta organización. Revísala en Configuración fiscal (pestaña TicketBAI).";
+  /** The SII literal sentence: needs no AD_MESSAGE row, so it works without the database. */
+  private static final String SII_TYPE_CLASSIC = "La factura debe contener información en el campo "
+      + "Clave tipo factura.";
   private static final String NIF_GO_ES = "El contacto no está marcado como Factura Simplificada, así que su CIF/NIF es obligatorio. Complétalo en Contactos.";
 
   @Before
@@ -253,5 +285,247 @@ public class ClassicMessageRemapTest {
         assertFalse(entry.catalogKey + " " + language, text.contains("<"));
       }
     }
+  }
+
+  // ── the database read (mocked Hibernate session) ────────────────────────────────────────────
+
+  /** The two HQL reads of {@code readTexts}: base texts and translations. */
+  private static final class DalStub implements AutoCloseable {
+    private final MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+    private final MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+    private final Session session = mock(Session.class);
+    @SuppressWarnings("unchecked")
+    private final Query<Object[]> base = mock(Query.class);
+    @SuppressWarnings("unchecked")
+    private final Query<Object[]> translated = mock(Query.class);
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    DalStub() {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      when(session.createQuery(startsWith("select m.searchKey"))).thenReturn((Query) base);
+      when(session.createQuery(startsWith("select t.message"))).thenReturn((Query) translated);
+      when(base.setParameterList(eq("keys"), anyCollection())).thenReturn(base);
+      when(translated.setParameterList(eq("keys"), anyCollection())).thenReturn(translated);
+    }
+
+    void rows(List<Object[]> baseRows, List<Object[]> translatedRows) {
+      when(base.list()).thenReturn(baseRows);
+      when(translated.list()).thenReturn(translatedRows);
+    }
+
+    @Override
+    public void close() {
+      obContext.close();
+      obDal.close();
+    }
+  }
+
+  private static List<Object[]> rowsOf(String key, String text) {
+    List<Object[]> rows = new ArrayList<>();
+    rows.add(new Object[] { key, text });
+    return rows;
+  }
+
+  private static void setLastFailedLoad(long value) throws Exception {
+    Field field = ClassicMessageRemap.class.getDeclaredField("lastFailedLoad");
+    field.setAccessible(true);
+    field.setLong(null, value);
+  }
+
+  /**
+   * The AD_MESSAGE texts are read once for the JVM — the base and the translation query, in admin
+   * mode that is always restored — and then serve every later response without a query.
+   */
+  @Test
+  public void theAdMessageTextsAreReadOnceAndServeEveryLaterResponse() throws Exception {
+    ClassicMessageRemap.setTextsForTest(null);
+    try (DalStub dal = new DalStub()) {
+      dal.rows(rowsOf("TBAI_ConfigNotFound", CONFIG_ES),
+          rowsOf("AEATSII_EmptyCertificatePath", CERT_ES));
+
+      for (int i = 0; i < 3; i++) {
+        NeoResponse response = NeoResponse.error(422, i % 2 == 0 ? CONFIG_ES : CERT_ES);
+        ClassicMessageRemap.apply(response, "es_ES");
+        assertEquals(i % 2 == 0 ? CONFIG_GO_ES : CERT_GO_ES,
+            response.getBody().getJSONObject("error").getString("message"));
+      }
+
+      verify(dal.session, times(2)).createQuery(anyString());
+      verify(dal.base).setParameterList(eq("keys"), anyCollection());
+      dal.obContext.verify(() -> OBContext.setAdminMode(true), times(1));
+      dal.obContext.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  /**
+   * A failed read is not retried on every response: within the 30 s backoff nothing queries the
+   * database again (and the AD_MESSAGE entries are skipped, the literal ones still work); once
+   * the backoff has passed, the next response reads again.
+   */
+  @Test
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  public void aFailedReadIsRetriedOnlyAfterTheBackoff() throws Exception {
+    ClassicMessageRemap.setTextsForTest(null);
+    try (DalStub dal = new DalStub()) {
+      when(dal.session.createQuery(startsWith("select m.searchKey")))
+          .thenThrow(new IllegalStateException("No session"))
+          .thenReturn((Query) dal.base);
+      dal.rows(rowsOf("TBAI_ConfigNotFound", CONFIG_ES), Collections.emptyList());
+
+      for (int i = 0; i < 3; i++) {
+        assertEquals(CONFIG_ES, ClassicMessageRemap.remapText(CONFIG_ES, "es_ES"));
+      }
+      assertEquals("La factura debe contener información en el campo Tipo factura.",
+          ClassicMessageRemap.remapText(SII_TYPE_CLASSIC, "es_ES"));
+      verify(dal.session, times(1)).createQuery(startsWith("select m.searchKey"));
+
+      setLastFailedLoad(System.currentTimeMillis() - 31_000L);
+
+      assertEquals(CONFIG_GO_ES, ClassicMessageRemap.remapText(CONFIG_ES, "es_ES"));
+      verify(dal.session, times(2)).createQuery(startsWith("select m.searchKey"));
+    }
+  }
+
+  /**
+   * An aborted transaction (the request already failed in the database) makes the read fail: the
+   * response is still written, unchanged, and the admin mode entered for the read is restored.
+   */
+  @Test
+  public void anAbortedTransactionDoesNotBreakTheResponse() throws Exception {
+    ClassicMessageRemap.setTextsForTest(null);
+    try (DalStub dal = new DalStub()) {
+      when(dal.base.list()).thenThrow(new GenericJDBCException("could not extract ResultSet",
+          new SQLException("ERROR: current transaction is aborted, commands ignored until end "
+              + "of transaction block", "25P02")));
+      NeoResponse response = NeoResponse.ensureTopLevelMessage(NeoResponse.error(422, REVERSED_ES));
+
+      assertSame(response, ClassicMessageRemap.apply(response, "es_ES"));
+
+      assertEquals(422, response.getHttpStatus());
+      assertEquals(REVERSED_ES, response.getBody().getString("message"));
+      assertEquals(REVERSED_ES, response.getBody().getJSONObject("error").getString("message"));
+      assertFalse(response.getBody().getJSONObject("error").has("messageKeys"));
+      verify(dal.translated, never()).list();
+      dal.obContext.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  // ── shapes and edge cases ───────────────────────────────────────────────────────────────────
+
+  /**
+   * {@code AEAT390_MARSHALLERROR}: the Classic text is filled with {@code String.format} and the
+   * validator's exception spans several lines. The whole exception text is the argument, its line
+   * breaks collapsed like the rest of the text.
+   */
+  @Test
+  public void aMultiLineExceptionFillsTheFormatPlaceholder() {
+    String exception = "cvc-pattern-valid: Value 'B1' is not facet-valid with respect to "
+        + "pattern.\ncvc-type.3.1.3: The value 'B1' of element 'NIF' is not valid";
+    String classic = String.format(MARSHALL.replace("\"", "&quot;"), exception);
+
+    assertEquals("Error interno al generar el fichero XML: cvc-pattern-valid: Value 'B1' is not "
+        + "facet-valid with respect to pattern. cvc-type.3.1.3: The value 'B1' of element 'NIF' "
+        + "is not valid. Suele deberse a que la estructura o algún dato de la declaración no es "
+        + "válido. Revisa los datos indicados en el error y vuelve a generar el fichero.",
+        ClassicMessageRemap.remapText(classic, "es_ES"));
+    assertEquals("Internal error while generating the XML file: cvc-pattern-valid: Value 'B1' "
+        + "is not facet-valid with respect to pattern. cvc-type.3.1.3: The value 'B1' of element "
+        + "'NIF' is not valid. This is usually caused by an invalid structure or value in the "
+        + "return. Check the data named in the error and generate the file again.",
+        ClassicMessageRemap.remapText(classic, "en_US"));
+  }
+
+  /**
+   * A failed {@code /batch}: the batch-level error and each per-operation error are remapped, and
+   * each error object gets its own key.
+   */
+  @Test
+  public void aBatchBodyIsRemappedAtEveryLevel() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("failedAt", new JSONObject().put("index", 1))
+        .put("error", new JSONObject().put("status", 422).put("message", REVERSED_ES))
+        .put("results", new JSONArray()
+            .put(new JSONObject().put("ok", true).put("id", "A1"))
+            .put(new JSONObject().put("ok", false).put("error",
+                new JSONObject().put("message", "Process execution failed: " + CERT_ES))));
+
+    ClassicMessageRemap.applyToBody(body, "es_ES");
+
+    JSONObject batchError = body.getJSONObject("error");
+    assertEquals(REVERSED_GO_ES, batchError.getString("message"));
+    assertEquals("ETVFAC_reversed_invoice", batchError.getJSONArray("messageKeys").getString(0));
+    JSONObject opError = body.getJSONArray("results").getJSONObject(1).getJSONObject("error");
+    assertEquals("Process execution failed: " + CERT_GO_ES, opError.getString("message"));
+    assertEquals("AEATSII_EmptyCertificatePath",
+        opError.getJSONArray("messageKeys").getString(0));
+    assertFalse(body.getJSONArray("results").getJSONObject(0).has("messageKeys"));
+  }
+
+  /** An async batch job poll: the finished job's result is the batch body, one level deeper. */
+  @Test
+  public void anAsyncBatchJobPollIsRemapped() throws Exception {
+    JSONObject body = new JSONObject().put("jobId", "J1").put("state", "failed")
+        .put("result", new JSONObject().put("results", new JSONArray().put(new JSONObject()
+            .put("ok", false).put("error", new JSONObject().put("status", 422)
+                .put("message", CONFIG_ES)))));
+
+    ClassicMessageRemap.applyToBody(body, "es_ES");
+
+    JSONObject error = body.getJSONObject("result").getJSONArray("results").getJSONObject(0)
+        .getJSONObject("error");
+    assertEquals(CONFIG_GO_ES, error.getString("message"));
+    assertEquals("TBAI_ConfigNotFound", error.getJSONArray("messageKeys").getString(0));
+    assertEquals("J1", body.getString("jobId"));
+  }
+
+  /** Arrays inside arrays are walked too; outside an error object no key array is created. */
+  @Test
+  public void nestedArraysAreWalked() throws Exception {
+    JSONObject body = new JSONObject().put("data", new JSONArray()
+        .put(new JSONArray().put(new JSONObject().put("text", REVERSED_ES)))
+        .put(new JSONArray().put(new JSONArray().put(new JSONObject().put("msgText", CERT_ES)))));
+
+    ClassicMessageRemap.applyToBody(body, "es_ES");
+
+    JSONObject first = body.getJSONArray("data").getJSONArray(0).getJSONObject(0);
+    assertEquals(REVERSED_GO_ES, first.getString("text"));
+    assertFalse(first.has("messageKeys"));
+    assertEquals(CERT_GO_ES, body.getJSONArray("data").getJSONArray(1).getJSONArray(0)
+        .getJSONObject(0).getString("msgText"));
+  }
+
+  /**
+   * A text shorter than 20 characters is never tried, not even a raw token; the same token
+   * inside a longer text is.
+   */
+  @Test
+  public void aTextShorterThanTwentyCharactersIsLeftAlone() throws Exception {
+    JSONObject error = new JSONObject().put("message", "@TBAI_SetKey@");
+    JSONObject body = new JSONObject().put("error", error);
+
+    ClassicMessageRemap.applyToBody(body, "es_ES");
+
+    assertEquals("@TBAI_SetKey@", error.getString("message"));
+    assertFalse(error.has("messageKeys"));
+    assertTrue(ClassicMessageRemap.remapText("Error al completar: @TBAI_SetKey@", "es_ES")
+        .startsWith("Error al completar: Faltan datos fiscales de TicketBAI"));
+  }
+
+  /** Two catalogued messages in one string: both are remapped and both keys published. */
+  @Test
+  public void twoCataloguedMessagesInOneStringAreBothRemapped() throws Exception {
+    NeoResponse response = NeoResponse.error(422, REVERSED_ES + "\n" + CERT_ES);
+
+    ClassicMessageRemap.apply(response, "es_ES");
+
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals(REVERSED_GO_ES + " " + CERT_GO_ES, error.getString("message"));
+    JSONArray keys = error.getJSONArray("messageKeys");
+    assertEquals(2, keys.length());
+    List<String> published = List.of(keys.getString(0), keys.getString(1));
+    assertTrue(published.toString(), published.contains("ETVFAC_reversed_invoice"));
+    assertTrue(published.toString(), published.contains("AEATSII_EmptyCertificatePath"));
   }
 }
