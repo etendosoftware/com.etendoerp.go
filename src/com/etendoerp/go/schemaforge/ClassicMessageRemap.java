@@ -74,8 +74,11 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * which a Classic call can change (see {@code SiiSendHandler}).
  *
  * <p><b>Identity.</b> When the recognised text sits next to a {@code messageKeys} array, or inside
- * an {@code error} object, its {@code AD_MESSAGE} key is added there, so a client keyed on the
- * identity keeps finding it.
+ * an {@code error} object (or at the root of an MCP error result, {@link #applyToErrorBody}), its
+ * {@code AD_MESSAGE} key is added there, so a client keyed on the identity keeps finding it. A text
+ * that is already the GO text of an entry, in any catalog language, is recognised too: the key is
+ * published and the text left alone, so the remap is idempotent and the key survives a text that
+ * was reworded before the exit that publishes it (an {@code etendo_action_batch} document result).
  *
  * <p><b>Total.</b> Nothing here can fail a response: any failure leaves the original text.
  */
@@ -96,6 +99,10 @@ public final class ClassicMessageRemap {
   private static final Pattern PLACEHOLDER = Pattern.compile("%(\\d+|s)");
   private static final Pattern HTML_BREAK = Pattern.compile("(?i)<br\\s*/?>");
   private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+  /** A {@code {n}} argument of a GO text (left as is by a format call with no arguments). */
+  private static final Pattern GO_PLACEHOLDER = Pattern.compile("\\{(\\d+)\\}");
+  /** The catalog languages a GO text may already be in. */
+  private static final List<String> GO_LANGUAGES = List.of("es", ENGLISH);
 
   /**
    * The catalogued messages: only messages a GO user can actually trigger (a message GO never
@@ -120,7 +127,6 @@ public final class ClassicMessageRemap {
       Entry.adMessage("AEATSII_SII_ACCRUAL_DATE_EMPTY"),
       Entry.adMessage("TBAI_ConfigNotFound"),
       // B — the field has another name in GO
-      Entry.adMessage("ETVFAC_null_description"),
       Entry.adMessage("ETVFAC_error_code_idtype"),
       Entry.adMessage("TBAI_EmptyNifCode"),
       Entry.adMessage("TBAI_EmptyPostalCode"),
@@ -190,11 +196,28 @@ public final class ClassicMessageRemap {
    * @param language the language of the GO text
    */
   public static void applyToBody(JSONObject body, String language) {
+    visitRoot(body, null, language);
+  }
+
+  /**
+   * {@link #applyToBody(JSONObject)} for a body that is itself an error object (an MCP error
+   * tool result, whose root is the flattened error the client reads): a recognised message at
+   * its root gets its key in a root {@code messageKeys}, as one inside {@code error} does.
+   *
+   * @param body the error body, mutated in place; may be {@code null}
+   */
+  public static void applyToErrorBody(JSONObject body) {
+    if (body != null) {
+      visitRoot(body, KEY_ERROR, requestLanguage());
+    }
+  }
+
+  private static void visitRoot(JSONObject body, String rootKey, String language) {
     if (body == null) {
       return;
     }
     try {
-      visit(body, null, language);
+      visit(body, rootKey, language);
     } catch (Exception e) {
       log.debug("[ETP-6158] Classic message remap skipped: {}", e.getMessage());
     }
@@ -226,7 +249,9 @@ public final class ClassicMessageRemap {
       if (value instanceof String && TEXT_KEYS.contains(key)) {
         Result result = remap((String) value, language);
         if (result != null) {
-          object.put(key, result.text);
+          if (!result.text.equals(value)) {
+            object.put(key, result.text);
+          }
           recordKeys(object, keyInParent, result.adMessageKeys);
         }
       } else if (value instanceof JSONObject) {
@@ -316,11 +341,66 @@ public final class ClassicMessageRemap {
           }
         }
       }
-      return current.equals(text) ? null : new Result(current, recognised);
+      recogniseGoTexts(current, recognised);
+      if (current.equals(text)) {
+        return recognised.isEmpty() ? null : new Result(text, recognised);
+      }
+      return new Result(current.trim(), recognised);
     } catch (Exception e) {
       log.debug("[ETP-6158] Could not remap a Classic message: {}", e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Adds to {@code recognised} the AD_MESSAGE key of every GO text already present in
+   * {@code text}, in any catalog language. A text can be remapped before it reaches the exit that
+   * publishes the key (a plain-text MCP error, a handler that remaps itself, a tool result parsed
+   * and rendered again by {@code etendo_action_batch}); recognising the GO text there keeps the
+   * identity without touching the text, and keeps the remap idempotent.
+   */
+  private static void recogniseGoTexts(String text, List<String> recognised) {
+    String normalized = normalize(text);
+    for (Map.Entry<String, List<Template>> go : goTemplates().entrySet()) {
+      if (recognised.contains(go.getKey())) {
+        continue;
+      }
+      for (Template template : go.getValue()) {
+        if (template.matches(normalized)) {
+          recognised.add(go.getKey());
+          break;
+        }
+      }
+    }
+  }
+
+  /** The GO texts of the AD_MESSAGE entries as templates, {@code {n}} as placeholders. */
+  private static volatile Map<String, List<Template>> goTemplates;
+
+  private static Map<String, List<Template>> goTemplates() {
+    Map<String, List<Template>> current = goTemplates;
+    if (current == null) {
+      Map<String, List<Template>> built = new java.util.LinkedHashMap<>();
+      for (Entry entry : ENTRIES) {
+        if (!entry.adMessage) {
+          continue;
+        }
+        List<Template> templates = new ArrayList<>();
+        for (String language : GO_LANGUAGES) {
+          String pattern = NeoHints.catalogText(entry.catalogKey, language);
+          if (pattern != null) {
+            Template template = Template.compile(GO_PLACEHOLDER.matcher(pattern).replaceAll("%$1"));
+            if (template != null) {
+              templates.add(template);
+            }
+          }
+        }
+        built.put(entry.catalogKey, Collections.unmodifiableList(templates));
+      }
+      current = Collections.unmodifiableMap(built);
+      goTemplates = current;
+    }
+    return current;
   }
 
   /** Replaces raw {@code @KEY@} tokens of catalogued, parameterless AD_MESSAGEs. */
@@ -437,6 +517,11 @@ public final class ClassicMessageRemap {
         }
       }
       regex.append("\\s*");
+    }
+
+    /** Whether {@code normalized} contains this text. */
+    boolean matches(String normalized) {
+      return pattern.matcher(normalized).find();
     }
 
     /**

@@ -57,8 +57,13 @@ public class ClassicMessageRemapTest {
       + "      %2 factura(s) enviadas previamente<br />\n"
       + "      %3\n"
       + "      Por favor, refresque la pantalla.";
-  private static final String NULL_DESCRIPTION = "El campo \"Descripción Verifactu\" no puede "
-      + "estar vacío.";
+  /** The base text as stored: HTML breaks, quotes and a {@code %s} that String.format fills. */
+  private static final String MARSHALL = "Error interno al generar el fichero XML:<br />%s.<br />"
+      + "<br />Este error se debe habitualmente a que la estructura o alguno de los datos del "
+      + "fichero XML no son válidos. Puede establecer a \"N\" el parámetro \"Validación estricta "
+      + "contra el esquema XSD\" dentro del grupo \"Validación\" en la configuración de este "
+      + "Modelo para evitar esta validación y forzar la generación del fichero.";
+  private static final String NIF_GO_ES = "El contacto no está marcado como Factura Simplificada, así que su CIF/NIF es obligatorio. Complétalo en Contactos.";
 
   @Before
   public void setUp() {
@@ -66,7 +71,7 @@ public class ClassicMessageRemapTest {
         "ETVFAC_reversed_invoice", List.of(REVERSED_ES),
         "AEATSII_EmptyCertificatePath", List.of(CERT_EN, CERT_ES),
         "AEATSII_InvoiceManualSending", List.of(MANUAL_SENDING_ES),
-        "ETVFAC_null_description", List.of(NULL_DESCRIPTION),
+        "AEAT390_MARSHALLERROR", List.of(MARSHALL),
         "TBAI_ConfigNotFound", List.of("No existe configuración de TBAI alcanzable. Revise la "
             + "ventana de configuración.")));
   }
@@ -129,13 +134,42 @@ public class ClassicMessageRemapTest {
         ClassicMessageRemap.remapText(classic, "es_ES"));
   }
 
-  /** {@code messageBD} escapes quotes as {@code &quot;}. */
+  /** {@code messageBD} escapes quotes as {@code &quot;}; {@code %s} is captured. */
   @Test
   public void theMessageBdEscapedFormMatches() {
-    String escaped = NULL_DESCRIPTION.replace("\"", "&quot;");
+    String escaped = String.format(MARSHALL.replace("\"", "&quot;"),
+        "cvc-pattern-valid: X no es válido");
 
-    assertEquals("El campo Descripción Operación de la solapa SIF (VERI*FACTU) no puede estar "
-        + "vacío.", ClassicMessageRemap.remapText(escaped, "es_ES"));
+    assertEquals("Error interno al generar el fichero XML: cvc-pattern-valid: X no es válido. "
+        + "Suele deberse a que la estructura o algún dato de la declaración no es válido. Revisa "
+        + "los datos indicados en el error y vuelve a generar el fichero.",
+        ClassicMessageRemap.remapText(escaped, "es_ES"));
+  }
+
+  /**
+   * A text already reworded for GO before it reaches the exit (a batch document's result, a
+   * handler that remaps itself) still publishes its key, and is left as is.
+   */
+  @Test
+  public void anAlreadyRewordedTextStillPublishesItsKey() throws Exception {
+    JSONObject body = new JSONObject().put("results", new JSONArray().put(new JSONObject()
+        .put("ok", false).put("error", new JSONObject().put("message", NIF_GO_ES))));
+
+    ClassicMessageRemap.applyToBody(body, "en_US");
+
+    JSONObject error = body.getJSONArray("results").getJSONObject(0).getJSONObject("error");
+    assertEquals(NIF_GO_ES, error.getString("message"));
+    assertEquals("TBAI_EmptyNifCode", error.getJSONArray("messageKeys").getString(0));
+  }
+
+  /** A remapped text is trimmed; padding around an untouched text is kept. */
+  @Test
+  public void aRemappedTextIsTrimmed() {
+    assertEquals("No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI).",
+        ClassicMessageRemap.remapText(" @TBAI_ConfigNotFound@ ", "es_ES"));
+    assertEquals("  Una nota cualquiera de la factura  ",
+        ClassicMessageRemap.remapText("  Una nota cualquiera de la factura  ", "es_ES"));
   }
 
   /** The raw, unparsed token is replaced too. */
@@ -204,7 +238,8 @@ public class ClassicMessageRemapTest {
   public void messagesGoNeverShowsAreNotCatalogued() {
     for (ClassicMessageRemap.Entry entry : ClassicMessageRemap.ENTRIES) {
       assertFalse(entry.catalogKey, List.of("AEATSII_RECTIFIC_2017",
-          "ETVFAC_complete_rectifying_type").contains(entry.catalogKey));
+          "ETVFAC_complete_rectifying_type", "ETVFAC_null_description")
+          .contains(entry.catalogKey));
     }
   }
 

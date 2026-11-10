@@ -7021,9 +7021,19 @@ whitespace normalised. Only the matched span is replaced. The GO text comes from
 `messages/neo_hints_<lang>.properties` (key = the `AD_MESSAGE` value, or the literal entry's key),
 in the language captured right after authentication (`NeoLanguage.captureRequestCode()` in
 `NeoServlet` and `McpSessionManager.executeInContext`, read with `NeoLanguage.requestCode()`), not
-the current `OBContext` language, which a Classic call can change mid-request (ETP-5745). When the
-text sits in an `error` object, or next to an existing `messageKeys` array, its `AD_MESSAGE` key is
-added there. Total: any failure leaves the original text.
+the current `OBContext` language, which a Classic call can change mid-request (ETP-5745).
+
+**Identity (`messageKeys`).** When a recognised text sits in an `error` object, or next to an
+existing `messageKeys` array, its `AD_MESSAGE` key is added there. On MCP the root of an error tool
+result is that error object (`McpResponseSanitizer#renderError`, used by
+`McpToolRouter#wrapAsErrorContent(JSONObject)` and by `McpActionEnvelope` for an `isError`
+result), so the key lands at its root: `{status, title, message, error:"validation_error",
+detail, messageKeys:["TBAI_EmptyNifCode"]}`. A text may already be the GO text when it reaches an
+exit (an `etendo_action_batch` document result is the single action's rendered error, parsed and
+rendered again; a handler such as `SiiSendHandler` remaps itself; a plain-text error): the GO text
+of each entry, in any catalog language, is recognised too, so the key is still published and the
+text is left as is — remapping stays idempotent. A remapped text is trimmed. Total: any failure
+leaves the original text.
 
 **Adding an entry.**
 
@@ -7033,7 +7043,10 @@ added there. Total: any failure leaves the original text.
    never runs) and `ETVFAC_complete_rectifying_type` (GO always fills the invoice's
    `em_etvfac_reverseinvtype` before VERI\*FACTU validates it: `SalesRectificativeFiscalDefaults`
    on header writes, `InvoiceCompletionService.populateVerifactuFieldsFromDocType` at completion,
-   and GO's rectificative document types ship `R1`/`I`) were dropped for that reason.
+   and GO's rectificative document types ship `R1`/`I`) were dropped for that reason, and so was
+   `ETVFAC_null_description` (at Complete the DB function `ETVFAC_MANDATORY_FIELDS` raises
+   `ETVFAC_Missing_Inv_Verifactu_Fields` first for a null or blank Descripción Operación, and GO
+   saves a whitespace-only value as null, so `InitialValidator`'s check never runs from GO).
 2. Add `Entry.adMessage("<AD_MESSAGE value>")` (or `Entry.literal("<key>", "<sentence>")`) to
    `ClassicMessageRemap.ENTRIES`.
 3. Add `<key> = <text>` to **both** `neo_hints_es.properties` (tú, no voseo) and

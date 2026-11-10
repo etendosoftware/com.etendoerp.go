@@ -2491,7 +2491,7 @@ public class McpToolRouter {
   static JSONObject wrapAsErrorContent(JSONObject body) {
     try {
       McpMessageKeyHints.addTo(body);
-      return wrapAsErrorContent(McpResponseSanitizer.render(body));
+      return wrapAsErrorContent(McpResponseSanitizer.renderError(body));
     } catch (JSONException e) {
       throw new McpToolException(ERROR_BUILDING_CONTENT, e);
     }
