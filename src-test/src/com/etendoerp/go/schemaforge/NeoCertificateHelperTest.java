@@ -262,7 +262,9 @@ public class NeoCertificateHelperTest {
     Session session = mock(Session.class);
     NativeQuery nativeQuery = mock(NativeQuery.class);
 
-    Date expirationDate = new Date();
+    // 1 July on purpose: as dd/MM/yyyy it read back month-first as 7 January in the browser, so
+    // only the exact ISO string proves the machine contract (ETP-6053).
+    Date expirationDate = java.sql.Date.valueOf("2027-07-01");
 
     when(obDal.getSession()).thenReturn(session);
     when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
@@ -275,7 +277,7 @@ public class NeoCertificateHelperTest {
       NeoResponse resp = NeoCertificateHelper.handleCertificateGet(request);
       assertEquals(200, resp.getHttpStatus());
       assertTrue(resp.getBody().getBoolean("exists"));
-      assertNotNull(resp.getBody().getString("validTo"));
+      assertEquals("2027-07-01", resp.getBody().getString("validTo"));
     }
   }
 
@@ -554,8 +556,8 @@ public class NeoCertificateHelperTest {
 
     when(cert.getSubjectX500Principal()).thenReturn(subjectPrincipal);
     when(cert.getIssuerX500Principal()).thenReturn(issuerPrincipal);
-    when(cert.getNotBefore()).thenReturn(new Date());
-    when(cert.getNotAfter()).thenReturn(new Date());
+    when(cert.getNotBefore()).thenReturn(java.sql.Date.valueOf("2025-07-01"));
+    when(cert.getNotAfter()).thenReturn(java.sql.Date.valueOf("2027-07-01"));
     when(cert.getSigAlgName()).thenReturn("SHA256withRSA");
 
     Method m = NeoCertificateHelper.class.getDeclaredMethod("buildCertDetails", X509Certificate.class);
@@ -564,8 +566,8 @@ public class NeoCertificateHelperTest {
 
     assertNotNull(details.getString("subject"));
     assertNotNull(details.getString("issuer"));
-    assertNotNull(details.getString("validFrom"));
-    assertNotNull(details.getString("validTo"));
+    assertEquals("2025-07-01", details.getString("validFrom"));
+    assertEquals("2027-07-01", details.getString("validTo"));
     assertEquals("SHA256withRSA", details.getString("algorithm"));
   }
 
