@@ -22,6 +22,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.erpCommon.utility.PropertyException;
 import org.openbravo.erpCommon.utility.PropertyNotFoundException;
@@ -167,7 +168,14 @@ class NeoFiscalModelsCatalogService {
       throw new IllegalStateException(
           "The stored fiscal models catalog could not be read; nothing was saved", e);
     }
-    Preferences.setPreferenceValue(PREF_KEY, toSave.toString(), false, client, null, null, null, null, null);
+    // Core stores the preference as a System row (client 0, org 0) visible at this client, which
+    // the NEO tenant write guard (ETP-5819) refuses unless it is written in its System rows scope.
+    // The guard checks on flush, so the flush runs inside the scope too.
+    String value = toSave.toString();
+    NeoTenantWriteGuard.allowingSystemRows(() -> {
+      Preferences.setPreferenceValue(PREF_KEY, value, false, client, null, null, null, null, null);
+      OBDal.getInstance().flush();
+    });
   }
 
   /** The stored catalog preference could not be read (not: it is empty or corrupt). */

@@ -19,26 +19,39 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.erpCommon.utility.PropertyException;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -51,6 +64,26 @@ import com.etendoerp.go.common.BoundedJsonParserTest;
  * @covers com.etendoerp.go.schemaforge.FiscalModel390Flag
  */
 public class NeoFiscalModelsCatalogServiceTest {
+
+  private OBDal obDal;
+  private MockedStatic<OBDal> obDalMock;
+  private MockedStatic<SessionHandler> sessionHandlerMock;
+
+  /** The save flushes its preference row; no test here runs against a real DAL session. */
+  @Before
+  public void setUpDal() {
+    obDal = mock(OBDal.class);
+    obDalMock = mockStatic(OBDal.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+    sessionHandlerMock = mockStatic(SessionHandler.class);
+    sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(mock(SessionHandler.class));
+  }
+
+  @After
+  public void tearDownDal() {
+    obDalMock.close();
+    sessionHandlerMock.close();
+  }
 
   @Test
   public void getActiveModelsReturnsStoredValueScopedToClientOnly() throws Exception {
@@ -516,6 +549,57 @@ public class NeoFiscalModelsCatalogServiceTest {
         assertFalse(label, saved.has(FiscalModel390Flag.UNAVAILABLE_KEY));
         assertEquals(label, 1, saved.length());
       }
+    }
+  }
+
+  // ------------------------------------------------- NEO tenant write guard (ETP-5819)
+
+  /**
+   * Core stores the preference as a System (client {@code 0}) row visible at the tenant, which the
+   * NEO tenant write guard refuses unless the write and its flush run inside its explicit System
+   * rows scope. Before, every PUT answered 403 and the catalog change was lost.
+   */
+  @Test
+  public void saveActiveModelsWritesAndFlushesThePreferenceInsideTheSystemRowsScope()
+      throws Exception {
+    Client client = mock(Client.class);
+    OBContext obCtx = contextFor(client);
+    List<String> admitted = new ArrayList<>();
+    doAnswer(invocation -> admitted.add("flush:" + systemRowAdmitted())).when(obDal).flush();
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<Preferences> prefMock = mockStatic(Preferences.class);
+         MockedStatic<FiscalModel390Flag> flag = flag(true)) {
+      ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+      storeCatalog(prefMock, client, "{}");
+      prefMock.when(() -> Preferences.setPreferenceValue(anyString(), anyString(), anyBoolean(),
+          any(), any(), any(), any(), any(), any()))
+          .thenAnswer(invocation -> {
+            admitted.add("save:" + systemRowAdmitted());
+            return mock(Preference.class);
+          });
+
+      NeoTenantWriteGuard.call(() -> {
+        NeoFiscalModelsCatalogService.saveActiveModels("{\"303\":true,\"390\":false}");
+        doNothing().when(obDal).flush();
+        return null;
+      });
+
+      assertEquals(List.of("save:true", "flush:true"), admitted);
+    }
+  }
+
+  /** Fires a client-0 insert at the real guard, as Hibernate does on flush. */
+  private static boolean systemRowAdmitted() {
+    Client system = mock(Client.class);
+    when(system.getId()).thenReturn("0");
+    EntityNewEvent event = mock(EntityNewEvent.class);
+    when(event.getTargetInstance()).thenReturn(system);
+    try {
+      new NeoTenantWriteGuard().onSave(event);
+      return true;
+    } catch (OBSecurityException e) {
+      return false;
     }
   }
 }
