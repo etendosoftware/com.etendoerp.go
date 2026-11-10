@@ -581,6 +581,7 @@ public class NeoFiscalModelsCatalogServiceTest {
 
       NeoTenantWriteGuard.call(() -> {
         NeoFiscalModelsCatalogService.saveActiveModels("{\"303\":true,\"390\":false}");
+        // call() flushes again on exit: reset the stub so only the service's own flush is recorded.
         doNothing().when(obDal).flush();
         return null;
       });

@@ -139,6 +139,9 @@ class NeoFiscalModelsCatalogService {
   /**
    * Upserts the active-models preference for the current OBContext client.
    *
+   * <p>The flush inside the System rows scope admits every pending System row in the session, not
+   * only the preference. That is safe because, before that point, this request has only read.
+   *
    * @param json JSON object string (e.g. {@code {"303": true, "349": false}})
    * @throws IllegalArgumentException if {@code json} is not valid JSON
    */
