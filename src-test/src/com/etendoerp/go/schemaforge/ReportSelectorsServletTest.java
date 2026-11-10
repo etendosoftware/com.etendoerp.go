@@ -426,6 +426,64 @@ class ReportSelectorsServletTest {
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      // ETP-6080: the calendar the org actually uses, inherited from its calendar owner.
+      for (String s : sql.getAllValues()) {
+        assertTrue(s.contains("WHERE o.ad_org_id = ad_org_getcalendarowner(:selectedOrgId))"), s);
+      }
+      verify(countQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+      verify(dataQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+    }
+
+    @Test
+    @DisplayName("year query without selectedOrgId keeps every client year and never binds it")
+    void yearWithoutOrgFilter() throws Exception {
+      configureAuthenticatedGet("year");
+
+      servlet.doGet(request, response);
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      assertFalse(sql.getAllValues().get(0).contains("ad_org_getcalendarowner"));
+      verify(countQuery, never()).setParameter(eq("selectedOrgId"), any());
+      verify(dataQuery, never()).setParameter(eq("selectedOrgId"), any());
+    }
+
+    @Test
+    @DisplayName("year rows carry startDate/endDate as yyyy-MM-dd text (July fiscal year)")
+    void yearRowsCarryFiscalYearBounds() throws Exception {
+      configureAuthenticatedGet("year");
+      when(countQuery.uniqueResult()).thenReturn(2);
+      when(dataQuery.list()).thenReturn(Arrays.asList(
+          new Object[]{ "Y1", "2028 (GO)", "2028 (GO)", "2028-07-01", "2029-06-30" },
+          new Object[]{ "Y2", "2027 (GO)", "2027 (GO)", null, null }));
+
+      servlet.doGet(request, response);
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      String dataSql = sql.getAllValues().get(1);
+      assertTrue(dataSql.contains("to_char(MIN(p.startdate), 'YYYY-MM-DD')"), dataSql);
+      assertTrue(dataSql.contains("to_char(MAX(p.enddate), 'YYYY-MM-DD')"), dataSql);
+      JSONArray items = new JSONObject(getResponseBody()).getJSONArray("items");
+      assertEquals("2028-07-01", items.getJSONObject(0).getString("startDate"));
+      assertEquals("2029-06-30", items.getJSONObject(0).getString("endDate"));
+      // A year without periods: empty bounds, the view falls back to 1 Jan.
+      assertEquals("", items.getJSONObject(1).getString("startDate"));
+    }
+
+    @Test
+    @DisplayName("non-year selectors keep the id/name/label shape")
+    void otherSelectorsHaveNoExtraKeys() throws Exception {
+      configureAuthenticatedGet("bpartner");
+      when(countQuery.uniqueResult()).thenReturn(1);
+      when(dataQuery.list()).thenReturn(Collections.singletonList(new Object[]{ "id1", "A", "A" }));
+
+      servlet.doGet(request, response);
+
+      JSONObject item = new JSONObject(getResponseBody()).getJSONArray("items").getJSONObject(0);
+      assertEquals(3, item.length());
     }
 
     @Test
@@ -672,16 +730,16 @@ class ReportSelectorsServletTest {
     }
 
     @Test
-    @DisplayName("clamps limit above MAX_LIMIT to 100")
+    @DisplayName("clamps limit above MAX_LIMIT to 1000")
     @SuppressWarnings("unchecked")
     void limitAboveMax() throws Exception {
       configureAuthenticatedGet("bpartner");
-      when(request.getParameter("limit")).thenReturn("500");
+      when(request.getParameter("limit")).thenReturn("5000");
 
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
-      verify(dataQuery).setMaxResults(100);
+      verify(dataQuery).setMaxResults(1000);
     }
 
     @Test
@@ -733,9 +791,9 @@ class ReportSelectorsServletTest {
   class ToJsonItemsTests {
 
     private JSONArray invokeToJsonItems(List<Object[]> rows) throws Exception {
-      Method method = ReportSelectorsServlet.class.getDeclaredMethod("toJsonItems", List.class);
+      Method method = ReportSelectorsServlet.class.getDeclaredMethod("toJsonItems", List.class, String[].class);
       method.setAccessible(true);
-      return (JSONArray) method.invoke(servlet, rows);
+      return (JSONArray) method.invoke(servlet, rows, new String[0]);
     }
 
     @Test

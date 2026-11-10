@@ -779,8 +779,18 @@ off, **before** the multipart is read and before any row or OCR work is created.
 `ETGO_INCOMING_DOCUMENT` table and the `Invoice Inbox` window ship unconditionally: the flag gates
 behaviour, not schema.
 
-**The toggle point.** `InvoiceInboxUploadEndpoint` is the one class that calls
-`InvoiceInboxFlag.isEnabled()`, at request entry.
+Everything of the inbox is contained in the flag, not only the upload: the **read** of the
+`invoice-inbox` spec (REST list/by id and MCP `etendo_list`/`etendo_get`) answers the same `403
+feature_disabled` when it is off (ETP-6049).
+
+**The toggle points.** All call `InvoiceInboxFlag.isEnabled()` / `isEnabledFor()`, never the key:
+- `InvoiceInboxUploadEndpoint` (upload), at request entry.
+- `InvoiceInboxHeaderHandler`, an `@NeoExtension(spec = "invoice-inbox", entity = "header")` pre-hook
+  that refuses every request on the spec when off (REST single/batch and MCP read, same dispatcher).
+  It also serves the `discard` action (`POST .../header/{id}/action/discard`, ETP-6049): the flag
+  is judged first in the same `handle`, so the action sits behind the same gate, with no second
+  evaluation point.
+- `SFWindowAccessMap`, which publishes `capabilities.invoiceInbox` for the UI.
 
 **The one gate.** `InvoiceInboxFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
 `GoFeatureFlags.FLAG_INVOICE_INBOX`. Never read the key anywhere else. It has no window or entity
@@ -790,6 +800,8 @@ identity in it.
   (`GoAccountResolver.currentAccountEmail()`) and the current tenant (`clientId`).
 - `InvoiceInboxFlag.isEnabled(accountEmail, clientId)` is the explicit overload for callers that do
   not run as the account owner.
+- `InvoiceInboxFlag.isEnabledFor(accountEmail)` takes an already-resolved account and the current
+  tenant; `SFWindowAccessMap` uses it (ETP-6049).
 
 **Evaluate at request entry, never in the OCR worker.** The asynchronous OCR worker has no
 `OBContext` user, so `currentAccountEmail()` returns `null` there and a targeted user would look
@@ -803,7 +815,10 @@ key, `Email` and lowercase `email`) and `clientId`. Write Datadog rules on the l
 attribute only, against lowercase values (never on the identifier, a percentage or a tenant
 attribute: the web client and the backend use different targeting keys). With no resolvable account
 the context carries `clientId` only, so an email rule does not match and the default stays off. The
-web client has no key for this flag yet; story ETP-6049 adds it when the inbox gets a UI.
+browser still has no flag key of its own (ETP-6049): `SFWindowAccessMap` publishes the answer as
+`capabilities.invoiceInbox` (per account, outside the admin branch, `false` on any error), exactly like
+`productMovements`, and the Invoice Inbox menu entry and window read that capability. There is still
+one evaluator, `InvoiceInboxFlag`; a change reaches a user when the access map is next loaded.
 
 **Turning it on locally:** `etendo.go.flags.invoice-inbox=true` in `Openbravo.properties` (or
 `-Detendo.go.flags.invoice-inbox=true`, or `ETGO_FLAG_INVOICE_INBOX=true` in Tomcat's environment),
@@ -815,7 +830,9 @@ add rules on the lowercase `email` attribute. The local property is inert while 
 selected, and an undefined key resolves to `false`, so a missing setting looks exactly like "off".
 
 **Retirement (TTL 2027-01-31, provisional until confirmed with product):** the inbox then ships to
-everyone. Unwrap the toggle point (the flag check at the top of `InvoiceInboxUploadEndpoint.handle`), delete
+everyone. Unwrap the toggle points (the flag check at the top of `InvoiceInboxUploadEndpoint.handle`, remove
+the flag gate from `InvoiceInboxHeaderHandler` (the handler stays: it serves `discard`), the
+`SFWindowAccessMap` capability), delete
 `InvoiceInboxFlag.java` and its test, delete `FLAG_INVOICE_INBOX` from `GoFeatureFlags`, remove this
 section and the configuration-table row, and delete the hosted setting. Keep the registry feature
 entry in `etendo_schema_forge`.

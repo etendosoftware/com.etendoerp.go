@@ -202,6 +202,20 @@ public class RectificativeImportGateTest {
     assertFalse(POLICY.isRectificative(null));
   }
 
+  /**
+   * pendingBasis "classic" is a purchase-side offer (ETP-6099 follow-up): the header policy of the
+   * purchase side offers it, the sales side and the caller that set no policy do not.
+   */
+  @Test
+  public void offersClassicPending_onlyOnThePurchaseHeaderPolicy() {
+    java.util.function.Function<org.openbravo.model.common.enterprise.DocumentType, String>
+        classifier = type -> "STANDARD";
+    assertTrue(RectificativeImportPolicy.forHeader(classifier, false).offersClassicPending());
+    assertFalse(RectificativeImportPolicy.forHeader(classifier, true).offersClassicPending());
+    assertFalse(RectificativeImportPolicy.NONE.offersClassicPending());
+    assertFalse("the two-argument constructor offers none", POLICY.offersClassicPending());
+  }
+
   // ── the advice ────────────────────────────────────────────────────────────
 
   @Test

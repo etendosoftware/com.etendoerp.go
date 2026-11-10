@@ -26,7 +26,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Function;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -60,9 +59,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * movement line, so the movement counts as invoiced for the receipt cap and the order cap counts
  * the same line through its order line. What is left (ordered and not delivered, or delivered but
  * already taken by another draft) is invoiced against the order line alone. See
- * {@link #buildBatches} for why the two kinds go in separate native calls and how the remainder is
- * protected from the native process swapping it for receipt lines; nothing is refused for having
- * deliveries.
+ * {@link OrderInvoiceBatching#buildBatches} for why the two kinds go in separate native calls
+ * and how the remainder is protected from the native process swapping it for receipt lines;
+ * nothing is refused for having deliveries.
  *
  * <p>{@code importOrderLines} takes one order ({@code orderId} + {@code lines}) or several
  * ({@code orders:[{orderId, lines?}]}), all validated, locked and planned before the first write
@@ -115,17 +114,19 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String KEY_AMOUNT = "amount";
   static final String KEY_UNIT_PRICE = "unitPrice";
   static final String KEY_DISCOUNT = "discount";
+  /** Classic {@code availableOrderLines}: THIS invoice already has a line of the order line. */
+  static final String KEY_IMPORTED_HERE = "importedHere";
   /** The three order actions of a normal invoice (a rectificative takes none, ETP-5876). */
   static final Set<String> ACTIONS =
       Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES, ACTION_IMPORT);
   private static final int MAX_CANDIDATES = 200;
   private static final int MAX_ORDERS = OrderImportRequest.MAX_ORDERS;
-  /** {@code availableOrders} on a sales invoice: how many orders to list (ETP-5828). */
-  static final String PARAM_LIMIT = "limit";
-  /** {@code availableOrderLines} on a sales invoice: also the lines with nothing left. */
-  static final String PARAM_INCLUDE_COVERED = "includeCovered";
-  /** The longest {@code availableOrders} page a sales invoice may ask for. */
-  static final int MAX_LISTED_ORDERS = 1000;
+  /** {@code availableOrders}: how many orders to list (ETP-5828; both directions since ETP-6099). */
+  static final String PARAM_LIMIT = ImportListing.PARAM_LIMIT;
+  /** {@code availableOrders} / {@code availableOrderLines}: also what has nothing left. */
+  static final String PARAM_INCLUDE_COVERED = ImportListing.PARAM_INCLUDE_COVERED;
+  /** The longest {@code availableOrders} page a caller may ask for. */
+  static final int MAX_LISTED_ORDERS = ImportListing.MAX_LIMIT;
 
   /**
    * The three contracts of the invoice this delegate is injected in, in flow order.
@@ -155,8 +156,15 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "sum of its pending lines' amounts (unit price x pending quantity), WITHOUT the "
             + "global discount, as the application's import popup shows it. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending counts what draft "
             + "invoices already hold." + (sales ? " Only orders with a line not fully invoiced are "
-            + "looked at, newest created first." : "") + " Step 1." + flow,
-        OrderImportListing.availableOrdersParams(sales))
+            + "looked at, newest created first." : "") + " limit (1 to " + MAX_LISTED_ORDERS
+            + "), offset and includeCovered are optional; with limit or offset the answer adds "
+            + "offset and nextOffset (page on while hasMore). includeCovered also lists the orders "
+            + "whose pending lines are all held by draft invoices, with pendingLines 0 and amount 0; "
+            + "detail adds creationDate (ISO instant, UTC) and leaves out of pendingLines and "
+            + "amount the lines this invoice already holds (an order left at 0 is then listed only "
+            + "with includeCovered)."
+            + " Step 1." + flow,
+        OrderImportListing.availableOrdersParams())
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
@@ -166,8 +174,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "already applied), discount that line discount as a %, amount unitPrice x "
             + "pendingQuantity (what the import popup shows), and pendingQuantity is "
             + "ordered minus invoiced minus what any draft invoice (this one included) already "
-            + "holds, and the id is the sourceLineId importOrderLines takes. Step 2." + flow,
-        OrderImportListing.availableLinesParams(sales))
+            + "holds, and the id is the sourceLineId importOrderLines takes. includeCovered also "
+            + "lists the lines with nothing left at pendingQuantity 0; detail adds "
+            + OrderImportListing.LINE_DETAIL_KEYS + " and importedHere (this invoice has an "
+            + "active line linked to the order line). Step 2." + flow,
+        OrderImportListing.availableLinesParams())
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_IMPORT, NeoActionContract.write(ACTION_IMPORT,
@@ -247,18 +258,39 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return ACTIONS;
   }
 
+  /**
+   * The two listings that take {@code pendingBasis: "classic"} where the header's policy offers it
+   * (ETP-6099 follow-up: the purchase invoice,
+   * {@link RectificativeImportPolicy#offersClassicPending}).
+   */
+  static final Set<String> CLASSIC_PENDING_ACTIONS =
+      Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES);
+
+  @Override
+  protected boolean classicPendingOffered(NeoContext context, String action) {
+    return CLASSIC_PENDING_ACTIONS.contains(action)
+        && RectificativeImportPolicy.from(context).offersClassicPending();
+  }
+
   @Override
   protected NeoResponse execute(NeoContext context, String action) throws Exception {
     JSONObject body = context.getRequestBody();
+    boolean classic = classicPending(context);
     if (ACTION_AVAILABLE_ORDERS.equals(action)) {
-      return availableOrders(requireExistingInvoice(context.getRecordId()), body);
+      Invoice invoice = requireExistingInvoice(context.getRecordId());
+      OrderInvoiceListing listing = new OrderInvoiceListing(this);
+      return classic ? listing.classicAvailableOrders(invoice, body)
+          : listing.availableOrders(invoice, body);
     }
     if (ACTION_AVAILABLE_LINES.equals(action)) {
       Invoice invoice = requireExistingInvoice(context.getRecordId());
       Order order = requireSourceOrder(invoice, requireParam(body, PARAM_ORDER_ID));
-      boolean sales = Boolean.TRUE.equals(invoice.isSalesTransaction());
-      return availableOrderLines(order, sales && OrderImportRequest.parseFlag(body,
-          PARAM_INCLUDE_COVERED));
+      // ETP-6099: includeCovered and detail on both directions (the purchase popup lists here too).
+      boolean includeCovered = ImportListing.includeCovered(body);
+      boolean detail = ImportListing.detail(body);
+      OrderInvoiceListing listing = new OrderInvoiceListing(this);
+      return classic ? listing.classicAvailableOrderLines(invoice, order, includeCovered, detail)
+          : listing.availableOrderLines(invoice, order, includeCovered, detail);
     }
     return importLines(requireDraftInvoice(context.getRecordId()), body);
   }
@@ -285,6 +317,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         linesById.put(ol.getId(), ol);
         documentLines.put(ol.getId(), label(ol));
       }
+    }
+
+    private static String label(OrderLine ol) {
+      return ol.getProduct() != null && ol.getProduct().getName() != null
+          ? ol.getProduct().getName() : ol.getId();
     }
   }
 
@@ -316,15 +353,16 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   /** Binds every planned order to its movement lines, then creates the lines, order by order. */
   private List<DocumentLineImport.ImportedLine> createPlannedLines(Invoice invoice,
       List<OrderImport> imports) throws SQLException, JSONException {
+    OrderInvoiceBatching batching = new OrderInvoiceBatching(this);
     for (OrderImport item : imports) {
-      item.batches = buildBatches(item.linesById, item.planned, item.sales);
+      item.batches = batching.buildBatches(item.linesById, item.planned, item.sales);
     }
     List<DocumentLineImport.ImportedLine> created = new ArrayList<>();
     for (OrderImport item : imports) {
       Batches batches = item.batches;
       created.addAll(createLines(invoice, batches.calls, OrderLine.class, item.planned,
           line -> line.getSalesOrderLine(),
-          (call, lines) -> unmarkRemainder(batches, call, lines)));
+          (call, lines) -> batching.unmarkRemainder(batches, call, lines)));
     }
     return created;
   }
@@ -451,103 +489,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     int remainderCall = -1;
   }
 
-  /**
-   * One native call per phase. First the entries bound to a movement line (the order line AND the
-   * receipt / shipment line, so the invoice line points at both and the movement counts as invoiced
-   * for the receipt cap); then, in a second call, the remainder: what was ordered and not delivered
-   * (or already taken by a draft), plus any line without movements.
-   *
-   * <p>The native process replaces a PLAIN order-line entry by every completed, not yet invoiced
-   * movement line of that order line, at THEIR quantity, and it ignores drafts: a receipt line fully
-   * covered by another draft invoice is still "not invoiced" for it (live case: order 10, receipt 6
-   * in a draft, request 4 gets swapped for the receipt's 6). An entry that already names a movement
-   * line is never swapped, so a remainder entry of an order line that has such lines carries one of
-   * them as a MARKER ({@code shipmentInOutLine}) and the link is removed once the line exists
-   * ({@link #unmarkRemainder}): the quantity is the entry's, the prices, tax and UOM are the
-   * order line's, and the invoice line ends up pointing at the order line only, so the receipt
-   * is not counted twice by its cap.
-   */
-  private Batches buildBatches(Map<String, OrderLine> linesById, Map<String, BigDecimal> planned,
-      boolean sales) throws SQLException, JSONException {
-    Map<String, List<ShipmentInOutLine>> movementsByLine = new LinkedHashMap<>();
-    Set<String> movementIds = new java.util.TreeSet<>();
-    Set<String> documentIds = new java.util.LinkedHashSet<>();
-    for (String id : planned.keySet()) {
-      List<ShipmentInOutLine> movements = movementLinesOf(linesById.get(id));
-      movementsByLine.put(id, movements);
-      for (ShipmentInOutLine movement : movements) {
-        movementIds.add(movement.getId());
-        documentIds.add(movement.getShipmentReceipt().getId());
-      }
-    }
-    lockInOutLines(movementIds);
-    Map<String, BigDecimal> pendingByMovement = new HashMap<>();
-    for (String documentId : documentIds) {
-      pendingByMovement.putAll(movementPending(documentId));
-    }
-    Batches batches = new Batches();
-    JSONArray bound = new JSONArray();
-    JSONArray remainders = new JSONArray();
-    for (Map.Entry<String, BigDecimal> entry : planned.entrySet()) {
-      OrderLine orderLine = linesById.get(entry.getKey());
-      List<OrderLineMovementAllocation.Allocation> allocations =
-          OrderLineMovementAllocation.allocate(entry.getValue(),
-              OrderLineMovementAllocation.candidatesOf(orderLine, entry.getValue(),
-                  movementsByLine.get(entry.getKey()), pendingByMovement));
-      BigDecimal remainder = entry.getValue();
-      for (OrderLineMovementAllocation.Allocation allocation : allocations) {
-        bound.put(MultiDocumentInvoiceSupport.buildOrderLineEntryForInOutLine(orderLine.getId(),
-            allocation.line, allocation.quantity));
-        remainder = remainder.subtract(allocation.quantity);
-      }
-      if (remainder.signum() != 0) {
-        JSONObject plain = new JSONObject().put("id", orderLine.getId())
-            .put("orderedQuantity", remainder.toPlainString());
-        Set<String> related = nativeRelatedRemaining(orderLine, sales).keySet();
-        if (!related.isEmpty()) {
-          String marker = related.iterator().next();
-          plain.put("shipmentInOutLine", marker);
-          batches.markerIds.add(marker);
-        }
-        remainders.put(plain);
-      }
-    }
-    if (bound.length() > 0) {
-      batches.calls.add(bound);
-    }
-    if (remainders.length() > 0) {
-      batches.calls.add(remainders);
-      batches.remainderCall = batches.calls.size() - 1;
-    }
-    return batches;
-  }
-
-  /**
-   * Removes the marker link from the lines the remainder call created, then asserts that NO line of
-   * that call still points at a movement line: a skipped unmark would leave the receipt counted
-   * twice by its cap, so it is rolled back and refused, never left silent.
-   */
-  private void unmarkRemainder(Batches batches, int call, List<InvoiceLine> created) {
-    if (call != batches.remainderCall || batches.markerIds.isEmpty()) {
-      return;
-    }
-    for (InvoiceLine line : created) {
-      ShipmentInOutLine linked = line.getGoodsShipmentLine();
-      if (linked != null && batches.markerIds.contains(linked.getId())) {
-        line.setGoodsShipmentLine(null);
-        OBDal.getInstance().save(line);
-      }
-    }
-    OBDal.getInstance().flush();
-    for (InvoiceLine line : created) {
-      if (line.getGoodsShipmentLine() != null) {
-        rollback();
-        throw DocumentLineImport.refusal(DocumentLineImport.ERROR_QUANTITY_NOT_HONOURED,
-            "A remainder line is still linked to a receipt / shipment line; nothing was imported");
-      }
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // The pending quantity
   // ---------------------------------------------------------------------------
@@ -572,113 +513,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return OrderInvoicePending.afterDrafts(base, drafts);
   }
 
-  // ---------------------------------------------------------------------------
-  // availableOrders / availableOrderLines
-  // ---------------------------------------------------------------------------
-
-  /**
-   * The sales invoice's "Importar desde pedido" popup lists through this action (ETP-5828) instead
-   * of reading up to 500 orders of the whole company and filtering them in the browser, which hid
-   * a customer's older orders once the company had more than 500. On a sales invoice the caller
-   * may therefore ask for a longer page ({@code limit}, up to {@value #MAX_LISTED_ORDERS}), the
-   * candidates are only the orders that still have a line not fully invoiced, and they come newest
-   * created first, the order the popup always showed. A purchase invoice keeps its listing exactly
-   * as it was: its popup does not read this action yet.
-   */
-  private NeoResponse availableOrders(Invoice invoice, JSONObject body) throws JSONException {
-    boolean sales = Boolean.TRUE.equals(invoice.isSalesTransaction());
-    String partnerId = invoice.getBusinessPartner() == null ? null
-        : invoice.getBusinessPartner().getId();
-    String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
-    int rows = sales ? OrderImportListing.requestedLimit(body, rowLimit()) : rowLimit();
-    int scan = sales ? Math.max(scanLimit(), rows) : scanLimit();
-    List<Order> candidates = findCandidateOrders(partnerId, sales, currencyId, scan);
-    Function<Order, Map<String, BigDecimal>> pendingOf = pendingLookup(candidates, sales);
-    return discover(candidates,
-        order -> availableOrderRow(order, partnerId, pendingOf.apply(order)), rows, scan);
-  }
-
-  /**
-   * The pending of each candidate of {@link #availableOrders}: on the sales side (ETP-5828, like
-   * limit / scan / prefilter) the draft quantities of every candidate's lines are read in one pass
-   * (chunked), not one query per order, and subtracted exactly as {@link #pendingToInvoice} would;
-   * the purchase side keeps the lazy per-order {@link #pendingToInvoice}. A return order has none.
-   */
-  private Function<Order, Map<String, BigDecimal>> pendingLookup(List<Order> candidates,
-      boolean sales) {
-    if (!sales) {
-      return order -> isReturn(order) ? Map.of() : pendingToInvoice(order, false);
-    }
-    Map<String, Map<String, BigDecimal>> baseByOrder = new HashMap<>();
-    Set<String> lineIds = new java.util.LinkedHashSet<>();
-    for (Order candidate : candidates) {
-      if (!isReturn(candidate)) {
-        Map<String, BigDecimal> base = OrderInvoicePending.beforeDrafts(candidate);
-        baseByOrder.put(candidate.getId(), base);
-        lineIds.addAll(base.keySet());
-      }
-    }
-    Map<String, BigDecimal> drafts = draftQuantitiesInChunks(lineIds, true);
-    return order -> isReturn(order) ? Map.of()
-        : afterDrafts(baseByOrder.get(order.getId()), drafts);
-  }
-
-  /** One {@code availableOrders} row, or {@code null} when the order has nothing pending. */
-  private JSONObject availableOrderRow(Order order, String partnerId,
-      Map<String, BigDecimal> pending) throws JSONException {
-    int pendingLines = pending.size();
-    if (pendingLines == 0) {
-      return null;
-    }
-    String orderCurrency = order.getCurrency() == null ? null : order.getCurrency().getId();
-    JSONObject row = documentRow(order.getId(), order.getDocumentNo(), day(order.getOrderDate()),
-        partnerId, order.getBusinessPartner().getName(), orderCurrency, pendingLines);
-    // The popup's "Dto. global X %" tag: always a %, 0 when the order has none.
-    row.put(KEY_GLOBAL_DISCOUNT,
-        InvoiceGlobalDiscountRule.reportedPercent(order.getEtgoTotalDiscount()));
-    // The popup's row amount: the plain sum of its pending lines (no global discount applied).
-    row.put(KEY_AMOUNT, pendingOrderAmount(order, pending));
-    return row;
-  }
-
-  /** How many order line ids one draft-quantities query binds at most. */
-  private static final int DRAFT_QUERY_CHUNK = 1000;
-
-  /** {@link #draftInvoicedQuantities} over any number of lines, {@value #DRAFT_QUERY_CHUNK} at a time. */
-  private Map<String, BigDecimal> draftQuantitiesInChunks(Collection<String> lineIds,
-      boolean sales) {
-    Map<String, BigDecimal> held = new HashMap<>();
-    List<String> ids = new ArrayList<>(lineIds);
-    for (int from = 0; from < ids.size(); from += DRAFT_QUERY_CHUNK) {
-      held.putAll(draftInvoicedQuantities(
-          ids.subList(from, Math.min(ids.size(), from + DRAFT_QUERY_CHUNK)), sales));
-    }
-    return held;
-  }
-
-  /**
-   * The lines of the order that can still be invoiced here. With {@code includeCovered} (a sales
-   * invoice only, ETP-5828) also the lines with nothing left, at {@code pendingQuantity} 0: the
-   * import popup shows them greyed out as already imported, and so reads every line it shows, with
-   * its price, from this ONE call instead of a second request per order.
-   */
-  private NeoResponse availableOrderLines(Order order, boolean includeCovered)
-      throws JSONException {
-    boolean sales = Boolean.TRUE.equals(order.isSalesTransaction());
-    Map<String, BigDecimal> pending = pendingToInvoice(order, sales);
-    JSONArray rows = new JSONArray();
-    for (OrderLine ol : order.getOrderLineList()) {
-      BigDecimal left = pending.get(ol.getId());
-      if (left == null && includeCovered && OrderImportListing.isListedLine(ol)) {
-        left = BigDecimal.ZERO;
-      }
-      if (left != null) {
-        rows.put(OrderImportListing.availableLineRow(order, ol, left));
-      }
-    }
-    return completePage(rows);
-  }
-
   /**
    * The popup's order-row amount: unit price × pending quantity summed over the order's pending
    * lines (the line discount is already in the unit price; the order's global discount is NOT
@@ -695,15 +529,26 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return sum.setScale(OrderImportListing.amountPrecision(order), RoundingMode.HALF_UP);
   }
 
+  /**
+   * The pending lines the popup leaves selectable (ETP-6099, {@code detail}): those not already
+   * linked from an active line of THIS invoice. Pending is quantity-based, so a line partly on this
+   * invoice still has some left, but the popup greys it out ({@code importedHere}); counting it
+   * listed an order that turned out empty once expanded. Without {@code detail} the set is empty
+   * and the pending map is returned as is, so the default answer is unchanged.
+   */
+  static Map<String, BigDecimal> selectableOnly(Map<String, BigDecimal> pending,
+      Set<String> importedHere) {
+    if (importedHere.isEmpty() || pending.isEmpty()) {
+      return pending;
+    }
+    Map<String, BigDecimal> selectable = new LinkedHashMap<>(pending);
+    selectable.keySet().removeAll(importedHere);
+    return selectable;
+  }
+
   // ---------------------------------------------------------------------------
   // Loading and validating
   // ---------------------------------------------------------------------------
-
-  /** A return order is credited through its own flow, never imported into an invoice. */
-  private static boolean isReturn(Order order) {
-    return order.getTransactionDocument() != null
-        && Boolean.TRUE.equals(order.getTransactionDocument().isReturn());
-  }
 
   private Order requireSourceOrder(Invoice invoice, String orderId) {
     Order order = loadOrder(orderId);
@@ -712,7 +557,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     }
     requireOwnClient("Order", orderId, order.getClient());
     DocumentLineImport.requireCompletedSource(order.getDocumentNo(), order.getDocumentStatus());
-    if (isReturn(order)) {
+    if (OrderInvoiceListing.isReturn(order)) {
       throw DocumentLineImport.refusal(DocumentLineImport.ERROR_DIRECTION_MISMATCH,
           "Document " + order.getDocumentNo() + " is a return order: it is credited through its "
               + "own return flow, not imported here");
@@ -727,11 +572,6 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         invoice.getCurrency() == null ? null : invoice.getCurrency().getId(),
         order.getCurrency() == null ? null : order.getCurrency().getId(), order.getDocumentNo());
     return order;
-  }
-
-  private static String label(OrderLine ol) {
-    return ol.getProduct() != null && ol.getProduct().getName() != null
-        ? ol.getProduct().getName() : ol.getId();
   }
 
   // ---------------------------------------------------------------------------
@@ -808,14 +648,62 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   }
 
   /**
+   * The candidates of the classic {@code availableOrders} (ETP-6099 follow-up): the completed,
+   * active orders of the partner and direction in the session's client, in the invoice's currency
+   * when it has one, newest created first (the old popup's {@code _sortBy=creationDate desc}),
+   * from {@code offset}; the {@code invoiceStatus} filter is applied per row.
+   */
+  protected List<Order> findClassicCandidateOrders(String partnerId, boolean sales,
+      String currencyId, int offset, int scan) {
+    StringBuilder hql = new StringBuilder("from Order o where o.documentStatus = 'CO' "
+        + "and o.salesTransaction = :sot and o.businessPartner.id = :bp and o.active = true "
+        + "and o.client.id = :client");
+    if (currencyId != null) {
+      hql.append(" and o.currency.id = :cur");
+    }
+    hql.append(" order by o.creationDate desc, o.documentNo desc, o.id desc");
+    org.hibernate.query.Query<Order> query = OBDal.getInstance().getSession()
+        .createQuery(hql.toString(), Order.class).setParameter("sot", sales)
+        .setParameter("bp", partnerId).setParameter("client", sessionClientId())
+        .setFirstResult(offset).setMaxResults(scan);
+    if (currencyId != null) {
+      query.setParameter("cur", currencyId);
+    }
+    return new ArrayList<>(query.list());
+  }
+
+  /** Seam: the order's {@code invoiceStatus} computed column (the % invoiced the window shows). */
+  protected Long invoiceStatusOf(Order order) {
+    return order.getInvoiceStatus();
+  }
+
+  /** Seam: the order lines the active lines of this invoice are linked to. */
+  protected Set<String> orderLinesOnInvoice(String invoiceId) {
+    return new java.util.HashSet<>(OBDal.getInstance().getSession().createQuery(
+        "select il.salesOrderLine.id from InvoiceLine il where il.invoice.id = :inv "
+            + "and il.active = true and il.salesOrderLine is not null", String.class)
+        .setParameter("inv", invoiceId).list());
+  }
+
+  /**
    * Completed orders of the partner, newest first; a bounded scan of {@code scan} candidates, not
-   * the whole history. On the sales side (ETP-5828, see {@link #availableOrders}) only the orders
-   * that still have a line not fully invoiced are candidates — a necessary condition of having
-   * something pending, so no order the rows would list is left out — newest created first; the
-   * purchase side keeps its order-date scan unchanged.
+   * the whole history. On the sales side (ETP-5828, see
+   * {@link OrderInvoiceListing#availableOrders}) only the orders that still have a line not fully
+   * invoiced are candidates — a necessary condition of having something pending, so no order the
+   * rows would list is left out — newest created first; the purchase side keeps its order-date
+   * scan unchanged.
    */
   protected List<Order> findCandidateOrders(String partnerId, boolean sales, String currencyId,
       int scan) {
+    return findCandidateOrders(partnerId, sales, currencyId, 0, scan);
+  }
+
+  /**
+   * {@link #findCandidateOrders(String, boolean, String, int)} from position {@code offset} of the
+   * same ordering (ETP-6099, the page of a caller that pages through the scan).
+   */
+  protected List<Order> findCandidateOrders(String partnerId, boolean sales, String currencyId,
+      int offset, int scan) {
     StringBuilder hql = new StringBuilder("from Order o where o.documentStatus = 'CO' "
         + "and o.salesTransaction = :sot and o.businessPartner.id = :bp and o.active = true");
     hql.append(" and o.client.id = :client");
@@ -826,14 +714,14 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       hql.append(" and exists (select 1 from OrderLine ol where ol.salesOrder.id = o.id"
           + " and ol.active = true and ol.product.id <> :dto"
           + " and ol.orderedQuantity <> ol.invoicedQuantity)");
-      hql.append(" order by o.creationDate desc, o.documentNo desc");
+      hql.append(" order by o.creationDate desc, o.documentNo desc, o.id desc");
     } else {
-      hql.append(" order by o.orderDate desc, o.documentNo desc");
+      hql.append(" order by o.orderDate desc, o.documentNo desc, o.id desc");
     }
     org.hibernate.query.Query<Order> query = OBDal.getInstance().getSession()
         .createQuery(hql.toString(), Order.class).setParameter("sot", sales)
         .setParameter("bp", partnerId).setParameter("client", sessionClientId())
-        .setMaxResults(scan);
+        .setFirstResult(offset).setMaxResults(scan);
     if (currencyId != null) {
       query.setParameter("cur", currencyId);
     }

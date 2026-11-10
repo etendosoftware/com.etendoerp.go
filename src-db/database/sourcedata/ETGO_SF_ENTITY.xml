@@ -2165,7 +2165,6 @@
 <!--6102D47FD12A4162858D948885F80544-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--6102D47FD12A4162858D948885F80544-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--6102D47FD12A4162858D948885F80544-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--6102D47FD12A4162858D948885F80544-->  <JAVA_QUALIFIER><![CDATA[goodsReceiptHeaderHandler]]></JAVA_QUALIFIER>
 <!--6102D47FD12A4162858D948885F80544-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--6102D47FD12A4162858D948885F80544-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"invoicefromshipment":"createPurchaseInvoice","CreateFrom":"importOrderLines"},"redirectReason":"The classic invoice-from-receipt process creates a SALES invoice from a purchase receipt, does not mark the receipt as invoiced and can report success without creating anything; createPurchaseInvoice creates a completed purchase invoice from this receipt","reason":"Classic invoicefromshipment is not the purchase flow; use createPurchaseInvoice","reasons":{"CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed purchase order to this draft goods receipt, with availableOrders and availableOrderLines listing what can be imported","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}},"pdf":{"source":"supplier","reason":"the receipt has no printable (hidePrint) and its preview shows the supplier delivery note the user uploads as the main attachment"},"defaults":{"context":["businessPartner"],"reason":"The partner address comes from the business partner."}}]]></MCP_CONFIG>
 <!--6102D47FD12A4162858D948885F80544--></ETGO_SF_ENTITY>
@@ -2947,6 +2946,7 @@
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <JAVA_QUALIFIER><![CDATA[productDefaultsHandler]]></JAVA_QUALIFIER>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--7973D68DD39E4F4C8D759A3007A27D56-->  <AGENT_PROMPT><![CDATA[A product's name is not unique: two products can share it. Identify one by its searchKey (code) or id. When several match what the user said, do not pick one: show them (name, searchKey, prices) and ask. If the user cannot tell, suggest — for them to confirm — the one used in that contact's most recent order or invoice (etendo_list on sales-order/header filtered by businessPartner, newest first, then its lines).]]></AGENT_PROMPT>
+<!--7973D68DD39E4F4C8D759A3007A27D56-->  <MCP_CONFIG><![CDATA[{"defaults":{"context":["productType"],"reason":"The tax category and the stocked and returnable flags follow the product type."}}]]></MCP_CONFIG>
 <!--7973D68DD39E4F4C8D759A3007A27D56--></ETGO_SF_ENTITY>
 
 <!--7ACF14A002FC4C66B993576581225D63--><ETGO_SF_ENTITY>
@@ -4031,7 +4031,6 @@
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--B898797B8C184821BFE6FD8B1304E943-->  <JAVA_QUALIFIER><![CDATA[document-sequence]]></JAVA_QUALIFIER>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--B898797B8C184821BFE6FD8B1304E943--></ETGO_SF_ENTITY>
 
@@ -4177,6 +4176,25 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--C0FB5CD0063142659C78CBE42B85891E-->  <JAVA_QUALIFIER><![CDATA[match-rule]]></JAVA_QUALIFIER>
 <!--C0FB5CD0063142659C78CBE42B85891E-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--C0FB5CD0063142659C78CBE42B85891E--></ETGO_SF_ENTITY>
+
+<!--C24AEA2FDC3C460DB477EA58C8C5A864--><ETGO_SF_ENTITY>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ETGO_SF_ENTITY_ID><![CDATA[C24AEA2FDC3C460DB477EA58C8C5A864]]></ETGO_SF_ENTITY_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <NAME><![CDATA[header]]></NAME>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ETGO_SF_SPEC_ID><![CDATA[7A63B6AA5CE44D77A52E41790BD8094A]]></ETGO_SF_SPEC_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_TAB_ID><![CDATA[AB6E71CD965B41B1913B44BE660456FA]]></AD_TAB_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPOST><![CDATA[N]]></ISPOST>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--C24AEA2FDC3C460DB477EA58C8C5A864--></ETGO_SF_ENTITY>
 
 <!--C339170F5740439186792CD2023D45A6--><ETGO_SF_ENTITY>
 <!--C339170F5740439186792CD2023D45A6-->  <ETGO_SF_ENTITY_ID><![CDATA[C339170F5740439186792CD2023D45A6]]></ETGO_SF_ENTITY_ID>

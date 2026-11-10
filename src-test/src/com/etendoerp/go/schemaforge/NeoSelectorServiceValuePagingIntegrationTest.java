@@ -30,8 +30,10 @@ import java.util.Set;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import org.junit.After;
+import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.dal.core.OBContext;
@@ -69,6 +71,9 @@ public class NeoSelectorServiceValuePagingIntegrationTest extends OBBaseTest {
   private static final String DEFAULT_ROLE_COLUMN = "5B75F08D1B784BE79C5A600053A01718";
   /** C_OrderLine.M_Product_ID: the Product selector over M_Product_Price_Warehouse_V. */
   private static final String ORDER_LINE_PRODUCT_COLUMN = "2221";
+
+  /** C_Order.C_BPartner_ID: a rich selector over a table with a string name and a numeric credit limit. */
+  private static final String ORDER_BPARTNER_COLUMN = "2762";
 
   private static final int SMALL_PAGE = 7;
 
@@ -213,5 +218,55 @@ public class NeoSelectorServiceValuePagingIntegrationTest extends OBBaseTest {
     List<String> walked = walk(column, 100, total);
     assertDistinct(walked);
     assertEquals("one item per product: as many as totalCount says", total, walked.size());
+  }
+
+  /**
+   * A string property is searched as a bare {@code upper(col)} (what a trigram index on
+   * {@code upper(col)} serves); any other type keeps the cast; the term is upper-cased by the
+   * database, never by Java.
+   */
+  @Test
+  public void searchPredicateIsBareUpperOnlyForStringProperties() {
+    StringBuilder hql = new StringBuilder();
+    SelectorOrgFilter.appendRichSearchFilter(hql, java.util.Arrays.asList(
+        SearchableFragment.ofRelativePath("name"), SearchableFragment.ofRelativePath("creditLimit"),
+        SearchableFragment.ofRelativePath("greeting.name")), "e", "x", false, "BusinessPartner");
+
+    assertEquals(" WHERE (upper(e.name) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(e.creditLimit as string), '')) LIKE upper(:search)"
+        + " OR upper(e.greeting.name) LIKE upper(:search))",
+        hql.toString());
+  }
+
+  /** Search is case-insensitive whatever the case of the term: the same rows come back. */
+  @Test
+  public void selectorSearchIgnoresTheCaseOfTheTerm() throws Exception {
+    Column column = OBDal.getInstance().get(Column.class, ORDER_BPARTNER_COLUMN);
+    Assume.assumeNotNull(column);
+    JSONObject all = query(column, 1, 0);
+    Assume.assumeTrue("needs at least one business partner", all.getInt("totalCount") > 0);
+    String label = all.getJSONArray("items").getJSONObject(0).getString("label");
+    Assume.assumeTrue("needs a label of 4+ letters", label.length() >= 4);
+    String term = label.substring(0, 4);
+
+    java.util.Set<String> lower = searchIds(column, term.toLowerCase());
+    java.util.Set<String> upper = searchIds(column, term.toUpperCase());
+    java.util.Set<String> typed = searchIds(column, term);
+
+    assertFalse("the partner the term was taken from must be found", typed.isEmpty());
+    assertEquals(typed, lower);
+    assertEquals(typed, upper);
+  }
+
+  private static java.util.Set<String> searchIds(Column column, String term) throws Exception {
+    NeoResponse response = NeoSelectorService.querySelectorByColumn(column, column.getDBColumnName(),
+        term, 1000, 0, new HashMap<>());
+    assertEquals(response.getBody().toString(), 200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray("items");
+    java.util.Set<String> ids = new HashSet<>();
+    for (int i = 0; i < items.length(); i++) {
+      ids.add(items.getJSONObject(i).getString("id"));
+    }
+    return ids;
   }
 }

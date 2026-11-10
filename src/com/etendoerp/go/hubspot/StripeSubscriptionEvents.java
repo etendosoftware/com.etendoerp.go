@@ -34,11 +34,13 @@ import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
  * Which Stripe billing events HubSpot hears about, and what it is told.
  *
  * <ul>
- *   <li>{@code invoice.paid}: a payment, every one of them, a zero total included.</li>
+ *   <li>{@code invoice.paid}: a payment. One of zero (a free first month, a full discount) is no
+ *       payment and is left out (ETP-6082). The billing reason tells the first charge from a
+ *       renewal.</li>
  *   <li>{@code invoice.payment_failed}: a failed charge; each attempt Stripe makes is one.</li>
  *   <li>{@code customer.subscription.updated}: only when a cancellation is scheduled or
- *       withdrawn. The date reported is when the owner asked, not when the period ends.</li>
- *   <li>{@code customer.subscription.deleted}: the subscription ended.</li>
+ *       withdrawn. A scheduled one also carries the day the owner loses access (ETP-6082).</li>
+ *   <li>{@code customer.subscription.deleted}: the subscription ended, dated when it did.</li>
  * </ul>
  *
  * <p>Nothing here reads the database: the event names the purchase it belongs to through the
@@ -52,13 +54,19 @@ final class StripeSubscriptionEvents {
   static final String FIELD_AMOUNT = "amount";
   static final String FIELD_CURRENCY = "currency";
   static final String FIELD_INTERVAL = "interval";
+  static final String FIELD_BILLING_REASON = "billingReason";
+  /** When a scheduled cancellation takes the owner's access away: the end of the period. */
+  static final String FIELD_ACCESS_ENDS = "accessEndsAt";
 
   static final String MONTHLY = "monthly";
   static final String ANNUAL = "annual";
 
+  private static final String AMOUNT_PAID = "amount_paid";
   private static final String CANCEL_AT_PERIOD_END = "cancel_at_period_end";
   private static final String CANCEL_AT = "cancel_at";
   private static final String CANCELED_AT = "canceled_at";
+  private static final String ENDED_AT = "ended_at";
+  private static final String CURRENT_PERIOD_END = "current_period_end";
   private static final String METADATA = "metadata";
 
   /** A billing period this long or longer is a year; any shorter one a month. */
@@ -104,6 +112,9 @@ final class StripeSubscriptionEvents {
     try {
       switch (StringUtils.trimToEmpty(type)) {
         case "invoice.paid":
+          if (isZeroPayment(object)) {
+            return Optional.empty();
+          }
           return Optional.of(new Translated(HubSpotOutboxStore.PAYMENT,
               StringUtils.defaultIfBlank(StripeJson.text(object, "id"), eventId), created,
               invoiceRequestId(object), subscriptionId, paymentPayload(object, subscriptionId,
@@ -117,7 +128,7 @@ final class StripeSubscriptionEvents {
         case "customer.subscription.deleted":
           return Optional.of(new Translated(HubSpotOutboxStore.CANCELED, subscriptionId, created,
               metadataRequestId(object), subscriptionId, payload(subscriptionId,
-                  firstOf(epochSeconds(object, CANCELED_AT), epochSeconds(object, "ended_at"),
+                  firstOf(epochSeconds(object, ENDED_AT), epochSeconds(object, CANCELED_AT),
                       created))));
         default:
           return Optional.empty();
@@ -145,12 +156,33 @@ final class StripeSubscriptionEvents {
     }
     if (scheduledNow) {
       // canceled_at is when the owner asked, even when the cancellation waits for the period end.
+      JSONObject payload = new JSONObject(payload(subscriptionId,
+          firstOf(epochSeconds(subscription, CANCELED_AT), created)));
+      Instant accessEnds = accessEnds(subscription);
+      if (accessEnds != null) {
+        payload.put(FIELD_ACCESS_ENDS, accessEnds.toString());
+      }
       return Optional.of(new Translated(HubSpotOutboxStore.CANCEL_REQUESTED, eventId, created,
-          metadataRequestId(subscription), subscriptionId, payload(subscriptionId,
-              firstOf(epochSeconds(subscription, CANCELED_AT), created))));
+          metadataRequestId(subscription), subscriptionId, payload.toString()));
     }
     return Optional.of(new Translated(HubSpotOutboxStore.CANCEL_REVERTED, eventId, created,
         metadataRequestId(subscription), subscriptionId, payload(subscriptionId, created)));
+  }
+
+  /**
+   * When a scheduled cancellation ends the access: {@code cancel_at}, which Stripe also sets for
+   * {@code cancel_at_period_end}, else the end of the current period, which newer API versions
+   * keep on the subscription's items.
+   */
+  static Instant accessEnds(JSONObject subscription) {
+    Instant periodEnd = epochSeconds(subscription, CURRENT_PERIOD_END);
+    JSONObject items = subscription.optJSONObject("items");
+    JSONArray data = items == null ? null : items.optJSONArray("data");
+    for (int i = 0; periodEnd == null && data != null && i < data.length(); i++) {
+      JSONObject item = data.optJSONObject(i);
+      periodEnd = item == null ? null : epochSeconds(item, CURRENT_PERIOD_END);
+    }
+    return firstOf(epochSeconds(subscription, CANCEL_AT), periodEnd);
   }
 
   /** Reads each field from {@code values} when it holds it, else from {@code current}. */
@@ -166,8 +198,8 @@ final class StripeSubscriptionEvents {
     Instant paidAt = transitions == null ? null : epochSeconds(transitions, "paid_at");
     JSONObject payload = new JSONObject(payload(subscriptionId, firstOf(paidAt, created)));
     // Self-serve plans are sold in two-decimal currencies, so the minor units are cents.
-    if (invoice.has("amount_paid")) {
-      payload.put(FIELD_AMOUNT, BigDecimal.valueOf(invoice.optLong("amount_paid", 0L))
+    if (invoice.has(AMOUNT_PAID)) {
+      payload.put(FIELD_AMOUNT, BigDecimal.valueOf(invoice.optLong(AMOUNT_PAID, 0L))
           .movePointLeft(2).toPlainString());
     }
     String currency = StripeJson.text(invoice, FIELD_CURRENCY);
@@ -178,7 +210,16 @@ final class StripeSubscriptionEvents {
     if (interval != null) {
       payload.put(FIELD_INTERVAL, interval);
     }
+    String reason = StripeJson.text(invoice, "billing_reason");
+    if (StringUtils.isNotBlank(reason)) {
+      payload.put(FIELD_BILLING_REASON, reason);
+    }
     return payload.toString();
+  }
+
+  /** An invoice that states it collected nothing. One that does not say is still a payment. */
+  static boolean isZeroPayment(JSONObject invoice) {
+    return invoice.has(AMOUNT_PAID) && invoice.optLong(AMOUNT_PAID, 0L) <= 0L;
   }
 
   /**

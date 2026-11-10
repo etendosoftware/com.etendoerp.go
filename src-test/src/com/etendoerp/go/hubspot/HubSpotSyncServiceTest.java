@@ -19,6 +19,7 @@ package com.etendoerp.go.hubspot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -31,7 +32,9 @@ import static org.mockito.Mockito.when;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
@@ -52,7 +55,7 @@ class HubSpotSyncServiceTest {
   private static final Instant NOW = Instant.parse("2026-10-22T12:00:00Z");
   private static final Instant READY = Instant.parse("2026-10-01T12:00:00Z");
   private static final HubSpotConfiguration ENABLED = new HubSpotConfiguration("t",
-      "https://hubspot.test", "pipe", "trial", "active", "won", "lost");
+      "https://hubspot.test", "pipe", "mql", "sql", "card", "first", "expired", "lost");
 
   private final HubSpotOutboxStore store = mock(HubSpotOutboxStore.class);
   private final DemoTrials trials = mock(DemoTrials.class);
@@ -66,10 +69,19 @@ class HubSpotSyncServiceTest {
         account + "@empresa.es", "Name", null);
   }
 
+  private static String json(String payload, String key) {
+    try {
+      return new org.codehaus.jettison.json.JSONObject(payload).optString(key, "");
+    } catch (org.codehaus.jettison.json.JSONException e) {
+      return "";
+    }
+  }
+
   @Test
   void withoutATokenNothingIsReadOrSent() {
     HubSpotSyncService disabled = new HubSpotSyncService(new HubSpotConfiguration(null,
-        "https://hubspot.test", "pipe", "trial", "active", "won", "lost"), store, trials, sender);
+        "https://hubspot.test", "pipe", "mql", "sql", "card", "first", "expired", "lost"),
+        store, trials, sender);
 
     HubSpotSyncService.Result result = disabled.run(NOW);
 
@@ -105,6 +117,76 @@ class HubSpotSyncServiceTest {
     verify(store).enqueue("A", HubSpotOutboxStore.PAID, "CA", "{\"plan\":\"pro\"}");
     verify(store, never()).hasEnteredEnvironment(anyString());
     verifyNoInteractions(trials);
+  }
+
+  @Test
+  void anExpiredDemoIsNotReportedWhenTheAccountAlreadyHasAProductive() {
+    // ETP-6082: "Prueba vencida" means no productive was created, whatever way it was bought.
+    when(store.findOpenDemos()).thenReturn(List.of(new OpenDemo("A", "CA", READY, true)));
+    when(store.findPaidCheckout("A", READY)).thenReturn(Optional.empty());
+    when(trials.find("CA", NOW)).thenReturn(Optional.of(new DemoTrials.Trial(READY,
+        READY.plus(Duration.ofDays(14)), true)));
+    when(store.hasProductiveEnvironment("A", "CA")).thenReturn(true);
+
+    assertEquals(0, service.run(NOW).getDetected());
+    verify(store, never()).enqueue("A", HubSpotOutboxStore.DEMO_EXPIRED, "CA", null);
+  }
+
+  @Test
+  void aPaymentAfterTheTrialExpiredIsStillDetected() {
+    when(store.findOpenDemos()).thenReturn(List.of(
+        new OpenDemo("A", "CA", READY, true, true, 0)));
+    when(store.findPaidCheckout("A", READY))
+        .thenReturn(Optional.of(new PaidCheckout("core", "annual")));
+    when(store.enqueue(anyString(), anyString(), anyString(), anyString())).thenReturn(true);
+
+    assertEquals(1, service.run(NOW).getDetected());
+    verify(store).enqueue(eq("A"), eq(HubSpotOutboxStore.PAID), eq("CA"),
+        argThat(payload -> json(payload, "plan").equals("core")
+            && json(payload, "interval").equals("annual")));
+  }
+
+  @Test
+  void anExpiryAlreadyReportedIsNotCheckedAgain() {
+    when(store.findOpenDemos()).thenReturn(List.of(
+        new OpenDemo("A", "CA", READY, true, true, 0)));
+    when(store.findPaidCheckout("A", READY)).thenReturn(Optional.empty());
+
+    service.run(NOW);
+
+    verifyNoInteractions(trials);
+    verify(store, never()).hasProductiveEnvironment(anyString(), anyString());
+  }
+
+  @Test
+  void eachMilestoneIsQueuedOnceWithItsDate() {
+    Instant firstPartner = Instant.parse("2026-10-03T09:15:00Z");
+    Map<String, Instant> reached = new LinkedHashMap<>();
+    reached.put(HubSpotOutboxStore.MILESTONE_BUSINESS_PARTNER, firstPartner);
+    reached.put(HubSpotOutboxStore.MILESTONE_INVOICE, firstPartner.plusSeconds(60));
+    when(store.findOpenDemos()).thenReturn(List.of(new OpenDemo("A", "CA", READY, true)));
+    when(store.findMilestones("CA", READY)).thenReturn(reached);
+    when(store.findPaidCheckout("A", READY)).thenReturn(Optional.empty());
+    when(store.enqueueKeyed(eq("A"), eq(HubSpotOutboxStore.MILESTONE), anyString(), eq("CA"),
+        anyString())).thenReturn(true, false);
+
+    // The second one was already queued: the store's key turned it away.
+    assertEquals(1, service.run(NOW).getDetected());
+    verify(store).enqueueKeyed(eq("A"), eq(HubSpotOutboxStore.MILESTONE),
+        eq(HubSpotOutboxStore.MILESTONE_BUSINESS_PARTNER), eq("CA"),
+        argThat(payload -> json(payload, "milestone").equals("business_partner")
+            && json(payload, "at").equals("2026-10-03T09:15:00Z")));
+  }
+
+  @Test
+  void aDemoWithEveryMilestoneReportedIsNotQueriedForThem() {
+    when(store.findOpenDemos()).thenReturn(List.of(new OpenDemo("A", "CA", READY, true, false,
+        HubSpotOutboxStore.MILESTONES.size())));
+    when(store.findPaidCheckout("A", READY)).thenReturn(Optional.empty());
+
+    service.run(NOW);
+
+    verify(store, never()).findMilestones(anyString(), any());
   }
 
   @Test

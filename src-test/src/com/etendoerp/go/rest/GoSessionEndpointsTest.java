@@ -54,6 +54,7 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
@@ -182,6 +183,59 @@ public class GoSessionEndpointsTest {
     assertEquals("csrf-xyz", body.getString("csrfToken"));
     assertEquals("USER1", body.getJSONObject("environment").getString("userId"));
     assertFalse("session token must NOT be in the body", body.has("token"));
+  }
+
+  @Test
+  public void aLoginLinkThatConfirmsTheAddressReportsTheAccountToHubSpot() throws Exception {
+    // ETP-6082: since ETP-6081 the welcome mail carries this link, so following it is how most
+    // sign-ups confirm their address, and so become a HubSpot lead.
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(goSessionService.create(eq("ACC1"), eq("link"), any(), any())).thenReturn(
+        new IssuedGoSession("sess", "refresh", "csrf", new GoSessionRecord()));
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<SignupAccountDalHelper> signup = mockStatic(SignupAccountDalHelper.class);
+        MockedStatic<EmailVerificationDalHelper> verify =
+            mockStatic(EmailVerificationDalHelper.class);
+        MockedStatic<EtendoGoDalHelper> commit = mockStatic(EtendoGoDalHelper.class);
+        MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
+      signup.when(() -> SignupAccountDalHelper.findAccountByLoginLinkHash(anyString(), any()))
+          .thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      verify.when(() -> EmailVerificationDalHelper.isEmailVerificationPending(account))
+          .thenReturn(true);
+
+      servlet.doPost(jsonPost("/session/link", new JSONObject().put("token", "link-token")),
+          new CapturedResponse().response);
+
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
+    }
+  }
+
+  @Test
+  public void aLoginLinkOfAnAlreadyConfirmedAccountReportsNothing() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(goSessionService.create(eq("ACC1"), eq("link"), any(), any())).thenReturn(
+        new IssuedGoSession("sess", "refresh", "csrf", new GoSessionRecord()));
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<SignupAccountDalHelper> signup = mockStatic(SignupAccountDalHelper.class);
+        MockedStatic<EmailVerificationDalHelper> verify =
+            mockStatic(EmailVerificationDalHelper.class);
+        MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
+      signup.when(() -> SignupAccountDalHelper.findAccountByLoginLinkHash(anyString(), any()))
+          .thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+
+      servlet.doPost(jsonPost("/session/link", new JSONObject().put("token", "link-token")),
+          new CapturedResponse().response);
+
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(any()), never());
+    }
   }
 
   @Test

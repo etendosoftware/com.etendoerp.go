@@ -87,6 +87,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
   private static final String FIELD_TAX_LOCATION = "taxLocation";
   private static final String FIELD_COUNTRY = "country";
+  private static final String FIELD_COUNTRY_CODE = "countryCode";
   private static final String FIELD_REGION = "region";
   private static final String FIELD_ADDRESS_LINE1 = "addressLine1";
   private static final String FIELD_ADDRESS_LINE2 = "addressLine2";
@@ -347,10 +348,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    *
    * <p>ETP-5806 — Mode B additionally requires {@code streetName}, {@code buildingNumber} and
    * {@code cityName} (alongside the pre-existing {@code country} check), a product decision
-   * stricter than Classic (where the 3 SEPA fields are optional): Street, Number, City and Country
-   * are mandatory for any address Etendo Go itself composes, on every channel (REST and MCP reach
-   * this same method). Mode A (reuse) is unaffected — the reused {@code C_Location} is trusted as
-   * already valid.
+   * stricter than Classic (where the 3 SEPA fields are optional): Street, City and Country are
+   * mandatory for any address Etendo Go itself composes, on every channel (REST and MCP reach this
+   * same method). Building Number is not independently mandatory — a blank/omitted value falls
+   * back to {@code "s/n"} when Street Name is present (ETP-5806 follow-up); see
+   * {@link StructuredAddressComposer#effectiveBuildingNumber}. Mode A (reuse) is unaffected — the
+   * reused {@code C_Location} is trusted as already valid.
    */
   private static NeoResponse rejectUnusableCreatePayload(JSONObject body, String locationAddressId,
       String countryId, boolean structuredAddressEnabled) {
@@ -369,9 +372,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     if (!structuredAddressEnabled) {
       return countryId == null ? NeoResponse.error(400, "Missing required field: country (C_Country_ID)") : null;
     }
+    String streetNameForValidation = readAlias(body, KEYS_STREET_NAME);
+    // ETP-5806 follow-up (QA finding) — a blank/omitted Building Number with a present Street Name
+    // falls back to "s/n" instead of being reported as missing. See
+    // StructuredAddressComposer#effectiveBuildingNumber.
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
-        readAlias(body, KEYS_STREET_NAME),
-        readAlias(body, KEYS_BUILDING_NUMBER),
+        streetNameForValidation,
+        StructuredAddressComposer.effectiveBuildingNumber(streetNameForValidation,
+            readAlias(body, KEYS_BUILDING_NUMBER)),
         nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
         countryId);
     if (!missing.isEmpty()) {
@@ -535,9 +543,13 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       }
       return null;
     }
+    String streetNameForValidation = readAlias(body, KEYS_STREET_NAME);
+    // ETP-5806 follow-up (QA finding) — same "s/n" fallback as create. See
+    // StructuredAddressComposer#effectiveBuildingNumber.
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
-        readAlias(body, KEYS_STREET_NAME),
-        readAlias(body, KEYS_BUILDING_NUMBER),
+        streetNameForValidation,
+        StructuredAddressComposer.effectiveBuildingNumber(streetNameForValidation,
+            readAlias(body, KEYS_BUILDING_NUMBER)),
         nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
         effectiveCountryForValidation);
     if (!missing.isEmpty()) {
@@ -708,8 +720,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // instead of being clobbered by this write's absence of the fields. Resolved per account in
     // handle()'s create/update entry points and threaded here.
     String streetName = structuredAddressEnabled ? readAlias(body, KEYS_STREET_NAME) : null;
+    // ETP-5806 follow-up — same "s/n" fallback applied during validation; persisting the raw
+    // (possibly blank) buildingNumber here would silently disagree with what was just validated.
     String buildingNumber = structuredAddressEnabled
-        ? readAlias(body, KEYS_BUILDING_NUMBER) : null;
+        ? StructuredAddressComposer.effectiveBuildingNumber(streetName,
+            readAlias(body, KEYS_BUILDING_NUMBER))
+        : null;
     String buildingName = structuredAddressEnabled ? readAlias(body, KEYS_BUILDING_NAME) : null;
     if (structuredAddressEnabled) {
       geoLoc.setOBSEPAStreetName(streetName);
@@ -972,9 +988,13 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       // Region is deliberately left on getName(): C_Region has no _Trl table, so there is
       // nothing to translate and the two calls would be equivalent.
       locationJson.put("country$_identifier",  geoLoc.getCountry().getIdentifier());
+      // ETP-6090: the ISO code a public API client sends on write, returned on read.
+      String isoCode = geoLoc.getCountry().getISOCountryCode();
+      locationJson.put(FIELD_COUNTRY_CODE,     isoCode != null ? isoCode : JSONObject.NULL);
     } else {
       locationJson.put(FIELD_COUNTRY,          JSONObject.NULL);
       locationJson.put("country$_identifier",  JSONObject.NULL);
+      locationJson.put(FIELD_COUNTRY_CODE,     JSONObject.NULL);
     }
     if (geoLoc.getRegion() != null) {
       locationJson.put(FIELD_REGION,           geoLoc.getRegion().getId());
@@ -1234,7 +1254,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     for (String alias : aliases) {
       String present = matchingKey(body, alias);
       if (present != null) {
-        return nullIfEmpty(body.optString(present, null));
+        // trimToNull, not nullIfEmpty: this is only ever called for streetName/buildingNumber/
+        // buildingName (see KEYS_STREET_NAME et al.), and a value of "   " is visually empty to
+        // whoever typed it — nullIfEmpty only rejects "". Left untrimmed, a value like " Main St"
+        // would pass both missingMandatoryFields and fieldsExceedingMaxLength with a leading
+        // space baked in, and reach OBSEPAStreetName/addressLine composition unchanged.
+        return StringUtils.trimToNull(nullIfEmpty(body.optString(present, null)));
       }
     }
     return null;

@@ -86,6 +86,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.schemaforge.fiscal.FiscalSystemConfigureAction
  * @covers com.etendoerp.go.mcp.McpFieldsSection
  * @covers com.etendoerp.go.mcp.McpFieldView
+ * @covers com.etendoerp.go.mcp.McpDefaultsSection
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {
@@ -1320,5 +1321,33 @@ class McpConfigSourcedataTest {
     assertEveryWriteHidden(verbs, CERTIFICATE);
     assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD).contains("action:'certificate'"));
     assertResolvesCleanly(CERTIFICATE);
+  }
+
+  private static final String PRODUCT_ENTITY = "7973D68DD39E4F4C8D759A3007A27D56";
+
+  /**
+   * ETP-5680: the product's defaults (tax category, stocked/returnable) follow its type, so the
+   * {@code etendo_defaults} catalog must list {@code productType} as required context, like the
+   * document headers list {@code businessPartner}.
+   */
+  @Test
+  @DisplayName("every authored defaults section validates, and the product declares productType")
+  void defaultsSectionsValidateAndProductDeclaresItsType() throws IOException, JSONException {
+    McpConfigSections.resetForTests();
+    List<String> failures = new ArrayList<>();
+    for (String[] row : authoredPayloads()) {
+      JSONObject body = new JSONObject(row[1]);
+      if (body.has(McpDefaultsSection.NAME)) {
+        McpDefaultsSection.validate(body.getJSONObject(McpDefaultsSection.NAME))
+            .forEach(p -> failures.add(row[0] + ": defaults: " + p));
+      }
+    }
+    assertTrue(failures.isEmpty(), "authored defaults sections are invalid:\n  "
+        + String.join("\n  ", failures));
+
+    JSONObject defaults = payloadOf(PRODUCT_ENTITY).getJSONObject(McpDefaultsSection.NAME);
+    assertTrue(defaults.getJSONArray(McpDefaultsSection.KEY_CONTEXT).toString()
+        .contains("\"productType\""), "product must declare productType as defaults context");
+    assertTrue(McpDefaultsSection.validate(defaults).isEmpty());
   }
 }
