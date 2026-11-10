@@ -191,14 +191,14 @@ public class McpToolRouterTest {
   @Test
   public void testWrapAsErrorContentPublishesTheClassicMessageKeyAtTheRoot() throws Exception {
     JSONObject error = new JSONObject().put("status", "error").put("title", "Error: ")
-        .put("message", "El contacto no está marcado como Factura Simplificada, así que su CIF/NIF es obligatorio. Complétalo en Contactos.").put("error", "validation_error")
+        .put("message", "El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.").put("error", "validation_error")
         .put("detail", "Request failed with status 400");
 
     JSONObject result = McpToolRouter.wrapAsErrorContent(error);
 
     JSONObject parsed = new JSONObject(
         result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
-    assertEquals("El contacto no está marcado como Factura Simplificada, así que su CIF/NIF es obligatorio. Complétalo en Contactos.", parsed.getString("message"));
+    assertEquals("El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.", parsed.getString("message"));
     assertEquals("TBAI_EmptyNifCode", parsed.getJSONArray("messageKeys").getString(0));
   }
 

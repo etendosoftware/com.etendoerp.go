@@ -21,6 +21,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -38,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -50,6 +52,8 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.usage.IsolatedDalRead;
 
 /**
  * The Classic message remap (ETP-6158): a catalogued Classic fiscal message that reaches NEO
@@ -65,7 +69,7 @@ public class ClassicMessageRemapTest {
   private static final String REVERSED_ES = "Si el tipo de factura es Rectificativa o Factura "
       + "emitida en sustitución de facturas simplificadas, debe añadir las facturas relacionadas "
       + "en la solapa Facturas Rectificativas.";
-  private static final String REVERSED_GO_ES = "El Tipo de Factura de VERI*FACTU (solapa SIF) es "
+  private static final String REVERSED_GO_ES = "El Tipo de Factura de VERI*FACTU (pestaña SIF) es "
       + "rectificativo o F3 (emitida en sustitución de simplificadas): añade las facturas que "
       + "rectifica en la pestaña Rectificaciones.";
   private static final String CERT_EN = "No valid certificate was found. Add the certificate to "
@@ -95,7 +99,7 @@ public class ClassicMessageRemapTest {
   /** The SII literal sentence: needs no AD_MESSAGE row, so it works without the database. */
   private static final String SII_TYPE_CLASSIC = "La factura debe contener información en el campo "
       + "Clave tipo factura.";
-  private static final String NIF_GO_ES = "El contacto no está marcado como Factura Simplificada, así que su CIF/NIF es obligatorio. Complétalo en Contactos.";
+  private static final String NIF_GO_ES = "El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.";
 
   @Before
   public void setUp() {
@@ -298,6 +302,93 @@ public class ClassicMessageRemapTest {
         envelope.getJSONArray("messageKeys").getString(0));
   }
 
+
+  // ── cost and bounds (review B1, W2, W3, N5) ─────────────────────────────────────────────────
+
+  private static final String MANUAL_ANCHORS = "1 factura(s) enviadas con éxito 2 factura(s) no "
+      + "enviadas ";
+
+  /**
+   * A placeholder that starts the Classic text takes only the word before it: text in front of
+   * the message stays where it was and does not leak into the argument.
+   */
+  @Test
+  public void aLeadingPlaceholderTakesOnlyTheWordBeforeIt() {
+    String classic = "Proceso terminado. 3 factura(s) enviadas con éxito<br />\n      0 factura(s) "
+        + "no enviadas<br />\n      0 factura(s) enviadas previamente<br />\n      \n"
+        + "      Por favor, refresque la pantalla.";
+
+    assertEquals("Proceso terminado. Facturas enviadas con éxito: 3. No enviadas: 0. Enviadas "
+        + "previamente: 0.", ClassicMessageRemap.remapText(classic, "es_ES"));
+  }
+
+  /** B1: a long text that matches nothing, and an adversarial repetition of anchors, stay cheap. */
+  @Test
+  public void longAndAdversarialTextsAreRemappedWithinBudget() {
+    StringBuilder noise = new StringBuilder();
+    while (noise.length() < 50_000) {
+      noise.append("texto sin relación con ningún mensaje ");
+    }
+    StringBuilder adversarial = new StringBuilder();
+    while (adversarial.length() < ClassicMessageRemap.MAX_TEXT_LENGTH - MANUAL_ANCHORS.length()) {
+      adversarial.append(MANUAL_ANCHORS);
+    }
+    String big = noise.toString();
+    String hostile = adversarial.toString();
+    ClassicMessageRemap.remapText(hostile, "es_ES"); // warm-up
+
+    long started = System.nanoTime();
+    String bigOut = ClassicMessageRemap.remapText(big, "es_ES");
+    String hostileOut = ClassicMessageRemap.remapText(hostile, "es_ES");
+    long millis = (System.nanoTime() - started) / 1_000_000L;
+
+    assertSame(big, bigOut);
+    assertEquals(hostile, hostileOut);
+    assertTrue("took " + millis + " ms", millis < 200);
+  }
+
+  /** B1: a text longer than the cap is not even tried, even when it carries a message. */
+  @Test
+  public void aTextLongerThanTheCapIsLeftUntouched() {
+    StringBuilder padding = new StringBuilder();
+    while (padding.length() <= ClassicMessageRemap.MAX_TEXT_LENGTH) {
+      padding.append("relleno ");
+    }
+    String text = padding + CONFIG_ES;
+
+    assertSame(text, ClassicMessageRemap.remapText(text, "es_ES"));
+  }
+
+  /** W2: an argument is taken from the original text: a Windows path keeps its backslashes. */
+  @Test
+  public void anArgumentKeepsItsOriginalCharacters() {
+    String classic = String.format(MARSHALL, "C:\\new\\cert.p12 &quot;roto&quot;");
+
+    assertEquals("Error interno al generar el fichero XML: C:\\new\\cert.p12 &quot;roto&quot;. "
+        + "Suele deberse a que la estructura o algún dato de la declaración no es válido. Revisa "
+        + "los datos indicados en el error y vuelve a generar el fichero.",
+        ClassicMessageRemap.remapText(classic, "es_ES"));
+  }
+
+  /** W3: the same message twice in one text is replaced twice. */
+  @Test
+  public void theSameMessageTwiceIsReplacedTwice() {
+    assertEquals(CONFIG_GO_ES + " / " + CONFIG_GO_ES,
+        ClassicMessageRemap.remapText(CONFIG_ES + " / " + CONFIG_ES, "es_ES"));
+  }
+
+  /**
+   * N5: only whitespace touching the match changes (one space between it and other text, none
+   * against an edge of the string); padding elsewhere stays.
+   */
+  @Test
+  public void onlyTheWhitespaceTouchingTheMatchChanges() {
+    assertEquals("Error: " + CONFIG_GO_ES,
+        ClassicMessageRemap.remapText("Error:\t" + CONFIG_ES + "   ", "es_ES"));
+    assertEquals("  Nota: " + CONFIG_GO_ES + " fin  ",
+        ClassicMessageRemap.remapText("  Nota:  " + CONFIG_ES + "\n fin  ", "es_ES"));
+  }
+
   /** The raw, unparsed token is replaced too. */
   @Test
   public void theRawTokenIsReplaced() {
@@ -355,7 +446,7 @@ public class ClassicMessageRemapTest {
     ClassicMessageRemap.setTextsForTest(Map.of("TBAI_EmptyDir", List.of(classic)));
 
     assertEquals("The contact is not marked as Simplified Invoice, so the invoice Partner Address "
-        + "must have its First line (the street) filled in. Fill it in in Contacts, Location tab.",
+        + "must have its First line (the street) filled in. Complete it in Contacts, Location tab.",
         ClassicMessageRemap.remapText(classic, "en_US"));
   }
 
@@ -387,6 +478,8 @@ public class ClassicMessageRemapTest {
   private static final class DalStub implements AutoCloseable {
     private final MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
     private final MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+    /** The isolated read runs inline here, so the DAL stubs of this thread answer it. */
+    private final MockedStatic<IsolatedDalRead> isolated = mockStatic(IsolatedDalRead.class);
     private final Session session = mock(Session.class);
     @SuppressWarnings("unchecked")
     private final Query<Object[]> base = mock(Query.class);
@@ -395,6 +488,8 @@ public class ClassicMessageRemapTest {
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
     DalStub() {
+      isolated.when(() -> IsolatedDalRead.call(any()))
+          .thenAnswer(inv -> ((Supplier<?>) inv.getArgument(0)).get());
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getSession()).thenReturn(session);
@@ -411,6 +506,7 @@ public class ClassicMessageRemapTest {
 
     @Override
     public void close() {
+      isolated.close();
       obContext.close();
       obDal.close();
     }
@@ -510,8 +606,8 @@ public class ClassicMessageRemapTest {
 
   /**
    * {@code AEAT390_MARSHALLERROR}: the Classic text is filled with {@code String.format} and the
-   * validator's exception spans several lines. The whole exception text is the argument, its line
-   * breaks collapsed like the rest of the text.
+   * validator's exception spans several lines. The whole exception text is the argument, taken
+   * from the original text as it is (its line breaks kept).
    */
   @Test
   public void aMultiLineExceptionFillsTheFormatPlaceholder() {
@@ -520,12 +616,12 @@ public class ClassicMessageRemapTest {
     String classic = String.format(MARSHALL.replace("\"", "&quot;"), exception);
 
     assertEquals("Error interno al generar el fichero XML: cvc-pattern-valid: Value 'B1' is not "
-        + "facet-valid with respect to pattern. cvc-type.3.1.3: The value 'B1' of element 'NIF' "
+        + "facet-valid with respect to pattern.\ncvc-type.3.1.3: The value 'B1' of element 'NIF' "
         + "is not valid. Suele deberse a que la estructura o algún dato de la declaración no es "
         + "válido. Revisa los datos indicados en el error y vuelve a generar el fichero.",
         ClassicMessageRemap.remapText(classic, "es_ES"));
     assertEquals("Internal error while generating the XML file: cvc-pattern-valid: Value 'B1' "
-        + "is not facet-valid with respect to pattern. cvc-type.3.1.3: The value 'B1' of element "
+        + "is not facet-valid with respect to pattern.\ncvc-type.3.1.3: The value 'B1' of element "
         + "'NIF' is not valid. This is usually caused by an invalid structure or value in the "
         + "return. Check the data named in the error and generate the file again.",
         ClassicMessageRemap.remapText(classic, "en_US"));

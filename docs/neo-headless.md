@@ -7004,27 +7004,39 @@ fiscal handlers) and `McpResponseSanitizer#render` (every MCP JSON tool result; 
 `McpToolRouter#wrapAsErrorContent(String)` too). It runs after `identifyPeriodRefusal`. Same
 behaviour on every channel: nothing to declare in §4.12.9.
 
-**What it does.** Every string under a `message`, `text`, `msgText` or `detail` key of the body, at
-any depth, is compared with each catalogued entry (`detail` is where the MCP write-path envelope of
+**What it does.** Every string of 20 to 8192 characters under a `message`, `text`, `msgText` or
+`detail` key of the body, at any depth, is compared (a longer string is left untouched) with each catalogued entry (`detail` is where the MCP write-path envelope of
 `McpWriteRequestSupport` carries the refusal). A string that is itself a serialized JSON object (an
 MCP content item, a body wrapped as text) is parsed and remapped on its values, never on its
 serialized text, and is serialized again only when a value changed:
 
-- an **AD_MESSAGE entry** matches the base text and every `AD_MESSAGE_TRL` text of its key (two HQL
-  queries, base texts and translations, run once for all entries and cached for the JVM; a failed
-  read is retried after 30 s, never per response), because Classic may have resolved it in a language other than the request's.
-  `%0..%n` and `%s` are captured and passed to the GO text as `{0}..{n}`; the raw `@KEY@` token is
-  replaced too when the GO text has no arguments;
+- an **AD_MESSAGE entry** matches the base text and every `AD_MESSAGE_TRL` text of its key, because
+  Classic may have resolved it in a language other than the request's. The texts are read with two
+  HQL queries (base texts and translations), once for all entries, in a DAL session of their own
+  (`IsolatedDalRead`), so the read can neither abort nor be broken by the request's transaction,
+  which is still open while the response is written; they are cached for the JVM and a failed read
+  is retried after 30 s, never per response. `%0..%n` and `%s` are passed to the GO text as
+  `{0}..{n}`; the raw `@KEY@` token is replaced too when the GO text has no arguments;
 - a **literal entry** matches a fixed Classic sentence that has no `AD_MESSAGE` (the two SII
   pre-send sentences of `SIIUtils.invoicePreviousValidations`, ETP-5745 — formerly
   `SiiSendHandler.DRIFTED_CLASSIC_SENTENCES`, now in this catalog).
+
+**Matching cost.** No regular expression runs over the text. A template is the list of the
+literal fragments between its placeholders, found in order with `indexOf` (and skipped at once
+when the text lacks its longest fragment), so the cost is linear in the text whatever it holds. A
+placeholder between two fragments takes what lies between them; one that starts the template
+takes only the word right before the first fragment (text in front of the message never leaks into
+it); one that ends it takes the rest. Every occurrence is replaced (up to 10 per text). Arguments
+are taken from the original text, not the normalised one (a `C:\new\cert.p12` path keeps its
+backslashes).
 
 Both sides are compared with `<br />` (also as a JSON serializer writes it, `<br \/>`), `&quot;`,
 the literal `\n` that `messageBD` escapes and runs of whitespace normalised. The normalisation is
 used for matching only: the match is mapped back to the original string and only that span is
 replaced, so escapes and spacing outside it stay exactly as they were. Whitespace the match took at
-either edge becomes one space; no separator is ever added where the original had none (next to a
-quote or a bracket). A remapped value is trimmed. The GO text comes from
+either edge becomes one space between the GO text and other text, and is dropped against the start
+or end of the string; no separator is ever added where the original had none (next to a quote or a
+bracket). The GO text comes from
 `messages/neo_hints_<lang>.properties` (key = the `AD_MESSAGE` value, or the literal entry's key),
 in the language captured right after authentication (`NeoLanguage.captureRequestCode()` in
 `NeoServlet` and `McpSessionManager.executeInContext`, read with `NeoLanguage.requestCode()`), not
@@ -7041,8 +7053,7 @@ detail, messageKeys:["TBAI_EmptyNifCode"]}`. A text may already be the GO text w
 exit (an `etendo_action_batch` document result is the single action's rendered error, parsed and
 rendered again; a handler such as `SiiSendHandler` remaps itself; a plain-text error): the GO text
 of each entry, in any catalog language, is recognised too, so the key is still published and the
-text is left as is — remapping stays idempotent. A remapped text is trimmed. Total: any failure
-leaves the original text.
+text is left as is — remapping stays idempotent. Total: any failure leaves the original text.
 
 **Adding an entry.**
 

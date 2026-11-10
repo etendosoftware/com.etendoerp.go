@@ -22,13 +22,15 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -38,6 +40,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.util.NeoAdminMode;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.usage.IsolatedDalRead;
 
 /**
  * Replaces, on NEO's way out, the text of a Classic module message that names Classic-only UI (a
@@ -53,20 +56,25 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * handlers' {@code sendError}, batch-job polls) and {@code McpResponseSanitizer#render} (every MCP
  * JSON tool result) call {@link #apply}; nothing else needs to.
  *
- * <p><b>Recognition.</b> Every string under a {@code message}, {@code text} or {@code msgText} key
- * of the body, at any depth, is tried against each {@link #ENTRIES entry}:
+ * <p><b>Recognition.</b> Every string under a {@code message}, {@code text}, {@code msgText} or
+ * {@code detail} key of the body, at any depth, of at most {@link #MAX_TEXT_LENGTH} characters, is
+ * tried against each {@link #ENTRIES entry}:
  * <ul>
  *   <li>an <em>AD_MESSAGE entry</em> matches the {@code AD_MESSAGE} base text and every
- *       {@code AD_MESSAGE_TRL} text of its key (read from the database once, cached), because the
- *       Classic text may arrive in a language other than the request's. {@code %0..%n} and
- *       {@code %s} become capture groups, handed to the GO text as {@code {0}..{n}}. The raw,
- *       unparsed {@code @KEY@} form is recognised too.</li>
+ *       {@code AD_MESSAGE_TRL} text of its key (read once, in a session of its own, and cached),
+ *       because the Classic text may arrive in a language other than the request's.
+ *       {@code %0..%n} and {@code %s} are placeholders, handed to the GO text as
+ *       {@code {0}..{n}}. The raw, unparsed {@code @KEY@} form is recognised too.</li>
  *   <li>a <em>literal entry</em> matches a fixed Classic sentence that has no {@code AD_MESSAGE}
  *       (the SII pre-send validations of {@code SIIUtils}, ETP-5745).</li>
  * </ul>
- * Both sides are compared with HTML line breaks, {@code &quot;}, the {@code \n} that
- * {@code messageBD} escapes and runs of whitespace normalised, so a translation indented with
- * newlines still matches. Only the matched span is replaced.
+ * Matching uses no regular expression over the text: a template is the list of its literal
+ * fragments, found in order with {@code indexOf}, so the cost is linear in the text whatever it
+ * holds. A placeholder between two fragments takes what lies between them; one that starts the
+ * text takes only the word before the first fragment; one that ends it takes the rest. Both sides
+ * are compared with HTML line breaks, {@code &quot;}, the {@code \n} that {@code messageBD} escapes
+ * and runs of whitespace normalised; the match and every argument are mapped back to the original
+ * string, so nothing outside the matched span changes.
  *
  * <p><b>Text.</b> The GO text is the {@code neo_hints_<lang>.properties} catalog entry keyed by the
  * {@code AD_MESSAGE} value (or the literal entry's own key), in the language captured at the start
@@ -93,12 +101,16 @@ public final class ClassicMessageRemap {
   private static final Set<String> TEXT_KEYS = Set.of("message", "text", "msgText", "detail");
   /** Shortest text worth trying: every catalogued message is longer. */
   private static final int MIN_TEXT_LENGTH = 20;
+  /** Longest text tried: a longer one is not a message and is left untouched. */
+  static final int MAX_TEXT_LENGTH = 8192;
+  /** Most occurrences of one message replaced in one text. */
+  private static final int MAX_REPLACEMENTS = 10;
   /** Do not retry a failed catalog read on every response. */
   private static final long RELOAD_BACKOFF_MS = 30_000L;
 
   private static final Pattern PLACEHOLDER = Pattern.compile("%(\\d+|s)");
   /** An HTML line break, also as a JSON serializer writes it ({@code <br \/>}). */
-  private static final Pattern HTML_BREAK = Pattern.compile("(?i)<br\\s*\\\\?/?>");
+  private static final Pattern HTML_BREAK = Pattern.compile("(?i)<br\\s{0,20}\\\\?/?>");
   /** A {@code {n}} argument of a GO text (left as is by a format call with no arguments). */
   private static final Pattern GO_PLACEHOLDER = Pattern.compile("\\{(\\d+)\\}");
   /** The catalog languages a GO text may already be in. */
@@ -112,38 +124,43 @@ public final class ClassicMessageRemap {
    */
   static final List<Entry> ENTRIES = List.of(
       // A — the text names Classic-only UI
-      Entry.adMessage("ETVFAC_invoice_type_rectifying"),
-      Entry.adMessage("ETVFAC_reversed_invoice"),
-      Entry.adMessage("AEAT349_CINVREV_CHECK"),
-      Entry.adMessage("AEATSII_EmptyCertificatePath"),
-      Entry.adMessage("TBAI_CertificateNotValid"),
-      Entry.adMessage("AEATSII_InvoiceManualSending"),
-      Entry.adMessage("AEAT390_MARSHALLERROR"),
-      Entry.adMessage("AEAT303_Periodicity_NotValid"),
-      Entry.adMessage("AEAT349_Periodicity_NotValid"),
-      Entry.adMessage("AEAT303_Period_NotDetected"),
-      Entry.adMessage("AEAT349_Period_NotDetected"),
-      Entry.adMessage("ETVFAC_Missing_DocType_Config"),
-      Entry.adMessage("AEATSII_SII_ACCRUAL_DATE_EMPTY"),
-      Entry.adMessage("TBAI_ConfigNotFound"),
+      Entry.ofAdMessage("ETVFAC_invoice_type_rectifying"),
+      Entry.ofAdMessage("ETVFAC_reversed_invoice"),
+      Entry.ofAdMessage("AEAT349_CINVREV_CHECK"),
+      Entry.ofAdMessage("AEATSII_EmptyCertificatePath"),
+      Entry.ofAdMessage("TBAI_CertificateNotValid"),
+      Entry.ofAdMessage("AEATSII_InvoiceManualSending"),
+      Entry.ofAdMessage("AEAT390_MARSHALLERROR"),
+      Entry.ofAdMessage("AEAT303_Periodicity_NotValid"),
+      Entry.ofAdMessage("AEAT349_Periodicity_NotValid"),
+      Entry.ofAdMessage("AEAT303_Period_NotDetected"),
+      Entry.ofAdMessage("AEAT349_Period_NotDetected"),
+      Entry.ofAdMessage("ETVFAC_Missing_DocType_Config"),
+      Entry.ofAdMessage("AEATSII_SII_ACCRUAL_DATE_EMPTY"),
+      Entry.ofAdMessage("TBAI_ConfigNotFound"),
       // B — the field has another name in GO
-      Entry.adMessage("ETVFAC_error_code_idtype"),
-      Entry.adMessage("TBAI_EmptyNifCode"),
-      Entry.adMessage("TBAI_EmptyPostalCode"),
-      Entry.adMessage("TBAI_EmptyDir"),
+      Entry.ofAdMessage("ETVFAC_error_code_idtype"),
+      Entry.ofAdMessage("TBAI_EmptyNifCode"),
+      Entry.ofAdMessage("TBAI_EmptyPostalCode"),
+      Entry.ofAdMessage("TBAI_EmptyDir"),
       // C — misleading in both products, corrected in GO only
-      Entry.adMessage("TBAI_SetKey"),
-      Entry.adMessage("TBAI_NullCertificate"),
+      Entry.ofAdMessage("TBAI_SetKey"),
+      Entry.ofAdMessage("TBAI_NullCertificate"),
       // Literal Classic sentences with no AD_MESSAGE (SIIUtils.invoicePreviousValidations,
       // ETP-5745). GO labels: sifDataTabs.field.invoiceType ("Tipo factura") and the purchase
       // invoice's POReference override ("Nº documento"), see purchase-invoice.md.
-      Entry.literal("siiMissingInvoiceType",
+      Entry.ofLiteral("siiMissingInvoiceType",
           "La factura debe contener información en el campo Clave tipo factura."),
-      Entry.literal("siiMissingDocumentNo",
+      Entry.ofLiteral("siiMissingDocumentNo",
           "La factura de compra debe contener información en el campo Referencia del proveedor."));
 
-  /** Compiled patterns per AD_MESSAGE key; filled once from the database. */
-  private static volatile Map<String, List<Template>> adMessageTemplates;
+  /** Templates per AD_MESSAGE key, from the database; {@code null} until read. */
+  private static final AtomicReference<Map<String, List<Template>>> AD_TEMPLATES =
+      new AtomicReference<>();
+  /** Templates of the GO texts per AD_MESSAGE key, from the catalog; {@code null} until built. */
+  private static final AtomicReference<Map<String, List<Template>>> GO_TEMPLATES =
+      new AtomicReference<>();
+  private static final Object LOAD_LOCK = new Object();
   private static volatile long lastFailedLoad;
 
   private ClassicMessageRemap() {
@@ -212,17 +229,6 @@ public final class ClassicMessageRemap {
     }
   }
 
-  private static void visitRoot(JSONObject body, String rootKey, String language) {
-    if (body == null) {
-      return;
-    }
-    try {
-      visit(body, rootKey, language);
-    } catch (Exception e) {
-      log.debug("[ETP-6158] Classic message remap skipped: {}", e.getMessage());
-    }
-  }
-
   /**
    * The remapped text, or {@code text} itself when it carries no catalogued Classic message.
    * Total: never throws.
@@ -240,16 +246,83 @@ public final class ClassicMessageRemap {
     return result == null ? text : result.text;
   }
 
+  // ── walking the body ────────────────────────────────────────────────────────────────────────
+
+  private static void visitRoot(JSONObject body, String rootKey, String language) {
+    if (body == null) {
+      return;
+    }
+    try {
+      visit(body, rootKey, language);
+    } catch (Exception e) {
+      log.debug("[ETP-6158] Classic message remap skipped: {}", e.getMessage());
+    }
+  }
+
+  private static void visit(JSONObject object, String keyInParent, String language)
+      throws Exception {
+    List<String> keys = new ArrayList<>();
+    for (Iterator<?> it = object.keys(); it.hasNext();) {
+      keys.add(String.valueOf(it.next()));
+    }
+    for (String key : keys) {
+      visitValue(object, key, keyInParent, language);
+    }
+  }
+
+  private static void visitValue(JSONObject object, String key, String keyInParent,
+      String language) throws Exception {
+    Object value = object.opt(key);
+    if (value instanceof String && TEXT_KEYS.contains(key)) {
+      remapField(object, key, (String) value, keyInParent, language);
+    } else if (value instanceof JSONObject) {
+      visit((JSONObject) value, key, language);
+    } else if (value instanceof JSONArray) {
+      visit((JSONArray) value, language);
+    }
+  }
+
+  private static void remapField(JSONObject object, String key, String value, String keyInParent,
+      String language) throws Exception {
+    String json = remapJsonString(value, language);
+    if (json != null) {
+      object.put(key, json);
+      return;
+    }
+    Result result = remap(value, language);
+    if (result == null) {
+      return;
+    }
+    if (!result.text.equals(value)) {
+      object.put(key, result.text);
+    }
+    recordKeys(object, keyInParent, result.adMessageKeys);
+  }
+
+  private static void visit(JSONArray array, String language) throws Exception {
+    for (int i = 0; i < array.length(); i++) {
+      Object value = array.opt(i);
+      if (value instanceof JSONObject) {
+        visit((JSONObject) value, null, language);
+      } else if (value instanceof JSONArray) {
+        visit((JSONArray) value, language);
+      }
+    }
+  }
+
   /**
    * A string that is itself a serialized JSON object (an MCP content item, a body rendered and
    * then wrapped as text) is remapped on its parsed values, never on its serialized text: the JSON
    * escapes ({@code \n}, {@code \/}, {@code \"}) are not message text and must survive intact.
    *
    * @return the serialized object when one of its values changed, else {@code null} (also when
-   *         the string is not a JSON object)
+   *         the string is not a JSON object, or is longer than {@link #MAX_TEXT_LENGTH})
    */
   private static String remapJsonString(String text, String language) {
-    String trimmed = text == null ? "" : text.trim();
+    if (text == null || text.length() > MAX_TEXT_LENGTH) {
+      return null;
+    }
+    String trimmed = text.trim();
     if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
       return null;
     }
@@ -261,48 +334,6 @@ public final class ClassicMessageRemap {
       return before.equals(after) ? null : after;
     } catch (Exception notJson) {
       return null;
-    }
-  }
-
-  // ── walking the body ────────────────────────────────────────────────────────────────────────
-
-  private static void visit(JSONObject object, String keyInParent, String language)
-      throws Exception {
-    List<String> keys = new ArrayList<>();
-    for (Iterator<?> it = object.keys(); it.hasNext();) {
-      keys.add(String.valueOf(it.next()));
-    }
-    for (String key : keys) {
-      Object value = object.opt(key);
-      if (value instanceof String && TEXT_KEYS.contains(key)) {
-        String json = remapJsonString((String) value, language);
-        if (json != null) {
-          object.put(key, json);
-          continue;
-        }
-        Result result = remap((String) value, language);
-        if (result != null) {
-          if (!result.text.equals(value)) {
-            object.put(key, result.text);
-          }
-          recordKeys(object, keyInParent, result.adMessageKeys);
-        }
-      } else if (value instanceof JSONObject) {
-        visit((JSONObject) value, key, language);
-      } else if (value instanceof JSONArray) {
-        visit((JSONArray) value, language);
-      }
-    }
-  }
-
-  private static void visit(JSONArray array, String language) throws Exception {
-    for (int i = 0; i < array.length(); i++) {
-      Object value = array.opt(i);
-      if (value instanceof JSONObject) {
-        visit((JSONObject) value, null, language);
-      } else if (value instanceof JSONArray) {
-        visit((JSONArray) value, language);
-      }
     }
   }
 
@@ -338,7 +369,7 @@ public final class ClassicMessageRemap {
 
   // ── recognising one text ────────────────────────────────────────────────────────────────────
 
-  /** The outcome of a remap that changed something. */
+  /** The outcome of a remap that changed something or recognised a key. */
   private static final class Result {
     private final String text;
     private final List<String> adMessageKeys;
@@ -351,37 +382,60 @@ public final class ClassicMessageRemap {
 
   /** The remapped text and the AD_MESSAGE keys recognised, or {@code null} when nothing matched. */
   private static Result remap(String text, String language) {
-    if (text == null || text.length() < MIN_TEXT_LENGTH) {
+    if (text == null || text.length() < MIN_TEXT_LENGTH || text.length() > MAX_TEXT_LENGTH) {
       return null;
     }
     try {
       List<String> recognised = new ArrayList<>();
       String current = remapRawTokens(text, language, recognised);
-      Normalized normalized = null;
       for (Entry entry : ENTRIES) {
-        for (Template template : templatesOf(entry)) {
-          if (normalized == null) {
-            normalized = Normalized.of(current);
-          }
-          String replaced = template.replaceIn(current, normalized, entry.catalogKey, language);
-          if (replaced != null) {
-            current = replaced;
-            normalized = null;
-            if (entry.adMessage && !recognised.contains(entry.catalogKey)) {
-              recognised.add(entry.catalogKey);
-            }
-            break;
-          }
-        }
+        current = remapEntry(current, entry, language, recognised);
       }
       recogniseGoTexts(current, recognised);
-      if (current.equals(text)) {
-        return recognised.isEmpty() ? null : new Result(text, recognised);
+      if (current.equals(text) && recognised.isEmpty()) {
+        return null;
       }
-      return new Result(current.trim(), recognised);
+      return new Result(current, recognised);
     } catch (Exception e) {
       log.debug("[ETP-6158] Could not remap a Classic message: {}", e.getMessage());
       return null;
+    }
+  }
+
+  /** {@code text} with every occurrence of {@code entry}'s Classic text replaced. */
+  private static String remapEntry(String text, Entry entry, String language,
+      List<String> recognised) {
+    for (Template template : templatesOf(entry)) {
+      String replaced = replaceAll(text, template, entry.catalogKey, language);
+      if (replaced != null) {
+        if (entry.adMessage) {
+          addOnce(recognised, entry.catalogKey);
+        }
+        return replaced;
+      }
+    }
+    return text;
+  }
+
+  /** Replaces occurrences until none is left (at most {@link #MAX_REPLACEMENTS}). */
+  private static String replaceAll(String text, Template template, String catalogKey,
+      String language) {
+    String current = text;
+    boolean changed = false;
+    for (int i = 0; i < MAX_REPLACEMENTS; i++) {
+      String next = template.replaceIn(current, Normalized.of(current), catalogKey, language);
+      if (next == null) {
+        break;
+      }
+      current = next;
+      changed = true;
+    }
+    return changed ? current : null;
+  }
+
+  private static void addOnce(List<String> list, String value) {
+    if (!list.contains(value)) {
+      list.add(value);
     }
   }
 
@@ -395,48 +449,54 @@ public final class ClassicMessageRemap {
   private static void recogniseGoTexts(String text, List<String> recognised) {
     String normalized = normalize(text);
     for (Map.Entry<String, List<Template>> go : goTemplates().entrySet()) {
-      if (recognised.contains(go.getKey())) {
-        continue;
-      }
-      for (Template template : go.getValue()) {
-        if (template.matches(normalized)) {
-          recognised.add(go.getKey());
-          break;
-        }
+      if (!recognised.contains(go.getKey()) && anyMatches(go.getValue(), normalized)) {
+        recognised.add(go.getKey());
       }
     }
   }
 
-  /** The GO texts of the AD_MESSAGE entries as templates, {@code {n}} as placeholders. */
-  private static volatile Map<String, List<Template>> goTemplates;
+  private static boolean anyMatches(List<Template> templates, String normalized) {
+    for (Template template : templates) {
+      if (template.find(normalized) != null) {
+        return true;
+      }
+    }
+    return false;
+  }
 
+  /** The GO texts of the AD_MESSAGE entries as templates, {@code {n}} as placeholders. */
   private static Map<String, List<Template>> goTemplates() {
-    Map<String, List<Template>> current = goTemplates;
+    Map<String, List<Template>> current = GO_TEMPLATES.get();
     if (current == null) {
-      Map<String, List<Template>> built = new java.util.LinkedHashMap<>();
+      Map<String, List<Template>> built = new LinkedHashMap<>();
       for (Entry entry : ENTRIES) {
-        if (!entry.adMessage) {
-          continue;
+        if (entry.adMessage) {
+          built.put(entry.catalogKey, goTemplatesOf(entry.catalogKey));
         }
-        List<Template> templates = new ArrayList<>();
-        for (String language : GO_LANGUAGES) {
-          String pattern = NeoHints.catalogText(entry.catalogKey, language);
-          if (pattern != null) {
-            Template template = Template.compile(GO_PLACEHOLDER.matcher(pattern).replaceAll("%$1"));
-            if (template != null) {
-              templates.add(template);
-            }
-          }
-        }
-        built.put(entry.catalogKey, Collections.unmodifiableList(templates));
       }
       current = Collections.unmodifiableMap(built);
-      goTemplates = current;
+      GO_TEMPLATES.set(current);
     }
     return current;
   }
 
-  /** Replaces raw {@code @KEY@} tokens of catalogued, parameterless AD_MESSAGEs. */
+  private static List<Template> goTemplatesOf(String catalogKey) {
+    List<Template> templates = new ArrayList<>();
+    for (String language : GO_LANGUAGES) {
+      String pattern = NeoHints.catalogText(catalogKey, language);
+      Template template = pattern == null ? null
+          : Template.compile(GO_PLACEHOLDER.matcher(pattern).replaceAll("%$1"));
+      if (template != null) {
+        templates.add(template);
+      }
+    }
+    return Collections.unmodifiableList(templates);
+  }
+
+  /**
+   * Replaces raw {@code @KEY@} tokens of catalogued, parameterless AD_MESSAGEs. Whitespace that
+   * only pads the token against the edge of the text is dropped with it.
+   */
   private static String remapRawTokens(String text, String language, List<String> recognised) {
     if (text.indexOf('@') < 0) {
       return text;
@@ -444,14 +504,25 @@ public final class ClassicMessageRemap {
     String result = text;
     for (Entry entry : ENTRIES) {
       String token = "@" + entry.catalogKey + "@";
-      if (entry.adMessage && result.contains(token)) {
-        String go = goText(entry.catalogKey, language);
-        // a raw token carries no arguments: a GO text that needs them is not usable here
-        if (go != null && !go.contains("{")) {
-          result = result.replace(token, go);
-          recognised.add(entry.catalogKey);
-        }
+      String go = entry.adMessage && result.contains(token) ? goText(entry.catalogKey, language)
+          : null;
+      // a raw token carries no arguments: a GO text that needs them is not usable here
+      if (go != null && !go.contains("{")) {
+        result = replaceToken(result, token, go);
+        addOnce(recognised, entry.catalogKey);
       }
+    }
+    return result;
+  }
+
+  private static String replaceToken(String text, String token, String go) {
+    String result = text;
+    int index = result.indexOf(token);
+    for (int i = 0; index >= 0 && i < MAX_REPLACEMENTS; i++) {
+      String before = result.substring(0, index);
+      String after = result.substring(index + token.length());
+      result = (before.isBlank() ? "" : before) + go + (after.isBlank() ? "" : after);
+      index = result.indexOf(token);
     }
     return result;
   }
@@ -460,8 +531,7 @@ public final class ClassicMessageRemap {
     if (!entry.adMessage) {
       return entry.literalTemplate;
     }
-    Map<String, List<Template>> loaded = loadedTemplates();
-    List<Template> templates = loaded == null ? null : loaded.get(entry.catalogKey);
+    List<Template> templates = loadedTemplates().get(entry.catalogKey);
     return templates == null ? Collections.emptyList() : templates;
   }
 
@@ -474,7 +544,7 @@ public final class ClassicMessageRemap {
     if (text == null) {
       text = NeoHints.catalogText(catalogKey, ENGLISH, args);
     }
-    return text == null ? null : StringUtils.trimToNull(text);
+    return text == null || text.isBlank() ? null : text.trim();
   }
 
   private static String requestLanguage() {
@@ -497,8 +567,8 @@ public final class ClassicMessageRemap {
 
   /**
    * A text in the compared form, with, for each of its characters, the span of the original text
-   * it came from. Matching runs on the normalized form; the replacement is applied to the original
-   * through the map, so nothing outside the matched span changes (an escape, a break, spacing).
+   * it came from. Matching runs on the normalized form; the replacement and the arguments are taken
+   * from the original through the map, so nothing outside the matched span changes.
    */
   static final class Normalized {
     private static final String QUOT = "&quot;";
@@ -509,156 +579,261 @@ public final class ClassicMessageRemap {
     private final int[] from;
     /** Original end index (exclusive) of each normalized character. */
     private final int[] to;
+    private final int originalLength;
 
-    private Normalized(String text, int[] from, int[] to) {
+    private Normalized(String text, int[] from, int[] to, int originalLength) {
       this.text = text;
       this.from = from;
       this.to = to;
+      this.originalLength = originalLength;
     }
 
     static Normalized of(String original) {
-      int length = original.length();
-      StringBuilder out = new StringBuilder(length);
-      int[] from = new int[length];
-      int[] to = new int[length];
+      Builder builder = new Builder(original.length());
       Matcher br = HTML_BREAK.matcher(original);
       int i = 0;
-      while (i < length) {
-        int next;
-        char emitted;
-        if (original.startsWith(QUOT, i)) {
-          next = i + QUOT.length();
-          emitted = '"';
-        } else if (original.startsWith(ESCAPED_NEWLINE, i)) {
-          next = i + ESCAPED_NEWLINE.length();
-          emitted = ' ';
-        } else if (original.charAt(i) == '<' && br.region(i, length).lookingAt()) {
-          next = br.end();
-          emitted = ' ';
-        } else {
-          next = i + 1;
-          emitted = Character.isWhitespace(original.charAt(i)) ? ' ' : original.charAt(i);
-        }
-        int n = out.length();
-        if (emitted == ' ' && (n == 0 || out.charAt(n - 1) == ' ')) {
-          if (n > 0) {
-            to[n - 1] = next; // a run of whitespace is one space
-          }
-        } else {
-          out.append(emitted);
-          from[n] = i;
-          to[n] = next;
-        }
+      while (i < original.length()) {
+        int next = tokenEnd(original, i, br);
+        builder.emit(tokenChar(original, i, next), i, next);
         i = next;
       }
-      int n = out.length();
-      if (n > 0 && out.charAt(n - 1) == ' ') {
-        out.setLength(n - 1);
+      return builder.build(original.length());
+    }
+
+    /** Where the token starting at {@code i} ends: an entity, an escape, a break, or one char. */
+    private static int tokenEnd(String original, int i, Matcher br) {
+      if (original.startsWith(QUOT, i)) {
+        return i + QUOT.length();
       }
-      return new Normalized(out.toString(), from, to);
+      if (original.startsWith(ESCAPED_NEWLINE, i)) {
+        return i + ESCAPED_NEWLINE.length();
+      }
+      if (original.charAt(i) == '<' && br.region(i, original.length()).lookingAt()) {
+        return br.end();
+      }
+      return i + 1;
     }
 
-    /** The original span of normalized {@code [start, end)}, or {@code null} when it is empty. */
-    int[] originalSpan(int start, int end) {
-      return start >= end ? null : new int[] { from[start], to[end - 1] };
+    /** The compared character of the token {@code [i, next)}. */
+    private static char tokenChar(String original, int i, int next) {
+      if (original.startsWith(QUOT, i)) {
+        return '"';
+      }
+      char c = original.charAt(i);
+      return next - i > 1 || Character.isWhitespace(c) ? ' ' : c;
     }
 
-    /** Whether the normalized character at {@code index} stands for whitespace. */
+    /** Accumulates the normalized text and its map; runs of whitespace become one space. */
+    private static final class Builder {
+      private final StringBuilder out;
+      private final int[] from;
+      private final int[] to;
+
+      Builder(int capacity) {
+        out = new StringBuilder(capacity);
+        from = new int[capacity];
+        to = new int[capacity];
+      }
+
+      void emit(char c, int start, int end) {
+        int n = out.length();
+        boolean space = c == ' ';
+        if (space && n == 0) {
+          return; // leading whitespace is dropped
+        }
+        if (space && out.charAt(n - 1) == ' ') {
+          to[n - 1] = end; // one space for the whole run
+          return;
+        }
+        out.append(c);
+        from[n] = start;
+        to[n] = end;
+      }
+
+      Normalized build(int originalLength) {
+        int n = out.length();
+        if (n > 0 && out.charAt(n - 1) == ' ') {
+          out.setLength(n - 1);
+        }
+        return new Normalized(out.toString(), from, to, originalLength);
+      }
+    }
+
     boolean isSpace(int index) {
       return index >= 0 && index < text.length() && text.charAt(index) == ' ';
     }
+
+    /** The original substring of normalized {@code [start, end)}, spaces at its edges left out. */
+    String originalOf(String original, int start, int end) {
+      int s = start;
+      int e = end;
+      while (s < e && isSpace(s)) {
+        s++;
+      }
+      while (e > s && isSpace(e - 1)) {
+        e--;
+      }
+      return s == e ? "" : original.substring(from[s], to[e - 1]);
+    }
+
+    /** Original start of normalized {@code index}; the text start for the first character. */
+    int originalStart(int index) {
+      return index == 0 ? 0 : from[index];
+    }
+
+    /** Original end of normalized {@code [.., end)}; the text end for the last character. */
+    int originalEnd(int end) {
+      return end == text.length() ? originalLength : to[end - 1];
+    }
   }
 
-  /** One Classic text compiled to a pattern; its groups are the placeholders, in order. */
+  /** Where a template matched a normalized text: the span and one span per placeholder. */
+  private static final class Match {
+    private final int start;
+    private final int end;
+    private final int[][] groups;
+
+    private Match(int start, int end, int[][] groups) {
+      this.start = start;
+      this.end = end;
+      this.groups = groups;
+    }
+  }
+
+  /**
+   * One Classic (or GO) text as its literal fragments, in order, with a placeholder between each
+   * two. Matched with {@code indexOf} only: linear in the text, no backtracking.
+   */
   static final class Template {
-    private final Pattern pattern;
-    /** For each capture group, the index of the GO text argument it fills. */
+    /** {@code literals.size() == argIndexes.length + 1}; the first and last may be empty. */
+    private final List<String> literals;
+    /** For each placeholder, the index of the GO text argument it fills. */
     private final int[] argIndexes;
     private final int argCount;
+    /** The longest fragment: a text without it cannot match. */
+    private final String longest;
 
-    private Template(Pattern pattern, int[] argIndexes, int argCount) {
-      this.pattern = pattern;
+    private Template(List<String> literals, int[] argIndexes, int argCount) {
+      this.literals = literals;
       this.argIndexes = argIndexes;
       this.argCount = argCount;
+      String best = "";
+      for (String literal : literals) {
+        if (literal.length() > best.length()) {
+          best = literal;
+        }
+      }
+      this.longest = best;
     }
 
     /**
-     * Compiles a Classic text. {@code %N} fills argument N, each {@code %s} the next argument in
-     * order. Whitespace is optional around every literal word, so an empty placeholder still
-     * matches; the last placeholder is greedy when nothing follows it.
+     * Compiles a text. {@code %N} fills argument N, each {@code %s} the next argument in order.
      *
-     * @return the template, or {@code null} for a blank text
+     * @return the template, or {@code null} when the text has no literal fragment at all
      */
     static Template compile(String classicText) {
       String normalized = normalize(classicText);
-      if (normalized.isEmpty()) {
-        return null;
-      }
-      StringBuilder regex = new StringBuilder();
+      List<String> literals = new ArrayList<>();
       List<Integer> indexes = new ArrayList<>();
       int positional = 0;
       int max = -1;
       Matcher matcher = PLACEHOLDER.matcher(normalized);
       int last = 0;
       while (matcher.find()) {
-        appendLiteral(regex, normalized.substring(last, matcher.start()));
-        boolean atEnd = normalized.substring(matcher.end()).trim().isEmpty();
-        regex.append(atEnd ? "(.*)" : "(.*?)");
+        literals.add(normalized.substring(last, matcher.start()).trim());
         int index = "s".equals(matcher.group(1)) ? positional++ : Integer.parseInt(matcher.group(1));
         indexes.add(index);
         max = Math.max(max, index);
         last = matcher.end();
       }
-      appendLiteral(regex, normalized.substring(last));
-      int[] argIndexes = indexes.stream().mapToInt(Integer::intValue).toArray();
-      return new Template(Pattern.compile(regex.toString(), Pattern.DOTALL), argIndexes, max + 1);
+      literals.add(normalized.substring(last).trim());
+      Template template = new Template(Collections.unmodifiableList(literals),
+          indexes.stream().mapToInt(Integer::intValue).toArray(), max + 1);
+      return template.longest.isEmpty() ? null : template;
     }
 
-    private static void appendLiteral(StringBuilder regex, String literal) {
-      String[] words = literal.trim().split(" ");
-      for (String word : words) {
-        if (!word.isEmpty()) {
-          regex.append("\\s*").append(Pattern.quote(word));
-        }
+    /** The first match in {@code normalized}, or {@code null}. */
+    Match find(String normalized) {
+      if (!normalized.contains(longest)) {
+        return null;
       }
-      regex.append("\\s*");
-    }
-
-    /** Whether {@code normalized} contains this text. */
-    boolean matches(String normalized) {
-      return pattern.matcher(normalized).find();
+      String first = literals.get(0);
+      int start = first.isEmpty() ? 0 : normalized.indexOf(first);
+      if (start < 0) {
+        return null;
+      }
+      int[][] groups = new int[argIndexes.length][];
+      int cursor = start + first.length();
+      for (int i = 1; i <= argIndexes.length; i++) {
+        String literal = literals.get(i);
+        int at = nextLiteral(normalized, literal, cursor, i == argIndexes.length);
+        if (at < 0) {
+          return null;
+        }
+        groups[i - 1] = new int[] { cursor, at };
+        cursor = at + literal.length();
+      }
+      if (first.isEmpty() && groups.length > 0) {
+        groups[0] = leadingToken(normalized, groups[0][1]);
+        start = groups[0][0];
+      }
+      return new Match(start, cursor, groups);
     }
 
     /**
-     * {@code original} with the span of the first match replaced by the GO text of
-     * {@code catalogKey}, or {@code null} when there is no match or no GO text. Only the matched
-     * characters change: the text around keeps its own escapes. Whitespace the match took at
-     * either edge becomes one space; a separator is never added where the original had none, so
-     * nothing is glued to, or spaced from, a quote or a bracket that was not before.
+     * Where {@code literal} is found from {@code cursor}; an empty one sits at the cursor, or at
+     * the end of the text when it closes the template (a trailing placeholder takes the rest).
+     */
+    private static int nextLiteral(String normalized, String literal, int cursor, boolean last) {
+      if (literal.isEmpty()) {
+        return last ? normalized.length() : cursor;
+      }
+      return normalized.indexOf(literal, cursor);
+    }
+
+    /** A placeholder that starts the template takes only the word before the first fragment. */
+    private static int[] leadingToken(String normalized, int literalAt) {
+      int end = literalAt > 0 && normalized.charAt(literalAt - 1) == ' ' ? literalAt - 1 : literalAt;
+      int start = end;
+      while (start > 0 && normalized.charAt(start - 1) != ' ') {
+        start--;
+      }
+      return new int[] { start, end };
+    }
+
+    /**
+     * {@code original} with the first match replaced by the GO text of {@code catalogKey}, or
+     * {@code null} when there is no match or no GO text. Only the matched span changes, plus the
+     * whitespace right next to it: between the GO text and other text it becomes one space, and
+     * against the start or end of the string it is dropped.
      */
     String replaceIn(String original, Normalized normalized, String catalogKey, String language) {
-      Matcher matcher = pattern.matcher(normalized.text);
-      if (!matcher.find()) {
+      Match match = find(normalized.text);
+      if (match == null) {
         return null;
       }
       Object[] args = new Object[argCount];
       Arrays.fill(args, "");
       for (int g = 0; g < argIndexes.length; g++) {
-        args[argIndexes[g]] = StringUtils.trimToEmpty(matcher.group(g + 1));
+        args[argIndexes[g]] = normalized.originalOf(original, match.groups[g][0],
+            match.groups[g][1]).trim();
       }
       String go = goText(catalogKey, language, args);
       if (go == null) {
         return null;
       }
-      int start = matcher.start();
-      int end = matcher.end();
-      int[] span = normalized.originalSpan(start, end);
-      if (span == null) {
-        return null;
-      }
-      String lead = normalized.isSpace(start) ? " " : "";
-      String trail = end - 1 > start && normalized.isSpace(end - 1) ? " " : "";
-      return original.substring(0, span[0]) + lead + go + trail + original.substring(span[1]);
+      int start = match.start;
+      int end = match.end;
+      boolean spaceBefore = normalized.isSpace(start - 1);
+      boolean spaceAfter = normalized.isSpace(end);
+      start = spaceBefore ? start - 1 : start;
+      end = spaceAfter ? end + 1 : end;
+      int originalStart = normalized.originalStart(start);
+      int originalEnd = normalized.originalEnd(end);
+      String lead = spaceBefore ? " " : "";
+      String trail = spaceAfter && end < normalized.text.length() ? " " : "";
+      return original.substring(0, originalStart) + lead + go + trail
+          + original.substring(originalEnd);
     }
   }
 
@@ -675,11 +850,11 @@ public final class ClassicMessageRemap {
       this.literalTemplate = literalTemplate;
     }
 
-    static Entry adMessage(String value) {
+    static Entry ofAdMessage(String value) {
       return new Entry(value, true, Collections.emptyList());
     }
 
-    static Entry literal(String catalogKey, String classicSentence) {
+    static Entry ofLiteral(String catalogKey, String classicSentence) {
       return new Entry(catalogKey, false, List.of(Template.compile(classicSentence)));
     }
   }
@@ -687,57 +862,69 @@ public final class ClassicMessageRemap {
   // ── AD_MESSAGE texts ────────────────────────────────────────────────────────────────────────
 
   /**
-   * The compiled templates of every AD_MESSAGE entry, read in one query the first time they are
-   * needed. A failed read (no session, an aborted transaction) is retried after
-   * {@link #RELOAD_BACKOFF_MS}, never on every response.
+   * The templates of every AD_MESSAGE entry, read the first time they are needed; empty while
+   * they cannot be read. A failed read is retried after {@link #RELOAD_BACKOFF_MS}, never on every
+   * response.
    */
   private static Map<String, List<Template>> loadedTemplates() {
-    Map<String, List<Template>> current = adMessageTemplates;
+    Map<String, List<Template>> current = AD_TEMPLATES.get();
     if (current != null) {
       return current;
     }
     if (System.currentTimeMillis() - lastFailedLoad < RELOAD_BACKOFF_MS) {
-      return null;
+      return Collections.emptyMap();
     }
-    synchronized (ClassicMessageRemap.class) {
-      if (adMessageTemplates == null) {
-        Map<String, List<String>> texts = readTexts();
-        if (texts == null) {
-          lastFailedLoad = System.currentTimeMillis();
-          return null;
-        }
-        adMessageTemplates = compileAll(texts);
+    synchronized (LOAD_LOCK) {
+      current = AD_TEMPLATES.get();
+      if (current != null) {
+        return current;
       }
-      return adMessageTemplates;
+      Optional<Map<String, List<String>>> texts = readTexts();
+      if (texts.isEmpty()) {
+        lastFailedLoad = System.currentTimeMillis();
+        return Collections.emptyMap();
+      }
+      current = compileAll(texts.get());
+      AD_TEMPLATES.set(current);
+      return current;
     }
   }
 
   static Map<String, List<Template>> compileAll(Map<String, List<String>> texts) {
     Map<String, List<Template>> compiled = new HashMap<>();
-    texts.forEach((key, list) -> {
-      List<Template> templates = new ArrayList<>();
-      List<String> seen = new ArrayList<>();
-      for (String text : list) {
-        String normalized = text == null ? "" : normalize(text);
-        if (!normalized.isEmpty() && !seen.contains(normalized)) {
-          seen.add(normalized);
-          templates.add(Template.compile(text));
-        }
-      }
-      compiled.put(key, Collections.unmodifiableList(templates));
-    });
+    texts.forEach((key, list) -> compiled.put(key, compileDistinct(list)));
     return Collections.unmodifiableMap(compiled);
+  }
+
+  private static List<Template> compileDistinct(List<String> texts) {
+    List<Template> templates = new ArrayList<>();
+    List<String> seen = new ArrayList<>();
+    for (String text : texts) {
+      String normalized = text == null ? "" : normalize(text);
+      Template template = normalized.isEmpty() || seen.contains(normalized) ? null
+          : Template.compile(text);
+      if (template != null) {
+        seen.add(normalized);
+        templates.add(template);
+      }
+    }
+    return Collections.unmodifiableList(templates);
   }
 
   /** For tests: replaces the AD_MESSAGE texts ({@code null} forgets them). */
   static void setTextsForTest(Map<String, List<String>> texts) {
-    adMessageTemplates = texts == null ? null : compileAll(texts);
+    AD_TEMPLATES.set(texts == null ? null : compileAll(texts));
     lastFailedLoad = 0L;
   }
 
-  /** Base text and every translation of every AD_MESSAGE entry, or {@code null} on failure. */
-  @SuppressWarnings("unchecked")
-  private static Map<String, List<String>> readTexts() {
+  /**
+   * Base text and every translation of every AD_MESSAGE entry (two HQL queries), read in a DAL
+   * session of its own ({@link IsolatedDalRead}): a failure there can neither abort nor be
+   * aborted by the request's transaction, which is still open while the response is written.
+   *
+   * @return the texts per key, or empty when they could not be read
+   */
+  private static Optional<Map<String, List<String>>> readTexts() {
     List<String> keys = new ArrayList<>();
     for (Entry entry : ENTRIES) {
       if (entry.adMessage) {
@@ -745,31 +932,36 @@ public final class ClassicMessageRemap {
       }
     }
     try {
-      NeoAdminMode.enter();
-      try {
-        Map<String, List<String>> texts = new HashMap<>();
-        List<Object[]> base = OBDal.getInstance().getSession()
-            .createQuery("select m.searchKey, m.messageText from ADMessage m"
-                + " where m.searchKey in (:keys)")
-            .setParameterList("keys", keys)
-            .list();
-        List<Object[]> translated = OBDal.getInstance().getSession()
-            .createQuery("select t.message.searchKey, t.messageText from ADMessageTrl t"
-                + " where t.message.searchKey in (:keys)")
-            .setParameterList("keys", keys)
-            .list();
-        for (List<Object[]> rows : List.of(base, translated)) {
-          for (Object[] row : rows) {
-            texts.computeIfAbsent((String) row[0], k -> new ArrayList<>()).add((String) row[1]);
-          }
-        }
-        return texts;
-      } finally {
-        OBContext.restorePreviousMode();
-      }
+      return Optional.of(IsolatedDalRead.call(() -> queryTexts(keys)));
     } catch (Exception e) {
       log.debug("[ETP-6158] Could not read the Classic message texts: {}", e.getMessage());
-      return null;
+      return Optional.empty();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, List<String>> queryTexts(List<String> keys) {
+    NeoAdminMode.enter();
+    try {
+      Map<String, List<String>> texts = new HashMap<>();
+      List<Object[]> base = OBDal.getInstance().getSession()
+          .createQuery("select m.searchKey, m.messageText from ADMessage m"
+              + " where m.searchKey in (:keys)")
+          .setParameterList("keys", keys)
+          .list();
+      List<Object[]> translated = OBDal.getInstance().getSession()
+          .createQuery("select t.message.searchKey, t.messageText from ADMessageTrl t"
+              + " where t.message.searchKey in (:keys)")
+          .setParameterList("keys", keys)
+          .list();
+      for (List<Object[]> rows : List.of(base, translated)) {
+        for (Object[] row : rows) {
+          texts.computeIfAbsent((String) row[0], k -> new ArrayList<>()).add((String) row[1]);
+        }
+      }
+      return texts;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 }

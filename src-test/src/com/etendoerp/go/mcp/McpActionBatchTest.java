@@ -212,7 +212,7 @@ class McpActionBatchTest {
   @Test
   @DisplayName("ETP-6158: a failed document keeps the Classic message key in its error object")
   void failedDocumentKeepsTheClassicMessageKey() throws Exception {
-    String goText = "El contacto no está marcado como Factura Simplificada, así que su CIF/NIF es obligatorio. Complétalo en Contactos.";
+    String goText = "El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.";
     JSONObject content = run(call("a"), (spec, args) -> McpToolRouter.wrapAsErrorContent(
         new JSONObject().put("status", "error").put("title", "Error: ").put("message", goText)
             .put("error", "validation_error").put("detail", "Request failed with status 400")));

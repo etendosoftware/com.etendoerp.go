@@ -125,7 +125,7 @@ class NeoServletProcessRequestTest {
   private static final String REVERSED_ES = "Si el tipo de factura es Rectificativa o Factura "
       + "emitida en sustitución de facturas simplificadas, debe añadir las facturas relacionadas "
       + "en la solapa Facturas Rectificativas.";
-  private static final String REVERSED_GO_ES = "El Tipo de Factura de VERI*FACTU (solapa SIF) es "
+  private static final String REVERSED_GO_ES = "El Tipo de Factura de VERI*FACTU (pestaña SIF) es "
       + "rectificativo o F3 (emitida en sustitución de simplificadas): añade las facturas que "
       + "rectifica en la pestaña Rectificaciones.";
 
