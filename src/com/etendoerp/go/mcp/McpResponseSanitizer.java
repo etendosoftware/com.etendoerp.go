@@ -25,6 +25,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.ClassicMessageRemap;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
@@ -150,6 +151,9 @@ final class McpResponseSanitizer {
       return "{}";
     }
     strip(body);
+    // ETP-6158: Classic fiscal messages that name Classic-only UI, reworded for GO (REST does the
+    // same in NeoServlet#writeResponse).
+    ClassicMessageRemap.applyToBody(body);
     // ETP-5684: a role without showAccountingFields reads no accounting status through the MCP,
     // whatever tool produced the body. The role flag is read only when there is one to remove.
     if (containsAccountingKey(body) && !NeoAccountingAccessPolicy.currentRoleSeesAccounting()) {

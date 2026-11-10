@@ -6988,6 +6988,56 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   answers `[]`, at most once a minute (the failure is cached), never touching the request.
 - **Write warnings** (a WARN verdict on a create) are not returned on this path.
 
+
+### 4.17 Classic fiscal messages reworded for GO (ETP-6158)
+
+The Spanish fiscal modules (VERI\*FACTU `com.etendoerp.verifactu`, TicketBAI `com.smf.ticketbai`,
+SII `org.openbravo.module.sii`, AEAT 303/349/390) raise `AD_MESSAGE`s whose text names Classic-only
+UI: a tab ("solapa Facturas Rectificativas"), a process ("Añadir Certificado Digital"), a window
+("ventana de configuración"), a launcher parameter, or a field label GO does not use. Their
+`AD_MESSAGE`/`AD_MESSAGE_TRL` rows are shared with Classic and **must not change**. NEO rewords them
+on the way out instead.
+
+**Where.** `ClassicMessageRemap` (`schemaforge/`) runs at the two exits every response passes:
+`NeoServlet#writeResponse` (REST single, `/batch`, batch-job polls, and every `sendError` of the
+fiscal handlers) and `McpResponseSanitizer#render` (every MCP JSON tool result; the plain-text
+`McpToolRouter#wrapAsErrorContent(String)` too). It runs after `identifyPeriodRefusal`. Same
+behaviour on every channel: nothing to declare in §4.12.9.
+
+**What it does.** Every string under a `message`, `text` or `msgText` key of the body, at any depth,
+is compared with each catalogued entry:
+
+- an **AD_MESSAGE entry** matches the base text and every `AD_MESSAGE_TRL` text of its key (one
+  query for all entries, cached for the JVM; a failed read is retried after 30 s, never per
+  response), because Classic may have resolved it in a language other than the request's.
+  `%0..%n` and `%s` are captured and passed to the GO text as `{0}..{n}`; the raw `@KEY@` token is
+  replaced too when the GO text has no arguments;
+- a **literal entry** matches a fixed Classic sentence that has no `AD_MESSAGE` (the two SII
+  pre-send sentences of `SIIUtils.invoicePreviousValidations`, ETP-5745 — formerly
+  `SiiSendHandler.DRIFTED_CLASSIC_SENTENCES`, now in this catalog).
+
+Both sides are compared with `<br />`, `&quot;`, the literal `\n` that `messageBD` escapes and runs of
+whitespace normalised. Only the matched span is replaced. The GO text comes from
+`messages/neo_hints_<lang>.properties` (key = the `AD_MESSAGE` value, or the literal entry's key),
+in the language captured right after authentication (`NeoLanguage.captureRequestCode()` in
+`NeoServlet` and `McpSessionManager.executeInContext`, read with `NeoLanguage.requestCode()`), not
+the current `OBContext` language, which a Classic call can change mid-request (ETP-5745). When the
+text sits in an `error` object, or next to an existing `messageKeys` array, its `AD_MESSAGE` key is
+added there. Total: any failure leaves the original text.
+
+**Adding an entry.**
+
+1. Confirm the message reaches GO (where it is raised, and which GO action triggers it).
+2. Add `Entry.adMessage("<AD_MESSAGE value>")` (or `Entry.literal("<key>", "<sentence>")`) to
+   `ClassicMessageRemap.ENTRIES`.
+3. Add `<key> = <text>` to **both** `neo_hints_es.properties` (tú, no voseo) and
+   `neo_hints_en.properties`. No HTML. Every GO label you cite must exist in the SPA locales
+   (`tools/app-shell/src/locales/es_ES.json` / `en_US.json`); note the locale key in the comment.
+4. `ClassicMessageRemapTest#everyEntryHasAGoTextInBothLanguages` fails when step 3 is missing.
+
+Never edit the Classic module's `AD_MESSAGE` to get the same effect, and never add a spec or window
+condition here: the catalog is keyed by message only.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
@@ -13500,6 +13550,8 @@ rectificative was computed either on the detail GET or by the header callout whe
   outside the spec's exposed field set on every channel alike — see the ETP-5747 note in §4.12.9.
   Purchase invoices are unchanged: SII offers no `R` in `EM_Aeatsii_Clave_Tipo_Fc`,
   VERI*FACTU never sends a purchase, and the TicketBAI reverse fields are sales-only.
+
+> **ETP-6158:** these two sentences are now literal entries of the central Classic message remap (`ClassicMessageRemap`, neo-headless.md §4.17), applied at NEO's REST and MCP exits; `remapDriftedFieldLabels` only delegates to it. Only the matched sentence is replaced now, not the whole `message`.
 
 **ETP-5745 (5th fix) — `SiiSendHandler` replaces two drifted classic validation sentences with a
 bilingual GO sentence.** `SIIUtils.invoicePreviousValidations` (classic `org.openbravo.module.sii`,

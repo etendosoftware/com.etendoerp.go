@@ -134,8 +134,7 @@ class Fiscal390SubmissionSupport {
     if (!testMode && !service.hasOrgCertificate(org)) {
       FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_CONFLICT,
           FiscalAeatSubmissionSupport.failureJson(false, ERR_NO_CERTIFICATE,
-              "No certificate configured for this organization. Upload one via Fiscal "
-                  + "Configuration before submitting in production mode."));
+              NeoMessageText.text("ETGO_FiscalSubmitNoCertificate")));
       return;
     }
 
