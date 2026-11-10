@@ -4,7 +4,7 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=plataforma [-Pkind=mock|integration|all]
 
-# --- con mocks (624)
+# --- con mocks (629)
 com.etendoerp.go.onboarding.OnboardingRemittanceSetupServiceTest
 com.etendoerp.go.payment.CheckoutPromotionTermsTest
 com.etendoerp.go.payment.MonthlySecondMonthPromotionServiceTest
@@ -130,6 +130,7 @@ com.etendoerp.go.mcp.SelectorContextParamsTest
 com.etendoerp.go.mcp.ToolRegistryGenerateToolsTest
 com.etendoerp.go.mcp.ToolRegistryTest
 com.etendoerp.go.modulescript.EnsureLegacyPlanScriptTest
+com.etendoerp.go.modulescript.SeedAllowedPlanChangesScriptTest
 com.etendoerp.go.oauth2.ApiScopesTest
 com.etendoerp.go.oauth2.OAuth2AuthorizationCodeSupportTest
 com.etendoerp.go.oauth2.OAuth2AuthorizeSupportTest
@@ -202,6 +203,8 @@ com.etendoerp.go.payment.HostedCheckoutServiceTest
 com.etendoerp.go.payment.HostedCheckoutSessionPlanTest
 com.etendoerp.go.payment.PausedSubscriptionAlertTest
 com.etendoerp.go.payment.PlanCatalogServiceTest
+com.etendoerp.go.payment.PlanChangeCatalogTest
+com.etendoerp.go.payment.PlanChangeServiceTest
 com.etendoerp.go.payment.PlanNotAvailableExceptionTest
 com.etendoerp.go.payment.PlanPriceDerivationHandlerTest
 com.etendoerp.go.payment.PlanQuotaSchemaInvariantTest
@@ -217,6 +220,7 @@ com.etendoerp.go.payment.SubscriptionLifecycleApplierPeriodTest
 com.etendoerp.go.payment.SubscriptionLifecycleApplierTest
 com.etendoerp.go.payment.SubscriptionLifecycleCorrelationTest
 com.etendoerp.go.payment.SubscriptionModelSwitchTest
+com.etendoerp.go.payment.SubscriptionPlanRolloverTest
 com.etendoerp.go.payment.SubscriptionServiceTest
 com.etendoerp.go.payment.SystemContextTest
 com.etendoerp.go.payment.TenantEnvironmentLifecycleServiceAdminModeTest
@@ -226,6 +230,7 @@ com.etendoerp.go.payment.TenantPaywallServiceTest
 com.etendoerp.go.payment.TenantPlanPreferenceFallbackAdminModeTest
 com.etendoerp.go.payment.TenantPlanServiceTest
 com.etendoerp.go.payment.WebhookPayloadSummaryTest
+com.etendoerp.go.payment.classic.SubscriptionPlanChangeActionHandlerTest
 com.etendoerp.go.payment.reconcile.BillingReconciliationProcessTest
 com.etendoerp.go.payment.reconcile.BillingReconciliationServiceTest
 com.etendoerp.go.payment.reconcile.ReconciliationAuditTest
