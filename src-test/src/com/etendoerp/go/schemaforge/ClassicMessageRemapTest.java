@@ -204,6 +204,100 @@ public class ClassicMessageRemapTest {
         ClassicMessageRemap.remapText("  Una nota cualquiera de la factura  ", "es_ES"));
   }
 
+  /**
+   * A tool result whose {@code text} is a JSON-serialized body (an MCP content item): the Classic
+   * message inside it, with {@code messageBD}'s {@code &quot;} and the serialized {@code \n}, is
+   * remapped, and the content stays valid JSON with its other fields intact.
+   */
+  @Test
+  public void aMessageInsideAJsonSerializedContentStringIsRemappedAndTheJsonStaysValid()
+      throws Exception {
+    String classic = "El certificado no es válido. Asegúrese de cargarlo correctamente desde la "
+        + "organización legal mediante el proceso \"Añadir Certificado Digital\".";
+    ClassicMessageRemap.setTextsForTest(Map.of("TBAI_CertificateNotValid", List.of(classic)));
+    String serialized = new JSONObject().put("status", "error").put("title", "Error: ")
+        .put("message", classic.replace("\"", "&quot;") + "\nDetalle: el fichero .p12 caducó")
+        .put("error", "validation_error").toString();
+    JSONObject body = new JSONObject().put("isError", true).put("content", new JSONArray()
+        .put(new JSONObject().put("type", "text").put("text", serialized)));
+
+    ClassicMessageRemap.applyToBody(body, "es_ES");
+
+    JSONObject content = new JSONObject(
+        body.getJSONArray("content").getJSONObject(0).getString("text"));
+    assertEquals("El certificado no es válido. Vuelve a subirlo en la sección Certificado digital "
+        + "de Configuración fiscal. Detalle: el fichero .p12 caducó", content.getString("message"));
+    assertEquals("error", content.getString("status"));
+    assertEquals("Error: ", content.getString("title"));
+    assertEquals("validation_error", content.getString("error"));
+  }
+
+  /** A replacement adds no separator next to punctuation or a quote. */
+  @Test
+  public void aReplacementAddsNoSpaceAroundIt() {
+    assertEquals("Error (No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI).)",
+        ClassicMessageRemap.remapText("Error (No existe configuración de TBAI alcanzable. Revise "
+            + "la ventana de configuración.)", "es_ES"));
+  }
+
+  /**
+   * A {@code messageBD} literal backslash-n outside the matched span is left exactly as it was,
+   * so a serialized body around it stays valid JSON for a strict parser.
+   */
+  @Test
+  public void anEscapeOutsideTheMatchSurvivesAndTheJsonStaysStrictlyValid() throws Exception {
+    String classic = "No existe configuración de TBAI alcanzable. Revise la ventana de "
+        + "configuración.";
+    String serialized = new JSONObject().put("message", classic + " Detalle: línea 1\\nlínea 2")
+        .toString();
+    JSONObject body = new JSONObject().put("content", new JSONArray()
+        .put(new JSONObject().put("type", "text").put("text", serialized)));
+
+    ClassicMessageRemap.applyToBody(body, "es_ES");
+
+    String out = body.getJSONArray("content").getJSONObject(0).getString("text");
+    com.fasterxml.jackson.databind.JsonNode strict =
+        new com.fasterxml.jackson.databind.ObjectMapper().readTree(out);
+    assertEquals("No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI). Detalle: línea 1\\nlínea 2",
+        strict.get("message").asText());
+    assertEquals("No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI). Detalle: línea 1\\nlínea 2",
+        ClassicMessageRemap.remapText(classic + "  Detalle: línea 1\\nlínea 2", "es_ES"));
+  }
+
+  /** A break as a JSON serializer writes it ({@code <br \/>}) is a break too. */
+  @Test
+  public void aSerializedBreakIsRecognised() {
+    String serializedForm = String.format(MARSHALL, "X").replace("/", "\\/");
+
+    assertTrue(ClassicMessageRemap.remapText(serializedForm, "es_ES")
+        .startsWith("Error interno al generar el fichero XML: X. Suele deberse"));
+  }
+
+  /**
+   * BUG-2: the MCP write-path envelope carries the Classic text under {@code detail}, padded: it
+   * is remapped there, trimmed, and its key is published at the root of the error result.
+   */
+  @Test
+  public void aClassicTextUnderDetailIsRemappedTrimmedAndKeyed() throws Exception {
+    String classic = "El campo \"Fecha acogida SII\" en la ventana de configuración está vacío. "
+        + "Debe rellenarse para guardar la cabecera de la factura.";
+    ClassicMessageRemap.setTextsForTest(Map.of("AEATSII_SII_ACCRUAL_DATE_EMPTY", List.of(classic)));
+    JSONObject envelope = new JSONObject().put("status", 422).put("error", "validation_error")
+        .put("hint", "A business rule rejected the values sent.")
+        .put("detail", " " + classic.replace("\"", "&quot;") + " ")
+        .put("seeAlso", "etendo://docs");
+
+    ClassicMessageRemap.applyToErrorBody(envelope);
+
+    assertEquals(ClassicMessageRemap.goText("AEATSII_SII_ACCRUAL_DATE_EMPTY", null),
+        envelope.getString("detail"));
+    assertEquals("AEATSII_SII_ACCRUAL_DATE_EMPTY",
+        envelope.getJSONArray("messageKeys").getString(0));
+  }
+
   /** The raw, unparsed token is replaced too. */
   @Test
   public void theRawTokenIsReplaced() {

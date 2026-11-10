@@ -7004,24 +7004,33 @@ fiscal handlers) and `McpResponseSanitizer#render` (every MCP JSON tool result; 
 `McpToolRouter#wrapAsErrorContent(String)` too). It runs after `identifyPeriodRefusal`. Same
 behaviour on every channel: nothing to declare in §4.12.9.
 
-**What it does.** Every string under a `message`, `text` or `msgText` key of the body, at any depth,
-is compared with each catalogued entry:
+**What it does.** Every string under a `message`, `text`, `msgText` or `detail` key of the body, at
+any depth, is compared with each catalogued entry (`detail` is where the MCP write-path envelope of
+`McpWriteRequestSupport` carries the refusal). A string that is itself a serialized JSON object (an
+MCP content item, a body wrapped as text) is parsed and remapped on its values, never on its
+serialized text, and is serialized again only when a value changed:
 
-- an **AD_MESSAGE entry** matches the base text and every `AD_MESSAGE_TRL` text of its key (one
-  query for all entries, cached for the JVM; a failed read is retried after 30 s, never per
-  response), because Classic may have resolved it in a language other than the request's.
+- an **AD_MESSAGE entry** matches the base text and every `AD_MESSAGE_TRL` text of its key (two HQL
+  queries, base texts and translations, run once for all entries and cached for the JVM; a failed
+  read is retried after 30 s, never per response), because Classic may have resolved it in a language other than the request's.
   `%0..%n` and `%s` are captured and passed to the GO text as `{0}..{n}`; the raw `@KEY@` token is
   replaced too when the GO text has no arguments;
 - a **literal entry** matches a fixed Classic sentence that has no `AD_MESSAGE` (the two SII
   pre-send sentences of `SIIUtils.invoicePreviousValidations`, ETP-5745 — formerly
   `SiiSendHandler.DRIFTED_CLASSIC_SENTENCES`, now in this catalog).
 
-Both sides are compared with `<br />`, `&quot;`, the literal `\n` that `messageBD` escapes and runs of
-whitespace normalised. Only the matched span is replaced. The GO text comes from
+Both sides are compared with `<br />` (also as a JSON serializer writes it, `<br \/>`), `&quot;`,
+the literal `\n` that `messageBD` escapes and runs of whitespace normalised. The normalisation is
+used for matching only: the match is mapped back to the original string and only that span is
+replaced, so escapes and spacing outside it stay exactly as they were. Whitespace the match took at
+either edge becomes one space; no separator is ever added where the original had none (next to a
+quote or a bracket). A remapped value is trimmed. The GO text comes from
 `messages/neo_hints_<lang>.properties` (key = the `AD_MESSAGE` value, or the literal entry's key),
 in the language captured right after authentication (`NeoLanguage.captureRequestCode()` in
 `NeoServlet` and `McpSessionManager.executeInContext`, read with `NeoLanguage.requestCode()`), not
 the current `OBContext` language, which a Classic call can change mid-request (ETP-5745).
+`NeoMessageText.text(key, args)` resolves its language the same way (captured first, then the
+current one), so a GO-authored text built after a Classic call cannot flip either.
 
 **Identity (`messageKeys`).** When a recognised text sits in an `error` object, or next to an
 existing `messageKeys` array, its `AD_MESSAGE` key is added there. On MCP the root of an error tool

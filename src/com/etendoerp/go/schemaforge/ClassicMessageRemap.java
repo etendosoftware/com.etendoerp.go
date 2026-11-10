@@ -90,15 +90,15 @@ public final class ClassicMessageRemap {
   private static final String KEY_MESSAGE_KEYS = "messageKeys";
   private static final String KEY_ERROR = "error";
   /** The body keys whose string value is a message for a person. */
-  private static final Set<String> TEXT_KEYS = Set.of("message", "text", "msgText");
+  private static final Set<String> TEXT_KEYS = Set.of("message", "text", "msgText", "detail");
   /** Shortest text worth trying: every catalogued message is longer. */
   private static final int MIN_TEXT_LENGTH = 20;
   /** Do not retry a failed catalog read on every response. */
   private static final long RELOAD_BACKOFF_MS = 30_000L;
 
   private static final Pattern PLACEHOLDER = Pattern.compile("%(\\d+|s)");
-  private static final Pattern HTML_BREAK = Pattern.compile("(?i)<br\\s*/?>");
-  private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+  /** An HTML line break, also as a JSON serializer writes it ({@code <br \/>}). */
+  private static final Pattern HTML_BREAK = Pattern.compile("(?i)<br\\s*\\\\?/?>");
   /** A {@code {n}} argument of a GO text (left as is by a format call with no arguments). */
   private static final Pattern GO_PLACEHOLDER = Pattern.compile("\\{(\\d+)\\}");
   /** The catalog languages a GO text may already be in. */
@@ -232,8 +232,36 @@ public final class ClassicMessageRemap {
    * @return the text with each recognised Classic message replaced by its GO text
    */
   public static String remapText(String text, String language) {
+    String json = remapJsonString(text, language);
+    if (json != null) {
+      return json;
+    }
     Result result = remap(text, language);
     return result == null ? text : result.text;
+  }
+
+  /**
+   * A string that is itself a serialized JSON object (an MCP content item, a body rendered and
+   * then wrapped as text) is remapped on its parsed values, never on its serialized text: the JSON
+   * escapes ({@code \n}, {@code \/}, {@code \"}) are not message text and must survive intact.
+   *
+   * @return the serialized object when one of its values changed, else {@code null} (also when
+   *         the string is not a JSON object)
+   */
+  private static String remapJsonString(String text, String language) {
+    String trimmed = text == null ? "" : text.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+      return null;
+    }
+    try {
+      JSONObject parsed = new JSONObject(trimmed);
+      String before = parsed.toString();
+      visit(parsed, null, language);
+      String after = parsed.toString();
+      return before.equals(after) ? null : after;
+    } catch (Exception notJson) {
+      return null;
+    }
   }
 
   // ── walking the body ────────────────────────────────────────────────────────────────────────
@@ -247,6 +275,11 @@ public final class ClassicMessageRemap {
     for (String key : keys) {
       Object value = object.opt(key);
       if (value instanceof String && TEXT_KEYS.contains(key)) {
+        String json = remapJsonString((String) value, language);
+        if (json != null) {
+          object.put(key, json);
+          continue;
+        }
         Result result = remap((String) value, language);
         if (result != null) {
           if (!result.text.equals(value)) {
@@ -324,16 +357,16 @@ public final class ClassicMessageRemap {
     try {
       List<String> recognised = new ArrayList<>();
       String current = remapRawTokens(text, language, recognised);
-      String normalized = null;
+      Normalized normalized = null;
       for (Entry entry : ENTRIES) {
         for (Template template : templatesOf(entry)) {
           if (normalized == null) {
-            normalized = normalize(current);
+            normalized = Normalized.of(current);
           }
-          String replaced = template.replaceIn(normalized, entry.catalogKey, language);
+          String replaced = template.replaceIn(current, normalized, entry.catalogKey, language);
           if (replaced != null) {
-            normalized = replaced;
             current = replaced;
+            normalized = null;
             if (entry.adMessage && !recognised.contains(entry.catalogKey)) {
               recognised.add(entry.catalogKey);
             }
@@ -459,9 +492,81 @@ public final class ClassicMessageRemap {
    * {@code messageBD} escapes and runs of whitespace become single spaces.
    */
   static String normalize(String text) {
-    String result = text.replace("&quot;", "\"").replace("\\n", " ");
-    result = HTML_BREAK.matcher(result).replaceAll(" ");
-    return WHITESPACE.matcher(result).replaceAll(" ").trim();
+    return Normalized.of(text).text;
+  }
+
+  /**
+   * A text in the compared form, with, for each of its characters, the span of the original text
+   * it came from. Matching runs on the normalized form; the replacement is applied to the original
+   * through the map, so nothing outside the matched span changes (an escape, a break, spacing).
+   */
+  static final class Normalized {
+    private static final String QUOT = "&quot;";
+    private static final String ESCAPED_NEWLINE = "\\n";
+
+    final String text;
+    /** Original start index of each normalized character. */
+    private final int[] from;
+    /** Original end index (exclusive) of each normalized character. */
+    private final int[] to;
+
+    private Normalized(String text, int[] from, int[] to) {
+      this.text = text;
+      this.from = from;
+      this.to = to;
+    }
+
+    static Normalized of(String original) {
+      int length = original.length();
+      StringBuilder out = new StringBuilder(length);
+      int[] from = new int[length];
+      int[] to = new int[length];
+      Matcher br = HTML_BREAK.matcher(original);
+      int i = 0;
+      while (i < length) {
+        int next;
+        char emitted;
+        if (original.startsWith(QUOT, i)) {
+          next = i + QUOT.length();
+          emitted = '"';
+        } else if (original.startsWith(ESCAPED_NEWLINE, i)) {
+          next = i + ESCAPED_NEWLINE.length();
+          emitted = ' ';
+        } else if (original.charAt(i) == '<' && br.region(i, length).lookingAt()) {
+          next = br.end();
+          emitted = ' ';
+        } else {
+          next = i + 1;
+          emitted = Character.isWhitespace(original.charAt(i)) ? ' ' : original.charAt(i);
+        }
+        int n = out.length();
+        if (emitted == ' ' && (n == 0 || out.charAt(n - 1) == ' ')) {
+          if (n > 0) {
+            to[n - 1] = next; // a run of whitespace is one space
+          }
+        } else {
+          out.append(emitted);
+          from[n] = i;
+          to[n] = next;
+        }
+        i = next;
+      }
+      int n = out.length();
+      if (n > 0 && out.charAt(n - 1) == ' ') {
+        out.setLength(n - 1);
+      }
+      return new Normalized(out.toString(), from, to);
+    }
+
+    /** The original span of normalized {@code [start, end)}, or {@code null} when it is empty. */
+    int[] originalSpan(int start, int end) {
+      return start >= end ? null : new int[] { from[start], to[end - 1] };
+    }
+
+    /** Whether the normalized character at {@code index} stands for whitespace. */
+    boolean isSpace(int index) {
+      return index >= 0 && index < text.length() && text.charAt(index) == ' ';
+    }
   }
 
   /** One Classic text compiled to a pattern; its groups are the placeholders, in order. */
@@ -525,11 +630,14 @@ public final class ClassicMessageRemap {
     }
 
     /**
-     * {@code normalized} with the first match replaced by the GO text of {@code catalogKey}, or
-     * {@code null} when there is no match or no GO text.
+     * {@code original} with the span of the first match replaced by the GO text of
+     * {@code catalogKey}, or {@code null} when there is no match or no GO text. Only the matched
+     * characters change: the text around keeps its own escapes. Whitespace the match took at
+     * either edge becomes one space; a separator is never added where the original had none, so
+     * nothing is glued to, or spaced from, a quote or a bracket that was not before.
      */
-    String replaceIn(String normalized, String catalogKey, String language) {
-      Matcher matcher = pattern.matcher(normalized);
+    String replaceIn(String original, Normalized normalized, String catalogKey, String language) {
+      Matcher matcher = pattern.matcher(normalized.text);
       if (!matcher.find()) {
         return null;
       }
@@ -542,9 +650,15 @@ public final class ClassicMessageRemap {
       if (go == null) {
         return null;
       }
-      String before = normalized.substring(0, matcher.start()).trim();
-      String after = normalized.substring(matcher.end()).trim();
-      return WHITESPACE.matcher((before + " " + go + " " + after)).replaceAll(" ").trim();
+      int start = matcher.start();
+      int end = matcher.end();
+      int[] span = normalized.originalSpan(start, end);
+      if (span == null) {
+        return null;
+      }
+      String lead = normalized.isSpace(start) ? " " : "";
+      String trail = end - 1 > start && normalized.isSpace(end - 1) ? " " : "";
+      return original.substring(0, span[0]) + lead + go + trail + original.substring(span[1]);
     }
   }
 
