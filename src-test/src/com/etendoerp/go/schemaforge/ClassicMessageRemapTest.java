@@ -187,6 +187,27 @@ public class ClassicMessageRemapTest {
     assertNull(ClassicMessageRemap.remapText(null, "es_ES"));
   }
 
+  /** TicketBAI address check on Confirmar: points to the GO address field, in English too. */
+  @Test
+  public void theTicketBaiAddressLineCheckPointsToContacts() {
+    String classic = "La Línea 1ª de la dirección del tercero debe estar completa para continuar. "
+        + "Por favor, verificar.";
+    ClassicMessageRemap.setTextsForTest(Map.of("TBAI_EmptyDir", List.of(classic)));
+
+    assertEquals("The contact is not marked as Simplified Invoice, so the invoice Partner Address "
+        + "must have its First line (the street) filled in. Fill it in in Contacts, Location tab.",
+        ClassicMessageRemap.remapText(classic, "en_US"));
+  }
+
+  /** Messages a GO user cannot trigger are not catalogued. */
+  @Test
+  public void messagesGoNeverShowsAreNotCatalogued() {
+    for (ClassicMessageRemap.Entry entry : ClassicMessageRemap.ENTRIES) {
+      assertFalse(entry.catalogKey, List.of("AEATSII_RECTIFIC_2017",
+          "ETVFAC_complete_rectifying_type").contains(entry.catalogKey));
+    }
+  }
+
   /** Every catalogued entry has a GO text in both catalogs, with no HTML. */
   @Test
   public void everyEntryHasAGoTextInBothLanguages() {

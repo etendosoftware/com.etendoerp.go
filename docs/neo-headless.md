@@ -7027,7 +7027,13 @@ added there. Total: any failure leaves the original text.
 
 **Adding an entry.**
 
-1. Confirm the message reaches GO (where it is raised, and which GO action triggers it).
+1. Confirm a GO user can actually trigger the message (where it is raised, and which GO action
+   triggers it). A message GO never shows is left out, even when its text names Classic UI:
+   `AEATSII_RECTIFIC_2017` (raised only by the Classic `UpdateInvoicesPreSii` process, which GO
+   never runs) and `ETVFAC_complete_rectifying_type` (GO always fills the invoice's
+   `em_etvfac_reverseinvtype` before VERI\*FACTU validates it: `SalesRectificativeFiscalDefaults`
+   on header writes, `InvoiceCompletionService.populateVerifactuFieldsFromDocType` at completion,
+   and GO's rectificative document types ship `R1`/`I`) were dropped for that reason.
 2. Add `Entry.adMessage("<AD_MESSAGE value>")` (or `Entry.literal("<key>", "<sentence>")`) to
    `ClassicMessageRemap.ENTRIES`.
 3. Add `<key> = <text>` to **both** `neo_hints_es.properties` (tú, no voseo) and

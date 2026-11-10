@@ -98,7 +98,8 @@ public final class ClassicMessageRemap {
   private static final Pattern WHITESPACE = Pattern.compile("\\s+");
 
   /**
-   * The catalogued messages. To add one: add the entry here and its text to BOTH
+   * The catalogued messages: only messages a GO user can actually trigger (a message GO never
+   * shows is left out, ETP-6158). To add one: add the entry here and its text to BOTH
    * {@code messages/neo_hints_es.properties} and {@code neo_hints_en.properties} under the same key
    * (see neo-headless.md §4.17).
    */
@@ -116,7 +117,6 @@ public final class ClassicMessageRemap {
       Entry.adMessage("AEAT303_Period_NotDetected"),
       Entry.adMessage("AEAT349_Period_NotDetected"),
       Entry.adMessage("ETVFAC_Missing_DocType_Config"),
-      Entry.adMessage("ETVFAC_complete_rectifying_type"),
       Entry.adMessage("AEATSII_SII_ACCRUAL_DATE_EMPTY"),
       Entry.adMessage("TBAI_ConfigNotFound"),
       // B — the field has another name in GO
@@ -124,10 +124,10 @@ public final class ClassicMessageRemap {
       Entry.adMessage("ETVFAC_error_code_idtype"),
       Entry.adMessage("TBAI_EmptyNifCode"),
       Entry.adMessage("TBAI_EmptyPostalCode"),
+      Entry.adMessage("TBAI_EmptyDir"),
       // C — misleading in both products, corrected in GO only
       Entry.adMessage("TBAI_SetKey"),
       Entry.adMessage("TBAI_NullCertificate"),
-      Entry.adMessage("AEATSII_RECTIFIC_2017"),
       // Literal Classic sentences with no AD_MESSAGE (SIIUtils.invoicePreviousValidations,
       // ETP-5745). GO labels: sifDataTabs.field.invoiceType ("Tipo factura") and the purchase
       // invoice's POReference override ("Nº documento"), see purchase-invoice.md.
