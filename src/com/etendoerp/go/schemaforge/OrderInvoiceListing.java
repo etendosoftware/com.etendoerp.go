@@ -191,7 +191,9 @@ final class OrderInvoiceListing {
     // ETP-5828 QA UI-4: which other drafts hold each line, so a taken line can be named.
     List<String> lineIds = new ArrayList<>();
     for (OrderLine ol : order.getOrderLineList()) {
-      lineIds.add(ol.getId());
+      if (OrderImportListing.isListedLine(ol)) {
+        lineIds.add(ol.getId());
+      }
     }
     Map<String, List<OrderInvoicePending.DraftInvoiceRef>> holders =
         handler.draftInvoicesHolding(lineIds, sales, invoice.getId());

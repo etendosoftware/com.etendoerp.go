@@ -127,7 +127,8 @@ final class OrderInvoicePending {
   static final String DRAFT_HOLDERS_HQL = "select distinct il.salesOrderLine.id, i.id, "
       + "i.documentNo from InvoiceLine il join il.invoice i where i.documentStatus = 'DR' "
       + "and i.salesTransaction = :sot and il.active = true and il.salesOrderLine.id in :ids "
-      + "and i.id <> :inv order by i.documentNo, i.id";
+      + "and i.id <> :inv and i.client.id = :client and i.organization.id in (:orgs) "
+      + "order by i.documentNo, i.id";
 
   /** A draft invoice holding part of an order line: what the popup and the agent are told. */
   static final class DraftInvoiceRef {
@@ -147,17 +148,22 @@ final class OrderInvoicePending {
    * @param orderLineIds    the order lines; an empty collection reads nothing
    * @param sales           the direction of the drafts
    * @param exceptInvoiceId the invoice the caller imports into (its own lines are "imported here")
+   * @param clientId        the session's client: a draft of another client is never named
+   * @param readableOrgs    the role's readable organizations: a draft outside them is never named
+   *                        (its quantity is still deducted by {@link #draftQuantities}, so such a
+   *                        line just reads «ya importado»)
    * @return {@code orderLineId -> drafts by document number}; a line no other draft holds is absent
    */
   static Map<String, List<DraftInvoiceRef>> draftHolders(Collection<String> orderLineIds,
-      boolean sales, String exceptInvoiceId) {
+      boolean sales, String exceptInvoiceId, String clientId, Collection<String> readableOrgs) {
     Map<String, List<DraftInvoiceRef>> holders = new LinkedHashMap<>();
-    if (orderLineIds.isEmpty()) {
+    if (orderLineIds.isEmpty() || readableOrgs == null || readableOrgs.isEmpty()) {
       return holders;
     }
     List<Object[]> rows = OBDal.getInstance().getSession()
         .createQuery(DRAFT_HOLDERS_HQL, Object[].class)
         .setParameter("sot", sales).setParameter("inv", exceptInvoiceId)
+        .setParameter("client", clientId).setParameterList("orgs", readableOrgs)
         .setParameterList("ids", orderLineIds).list();
     for (Object[] row : rows) {
       holders.computeIfAbsent((String) row[0], k -> new ArrayList<>())

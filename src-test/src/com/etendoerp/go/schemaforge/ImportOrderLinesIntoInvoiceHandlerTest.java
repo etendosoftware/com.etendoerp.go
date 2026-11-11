@@ -291,13 +291,15 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
     /** The OTHER drafts holding each order line (ETP-5828 QA UI-4); empty: none. */
     final Map<String, List<OrderInvoicePending.DraftInvoiceRef>> holders = new HashMap<>();
-    /** The invoice the last holders read left out. */
+    /** The invoice the last holders read left out, and the order lines it asked about. */
     String holdersExcept;
+    List<String> holdersAsked;
 
     @Override
     protected Map<String, List<OrderInvoicePending.DraftInvoiceRef>> draftInvoicesHolding(
         Collection<String> orderLineIds, boolean sales, String exceptInvoiceId) {
       holdersExcept = exceptInvoiceId;
+      holdersAsked = new ArrayList<>(orderLineIds);
       return holders;
     }
   }
@@ -1407,6 +1409,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
           .getBody().getJSONObject("response").getJSONArray("data");
 
       assertEquals(side, "i1", probe.holdersExcept);
+      assertEquals(side + ": only the listed lines are looked up", List.of("ol1", "ol2"),
+          probe.holdersAsked);
       assertFalse(side + ": no other draft holds ol1",
           rows.getJSONObject(0).has("inDraftInvoices"));
       JSONArray held = rows.getJSONObject(1).getJSONArray("inDraftInvoices");
@@ -1417,10 +1421,14 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     }
   }
 
-  /** The holders read: drafts of the direction, the target left out, nothing read for no line. */
+  /**
+   * The holders read: drafts of the direction, the target left out, only the session's client and
+   * the role's readable organizations (their document number reaches the caller); nothing is read
+   * for no line or no readable organization.
+   */
   @Test
   @SuppressWarnings("unchecked")
-  public void draftHolders_readsTheOtherDraftsOfTheDirection_byDocumentNo() {
+  public void draftHolders_readsTheOtherDraftsOfTheDirection_inTheReadableOrgs() {
     org.hibernate.Session session = mock(org.hibernate.Session.class);
     when(dal.getSession()).thenReturn(session);
     org.hibernate.query.Query<Object[]> query = mock(org.hibernate.query.Query.class);
@@ -1431,18 +1439,26 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     List<Object[]> found = List.<Object[]>of(new Object[] { "ol1", "inv-a", "FV1" },
         new Object[] { "ol1", "inv-b", "FV2" });
     when(query.list()).thenReturn(found);
+    List<String> orgs = List.of("org-1", "org-2");
 
     Map<String, List<OrderInvoicePending.DraftInvoiceRef>> holders =
-        new ImportOrderLinesIntoInvoiceHandler().draftInvoicesHolding(List.of("ol1"), true, "i1");
+        OrderInvoicePending.draftHolders(List.of("ol1"), true, "i1", "client-1", orgs);
 
     assertEquals(2, holders.get("ol1").size());
     assertEquals("FV2", holders.get("ol1").get(1).documentNo);
     Mockito.verify(query).setParameter("inv", "i1");
     Mockito.verify(query).setParameter("sot", true);
+    Mockito.verify(query).setParameter("client", "client-1");
+    Mockito.verify(query).setParameterList("orgs", orgs);
     assertTrue(hql.getValue(), hql.getValue().contains("i.documentStatus = 'DR'")
-        && hql.getValue().contains("i.id <> :inv"));
+        && hql.getValue().contains("i.id <> :inv")
+        && hql.getValue().contains("i.client.id = :client")
+        && hql.getValue().contains("i.organization.id in (:orgs)"));
     assertTrue("no line, no query",
-        OrderInvoicePending.draftHolders(List.of(), true, "i1").isEmpty());
+        OrderInvoicePending.draftHolders(List.of(), true, "i1", "client-1", orgs).isEmpty());
+    assertTrue("no readable organization, no query",
+        OrderInvoicePending.draftHolders(List.of("ol1"), true, "i1", "client-1", List.of())
+            .isEmpty());
     Mockito.verify(session, Mockito.times(1)).createQuery(Mockito.anyString(),
         Mockito.eq(Object[].class));
   }

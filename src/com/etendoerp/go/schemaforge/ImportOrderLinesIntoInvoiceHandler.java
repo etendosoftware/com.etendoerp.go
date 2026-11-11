@@ -596,10 +596,20 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     return OrderInvoicePending.draftQuantities(orderLineIds, sales);
   }
 
-  /** Seam: per order line, the OTHER draft invoices of the direction that hold it. */
+  /**
+   * Seam: per order line, the OTHER draft invoices of the direction that hold it, only those of
+   * the session's client and the role's readable organizations (their document number is shown).
+   */
   protected Map<String, List<OrderInvoicePending.DraftInvoiceRef>> draftInvoicesHolding(
       Collection<String> orderLineIds, boolean sales, String exceptInvoiceId) {
-    return OrderInvoicePending.draftHolders(orderLineIds, sales, exceptInvoiceId);
+    return OrderInvoicePending.draftHolders(orderLineIds, sales, exceptInvoiceId,
+        sessionClientId(), readableOrganizations());
+  }
+
+  /** Seam: the organizations the session's role can read. */
+  protected List<String> readableOrganizations() {
+    return java.util.Arrays.asList(
+        org.openbravo.dal.core.OBContext.getOBContext().getReadableOrganizations());
   }
 
   /**
