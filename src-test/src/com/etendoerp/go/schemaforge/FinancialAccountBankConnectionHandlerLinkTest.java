@@ -72,6 +72,7 @@ import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsS
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.AccountTransactionsSync;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
@@ -390,14 +391,14 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactionsWithResult(eq(finAcc),
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
           any())).thenAnswer(invocation -> {
             StringBuilder sb = invocation.getArgument(1);
             sb.append("  Imported 5 statements  ");
-            return new SaltEdgeAccountLinkHelper.SyncResult("OK", false);
+            return new AccountTransactionsSync.SyncResult("OK", false);
           });
 
       NeoResponse response = handler.handle(postContext("sync", body));
@@ -419,11 +420,11 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactionsWithResult(eq(finAcc),
-          any())).thenReturn(new SaltEdgeAccountLinkHelper.SyncResult("OK", false));
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenReturn(new AccountTransactionsSync.SyncResult("OK", false));
 
       JSONObject data = dataOf(handler.handle(postContext("sync", body)));
 
@@ -440,11 +441,11 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactionsWithResult(eq(finAcc),
-          any())).thenReturn(new SaltEdgeAccountLinkHelper.SyncResult("ERROR", false));
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any())).thenReturn(new AccountTransactionsSync.SyncResult("ERROR", false));
 
       JSONObject data = dataOf(handler.handle(postContext("sync", body)));
 
@@ -1376,15 +1377,15 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<NeoLanguage> lang = mockStatic(NeoLanguage.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        MockedStatic<AccountTransactionsSync> syncStatic =
+            mockStatic(AccountTransactionsSync.class)) {
       stubObContext(obContext);
       lang.when(NeoLanguage::currentCode).thenReturn(language);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactionsWithResult(eq(finAcc),
+      syncStatic.when(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
           any())).thenAnswer(invocation -> {
             StringBuilder sb = invocation.getArgument(1);
             sb.append("  PSD2 buffer  ");
-            return new SaltEdgeAccountLinkHelper.SyncResult(fetchStatus, duplicateCheckFailed);
+            return new AccountTransactionsSync.SyncResult(fetchStatus, duplicateCheckFailed);
           });
 
       NeoResponse response = handler.handle(postContext("sync", body));

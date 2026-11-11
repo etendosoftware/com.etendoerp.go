@@ -4018,7 +4018,7 @@ that is still linked to Salt Edge remains blocked from deletion.
 
 **Synchronizing (ETP-6154).** A bank sync imports the account's new movements from Salt Edge as
 bank statement lines. It is the same per-account fetch as Classic's *Get Bank Statement* button
-(`SaltEdgeAccountLinkHelper.fetchAccountTransactionsWithResult` in the PSD2 module) and it runs
+(`AccountTransactionsSync.fetchAccountTransactionsWithResult` in the PSD2 module) and it runs
 **synchronously** inside the request. At most one sync of an account runs at a time, on every path
 (SPA, MCP, Classic, scheduled processes): the PSD2 module wraps the fetch in a per-account,
 non-waiting PostgreSQL advisory lock (`AccountSyncLock`) and commits the imported lines before

@@ -48,6 +48,7 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.AccountSyncLock;
+import com.etendoerp.psd2.bank.integration.utils.AccountTransactionsSync;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
@@ -894,8 +895,8 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     StringBuilder messages = new StringBuilder();
     // Single source of truth: the same per-account fetch behind the Classic "Get Bank Statement"
     // button (GetTransactions action) — both delegate to fetchAccountTransactions.
-    SaltEdgeAccountLinkHelper.SyncResult result =
-        SaltEdgeAccountLinkHelper.fetchAccountTransactionsWithResult(finAcc, messages);
+    AccountTransactionsSync.SyncResult result =
+        AccountTransactionsSync.fetchAccountTransactionsWithResult(finAcc, messages);
     String status = result.getStatus();
     JSONObject data = new JSONObject();
     String language = NeoLanguage.currentCode();
