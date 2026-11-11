@@ -42,6 +42,8 @@ public class HostedCheckoutService {
 
   private static final String REQUEST_ID_FIELD = "requestId";
   private static final String SUBSCRIPTION_FIELD = "subscription";
+  private static final String STATUS_FIELD = "status";
+  private static final String CHECKOUT_KEY_PREFIX = "checkout:";
 
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   PlanCatalogService planCatalogService = new PlanCatalogService();
@@ -68,6 +70,7 @@ public class HostedCheckoutService {
   public static final class PurchaseSelectionChangedException extends IllegalStateException {
     private static final long serialVersionUID = 1L;
 
+    /** Creates a conflict indicating that the confirmed unpaid purchase is no longer current. */
     public PurchaseSelectionChangedException() {
       super("The pending checkout changed. Reload the purchase before trying again.");
     }
@@ -128,7 +131,12 @@ public class HostedCheckoutService {
       this.language = language;
     }
 
-    /** Copies these immutable options with the buyer's language for the hosted offer text. */
+    /**
+     * Copies these immutable options with the buyer's language for the hosted offer text.
+     *
+     * @param language language to persist with the purchase's offer snapshot
+     * @return new options carrying the language and the original checkout selections
+     */
     public SessionOptions withLanguage(String language) {
       return new SessionOptions(demoClientId, transferProducts, transferContacts, beforeProvider,
           reactivatedClientId, language);
@@ -237,7 +245,20 @@ public class HostedCheckoutService {
     return createSession(accountId, accountEmail, clientName, origin, planKey, options, null);
   }
 
-  /** Creates a purchase, optionally replacing an explicitly confirmed unpaid predecessor. */
+  /**
+   * Creates a purchase, optionally replacing an explicitly confirmed unpaid predecessor.
+   *
+   * @param accountId authenticated account identifier recorded on the purchase
+   * @param accountEmail authenticated buyer email
+   * @param clientName requested environment name
+   * @param origin configured public application origin used for checkout return URLs
+   * @param planKey catalog key selected by the buyer; blank requests the legacy fallback
+   * @param options demo source, transfer choices and callback; {@code null} uses empty options
+   * @param replacePurchaseId confirmed unpaid purchase to supersede, or blank for a new purchase
+   * @return durable purchase details and the provider checkout URL
+   * @throws IOException when the provider price or pending session cannot be verified
+   * @throws JSONException when a provider response is not valid JSON
+   */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin, String planKey, SessionOptions options, String replacePurchaseId)
       throws IOException, JSONException {
@@ -297,7 +318,16 @@ public class HostedCheckoutService {
         sessionOptions.reactivatedClientId != null, terms);
   }
 
-  /** A new plan selection may resume only the exact plan and provider Price originally bought. */
+  /**
+   * Checks whether a purchase may resume under the requested commercial selection.
+   * Legacy callers without a selected plan may explicitly resume the historical purchase.
+   *
+   * @param purchase existing purchase, or {@code null} when none was found
+   * @param planKey selected catalog key, or blank for a legacy resume without a new selection
+   * @return whether the selected plan and provider price match, or a legacy resume was requested
+   * @throws IOException when the selected provider price cannot be verified
+   * @throws JSONException when the provider price response is not valid JSON
+   */
   public boolean matchesSelection(CheckoutRequest purchase, String planKey)
       throws IOException, JSONException {
     // Older clients carry no selection at all: that is an explicit resume of the historical
@@ -313,16 +343,16 @@ public class HostedCheckoutService {
     if (StringUtils.isBlank(sessionId)) throw new PurchaseSelectionChangedException();
     JSONObject session = retrieveSession(sessionId);
     if (!sessionId.equals(session.optString("id", ""))) throw new IOException("Unexpected session");
-    if ("open".equals(session.optString("status", ""))) {
+    if ("open".equals(session.optString(STATUS_FIELD, ""))) {
       StripeResponse expired = stripeApiClient.postForm("/v1/checkout/sessions/"
           + URLEncoder.encode(sessionId, StandardCharsets.UTF_8.name()) + "/expire", "",
-          "checkout:" + sessionId + ":expire-for-replacement");
+          CHECKOUT_KEY_PREFIX + sessionId + ":expire-for-replacement");
       if (!expired.isSuccess()) throw new IOException("Could not expire the pending checkout");
       session = expired.json();
     }
     // Complete with async payment pending is deliberately refused too: it may still collect money.
     if (!sessionId.equals(session.optString("id", ""))
-        || !"expired".equals(session.optString("status", ""))
+        || !"expired".equals(session.optString(STATUS_FIELD, ""))
         || !"unpaid".equals(session.optString("payment_status", ""))) {
       throw new PurchaseSelectionChangedException();
     }
@@ -453,7 +483,7 @@ public class HostedCheckoutService {
       if (!sessionId.equals(existing.optString("id", ""))) {
         throw new IOException("Stripe returned a different existing checkout session");
       }
-      String sessionStatus = existing.optString("status", "");
+      String sessionStatus = existing.optString(STATUS_FIELD, "");
       if ("open".equals(sessionStatus)) {
         String originalMode = existing.optString("mode", "");
         if (originalMode.isEmpty()) {
@@ -577,11 +607,11 @@ public class HostedCheckoutService {
   }
 
   static String initialIdempotencyKey(String requestId) {
-    return "checkout:" + requestId + ":initial";
+    return CHECKOUT_KEY_PREFIX + requestId + ":initial";
   }
 
   static String replacementIdempotencyKey(String requestId, String expiredSessionId) {
-    return "checkout:" + requestId + ":after:" + expiredSessionId;
+    return CHECKOUT_KEY_PREFIX + requestId + ":after:" + expiredSessionId;
   }
 
   /**

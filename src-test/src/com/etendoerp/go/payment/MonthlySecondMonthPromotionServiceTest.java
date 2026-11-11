@@ -1,6 +1,11 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
@@ -9,9 +14,43 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.Map;
+import java.sql.Connection;
+import java.sql.SQLException;
 
 /** @covers com.etendoerp.go.payment.MonthlySecondMonthPromotionService */
 class MonthlySecondMonthPromotionServiceTest {
+  @Test void rollbackFailurePreservesCloseFailureAndClosesConnectionOnce() throws Exception {
+    Connection connection = mock(Connection.class);
+    SQLException rollbackFailure = new SQLException("rollback failed");
+    SQLException closeFailure = new SQLException("close failed");
+    doThrow(rollbackFailure).when(connection).rollback();
+    doThrow(closeFailure).when(connection).close();
+
+    IllegalStateException failure = assertThrows(IllegalStateException.class,
+        () -> MonthlySecondMonthPromotionService.release(connection));
+
+    assertSame(rollbackFailure, failure.getCause());
+    assertArrayEquals(new Throwable[]{closeFailure}, rollbackFailure.getSuppressed());
+    verify(connection, times(1)).close();
+    verify(connection, never()).setAutoCommit(true);
+  }
+
+  @Test void providerFailureRemainsPrimaryWhenReleasingTheLockAlsoFails() throws Exception {
+    Fixture f = new Fixture();
+    f.stripe.timeoutCreate = true;
+    IllegalStateException closeFailure = new IllegalStateException("lock close failed");
+    int[] releases = {0};
+    f.service.locks = request -> () -> { releases[0]++; throw closeFailure; };
+
+    IllegalStateException failure = assertThrows(IllegalStateException.class,
+        () -> f.service.applyPaidCheckout(f.session));
+
+    assertEquals("Promotion provider unavailable", failure.getMessage());
+    assertArrayEquals(new Throwable[]{closeFailure}, failure.getSuppressed());
+    assertEquals(1, releases[0]);
+    assertFalse(f.ledger.rows.containsKey(MonthlySecondMonthPromotionService.APPLIED_TYPE));
+  }
+
   @Test void paidCheckoutInstallsOnceAndDuplicateMakesNoProviderCall() throws Exception {
     Fixture f = new Fixture();
     f.service.applyPaidCheckout(f.session);

@@ -15,7 +15,11 @@ public class PromotionRecovery {
   MonthlySecondMonthPromotionService promotions = new MonthlySecondMonthPromotionService();
   BillingEventStore events = new BillingEventStore();
 
-  /** A dry run performs neither provider mutations nor ledger writes. */
+  /**
+   * Replays outstanding promotion intents; a dry run mutates neither provider nor ledger.
+   *
+   * @param dryRun whether to inspect candidates without applying promotions or writing markers
+   */
   public void recover(boolean dryRun) {
     List<BillingEvent> pending = SystemContext.call("pending checkout promotions", () ->
         OBDal.getInstance().createQuery(BillingEvent.class,

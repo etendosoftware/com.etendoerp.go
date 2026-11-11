@@ -268,6 +268,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** Default {@code upgradeAction} of an onboarding: create a new environment. */
   private static final String UPGRADE_ACTION_CREATE_PRODUCTIVE = "create-productive";
   private static final String FIELD_PLAN_KEY = "planKey";
+  private static final String FIELD_REPLACE_PURCHASE_ID = "replacePurchaseId";
+  private static final String STATUS_CHECKOUT_CREATED = "CREATED";
+  private static final String CODE_PURCHASE_SELECTION_CHANGED = "PURCHASE_SELECTION_CHANGED";
+  private static final String PURCHASE_SELECTION_CHANGED_MESSAGE =
+      "The pending checkout changed. Please review the purchase again.";
   private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
   private static final String PLAN_NOT_AVAILABLE_MESSAGE =
       "The selected plan is no longer available. Reload the page to see the current plans.";
@@ -1195,7 +1200,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
                     body.optString(FIELD_COUNTRY_CODE, ""));
                 recordDemoDataTransferSelection(body, requestId, selection);
               }).withLanguage(body.optString(FIELD_LANGUAGE, "es_ES"));
-      String replaceId = StringUtils.trimToNull(body.optString("replacePurchaseId", ""));
+      String replaceId = StringUtils.trimToNull(body.optString(FIELD_REPLACE_PURCHASE_ID, ""));
       JSONObject result = replaceId == null
           ? hostedCheckoutService.createSession(account.getId(), account.getEmail(), clientName,
               origin, planKey, options)
@@ -1234,9 +1239,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
           PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
     } catch (HostedCheckoutService.PurchaseSelectionChangedException e) {
-      writeError(response, HttpServletResponse.SC_CONFLICT, "PURCHASE_SELECTION_CHANGED",
-          "The pending checkout changed. Please review the purchase again.",
-          "The pending checkout changed. Please review the purchase again.");
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_PURCHASE_SELECTION_CHANGED,
+          PURCHASE_SELECTION_CHANGED_MESSAGE,
+          PURCHASE_SELECTION_CHANGED_MESSAGE);
     } catch (HostedCheckoutService.CheckoutNotConfiguredException e) {
       log.warn("Checkout is not available: {}", e.getMessage());
       writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
@@ -1291,20 +1296,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
       if (activePurchase != null) {
-        String replaceId = StringUtils.trimToNull(body.optString("replacePurchaseId", ""));
+        String replaceId = StringUtils.trimToNull(body.optString(FIELD_REPLACE_PURCHASE_ID, ""));
         if (replaceId == null) {
           handleActiveBillingPurchase(response, account, body, activePurchase);
           return;
         }
         if (!replaceId.equals(activePurchase.getRequest())
-            || !"CREATED".equals(activePurchase.getCheckoutRequestStatus())) {
+            || !STATUS_CHECKOUT_CREATED.equals(
+                activePurchase.getCheckoutRequestStatus())) {
           writePurchaseSelectionConflict(response, activePurchase);
           return;
         }
-      } else if (StringUtils.isNotBlank(body.optString("replacePurchaseId", ""))) {
-        writeError(response, HttpServletResponse.SC_CONFLICT, "PURCHASE_SELECTION_CHANGED",
-            "The pending checkout changed. Please review the purchase again.",
-            "The pending checkout changed. Please review the purchase again.");
+      } else if (StringUtils.isNotBlank(body.optString(FIELD_REPLACE_PURCHASE_ID, ""))) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, CODE_PURCHASE_SELECTION_CHANGED,
+            PURCHASE_SELECTION_CHANGED_MESSAGE,
+            PURCHASE_SELECTION_CHANGED_MESSAGE);
         return;
       }
       CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
@@ -1435,7 +1441,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleActiveBillingPurchase(HttpServletResponse response, Account account,
       JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
-    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+    if ("CREATING".equals(status) || STATUS_CHECKOUT_CREATED.equals(status)) {
       try {
         String selectedPlanKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
         if (selectedPlanKey != null
@@ -1477,19 +1483,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void writePurchaseSelectionConflict(HttpServletResponse response, CheckoutRequest purchase)
       throws IOException, JSONException {
     JSONObject conflict = buildBillingPurchaseJson(purchase);
-    conflict.put("replacementAllowed", "CREATED".equals(purchase.getCheckoutRequestStatus())
-        && StringUtils.isNotBlank(purchase.getStripeSession()));
+    conflict.put("replacementAllowed",
+        STATUS_CHECKOUT_CREATED.equals(purchase.getCheckoutRequestStatus())
+            && StringUtils.isNotBlank(purchase.getStripeSession()));
     JSONObject error = new JSONObject();
-    error.put("code", "PURCHASE_SELECTION_CHANGED");
-    error.put("message", "A pending checkout has different conditions. Confirm its replacement.");
-    conflict.put("error", error);
+    error.put(FIELD_CODE, CODE_PURCHASE_SELECTION_CHANGED);
+    error.put(FIELD_MESSAGE, "A pending checkout has different conditions. Confirm its replacement.");
+    conflict.put(FIELD_ERROR, error);
     writeResponse(response, HttpServletResponse.SC_CONFLICT, conflict);
   }
 
   private void handleExistingBillingPurchase(HttpServletResponse response, Account account,
       CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
-    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+    if ("CREATING".equals(status) || STATUS_CHECKOUT_CREATED.equals(status)) {
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
