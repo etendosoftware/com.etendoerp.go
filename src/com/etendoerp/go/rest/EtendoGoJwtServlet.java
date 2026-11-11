@@ -1295,30 +1295,36 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (clientName == null) return;
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
-      if (activePurchase != null) {
-        String replaceId = StringUtils.trimToNull(body.optString(FIELD_REPLACE_PURCHASE_ID, ""));
-        if (replaceId == null) {
-          handleActiveBillingPurchase(response, account, body, activePurchase);
-          return;
-        }
-        if (!replaceId.equals(activePurchase.getRequest())
-            || !STATUS_CHECKOUT_CREATED.equals(
-                activePurchase.getCheckoutRequestStatus())) {
-          writePurchaseSelectionConflict(response, activePurchase);
-          return;
-        }
-      } else if (StringUtils.isNotBlank(body.optString(FIELD_REPLACE_PURCHASE_ID, ""))) {
-        writeError(response, HttpServletResponse.SC_CONFLICT, CODE_PURCHASE_SELECTION_CHANGED,
-            PURCHASE_SELECTION_CHANGED_MESSAGE,
-            PURCHASE_SELECTION_CHANGED_MESSAGE);
-        return;
-      }
+      if (handlePriorBillingPurchase(response, account, body, activePurchase)) return;
       CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
           body);
       if (selection == null) return;
       createHostedCheckoutSession(response, account, body, clientName, selection,
           true);
     });
+  }
+
+  /** Answers an existing purchase or a stale replacement; false permits purchase creation. */
+  private boolean handlePriorBillingPurchase(HttpServletResponse response, Account account,
+      JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
+    if (activePurchase != null) {
+      String replaceId = StringUtils.trimToNull(body.optString(FIELD_REPLACE_PURCHASE_ID, ""));
+      if (replaceId == null) {
+        handleActiveBillingPurchase(response, account, body, activePurchase);
+        return true;
+      }
+      if (!replaceId.equals(activePurchase.getRequest())
+          || !STATUS_CHECKOUT_CREATED.equals(activePurchase.getCheckoutRequestStatus())) {
+        writePurchaseSelectionConflict(response, activePurchase);
+        return true;
+      }
+    } else if (StringUtils.isNotBlank(body.optString(FIELD_REPLACE_PURCHASE_ID, ""))) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_PURCHASE_SELECTION_CHANGED,
+          PURCHASE_SELECTION_CHANGED_MESSAGE,
+          PURCHASE_SELECTION_CHANGED_MESSAGE);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -1443,17 +1449,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String status = activePurchase.getCheckoutRequestStatus();
     if ("CREATING".equals(status) || STATUS_CHECKOUT_CREATED.equals(status)) {
       try {
-        String selectedPlanKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
-        if (selectedPlanKey != null
-            && !hostedCheckoutService.matchesSelection(activePurchase, selectedPlanKey)) {
-          writePurchaseSelectionConflict(response, activePurchase);
-          return;
-        }
-        // Only a purchase that recorded a demo source may carry a transfer selection.
-        String persistedDemoClientId = activePurchase.getDemoClient() == null
-            ? null : activePurchase.getDemoClient().getId();
-        recordDemoDataTransferSelection(body, activePurchase.getRequest(),
-            new CheckoutSelection(persistedDemoClientId, false, false));
+        if (!recordActiveBillingPurchaseSelection(response, body, activePurchase)) return;
       } catch (PlanNotAvailableException e) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
             PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
@@ -1478,6 +1474,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
     }
     handleExistingBillingPurchase(response, account, activePurchase);
+  }
+
+  /** Validates and records the selection; false means the plan conflict was already answered. */
+  private boolean recordActiveBillingPurchaseSelection(HttpServletResponse response,
+      JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
+    String selectedPlanKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
+    if (selectedPlanKey != null
+        && !hostedCheckoutService.matchesSelection(activePurchase, selectedPlanKey)) {
+      writePurchaseSelectionConflict(response, activePurchase);
+      return false;
+    }
+    // Only a purchase that recorded a demo source may carry a transfer selection.
+    String persistedDemoClientId = activePurchase.getDemoClient() == null
+        ? null : activePurchase.getDemoClient().getId();
+    recordDemoDataTransferSelection(body, activePurchase.getRequest(),
+        new CheckoutSelection(persistedDemoClientId, false, false));
+    return true;
   }
 
   private void writePurchaseSelectionConflict(HttpServletResponse response, CheckoutRequest purchase)

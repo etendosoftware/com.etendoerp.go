@@ -296,7 +296,41 @@ abstract class CheckoutRequestStoreQuerySupport {
     });
   }
 
+  /**
+   * Resolves an account-owned purchase for a serialized provider operation.
+   *
+   * @param requestId server-generated checkout correlation id
+   * @param accountEmail authenticated account email
+   * @return the matching purchase, or {@code null} when none is available
+   */
+  protected abstract CheckoutRequest find(String requestId, String accountEmail);
+
   protected abstract CheckoutRequest find(String requestId, String accountId, String accountEmail);
+
+  /** Serializes provider operations on one account-owned purchase, re-reading under the lock. */
+  CheckoutRequest lockCheckout(String requestId, String accountEmail) {
+    return runAsSystem(() -> {
+      CheckoutRequest request = find(requestId, accountEmail);
+      if (request == null) throw new IllegalStateException("The checkout purchase is unavailable");
+      OBDal.getInstance().getSession().refresh(request,
+          new LockOptions(LockMode.PESSIMISTIC_WRITE));
+      if (!CheckoutRequestStore.STATUS_CREATING.equals(request.getCheckoutRequestStatus())
+          && !CheckoutRequestStore.STATUS_CREATED.equals(request.getCheckoutRequestStatus())) {
+        throw new IllegalStateException("The checkout purchase is no longer unpaid");
+      }
+      return request;
+    });
+  }
+
+  /** Ends a provider-only read and releases its checkout lock. */
+  void finishCheckoutOperation() {
+    runAsSystem(this::flushAndCommit);
+  }
+
+  /** Releases a checkout lock after a provider failure, discarding uncommitted successor writes. */
+  void abortCheckoutOperation() {
+    runAsSystem(() -> OBDal.getInstance().rollbackAndClose());
+  }
 
   /**
    * Finds the one purchase that backs the authenticated account's subscription.
@@ -628,31 +662,6 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       OBDal.getInstance().save(request);
       flushAndCommit();
     });
-  }
-
-  /** Serializes provider operations on one account-owned purchase, re-reading under the lock. */
-  CheckoutRequest lockCheckout(String requestId, String accountEmail) {
-    return runAsSystem(() -> {
-      CheckoutRequest request = find(requestId, accountEmail);
-      if (request == null) throw new IllegalStateException("The checkout purchase is unavailable");
-      OBDal.getInstance().getSession().refresh(request,
-          new LockOptions(LockMode.PESSIMISTIC_WRITE));
-      if (!STATUS_CREATING.equals(request.getCheckoutRequestStatus())
-          && !STATUS_CREATED.equals(request.getCheckoutRequestStatus())) {
-        throw new IllegalStateException("The checkout purchase is no longer unpaid");
-      }
-      return request;
-    });
-  }
-
-  /** Ends a provider-only read and releases its checkout lock. */
-  void finishCheckoutOperation() {
-    runAsSystem(this::flushAndCommit);
-  }
-
-  /** Releases a checkout lock after a provider failure, discarding uncommitted successor writes. */
-  void abortCheckoutOperation() {
-    runAsSystem(() -> OBDal.getInstance().rollbackAndClose());
   }
 
   /**

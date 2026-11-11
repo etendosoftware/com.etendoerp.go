@@ -296,8 +296,8 @@ public class HostedCheckoutService {
     // it is the evidence that someone tried to buy something. A row left without a session id is
     // never closed automatically: the provider cannot confirm it was not paid, so the billing
     // reconciliation parks it for review (ETP-5048 decision 6).
-    CheckoutRequestStore.RequestOptions requestOptions =
-        new CheckoutRequestStore.RequestOptions(sessionOptions.demoClientId, true,
+    CheckoutRequestStoreQuerySupport.RequestOptions requestOptions =
+        new CheckoutRequestStoreQuerySupport.RequestOptions(sessionOptions.demoClientId, true,
             sessionOptions.transferProducts, sessionOptions.transferContacts, price.getId(),
             sessionOptions.reactivatedClientId);
     try {
