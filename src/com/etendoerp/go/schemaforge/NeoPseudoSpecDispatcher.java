@@ -29,7 +29,6 @@ import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
 import com.etendoerp.go.schemaforge.webhooks.SFMyReportAccess;
-import com.etendoerp.go.schemaforge.webhooks.SFPortalAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFRefreshToken;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
@@ -232,13 +231,6 @@ class NeoPseudoSpecDispatcher {
       case "costingcadence":
         return dispatchGoWebhook("Costingcadence", method, request, response,
             new SFCostingCadence());
-
-      // ETP-5267 — the internal-user side of the Business Partner self-service portal: does this
-      // Business Partner have a live portal link, and revoke it. Deliberately NOT behind the
-      // bp-portal-link flag: revocation is the only kill switch for a link that is already out, and
-      // must work whatever the flag says for this sender. See SFPortalAccess's class javadoc.
-      case "portalaccess":
-        return dispatchGoWebhook("Portalaccess", method, request, response, new SFPortalAccess());
 
       default:
         return false;

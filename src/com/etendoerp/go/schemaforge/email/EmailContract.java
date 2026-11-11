@@ -111,4 +111,35 @@ public interface EmailContract {
    */
   EmailContractResolution resolve(EmailContractCommand command, EmailRecipientResolution recipient);
 
+  /**
+   * The NEO spec a given send belongs to, for the history row.
+   *
+   * <p>Defaults to {@link #getSpecName()}. A contract that sends on behalf of documents of several
+   * windows (the portal link renewal) answers per send.
+   *
+   * @param context the resolved send
+   * @return kebab-case spec name, or {@code null}
+   */
+  default String getSpecName(EmailSendContext context) {
+    return getSpecName();
+  }
+
+  /**
+   * Called once the provider accepted the email, i.e. only for a {@code SENT} outcome, and never
+   * for a duplicate, throttled, suppressed or failed one.
+   *
+   * <p>A no-op by default. Runs in the send's transaction, before it is committed, so whatever the
+   * contract writes here commits with the send's own audit row. It must not throw: the email has
+   * left and the send is reported as sent whatever happens here (the service logs and swallows a
+   * failure).
+   *
+   * @param context the send that was delivered; {@code context.getProviderRequest()} carries the
+   *     contract's own {@link EmailProviderRequest#getSendCorrelationId() correlation id}
+   * @param sendLogId the {@code ETGO_Email_Send_Log} row written for it, or {@code null} when the
+   *     contract keeps no history or the row could not be written
+   */
+  default void onDelivered(EmailSendContext context, String sendLogId) {
+    // Nothing to do unless a contract needs to react to a delivered email.
+  }
+
 }

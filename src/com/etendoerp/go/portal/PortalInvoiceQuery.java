@@ -132,7 +132,7 @@ final class PortalInvoiceQuery {
    * Applies the scope filters and switches off DAL's own client/organization filtering.
    *
    * <p>The latter is required, not a shortcut: a portal request has no session, so DAL would filter
-   * against the SYSTEM bootstrap context and match nothing (see {@link PortalAccessDal}). The scope
+   * against the SYSTEM bootstrap context and match nothing (see {@link PortalLinkDal}). The scope
    * that replaces it is stated explicitly above and comes only from the validated token row.
    */
   private static void applyScope(OBQuery<Invoice> query, PortalSession session) {

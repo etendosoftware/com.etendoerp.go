@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.email;
 import java.util.Date;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
@@ -33,8 +34,10 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -97,6 +100,7 @@ public class DalEmailSendLogStore implements EmailSendLogStore {
   private static final int LEN_IDEMPOTENCY_KEY = 255;
 
   private static final String RECIPIENT_SEPARATOR = ", ";
+  private static final String SYSTEM_ID = "0";
 
   private final Supplier<BaseOBObject> recordSupplier;
 
@@ -114,10 +118,19 @@ public class DalEmailSendLogStore implements EmailSendLogStore {
 
   @Override
   public void recordSend(EmailSendHistoryRecord historyRecord) {
+    recordSendReturningId(historyRecord);
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>The id is read back from the saved entry; DAL assigns it on save.</p>
+   */
+  @Override
+  public Optional<String> recordSendReturningId(EmailSendHistoryRecord historyRecord) {
     Objects.requireNonNull(historyRecord, "Email send history record cannot be null");
     BaseOBObject entry = recordSupplier.get();
-    entry.set(PROP_CLIENT, OBContext.getOBContext().getCurrentClient());
-    entry.set(PROP_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
+    setOwner(entry, historyRecord);
     entry.set(PROP_ACTIVE, Boolean.TRUE);
     entry.set(PROP_CONTRACT_NAME, truncate(historyRecord.getContractName(), LEN_CONTRACT_NAME));
     entry.set(PROP_SPEC_NAME, truncate(historyRecord.getSpecName(), LEN_SPEC_NAME));
@@ -137,6 +150,31 @@ public class DalEmailSendLogStore implements EmailSendLogStore {
     entry.set(PROP_IDEMPOTENCY_KEY,
         truncate(historyRecord.getIdempotencyKey(), LEN_IDEMPOTENCY_KEY));
     OBDal.getInstance().save(entry);
+    Object id = entry.getId();
+    return id == null ? Optional.empty() : Optional.of(id.toString());
+  }
+
+  /**
+   * Owns the row by the session's client and organization — the normal case, which is what makes
+   * the row the tenant's own.
+   *
+   * <p>A System-context send (ETP-6209: the portal link renewal, which has no tenant session)
+   * would otherwise file the row under client {@code 0}, where the document's window never sees
+   * it. There the row is owned by the tenant the send was made for, at organization {@code 0}
+   * ({@code *}), readable by every organization of that tenant. Writing for another client from
+   * System needs admin mode, which every System-context caller already runs in.</p>
+   */
+  private static void setOwner(BaseOBObject entry, EmailSendHistoryRecord historyRecord) {
+    Client currentClient = OBContext.getOBContext().getCurrentClient();
+    String tenantId = StringUtils.trimToNull(historyRecord.getTenantId());
+    boolean systemSend = currentClient != null && SYSTEM_ID.equals(currentClient.getId());
+    if (systemSend && tenantId != null && !SYSTEM_ID.equals(tenantId)) {
+      entry.set(PROP_CLIENT, OBDal.getInstance().get(Client.class, tenantId));
+      entry.set(PROP_ORGANIZATION, OBDal.getInstance().get(Organization.class, SYSTEM_ID));
+      return;
+    }
+    entry.set(PROP_CLIENT, currentClient);
+    entry.set(PROP_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
   }
 
   /**

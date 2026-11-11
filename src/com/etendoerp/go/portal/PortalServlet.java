@@ -50,13 +50,21 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
- * The Business Partner self-service portal's read-only API, at {@code /sws/portal/*} (ETP-5267).
+ * The customer portal's API, at {@code /sws/portal/*} (ETP-5267, link model ETP-6209).
  *
  * <pre>
- * GET /sws/portal/me[/{token}]                 the Business Partner and tenant the token speaks for
- * GET /sws/portal/invoices                     completed sales invoices + outstanding balance
- * GET /sws/portal/invoices/{invoiceId}/pdf     the invoice's main attachment, streamed
+ * GET  /sws/portal/me[/{token}]                 the link's state, and who it speaks for when valid
+ * POST /sws/portal/renew                        email a new link for an expired one
+ * GET  /sws/portal/invoices                     completed sales invoices + outstanding balance
+ * GET  /sws/portal/invoices/{invoiceId}/pdf     the invoice's main attachment, streamed
+ * GET  /sws/portal/logo                         the issuing company's logo
  * </pre>
+ *
+ * <p><b>One link per document email, valid for a fixed time</b> ({@link PortalLinkService}). On
+ * {@code /me} a link is valid, expired, unavailable (customer blocked or inactive, or the issuing
+ * company's plan expired) or invalid. An expired link is renewed by {@code POST /renew}, which the
+ * page calls on its own; it is a POST, not a side effect of the GET, so link scanners that
+ * pre-fetch GETs never trigger an email.
  *
  * <p><b>Deliberately its own servlet, isolated from NEO Headless.</b> It is never reachable through
  * {@code NeoServlet}, {@code NeoCrudHandler} or {@code DataSourceServlet} — the generic CRUD engine
@@ -79,9 +87,10 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *   <li><b>Scope comes only from the validated row.</b> Structural: {@link PortalSession} has no
  *       public constructor, so no endpoint here can obtain a client or Business Partner id from a
  *       request parameter. There is nothing to review per-endpoint.</li>
- *   <li><b>Unknown and revoked are indistinguishable.</b> {@link PortalAccessService#validate}
- *       answers empty for both, and {@link #rejectInvalidLink} is the single response for every
- *       such case.</li>
+ *   <li><b>Unknown, pending and deactivated are indistinguishable.</b>
+ *       {@link PortalLinkService#validate} answers {@code INVALID} for all of them, and
+ *       {@link #rejectInvalidLink} is the single response — byte-identical to the MVP's. Only a
+ *       link that was really emailed can answer {@code expired} or {@code unavailable}.</li>
  *   <li><b>Every invoice read filters tenant + Business Partner + {@code docstatus = 'CO'}.</b>
  *       Centralised in {@link PortalInvoiceQuery}; this servlet composes no invoice query of its
  *       own.</li>
@@ -90,7 +99,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *   <li><b>Every response is {@code no-store}.</b> Set in {@link #service} before any handler runs,
  *       so it cannot be forgotten on a new endpoint. Without it a shared cache keyed on path alone
  *       could serve one Business Partner's data to another.</li>
- *   <li><b>{@code /me} is rate limited</b> ({@link PortalRateLimiter}) as defence in depth.</li>
+ *   <li><b>{@code /me} and {@code /renew} are rate limited</b> ({@link PortalRateLimiter}) as
+ *       defence in depth.</li>
  *   <li><b>Out of scope answers 404, never 403</b> — a 403 would confirm the record exists.</li>
  * </ol>
  *
@@ -107,6 +117,7 @@ public class PortalServlet extends HttpBaseServlet {
   private static final Logger log = LogManager.getLogger(PortalServlet.class);
 
   private static final String PATH_ME = "/me";
+  private static final String PATH_RENEW = "/renew";
   private static final String PATH_INVOICES = "/invoices";
   private static final String PDF_SUFFIX = "/pdf";
 
@@ -146,14 +157,27 @@ public class PortalServlet extends HttpBaseServlet {
   /**
    * The one message every rejected token gets, whatever the reason. Kept deliberately free of
    * detail: the frontend renders its own localized "this link is no longer valid" page, and the
-   * response must not distinguish unknown from revoked from malformed.
+   * response must not distinguish unknown from pending from deactivated from malformed.
    */
   private static final String INVALID_LINK = "This link is no longer valid";
   /** The answer to every out-of-scope or unmapped request. Never {@code 403} — see invariant 7. */
   private static final String NOT_FOUND = "Not found";
 
-  private final transient PortalAccessService accessService = new PortalAccessService();
+  /** JSON field and values of the link state {@code /me} and {@code /renew} answer with. */
+  private static final String FIELD_STATE = "state";
+  private static final String STATE_VALID = "valid";
+  private static final String STATE_EXPIRED = "expired";
+  private static final String STATE_UNAVAILABLE = "unavailable";
+  private static final String STATE_RENEWED = "renewed";
+  private static final String FIELD_RENEWAL = "renewal";
+  private static final String RENEWAL_SENT = "sent";
+  private static final String RENEWAL_RECENTLY_SENT = "recentlySent";
+  private static final String FIELD_TENANT_NAME = "tenantName";
+  private static final String FIELD_HAS_LOGO = "hasLogo";
+
+  private final transient PortalLinkService linkService = new PortalLinkService();
   private final transient PortalRateLimiter meRateLimiter = new PortalRateLimiter();
+  private final transient PortalRateLimiter renewRateLimiter = new PortalRateLimiter();
 
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response)
@@ -162,12 +186,36 @@ public class PortalServlet extends HttpBaseServlet {
     // response. Invariant 5.
     response.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
     response.setHeader("Pragma", "no-cache");
+    String path = StringUtils.defaultString(request.getPathInfo());
+    // The one write is the renewal; every other endpoint is read-only.
+    if ("POST".equalsIgnoreCase(request.getMethod()) && path.equals(PATH_RENEW)) {
+      doPost(request, response);
+      return;
+    }
     if (!"GET".equalsIgnoreCase(request.getMethod())) {
       sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "The portal API is read-only");
       return;
     }
     doGet(request, response);
+  }
+
+  @Override
+  public void doPost(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setAdminMode(true);
+      handleRenew(request, response);
+    } catch (Exception e) {
+      log.error("Portal renewal request failed", e);
+      if (!response.isCommitted()) {
+        response.reset();
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "The portal is temporarily unavailable");
+      }
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   @Override
@@ -201,8 +249,19 @@ public class PortalServlet extends HttpBaseServlet {
   }
 
   /**
-   * Validates the token and answers who it speaks for. The portal's entry point, and the only
-   * rate-limited endpoint.
+   * Validates the token and answers its state — and, when valid, who it speaks for. The portal's
+   * entry point, and rate limited.
+   *
+   * <pre>
+   * 401 {"error": "This link is no longer valid"}          unknown, pending, deactivated (as MVP)
+   * 200 {"state": "valid", businessPartnerName, tenantName, hasLogo, entryDocument: {kind, id}}
+   * 200 {"state": "expired", tenantName, hasLogo}          the page then calls POST /renew
+   * 200 {"state": "unavailable", tenantName, hasLogo}      blocked, inactive or plan expired
+   * </pre>
+   *
+   * <p>An expired or unavailable answer carries no Business Partner name and no document: the
+   * holder of that link is no longer entitled to them. Which of the three closures applies is never
+   * said.
    */
   private void handleMe(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
@@ -210,23 +269,75 @@ public class PortalServlet extends HttpBaseServlet {
       sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
       return;
     }
-    Optional<PortalSession> session = accessService.validate(resolveToken(request));
-    if (!session.isPresent()) {
+    PortalLinkService.Validation validation = linkService.validate(resolveToken(request));
+    Optional<PortalLink> resolved = validation.getLink();
+    if (validation.getState() == PortalLinkService.State.INVALID || !resolved.isPresent()) {
       rejectInvalidLink(response);
       return;
     }
-    PortalSession validated = session.get();
-    // Flat `businessPartnerName` / `tenantName`, per the payload contract the frontend is built
-    // against. Both are always present as strings, empty when the record carries no name: the
-    // header degrades, it never errors.
+    PortalLink link = resolved.get();
     JSONObject body = new JSONObject();
-    body.put("businessPartnerName", StringUtils.defaultString(validated.getBusinessPartnerName()));
-    body.put("tenantName", StringUtils.defaultString(validated.getTenantName()));
+    body.put(FIELD_TENANT_NAME, StringUtils.defaultString(link.getClientName()));
     // Whether there is a logo to fetch, so the page never requests one that does not exist and
     // never has to hide a broken image. The bytes come from GET /logo, not inlined here: a base64
-    // logo would bloat every /me response, and /me is the request that decides whether the page
-    // renders at all.
-    body.put("hasLogo", resolveTenantLogo(validated.getClientId()) != null);
+    // logo would bloat every /me response.
+    body.put(FIELD_HAS_LOGO, resolveTenantLogo(link.getClientId()) != null);
+    if (validation.getState() == PortalLinkService.State.EXPIRED) {
+      body.put(FIELD_STATE, STATE_EXPIRED);
+    } else if (validation.getState() == PortalLinkService.State.UNAVAILABLE) {
+      body.put(FIELD_STATE, STATE_UNAVAILABLE);
+    } else {
+      body.put(FIELD_STATE, STATE_VALID);
+      body.put("businessPartnerName", StringUtils.defaultString(link.getBusinessPartnerName()));
+      JSONObject entryDocument = new JSONObject();
+      entryDocument.put("kind", link.getDocumentKind().name());
+      entryDocument.put("id", link.getRecordId());
+      body.put("entryDocument", entryDocument);
+      PortalUsageEvents.opened(link);
+    }
+    sendJson(response, HttpServletResponse.SC_OK, body);
+  }
+
+  /**
+   * Emails a new link for an expired one, to the expired link's own recipients.
+   *
+   * <pre>
+   * 401 {"error": "This link is no longer valid"}          unknown, pending, deactivated
+   * 200 {"state": "renewed", "renewal": "sent"}            a new link went out
+   * 200 {"state": "renewed", "renewal": "recentlySent"}    one went out recently; nothing sent now
+   * 200 {"state": "unavailable"}                           blocked, inactive or plan expired
+   * 200 {"state": "valid"}                                 the link has not expired
+   * 503 {"error": "..."}                                   the email could not be sent; retry
+   * </pre>
+   */
+  private void handleRenew(HttpServletRequest request, HttpServletResponse response)
+      throws IOException, JSONException {
+    if (!renewRateLimiter.tryAcquire(request.getRemoteAddr())) {
+      sendError(response, HTTP_TOO_MANY_REQUESTS, "Too many requests");
+      return;
+    }
+    PortalLinkService.RenewalOutcome outcome = linkService.renew(resolveToken(request));
+    if (outcome == PortalLinkService.RenewalOutcome.INVALID) {
+      rejectInvalidLink(response);
+      return;
+    }
+    if (outcome == PortalLinkService.RenewalOutcome.FAILED) {
+      sendError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+          "The portal is temporarily unavailable");
+      return;
+    }
+    JSONObject body = new JSONObject();
+    if (outcome == PortalLinkService.RenewalOutcome.SENT) {
+      body.put(FIELD_STATE, STATE_RENEWED);
+      body.put(FIELD_RENEWAL, RENEWAL_SENT);
+    } else if (outcome == PortalLinkService.RenewalOutcome.RECENTLY_SENT) {
+      body.put(FIELD_STATE, STATE_RENEWED);
+      body.put(FIELD_RENEWAL, RENEWAL_RECENTLY_SENT);
+    } else if (outcome == PortalLinkService.RenewalOutcome.UNAVAILABLE) {
+      body.put(FIELD_STATE, STATE_UNAVAILABLE);
+    } else {
+      body.put(FIELD_STATE, STATE_VALID);
+    }
     sendJson(response, HttpServletResponse.SC_OK, body);
   }
 
@@ -249,12 +360,14 @@ public class PortalServlet extends HttpBaseServlet {
    */
   private void handleLogo(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
-    Optional<PortalSession> session = accessService.validate(resolveToken(request));
-    if (!session.isPresent()) {
+    // Any sent link, expired or closed included: the "this link expired" page shows whose portal
+    // it is too, and a company's logo is no secret.
+    Optional<PortalLink> link = linkService.findSentLink(resolveToken(request));
+    if (!link.isPresent()) {
       rejectInvalidLink(response);
       return;
     }
-    Image logo = resolveTenantLogo(session.get().getClientId());
+    Image logo = resolveTenantLogo(link.get().getClientId());
     byte[] bytes = logo == null ? null : logo.getBindaryData();
     if (bytes == null || bytes.length == 0) {
       sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
@@ -285,7 +398,7 @@ public class PortalServlet extends HttpBaseServlet {
   /** Lists the Business Partner's completed sales invoices and their outstanding balance. */
   private void handleInvoices(HttpServletRequest request, HttpServletResponse response)
       throws IOException, JSONException {
-    Optional<PortalSession> session = accessService.validate(resolveToken(request));
+    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
     if (!session.isPresent()) {
       rejectInvalidLink(response);
       return;
@@ -373,7 +486,7 @@ public class PortalServlet extends HttpBaseServlet {
    */
   private void handleInvoicePdf(HttpServletRequest request, HttpServletResponse response,
       String invoiceId) throws IOException, JSONException {
-    Optional<PortalSession> session = accessService.validate(resolveToken(request));
+    Optional<PortalSession> session = linkService.validate(resolveToken(request)).getSession();
     if (!session.isPresent()) {
       rejectInvalidLink(response);
       return;
@@ -390,6 +503,7 @@ public class PortalServlet extends HttpBaseServlet {
       return;
     }
     NeoAttachmentsDownloader.handleDownload(attachmentId, response);
+    PortalUsageEvents.downloaded(validated, invoice.getId());
   }
 
   private String resolveMainAttachmentId(String invoiceId) {
@@ -493,7 +607,10 @@ public class PortalServlet extends HttpBaseServlet {
     return value == null ? "" : new SimpleDateFormat(DATE_FORMAT).format(value);
   }
 
-  /** The single response for every rejected token: unknown, revoked, malformed or absent. */
+  /**
+   * The single response for every rejected token: unknown, pending, deactivated, malformed or
+   * absent.
+   */
   private void rejectInvalidLink(HttpServletResponse response) throws IOException {
     sendError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_LINK);
   }

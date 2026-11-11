@@ -358,6 +358,35 @@ link we mailed.
 | `return-to-vendor-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the vendor-return business partner | `version`, `recordId` |
 | `return-material-receipt-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the return receipt business partner | `version`, `recordId` |
 | `return-to-vendor-shipment-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the return shipment business partner | `version`, `recordId` |
+| `portal-link-renewal` | `custom` | The To and CC stored on the expired `ETGO_Portal_Link` row named by `linkId` — never the person who opened the link | `linkId`, `recordId` (the document), `tenantId`, `language`. Accepted only inside `PortalRenewalScope` (set by `PortalLinkService#renew`); any other caller gets 403 |
+
+### Customer portal link (ETP-5267, ETP-6209)
+
+A document-send contract that declares `portalDocumentKind()` (only `sales-quotation-send`,
+`sales-order-send`, `goods-shipment-send` and `sales-invoice-send`) adds one paragraph with a link
+to the customer portal, when the `bp-portal-link` flag is on for the sending account. The base
+class only asks whether a kind was declared; it names no window or table.
+
+- **One link per send.** `PortalLinkService#mintForSend` inserts an `ETGO_Portal_Link` row in
+  `resolve()` with `SENT_AT` null (pending) and the email's To and CC. The link id travels as
+  `EmailProviderRequest#getSendCorrelationId()`, which is never part of the provider payload.
+- **Valid only if the email left.** `TransactionalEmailService` calls `EmailContract#onDelivered`
+  on a `SENT` outcome only, after the history row and before the audit row that commits the send.
+  The document contract confirms the link there (`SENT_AT`, `EXPIRES_AT = SENT_AT + 48h`,
+  `ETGO_EMAIL_SEND_LOG_ID`). A throttled, duplicate, suppressed or failed send leaves the link
+  pending, which the portal answers as invalid.
+- **Renewal.** `portal-link-renewal` mints the new link the same way, chained to the expired one
+  (`PARENT_LINK_ID`, same `ROOT_LINK_ID`), and files the send under the document's own history
+  (`getSpecName(EmailSendContext)`; `DalEmailSendLogStore` owns a System-context row by the
+  command's tenant, organization `*`).
+
+| Property | Environment Variable | Default | Purpose |
+|----------|----------------------|---------|---------|
+| `etendo.go.portal.link.ttlMinutes` | `ETGO_PORTAL_LINK_TTL_MINUTES` | 2880 (48 h) | Link lifetime after its send. Non-positive or malformed ⇒ default. Lower it only to test expiry |
+| `etendo.go.portal.renewal.cooldownMinutes` | `ETGO_PORTAL_RENEWAL_COOLDOWN_MINUTES` | 60 | An expired link is renewed at most once per cool-down |
+| `etendo.go.portal.renewal.maxPerDay` | `ETGO_PORTAL_RENEWAL_MAX_PER_DAY` | 5 | Renewals per Business Partner per rolling 24 h. **`0` = no limit**; negative or malformed ⇒ default |
+
+`etendo.go.portal.tokenSecret` (MVP) is no longer read: tokens are random per link.
 
 `custom` and `support-custom-email` are not registered as public contracts by default. Some closed auth contracts use the provider's `custom` template because the current provider allowlist exposes `custom`, `reset-password`, `login-alert`, and `invoice`. Those contracts still generate fixed `subject` and `body` values server-side and never accept arbitrary provider payloads from the browser. A generic custom HTML email can only be added later as an explicit support/admin contract with role checks, reason capture, sanitizer, throttle, and audit.
 

@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -30,11 +31,15 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
 import com.etendoerp.go.common.ConfigPropertyReader;
+import com.etendoerp.go.portal.PortalDocumentKind;
+import com.etendoerp.go.portal.PortalLinkService;
 import com.etendoerp.go.schemaforge.email.render.EmailContent;
 import com.etendoerp.go.schemaforge.email.render.EmailDates;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
+import com.etendoerp.go.schemaforge.email.render.EmailPalette;
+import com.etendoerp.go.schemaforge.email.render.ValidityWindow;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
@@ -121,6 +126,9 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   private static final String SPEC_ACCESS_DENIED = "Access denied to spec for current role";
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
+
+  private static final String PORTAL_LINK_STYLE =
+      "\" style=\"color:" + EmailPalette.LIGHT_LINK + ";text-decoration:none;\">";
 
   /** Suffix every document-send contract name carries, mirroring the frontend's own rule. */
   private static final String CONTRACT_NAME_SUFFIX = "-send";
@@ -480,14 +488,21 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       // who sent it. Derived from the session, never from the command body.
       String replyTo = EmailSenderIdentity.resolveReplyTo();
       // Resolved here, at the top of the send, rather than deep inside buildContent: a subclass's
-      // hook may consult feature gates and hit the database (see SalesInvoiceSendEmailContract),
-      // and that belongs where the command is still in scope and the decision is readable.
+      // hook may consult feature gates and hit the database, and that belongs where the command is
+      // still in scope and the decision is readable.
       Optional<String> extraParagraphHtml =
           resolveAdditionalParagraphHtml(command, document.get(), language);
+      // ETP-6209 — the customer portal link, for a contract that declared a portal document kind.
+      // Minted pending: it becomes usable only in onDelivered, i.e. only if this email leaves.
+      Optional<PortalLinkService.MintedLink> portalLink = mintPortalLink(document.get(),
+          recipients, language);
+      Optional<String> portalParagraph = portalLink.map(link -> renderPortalParagraph(link,
+          language));
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
           buildTemplateData(document.get(), downloadLink.get(), language, messageEdits, replyTo,
-              extraParagraphHtml),
-          replyTo));
+              join(extraParagraphHtml, portalParagraph)),
+          replyTo).withSendCorrelationId(portalLink.map(PortalLinkService.MintedLink::getId)
+              .orElse(null)));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
     }
@@ -527,9 +542,9 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
    *
    * <p><b>Empty by default, and that default is the guarantee.</b> Every contract that does not
    * override this produces a byte-identical email to the one it produced before the hook existed —
-   * not because the caller is careful, but because there is nothing to append. The one override
-   * today is {@code SalesInvoiceSendEmailContract}, for the Business Partner portal link
-   * (ETP-5267), and it answers empty unless both of that feature's gates are open.
+   * not because the caller is careful, but because there is nothing to append. No contract
+   * overrides it today: the customer portal link, its first user (ETP-5267), moved to
+   * {@link #portalDocumentKind()} in ETP-6209.
    *
    * <p>Rendered between the body copy and the summary block (see {@link #buildContent}). It is
    * <em>not</em> a second call to action: {@link EmailContent} carries one button, which belongs to
@@ -543,6 +558,95 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   protected Optional<String> resolveAdditionalParagraphHtml(EmailContractCommand command,
       EmailDocumentRecord document, String language) {
     return Optional.empty();
+  }
+
+  /**
+   * Per-contract declaration: the kind of sales document this contract sends, when its email
+   * should carry a customer portal link (ETP-6209).
+   *
+   * <p><b>Empty by default, and that default is the guarantee</b> that no other contract's email
+   * changes and no link row is ever minted for it. The four sales contracts (quotation, order,
+   * goods shipment, invoice — credit notes travel through the invoice one) override it. This base
+   * class only asks whether a kind was declared; it never names a window, a table or a contract,
+   * so the shared send path stays free of entity identity. Whether the link actually goes out is
+   * still the {@code bp-portal-link} flag's decision, evaluated inside
+   * {@link PortalLinkService#mintForSend} for the sending account.
+   *
+   * @return the declared kind, or empty for a contract whose email carries no portal link
+   */
+  protected Optional<PortalDocumentKind> portalDocumentKind() {
+    return Optional.empty();
+  }
+
+  /**
+   * The portal link service this contract mints and confirms links with. Overridable so a unit
+   * test can exercise the send without the DAL.
+   *
+   * @return the service
+   */
+  protected PortalLinkService portalLinkService() {
+    return PortalLinkServiceHolder.INSTANCE;
+  }
+
+  /** Lazy holder: a contract never sending a portal link never builds the service. */
+  private static final class PortalLinkServiceHolder {
+    private static final PortalLinkService INSTANCE = new PortalLinkService();
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>Confirms the portal link this email carried (ETP-6209): only now, with the email gone, does
+   * the link start its lifetime. A send that was throttled, refused as duplicate or failed never
+   * reaches here, so its link stays pending and never works.</p>
+   */
+  @Override
+  public void onDelivered(EmailSendContext context, String sendLogId) {
+    String linkId = context == null || context.getProviderRequest() == null ? null
+        : context.getProviderRequest().getSendCorrelationId();
+    if (linkId == null || !portalDocumentKind().isPresent()) {
+      return;
+    }
+    EmailRecipientSet recipients = context.getRecipientSet();
+    portalLinkService().confirm(linkId, sendLogId,
+        recipients == null ? 0 : recipients.totalCount());
+  }
+
+  private Optional<PortalLinkService.MintedLink> mintPortalLink(EmailDocumentRecord document,
+      EmailRecipientSet recipients, String language) {
+    Optional<PortalDocumentKind> kind = portalDocumentKind();
+    if (!kind.isPresent()) {
+      return Optional.empty();
+    }
+    return portalLinkService().mintForSend(kind.get(), document.getRecordId(),
+        recipients.getTo(), recipients.getCc(), language, name);
+  }
+
+  /**
+   * Renders the portal sentence and its inline anchor.
+   *
+   * <p>An anchor in a paragraph rather than a second call-to-action button: the layout carries
+   * exactly one button and it belongs to the document itself. Both the copy and the URL are
+   * escaped before interpolation, and {@code applyBold} runs after escaping — the order
+   * {@code EmailEscape#applyBold} documents as mandatory. The validity interpolates the configured
+   * lifetime, never a literal (a number in the copy always comes from the record).</p>
+   */
+  private static String renderPortalParagraph(PortalLinkService.MintedLink link,
+      String language) {
+    Instant now = Instant.now();
+    long hours = ValidityWindow.hoursUntil(now, now.plus(link.getValidity()));
+    String intro = EmailEscape.applyBold(EmailEscape.escapeHtml(
+        EmailMessages.get("document.portal.intro", language, hours)));
+    String label = EmailEscape.escapeHtml(EmailMessages.get("document.portal.cta", language));
+    return intro + " <a class=\"sf-link\" href=\"" + EmailEscape.escapeHtml(link.getUrl())
+        + PORTAL_LINK_STYLE + label + "</a>";
+  }
+
+  private static Optional<String> join(Optional<String> first, Optional<String> second) {
+    if (!first.isPresent()) {
+      return second;
+    }
+    return second.isPresent() ? Optional.of(first.get() + "<br><br>" + second.get()) : first;
   }
 
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
