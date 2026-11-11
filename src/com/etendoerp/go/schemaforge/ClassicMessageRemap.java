@@ -71,7 +71,8 @@ import com.etendoerp.go.usage.IsolatedDalRead;
  * Matching uses no regular expression over the text: a template is the list of its literal
  * fragments, found in order with {@code indexOf}, so the cost is linear in the text whatever it
  * holds. A placeholder between two fragments takes what lies between them; one that starts the
- * text takes only the word before the first fragment; one that ends it takes the rest. Both sides
+ * text takes only the run of letters and digits before the first fragment; one that ends it takes
+ * the rest. A raw {@code @KEY@} token is replaced whatever the length of the text. Both sides
  * are compared with HTML line breaks, {@code &quot;}, the {@code \n} that {@code messageBD} escapes
  * and runs of whitespace normalised; the match and every argument are mapped back to the original
  * string, so nothing outside the matched span changes.
@@ -296,7 +297,7 @@ public final class ClassicMessageRemap {
     if (!result.text.equals(value)) {
       object.put(key, result.text);
     }
-    recordKeys(object, keyInParent, result.adMessageKeys);
+    MessageKeys.publish(object, keyInParent, result.adMessageKeys);
   }
 
   private static void visit(JSONArray array, String language) throws Exception {
@@ -337,34 +338,40 @@ public final class ClassicMessageRemap {
     }
   }
 
-  /** Adds the recognised keys to the object's {@code messageKeys}, see the class javadoc. */
-  private static void recordKeys(JSONObject object, String keyInParent, List<String> keys)
-      throws Exception {
-    if (keys.isEmpty()) {
-      return;
+  /** Publishes recognised keys in {@code messageKeys}, see the class javadoc. */
+  private static final class MessageKeys {
+
+    private MessageKeys() {
     }
-    JSONArray messageKeys = object.optJSONArray(KEY_MESSAGE_KEYS);
-    if (messageKeys == null) {
-      if (!KEY_ERROR.equals(keyInParent)) {
+
+    /** Adds the recognised keys to the object's {@code messageKeys}. */
+    static void publish(JSONObject object, String keyInParent, List<String> keys) throws Exception {
+      if (keys.isEmpty()) {
         return;
       }
-      messageKeys = new JSONArray();
-      object.put(KEY_MESSAGE_KEYS, messageKeys);
-    }
-    for (String key : keys) {
-      if (!contains(messageKeys, key)) {
-        messageKeys.put(key);
+      JSONArray messageKeys = object.optJSONArray(KEY_MESSAGE_KEYS);
+      if (messageKeys == null) {
+        if (!KEY_ERROR.equals(keyInParent)) {
+          return;
+        }
+        messageKeys = new JSONArray();
+        object.put(KEY_MESSAGE_KEYS, messageKeys);
+      }
+      for (String key : keys) {
+        if (!contains(messageKeys, key)) {
+          messageKeys.put(key);
+        }
       }
     }
-  }
 
-  private static boolean contains(JSONArray array, String value) {
-    for (int i = 0; i < array.length(); i++) {
-      if (value.equals(array.optString(i, null))) {
-        return true;
+    private static boolean contains(JSONArray array, String value) {
+      for (int i = 0; i < array.length(); i++) {
+        if (value.equals(array.optString(i, null))) {
+          return true;
+        }
       }
+      return false;
     }
-    return false;
   }
 
   // ── recognising one text ────────────────────────────────────────────────────────────────────
@@ -382,16 +389,20 @@ public final class ClassicMessageRemap {
 
   /** The remapped text and the AD_MESSAGE keys recognised, or {@code null} when nothing matched. */
   private static Result remap(String text, String language) {
-    if (text == null || text.length() < MIN_TEXT_LENGTH || text.length() > MAX_TEXT_LENGTH) {
+    if (text == null) {
+      return null;
+    }
+    if (text.length() > MAX_TEXT_LENGTH) {
+      logOverCap(text);
       return null;
     }
     try {
       List<String> recognised = new ArrayList<>();
+      // a raw @KEY@ token is short: it is replaced whatever the length of the text
       String current = remapRawTokens(text, language, recognised);
-      for (Entry entry : ENTRIES) {
-        current = remapEntry(current, entry, language, recognised);
+      if (current.length() >= MIN_TEXT_LENGTH) {
+        current = remapTemplates(current, language, recognised);
       }
-      recogniseGoTexts(current, recognised);
       if (current.equals(text) && recognised.isEmpty()) {
         return null;
       }
@@ -402,11 +413,45 @@ public final class ClassicMessageRemap {
     }
   }
 
+  /**
+   * Every entry's templates against {@code text}, normalised once and again only after a
+   * replacement; then the GO texts already present.
+   */
+  private static String remapTemplates(String text, String language, List<String> recognised) {
+    String current = text;
+    Normalized normalized = Normalized.of(current);
+    for (Entry entry : ENTRIES) {
+      String next = remapEntry(current, normalized, entry, language, recognised);
+      if (!next.equals(current)) {
+        current = next;
+        normalized = Normalized.of(current);
+      }
+    }
+    recogniseGoTexts(normalized.text, recognised);
+    return current;
+  }
+
+  /** A text over the cap is left alone; say so when it looks like it held a message. */
+  private static void logOverCap(String text) {
+    if (!log.isDebugEnabled()) {
+      return;
+    }
+    for (Entry entry : ENTRIES) {
+      for (Template template : templatesOf(entry)) {
+        if (text.contains(template.longest)) {
+          log.debug("[ETP-6158] A text of {} characters, over the {} cap, holds a fragment of {} "
+              + "and was left untouched", text.length(), MAX_TEXT_LENGTH, entry.catalogKey);
+          return;
+        }
+      }
+    }
+  }
+
   /** {@code text} with every occurrence of {@code entry}'s Classic text replaced. */
-  private static String remapEntry(String text, Entry entry, String language,
-      List<String> recognised) {
+  private static String remapEntry(String text, Normalized normalized, Entry entry,
+      String language, List<String> recognised) {
     for (Template template : templatesOf(entry)) {
-      String replaced = replaceAll(text, template, entry.catalogKey, language);
+      String replaced = replaceAll(text, normalized, template, entry.catalogKey, language);
       if (replaced != null) {
         if (entry.adMessage) {
           addOnce(recognised, entry.catalogKey);
@@ -418,16 +463,18 @@ public final class ClassicMessageRemap {
   }
 
   /** Replaces occurrences until none is left (at most {@link #MAX_REPLACEMENTS}). */
-  private static String replaceAll(String text, Template template, String catalogKey,
-      String language) {
+  private static String replaceAll(String text, Normalized normalized, Template template,
+      String catalogKey, String language) {
     String current = text;
+    Normalized currentNormalized = normalized;
     boolean changed = false;
     for (int i = 0; i < MAX_REPLACEMENTS; i++) {
-      String next = template.replaceIn(current, Normalized.of(current), catalogKey, language);
+      String next = template.replaceIn(current, currentNormalized, catalogKey, language);
       if (next == null) {
         break;
       }
       current = next;
+      currentNormalized = Normalized.of(current);
       changed = true;
     }
     return changed ? current : null;
@@ -446,8 +493,7 @@ public final class ClassicMessageRemap {
    * and rendered again by {@code etendo_action_batch}); recognising the GO text there keeps the
    * identity without touching the text, and keeps the remap idempotent.
    */
-  private static void recogniseGoTexts(String text, List<String> recognised) {
-    String normalized = normalize(text);
+  private static void recogniseGoTexts(String normalized, List<String> recognised) {
     for (Map.Entry<String, List<Template>> go : goTemplates().entrySet()) {
       if (!recognised.contains(go.getKey()) && anyMatches(go.getValue(), normalized)) {
         recognised.add(go.getKey());
@@ -773,9 +819,9 @@ public final class ClassicMessageRemap {
         groups[i - 1] = new int[] { cursor, at };
         cursor = at + literal.length();
       }
-      if (first.isEmpty() && groups.length > 0) {
-        groups[0] = leadingToken(normalized, groups[0][1]);
-        start = groups[0][0];
+      if (groups.length > 0) {
+        start = first.isEmpty() ? leadingStart(normalized, groups)
+            : latestStart(normalized, first, start, groups);
       }
       return new Match(start, cursor, groups);
     }
@@ -791,14 +837,37 @@ public final class ClassicMessageRemap {
       return normalized.indexOf(literal, cursor);
     }
 
-    /** A placeholder that starts the template takes only the word before the first fragment. */
+    /**
+     * A placeholder that starts the template takes only the run of letters and digits right before
+     * the first fragment ({@code "Resultado:3 factura(s)"} gives {@code 3}, not the whole word).
+     */
     private static int[] leadingToken(String normalized, int literalAt) {
       int end = literalAt > 0 && normalized.charAt(literalAt - 1) == ' ' ? literalAt - 1 : literalAt;
       int start = end;
-      while (start > 0 && normalized.charAt(start - 1) != ' ') {
+      while (start > 0 && Character.isLetterOrDigit(normalized.charAt(start - 1))) {
         start--;
       }
       return new int[] { start, end };
+    }
+
+    /** The start of a match whose template begins with a placeholder: its leading token. */
+    private static int leadingStart(String normalized, int[][] groups) {
+      groups[0] = leadingToken(normalized, groups[0][1]);
+      return groups[0][0];
+    }
+
+    /**
+     * Of every occurrence of the first fragment before the second one, the last: an earlier
+     * occurrence that is not followed by the rest of the message (a truncated copy, the same
+     * words used elsewhere) is not part of the match and never ends up inside an argument.
+     */
+    private static int latestStart(String normalized, String first, int start, int[][] groups) {
+      int latest = normalized.lastIndexOf(first, groups[0][1] - first.length());
+      if (latest <= start) {
+        return start;
+      }
+      groups[0][0] = latest + first.length();
+      return latest;
     }
 
     /**
@@ -855,7 +924,10 @@ public final class ClassicMessageRemap {
     }
 
     static Entry ofLiteral(String catalogKey, String classicSentence) {
-      return new Entry(catalogKey, false, List.of(Template.compile(classicSentence)));
+      Template template = classicSentence == null || classicSentence.isBlank() ? null
+          : Template.compile(classicSentence);
+      return new Entry(catalogKey, false,
+          template == null ? Collections.emptyList() : List.of(template));
     }
   }
 

@@ -7005,7 +7005,9 @@ fiscal handlers) and `McpResponseSanitizer#render` (every MCP JSON tool result; 
 behaviour on every channel: nothing to declare in §4.12.9.
 
 **What it does.** Every string of 20 to 8192 characters under a `message`, `text`, `msgText` or
-`detail` key of the body, at any depth, is compared (a longer string is left untouched) with each catalogued entry (`detail` is where the MCP write-path envelope of
+`detail` key of the body, at any depth, is compared (a longer string is left untouched, with a
+debug log line when it holds a fragment of a catalogued message; a raw `@KEY@` token is replaced
+whatever the length of the text, so a whole message such as `@TBAI_SetKey@` is covered) with each catalogued entry (`detail` is where the MCP write-path envelope of
 `McpWriteRequestSupport` carries the refusal). A string that is itself a serialized JSON object (an
 MCP content item, a body wrapped as text) is parsed and remapped on its values, never on its
 serialized text, and is serialized again only when a value changed:
@@ -7025,8 +7027,11 @@ serialized text, and is serialized again only when a value changed:
 literal fragments between its placeholders, found in order with `indexOf` (and skipped at once
 when the text lacks its longest fragment), so the cost is linear in the text whatever it holds. A
 placeholder between two fragments takes what lies between them; one that starts the template
-takes only the word right before the first fragment (text in front of the message never leaks into
-it); one that ends it takes the rest. Every occurrence is replaced (up to 10 per text). Arguments
+takes only the run of letters and digits right before the first fragment (`Resultado:3 factura(s)…`
+gives `3`: text in front of the message never leaks into it); one that ends it takes the rest. Of
+several occurrences of the first fragment before the second one, the last starts the match, so an
+earlier truncated copy stays as it is. The text is normalised once, and again only after a
+replacement. Every occurrence is replaced (up to 10 per text). Arguments
 are taken from the original text, not the normalised one (a `C:\new\cert.p12` path keeps its
 backslashes).
 

@@ -687,20 +687,58 @@ public class ClassicMessageRemapTest {
   }
 
   /**
-   * A text shorter than 20 characters is never tried, not even a raw token; the same token
-   * inside a longer text is.
+   * A raw token is replaced however short the text (a whole message can be just
+   * {@code @TBAI_SetKey@}), and keeps its key; a short text that is not a token is never tried.
    */
   @Test
-  public void aTextShorterThanTwentyCharactersIsLeftAlone() throws Exception {
+  public void aShortRawTokenIsRemappedAndAShortTextIsLeftAlone() throws Exception {
     JSONObject error = new JSONObject().put("message", "@TBAI_SetKey@");
     JSONObject body = new JSONObject().put("error", error);
 
     ClassicMessageRemap.applyToBody(body, "es_ES");
 
-    assertEquals("@TBAI_SetKey@", error.getString("message"));
-    assertFalse(error.has("messageKeys"));
+    assertTrue(error.getString("message").startsWith("Faltan datos fiscales de TicketBAI"));
+    assertEquals("TBAI_SetKey", error.getJSONArray("messageKeys").getString(0));
     assertTrue(ClassicMessageRemap.remapText("Error al completar: @TBAI_SetKey@", "es_ES")
         .startsWith("Error al completar: Faltan datos fiscales de TicketBAI"));
+    assertEquals("Tipo factura vacío", ClassicMessageRemap.remapText("Tipo factura vacío", "es_ES"));
+  }
+
+  /** A leading placeholder takes only the letters and digits right before the first fragment. */
+  @Test
+  public void aLeadingPlaceholderTakesOnlyTheTrailingAlphanumericRun() {
+    String rest = " factura(s) enviadas con éxito<br />\n      0 factura(s) no enviadas<br />\n"
+        + "      0 factura(s) enviadas previamente<br />\n      \n"
+        + "      Por favor, refresque la pantalla.";
+    String go = "Facturas enviadas con éxito: 3. No enviadas: 0. Enviadas previamente: 0.";
+
+    assertEquals("Resultado:" + go, ClassicMessageRemap.remapText("Resultado:3" + rest, "es_ES"));
+    assertEquals("(" + go + ")", ClassicMessageRemap.remapText("(3" + rest + ")", "es_ES"));
+  }
+
+  /**
+   * An earlier, incomplete copy of the first fragment does not become part of the match: the
+   * full message after it is remapped and the copy stays as it was.
+   */
+  @Test
+  public void anEarlierIncompleteOccurrenceDoesNotHideTheFullMatch() {
+    String text = "Error interno al generar el fichero XML: (copia cortada) / "
+        + String.format(MARSHALL, "X");
+
+    assertEquals("Error interno al generar el fichero XML: (copia cortada) / Error interno al "
+        + "generar el fichero XML: X. Suele deberse a que la estructura o algún dato de la "
+        + "declaración no es válido. Revisa los datos indicados en el error y vuelve a generar el "
+        + "fichero.", ClassicMessageRemap.remapText(text, "es_ES"));
+  }
+
+  /** A blank or missing literal sentence yields an entry that matches nothing, no failure. */
+  @Test
+  public void aBlankLiteralSentenceIsHarmless() {
+    ClassicMessageRemap.Entry none = ClassicMessageRemap.Entry.ofLiteral("k", null);
+    ClassicMessageRemap.Entry blank = ClassicMessageRemap.Entry.ofLiteral("k", "   ");
+
+    assertEquals("k", none.catalogKey);
+    assertEquals("k", blank.catalogKey);
   }
 
   /** Two catalogued messages in one string: both are remapped and both keys published. */
