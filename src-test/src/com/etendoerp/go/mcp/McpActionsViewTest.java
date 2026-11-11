@@ -206,11 +206,12 @@ class McpActionsViewTest {
         JSONObject action = actions.getJSONObject(i);
         names.add(action.has("name") ? action.getString("name") : action.getString("action"));
       }
-      assertEquals(List.of("completeAction", "cancelAction", "createDraftInvoice",
+      // ETP-6179: sifDefaults previews the invoice's fiscal data before createDraftInvoice
+      assertEquals(List.of("completeAction", "cancelAction", "createDraftInvoice", "sifDefaults",
           "rejectQuotation", "createRejectReason"), names);
       assertTrue(actions.getJSONObject(2).has("parameters"));
-      assertEquals(5, response.getInt("actionCount"));
-      assertEquals(5, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
+      assertEquals(6, response.getInt("actionCount"));
+      assertEquals(6, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
       assertTrue(response.getString("declaredActionsHint").contains("etendo_action"));
     }
 

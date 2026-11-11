@@ -57,7 +57,14 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * <p>Extends {@link AbstractReturnDocumentHeaderHandler}, which owns the {@code postingService}
  * injection point and the {@code handle()} wiring shared with {@link ReturnMaterialReceiptHeaderHandler}.
+ *
+ * <p><b>Binding (ETP-6179).</b> Bound by {@link NeoExtension} on every channel, which wins over the
+ * qualifier. The {@code @Named} stays for now because the row's {@code Java_Qualifier}
+ * ({@code returnToVendorShipmentHeaderHandler}) is still in {@code ETGO_SF_ENTITY}: removing both
+ * together is the pending data step of the neo-extension-migration recipe. Until then the two name
+ * the same class, so there is no qualifier disagreement.
  */
+@NeoExtension(spec = "return-to-vendor-shipment", entity = "returnToVendorShipment")
 @Named("returnToVendorShipmentHeaderHandler")
 public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentHeaderHandler {
 
@@ -219,9 +226,13 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
             NeoActionContract.TYPE_BOOLEAN,
             "Only the JSON boolean true creates a second factura rectificativa for a return "
                 + "that already has one; anything else (absent, false, a string, a number) keeps "
-                + "the one-per-return refusal. Use it only when a second one is really intended."))
+                + "the one-per-return refusal. Use it only when a second one is really intended."),
+        InvoiceSifPreset.sifFieldsParam())
         .withIdDescription("The id of the completed return shipment.")
         .availableWhen(DocumentAvailability.WHEN_COMPLETED));
+    // ETP-6179: the SIF fields the factura rectificativa would get (SII only on a purchase).
+    contracts.put(InvoiceSifPreset.ACTION_SIF_DEFAULTS, InvoiceSifPreset.defaultsContract(
+        ACTION_CREATE_RETURN_INVOICE, "The id of the return shipment."));
     contracts.putAll(GoodsPostingContracts.CONTRACTS);
     contracts.put(ReturnCompletionContract.CONTRACT.getName(), ReturnCompletionContract.CONTRACT);
     return Collections.unmodifiableMap(contracts);

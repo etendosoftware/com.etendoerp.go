@@ -1129,13 +1129,17 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
     java.util.Map<String, NeoActionContract> contracts = handler.actionContracts();
 
     assertEquals(java.util.List.of("availableReceipts", "availableReceiptLines",
-        "importReceiptLines", "rectifiableInvoices", "createReturnInvoice", "post", "unpost",
-        "documentAction"),
+        "importReceiptLines", "rectifiableInvoices", "createReturnInvoice", "sifDefaults", "post",
+        "unpost", "documentAction"),
         java.util.List.copyOf(contracts.keySet()));
     assertFalse(contracts.get("availableReceipts").isMutating());
     assertFalse(contracts.get("availableReceiptLines").isMutating());
     assertTrue(contracts.get("importReceiptLines").isMutating());
     assertTrue(contracts.get("documentAction").getDescription().contains("DRAFT"));
+    // ETP-6179: the rectificativa's SIF fields, previewed and accepted like the customer return
+    assertFalse(contracts.get("sifDefaults").isMutating());
+    assertTrue(contracts.get("createReturnInvoice").getParams().stream()
+        .anyMatch(p -> "sifFields".equals(p.getName())));
   }
 
   /** Every declared action is one handle() dispatches (a 400 with no record and no body), except

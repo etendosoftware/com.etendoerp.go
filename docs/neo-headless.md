@@ -5186,13 +5186,6 @@ this fix.
 
 #### 4.12.9 `etendo_batch` is on again, and what still differs (ETP-5335 → ETP-5415)
 
-> **SIF fields of a return-to-vendor rectificativa: REST and SPA yes, MCP no (ETP-6179).**
-> `createReturnInvoice` on `return-to-vendor-shipment` reads `sifFields` and the header answers
-> `sifDefaults` on every channel, but the pair is still bound by `Java_Qualifier` and its contract was
-> not touched, so `etendo_action` does not list either and refuses `sifFields` as an unknown parameter.
-> A caller that sends nothing still gets the defaults and the rectification guard. Closes when the
-> pair migrates to `@NeoExtension` (see §4.12.36b, ETP-6179).
-
 > **Accounting status: REST returns it, MCP does not (ETP-5684).** For a role without
 > `showAccountingFields`, every MCP tool result drops `posted`, `etblkpAccountingstatus` and
 > `etblkpBulkposting` (`McpResponseSanitizer`), and `etendo_schema` does not list those columns.
@@ -7342,6 +7335,19 @@ comments naming an example of a structural rule (a report spec whose handler dec
 while it has one and the simple class name otherwise. For these two specs it changed from
 `bankReconciliation` / `bank-statements` to `ReconciliationHandler` / `BankStatementsHandler`.
 Nothing in the SPA or the artifacts reads it.
+
+**Annotated, data step pending (ETP-6179).** `return-to-vendor-shipment` / `returnToVendorShipment`
+is bound by `@NeoExtension` on `ReturnToVendorShipmentHeaderHandler` (forced by the touch rule: its
+`createReturnInvoice` contract gained `sifFields` and the pair gained `sifDefaults`). Every hook it
+overrides or inherits (`handle`, `afterHandle`, `responseEnrichedFields`, `actionContracts`,
+`unavailableActions`) already had an annotation-aware reader — the same set ETP-6026 proved for its
+sibling `return-material-receipt`. The annotation wins on every channel. The row's
+`JAVA_QUALIFIER` (`returnToVendorShipmentHeaderHandler`) and the matching `@Named` are still there,
+naming the same class (no qualifier disagreement, no parity CONFLICT); removing both, lowering
+`EXTENSION_CEILING` and dropping `javaQualifier` from the artifact's `decisions.json` is the pending
+data step. The class left `legacyHandlers` in the guardrail allowlist, and `NeoExtensionParityTest`'s
+legacy fixture moved to `return-to-vendor-shipment` / `returnToVendorShipmentLine`
+(`returnToVendorShipmentLineHandler`), still legacy.
 
 Still pending from the same audit: the `accountingDate` re-injection in
 `NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living
@@ -13565,13 +13571,14 @@ for a document type configured `F2`), with no SII motive and no TicketBAI code. 
   `systems` empty means nothing to choose. The SPA's "Datos fiscales" step is built from it, so the
   screen and the server never disagree. Declared in the contracts of `sales-order/header`,
   `sales-quotation/quotation`, `goods-shipment/goodsShipment`, `purchase-order/header`,
-  `goods-receipt/goodsReceipt` and `return-material-receipt/returnMaterialReceipt`.
-- **Declared divergence:** `return-to-vendor-shipment/returnToVendorShipment` is still bound by
-  `Java_Qualifier`; its contract was not touched (touching it means migrating it), so MCP does not
-  list `sifFields` / `sifDefaults` there and refuses `sifFields` as unknown. REST and the SPA reach both
-  (`createReturnInvoice` reads the key through the shared `ReturnInvoiceSupport`, `sifDefaults` is
-  answered by `AbstractReturnDocumentHeaderHandler`). A purchase rectificative only has SII fields, and
-  no motive (purchase-side corrective support is not implemented, CP-10).
+  `goods-receipt/goodsReceipt`, `return-material-receipt/returnMaterialReceipt` and
+  `return-to-vendor-shipment/returnToVendorShipment`.
+- **Return to vendor:** `return-to-vendor-shipment/returnToVendorShipment` was migrated to
+  `@NeoExtension` in the same ticket (§5.3.a), so its contract declares `sifFields` and `sifDefaults`
+  like the customer return, on every channel. `sifDefaults` of both returns is answered by
+  `AbstractReturnDocumentHeaderHandler`, `createReturnInvoice` reads the key through the shared
+  `ReturnInvoiceSupport`. A purchase rectificative only has SII fields, and no motive (purchase-side
+  corrective support is not implemented, CP-10).
 - **Ordinary document types only for an ordinary invoice:** `CreateDraftInvoiceHandler.findARInvoiceDocType`
   and `CreatePurchaseInvoiceHandler.findAPInvoiceDocType` skip return (`IsReturn`) and rectificative
   types (`RectificativeSupport.isCorrective`); before, the org's default "Factura rectificativa" could
