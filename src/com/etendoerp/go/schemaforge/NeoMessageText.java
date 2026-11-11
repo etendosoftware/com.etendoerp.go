@@ -192,8 +192,10 @@ public final class NeoMessageText {
   private static String queryText(String sql, String... params) {
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
       Connection conn = OBDal.getInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         for (int i = 0; i < params.length; i++) {
