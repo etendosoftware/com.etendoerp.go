@@ -30,6 +30,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -81,6 +82,7 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * and {@code ContactsLocationAddressParentAndRegionTest} (parent resolution, region columns).
  *
  * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
+ * @covers com.etendoerp.go.schemaforge.ContactAddressName
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -457,6 +459,51 @@ class ContactsLocationAddressCreateModesTest {
         .queryParams(queryParams)
         .endpointType(NeoEndpointType.CRUD)
         .build();
+  }
+
+  /**
+   * ETP-6206: {@code C_BPartner_Location.Name} is 60 characters. The app's editor and the Contacts
+   * import send "city, address line", so a long street used to push the name past the column and the
+   * create failed at flush with the row rolled back. The stored name is now capped.
+   */
+  @Nested
+  @DisplayName("the stored address name fits C_BPartner_Location.Name (60)")
+  class AddressNameLength {
+
+    @Test
+    @DisplayName("a sent name over 60 characters is cut to 60")
+    void aLongSentNameIsCut() throws Exception {
+      JSONObject body = new JSONObject()
+          .put("name", "Madrid, Calle de la Ribera del Manzanares y Paseo de la Virgen del P");
+      String name = ContactAddressName.of(null, body, null, loc -> null);
+      assertEquals("Madrid, Calle de la Ribera del Manzanares y Paseo de la Virg", name);
+      assertEquals(60, name.length());
+    }
+
+    @Test
+    @DisplayName("a sent name that fits is stored unchanged")
+    void aShortSentNameIsUnchanged() throws Exception {
+      JSONObject body = new JSONObject().put("name", "Madrid, Calle Mayor, 7");
+      assertEquals("Madrid, Calle Mayor, 7", ContactAddressName.of(null, body, null, loc -> null));
+    }
+
+    @Test
+    @DisplayName("a cut that lands on the separator drops the dangling \", \"")
+    void aCutOnTheSeparatorIsTrimmed() throws Exception {
+      JSONObject body = new JSONObject().put("name", "A".repeat(58) + ", Madrid");
+      assertEquals("A".repeat(58), ContactAddressName.of(null, body, null, loc -> null));
+    }
+
+    @Test
+    @DisplayName("over MCP, a display name over 60 characters is cut too")
+    void aLongMcpDisplayNameIsCut() {
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.isMcpOrigin()).thenReturn(true);
+      when(ctx.getAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS)).thenReturn(Collections.emptyList());
+      String name = ContactAddressName.of(ctx, new JSONObject(), mock(Location.class),
+          loc -> "B".repeat(70));
+      assertEquals("B".repeat(60), name);
+    }
   }
 
   private JSONObject recordOf(NeoResponse response) throws Exception {
