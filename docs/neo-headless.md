@@ -7336,18 +7336,18 @@ while it has one and the simple class name otherwise. For these two specs it cha
 `bankReconciliation` / `bank-statements` to `ReconciliationHandler` / `BankStatementsHandler`.
 Nothing in the SPA or the artifacts reads it.
 
-**Annotated, data step pending (ETP-6179).** `return-to-vendor-shipment` / `returnToVendorShipment`
-is bound by `@NeoExtension` on `ReturnToVendorShipmentHeaderHandler` (forced by the touch rule: its
-`createReturnInvoice` contract gained `sifFields` and the pair gained `sifDefaults`). Every hook it
-overrides or inherits (`handle`, `afterHandle`, `responseEnrichedFields`, `actionContracts`,
-`unavailableActions`) already had an annotation-aware reader — the same set ETP-6026 proved for its
-sibling `return-material-receipt`. The annotation wins on every channel. The row's
-`JAVA_QUALIFIER` (`returnToVendorShipmentHeaderHandler`) and the matching `@Named` are still there,
-naming the same class (no qualifier disagreement, no parity CONFLICT); removing both, lowering
-`EXTENSION_CEILING` and dropping `javaQualifier` from the artifact's `decisions.json` is the pending
-data step. The class left `legacyHandlers` in the guardrail allowlist, and `NeoExtensionParityTest`'s
-legacy fixture moved to `return-to-vendor-shipment` / `returnToVendorShipmentLine`
-(`returnToVendorShipmentLineHandler`), still legacy.
+**Migrated (ETP-6179).** `return-to-vendor-shipment` / `returnToVendorShipment` binds by annotation
+**only** (`ReturnToVendorShipmentHeaderHandler`, former qualifier
+`returnToVendorShipmentHeaderHandler`), forced by the touch rule: its `createReturnInvoice` contract
+gained `sifFields` and the pair gained `sifDefaults`. Every hook it overrides or inherits (`handle`,
+`afterHandle`, `responseEnrichedFields`, `actionContracts`, `unavailableActions`) already had an
+annotation-aware reader — the same set ETP-6026 proved for its sibling `return-material-receipt`. The
+row's `JAVA_QUALIFIER`, the class's `@Named` and the artifact's `javaQualifier` were removed,
+`EXTENSION_CEILING` went 78 → 77, the class left `legacyHandlers` in the guardrail allowlist, and
+`NeoExtensionParityTest`'s legacy fixture moved to `return-to-vendor-shipment` /
+`returnToVendorShipmentLine` (`returnToVendorShipmentLineHandler`), still legacy. A database that has
+not run `update.database` still carries the old qualifier on the row: harmless, the annotation is
+resolved first and no bean carries that name any more.
 
 Still pending from the same audit: the `accountingDate` re-injection in
 `NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living

@@ -28,7 +28,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
@@ -58,14 +57,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <p>Extends {@link AbstractReturnDocumentHeaderHandler}, which owns the {@code postingService}
  * injection point and the {@code handle()} wiring shared with {@link ReturnMaterialReceiptHeaderHandler}.
  *
- * <p><b>Binding (ETP-6179).</b> Bound by {@link NeoExtension} on every channel, which wins over the
- * qualifier. The {@code @Named} stays for now because the row's {@code Java_Qualifier}
- * ({@code returnToVendorShipmentHeaderHandler}) is still in {@code ETGO_SF_ENTITY}: removing both
- * together is the pending data step of the neo-extension-migration recipe. Until then the two name
- * the same class, so there is no qualifier disagreement.
+ * <p><b>Binding (ETP-6179).</b> Bound by {@link NeoExtension} on every channel. The row's
+ * {@code Java_Qualifier} ({@code returnToVendorShipmentHeaderHandler}) and the class's
+ * {@code @Named} were removed in the same change (neo-extension-migration).
  */
 @NeoExtension(spec = "return-to-vendor-shipment", entity = "returnToVendorShipment")
-@Named("returnToVendorShipmentHeaderHandler")
 public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnToVendorShipmentHeaderHandler.class);
