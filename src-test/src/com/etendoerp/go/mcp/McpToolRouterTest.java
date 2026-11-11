@@ -27,6 +27,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -55,6 +56,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpToolResponses
  * @covers com.etendoerp.go.mcp.McpResponseSanitizer
  * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
+ * @covers com.etendoerp.go.schemaforge.ClassicMessageRemap
  */
 public class McpToolRouterTest {
 
@@ -1723,6 +1726,39 @@ public class McpToolRouterTest {
     assertEquals("conflict", envelope.getString("error"));
     assertEquals("record_in_use", envelope.getString("code"));
     assertEquals(McpConstants.SEE_ALSO_WRITING, envelope.getString("seeAlso"));
+  }
+
+  /**
+   * ETP-6158: a classified write failure that already carries a key keeps it; the key of the
+   * Classic message recognised in its {@code detail} is appended once, also when the error result
+   * is rendered a second time (the text is then already the GO one).
+   */
+  @Test
+  public void testClassifiedFailureKeepsItsKeysAndAppendsTheClassicOneOnce() throws Exception {
+    JSONObject response = dalFailure("Some core prose");
+    response.getJSONObject("response").getJSONObject("error").put("neoClassification",
+        new JSONObject().put("status", 422).put("code", "business_rule")
+            .put("message", "No se pudo completar: @TBAI_ConfigNotFound@")
+            .put("messageKeys", new JSONArray().put("APRM_PAYMENTMETHOD_MISSING")));
+    String go = "No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI).";
+
+    JSONObject first;
+    JSONObject second;
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      JSONObject envelope = invokeCheckJsonServiceError(response, McpConstants.SEE_ALSO_WRITING);
+      first = new JSONObject(contentText(McpToolRouter.wrapAsErrorContent(envelope)));
+      second = new JSONObject(contentText(McpToolRouter.wrapAsErrorContent(
+          new JSONObject(first.toString()))));
+    }
+
+    for (JSONObject rendered : List.of(first, second)) {
+      assertEquals("No se pudo completar: " + go, rendered.getString("detail"));
+      JSONArray keys = rendered.getJSONArray("messageKeys");
+      assertEquals(rendered.toString(), 2, keys.length());
+      assertEquals("APRM_PAYMENTMETHOD_MISSING", keys.getString(0));
+      assertEquals("TBAI_ConfigNotFound", keys.getString(1));
+    }
   }
 
   /** A captured fault keeps this channel's existing answer for a refused write (declared, §4.12.9). */

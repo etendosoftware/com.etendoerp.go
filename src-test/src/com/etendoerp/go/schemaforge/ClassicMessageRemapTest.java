@@ -756,4 +756,51 @@ public class ClassicMessageRemapTest {
     assertTrue(published.toString(), published.contains("ETVFAC_reversed_invoice"));
     assertTrue(published.toString(), published.contains("AEATSII_EmptyCertificatePath"));
   }
+
+  /**
+   * A success body that carries no catalogued text leaves byte-identical — escapes, HTML breaks,
+   * spacing and key order untouched — and gets no {@code messageKeys}.
+   */
+  @Test
+  public void aBodyWithNoCataloguedTextIsLeftByteIdentical() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("message", "Registro guardado correctamente.  Revisa  las líneas<br />antes de "
+            + "completar &quot;FV-12&quot;\\n y continúa.")
+        .put("response", new JSONObject().put("status", 0).put("data", new JSONArray()
+            .put(new JSONObject().put("id", "A1").put("text", "Una nota cualquiera de la factura\n"
+                + "con dos líneas")
+                .put("detail", "Factura emitida en sustitución de otra (nota interna)"))))
+        .put("messages", new JSONArray().put(new JSONObject().put("type", "info")
+            .put("msgText", "El proceso terminó sin incidencias en 3 facturas")));
+    String before = body.toString();
+
+    ClassicMessageRemap.applyToBody(body, "es_ES");
+
+    assertEquals(before, body.toString());
+    assertFalse(body.toString().contains("messageKeys"));
+  }
+
+  /**
+   * {@code AEATSII_InvoiceManualSending}: each of the four captured arguments lands in its own
+   * {@code {n}} of the GO text, in Spanish and in English, whichever language Classic used.
+   */
+  @Test
+  public void everyCapturedArgumentLandsInItsOwnPlaceholder() {
+    String classicEn = "%0 invoice(s) successfully sent<br />\n%1 invoice(s) were not sent<br />\n"
+        + "%2 invoice(s) previously sent<br />\n%3\nPlease, refresh screen.";
+    ClassicMessageRemap.setTextsForTest(Map.of("AEATSII_InvoiceManualSending",
+        List.of(classicEn, MANUAL_SENDING_ES)));
+    String fromEnglish = "7 invoice(s) successfully sent<br />\n3 invoice(s) were not sent<br />\n"
+        + "5 invoice(s) previously sent<br />\nFV-9: NIF no censado\nPlease, refresh screen.";
+    String fromSpanish = "7 factura(s) enviadas con éxito<br />\n      3 factura(s) no enviadas"
+        + "<br />\n      5 factura(s) enviadas previamente<br />\n      FV-9: NIF no censado\n"
+        + "      Por favor, refresque la pantalla.";
+
+    for (String classic : List.of(fromEnglish, fromSpanish)) {
+      assertEquals(classic, "Facturas enviadas con éxito: 7. No enviadas: 3. Enviadas "
+          + "previamente: 5. FV-9: NIF no censado", ClassicMessageRemap.remapText(classic, "es_ES"));
+      assertEquals(classic, "Invoices sent successfully: 7. Not sent: 3. Previously sent: 5. "
+          + "FV-9: NIF no censado", ClassicMessageRemap.remapText(classic, "en_US"));
+    }
+  }
 }
