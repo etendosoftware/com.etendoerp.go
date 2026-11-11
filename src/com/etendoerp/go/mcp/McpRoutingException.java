@@ -19,7 +19,6 @@ package com.etendoerp.go.mcp;
 
 import java.util.List;
 
-import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -446,7 +445,8 @@ class McpRoutingException extends OBException {
    */
   static McpRoutingException unknownFilterField(String key, String entityName,
       List<String> available) {
-    List<String> names = available == null ? List.of() : closestFirst(key, available);
+    List<String> names = available == null ? List.of()
+        : McpClosestNames.closestFirst(key, available);
     boolean truncated = names.size() > McpConstants.MAX_AVAILABLE_NAMES;
     if (truncated) {
       names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
@@ -466,35 +466,6 @@ class McpRoutingException extends OBException {
                 + "field."
             : RETRY_WITH_AVAILABLE,
         McpConstants.SEE_ALSO_READING);
-  }
-
-  /**
-   * The names that share a word with {@code key} first, the rest after, each group in its original
-   * order (ETP-5848). The cap below keeps the first {@link McpConstants#MAX_AVAILABLE_NAMES}, so an
-   * alphabetical list cut the likely answer: an agent filtering contacts by {@code commercialName}
-   * got twenty names from {@code account} to {@code deliveryMethod}, and the commercial name
-   * ({@code name2}) was not among them.
-   *
-   * @param key   the filter key as the caller spelled it
-   * @param names the filterable names
-   * @return a new list, closest first
-   */
-  static List<String> closestFirst(String key, List<String> names) {
-    String[] words = StringUtils.splitByCharacterTypeCamelCase(StringUtils.defaultString(key));
-    List<String> close = new java.util.ArrayList<>();
-    List<String> rest = new java.util.ArrayList<>();
-    for (String name : names) {
-      boolean shares = false;
-      for (String word : words) {
-        if (word.length() > 2 && StringUtils.containsIgnoreCase(name, word)) {
-          shares = true;
-          break;
-        }
-      }
-      (shares ? close : rest).add(name);
-    }
-    close.addAll(rest);
-    return close;
   }
 
   /**

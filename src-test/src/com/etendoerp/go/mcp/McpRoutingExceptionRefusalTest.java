@@ -198,7 +198,7 @@ class McpRoutingExceptionRefusalTest {
     @DisplayName("keeps the original order when no name shares a word with the key")
     void orderKeptWithoutAMatch() {
       assertEquals(List.of("documentNo", "businessPartner"),
-          McpRoutingException.closestFirst("xyz", List.of("documentNo", "businessPartner")));
+          McpClosestNames.closestFirst("xyz", List.of("documentNo", "businessPartner")));
     }
 
     @Test
