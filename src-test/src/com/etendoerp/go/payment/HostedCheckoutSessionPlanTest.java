@@ -81,6 +81,7 @@ class HostedCheckoutSessionPlanTest {
     stripeApiClient = mock(StripeApiClient.class);
     stripePriceService = mock(StripePriceService.class);
     service = new HostedCheckoutService();
+    service.promotionTerms = mock(CheckoutPromotionTerms.class);
     service.stripePriceService = stripePriceService;
     service.planCatalogService = planCatalogService;
     service.checkoutRequestStore = checkoutRequestStore;
@@ -98,6 +99,9 @@ class HostedCheckoutSessionPlanTest {
     Plan plan = mock(Plan.class);
     when(plan.getSearchKey()).thenReturn(PLAN_KEY);
     when(plan.getProviderPriceID()).thenReturn(priceId);
+    when(plan.getDisplayPrice()).thenReturn(new java.math.BigDecimal("29.00"));
+    when(plan.getCurrencyCode()).thenReturn("EUR");
+    when(plan.getBillingInterval()).thenReturn("month");
     return plan;
   }
 

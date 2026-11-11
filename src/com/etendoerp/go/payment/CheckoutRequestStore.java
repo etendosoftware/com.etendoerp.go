@@ -580,9 +580,27 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    */
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName, RequestOptions options, Plan plan) {
+    recordRequested(requestId, accountId, accountEmail, clientName, options, plan, null);
+  }
+
+  /**
+   * Atomically retires a provider-confirmed expired predecessor and records its successor.
+   * The caller holds the predecessor's checkout lock while expiring its Stripe session.
+   * Keeping both writes in one commit leaves no window without an active purchase.
+   */
+  void recordRequested(String requestId, String accountId, String accountEmail,
+      String clientName, RequestOptions options, Plan plan, CheckoutRequest predecessor) {
     RequestOptions requestOptions = options == null
         ? new RequestOptions(null, false, false, false, null) : options;
     runAsSystem(() -> {
+      if (predecessor != null) {
+        if (!STATUS_CREATED.equals(predecessor.getCheckoutRequestStatus())) {
+          throw new IllegalStateException("Only an unpaid created checkout may be replaced");
+        }
+        predecessor.setCheckoutRequestStatus(STATUS_EXPIRED);
+        predecessor.setExpiredAt(new Date());
+        OBDal.getInstance().save(predecessor);
+      }
       CheckoutRequest request = OBProvider.getInstance().get(CheckoutRequest.class);
       request.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
       request.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
@@ -610,6 +628,31 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       OBDal.getInstance().save(request);
       flushAndCommit();
     });
+  }
+
+  /** Serializes provider operations on one account-owned purchase, re-reading under the lock. */
+  CheckoutRequest lockCheckout(String requestId, String accountEmail) {
+    return runAsSystem(() -> {
+      CheckoutRequest request = find(requestId, accountEmail);
+      if (request == null) throw new IllegalStateException("The checkout purchase is unavailable");
+      OBDal.getInstance().getSession().refresh(request,
+          new LockOptions(LockMode.PESSIMISTIC_WRITE));
+      if (!STATUS_CREATING.equals(request.getCheckoutRequestStatus())
+          && !STATUS_CREATED.equals(request.getCheckoutRequestStatus())) {
+        throw new IllegalStateException("The checkout purchase is no longer unpaid");
+      }
+      return request;
+    });
+  }
+
+  /** Ends a provider-only read and releases its checkout lock. */
+  void finishCheckoutOperation() {
+    runAsSystem(this::flushAndCommit);
+  }
+
+  /** Releases a checkout lock after a provider failure, discarding uncommitted successor writes. */
+  void abortCheckoutOperation() {
+    runAsSystem(() -> OBDal.getInstance().rollbackAndClose());
   }
 
   /**

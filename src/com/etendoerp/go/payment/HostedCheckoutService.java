@@ -3,9 +3,11 @@ package com.etendoerp.go.payment;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -45,6 +47,7 @@ public class HostedCheckoutService {
   PlanCatalogService planCatalogService = new PlanCatalogService();
   /** Validates the provider price before it is charged; package-visible for test doubles. */
   StripePriceService stripePriceService = new StripePriceService();
+  CheckoutPromotionTerms promotionTerms = new CheckoutPromotionTerms();
   /**
    * The provider gateway, package-visible so a test can swap in a recording double. Same shape as
    * {@code PlanPriceDerivationHandler}'s: the base URL, the credentials and the timeouts belong to
@@ -58,6 +61,15 @@ public class HostedCheckoutService {
 
     private OriginalPriceUnavailableException() {
       super("The original checkout price is unavailable");
+    }
+  }
+
+  /** A confirmed replacement no longer names the current unpaid purchase. */
+  public static final class PurchaseSelectionChangedException extends IllegalStateException {
+    private static final long serialVersionUID = 1L;
+
+    public PurchaseSelectionChangedException() {
+      super("The pending checkout changed. Reload the purchase before trying again.");
     }
   }
 
@@ -83,6 +95,7 @@ public class HostedCheckoutService {
     private final boolean transferContacts;
     private final Consumer<String> beforeProvider;
     private final String reactivatedClientId;
+    private final String language;
 
     /**
      * Creates the options of one checkout.
@@ -100,11 +113,25 @@ public class HostedCheckoutService {
 
     private SessionOptions(String demoClientId, boolean transferProducts,
         boolean transferContacts, Consumer<String> beforeProvider, String reactivatedClientId) {
+      this(demoClientId, transferProducts, transferContacts, beforeProvider, reactivatedClientId,
+          "es_ES");
+    }
+
+    private SessionOptions(String demoClientId, boolean transferProducts,
+        boolean transferContacts, Consumer<String> beforeProvider, String reactivatedClientId,
+        String language) {
       this.demoClientId = demoClientId;
       this.transferProducts = transferProducts;
       this.transferContacts = transferContacts;
       this.beforeProvider = beforeProvider == null ? requestId -> { } : beforeProvider;
       this.reactivatedClientId = reactivatedClientId;
+      this.language = language;
+    }
+
+    /** Copies these immutable options with the buyer's language for the hosted offer text. */
+    public SessionOptions withLanguage(String language) {
+      return new SessionOptions(demoClientId, transferProducts, transferContacts, beforeProvider,
+          reactivatedClientId, language);
     }
 
     /** @return options for a checkout with no demo source and no callback */
@@ -207,27 +234,98 @@ public class HostedCheckoutService {
    */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin, String planKey, SessionOptions options) throws IOException, JSONException {
+    return createSession(accountId, accountEmail, clientName, origin, planKey, options, null);
+  }
+
+  /** Creates a purchase, optionally replacing an explicitly confirmed unpaid predecessor. */
+  public JSONObject createSession(String accountId, String accountEmail, String clientName,
+      String origin, String planKey, SessionOptions options, String replacePurchaseId)
+      throws IOException, JSONException {
     requireConfigured();
     SessionOptions sessionOptions = options == null ? SessionOptions.none() : options;
     PricedPlan offer = resolvePricedPlan(planKey);
     Plan plan = offer.plan;
     StripePriceService.Price price = offer.price;
     String requestId = UUID.randomUUID().toString();
+    // Persist intent before the purchase (and before locking an old one): this ledger commit
+    // must neither leave a recoverable purchase without its offer nor release a replacement lock.
+    JSONObject terms = promotionTerms.recordIntent(requestId, price,
+        sessionOptions.reactivatedClientId == null && !PlanCatalogService.namesLegacyPlan(planKey),
+        sessionOptions.language);
+    CheckoutRequest predecessor = null;
+    if (StringUtils.isNotBlank(replacePurchaseId)) {
+      try {
+        predecessor = checkoutRequestStore.lockCheckout(replacePurchaseId, accountEmail);
+        if (!CheckoutRequestStore.STATUS_CREATED.equals(predecessor.getCheckoutRequestStatus())
+            || predecessor.getEtendoGoAccount() == null
+            || !accountId.equals(predecessor.getEtendoGoAccount().getId())
+            || !StringUtils.equalsIgnoreCase(clientName, predecessor.getClientName())
+            || predecessor.getCreatedClient() != null) {
+          throw new PurchaseSelectionChangedException();
+        }
+        expireUnpaidSession(predecessor.getStripeSession());
+      } catch (IOException | RuntimeException e) {
+        checkoutRequestStore.abortCheckoutOperation();
+        throw e;
+      }
+    }
     // Recorded and committed BEFORE the provider is contacted. A crash during the call below would
     // otherwise leave a session at Stripe that nothing on this side can name, and therefore that no
     // reconciliation could ever find. The row is deliberately not rolled back when the call fails:
     // it is the evidence that someone tried to buy something. A row left without a session id is
     // never closed automatically: the provider cannot confirm it was not paid, so the billing
     // reconciliation parks it for review (ETP-5048 decision 6).
-    checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName,
+    CheckoutRequestStore.RequestOptions requestOptions =
         new CheckoutRequestStore.RequestOptions(sessionOptions.demoClientId, true,
             sessionOptions.transferProducts, sessionOptions.transferContacts, price.getId(),
-            sessionOptions.reactivatedClientId),
-        plan);
+            sessionOptions.reactivatedClientId);
+    try {
+      if (predecessor == null) {
+        checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName,
+            requestOptions, plan);
+      } else {
+        checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName,
+            requestOptions, plan, predecessor);
+      }
+    } catch (RuntimeException e) {
+      if (predecessor != null) checkoutRequestStore.abortCheckoutOperation();
+      throw e;
+    }
     sessionOptions.beforeProvider.accept(requestId);
     return createProviderSession(requestId, accountEmail, clientName, origin, price,
         plan.getSearchKey(), initialIdempotencyKey(requestId), null,
-        sessionOptions.reactivatedClientId != null);
+        sessionOptions.reactivatedClientId != null, terms);
+  }
+
+  /** A new plan selection may resume only the exact plan and provider Price originally bought. */
+  public boolean matchesSelection(CheckoutRequest purchase, String planKey)
+      throws IOException, JSONException {
+    // Older clients carry no selection at all: that is an explicit resume of the historical
+    // purchase, not permission to sell the current fallback. New clients always name their card.
+    if (purchase != null && StringUtils.isBlank(planKey)) return true;
+    PricedPlan selected = resolvePricedPlan(planKey);
+    return purchase != null && purchase.getPlan() != null
+        && StringUtils.equals(selected.plan.getSearchKey(), purchase.getPlan().getSearchKey())
+        && StringUtils.equals(selected.price.getId(), purchase.getStripePrice());
+  }
+
+  private void expireUnpaidSession(String sessionId) throws IOException {
+    if (StringUtils.isBlank(sessionId)) throw new PurchaseSelectionChangedException();
+    JSONObject session = retrieveSession(sessionId);
+    if (!sessionId.equals(session.optString("id", ""))) throw new IOException("Unexpected session");
+    if ("open".equals(session.optString("status", ""))) {
+      StripeResponse expired = stripeApiClient.postForm("/v1/checkout/sessions/"
+          + URLEncoder.encode(sessionId, StandardCharsets.UTF_8.name()) + "/expire", "",
+          "checkout:" + sessionId + ":expire-for-replacement");
+      if (!expired.isSuccess()) throw new IOException("Could not expire the pending checkout");
+      session = expired.json();
+    }
+    // Complete with async payment pending is deliberately refused too: it may still collect money.
+    if (!sessionId.equals(session.optString("id", ""))
+        || !"expired".equals(session.optString("status", ""))
+        || !"unpaid".equals(session.optString("payment_status", ""))) {
+      throw new PurchaseSelectionChangedException();
+    }
   }
 
   /**
@@ -260,10 +358,26 @@ public class HostedCheckoutService {
         // stale — the page tells the buyer to reload it.
         throw new PlanNotAvailableException(planKey);
       }
-      return new PricedPlan(legacy, stripePriceService.retrievePrice(legacy.getProviderPriceID()));
+      return pricedPlan(legacy, stripePriceService.retrievePrice(legacy.getProviderPriceID()));
     }
     Plan plan = resolvePurchasablePlan(planKey);
-    return new PricedPlan(plan, stripePriceService.retrievePrice(plan.getProviderPriceID()));
+    return pricedPlan(plan, stripePriceService.retrievePrice(plan.getProviderPriceID()));
+  }
+
+  private static PricedPlan pricedPlan(Plan plan, StripePriceService.Price price) {
+    // The fallback is quoted directly from Stripe. Every other card comes from the catalog,
+    // so a mislabeled amount or recurrence must fail closed instead of selling another contract.
+    if (!PlanCatalogService.namesLegacyPlan(plan.getSearchKey())) {
+      BigDecimal shown = plan.getDisplayPrice();
+      BigDecimal charged = BigDecimal.valueOf(price.getAmountMinor())
+          .movePointLeft(StripeCurrencyScale.exponent(price.getCurrency()));
+      if (shown == null || shown.compareTo(charged) != 0
+          || !StringUtils.equalsIgnoreCase(plan.getCurrencyCode(), price.getCurrency())
+          || !StringUtils.equals(plan.getBillingInterval(), price.getInterval())) {
+        throw new CheckoutNotConfiguredException("The plan catalog and provider Price disagree");
+      }
+    }
+    return new PricedPlan(plan, price);
   }
 
   /**
@@ -320,6 +434,19 @@ public class HostedCheckoutService {
   public JSONObject reopenSession(String requestId, String accountEmail, String clientName,
       String origin) throws IOException, JSONException {
     requireConfigured();
+    try {
+      checkoutRequestStore.lockCheckout(requestId, accountEmail);
+      JSONObject result = reopenLockedSession(requestId, accountEmail, clientName, origin);
+      checkoutRequestStore.finishCheckoutOperation();
+      return result;
+    } catch (IOException | JSONException | RuntimeException e) {
+      checkoutRequestStore.abortCheckoutOperation();
+      throw e;
+    }
+  }
+
+  private JSONObject reopenLockedSession(String requestId, String accountEmail, String clientName,
+      String origin) throws IOException, JSONException {
     String sessionId = checkoutRequestStore.findStripeSessionId(requestId);
     if (sessionId != null) {
       JSONObject existing = retrieveSession(sessionId);
@@ -332,7 +459,9 @@ public class HostedCheckoutService {
         if (originalMode.isEmpty()) {
           throw new IOException("Stripe returned an existing session without its checkout mode");
         }
-        return buildResult(requestId, existing.optString("url", ""), originalMode);
+        JSONObject result = buildResult(requestId, existing.optString("url", ""), originalMode);
+        addPublicTerms(result, promotionTerms.termsForRequest(requestId));
+        return result;
       }
       if ("complete".equals(sessionStatus)) {
         return buildCompletedResult(requestId, existing);
@@ -352,7 +481,8 @@ public class HostedCheckoutService {
         planKeyOf(request),
         sessionId == null ? initialIdempotencyKey(requestId)
             : replacementIdempotencyKey(requestId, sessionId), sessionId,
-        CheckoutRequestStoreQuerySupport.isPendingReactivation(request));
+        CheckoutRequestStoreQuerySupport.isPendingReactivation(request),
+        promotionTerms.termsForRequest(requestId));
   }
 
   /** The plan key recorded on the request, echoed as metadata; blank for a pre-plan request. */
@@ -380,10 +510,15 @@ public class HostedCheckoutService {
   @SuppressWarnings("java:S107")
   private JSONObject createProviderSession(String requestId, String accountEmail, String clientName,
       String origin, StripePriceService.Price price, String planKey, String idempotencyKey,
-      String expectedSessionId, boolean reactivation) throws IOException, JSONException {
+      String expectedSessionId, boolean reactivation, JSONObject terms) throws IOException, JSONException {
     String mode = modeOf(price);
     String form = buildSessionForm(requestId, accountEmail, clientName, origin, price.getId(),
         planKey, mode, reactivation);
+    StringBuilder promotedForm = new StringBuilder(form);
+    for (Map.Entry<String, String> field : CheckoutPromotionTerms.formFields(terms).entrySet()) {
+      add(promotedForm, field.getKey(), field.getValue());
+    }
+    form = promotedForm.toString();
     StripeResponse response = stripeApiClient.postForm("/v1/checkout/sessions", form,
         idempotencyKey);
     if (!response.isSuccess()) {
@@ -404,9 +539,15 @@ public class HostedCheckoutService {
     result.put(REQUEST_ID_FIELD, requestId);
     result.put("checkoutUrl", providerUrl);
     result.put("mode", mode);
+    addPublicTerms(result, terms);
     // ETP-5049: no provider price id in a browser-facing answer. The browser names a plan, never a
     // price; the charged price id stays on the request row (STRIPE_PRICE_ID) for the server.
     return result;
+  }
+
+  private static void addPublicTerms(JSONObject result, JSONObject terms) throws JSONException {
+    JSONObject publicTerms = CheckoutPromotionTerms.publicTerms(terms);
+    if (publicTerms != null) result.put("commercialTerms", publicTerms);
   }
 
   /** A one-time price is a payment checkout; every recurring price is a subscription. */

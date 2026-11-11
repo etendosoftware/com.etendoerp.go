@@ -219,6 +219,8 @@ public class BillingReconciliationService {
         () -> reviewSessionlessCheckouts(result, audit));
     runPhase(Phase.SUBSCRIPTIONS.label(), Phase.SUBSCRIPTIONS, result,
         () -> subscriptions.run(result, audit));
+    runPhase("checkout promotions", null, result,
+        () -> new com.etendoerp.go.payment.PromotionRecovery().recover(dryRun));
     runPhase("stuck events", null, result, () -> sweepStaleEvents(result, audit));
     // Its own step, after the sweep and whatever the sweep could do: a DB fact on every run.
     // Counts the stuck events parked by earlier runs and still unresolved (a review row exists,
