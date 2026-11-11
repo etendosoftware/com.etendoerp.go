@@ -29,6 +29,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
@@ -186,7 +187,17 @@ public class NeoServlet extends HttpBaseServlet {
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
+    // ETP-6158: the language the Classic message remap answers in, fixed before any Classic call.
+    String previousLanguage = NeoLanguage.captureRequestCode();
+    try {
+      dispatchAuthenticated(request, response, method);
+    } finally {
+      NeoLanguage.restoreRequestCode(previousLanguage);
+    }
+  }
 
+  private void dispatchAuthenticated(HttpServletRequest request, HttpServletResponse response,
+      String method) throws IOException {
     NeoPathInfo pathInfo = requestRouter.parseRequestPath(request, response);
     if (pathInfo == null) {
       return;
@@ -363,6 +374,8 @@ public class NeoServlet extends HttpBaseServlet {
   void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
       throws IOException {
     NeoResponse.identifyPeriodRefusal(neoResponse);
+    // ETP-6158: Classic fiscal messages that name Classic-only UI, reworded for GO.
+    ClassicMessageRemap.apply(neoResponse);
     if (neoResponse == null) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;

@@ -60,7 +60,7 @@ concurrency:
 env:
   CORE_BRANCH: epic/ETP-3504
   MODULE_BRANCH: ${{ github.head_ref || github.ref_name }}
-  PIPELINES_REPO: git@bitbucket.org:koodu_software/com.etendoerp.jenkins.pipelines.git
+  PIPELINES_REPO: git@ssh.bitbucket.org:koodu_software/com.etendoerp.jenkins.pipelines.git
   RETENTION_DAYS: 30
 
 jobs:
@@ -259,9 +259,23 @@ jobs:
           cp .env.example .env
           make install
 
+      # No --with-deps: the runner image already has every library Chromium needs, so apt only added
+      # fonts no test uses, and when the Ubuntu mirror did not resolve it hung the job for 10 min and
+      # failed it. The browser is cached per Playwright version and downloads only on a bump.
+      - name: Playwright version
+        id: playwright
+        working-directory: etendo_core/schema_forge
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
       - name: Install Chromium
         working-directory: etendo_core/schema_forge
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       # The Playwright reporter of the per-cell report. Without it the suite still runs, only the
       # report misses the E2E results.
