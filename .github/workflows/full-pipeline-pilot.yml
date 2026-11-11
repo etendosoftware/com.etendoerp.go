@@ -6,6 +6,11 @@ name: Full Pipeline Pilot
 # a failed block re-runs alone ("Re-run failed jobs"). This is not a required check: the pilot
 # compares duration and failures per block with Jenkins before anything is replaced.
 #
+# Every job name starts with "Pilot: ". The cut job (auto-cut.mjs in com.etendoerp.jenkins.pipelines)
+# and base-branch-health.yml ignore the checks with that prefix, so a red or still running pilot
+# job neither holds a cut nor turns main red while Jenkins is the gate. Dropping the prefix when
+# Actions replaces Jenkins makes them count.
+#
 # Both test jobs build the environment the way Jenkins builds it (.github/actions/etendo-env:
 # etendo-localenv, its own PostgreSQL, install, the GOClient seeds, smartbuild):
 #   go-tests     the module's Java suite, both halves, and the JaCoCo report. Sonar and the
@@ -60,7 +65,7 @@ env:
 
 jobs:
   go-tests:
-    name: Go tests + coverage
+    name: 'Pilot: Go tests + coverage'
     # branch-merge-policy.yml already rejects any other branch into main; this keeps such a PR
     # from also spending runners before it is closed.
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
@@ -173,7 +178,7 @@ jobs:
           if-no-files-found: ignore
 
   integration:
-    name: Integration (Tomcat + Playwright)
+    name: 'Pilot: Integration (Tomcat + Playwright)'
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -362,7 +367,7 @@ jobs:
           if-no-files-found: ignore
 
   cell-report:
-    name: Cell report
+    name: 'Pilot: Cell report'
     needs: [go-tests, integration]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04
