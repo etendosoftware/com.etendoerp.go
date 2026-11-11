@@ -1401,7 +1401,7 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       probe.drafts.put("ol2", bd("5"));
       probe.holders.put("ol2", List.of(
           new OrderInvoicePending.DraftInvoiceRef("inv-a", "FV1000002", bd("2")),
-          new OrderInvoicePending.DraftInvoiceRef("inv-b", "FV1000003", bd("3"))));
+          new OrderInvoicePending.DraftInvoiceRef("inv-b", "FV1000003", bd("3.000"))));
       String side = isSales ? "sales" : "purchase";
 
       JSONArray rows = run(probe, "availableOrderLines",
@@ -1418,8 +1418,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       assertEquals(side, "inv-a", held.getJSONObject(0).getString("id"));
       assertEquals(side, "FV1000002", held.getJSONObject(0).getString("documentNo"));
       assertEquals(side, "FV1000003", held.getJSONObject(1).getString("documentNo"));
-      assertEquals(side + ": what each draft holds of the line", 0,
-          bd("3").compareTo(new BigDecimal(held.getJSONObject(1).get("quantity").toString())));
+      assertEquals(side + ": what each draft holds of the line, no trailing zeros", "3",
+          held.getJSONObject(1).get("quantity").toString());
     }
   }
 

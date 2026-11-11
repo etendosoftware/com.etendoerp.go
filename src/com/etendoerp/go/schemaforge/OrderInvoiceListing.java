@@ -226,7 +226,7 @@ final class OrderInvoiceListing {
     JSONArray refs = new JSONArray();
     for (OrderInvoicePending.DraftInvoiceRef draft : drafts) {
       refs.put(new JSONObject().put("id", draft.id).put("documentNo", draft.documentNo)
-          .put("quantity", draft.quantity));
+          .put("quantity", OrderImportListing.trimmed(draft.quantity)));
     }
     row.put(ImportOrderLinesIntoInvoiceHandler.KEY_IN_DRAFT_INVOICES, refs);
   }
