@@ -24,6 +24,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
@@ -42,6 +44,8 @@ import org.openbravo.model.common.order.OrderLine;
  * here selects an entity or a direction.</p>
  */
 final class OrderInvoicePending {
+
+  private static final Logger log = LogManager.getLogger(OrderInvoicePending.class);
 
   /**
    * Per order line, the quantity held by the active lines of DRAFT invoices of the direction.
@@ -157,7 +161,12 @@ final class OrderInvoicePending {
   static Map<String, List<DraftInvoiceRef>> draftHolders(Collection<String> orderLineIds,
       boolean sales, String exceptInvoiceId, String clientId, Collection<String> readableOrgs) {
     Map<String, List<DraftInvoiceRef>> holders = new LinkedHashMap<>();
-    if (orderLineIds.isEmpty() || readableOrgs == null || readableOrgs.isEmpty()) {
+    if (orderLineIds.isEmpty()) {
+      return holders;
+    }
+    if (readableOrgs == null || readableOrgs.isEmpty()) {
+      log.debug("No readable organization: no draft invoice holding order lines {} is named",
+          orderLineIds);
       return holders;
     }
     List<Object[]> rows = OBDal.getInstance().getSession()
