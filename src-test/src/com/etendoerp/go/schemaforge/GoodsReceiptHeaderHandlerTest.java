@@ -1057,11 +1057,12 @@ public class GoodsReceiptHeaderHandlerTest {
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
             "importOrderLines", "availableInvoices", "availableInvoiceLines",
-            "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord", "post", "unpost"),
+            "createPurchaseInvoice", "sifDefaults", "createPurchaseReturn", "cloneRecord", "post",
+            "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
-    assertEquals(java.util.List.of("receiptIds", "priceListId", "lines"),
+    assertEquals(java.util.List.of("receiptIds", "priceListId", "lines", "sifFields"),
         invoice.getParams().stream().map(NeoActionContract.Param::getName)
             .collect(java.util.stream.Collectors.toList()));
     assertTrue("every body key is optional",

@@ -3814,6 +3814,33 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
+  /**
+   * ETP-6179 repro: an ordinary invoice was generated with a return or rectificative document
+   * type whenever one ranked first (the org's own default "Factura rectificativa", say), and was
+   * then sent to SII/TicketBAI/VERI*FACTU as a correction of nothing.
+   */
+  @Test
+  public void testFindArInvoiceDocTypeNeverPicksAReturnOrRectificativeType() {
+    RectificativeSupport.setColumnPresentForTests(true);
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType rectificative = mockCandidate("dt-rectif", "org-1", true, "SEQ-R");
+      when(rectificative.isEtsgIsRectificative()).thenReturn(true);
+      DocumentType returnType = mockCandidate("dt-return", "org-1", false, "SEQ-RM");
+      when(returnType.isReturn()).thenReturn(true);
+      DocumentType ordinary = mockCandidate("dt-ordinary", "0", false, "SEQ-1");
+      mockDocumentTypeCriteria(dal, Arrays.asList(rectificative, returnType, ordinary));
+
+      DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-1");
+
+      assertSame(ordinary, result);
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
   // ── handlePendingLines ────────────────────────────────────────────────────
 
   /** Blank recordId returns 400. */

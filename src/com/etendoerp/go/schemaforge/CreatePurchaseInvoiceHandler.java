@@ -116,7 +116,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           + "allowDuplicate:true creates the invoice anyway and lists the drafts the order had. "
           + "The order's global discount (etgoTotalDiscount, always a %) "
           + "is carried to the new invoice's total discount as the same %, never as an amount.",
-      OrderInvoiceDuplicateGuard.allowDuplicateParam())
+      OrderInvoiceDuplicateGuard.allowDuplicateParam(), InvoiceSifPreset.sifFieldsParam())
       .withIdDescription("the id of the purchase order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -158,9 +158,20 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
               + "opposite sign to the line, or for a line with nothing pending is refused with "
               + "400 naming the line and its pending quantity (it is never capped silently), and "
               + "so is a list none of whose entries has a receiptLineId and a non-zero quantity. "
-              + "Omit to invoice the pending quantity of every line."))
+              + "Omit to invoice the pending quantity of every line."),
+      InvoiceSifPreset.sifFieldsParam())
       .withIdDescription("the id of the goods receipt to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
+
+  /** ETP-6179: the SIF fields the order's {@code createPurchaseInvoice} would give its invoice. */
+  static final NeoActionContract ORDER_SIF_DEFAULTS_CONTRACT = InvoiceSifPreset.defaultsContract(
+      ACTION_NAME, "the id of the purchase order to invoice");
+
+  /** ETP-6179: the SIF fields the receipt's {@code createPurchaseInvoice} would give its invoice. */
+  static final NeoActionContract RECEIPT_SIF_DEFAULTS_CONTRACT =
+      InvoiceSifPreset.defaultsContract(ACTION_NAME, "the id of the goods receipt to invoice",
+          NeoActionContract.Param.array(PARAM_RECEIPT_IDS, NeoActionContract.TYPE_STRING, false,
+              "The same receiptIds createPurchaseInvoice would receive. Omit for this receipt."));
 
   private static final String ERR_ORDER_NOT_COMPLETED =
       "Purchase order %s is not completed (status %s): complete it before creating the invoice";
@@ -234,6 +245,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       return OrderInvoiceListSupport.listInvoices(context, false);
     }
 
+    // POST sifDefaults — the SIF fields the invoice would get (ETP-6179), creates nothing
+    if (InvoiceSifPreset.ACTION_SIF_DEFAULTS.equals(fieldName) && "POST".equals(method)) {
+      return handleSifDefaults(context, specName);
+    }
+
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(method)) {
       return null;
     }
@@ -251,6 +267,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         OBContext.restorePreviousMode();
       }
     } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
+    } catch (InvoiceSifPreset.Refused e) {
+      log.warn("Refused the SIF fields of the purchase invoice generated from {}", recordId);
       return e.toResponse();
     } catch (DocumentCurrencyRate.MissingRateException e) {
       OBDal.getInstance().rollbackAndClose();
@@ -319,6 +338,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (!SPEC_GOODS_RECEIPT.equals(specName)) {
       DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
     }
+    // ETP-6179: the SIF fields the caller chose (or their defaults) before completing.
+    InvoiceSifPreset.applyBeforeCompletion(invoice, context.getRequestBody());
     InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
     Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
 
@@ -587,18 +608,85 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     return invoiceDocType;
   }
 
-  private DocumentType findAPInvoiceDocType(String clientId) {
+  /**
+   * The client's AP invoice document type, the default first. ETP-6179: never a return or
+   * rectificative type ({@link RectificativeSupport#isCorrective}) — an ordinary purchase invoice
+   * generated with one would be booked as a correction.
+   */
+  protected DocumentType findAPInvoiceDocType(String clientId) {
     org.openbravo.model.ad.system.Client client =
         OBDal.getInstance().get(org.openbravo.model.ad.system.Client.class, clientId);
-    List<DocumentType> results = OBDal.getInstance().createCriteria(DocumentType.class)
-        .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, client))
-        .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "API"))
-        .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, false))
-        .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
-        .addOrderBy(DocumentType.PROPERTY_DEFAULT, false)
-        .setMaxResults(1)
-        .list();
+    List<DocumentType> results = RectificativeSupport.ordinaryOnly(
+        OBDal.getInstance().createCriteria(DocumentType.class)
+            .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, client))
+            .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "API"))
+            .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, false))
+            .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
+            .addOrderBy(DocumentType.PROPERTY_DEFAULT, false)
+            .list());
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  /**
+   * ETP-6179: answers {@code sifDefaults}, the SIF fields the purchase invoice
+   * {@code createPurchaseInvoice} would create from this record gets, creating nothing.
+   */
+  private NeoResponse handleSifDefaults(NeoContext context, String specName) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        return InvoiceSifPreset.previewResponse(
+            resolveSifTarget(specName, recordId, context.getRequestBody()));
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (OBException e) {
+      return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error previewing the SIF fields for {}: {}", recordId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An internal error occurred while previewing the invoice's fiscal data");
+    }
+  }
+
+  /**
+   * The purchase invoice the creation would build, as far as its SIF fields depend on it: the
+   * order's invoice type ({@link #resolveAPInvoiceDocType}) when there is an order, else the
+   * client's ({@link #findAPInvoiceDocType}).
+   */
+  protected InvoiceSifPreset.Target resolveSifTarget(String specName, String recordId,
+      JSONObject body) {
+    Order order;
+    org.openbravo.model.common.enterprise.Organization org;
+    BusinessPartner partner;
+    if (SPEC_GOODS_RECEIPT.equals(specName)) {
+      List<String> receiptIds = parseReceiptIds(body, recordId);
+      ShipmentInOut first = OBDal.getInstance().get(ShipmentInOut.class, receiptIds.get(0));
+      if (first == null) {
+        throw new OBException("Goods receipt not found: " + receiptIds.get(0));
+      }
+      order = receiptIds.size() == 1
+          ? (first.getSalesOrder() != null ? first.getSalesOrder() : deriveOrderFromLines(first))
+          : resolveCommonOrder(MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(
+              receiptIds, "Goods receipt not found: ", "No goods receipts provided",
+              "All goods receipts must belong to the same Business Partner"));
+      org = first.getOrganization();
+      partner = first.getBusinessPartner();
+    } else {
+      order = OBDal.getInstance().get(Order.class, recordId);
+      if (order == null) {
+        throw new OBException("Purchase order not found: " + recordId);
+      }
+      org = order.getOrganization();
+      partner = order.getBusinessPartner();
+    }
+    DocumentType docType = order != null ? resolveAPInvoiceDocType(order)
+        : findAPInvoiceDocType(org.getClient().getId());
+    return new InvoiceSifPreset.Target(org, partner, docType, false, order);
   }
 
   // ── Multi-receipt (bulk) invoice creation ──────────────────────────────────────────

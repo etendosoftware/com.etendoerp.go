@@ -1136,7 +1136,7 @@ public class GoodsShipmentHeaderHandlerTest {
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
             "importOrderLines", "availableInvoices", "availableInvoiceLines", "createDraftInvoice",
-            "createReturn", "cloneRecord", "post", "unpost"),
+            "sifDefaults", "createReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
@@ -1194,7 +1194,7 @@ public class GoodsShipmentHeaderHandlerTest {
       names.add(p.getName());
       assertFalse(p.getName() + " must be optional: the SPA posts only priceListId", p.isRequired());
     }
-    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines"), names);
+    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines", "sifFields"), names);
     String d = c.getDescription();
     org.junit.Assert.assertTrue(d, d.contains("COMPLETES") && d.contains("completed")
         && d.contains("cannot have its quantities edited"));

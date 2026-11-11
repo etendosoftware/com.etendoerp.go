@@ -390,6 +390,9 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(CreateDraftInvoiceHandler.QUOTATION_CONTRACT.getName(),
         CreateDraftInvoiceHandler.QUOTATION_CONTRACT);
+    // ETP-6179: the SIF fields the generated invoice would get.
+    contracts.put(CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT);
     contracts.put(RejectQuotationHandler.CONTRACT.getName(), RejectQuotationHandler.CONTRACT);
     contracts.put(CreateRejectReasonHandler.CONTRACT.getName(), CreateRejectReasonHandler.CONTRACT);
     return Collections.unmodifiableMap(contracts);

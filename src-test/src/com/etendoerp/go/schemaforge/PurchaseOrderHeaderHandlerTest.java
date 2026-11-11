@@ -890,13 +890,16 @@ public class PurchaseOrderHeaderHandlerTest {
   public void actionContracts_declaresReceiptInvoiceAndCloneWithoutParams() throws Exception {
     Map<String, NeoActionContract> contracts = new PurchaseOrderHeaderHandler().actionContracts();
 
-    assertEquals(List.of("createGoodsReceipt", "createPurchaseInvoice", "cloneRecord"),
+    assertEquals(List.of("createGoodsReceipt", "createPurchaseInvoice", "sifDefaults",
+            "cloneRecord"),
         List.copyOf(contracts.keySet()));
     for (NeoActionContract c : contracts.values()) {
       assertEquals("POST", c.getHttpMethod());
-      // ETP-5714: createPurchaseInvoice declares only the optional boolean allowDuplicate
+      // ETP-5714: createPurchaseInvoice declares the optional boolean allowDuplicate;
+      // ETP-6179: and the optional sifFields object
       assertEquals(c.getName() + " parameters",
-          "createPurchaseInvoice".equals(c.getName()) ? List.of("allowDuplicate") : List.<String>of(),
+          "createPurchaseInvoice".equals(c.getName()) ? List.of("allowDuplicate", "sifFields")
+              : List.<String>of(),
           c.getParams().stream().map(NeoActionContract.Param::getName)
               .collect(java.util.stream.Collectors.toList()));
     }

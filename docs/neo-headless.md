@@ -5186,6 +5186,13 @@ this fix.
 
 #### 4.12.9 `etendo_batch` is on again, and what still differs (ETP-5335 → ETP-5415)
 
+> **SIF fields of a return-to-vendor rectificativa: REST and SPA yes, MCP no (ETP-6179).**
+> `createReturnInvoice` on `return-to-vendor-shipment` reads `sifFields` and the header answers
+> `sifDefaults` on every channel, but the pair is still bound by `Java_Qualifier` and its contract was
+> not touched, so `etendo_action` does not list either and refuses `sifFields` as an unknown parameter.
+> A caller that sends nothing still gets the defaults and the rectification guard. Closes when the
+> pair migrates to `@NeoExtension` (see §4.12.36b, ETP-6179).
+
 > **Accounting status: REST returns it, MCP does not (ETP-5684).** For a role without
 > `showAccountingFields`, every MCP tool result drops `posted`, `etblkpAccountingstatus` and
 > `etblkpBulkposting` (`McpResponseSanitizer`), and `etendo_schema` does not list those columns.
@@ -13518,6 +13525,57 @@ any read error, mirroring `InvoiceReactivationGuard`/`RectificationTotalGuard`. 
 every channel, so no divergence to declare. Full user-facing description:
 `etendo_schema_forge`'s `docs/generated-custom-windows/sales-invoice.md` → *Rectificative invoice
 fiscal-code validation*.
+
+**ETP-6179 — the one-step invoice-creating actions take the SIF fields and reach the guard.**
+`createDraftInvoice` (sales order, sales quotation, goods shipment), `createPurchaseInvoice`
+(purchase order, goods receipt) and `createReturnInvoice` (return material receipt, return to vendor
+shipment) build the invoice header with `OBProvider` and complete it in the same call, so they never
+went through `completeInvoiceIfNeeded`: a factura rectificativa generated from a return completed as
+an ordinary `F1` (the `C_Invoice.EM_Etvfac_Inv_Type` entity default, which also made
+`InvoiceCompletionService.populateVerifactuFieldsFromDocType`'s `COALESCE(invoice, docType)` a no-op
+for a document type configured `F2`), with no SII motive and no TicketBAI code. `InvoiceSifPreset`
+(invoice-specific, structure only) now runs right before `completeInvoiceOrThrow` in all three:
+
+- **Body key `sifFields`** (optional object, declared in every one of those contracts through
+  `InvoiceSifPreset.sifFieldsParam()`): `{field: value}` with the DAL property names of the SIF tab.
+  Only the editable fields of the systems active for the invoice's organization are accepted — SII
+  (`siiConfigActive`, both directions): `etsgDateOperation`, `aeatsiiClaveTipo` (sales, `F1`/`F2`/`F4`)
+  or `aeatsiiMotivoRectif` (sales rectificative, `R1`–`R5`) or `aeatsiiClaveTipoFc` (purchase,
+  `F6`/`LC`/`F5`/`F1`), `aeatsiiDescripcionSii`, `aeatsiiIsauthorization`, `aeatsiiFechaRegCont`
+  (purchase); VERI\*FACTU (sales only): `etvfacInvType` (`F1`/`F2`, or `R1`–`R5` on a rectificative),
+  `etvfacVerifacDesc`, `etvfacSimpinvart7273`, `etvfacInvNoIDArt61d`; TicketBAI (sales rectificative
+  only): `tbaiReverseinvoicecode`. Anything else is a 422 `ETGO_InvoiceSifFieldInvalid`
+  (`messageParams.field`); `aeatsiiIsauthorization:true` without an SII authorization number is a 422
+  `ETGO_InvoiceSiiAuthorizationUnavailable`.
+- **Defaults for a caller that sends nothing** (MCP, REST): the VERI\*FACTU type of the document type
+  the action uses (`F1` when it has none or has a rectificative code); on a rectificative, `R4` for
+  SII's motive, TicketBAI's code and VERI\*FACTU's type. A key not sent that is not one of those keeps
+  what the creation path gave the invoice. Structural fields follow: SII `R`/`I`, the TicketBAI and
+  VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`). This supersedes, for
+  these flows only, the CP-14 "never preselect a motive" stance: the screen shows the value in a
+  mandatory step before anything is confirmed (decided by the user, ETP-6179).
+- **Then `RectificationFiscalCodeGuard.evaluate(invoice)`** — the same per-system rule and 422 bodies as
+  the header completion (`ETGO_InvoiceRectificationCodeRequired`,
+  `ETGO_InvoiceVerifactuInvTypeNotRectificative`). A refusal rolls the whole creation back
+  (`InvoiceSifPreset.Refused#toResponse`, batch-aware like `NeoQuotaCreateCheck.Refused`).
+- **Read action `sifDefaults`** (POST, creates nothing) on every one of those sources: same body keys
+  that select what is invoiced (`shipmentIds` / `receiptIds`), answers
+  `{data:{systems, sales, rectificative, fields:{name: default}, fieldSpecs:[{name, system, type,
+  options}], siiAuthorizationAvailable}}`, resolving the document type exactly as the creation does.
+  `systems` empty means nothing to choose. The SPA's "Datos fiscales" step is built from it, so the
+  screen and the server never disagree. Declared in the contracts of `sales-order/header`,
+  `sales-quotation/quotation`, `goods-shipment/goodsShipment`, `purchase-order/header`,
+  `goods-receipt/goodsReceipt` and `return-material-receipt/returnMaterialReceipt`.
+- **Declared divergence:** `return-to-vendor-shipment/returnToVendorShipment` is still bound by
+  `Java_Qualifier`; its contract was not touched (touching it means migrating it), so MCP does not
+  list `sifFields` / `sifDefaults` there and refuses `sifFields` as unknown. REST and the SPA reach both
+  (`createReturnInvoice` reads the key through the shared `ReturnInvoiceSupport`, `sifDefaults` is
+  answered by `AbstractReturnDocumentHeaderHandler`). A purchase rectificative only has SII fields, and
+  no motive (purchase-side corrective support is not implemented, CP-10).
+- **Ordinary document types only for an ordinary invoice:** `CreateDraftInvoiceHandler.findARInvoiceDocType`
+  and `CreatePurchaseInvoiceHandler.findAPInvoiceDocType` skip return (`IsReturn`) and rectificative
+  types (`RectificativeSupport.isCorrective`); before, the org's default "Factura rectificativa" could
+  be picked for an invoice generated from a shipment.
 
 **ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
 already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`

@@ -1330,7 +1330,7 @@ public class SalesOrderHeaderHandlerTest {
   public void actionContracts_declaresShipmentInvoiceAndClone() {
     Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts = new SalesOrderHeaderHandler().actionContracts();
 
-    assertEquals(List.of("createShipment", "createDraftInvoice", "cloneRecord"),
+    assertEquals(List.of("createShipment", "createDraftInvoice", "sifDefaults", "cloneRecord"),
         List.copyOf(contracts.keySet()));
     for (com.etendoerp.go.schemaforge.util.NeoActionContract c : contracts.values()) {
       assertEquals("POST", c.getHttpMethod());
@@ -1349,7 +1349,7 @@ public class SalesOrderHeaderHandlerTest {
         && invoice.contains("invoiced only for what those shipments still hold")
         && invoice.contains("including one whose shipped quantity draft invoices already hold"));
     assertFalse(invoice.contains("as importOrderLines would"));
-    assertEquals(List.of("lines"), contracts.get("createDraftInvoice").getParams().stream()
+    assertEquals(List.of("lines", "sifFields"), contracts.get("createDraftInvoice").getParams().stream()
         .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
   }
 

@@ -1407,11 +1407,15 @@ public class SalesQuotationHeaderHandlerTest {
     Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
         new SalesQuotationHeaderHandler().actionContracts();
 
-    assertEquals(List.of("createDraftInvoice", "rejectQuotation", "createRejectReason"),
+    assertEquals(List.of("createDraftInvoice", "sifDefaults", "rejectQuotation",
+            "createRejectReason"),
         List.copyOf(contracts.keySet()));
     com.etendoerp.go.schemaforge.util.NeoActionContract invoice = contracts.get("createDraftInvoice");
     assertSame(CreateDraftInvoiceHandler.QUOTATION_CONTRACT, invoice);
-    assertTrue("a quotation is invoiced in full: no parameters", invoice.getParams().isEmpty());
+    // a quotation is invoiced in full: its only parameter is the SIF fields (ETP-6179)
+    assertEquals(List.of("sifFields"), invoice.getParams().stream()
+        .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName)
+        .collect(java.util.stream.Collectors.toList()));
     String description = invoice.getDescription();
     assertTrue("must warn the invoice is completed despite the name",
         description.contains("COMPLETES") && description.contains("despite the name"));
