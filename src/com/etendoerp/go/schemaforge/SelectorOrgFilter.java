@@ -142,7 +142,7 @@ public final class SelectorOrgFilter {
    * Append a full-text search predicate across all searchable properties of a custom-HQL selector.
    * Standard rich selectors use {@link #appendRichSearchFilter} instead.
    *
-   * <p>Emits an OR clause: {@code (upper(COALESCE(cast(<expr> as string), '')) LIKE upper(:search))}.
+   * <p>Emits an OR clause: {@code ((upper(x) LIKE :searchLoose AND lower(x) LIKE :search))} with {@code x = COALESCE(cast(<expr> as string), '')}.
    * No-op when {@code search} is blank or {@code searchableProps} is empty.
    *
    * <p>Each fragment is resolved via {@link #resolveSearchableExpression(String, String)}:
@@ -196,10 +196,45 @@ public final class SelectorOrgFilter {
   }
 
   /**
-   * One OR-ed {@code upper(...) LIKE upper(:search)} per expression. The term is upper-cased by the
-   * database with the same function as the column, so the match cannot differ by Java/PostgreSQL
-   * case rules, and a string column stays a bare {@code upper(col)} that a trigram index on
-   * {@code upper(col)} can serve. Other types (and fragments whose type is unknown) keep the cast.
+   * The two-part search predicate (ETP-6103): {@code upper(x) LIKE :searchLoose} is the prefilter a
+   * trigram index on {@code upper(x)} can serve; {@code lower(x) LIKE :search} keeps the exact
+   * pre-ETP-6103 results, because on a C-collation database upper()/lower() only fold ASCII, so a
+   * plain {@code upper(x) LIKE upper(:search)} would miss accented text. The caller binds both
+   * params (see {@link #searchPattern} / {@link #searchLoosePattern}).
+   */
+  static String searchLike(String expression) {
+    return "(upper(" + expression + ") LIKE :searchLoose AND lower(" + expression + ") LIKE :search)";
+  }
+
+  /** The {@code :search} value: the term lowercased in Java, exactly as before ETP-6103. */
+  static String searchPattern(String search) {
+    return "%" + search.toLowerCase() + "%";
+  }
+
+  /**
+   * The {@code :searchLoose} value, built from {@link #searchPattern}: ASCII letters upper-cased,
+   * every other code point (one per character, surrogate pairs included) a {@code _} wildcard. It
+   * matches whenever the lower() predicate does, whatever the database locale (on a C-collation
+   * database upper()/lower() only fold ASCII), and it can drive a trigram index on {@code upper(col)}.
+   */
+  static String searchLoosePattern(String search) {
+    StringBuilder out = new StringBuilder();
+    searchPattern(search).codePoints().forEach(cp -> {
+      // A backslash is LIKE's escape: "\ú" would become "\_" (a literal "_") and reject rows.
+      if (cp < 128 && cp != '\\') {
+        out.append((char) Character.toUpperCase(cp));
+      } else {
+        out.append('_');
+      }
+    });
+    return out.toString();
+  }
+
+  /**
+   * One OR-ed {@link #searchLike} per expression. A string column stays a
+   * bare {@code upper(col)} that a trigram index on {@code upper(col)} can serve (the lower() half
+   * keeps the exact pre-ETP-6103 results on a C-collation database). Other types (and fragments
+   * whose type is unknown) keep the cast.
    * A NULL column never matches (before it was '' and matched only a term of wildcards).
    */
   private static void appendSearchPredicate(StringBuilder hql, List<String> expressions,
@@ -214,9 +249,10 @@ public final class SelectorOrgFilter {
       }
       String expression = expressions.get(i);
       if (isStringProperty(entityName, alias, expression)) {
-        hql.append("upper(").append(expression).append(") LIKE upper(:search)");
+        hql.append(searchLike(expression));
       } else {
-        hql.append("upper(COALESCE(cast(").append(expression).append(" as string), '')) LIKE upper(:search)");
+        hql.append(searchLike(
+            "COALESCE(cast(" + expression + " as string), '')"));
       }
     }
     hql.append(")");

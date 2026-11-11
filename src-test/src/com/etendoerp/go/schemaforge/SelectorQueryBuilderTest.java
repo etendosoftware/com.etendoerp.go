@@ -186,8 +186,8 @@ class SelectorQueryBuilderTest {
       SelectorOrgFilter.appendCustomSearchFilter(hql, Arrays.asList("e.name", "e.creditLimit"), "e",
           "mi", false, "BusinessPartner");
       String result = hql.toString();
-      assertTrue(result.contains("upper(e.name) LIKE upper(:search)"), result);
-      assertTrue(result.contains("upper(COALESCE(cast(e.creditLimit as string), '')) LIKE upper(:search)"),
+      assertTrue(result.contains("(upper(e.name) LIKE :searchLoose AND lower(e.name) LIKE :search)"), result);
+      assertTrue(result.contains("(upper(COALESCE(cast(e.creditLimit as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.creditLimit as string), '')) LIKE :search)"),
           result);
     }
   }
@@ -214,9 +214,9 @@ class SelectorQueryBuilderTest {
         SearchableFragment.ofRelativePath("product.name"),
         SearchableFragment.ofRelativePath("name"),
         SearchableFragment.ofClauseLeftPart("bp.searchKey")), "e", "mi", false);
-    assertEquals(" WHERE (upper(COALESCE(cast(e.product.name as string), '')) LIKE upper(:search)"
-        + " OR upper(COALESCE(cast(e.name as string), '')) LIKE upper(:search)"
-        + " OR upper(COALESCE(cast(bp.searchKey as string), '')) LIKE upper(:search))", hql.toString());
+    assertEquals(" WHERE ((upper(COALESCE(cast(e.product.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.product.name as string), '')) LIKE :search)"
+        + " OR (upper(COALESCE(cast(e.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.name as string), '')) LIKE :search)"
+        + " OR (upper(COALESCE(cast(bp.searchKey as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(bp.searchKey as string), '')) LIKE :search))", hql.toString());
   }
 
   /** Rich path: no-op when search is blank, like the custom path. */
@@ -294,8 +294,8 @@ class SelectorQueryBuilderTest {
     String where = withoutOrgFilters(() -> SelectorQueryBuilder.buildRichQueryWhereClause(
         meta, "p", "e.active = true", "e", null).getHql());
 
-    assertEquals("as e where e.active = true AND (upper(COALESCE(cast(e.product.name as string), '')) LIKE upper(:search)"
-        + " OR upper(COALESCE(cast(e.product.searchKey as string), '')) LIKE upper(:search))", where);
+    assertEquals("as e where e.active = true AND ((upper(COALESCE(cast(e.product.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.product.name as string), '')) LIKE :search)"
+        + " OR (upper(COALESCE(cast(e.product.searchKey as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.product.searchKey as string), '')) LIKE :search))", where);
   }
 
   /** Custom-HQL path: unchanged — a dotted fragment is used as written, whatever its origin. */
@@ -313,9 +313,9 @@ class SelectorQueryBuilderTest {
         " FROM BusinessPartner bp", "bp", meta, null, "mi", null).getHql());
 
     assertEquals(" FROM BusinessPartner bp WHERE ("
-        + "upper(COALESCE(cast(contact.name as string), '')) LIKE upper(:search)"
-        + " OR upper(COALESCE(cast(bp.searchKey as string), '')) LIKE upper(:search)"
-        + " OR upper(COALESCE(cast(bp.name as string), '')) LIKE upper(:search))", from);
+        + "(upper(COALESCE(cast(contact.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(contact.name as string), '')) LIKE :search)"
+        + " OR (upper(COALESCE(cast(bp.searchKey as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(bp.searchKey as string), '')) LIKE :search)"
+        + " OR (upper(COALESCE(cast(bp.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(bp.name as string), '')) LIKE :search))", from);
   }
 
   // --------------------------------------------------------------------
