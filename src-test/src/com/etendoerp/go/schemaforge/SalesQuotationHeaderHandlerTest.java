@@ -938,6 +938,37 @@ public class SalesQuotationHeaderHandlerTest {
     }
   }
 
+  /**
+   * ETP-5848: a refusal core RAISEs while converting — a quotation with no payment method — is the
+   * caller's to fix, so it is a 422 naming the message key, not a 500 with the raw exception.
+   */
+  @Test
+  public void testConvertQuotation_coreRefusal_isA422WithItsMessageKey() throws Exception {
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    when(process.convertQuotationIntoSalesOrder(false, "q-5528")).thenThrow(new IllegalStateException(
+        new java.sql.SQLException("ERROR: @APRM_PAYMENTMETHOD_MISSING@", "P0001")));
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class), mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class), mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+    OBDal dal = mock(OBDal.class);
+    NeoResponse result;
+    try (MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("createOrder").recordId("q-5528").build());
+    }
+
+    assertEquals(422, result.getHttpStatus());
+    JSONObject error = result.getBody().getJSONObject("error");
+    assertEquals("APRM_PAYMENTMETHOD_MISSING", error.getJSONArray("messageKeys").getString(0));
+    assertFalse(result.getBody().has("salesOrderId"));
+    verify(dal).rollbackAndClose();
+  }
+
   /** An order core did not leave in CO is not reactivated. */
   @Test
   public void testConvertQuotation_orderNotCompleted_noReactivation() throws Exception {
