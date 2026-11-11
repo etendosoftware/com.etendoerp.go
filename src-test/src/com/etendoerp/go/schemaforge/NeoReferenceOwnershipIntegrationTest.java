@@ -79,7 +79,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * through {@link BatchService#executeBatch}, so the refusal is proven where it happens: before any
  * customization runs. Both shipped entities used here have one — {@code sales-order/lines}
  * ({@code orderLineHandler}) and {@code contacts/locationAddress}
- * ({@code contactsLocationAddressHandler}, which persists on its own). Target-mutation cases
+ * ({@code ContactsLocationAddressHandler}, bound by {@code @NeoExtension}, which persists on its
+ * own). Target-mutation cases
  * stop at a mocked customization boundary: real DAL ownership and reference preflight run, but
  * the boundary returns a sentinel response so neither refused nor permitted fixtures are mutated.
  *
@@ -363,7 +364,9 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
     AtomicReference<NeoResponse> written = new AtomicReference<>();
     when(servlet.findEntity(spec.getId(), entityName)).thenReturn(entity);
     when(servlet.extractQueryParams(any())).thenReturn(query == null ? new HashMap<>() : query);
-    when(servlet.handleWithHooks(anyString(), any(NeoContext.class), any(), any()))
+    // ETP-6206: contacts/locationAddress is bound by @NeoExtension alone, so its Java_Qualifier
+    // (the first argument) is null; anyString() does not match null.
+    when(servlet.handleWithHooks(nullable(String.class), any(NeoContext.class), any(), any()))
         .thenAnswer(inv -> NeoServletSupport.handleWithHooks(inv.getArgument(0),
             inv.getArgument(1), handler));
     doAnswer(inv -> {
