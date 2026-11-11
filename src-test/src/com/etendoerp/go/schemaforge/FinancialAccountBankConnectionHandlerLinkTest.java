@@ -464,12 +464,12 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     JSONObject english = syncData(BankIntegrationConstants.SYNC_IN_PROGRESS, "en_US");
 
     assertEquals("IN_PROGRESS", spanish.getString("status"));
-    assertEquals("Sincronizaci\u00f3n en curso, por favor espera\u2026",
+    assertEquals("Trayendo extractos, por favor espera\u2026",
         spanish.getString("message"));
     assertFalse(spanish.has("code"));
     assertTrue(spanish.has("lastSyncDate"));
     assertEquals("IN_PROGRESS", english.getString("status"));
-    assertEquals("Synchronization in progress, please wait\u2026", english.getString("message"));
+    assertEquals("Fetching statements, please wait\u2026", english.getString("message"));
   }
 
   /**
@@ -483,10 +483,10 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
     assertEquals("ERROR", spanish.getString("status"));
     assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", spanish.getString("code"));
-    assertEquals("No se pudo iniciar la sincronizaci\u00f3n bancaria en este momento. Por favor, "
+    assertEquals("No se pudieron traer los extractos en este momento. Por favor, "
         + "int\u00e9ntalo de nuevo en unos instantes.", spanish.getString("message"));
     assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", english.getString("code"));
-    assertEquals("The bank synchronization could not start right now. Please try again in a few "
+    assertEquals("The statements could not be fetched right now. Please try again in a few "
         + "moments.", english.getString("message"));
   }
 
@@ -565,7 +565,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     assertEquals("PSD2 buffer", error.getString("message"));
     assertEquals("IN_PROGRESS", inProgress.getString("status"));
     assertFalse(inProgress.has("code"));
-    assertEquals("Synchronization in progress, please wait\u2026", inProgress.getString("message"));
+    assertEquals("Fetching statements, please wait\u2026", inProgress.getString("message"));
     assertEquals("ERROR", unavailable.getString("status"));
     assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", unavailable.getString("code"));
   }

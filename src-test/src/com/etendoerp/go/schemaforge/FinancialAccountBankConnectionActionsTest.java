@@ -317,7 +317,7 @@ class FinancialAccountBankConnectionActionsTest {
     void syncBank() throws Exception {
       endpointAnswer = NeoResponse.ok(new JSONObject().put("response", new JSONObject()
           .put("data", new JSONObject().put("status", "IN_PROGRESS")
-              .put("message", "Synchronization in progress, please wait\u2026")
+              .put("message", "Fetching statements, please wait\u2026")
               .put("lastSyncDate", JSONObject.NULL))));
 
       NeoResponse r = actions.handle(ctx("syncBank", ACCOUNT, "POST", true));
@@ -332,7 +332,7 @@ class FinancialAccountBankConnectionActionsTest {
       assertEquals(200, r.getHttpStatus());
       JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
       assertEquals("IN_PROGRESS", data.getString("status"));
-      assertEquals("Synchronization in progress, please wait\u2026", data.getString("message"));
+      assertEquals("Fetching statements, please wait\u2026", data.getString("message"));
     }
 
     @Test

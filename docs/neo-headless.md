@@ -4042,7 +4042,7 @@ lock anyway.
 | Outcome | `status` | `code` | `message` |
 |---|---|---|---|
 | Finished | `OK` (the PSD2 module's `Success`, renamed on the wire by `wireSyncStatus`), `WARNING` or `ERROR` | absent | the PSD2 module's message lines, as before |
-| Another sync of the account holds the lock | `IN_PROGRESS` | absent | `psd2BankSyncInProgress` ("Synchronization in progress, please wait…") |
+| Another sync of the account holds the lock | `IN_PROGRESS` | absent | `psd2BankSyncInProgress` ("Fetching statements, please wait…") |
 | The lock could not be taken (no external pool, no connection); retriable | `ERROR` | `BANK_SYNC_LOCK_UNAVAILABLE` | `psd2BankSyncLockUnavailable` |
 | The "already imported?" check failed for at least one bank connection; retriable | the run's own status: `ERROR`, or `WARNING` when another connection still imported | `BANK_SYNC_DUPLICATE_CHECK_FAILED` | `psd2BankSyncDuplicateCheckFailed` |
 
