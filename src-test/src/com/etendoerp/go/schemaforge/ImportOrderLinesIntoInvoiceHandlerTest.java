@@ -1400,8 +1400,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       Probe probe = isSales ? salesScenario() : scenario();
       probe.drafts.put("ol2", bd("5"));
       probe.holders.put("ol2", List.of(
-          new OrderInvoicePending.DraftInvoiceRef("inv-a", "FV1000002"),
-          new OrderInvoicePending.DraftInvoiceRef("inv-b", "FV1000003")));
+          new OrderInvoicePending.DraftInvoiceRef("inv-a", "FV1000002", bd("2")),
+          new OrderInvoicePending.DraftInvoiceRef("inv-b", "FV1000003", bd("3"))));
       String side = isSales ? "sales" : "purchase";
 
       JSONArray rows = run(probe, "availableOrderLines",
@@ -1418,6 +1418,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       assertEquals(side, "inv-a", held.getJSONObject(0).getString("id"));
       assertEquals(side, "FV1000002", held.getJSONObject(0).getString("documentNo"));
       assertEquals(side, "FV1000003", held.getJSONObject(1).getString("documentNo"));
+      assertEquals(side + ": what each draft holds of the line", 0,
+          bd("3").compareTo(new BigDecimal(held.getJSONObject(1).get("quantity").toString())));
     }
   }
 
@@ -1436,8 +1438,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     when(session.createQuery(hql.capture(), Mockito.eq(Object[].class))).thenReturn(query);
     when(query.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(query);
     when(query.setParameterList(Mockito.anyString(), Mockito.anyCollection())).thenReturn(query);
-    List<Object[]> found = List.<Object[]>of(new Object[] { "ol1", "inv-a", "FV1" },
-        new Object[] { "ol1", "inv-b", "FV2" });
+    List<Object[]> found = List.<Object[]>of(new Object[] { "ol1", "inv-a", "FV1", bd("1") },
+        new Object[] { "ol1", "inv-b", "FV2", bd("4") });
     when(query.list()).thenReturn(found);
     List<String> orgs = List.of("org-1", "org-2");
 
@@ -1446,6 +1448,7 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
     assertEquals(2, holders.get("ol1").size());
     assertEquals("FV2", holders.get("ol1").get(1).documentNo);
+    assertEquals(0, bd("4").compareTo(holders.get("ol1").get(1).quantity));
     Mockito.verify(query).setParameter("inv", "i1");
     Mockito.verify(query).setParameter("sot", true);
     Mockito.verify(query).setParameter("client", "client-1");
@@ -1453,6 +1456,7 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertTrue(hql.getValue(), hql.getValue().contains("i.documentStatus = 'DR'")
         && hql.getValue().contains("i.id <> :inv")
         && hql.getValue().contains("i.client.id = :client")
+        && hql.getValue().contains("sum(il.invoicedQuantity)")
         && hql.getValue().contains("i.organization.id in (:orgs)"));
     assertTrue("no line, no query",
         OrderInvoicePending.draftHolders(List.of(), true, "i1", "client-1", orgs).isEmpty());

@@ -12825,7 +12825,7 @@ the global discount — the import popup's row amount. `availableOrderLines` of 
 (the order line's net price, its line discount already applied), `discount` (that line discount as a %, written like
 `globalDiscount`) and `amount` (`unitPrice` × `pendingQuantity`, at the currency's precision), which is what the popup
 shows per line (ETP-5828, UI/MCP parity), and `inDraftInvoices` when OTHER draft invoices of the
-direction hold part of the line: `[{id, documentNo}]` of those drafts by document number, this
+direction hold part of the line: `[{id, documentNo, quantity}]` of those drafts by document number (`quantity`: what that draft's active lines hold of the order line, ETP-5828 QA OBS-2: the popup also names the draft holding PART of a still selectable line, «1 en factura borrador X»), this
 invoice left out, absent when none (ETP-5828 QA UI-4: the popup says «en factura borrador X»
 instead of a bare «ya importado» for a line taken by another draft, and the agent can tell the user
 the same). Only the listed lines are looked up, and only drafts of the session's client and the

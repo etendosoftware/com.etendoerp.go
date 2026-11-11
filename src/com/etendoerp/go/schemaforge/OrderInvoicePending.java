@@ -128,20 +128,24 @@ final class OrderInvoicePending {
    * The DRAFT invoices (of the direction, {@code exceptInvoiceId} left out) whose active lines hold
    * each order line, by document number: the same population {@link #DRAFT_QUANTITIES_HQL} counts.
    */
-  static final String DRAFT_HOLDERS_HQL = "select distinct il.salesOrderLine.id, i.id, "
-      + "i.documentNo from InvoiceLine il join il.invoice i where i.documentStatus = 'DR' "
+  static final String DRAFT_HOLDERS_HQL = "select il.salesOrderLine.id, i.id, i.documentNo, "
+      + "sum(il.invoicedQuantity) from InvoiceLine il join il.invoice i "
+      + "where i.documentStatus = 'DR' "
       + "and i.salesTransaction = :sot and il.active = true and il.salesOrderLine.id in :ids "
       + "and i.id <> :inv and i.client.id = :client and i.organization.id in (:orgs) "
-      + "order by i.documentNo, i.id";
+      + "group by il.salesOrderLine.id, i.id, i.documentNo order by i.documentNo, i.id";
 
   /** A draft invoice holding part of an order line: what the popup and the agent are told. */
   static final class DraftInvoiceRef {
     final String id;
     final String documentNo;
+    /** What the draft's active lines hold of the order line, signed like those lines. */
+    final BigDecimal quantity;
 
-    DraftInvoiceRef(String id, String documentNo) {
+    DraftInvoiceRef(String id, String documentNo, BigDecimal quantity) {
       this.id = id;
       this.documentNo = documentNo;
+      this.quantity = quantity == null ? BigDecimal.ZERO : quantity;
     }
   }
 
@@ -176,7 +180,7 @@ final class OrderInvoicePending {
         .setParameterList("ids", orderLineIds).list();
     for (Object[] row : rows) {
       holders.computeIfAbsent((String) row[0], k -> new ArrayList<>())
-          .add(new DraftInvoiceRef((String) row[1], (String) row[2]));
+          .add(new DraftInvoiceRef((String) row[1], (String) row[2], (BigDecimal) row[3]));
     }
     return holders;
   }
