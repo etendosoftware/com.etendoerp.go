@@ -5196,6 +5196,11 @@ this fix.
 > hides the value itself. Stripping it from REST would make posted documents editable in the UI.
 > Posting and un-posting are refused on both channels alike (§ access control, 4b).
 
+> **Product Movements sorted by the visible Type label is REST only (ETP-5908).** The REST list
+> of `product/transactions` honours `typeLabelOrder` (§5.3.4.a) when `_sortBy` starts with
+> `etgoDocKind`; MCP `etendo_list` never goes through `handleDefault`, ignores the parameter, and
+> keeps ordering by the stored `etgoDocKind` code. Nothing in an MCP response says so.
+
 > **Public API usage is counted on REST only (ETP-6057).** A request made with a public API key's
 > token is counted (`publicapi.request`, [`public-api-usage.md`](public-api-usage.md)) on
 > `/sws/neo/*`, the batch route included (one request per operation), because that is the public API
@@ -8174,6 +8179,62 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 
 - `outstandingAmount` exists for invoices only. `approximate` and `missingRateCurrencies` follow the `NeoCurrencyTotals` rule: a non-zero foreign subtotal was converted / a currency without rate is left out and listed.
 - Draft discount compensation: the grid rewrites `grandTotalAmount` (and invoice `outstandingAmount`) of an unprocessed document with `etgoTotalDiscount > 0` and no active discount line to `amount * (1 - pct/100)`. The aggregate applies the same rule per row in HQL, so the footer adds up to the visible rows. Rounding differs slightly: the server uses PostgreSQL `round(numeric, 2)` (half away from zero) per row, the grid uses Java half-up (`NeoHandlerUtils.roundHalfUp`); they can differ by one cent only for negative exact halves or floating-point edge cases.
+
+#### 5.3.4.a Page order a property path cannot express — `NeoHandler#orderedPage` (ETP-5908)
+
+`_sortBy` only knows property paths, so an order that is not any column's order cannot be requested
+through it, and re-sorting the 50 loaded rows of an infinite scroll would reorder one page, not the
+set. `NeoHandler#orderedPage(context, filteredSet, startRow, pageSize)` lets an entity customization
+return the ids of the requested page, in its order, plus the size of the whole filtered set
+(`NeoOrderedPage`), or `null` to keep the default order (the default of the hook).
+
+- **Wiring (shared, names no entity).** `NeoCrudHandler.handleDefault`, on a list GET, calls
+  `NeoOrderedListPage.apply` right after `NeoListAggregateQuery.remember`. When the customization
+  answers, the fetch is narrowed to `e.id in (<page ids>)` (ids checked against `[A-Za-z0-9_-]{1,64}`
+  first; one that does not match refuses the page and keeps the default order), served as one page
+  sorted by `id`; `NeoOrderedListPage.reorder` then puts the rows back in the customization's order
+  and restores `startRow`, `endRow` and `totalRows` to those of the whole list. Field filtering,
+  identifier enrichment and `afterHandle` run on the result as for any page, so the response keeps
+  its shape. A page over 1000 rows, or an invalid range, keeps the default order.
+- **`NeoListAggregateQuery#orderedIds(orderBy, first, max)` / `#count()`** read the page and the
+  total over the same filtered set as the list (tab, parent, read predicate, grid criteria, readable
+  client/org flags; not admin mode). The order-by is concatenated into the HQL: server-side constants
+  and integers only.
+- **Channels.** REST single and REST batch GET lists. MCP lists do not go through `handleDefault`
+  (declared in §4.12.9).
+
+**Implementer: `ProductTransactionsHandler#orderedPage`**, bound with `@NeoExtension` by `ProductMovementsTabHandler` (`product/transactions`) and `WarehouseProductTransactionsHandler` (`warehouse/productTransactions`) — two thin subclasses, the annotation is not repeatable; both rows have no `Java_Qualifier` (Product window, `transactions` entity,
+the Movements tab; only for an account with the `product-movements-tab` flag, like the rest of the
+tab's extra work). Request contract:
+
+| Parameter | Value | Effect |
+|---|---|---|
+| `_sortBy` | `[-]etgoDocKind[,<tie-breaker>...]`; tie-breakers from `movementDate`, `transactionProcessDate`, `id`, each optionally `-`-prefixed | the Type sort; the order of the tie-breakers is the client's, the id is appended if absent. Any other first field, or a tie-breaker outside the list, keeps the default order |
+| `typeLabelOrder` | comma-separated bucket ids in ascending display order, e.g. `vendor-receipt,customer-shipment,vendor-return,...` | ranks the rows by bucket in that order (`-etgoDocKind` reverses the listed buckets). Unknown ids are ignored; none valid or the parameter absent keeps the default order (the stored `etgoDocKind` code) |
+
+Bucket ids: `vendor-receipt`, `vendor-return`, `customer-shipment`, `customer-return`, `transfer`,
+`internal-consumption`, `inventory-in`, `inventory-out`. A bucket the client did not list sorts after
+the listed ones; rows with no label (production, work orders) always sort last, in both directions.
+
+The bucket of a row is computed in HQL (`ProductMovementTypeOrder#bucketCase`) with the rule the SPA
+uses to pick the visible label (`resolveMovementBucket`, `productMovements.js`):
+
+| `etgoDocKind` (sign of `movementQuantity`) | bucket |
+|---|---|
+| `goods-receipt` (>= 0) / (< 0) | `vendor-receipt` / `vendor-return` |
+| `return-to-vendor-shipment` | `vendor-return` |
+| `goods-shipment` (<= 0) / (> 0) | `customer-shipment` / `customer-return` |
+| `return-material-receipt` | `customer-return` |
+| `goods-movements` | `transfer` |
+| `internal-consumption` | `internal-consumption` |
+| `physical-inventory` (>= 0) / (< 0) | `inventory-in` / `inventory-out` |
+| any other or null kind | by `movementType`: `V+` vendor-receipt, `V-` vendor-return, `C-` customer-shipment, `C+` customer-return, `I+` inventory-in, `I-` inventory-out, `M+`/`M-` transfer, `D+`/`D-` internal-consumption; anything else unlabeled |
+
+`ProductTransactionsHandlerTest` and the SPA's `productMovements.vitest.js` hold the SAME table of
+cases; change the rule in both code and both tests together. The SPA computes `typeLabelOrder` from
+the translated labels of the active language (`localeCompare`), so the order follows the user's
+locale; the server never reads `Accept-Language` for it. Against a backend without this change the
+parameter is ignored and the list keeps the stored-code order.
 
 #### 5.3.5 Payment terms — days validation, duplicates and days-only create (`PaymentTermHandler`, ETP-5826)
 

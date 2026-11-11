@@ -29,6 +29,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -36,6 +38,10 @@ import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -66,6 +72,9 @@ import org.openbravo.dal.service.OBDal;
  * </ul>
  *
  * <p>Tests that require a live Etendo DB are covered by integration tests.
+ *
+ * @covers com.etendoerp.go.schemaforge.ProductTransactionsHandler
+ * @covers com.etendoerp.go.schemaforge.ProductMovementTypeOrder
  */
 class ProductTransactionsHandlerTest {
 
@@ -126,6 +135,28 @@ class ProductTransactionsHandlerTest {
     when(query.setParameterList(eq("ids"), anyList())).thenReturn(query);
     when(query.list()).thenReturn(rows);
     return query;
+  }
+
+  // ---------------------------------------------------------------------------
+  // binding — one @NeoExtension per (spec, entity), no legacy @Named
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Both pairs the handler serves resolve by annotation, and the shared behaviour class carries no
+   * binding of its own (a {@code @Named} would be a second, ambiguous bean).
+   */
+  @Test
+  void binding_bothPairsAreAnnotated_andBaseIsUnbound() {
+    NeoExtension w = WarehouseProductTransactionsHandler.class.getAnnotation(NeoExtension.class);
+    NeoExtension p = ProductMovementsTabHandler.class.getAnnotation(NeoExtension.class);
+    assertEquals("warehouse", w.spec());
+    assertEquals("productTransactions", w.entity());
+    assertEquals("product", p.spec());
+    assertEquals("transactions", p.entity());
+    assertNull(ProductTransactionsHandler.class.getAnnotation(NeoExtension.class));
+    assertNull(ProductTransactionsHandler.class.getAnnotation(javax.inject.Named.class));
+    assertNull(WarehouseProductTransactionsHandler.class.getAnnotation(javax.inject.Named.class));
+    assertNull(ProductMovementsTabHandler.class.getAnnotation(javax.inject.Named.class));
   }
 
   // ---------------------------------------------------------------------------
@@ -1236,5 +1267,354 @@ class ProductTransactionsHandlerTest {
     NeoContext ctx = productCtx(java.util.Map.of("parentId", "P1"));
     ctx.setPreviousResult(NeoResponse.ok(wrapData(new JSONArray())));
     assertNoNativeQuery(ctx);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sort by the visible Type label: bucket rule, order-by and the orderedPage hook
+  // ---------------------------------------------------------------------------
+
+  /**
+   * One row of the shared table of cases: {kind, movementQuantity, movementType, expected bucket}.
+   * The SAME table is in {@code productMovements.vitest.js} (SPA, {@code resolveMovementBucket}); if one
+   * side changes a rule, both tests must change together or one of them fails.
+   */
+  private static final String[][] BUCKET_CASES = {
+      { "goods-receipt", "5", "V+", "vendor-receipt" },
+      { "goods-receipt", "0", "V+", "vendor-receipt" },
+      { "goods-receipt", "-5", "V-", "vendor-return" },
+      { "return-to-vendor-shipment", "-1", "V-", "vendor-return" },
+      { "goods-shipment", "-3", "C-", "customer-shipment" },
+      { "goods-shipment", "0", "C-", "customer-shipment" },
+      { "goods-shipment", "3", "C+", "customer-return" },
+      { "return-material-receipt", "2", "C+", "customer-return" },
+      { "goods-movements", "1", "M+", "transfer" },
+      { "goods-movements", "-1", "M-", "transfer" },
+      { "internal-consumption", "-1", "D-", "internal-consumption" },
+      { "physical-inventory", "2", "I+", "inventory-in" },
+      { "physical-inventory", "0", "I+", "inventory-in" },
+      { "physical-inventory", "-2", "I-", "inventory-out" },
+      { null, "4", "V+", "vendor-receipt" },
+      { null, "-4", "V-", "vendor-return" },
+      { null, "-4", "C-", "customer-shipment" },
+      { null, "4", "C+", "customer-return" },
+      { null, "4", "I+", "inventory-in" },
+      { null, "-4", "I-", "inventory-out" },
+      { null, "4", "M+", "transfer" },
+      { null, "-4", "M-", "transfer" },
+      { null, "4", "D+", "internal-consumption" },
+      { null, "-4", "D-", "internal-consumption" },
+      { null, "4", "P+", "unlabeled" },
+      { null, "4", null, "unlabeled" },
+      // a kind the rule does not know falls through to the movement type code, like a null kind
+      { "something-new", "4", "V+", "vendor-receipt" },
+      { "something-new", "4", "P+", "unlabeled" },
+      // the kind wins over the code
+      { "goods-shipment", "-3", "V+", "customer-shipment" },
+  };
+
+  /** Tiny interpreter of the generated {@code case ... end}: enough to evaluate it on a row. */
+  private static final Pattern CASE_TOKEN = Pattern.compile(
+      "\\(|\\)|case|when|then|else|end|and|e\\.\\w+|'[^']*'|[<>=]|-?\\d+");
+
+  private static String evalCase(String expression, String kind, String qty, String movementType) {
+    List<String> tokens = new java.util.ArrayList<>();
+    Matcher m = CASE_TOKEN.matcher(expression);
+    while (m.find()) {
+      tokens.add(m.group());
+    }
+    int[] pos = { 0 };
+    return evalValue(tokens, pos, Map.of("e.etgoDocKind", kind == null ? "" : "'" + kind + "'",
+        "e.movementQuantity", qty, "e.movementType", movementType == null ? "" : "'" + movementType + "'"));
+  }
+
+  private static String evalValue(List<String> t, int[] p, Map<String, String> row) {
+    if ("(".equals(t.get(p[0]))) {
+      p[0]++;
+      String v = evalValue(t, p, row);
+      p[0]++; // ')'
+      return v;
+    }
+    if (!"case".equals(t.get(p[0]))) {
+      return t.get(p[0]++);
+    }
+    p[0]++;
+    String result = null;
+    boolean decided = false;
+    while ("when".equals(t.get(p[0]))) {
+      p[0]++;
+      String left = row.get(t.get(p[0]++));
+      String op = t.get(p[0]++);
+      String right = t.get(p[0]++);
+      boolean ok = "=".equals(op) ? right.equals(left)
+          : "<".equals(op) ? Double.parseDouble(left) < Double.parseDouble(right)
+              : Double.parseDouble(left) > Double.parseDouble(right);
+      p[0]++; // then
+      String v = evalValue(t, p, row);
+      if (ok && !decided) {
+        result = v;
+        decided = true;
+      }
+    }
+    p[0]++; // else
+    String other = evalValue(t, p, row);
+    p[0]++; // end
+    return decided ? result : other;
+  }
+
+  private static Function<String, String> quoted() {
+    return id -> "'" + id + "'";
+  }
+
+  /** Every kind and sign of the shared table lands in the bucket the client derives its label from. */
+  @Test
+  void typeOrder_bucketRule_matchesTheSharedTableOfCases() {
+    String expression = ProductMovementTypeOrder.bucketCase(quoted());
+    for (String[] c : BUCKET_CASES) {
+      assertEquals("'" + c[3] + "'", evalCase(expression, c[0], c[1], c[2]),
+          "kind=" + c[0] + " qty=" + c[1] + " type=" + c[2]);
+    }
+  }
+
+  /** The bucket ids the backend accepts are exactly the ones the shared table can produce. */
+  @Test
+  void typeOrder_bucketIds_areTheOnesTheTableProduces() {
+    java.util.Set<String> produced = new java.util.TreeSet<>();
+    for (String[] c : BUCKET_CASES) {
+      if (!"unlabeled".equals(c[3])) {
+        produced.add(c[3]);
+      }
+    }
+    assertEquals(new java.util.TreeSet<>(ProductMovementTypeOrder.BUCKETS), produced);
+  }
+
+  private static int rankOf(String orderBy, String kind, String qty, String movementType) {
+    String rankCase = orderBy.substring(0, orderBy.indexOf(" asc, "));
+    return Integer.parseInt(evalCase(rankCase, kind, qty, movementType));
+  }
+
+  private static final String ES_ORDER = "vendor-receipt,customer-shipment,vendor-return,customer-return,"
+      + "transfer,internal-consumption,inventory-in,inventory-out";
+
+  /** Ascending: rows rank by the client's order of the labels, tie-breakers follow, id closes the order. */
+  @Test
+  void typeOrder_ascending_ranksByTheClientOrderThenTieBreakers() {
+    String orderBy = ProductMovementTypeOrder.buildOrderBy(
+        "etgoDocKind,-movementDate,-transactionProcessDate,-id", ES_ORDER);
+    assertNotNull(orderBy);
+    assertEquals(0, rankOf(orderBy, "goods-receipt", "5", "V+"));
+    assertEquals(1, rankOf(orderBy, "goods-shipment", "-3", "C-"));
+    assertEquals(2, rankOf(orderBy, "goods-receipt", "-5", "V-"));
+    assertEquals(3, rankOf(orderBy, "goods-shipment", "3", "C+"));
+    assertEquals(7, rankOf(orderBy, "physical-inventory", "-2", "I-"));
+    assertTrue(orderBy.endsWith(" asc, e.movementDate desc, e.transactionProcessDate desc, e.id desc"),
+        orderBy);
+  }
+
+  /** Descending reverses the buckets, never the tie-breakers the client sent. */
+  @Test
+  void typeOrder_descending_reversesTheBuckets() {
+    String orderBy = ProductMovementTypeOrder.buildOrderBy("-etgoDocKind,-movementDate,-id", ES_ORDER);
+    assertNotNull(orderBy);
+    assertEquals(7, rankOf(orderBy, "goods-receipt", "5", "V+"));
+    assertEquals(0, rankOf(orderBy, "physical-inventory", "-2", "I-"));
+    assertTrue(orderBy.endsWith(" asc, e.movementDate desc, e.id desc"), orderBy);
+  }
+
+  /** Rows with no label sort last in both directions; a bucket the client did not list sorts before them. */
+  @Test
+  void typeOrder_unlabeledRowsAreLast_inBothDirections() {
+    String partial = "vendor-receipt,vendor-return";
+    for (String sort : new String[] { "etgoDocKind,id", "-etgoDocKind,id" }) {
+      String orderBy = ProductMovementTypeOrder.buildOrderBy(sort, partial);
+      int listed = rankOf(orderBy, "goods-receipt", "5", "V+");
+      int unlisted = rankOf(orderBy, "goods-movements", "1", "M+");
+      int unlabeled = rankOf(orderBy, null, "4", "P+");
+      assertTrue(listed < unlisted && unlisted < unlabeled, sort + ": " + listed + "," + unlisted + "," + unlabeled);
+    }
+  }
+
+  /** Without the parameter, with an empty one, or for any other sort field the default order stands. */
+  @Test
+  void typeOrder_notApplicable_returnsNull() {
+    assertNull(ProductMovementTypeOrder.buildOrderBy("etgoDocKind,-movementDate,-id", null));
+    assertNull(ProductMovementTypeOrder.buildOrderBy("etgoDocKind,-movementDate,-id", ""));
+    assertNull(ProductMovementTypeOrder.buildOrderBy("movementQuantity,-id", ES_ORDER));
+    assertNull(ProductMovementTypeOrder.buildOrderBy("-movementDate,-id", ES_ORDER));
+    assertNull(ProductMovementTypeOrder.buildOrderBy(null, ES_ORDER));
+    assertNull(ProductMovementTypeOrder.buildOrderBy(" ", ES_ORDER));
+  }
+
+  /** Unknown ids are ignored; request text never reaches the HQL, only allow-list members do. */
+  @Test
+  void typeOrder_unknownAndMaliciousIds_areIgnoredNeverConcatenated() {
+    String hostile = "vendor-receipt';delete from m_transaction;--, 1) or (1=1, ,vendor-return,vendor-return,<script>";
+    assertEquals(List.of("vendor-return"), ProductMovementTypeOrder.parseOrder(hostile));
+    String orderBy = ProductMovementTypeOrder.buildOrderBy("etgoDocKind,id", hostile);
+    assertNotNull(orderBy);
+    assertFalse(orderBy.contains("delete"));
+    assertFalse(orderBy.contains("script"));
+    assertFalse(orderBy.contains("1=1"));
+    // only hostile ids: nothing valid to order by, so the default order stands
+    assertNull(ProductMovementTypeOrder.buildOrderBy("etgoDocKind,id", "x';drop table a;--,y"));
+  }
+
+  /** A tie-breaker outside the allow-list makes the request decline: nothing client-chosen reaches the HQL. */
+  @Test
+  void typeOrder_unknownTieBreaker_declines() {
+    assertNull(ProductMovementTypeOrder.buildOrderBy("etgoDocKind,e.id;drop table x", ES_ORDER));
+    assertNull(ProductMovementTypeOrder.buildOrderBy("etgoDocKind,-product", ES_ORDER));
+  }
+
+  /** A sort with no id tie-breaker still ends in the id: pages never overlap. */
+  @Test
+  void typeOrder_withoutIdTieBreaker_appendsTheId() {
+    String orderBy = ProductMovementTypeOrder.buildOrderBy("etgoDocKind,-movementDate", ES_ORDER);
+    assertTrue(orderBy.endsWith(", e.movementDate desc, e.id asc"), orderBy);
+  }
+
+  /** The hook asks the filtered set for exactly the requested page, in the built order, plus the total. */
+  @Test
+  void orderedPage_productSpec_readsTheRequestedPageOfTheFilteredSet() {
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    when(set.orderedIds(anyString(), eq(50), eq(50))).thenReturn(List.of("A", "B"));
+    when(set.count()).thenReturn(123);
+    NeoContext ctx = productCtx(Map.of("parentId", "P1", "_sortBy", "-etgoDocKind,-movementDate,-id",
+        "typeLabelOrder", ES_ORDER));
+
+    NeoOrderedPage page = HANDLER.orderedPage(ctx, set, 50, 50);
+
+    assertNotNull(page);
+    assertEquals(List.of("A", "B"), page.getIds());
+    assertEquals(123, page.getTotalRows());
+    verify(set).orderedIds(contains("e.movementDate desc"), eq(50), eq(50));
+  }
+
+  /** No parameter: the hook declines and runs no query, so every other caller keeps the current sort. */
+  @Test
+  void orderedPage_withoutTheParameter_declinesAndRunsNothing() {
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    NeoContext ctx = productCtx(Map.of("parentId", "P1", "_sortBy", "etgoDocKind,-movementDate,-id"));
+
+    assertNull(HANDLER.orderedPage(ctx, set, 0, 50));
+    verify(set, never()).orderedIds(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+        org.mockito.ArgumentMatchers.anyInt());
+    verify(set, never()).count();
+  }
+
+  /** The flag off, or another window sharing the handler: the default order, nothing queried. */
+  @Test
+  void orderedPage_flagOffOrWarehouseSpec_declines() {
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    Map<String, String> params = Map.of("_sortBy", "etgoDocKind,-id", "typeLabelOrder", ES_ORDER);
+    policy.when(ProductMovementsPolicy::isEnabled).thenReturn(false);
+    assertNull(HANDLER.orderedPage(productCtx(params), set, 0, 50));
+    policy.when(ProductMovementsPolicy::isEnabled).thenReturn(true);
+    NeoContext warehouse = NeoContext.builder().specName("warehouse").entityName("productTransactions")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).queryParams(params).build();
+    assertNull(HANDLER.orderedPage(warehouse, set, 0, 50));
+    verify(set, never()).count();
+  }
+
+  /**
+   * The return rows as the real data stores them (not as the sign rule alone would guess): a customer
+   * return is {@code C-} with a POSITIVE quantity, a vendor return is {@code V+} with a NEGATIVE one;
+   * the document kind decides, so the odd movement type and sign do not move the row to another bucket.
+   * Kept apart from the shared table, which mirrors the client's and must not change here alone.
+   */
+  @Test
+  void typeOrder_realReturnRows_followTheirDocumentKind() {
+    String expression = ProductMovementTypeOrder.bucketCase(quoted());
+    assertEquals("'customer-return'", evalCase(expression, "return-material-receipt", "3", "C-"));
+    assertEquals("'customer-return'", evalCase(expression, "return-material-receipt", "-3", "C-"));
+    assertEquals("'vendor-return'", evalCase(expression, "return-to-vendor-shipment", "-3", "V+"));
+    assertEquals("'vendor-return'", evalCase(expression, "return-to-vendor-shipment", "3", "V+"));
+    assertEquals("'internal-consumption'", evalCase(expression, "internal-consumption", "-3", "D-"));
+    // a plain shipment with the same C- code is NOT a return
+    assertEquals("'customer-shipment'", evalCase(expression, "goods-shipment", "-3", "C-"));
+  }
+
+  /** A repeated id counts once: the ranks stay dense and no listed bucket falls behind the unlisted ones. */
+  @Test
+  void typeOrder_duplicateIdsInTheOrder_countOnce() {
+    assertEquals(List.of("vendor-return", "vendor-receipt"),
+        ProductMovementTypeOrder.parseOrder("vendor-return,vendor-return,vendor-receipt,vendor-return"));
+    String orderBy = ProductMovementTypeOrder.buildOrderBy("etgoDocKind,id",
+        "vendor-return,vendor-return,vendor-receipt");
+    assertEquals(0, rankOf(orderBy, "return-to-vendor-shipment", "-1", "V-"));
+    assertEquals(1, rankOf(orderBy, "goods-receipt", "1", "V+"));
+    assertEquals(2, rankOf(orderBy, "goods-movements", "1", "M+"));
+    assertEquals(3, rankOf(orderBy, null, "1", "P+"));
+  }
+
+  /** Blank, whitespace-only or separator-only values are an absent order: default sort. */
+  @Test
+  void typeOrder_blankOrder_declines() {
+    for (String blank : new String[] { " ", ",", " , ,", "\t" }) {
+      assertNull(ProductMovementTypeOrder.buildOrderBy("etgoDocKind,id", blank), "[" + blank + "]");
+    }
+    assertTrue(ProductMovementTypeOrder.parseOrder(null).isEmpty());
+  }
+
+  /** Ids with padding are trimmed; ids with different case or inner text are not buckets. */
+  @Test
+  void typeOrder_parseOrder_trimsButDoesNotGuess() {
+    assertEquals(List.of("transfer", "vendor-receipt"),
+        ProductMovementTypeOrder.parseOrder(" transfer , Vendor-Receipt,vendor-receipt "));
+  }
+
+  /**
+   * No HQL injection: whatever the request carries, the generated order-by is made only of the
+   * allow-listed property paths, the bucket/kind/code constants, integers computed here and keywords.
+   */
+  @Test
+  void typeOrder_generatedHql_containsOnlyAllowListedTokens() {
+    String hostile = "vendor-receipt,'; drop table a;--,transfer\") or 1=1";
+    String orderBy = ProductMovementTypeOrder.buildOrderBy(
+        "-etgoDocKind,-movementDate,transactionProcessDate,id", hostile);
+    assertNotNull(orderBy);
+    java.util.Set<String> literals = new java.util.HashSet<>(List.of("goods-receipt", "return-to-vendor-shipment",
+        "goods-shipment", "return-material-receipt", "goods-movements", "internal-consumption",
+        "physical-inventory", "V+", "V-", "C-", "C+", "I+", "I-", "M+", "M-", "D+", "D-"));
+    Matcher quotedLiteral = Pattern.compile("'([^']*)'").matcher(orderBy);
+    while (quotedLiteral.find()) {
+      assertTrue(literals.contains(quotedLiteral.group(1)), "unexpected literal: " + quotedLiteral.group(1));
+    }
+    String rest = orderBy.replaceAll("'[^']*'", "");
+    java.util.Set<String> words = new java.util.HashSet<>(List.of("case", "when", "then", "else", "end", "asc",
+        "desc", "e.etgoDocKind", "e.movementQuantity", "e.movementType", "e.movementDate",
+        "e.transactionProcessDate", "e.id"));
+    Matcher token = Pattern.compile("[A-Za-z_.]+|\\d+|[(),<>=]|\\s+|.").matcher(rest);
+    while (token.find()) {
+      String t = token.group();
+      assertTrue(t.isBlank() || t.matches("\\d+") || t.matches("[(),<>=]") || words.contains(t),
+          "unexpected token: [" + t + "] in " + orderBy);
+    }
+  }
+
+  /** An allow-listed tie-breaker may be descending, may be the id alone, and the id is never repeated. */
+  @Test
+  void typeOrder_tieBreakers_areAllowListedAndIdIsNotRepeated() {
+    String orderBy = ProductMovementTypeOrder.buildOrderBy("etgoDocKind,-id", ES_ORDER);
+    assertTrue(orderBy.endsWith(" asc, e.id desc"), orderBy);
+    assertEquals(1, orderBy.split("e\\.id", -1).length - 1);
+    assertTrue(ProductMovementTypeOrder.buildOrderBy("etgoDocKind", ES_ORDER).endsWith(" asc, e.id asc"));
+    assertNull(ProductMovementTypeOrder.buildOrderBy("etgoDocKind,id,product", ES_ORDER));
+  }
+
+  /** An unallowed tie-breaker makes the hook decline (200, default order) and run no query. */
+  @Test
+  void orderedPage_unallowedTieBreaker_declinesWithoutQuerying() {
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    NeoContext ctx = productCtx(Map.of("_sortBy", "etgoDocKind,-product", "typeLabelOrder", ES_ORDER));
+    assertNull(HANDLER.orderedPage(ctx, set, 0, 50));
+    verify(set, never()).count();
+  }
+
+  /** A context with no query params at all is the default order. */
+  @Test
+  void orderedPage_withoutQueryParams_declines() {
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    assertNull(HANDLER.orderedPage(productCtx(null), set, 0, 50));
+    verify(set, never()).count();
   }
 }

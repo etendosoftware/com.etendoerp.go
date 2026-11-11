@@ -356,6 +356,9 @@ class NeoCrudHandler {
         // ETP-5778: let a customization's afterHandle aggregate the whole filtered set, not just
         // the page. FK dropdowns (_distinct) and grid summaries (_summary) never need it.
         NeoListAggregateQuery.remember(context, params);
+        // A customization whose page order is not a property path (NeoHandler#orderedPage) narrows
+        // the fetch to its page here; reorder() below restores its order and the paging figures.
+        NeoOrderedListPage.apply(context, params);
       }
 
       return executeJsonServiceAndBuildResponse(
@@ -642,6 +645,7 @@ class NeoCrudHandler {
     // Kept even for an ids-only response: it renames DAL properties to the API keys a
     // customization's afterHandle reads, so skipping it would change what the hook sees.
     fieldFilter.filterGetResponse(responseJson);
+    NeoOrderedListPage.reorder(context, responseJson);
     enrichResponseIdentifiers(context, responseJson);
     return NeoResponse.ok(responseJson);
   }
