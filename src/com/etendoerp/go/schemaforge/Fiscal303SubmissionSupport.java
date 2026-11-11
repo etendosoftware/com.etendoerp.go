@@ -299,8 +299,7 @@ class Fiscal303SubmissionSupport {
     if (!testMode && !service.hasOrgCertificate(org)) {
       writeJson(response, HttpServletResponse.SC_CONFLICT,
           owner.buildFailureJson(false, ERR_NO_CERTIFICATE,
-              "No certificate configured for this organization. Upload one via Fiscal "
-                  + "Configuration before submitting in production mode."));
+              NeoMessageText.text("ETGO_FiscalSubmitNoCertificate")));
       return;
     }
 

@@ -27,6 +27,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -55,6 +56,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpToolResponses
  * @covers com.etendoerp.go.mcp.McpResponseSanitizer
  * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
+ * @covers com.etendoerp.go.schemaforge.ClassicMessageRemap
  */
 public class McpToolRouterTest {
 
@@ -183,6 +186,25 @@ public class McpToolRouterTest {
     assertFalse("error result must not be pretty-printed: " + text, text.contains("\n"));
   }
 
+  /**
+   * ETP-6158: the root of an MCP error result is the error object the client reads, so a Classic
+   * fiscal message recognised there (here already reworded for GO) publishes its AD_MESSAGE key
+   * in a root {@code messageKeys}.
+   */
+  @Test
+  public void testWrapAsErrorContentPublishesTheClassicMessageKeyAtTheRoot() throws Exception {
+    JSONObject error = new JSONObject().put("status", "error").put("title", "Error: ")
+        .put("message", "El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.").put("error", "validation_error")
+        .put("detail", "Request failed with status 400");
+
+    JSONObject result = McpToolRouter.wrapAsErrorContent(error);
+
+    JSONObject parsed = new JSONObject(
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
+    assertEquals("El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.", parsed.getString("message"));
+    assertEquals("TBAI_EmptyNifCode", parsed.getJSONArray("messageKeys").getString(0));
+  }
+
   /** IMP-53: the unexpected-failure envelope is rendered compact. */
   @Test
   public void testUnexpectedErrorBodyIsCompact() throws Exception {
@@ -220,6 +242,70 @@ public class McpToolRouterTest {
     JSONObject block = content.getJSONObject(0);
     assertEquals("text", block.getString("type"));
     assertEquals("Something failed", block.getString("text"));
+  }
+
+  /**
+   * ETP-6158: an exception message passed as plain text can carry a Classic fiscal message; it
+   * leaves the MCP reworded for GO, in the language captured for the request (here the current
+   * {@code OBContext} language, nothing having been captured). The SII sentence and the raw
+   * {@code @KEY@} token need no AD_MESSAGE row, so no database is involved.
+   */
+  @Test
+  public void testWrapAsErrorContentRemapsAClassicMessageInThePlainText() throws Exception {
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      JSONObject result = McpToolRouter.wrapAsErrorContent("Process execution failed: "
+          + "La factura debe contener información en el campo Clave tipo factura.");
+
+      assertTrue(result.getBoolean(FIELD_IS_ERROR));
+      assertEquals("Process execution failed: La factura debe contener información en el campo "
+          + "Tipo factura.", result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
+    }
+    try (MockedStatic<OBContext> ctx = contextInLanguage("en_US")) {
+      JSONObject result = McpToolRouter.wrapAsErrorContent("Error: @TBAI_ConfigNotFound@");
+
+      assertEquals("Error: There is no active TicketBAI configuration for this organization. "
+          + "Check it in Fiscal configuration (TicketBAI tab).",
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
+    }
+  }
+
+  /**
+   * ETP-6158: every JSON tool result rendered by {@link McpResponseSanitizer#render} has its
+   * Classic fiscal messages reworded, at any depth; a plain (non-error) result gets no root
+   * {@code messageKeys}, only the {@code error} object inside it does.
+   */
+  @Test
+  public void testRenderRemapsClassicMessagesAtAnyDepth() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("message", "Error: @TBAI_ConfigNotFound@")
+        .put("results", new JSONArray().put(new JSONObject().put("error", new JSONObject()
+            .put("message", "@TBAI_ConfigNotFound@ (organización 2)"))));
+
+    String rendered;
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      rendered = McpResponseSanitizer.render(body);
+    }
+
+    JSONObject parsed = new JSONObject(rendered);
+    String go = "No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI).";
+    assertEquals("Error: " + go, parsed.getString("message"));
+    assertFalse(parsed.has("messageKeys"));
+    JSONObject error = parsed.getJSONArray("results").getJSONObject(0).getJSONObject("error");
+    assertEquals(go + " (organización 2)", error.getString("message"));
+    assertEquals("TBAI_ConfigNotFound", error.getJSONArray("messageKeys").getString(0));
+  }
+
+  /** A static OBContext whose language is {@code code}; the caller closes it. */
+  private static MockedStatic<OBContext> contextInLanguage(String code) {
+    org.openbravo.model.ad.system.Language language =
+        mock(org.openbravo.model.ad.system.Language.class);
+    when(language.getLanguage()).thenReturn(code);
+    OBContext context = mock(OBContext.class);
+    when(context.getLanguage()).thenReturn(language);
+    MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+    ctx.when(OBContext::getOBContext).thenReturn(context);
+    return ctx;
   }
 
   /** Tests that wrapAsErrorContent handles an empty error message. */
@@ -1640,6 +1726,39 @@ public class McpToolRouterTest {
     assertEquals("conflict", envelope.getString("error"));
     assertEquals("record_in_use", envelope.getString("code"));
     assertEquals(McpConstants.SEE_ALSO_WRITING, envelope.getString("seeAlso"));
+  }
+
+  /**
+   * ETP-6158: a classified write failure that already carries a key keeps it; the key of the
+   * Classic message recognised in its {@code detail} is appended once, also when the error result
+   * is rendered a second time (the text is then already the GO one).
+   */
+  @Test
+  public void testClassifiedFailureKeepsItsKeysAndAppendsTheClassicOneOnce() throws Exception {
+    JSONObject response = dalFailure("Some core prose");
+    response.getJSONObject("response").getJSONObject("error").put("neoClassification",
+        new JSONObject().put("status", 422).put("code", "business_rule")
+            .put("message", "No se pudo completar: @TBAI_ConfigNotFound@")
+            .put("messageKeys", new JSONArray().put("APRM_PAYMENTMETHOD_MISSING")));
+    String go = "No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI).";
+
+    JSONObject first;
+    JSONObject second;
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      JSONObject envelope = invokeCheckJsonServiceError(response, McpConstants.SEE_ALSO_WRITING);
+      first = new JSONObject(contentText(McpToolRouter.wrapAsErrorContent(envelope)));
+      second = new JSONObject(contentText(McpToolRouter.wrapAsErrorContent(
+          new JSONObject(first.toString()))));
+    }
+
+    for (JSONObject rendered : List.of(first, second)) {
+      assertEquals("No se pudo completar: " + go, rendered.getString("detail"));
+      JSONArray keys = rendered.getJSONArray("messageKeys");
+      assertEquals(rendered.toString(), 2, keys.length());
+      assertEquals("APRM_PAYMENTMETHOD_MISSING", keys.getString(0));
+      assertEquals("TBAI_ConfigNotFound", keys.getString(1));
+    }
   }
 
   /** A captured fault keeps this channel's existing answer for a refused write (declared, §4.12.9). */

@@ -41,6 +41,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Language;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+
 /**
  * Unit tests for {@link DocumentRateMessages}: where an exchange-rate text comes from — a translated
  * {@code AD_MESSAGE_TRL} row, then the versioned {@code neo_hints_<lang>} catalog, then the
@@ -141,6 +143,27 @@ public class DocumentRateMessagesTest {
   }
 
   /** {@code dd/MM/yyyy} (the format takes no language); an absent date is empty. */
+  /**
+   * ETP-6158: the text follows the language captured at the start of the request, not the
+   * {@code OBContext} language a Classic call may have changed since.
+   */
+  @Test
+  public void textUsesTheLanguageCapturedAtRequestStart() throws Exception {
+    String text = withMessageRows(null, null, "es_ES", trl -> {
+      String previous = NeoLanguage.captureRequestCode();
+      try {
+        Language english = mock(Language.class);
+        when(english.getLanguage()).thenReturn("en_US");
+        when(OBContext.getOBContext().getLanguage()).thenReturn(english);
+        return NeoMessageText.text("ETGO_FiscalSubmitNoCertificate");
+      } finally {
+        NeoLanguage.restoreRequestCode(previous);
+      }
+    });
+
+    assertTrue(text, text.startsWith("Esta organización no tiene un certificado configurado."));
+  }
+
   @Test
   public void formatDateIsDayMonthYearInEveryLanguage() {
     LocalDate date = LocalDate.of(2026, 3, 31);
