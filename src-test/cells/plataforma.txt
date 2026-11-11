@@ -35,6 +35,7 @@ com.etendoerp.go.hubspot.HubSpotOutboxTest
 com.etendoerp.go.hubspot.HubSpotSyncProcessTest
 com.etendoerp.go.hubspot.HubSpotSyncServiceTest
 com.etendoerp.go.hubspot.StripeSubscriptionEventsTest
+com.etendoerp.go.llm.LlmDeciderTest
 com.etendoerp.go.mcp.Context7DocsClientTest
 com.etendoerp.go.mcp.McpActionBatchTest
 com.etendoerp.go.mcp.McpActionEnvelopeTest
