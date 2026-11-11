@@ -4,6 +4,7 @@ package com.etendoerp.go.testsupport;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -24,7 +25,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.database.ExternalConnectionPool;
 
 /**
- * Reproduces the two JVM-wide leaks that forced DAL integration tests into their own JVM, and
+ * Reproduces the JVM-wide leaks that forced DAL integration tests into their own JVM, and
  * checks that the listener names the leaking test and leaves the state as a fresh JVM would.
  *
  * @covers com.etendoerp.go.testsupport.StaticStateLeakListener
@@ -104,6 +105,29 @@ public class StaticStateLeakListenerTest {
     assertEquals(healthy, dataSources.get(pool));
   }
 
+  @Test
+  public void contextLeftByAUnitTestClassIsReportedAndCleared() throws ReflectiveOperationException {
+    contextInstance().set(mock(OBContext.class));
+
+    List<String> found = StaticStateLeakListener.checkAndRepair("LeakyUnitTest", true);
+
+    assertEquals(1, found.size());
+    assertTrue(found.get(0).contains("OBContext left set"));
+    assertNull("the next class must start with no context", contextInstance().get());
+  }
+
+  @Test
+  public void contextIsLeftAloneOutsideAFinishedUnitTestClass()
+      throws ReflectiveOperationException {
+    OBContext context = mock(OBContext.class);
+    contextInstance().set(context);
+
+    // A single test, or a DAL class, keeps its context: the next test of the class may rely on it.
+    assertTrue(StaticStateLeakListener.checkAndRepair("SomeTest#oneMethod").isEmpty());
+    assertTrue(StaticStateLeakListener.checkAndRepair("SomeTest#oneMethod", false).isEmpty());
+    assertSame(context, contextInstance().get());
+  }
+
   private static Field poolInstanceField() throws NoSuchFieldException {
     Field field = ExternalConnectionPool.class.getDeclaredField("instance");
     field.setAccessible(true);
@@ -119,5 +143,13 @@ public class StaticStateLeakListenerTest {
 
   private static void clearAdminStack() throws ReflectiveOperationException {
     adminStack().remove();
+    contextInstance().remove();
+  }
+
+  @SuppressWarnings("unchecked")
+  private static ThreadLocal<Object> contextInstance() throws ReflectiveOperationException {
+    Field field = OBContext.class.getDeclaredField("instance");
+    field.setAccessible(true);
+    return (ThreadLocal<Object>) field.get(null);
   }
 }

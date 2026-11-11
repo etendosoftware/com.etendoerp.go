@@ -48,6 +48,7 @@ final class SignupAccountDalHelper {
   static final String PROPERTY_SIGNUP_SEND_EMAILS = "signupSendEmails";
   static final String PROPERTY_SIGNUP_SOURCE = "signupSource";
   static final String PROPERTY_TERMS_ACCEPTED_AT = "termsAcceptedAt";
+  static final String PROPERTY_TERMS_VERSION = "termsVersion";
 
   static final String STATUS_PROVISIONING = "provisioning";
   static final String STATUS_READY = "ready";
@@ -64,7 +65,13 @@ final class SignupAccountDalHelper {
   }
 
   /** What the signup API stores about an account it creates, besides the account itself. */
-  record SignupData(String channel, boolean sendEmails, String source, Date termsAcceptedAt) {
+  /**
+   * @param termsAcceptedAt when the site's visitor accepted the terms, {@code null} if they did not
+   * @param termsVersion    the version accepted (ETP-6081), {@code null} when they did not or none
+   *                        is published
+   */
+  record SignupData(String channel, boolean sendEmails, String source, Date termsAcceptedAt,
+      String termsVersion) {
   }
 
   /**
@@ -81,6 +88,7 @@ final class SignupAccountDalHelper {
           account.set(PROPERTY_SIGNUP_SEND_EMAILS, signup.sendEmails());
           account.set(PROPERTY_SIGNUP_SOURCE, signup.source());
           account.set(PROPERTY_TERMS_ACCEPTED_AT, signup.termsAcceptedAt());
+          account.set(PROPERTY_TERMS_VERSION, signup.termsVersion());
           account.set(PROPERTY_SIGNUP_STATUS, STATUS_PROVISIONING);
         });
   }

@@ -91,18 +91,20 @@ final class OrderImportRequest {
 
   /** {@code carryGlobalDiscount}: absent or null is {@code true}; a non-boolean is a 400. */
   static boolean parseCarryDiscount(JSONObject body) {
-    Object value = body == null ? null : body.opt(PARAM_CARRY_DISCOUNT);
-    if (value == null || JSONObject.NULL.equals(value)) {
-      return true;
-    }
-    if (value instanceof Boolean) {
-      return (Boolean) value;
-    }
-    String text = String.valueOf(value).trim();
-    if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
-      return Boolean.parseBoolean(text);
-    }
-    throw badRequest(PARAM_CARRY_DISCOUNT + " must be true or false");
+    return parseBoolean(body, PARAM_CARRY_DISCOUNT, true);
+  }
+
+  /**
+   * An optional boolean flag of a request ({@code includeCovered}, ETP-5828): absent or null is
+   * {@code false}; a non-boolean is a 400.
+   */
+  static boolean parseFlag(JSONObject body, String key) {
+    return parseBoolean(body, key, false);
+  }
+
+  /** {@link ImportListing#parseBoolean}, refused as {@code importInvalidLine} as it always was. */
+  private static boolean parseBoolean(JSONObject body, String key, boolean whenAbsent) {
+    return ImportListing.parseBoolean(body, key, whenAbsent, DocumentLineImport.ERROR_INVALID_LINE);
   }
 
   /** Whether {@code key} carries a value: a key sent as JSON null counts as absent. */

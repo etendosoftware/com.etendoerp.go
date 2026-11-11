@@ -75,8 +75,8 @@ final class McpDocumentEmailTool {
   /** The draft advice of this tool: the same sentence as the PDF tool's, with its own retry verb. */
   private static final String DRAFT_SEND_HINT = McpDocumentPdfTool.DRAFT_HINT_PREFIX
       + "ask to send again.";
-  private static final String PREVIEW_STORES_NOTHING = "For a window whose preview stores nothing "
-      + "(a return receipt) the first send must be done from the application.";
+  private static final String PREVIEW_STORES_NOTHING = "If its preview stores nothing (a return "
+      + "receipt), the first send must be done from the application.";
   /** The advice of a send refused by status (ETP-6013); the detail already names the rule. */
   static final String STATUS_HINT = "Nothing was sent. The application offers 'Send by email' "
       + "only in the statuses the detail names, whatever PDF the document already has: bring the "
@@ -276,23 +276,24 @@ final class McpDocumentEmailTool {
     if (pdf.getStatus() == NeoDocumentPdf.Status.MISSING) {
       problem.put(McpConstants.KEY_HINT, missingHint(pdf));
     } else if (pdf.getStatus() == NeoDocumentPdf.Status.STALE) {
-      problem.put(McpConstants.KEY_HINT, McpDocumentPdfTool.JUST_COMPLETED_HINT
-          + "Otherwise open the document's preview in the application so its PDF is refreshed, "
-          + "then ask to send again. " + PREVIEW_STORES_NOTHING);
+      problem.put(McpConstants.KEY_HINT, McpDocumentPdfTool.STALE_RETRY_HINT
+          + "Otherwise the server could not regenerate it: ask the user to open the document's "
+          + "preview in the application so its PDF is refreshed, then ask to send again. "
+          + PREVIEW_STORES_NOTHING);
     }
     return problem;
   }
 
   /** Same states as {@code etendo_get_document_pdf}: a draft, another status, status unknown. */
   private static String missingHint(NeoDocumentPdf.Result pdf) {
-    String documentStatus = pdf.getDocumentStatus();
     if (pdf.isDraft()) {
       return DRAFT_SEND_HINT;
     }
-    String advice = McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise open the document's preview "
-        + "in the application so its PDF is stored, then ask to send again";
-    return (documentStatus == null ? advice + " (a draft never stores a PDF: complete it first). "
-        : advice + ". ") + PREVIEW_STORES_NOTHING;
+    String advice = McpDocumentPdfTool.JUST_COMPLETED_HINT + "Otherwise the server could not "
+        + "generate it: ask the user to open the document's preview in the application so its PDF "
+        + "is stored, then ask to send again. " + PREVIEW_STORES_NOTHING;
+    return pdf.getDocumentStatus() == null
+        ? McpDocumentPdfTool.UNKNOWN_STATUS_DRAFT_REMARK + advice : advice;
   }
 
   private static JSONObject pdfSummary(NeoDocumentPdf.Result pdf, JSONObject problem)

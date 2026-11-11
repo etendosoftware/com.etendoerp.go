@@ -45,6 +45,7 @@ import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.terms.TermsAndConditionsService;
 
 /**
  * Service managing company user invitations (ETP-4894).
@@ -53,6 +54,9 @@ import com.etendoerp.go.supportaccess.SupportAccessGuard;
  * registration & acceptance outside onboarding.
  */
 public class CompanyInvitationService {
+
+  /** ETP-6081: the terms recorded on an account an invitation creates. */
+  private final TermsAndConditionsService termsService = new TermsAndConditionsService();
 
   private static final Logger log = LogManager.getLogger(CompanyInvitationService.class);
   private static final SecureRandom RANDOM = new SecureRandom();
@@ -696,14 +700,19 @@ public class CompanyInvitationService {
   /**
    * Registers a minimal platform account bound strictly to the invitation email, then accepts it.
    *
+   * <p>When this creates the account, it also records the terms the invitee accepted (ETP-6081):
+   * the register screen they used states that creating the account accepts them.
+   *
    * @param rawToken Bearer token
    * @param name Account holder display name
    * @param password Account password
+   * @param termsVersion the terms version the screen showed, or {@code null} to record the one
+   *     in force
    * @return Response JSON with session token and account data
    * @throws JSONException when the response cannot be serialized
    */
-  public JSONObject registerAndAccept(String rawToken, String name, String password)
-      throws JSONException {
+  public JSONObject registerAndAccept(String rawToken, String name, String password,
+      String termsVersion) throws JSONException {
     if (StringUtils.isBlank(rawToken)) {
       return errorResponse(400, CODE_MISSING_TOKEN, MESSAGE_MISSING_TOKEN);
     }
@@ -716,11 +725,12 @@ public class CompanyInvitationService {
       return errorResponse(400, "WEAK_PASSWORD", PasswordPolicy.USER_MESSAGE);
     }
 
-    return withAdminMode(() -> registerAndAcceptInAdminMode(rawToken, trimmedName, password));
+    return withAdminMode(() -> registerAndAcceptInAdminMode(rawToken, trimmedName, password,
+        termsVersion));
   }
 
   private JSONObject registerAndAcceptInAdminMode(String rawToken, String trimmedName,
-      String password) throws JSONException {
+      String password, String termsVersion) throws JSONException {
     Invitation invitation = findInvitation(rawToken);
     if (invitation == null) {
       return errorResponse(404, CODE_INVALID_TOKEN, MESSAGE_INVALID_TOKEN);
@@ -762,6 +772,9 @@ public class CompanyInvitationService {
 
       if (account == null) {
         account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, trimmedName, sessionToken);
+        // Committed with the invitation below.
+        EtendoGoJwtDalHelper.recordTermsAcceptance(account,
+            termsService.resolveAcceptedVersion(termsVersion, null), new Date());
       } else {
         account.setPasswordHash(passwordHash);
         account.setName(trimmedName);

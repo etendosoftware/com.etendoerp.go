@@ -151,6 +151,7 @@ import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.terms.TermsAndConditionsService;
 import com.etendoerp.go.usage.IsolatedReader;
 import com.etendoerp.go.usage.TenantSeatCounter;
 import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
@@ -366,6 +367,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String EMAIL_VERIFY_NEUTRAL_MESSAGE =
       "If this account still needs an email confirmation, a new link has been sent.";
   private static final String PATH_VERIFY_EMAIL = "/verify-email";
+  /** ETP-6081: the terms and conditions in force, public. */
+  private static final String PATH_TERMS = "/terms";
+  private static final String FIELD_TERMS_VERSION = "termsVersion";
+  /** ETP-6081: consent to promotional mail, asked in the terms dialog of the register screen. */
+  private static final String FIELD_MARKETING_CONSENT = "marketingConsent";
   private static final String PATH_VERIFY_EMAIL_RESEND = "/verify-email/resend";
   private static final String FIELD_EMAIL_VERIFIED = "emailVerified";
   private static final String FIELD_EMAIL_VERIFICATION_PENDING = "emailVerificationPending";
@@ -420,6 +426,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
       FIELD_FISCAL_ID_VALUE, FIELD_ADDRESS, FIELD_STREET_NAME, FIELD_BUILDING_NUMBER,
       FIELD_BUILDING_NAME, FIELD_CITY_NAME, "sector", FIELD_INCLUDE_SAMPLE_DATA };
+  /** ETP-6081 — the optional phone, "+34 600123456", stored on the account. */
+  private static final String FIELD_PHONE = "phone";
+  private static final String FIELD_SECTOR = "sector";
+  private static final String FIELD_SECTOR_MISSING = "sectorMissing";
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -524,6 +534,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
   private final AccountRegistrationService accountRegistration;
+  /** ETP-6081: the terms and conditions shown at registration and recorded on new accounts. */
+  private final TermsAndConditionsService termsService = new TermsAndConditionsService();
   com.etendoerp.go.schemaforge.email.InternalAlertService internalAlertService =
       new com.etendoerp.go.schemaforge.email.InternalAlertService();
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
@@ -611,6 +623,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleCalendarReviewState(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
+    } else if (isPath(path, PATH_TERMS)) {
+      handleTermsAndConditions(request, response);
     } else {
       return false;
     }
@@ -2452,7 +2466,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String name = body.optString("name", "").trim();
     String password = body.optString(FIELD_PASSWORD, "");
     try {
-      JSONObject result = companyInvitationService.registerAndAccept(token, name, password);
+      JSONObject result = companyInvitationService.registerAndAccept(token, name, password,
+          body.optString(FIELD_TERMS_VERSION, null));
       if (result.optBoolean(FIELD_ERROR, false)) {
         int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
         writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
@@ -2470,8 +2485,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * POST /sws/go/register
-   * Body: { "email": "...", "password": "...", "name": "...", "language": "es_ES" }
+   * Body: { "email": "...", "name": "...", "password": "...", "language": "es_ES" }
    * Returns 201 with session token on success, 400 if email is taken.
+   *
+   * <p>ETP-6081: {@code password} is optional. Without it the account is created with no local
+   * password, like an account of the signup API: the session opened here keeps the onboarding
+   * going, the welcome mail carries a one-time login link for any other browser, and "forgot
+   * password" lets it create one later. A password that is sent is still validated and stored, so
+   * a client that still asks for one keeps working.
    */
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -2495,25 +2516,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
 
     String email;
-    String password;
     String name;
     String language;
     try {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
-      password = body.getString(FIELD_PASSWORD);
       name = body.getString("name").trim();
       language = body.optString(FIELD_LANGUAGE, "").trim();
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_REGISTER_MISSING_FIELDS,
-          "Missing required fields: email, password, name",
-          "Missing required fields: email, password, name");
+          "Missing required fields: email, name", "Missing required fields: email, name");
       return;
     }
+    // ETP-6081: optional. An empty value means "no password", the same as leaving it out.
+    String password = StringUtils.defaultIfEmpty(body.optString(FIELD_PASSWORD, ""), null);
 
-    if (email.isEmpty() || password.isEmpty() || name.isEmpty()) {
+    if (email.isEmpty() || name.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_REGISTER_EMPTY_FIELDS,
-          "Fields email, password, and name must not be empty",
-          "Fields email, password, and name must not be empty");
+          "Fields email and name must not be empty", "Fields email and name must not be empty");
       return;
     }
     // Defense in depth: reject anything that is not a well-formed email. This blocks control
@@ -2534,7 +2553,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeFieldTooLongError(response, violation);
       return;
     }
-    if (!PasswordPolicy.isStrong(password)) {
+    if (!isAcceptableRegisterPassword(password)) {
       writeWeakPasswordError(response);
       return;
     }
@@ -2551,13 +2570,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      String passwordHash = hashPassword(password);
+      String passwordHash = registerPasswordHash(password);
       String legacySessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name,
           legacySessionToken);
-      // createAccount committed the account; this commit carries only its HubSpot event.
-      HubSpotOutbox.accountCreated(account);
-      EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
+      // ETP-6081: the optional phone of the register form. A value that is not a phone is dropped
+      // rather than refusing the sign-up over a marketing field (the form already validates it).
+      String phone = SignupPhone.normalize(body.optString(FIELD_PHONE, null));
+      if (phone != null) {
+        account.set(EtendoGoJwtDalHelper.PROPERTY_PHONE, phone);
+      }
+      // ETP-6082: the business sector of the register form, for HubSpot. The form requires it; a
+      // value outside the list is dropped rather than refusing the sign-up over a marketing field.
+      String sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
+      if (sector != null) {
+        account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
+      }
+      // ETP-6081: the consent to promotional mail is a choice of its own; a body without it (an
+      // older screen) gave none.
+      TermsAndConditionsService.recordMarketingConsent(account,
+          body.optBoolean(FIELD_MARKETING_CONSENT, false));
+      // ETP-6081: the register screen states that creating the account accepts the terms; the
+      // version it showed is recorded with the account.
+      EtendoGoJwtDalHelper.recordTermsAcceptance(account, termsService.resolveAcceptedVersion(
+          body.optString(FIELD_TERMS_VERSION, null), language), new Date());
+      // createAccount committed the account; this commit carries its phone, sector and terms. Its
+      // HubSpot event waits for the address to be confirmed (ETP-6082, handleVerifyEmail).
+      EtendoGoDalHelper.commitDalChanges("account sign-up details", log);
       String normalizedLanguage = StringUtils.trimToNull(language);
       // ETP-4798: the session token below still comes back, so the user keeps filling in the
       // onboarding form and their draft keeps saving. What the unconfirmed address blocks is the
@@ -2565,8 +2604,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       issueEmailVerification(account, normalizedLanguage, true);
 
       if (createCookieSession) {
-        IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
-            request.getHeader(HEADER_USER_AGENT), null);
+        IssuedGoSession issued = goSessionService.create(account.getId(),
+            registerAuthMethod(passwordHash), request.getHeader(HEADER_USER_AGENT), null);
         writeSessionResponse(response, HttpServletResponse.SC_CREATED, account, issued);
       } else {
         JSONObject result = new JSONObject();
@@ -2587,6 +2626,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /** ETP-6081: the sign-up password is optional; one that is sent must still be strong. */
+  private static boolean isAcceptableRegisterPassword(String password) {
+    return password == null || PasswordPolicy.isStrong(password);
+  }
+
+  /** The stored hash of the sign-up password, or {@code null} for a passwordless account. */
+  private static String registerPasswordHash(String password) {
+    return password == null ? null : PasswordHasher.hash(password);
+  }
+
+  /**
+   * The method recorded on the sign-up session. A passwordless account is let in by the link it
+   * gets mailed, so its first session is recorded under that one; the stored values are a closed
+   * list ({@code ETGO_GOS_AUTHMETHOD}).
+   */
+  private static String registerAuthMethod(String passwordHash) {
+    return passwordHash == null ? AUTH_METHOD_LINK : FIELD_PASSWORD;
   }
 
   /**
@@ -2654,6 +2712,57 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * GET /sws/go/terms?language=es_ES (ETP-6081).
+   *
+   * <p>Deliberately unauthenticated: the register screen shows the terms before any account
+   * exists. Returns only the text in force and its identity ({@code version}, {@code language},
+   * {@code content}, {@code publishedAt}); 404 when no version is published.
+   */
+  private void handleTermsAndConditions(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Optional<TermsAndConditionsService.Terms> terms = termsService.findCurrent(
+          request.getParameter(FIELD_LANGUAGE));
+      if (terms.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "TERMS_NOT_FOUND",
+            "No terms and conditions are published", "No terms and conditions are published");
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, terms.get().toJson());
+    } catch (RuntimeException | JSONException e) {
+      log.error("Could not read the terms and conditions", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The terms version an SSO body carries besides the credential, or {@code null}. */
+  static String termsVersionOf(String rawBody) {
+    return StringUtils.trimToNull(signupFieldsOf(rawBody).optString(FIELD_TERMS_VERSION, null));
+  }
+
+  /** Whether an SSO body carries the consent to promotional mail; none sent means none given. */
+  static boolean marketingConsentOf(String rawBody) {
+    return signupFieldsOf(rawBody).optBoolean(FIELD_MARKETING_CONSENT, false);
+  }
+
+  /** The JSON object of an SSO body, or an empty one when the body is not a JSON object. */
+  private static JSONObject signupFieldsOf(String rawBody) {
+    if (StringUtils.isBlank(rawBody) || !rawBody.trim().startsWith("{")) {
+      return new JSONObject();
+    }
+    try {
+      return BoundedJsonParser.parseObject(rawBody);
+    } catch (JSONException e) {
+      return new JSONObject();
+    }
+  }
+
+  /**
    * POST /sws/go/sso/{provider}
    * Returns 200 with a platform session token after validating the provider credential.
    */
@@ -2674,7 +2783,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
 
       String sessionToken = generateToken();
-      Account account = resolveSsoAccount(assertion, sessionToken, response);
+      Account account = resolveSsoAccount(assertion, sessionToken, termsVersionOf(rawBody),
+          marketingConsentOf(rawBody), response);
       if (account == null) {
         return;
       }
@@ -2708,7 +2818,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * {@code null} on a linking conflict. Shared by the legacy SSO login and the cookie SSO create.
    */
   private Account resolveSsoAccount(EtendoGoSsoAssertion assertion, String sessionToken,
-      HttpServletResponse response) throws IOException {
+      String sentTermsVersion, boolean marketingConsent, HttpServletResponse response)
+      throws IOException {
     // ETP-5351: nobody signs in as the technical support account, whatever the provider asserts.
     if (SupportAccessGuard.isSupportEmail(assertion.getEmail())) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
@@ -2737,11 +2848,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Account created = EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(),
           assertion.getName(), assertion.getProvider(), assertion.getSubject(),
           assertion.getEmail(), sessionToken, loginAt);
+      // ETP-6081: an SSO sign-in that creates the account accepts the terms just like the form
+      // does; the register screen shows the notice under both. The provider asserts no language,
+      // so a missing version falls back to the one in force in English.
+      TermsAndConditionsService.recordMarketingConsent(created, marketingConsent);
+      EtendoGoJwtDalHelper.recordTermsAcceptance(created,
+          termsService.resolveAcceptedVersion(sentTermsVersion, null), loginAt);
       HubSpotOutbox.accountCreated(created);
       EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
       return created;
     }
+    boolean confirming = EmailVerificationDalHelper.isEmailVerificationPending(account);
     EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
+    if (confirming) {
+      // ETP-6082: an account registered by the form and confirmed by signing in with its
+      // provider is a lead from now on, as if it had followed the mailed link.
+      reportConfirmedAccount(account);
+    }
     return account;
   }
 
@@ -2765,7 +2888,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
 
-      Account account = resolveSsoAccount(assertion, generateToken(), response);
+      Account account = resolveSsoAccount(assertion, generateToken(), termsVersionOf(rawBody),
+          marketingConsentOf(rawBody), response);
       if (account == null) {
         return;
       }
@@ -2925,6 +3049,36 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-6082: a sign-up becomes a HubSpot lead, and gets its deal, once its address is proven:
+   * by the confirmation link, by the welcome mail's login link, or by signing in with an identity
+   * provider on that address. An account created by an SSO sign-in is reported when it is created
+   * instead (its provider vouched). Reporting it twice adds nothing.
+   *
+   * @param account the account whose address was just confirmed
+   */
+  /**
+   * ETP-6082 — keeps the business sector the company step asked for, on an account that had none.
+   * A sector already chosen at sign-up is never overwritten. Committed before provisioning, which
+   * switches the context to the new tenant; HubSpot reads it when it sends the demo's event.
+   */
+  static boolean isSectorMissing(Account account) {
+    return account.get(EtendoGoJwtDalHelper.PROPERTY_SECTOR) == null;
+  }
+
+  static void storeMissingSector(Account account, String sector) {
+    if (sector == null || !isSectorMissing(account)) {
+      return;
+    }
+    account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
+    EtendoGoDalHelper.commitDalChanges("account sector", log);
+  }
+
+  private static void reportConfirmedAccount(Account account) {
+    HubSpotOutbox.accountCreated(account);
+    EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
+  }
+
+  /**
    * POST /sws/go/verify-email
    * Body: { "token": "..." }
    *
@@ -2976,6 +3130,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       if (!EmailVerificationDalHelper.isEmailVerified(account)) {
         EmailVerificationDalHelper.consumeEmailVerification(account, new Date());
+        reportConfirmedAccount(account);
       }
 
       JSONObject result = new JSONObject();
@@ -3406,6 +3561,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           EmailVerificationDalHelper.isEmailVerificationPending(account));
       result.put("authMethods", buildAuthMethods(account));
       result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(authenticated.sessionRecord));
+      // ETP-6082: the onboarding asks the business sector only when the account has none yet.
+      result.put(FIELD_SECTOR_MISSING, isSectorMissing(account));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -5616,6 +5773,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (onboardingRequest == null) {
       return null;
     }
+    storeMissingSector(authenticated.account, onboardingRequest.sector);
     // ETP-5689: an additional environment arrives without a full name; fall back to the
     // account's name (then its email) here, once, so both the pooled and the classic path name
     // the owner after the person instead of the client-suffixed username.
@@ -6226,6 +6384,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.upgradeAction = body.optString("upgradeAction", UPGRADE_ACTION_CREATE_PRODUCTIVE).trim();
       // ETP-5426: opt-in, off unless the form explicitly sends true.
       data.includeSampleData = body.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
+      // ETP-6082: the company step asks the business sector only of an account that has none (an
+      // SSO sign-up never sees the register form). Anything outside HubSpot's list is dropped.
+      data.sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -6257,10 +6418,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-5806 — Street/Number/City are mandatory together, but ONLY once the user actually
-   * started filling the structured address block in (building name does not gate this, since
-   * it is optional even once the block is started). Extracted out of
-   * {@link #parseOnboardingRequest} to keep its cognitive complexity in check.
+   * ETP-5806 — Street and City are mandatory together, but ONLY once the user actually started
+   * filling the structured address block in (building name does not gate this, since it is
+   * optional even once the block is started). Building Number does not independently gate this
+   * either (ETP-5806 follow-up) — see {@link StructuredAddressComposer#effectiveBuildingNumber}.
+   * Extracted out of {@link #parseOnboardingRequest} to keep its cognitive complexity in check.
    *
    * @return {@code true} to continue; {@code false} once an error response has been written
    */
@@ -6281,16 +6443,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!addressBlockStarted) {
       return true;
     }
-    List<String> missing = new ArrayList<>();
-    if (StringUtils.isBlank(data.streetName)) {
-      missing.add(FIELD_STREET_NAME);
-    }
-    if (StringUtils.isBlank(data.buildingNumber)) {
-      missing.add(FIELD_BUILDING_NUMBER);
-    }
-    if (StringUtils.isBlank(data.city)) {
-      missing.add(FIELD_CITY_NAME);
-    }
+    // ETP-5806 follow-up — Building Number is not independently mandatory: a blank value with a
+    // present Street Name falls back to "s/n" (StructuredAddressComposer#effectiveBuildingNumber),
+    // the same rule already applied by the 3 NEO handlers (Contacts/Warehouse/BpLocation) and by
+    // OnboardingOrgInfoService#applyAddressFields when it persists this same data a moment later.
+    // Reusing missingMandatoryFields here (instead of a 4th hand-rolled copy of the field list)
+    // keeps this validator from drifting out of sync with that rule again. Country is passed as
+    // the already-defaulted ISO code (never blank at this point) purely to satisfy the shared
+    // method's signature — it is validated independently elsewhere in this request.
+    List<String> missing = StructuredAddressComposer.missingMandatoryFields(data.streetName,
+        StructuredAddressComposer.effectiveBuildingNumber(data.streetName, data.buildingNumber),
+        data.city, data.countryCode);
     if (missing.isEmpty()) {
       return true;
     }
@@ -6921,8 +7084,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       String accountId = account.getId();
+      boolean confirming = EmailVerificationDalHelper.isEmailVerificationPending(account);
       SignupAccountDalHelper.consumeLoginLink(account, new Date());
       Account consumed = EtendoGoJwtDalHelper.findActiveAccountById(accountId);
+      if (confirming) {
+        // ETP-6082: since ETP-6081 the welcome mail carries this link, not the confirmation-only
+        // one, so following it is how most sign-ups confirm their address.
+        reportConfirmedAccount(consumed);
+      }
       String environmentUserId = SignupAccountDalHelper.environmentUserId(consumed);
       IssuedGoSession issued = goSessionService.create(accountId, AUTH_METHOD_LINK,
           request.getHeader(HEADER_USER_AGENT), null);
@@ -7613,7 +7782,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Build the standard {@code {id, email, name}} JSON projection of an account, shared by every
+   * Build the standard {@code {id, email, name, sectorMissing}} JSON projection of an account, shared by every
    * endpoint that returns account data.
    */
   private static JSONObject buildAccountJson(Account account) throws JSONException {
@@ -7621,6 +7790,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     accountJson.put("id", account.getId());
     accountJson.put(FIELD_EMAIL, account.getEmail());
     accountJson.put("name", account.getName());
+    // ETP-6082: the onboarding asks the business sector only when the account has none yet.
+    accountJson.put(FIELD_SECTOR_MISSING, isSectorMissing(account));
     return accountJson;
   }
 
@@ -7817,6 +7988,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5426: the signup form's "include sample data" opt-in. Honoured only when
     // OnboardingSampleDataService.isEligible accepts the request.
     private boolean includeSampleData;
+    // ETP-6082: the business sector, sent only when the account had none.
+    private String sector;
     // ETP-5847: set for an environment the signup API creates, which mails its own ready message
     // (with a login link, or none at all when the caller turned mails off).
     private boolean skipEnvironmentReadyMail;

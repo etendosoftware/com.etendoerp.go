@@ -22,7 +22,6 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -107,17 +106,23 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           + "It is independent of createShipment: an order can be invoiced without being "
           + "shipped, shipped without being invoiced, or both. Typical sequence for an order: "
           + "documentAction (confirm) -> createShipment -> createDraftInvoice. A line is invoiced "
-          + "only for what is still pending (ordered minus invoiced, same sign as the ordered "
-          + "quantity): an already-invoiced or over-invoiced line is never invoiced again, so a "
-          + "second call does not duplicate the invoice and, once nothing is pending, answers "
-          + "400 'No hay líneas a facturar en este pedido'. Without lines, a line with completed, "
-          + "not-yet-invoiced shipments is invoiced for the quantity of those shipments. Only "
-          + "COMPLETED invoices count as invoiced, but an order that already has a DRAFT invoice "
-          + "is refused with 409 draftInvoiceExists, creating nothing (one draft per order, as on "
-          + "the screen, which hides the button): the refusal lists the draft numbers in "
-          + "existingDraftInvoices, and allowDuplicate:true creates the invoice anyway and lists "
-          + "the drafts the order had. The order's global discount (etgoTotalDiscount, always a %) "
-          + "is carried to the new invoice's total discount as the same %, never as an amount.",
+          + "only for what is still pending: ordered minus invoiced (completed invoices) minus "
+          + "what the lines of DRAFT sales invoices already hold for it, same sign as the ordered "
+          + "quantity, the very pending availableOrderLines reports on a draft sales invoice. An "
+          + "already-invoiced, over-invoiced or draft-held quantity is never invoiced again, so a "
+          + "second call does not duplicate the invoice. Once nothing is pending at all it answers "
+          + "400 'No hay líneas a facturar en este pedido'; when what is left is entirely held by "
+          + "draft invoices it answers 400 '" + OrderDocumentAvailability.DRAFT_COVERS_INVOICE_PREFIX
+          + "<numbers>" + OrderDocumentAvailability.DRAFT_COVERS_INVOICE_SUFFIX + "', creating "
+          + "nothing (complete or delete the draft instead; there is no way past it, as on the "
+          + "screen, which hides the button then). A draft that holds only part of the order does "
+          + "not stop the call: the new invoice takes what is left. Without lines, one rule "
+          + "applies with or without a draft: a line with completed, not-yet-invoiced shipments "
+          + "(drafts counted) is invoiced only for what those shipments still hold, never for its "
+          + "unshipped rest; any other line, including one whose shipped quantity draft invoices "
+          + "already hold, is invoiced for its net pending. The "
+          + "order's global discount (etgoTotalDiscount, always a %) is carried to the new "
+          + "invoice's total discount as the same %, never as an amount.",
       NeoActionContract.Param.array(PARAM_LINES, NeoActionContract.TYPE_OBJECT, false,
           "Partial invoicing: [{orderLineId, quantity}] with the quantity to invoice per order "
               + "line. Honoured only for order lines that have NO completed shipment not yet "
@@ -126,12 +131,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "on the goods shipment, where quantities per shipment line are honoured). An "
               + "invoice generated from a shipment cannot have its quantities edited afterwards "
               + "(reactivating it does not allow it), so give any partial quantity at creation. "
-              + "A quantity above what is still pending for that line, or for a line with "
-              + "nothing pending, is refused with 400 naming the line and its pending quantity "
-              + "(it is never capped silently), and so is a list none of whose entries has an "
-              + "orderLineId and a quantity above zero. Omit to invoice the pending quantity of "
-              + "every line."),
-      OrderInvoiceDuplicateGuard.allowDuplicateParam())
+              + "A quantity above what is still pending for that line (net of draft invoices), "
+              + "or for a line with nothing pending, is refused with 400 naming the line and its "
+              + "pending quantity (it is never capped silently), and so is a list none of whose "
+              + "entries has an orderLineId and a quantity above zero. Omit to invoice the "
+              + "pending quantity of every line."))
       .withIdDescription("the id of the sales order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -202,6 +206,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
   @Inject
   TotalDiscountService totalDiscountService;
+
+  /** The order import of a draft sales invoice, reused for an order partly held by drafts. */
+  @Inject
+  ImportOrderLinesIntoInvoiceHandler orderLineImport;
 
   private static final String CHECK_ACTION = "checkDraftInvoice";
   private static final String LIST_ACTION = "listInvoices";
@@ -320,9 +328,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         MultiDocumentInvoiceSupport.requireParsedLines(body, PARAM_LINES, lineOverrides,
             ERR_LINES_UNUSABLE);
 
-        List<String> existingDrafts = new ArrayList<>();
-        Invoice invoice =
-            createFromSource(specName, recordId, body, lineOverrides, existingDrafts);
+        Invoice invoice = createFromSource(specName, recordId, body, lineOverrides);
         if (invoice == null) {
           return null;
         }
@@ -368,7 +374,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         data.put("id", invoiceId);
         data.put(FIELD_DOCUMENT_NO, completed.getDocumentNo());
         data.put("documentStatus", completed.getDocumentStatus());
-        OrderInvoiceDuplicateGuard.listExisting(data, existingDrafts);
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -386,9 +391,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
       return e.toResponse();
-    } catch (OrderInvoiceDuplicateGuard.Refusal e) {
-      // ETP-5714: a draft invoice already covers the order; nothing was created
-      return e.getResponse();
+    } catch (DocumentLineImport.ImportRefusal e) {
+      // ETP-5828: the order-import path of an order partly held by drafts refused; nothing kept
+      OBDal.getInstance().rollbackAndClose();
+      log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
+      return e.response();
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
       return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
@@ -408,21 +415,18 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * @param recordId       the source document id
    * @param body           the request body
    * @param lineOverrides  the parsed {@code lines} quantities
-   * @param existingDrafts out: the draft invoice numbers a sales order already had (ETP-5714)
    * @return the created (not yet completed) invoice, or {@code null} for a spec this handler does
    *     not serve
    */
   private Invoice createFromSource(String specName, String recordId, JSONObject body,
-      Map<String, BigDecimal> lineOverrides, List<String> existingDrafts) {
+      Map<String, BigDecimal> lineOverrides) {
     if (SPEC_SALES_ORDER.equals(specName)) {
       // ETP-5709: only the direct-from-order route. createFromOrder is also what the
       // quotation route calls, so the check cannot live there; a quotation never reaches CO
       // and keeps its own flow unchanged.
       requireOrderCompleted(recordId);
-      // ETP-5714: one draft invoice per order, as on the screen (it hides the button then)
-      existingDrafts.addAll(OrderInvoiceDuplicateGuard.draftsOf(recordId, true));
-      OrderInvoiceDuplicateGuard.requireNoDraft(body, existingDrafts);
-      return createFromOrder(recordId, lineOverrides, null);
+      // ETP-5828: pending net of the draft invoices (ETP-5714's one-draft refusal is gone here)
+      return createFromSalesOrder(recordId, lineOverrides);
     }
     if (SPEC_SALES_QUOTATION.equals(specName)) {
       // ETP-5709: the SPA offers this only from UE or CO; the route used to accept any
@@ -478,6 +482,165 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     }
     DocumentStatusGuard.requireCompleted(order.getDocumentNo(), order.getDocumentStatus(),
         "El pedido %s no está completado (estado %s): complétalo antes de crear la factura");
+  }
+
+  /**
+   * "Generar factura" on a sales order (ETP-5828): invoices what is pending NET of the draft
+   * invoices ({@link OrderInvoicePending}, the rule {@code availableOrderLines} /
+   * {@code importOrderLines} use on a draft sales invoice), so a draft holding part of the order no
+   * longer stops it.
+   *
+   * <ul>
+   *   <li>Nothing pending at all keeps "No hay líneas a facturar en este pedido"; something
+   *   pending that the drafts hold entirely answers the draft-covers reason
+   *   ({@link OrderDocumentAvailability#draftCoversInvoiceReason}), creating nothing.</li>
+   *   <li>Explicit {@code lines} are validated against the net pending, never capped.</li>
+   *   <li>No draft holding any of the order's lines: the ETP-5709 creation, unchanged.</li>
+   *   <li>A draft holding part of it: the SAME quantity rule as the no-draft creation, minus what
+   *   the drafts hold ({@link ImportOrderLinesIntoInvoiceHandler#shipmentScopedPending}): a line
+   *   with completed, not yet invoiced shipments is invoiced only for what those shipment lines
+   *   can still take (never its unshipped remainder), a line without them — or whose shipped
+   *   quantity the drafts already hold entirely — for its net pending; explicit {@code lines} are
+   *   used as validated above. The header is built from the order as always and the
+   *   lines come from the order import ({@link ImportOrderLinesIntoInvoiceHandler#importOrderInto}),
+   *   bound to those shipment lines: plain order-line entries would let the native process swap
+   *   one for a whole shipment line the draft already holds, invoicing that quantity twice.</li>
+   * </ul>
+   * The order's global discount is carried as a % in both cases ({@link #finishFromOrder}).
+   *
+   * @param orderId       the completed sales order
+   * @param lineOverrides the parsed {@code lines}; empty invoices everything pending
+   * @return the created (not yet completed) invoice
+   */
+  protected Invoice createFromSalesOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+    Order order = OBDal.getInstance().get(Order.class, orderId);
+    if (order == null) {
+      throw new OBException(ERR_ORDER_NOT_FOUND + orderId);
+    }
+    Map<String, BigDecimal> base = OrderInvoicePending.beforeDrafts(order);
+    Map<String, BigDecimal> held = base.isEmpty() ? Collections.emptyMap()
+        : draftInvoicedQuantities(base.keySet());
+    Map<String, BigDecimal> net = OrderInvoicePending.afterDrafts(base, held);
+    if (net.isEmpty() && !base.isEmpty()) {
+      throw new OBException(OrderDocumentAvailability.draftCoversInvoiceReason(
+          OrderInvoiceDuplicateGuard.draftsOf(orderId, true)));
+    }
+    boolean draftsHold = holdsAnyQuantity(held);
+    if (!lineOverrides.isEmpty()) {
+      requireOverridesWithinPending(order, lineOverrides, net);
+      if (draftsHold) {
+        requireNoShipmentLeftNetOfDrafts(order, lineOverrides, net);
+      } else {
+        requireNoUninvoicedShipments(order, lineOverrides);
+      }
+    }
+    if (!draftsHold) {
+      return createFromOrder(orderId, lineOverrides, null, null);
+    }
+    // Explicit lines never name a line with shipment quantity left to invoice (refused above), so
+    // they already follow the rule; without them, the shipment-scoped quantities.
+    Map<String, BigDecimal> quantities = lineOverrides.isEmpty()
+        ? shipmentScopedPending(order) : lineOverrides;
+    if (quantities.isEmpty()) {
+      throw new OBException(OrderDocumentAvailability.draftCoversInvoiceReason(
+          OrderInvoiceDuplicateGuard.draftsOf(orderId, true)));
+    }
+    return createFromOrderNetOfDrafts(order, quantities);
+  }
+
+  /**
+   * Seam: per order line, what an order partly held by drafts is invoiced for without explicit
+   * {@code lines} ({@link ImportOrderLinesIntoInvoiceHandler#shipmentScopedPending}).
+   */
+  protected Map<String, BigDecimal> shipmentScopedPending(Order order) {
+    return orderImportDelegate().shipmentScopedPending(order);
+  }
+
+  /**
+   * The ETP-5709 refusal of explicit {@code lines} for a line with shipments not yet invoiced, made
+   * draft-aware for an order partly held by drafts (ETP-5828): it applies only while those
+   * shipment lines can still take some of the line's net pending. A line whose shipped quantity
+   * the drafts already hold entirely is invoiced for its net pending without {@code lines}, so its
+   * explicit quantity is honoured too: explicit lines and the default follow one rule.
+   */
+  private void requireNoShipmentLeftNetOfDrafts(Order order, Map<String, BigDecimal> lineOverrides,
+      Map<String, BigDecimal> net) {
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal left = net.get(ol.getId());
+      if (lineOverrides.containsKey(ol.getId()) && left != null
+          && hasShipmentLeftNetOfDrafts(ol, left)) {
+        throw new OBException(String.format(ERR_ORDER_LINE_HAS_SHIPMENTS,
+            ol.getLineNo() + " (" + ol.getId() + ")"));
+      }
+    }
+  }
+
+  /**
+   * Seam (DB): whether the line's completed, not yet invoiced shipment lines can still take part
+   * of {@code netPending}, drafts counted
+   * ({@link ImportOrderLinesIntoInvoiceHandler#shippedLeftToInvoice}).
+   */
+  protected boolean hasShipmentLeftNetOfDrafts(OrderLine orderLine, BigDecimal netPending) {
+    return orderImportDelegate().shippedLeftToInvoice(orderLine, netPending, true).signum() != 0;
+  }
+
+  private ImportOrderLinesIntoInvoiceHandler orderImportDelegate() {
+    return orderLineImport != null ? orderLineImport : new ImportOrderLinesIntoInvoiceHandler();
+  }
+
+  private static boolean holdsAnyQuantity(Map<String, BigDecimal> held) {
+    for (BigDecimal quantity : held.values()) {
+      if (quantity != null && quantity.signum() != 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Seam (DB): per order line, what the lines of DRAFT sales invoices hold
+   * ({@link OrderInvoicePending#draftQuantities}).
+   */
+  protected Map<String, BigDecimal> draftInvoicedQuantities(java.util.Collection<String> orderLineIds) {
+    return OrderInvoicePending.draftQuantities(orderLineIds, true);
+  }
+
+  /**
+   * The invoice of a sales order part of which draft invoices hold (see
+   * {@link #createFromSalesOrder}): header from the order, lines through the order import.
+   */
+  protected Invoice createFromOrderNetOfDrafts(Order order, Map<String, BigDecimal> lineOverrides) {
+    Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(order,
+        resolveARInvoiceDocType(order), true);
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+    try {
+      importNetOfDrafts(invoice, order, lineOverrides);
+      return finishFromOrder(order, invoice);
+    } catch (OBException e) {
+      // The header is already flushed and a 400 is not an exception for the request filter (it
+      // commits whatever the session holds when the handler returns normally): roll it back here
+      // so no orphan draft header survives, then let handleCreate answer the same 400.
+      OBDal.getInstance().rollbackAndClose();
+      throw e;
+    }
+  }
+
+  /**
+   * Seam: the order import's line creation into the new invoice, for exactly {@code lineOverrides}
+   * (lock, plan within the net pending, bind to the shipment lines, native creation,
+   * post-processing, exact-quantity check).
+   */
+  protected void importNetOfDrafts(Invoice invoice, Order order,
+      Map<String, BigDecimal> lineOverrides) {
+    try {
+      orderImportDelegate().importOrderInto(invoice, order, lineOverrides);
+    } catch (java.sql.SQLException | org.codehaus.jettison.json.JSONException e) {
+      // The header is already flushed: undo it, and let handleCreate's generic branch answer the
+      // 500 — a DB or JSON failure is not a 400, and its text never reaches the response.
+      OBDal.getInstance().rollbackAndClose();
+      throw new IllegalStateException("Order import failed for order " + order.getId(), e);
+    }
   }
 
   /**
@@ -906,12 +1069,28 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * agent must learn that its request cannot be honoured, so nothing is capped silently.
    */
   private void requireOverridesWithinPending(Order order, Map<String, BigDecimal> lineOverrides) {
+    Map<String, BigDecimal> pendingByLine = new HashMap<>();
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal pending = resolvePendingForLine(ol, false, Collections.emptyMap());
+      if (pending != null) {
+        pendingByLine.put(ol.getId(), pending);
+      }
+    }
+    requireOverridesWithinPending(order, lineOverrides, pendingByLine);
+  }
+
+  /**
+   * Same refusal against a given pending per order line (ETP-5828: the sales order's net of
+   * drafts); a line absent from {@code pendingByLine} has nothing pending.
+   */
+  private void requireOverridesWithinPending(Order order, Map<String, BigDecimal> lineOverrides,
+      Map<String, BigDecimal> pendingByLine) {
     for (OrderLine ol : order.getOrderLineList()) {
       BigDecimal requested = lineOverrides.get(ol.getId());
       if (requested == null) {
         continue;
       }
-      BigDecimal pending = resolvePendingForLine(ol, false, Collections.emptyMap());
+      BigDecimal pending = pendingByLine.get(ol.getId());
       if (pending == null || requested.signum() != pending.signum()
           || requested.abs().compareTo(pending.abs()) > 0) {
         throw new OBException(String.format(ERR_ORDER_LINE_EXCEEDS_PENDING,
@@ -1001,13 +1180,23 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
     }
 
+    return finishFromOrder(order, invoice);
+  }
+
+  /**
+   * The tail every invoice built from an order shares, whichever way its lines were created: the
+   * order's global discount carried as the same % (never an amount, CP28), the gross amounts and
+   * the order's currency rate.
+   */
+  private Invoice finishFromOrder(Order order, Invoice invoice) {
     OBDal.getInstance().getSession().refresh(invoice);
-    invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
-    getSupport().ensureLineGrossAmounts(invoice);
+    Invoice result = getSupport().applyOrderDiscountToInvoice(invoice, order.getId(),
+        totalDiscountService);
+    getSupport().ensureLineGrossAmounts(result);
 
-    getSupport().propagateOrderRateToInvoice(order, invoice);
+    getSupport().propagateOrderRateToInvoice(order, result);
 
-    return invoice;
+    return result;
   }
 
   /**

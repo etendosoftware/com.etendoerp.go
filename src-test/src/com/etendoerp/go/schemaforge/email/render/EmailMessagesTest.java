@@ -94,6 +94,15 @@ public class EmailMessagesTest {
   }
 
   @Test
+  public void theWelcomeLinkCountsDaysInEitherLanguage() {
+    // ETP-6081: the welcome carries the 7-day login link, and one day must not read "1 días".
+    assertTrue(EmailMessages.get("new-account.note.expiry", "es_ES", 7L).contains("7 días"));
+    assertTrue(EmailMessages.get("new-account.note.expiry", "es_ES", 1L).contains("1 día."));
+    assertTrue(EmailMessages.get("verify-email.note.expiry", "en_US", 7L).contains("7 days"));
+    assertTrue(EmailMessages.get("verify-email.note.expiry", "en_US", 1L).contains("1 day."));
+  }
+
+  @Test
   public void keepsBothCatalogsInSync() {
     // A key added to one language and forgotten in the other silently ships the Spanish string to
     // an English recipient. Cheaper to catch here than in an inbox.

@@ -233,8 +233,11 @@ public final class NeoDocumentPdf {
     void close();
   }
 
-  /** How many documents one MCP call may render synchronously; the rest are queued. */
-  static final int SYNC_RENDERS_PER_CALL = 3;
+  /**
+   * How many documents one MCP call may render synchronously; the rest are queued. Public so the PDF
+   * tool's retry hint names the same number.
+   */
+  public static final int SYNC_RENDERS_PER_CALL = 3;
 
   /** The renders left to the current MCP call, or {@code null} outside a budgeted call (no limit). */
   private static final ThreadLocal<int[]> SYNC_RENDER_BUDGET = new ThreadLocal<>();

@@ -516,6 +516,142 @@ public class BatchServiceTest {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // ETP-6143: DELETE operations (bulk delete as one request)
+  // ---------------------------------------------------------------------------
+
+  private static JSONObject deleteOp(String opId, String recordId) throws Exception {
+    JSONObject op = new JSONObject().put("id", opId).put("spec", SCOPE_SPEC)
+        .put("entity", "product").put("method", "DELETE");
+    return recordId == null ? op : op.put("recordId", recordId);
+  }
+
+  /** Runs {@code ops} with a writable entity whose DELETE is {@code deleteEnabled}. */
+  private JSONObject runDeleteBatch(JSONArray ops, boolean deleteEnabled, NeoResponse answer,
+      List<NeoContext> seen) throws Exception {
+    return runDeleteBatch(ops, deleteEnabled, answer, seen, null);
+  }
+
+  private JSONObject runDeleteBatch(JSONArray ops, boolean deleteEnabled, NeoResponse answer,
+      List<NeoContext> seen, NeoResponse preflightRefusal) throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+         MockedStatic<NeoAccountingAccessPolicy> acct =
+             mockStatic(NeoAccountingAccessPolicy.class);
+         MockedStatic<NeoWritePreflight> preflight = mockStatic(NeoWritePreflight.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      SFEntity entity = stubWritableEntity(obDal, support, access, acct).list().get(0);
+      when(entity.isDelete()).thenReturn(deleteEnabled);
+      List<NeoContext> preflighted = new ArrayList<>();
+      preflight.when(() -> NeoWritePreflight.refusalFor(any(NeoContext.class)))
+          .thenAnswer(invocation -> {
+            preflighted.add(invocation.getArgument(0));
+            return preflightRefusal;
+          });
+      support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(),
+          any())).thenAnswer(invocation -> {
+            seen.add(invocation.getArgument(1));
+            return answer;
+          });
+      JSONObject result = BatchService.forBatchOnly().executeBatch(ops, null);
+      for (NeoContext ctx : preflighted) {
+        assertEquals("the ownership preflight sees the DELETE", "DELETE", ctx.getHttpMethod());
+      }
+      return result;
+    }
+  }
+
+  private static NeoResponse deletedAnswer(String id) throws Exception {
+    return new NeoResponse(200, new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", id)))));
+  }
+
+  @Test
+  public void executeBatchDeletesEachRecordThroughTheDeletePipeline() throws Exception {
+    List<NeoContext> seen = new ArrayList<>();
+    JSONArray ops = new JSONArray().put(deleteOp("d0", "R0")).put(deleteOp("d1", "R1"));
+
+    JSONObject result = runDeleteBatch(ops, true, deletedAnswer("R0"), seen);
+
+    assertTrue(result.getBoolean("committed"));
+    assertEquals(2, seen.size());
+    assertEquals("DELETE", seen.get(0).getHttpMethod());
+    assertEquals("R0", seen.get(0).getRecordId());
+    assertEquals("R1", seen.get(1).getRecordId());
+    JSONObject second = result.getJSONArray("operations").getJSONObject(1);
+    assertEquals("d1", second.getString("id"));
+    assertEquals("DELETE", second.getString("method"));
+    assertEquals("the reported id is the record the op named, not the response's", "R1",
+        second.getString("recordId"));
+  }
+
+  /**
+   * A record of another tenant (or of an organization the role cannot write) is refused by the
+   * write preflight ({@code NeoActionRecordGuard} → {@code TenantOwnership}) with the same 404 as
+   * an unknown id, and the delete never reaches the write path.
+   */
+  @Test
+  public void executeBatchRefusesADeleteOfARecordTheTenantDoesNotOwn() throws Exception {
+    List<NeoContext> seen = new ArrayList<>();
+    NeoResponse notFound = NeoResponse.error(404, "Record not found");
+
+    JSONObject result = runDeleteBatch(new JSONArray().put(deleteOp("d0", "FOREIGN")), true,
+        deletedAnswer("FOREIGN"), seen, notFound);
+
+    assertFalse(result.getBoolean("committed"));
+    assertEquals(404, result.getJSONObject("error").getInt("status"));
+    assertTrue("the delete never ran", seen.isEmpty());
+  }
+
+  @Test
+  public void executeBatchRefusesADeleteWithoutRecordIdBeforeTouchingTheRecord() throws Exception {
+    List<NeoContext> seen = new ArrayList<>();
+
+    JSONObject result = runDeleteBatch(new JSONArray().put(deleteOp("d0", null)), true,
+        deletedAnswer("x"), seen);
+
+    assertFalse(result.getBoolean("committed"));
+    assertEquals(400, result.getJSONObject("error").getInt("status"));
+    assertTrue(seen.isEmpty());
+  }
+
+  @Test
+  public void executeBatchRefusesADeleteCarryingABody() throws Exception {
+    List<NeoContext> seen = new ArrayList<>();
+    JSONObject op = deleteOp("d0", "R0").put("body", new JSONObject());
+
+    JSONObject result = runDeleteBatch(new JSONArray().put(op), true, deletedAnswer("R0"), seen);
+
+    assertEquals(400, result.getJSONObject("error").getInt("status"));
+    assertTrue(seen.isEmpty());
+  }
+
+  @Test
+  public void executeBatchRefusesADeleteTheEntityDoesNotEnable() throws Exception {
+    List<NeoContext> seen = new ArrayList<>();
+
+    JSONObject result = runDeleteBatch(new JSONArray().put(deleteOp("d0", "R0")), false,
+        deletedAnswer("R0"), seen);
+
+    assertEquals(405, result.getJSONObject("error").getInt("status"));
+    assertTrue(seen.isEmpty());
+  }
+
+  @Test
+  public void executeBatchReportsTheServersReasonForARefusedDelete() throws Exception {
+    NeoResponse inUse = NeoResponse.error(409, "The record is in use");
+
+    JSONObject result = runDeleteBatch(new JSONArray().put(deleteOp("d0", "R0")), true, inUse,
+        new ArrayList<>());
+
+    assertFalse(result.getBoolean("committed"));
+    assertEquals(409, result.getJSONObject("error").getInt("status"));
+    assertEquals("The record is in use", result.getJSONObject("error").getString("message"));
+    assertEquals("d0", result.getJSONObject("failedAt").getString("id"));
+  }
+
   /** ETP-5772: REST /batch runs under admin mode, so it must check spec access itself. */
   @Test
   public void executeBatchRefusesCreateWithoutSpecAccess() throws Exception {

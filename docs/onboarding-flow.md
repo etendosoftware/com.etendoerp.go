@@ -351,11 +351,17 @@ whether the signup wizard's Company step collects Street/Number/Building Name/Ci
 single free-text address line. **While off** (default pre-launch), `address` is the only field
 read and `createLocation` populates `Address1` from it exactly as before this ticket — the 3
 structured fields are never read even if a stale client still sends them. **While on**, the wizard
-also sends `streetName`/`buildingNumber`/`buildingName`/`city`; `streetName`/`buildingNumber`/`city`
-are mandatory together **only once the user has started filling the block in**
+also sends `streetName`/`buildingNumber`/`buildingName`/`city`; `streetName`/`city` are mandatory
+together **only once the user has started filling the block in**
 (`EtendoGoJwtServlet#validateStructuredAddressBlock`) — a blank block is still accepted, matching
-the step's minimalist, fully-optional-address design. `OnboardingOrgInfoService#applyAddressFields`
-then prioritizes the structured fields over the legacy `address` when both are present, computing
+the step's minimalist, fully-optional-address design. `buildingNumber` is **not** independently
+mandatory (ETP-5806 follow-up, same rule as the 3 NEO handlers — see `neo-headless.md`
+§4.12.9 "`buildingNumber` fallback, now consistent across every channel"): a blank/omitted value
+with a present `streetName` resolves to the literal `"s/n"` via
+`StructuredAddressComposer#effectiveBuildingNumber`, both at this validator (so a direct caller that
+omits it is no longer rejected with a 400) and again at `OnboardingOrgInfoService#applyAddressFields`
+(so it is what actually gets persisted). `OnboardingOrgInfoService#applyAddressFields` then
+prioritizes the structured fields over the legacy `address` when both are present, computing
 `addressLine1`/`addressLine2` via `StructuredAddressComposer` (the same algorithm every other
 address popup uses) and persisting the 3 raw columns alongside them. `OnboardingWarehouseAddressService`
 copies the 3 structured columns too, when it mirrors the org's fiscal address onto the default
@@ -746,7 +752,8 @@ tenant.
 The onboarding flow participates in the local-account transactional auth email
 model:
 
-- `/sws/go/register` sends `new-account` after the account commit.
+- `/sws/go/register` sends `new-account` after the account commit; since ETP-6081 it carries
+  the one-time login link (see *Sign-up without a password* below).
 - `/sws/go/onboarding` sends `environment-ready` only after onboarding commits.
 - Both emails use server-generated links based on `etendo.go.app.baseUrl` or
   `ETGO_APP_BASE_URL`.
@@ -788,6 +795,49 @@ accounts are auto-linked by email only when the provider-specific verifier marks
 that email as authoritative. The Google implementation does this for any email
 verified by Google (where the `email_verified` claim is `true`). No email
 verification fields or login gates are added.
+
+## Terms and conditions and phone at sign-up (ETP-6081)
+
+- **Terms.** The register screen states that creating the account accepts the terms and
+  conditions, under both the form and the SSO button, and opens them in a popup from
+  `GET /sws/go/terms`. Every account created at sign-up (form, SSO, company invitation, signup
+  API) stores `TERMS_ACCEPTED_AT` and `TERMS_VERSION`. Full reference:
+  [terms-and-conditions.md](terms-and-conditions.md).
+- **Phone.** The register form asks for an optional phone: a prefix selector (two-letter country
+  code and dialling code, `ES +34`) plus the number. `POST /sws/go/session/register` receives one
+  `phone` value, `+34 600123456`, and stores it in `ETGO_ACCOUNT.PHONE` with the account. A value
+  that is not a phone is dropped, never refused. An SSO sign-up skips the form, so it has no phone,
+  and a company invitation does not ask for it. It reaches the HubSpot contact
+  ([hubspot-sync.md](hubspot-sync.md)).
+
+## Sign-up without a password (ETP-6081)
+
+The register form asks for name, email and, optionally, a phone. No password.
+
+- **The account.** `POST /sws/go/session/register` (and legacy `/register`) treats `password` as
+  optional. Without one the account is created with no local password, like a signup API account;
+  a password that is sent is still checked against the policy and stored, so a client that asks
+  for one keeps working. The session opened by the register call carries the onboarding on in that
+  browser (`AUTH_METHOD = 'link'` for a passwordless account).
+- **The welcome mail.** `new-account` carries the **one-time login link**
+  (`/onboarding?loginToken=`), valid 7 days, instead of the confirmation-only link.
+  `AccountRegistrationService.issueEmailVerification` stores one token as both the confirmation
+  token and the login link (`EmailVerificationDalHelper.storeEmailVerifyToken`), so:
+  - the account stays gated from creating its environment exactly as before
+    (`isEmailVerificationPending`, ETP-4798);
+  - following the link (`POST /sws/go/session/link`) spends it, confirms the address and opens a
+    session in any browser;
+  - an old `?verifyToken=` link keeps working, because the confirmation columns are unchanged.
+- **Resend.** "Send the link again" (`/verify-email/resend`) mails a fresh login link in the
+  `verify-email` message; a send that fails puts back the previous token and link, so the one
+  already in the inbox keeps working.
+- **Coming back later.** The link works once. Afterwards the account signs in through "Forgot
+  password?", which for an account with no password mails `set-password` and lets it create one.
+  The login screen says so under that action ("Created your account without a password?"). A
+  password sign-in of a passwordless account still answers `INVALID_CREDENTIALS`, the same as a
+  wrong password, so the screen does not reveal which addresses have an account.
+- **Company invitations are unchanged.** The invitation's register screen still asks for a password
+  (`RegisterStep askPassword`), because `register-and-accept` requires one.
 
 ## Onboarding Draft (resume support)
 
@@ -1073,9 +1123,10 @@ meant two ways to write the same rows.
 
 ### Prefix validation
 
-`DocumentSequenceHandler` (a `NeoHandler` bound to the spec's `Java_Qualifier`) rejects a prefix
+`DocumentSequenceHandler` (a `NeoHandler` bound by `@NeoExtension(spec = "document-sequence",
+entity = "sequence")` since ETP-5837) rejects a prefix
 the Spanish fiscal localizations would refuse, **before** it is stored — see
-`docs/neo-headless-extensibility.md` for the handler pattern. Classic validates the same rules,
+`docs/neo-headless.md` §5.3.a for the binding. Classic validates the same rules,
 but only inside `ProcessInvoiceTbaiHook.preProcess`, which runs when a *rectificative* invoice is
 completed in a TicketBAI-configured organization. A prefix chosen during onboarding therefore
 went unchecked for as long as it took to issue that first corrective invoice.

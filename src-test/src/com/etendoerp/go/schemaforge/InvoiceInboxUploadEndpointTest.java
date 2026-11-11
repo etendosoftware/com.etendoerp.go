@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -112,6 +114,29 @@ class InvoiceInboxUploadEndpointTest {
     access.verifyNoInteractions();
     obContext.verifyNoInteractions();
     intake.verifyNoInteractions();
+  }
+
+  @Test
+  void featureDisabledIsTheVeryEnvelopeOfTheFlagOffRefusal() throws Exception {
+    flag.when(InvoiceInboxFlag::isEnabled).thenReturn(false);
+
+    NeoResponse helper = InvoiceInboxUploadEndpoint.featureDisabled();
+    NeoResponse refused = InvoiceInboxUploadEndpoint.handle(request(MULTIPART, 100L));
+
+    assertRefusal(helper, 403, "feature_disabled");
+    assertEquals(helper.getBody().toString(), refused.getBody().toString());
+    assertEquals("The invoice inbox is not enabled for this user.",
+        helper.getBody().getJSONObject("error").getString("message"));
+  }
+
+  @Test
+  void isWritableOrganizationRefusesTheStarOrgAndAcceptsOnlyWritableOnes() {
+    contextOf(ORG_ID, Set.of(ORG_ID, "0"));
+    OBContext context = OBContext.getOBContext();
+
+    assertFalse(InvoiceInboxUploadEndpoint.isWritableOrganization(context, "0"));
+    assertTrue(InvoiceInboxUploadEndpoint.isWritableOrganization(context, ORG_ID));
+    assertFalse(InvoiceInboxUploadEndpoint.isWritableOrganization(context, "OTHER-ORG"));
   }
 
   @Test
@@ -481,5 +506,23 @@ class InvoiceInboxUploadEndpointTest {
     assertEquals("ID-a.pdf", response.getBody().getJSONArray("results").getJSONObject(0)
         .getString("incomingDocumentId"));
     processor.verify(() -> InvoiceInboxProcessor.submit(anyString()), times(2));
+  }
+
+  /**
+   * The route decision lives here, not in the generic built-in dispatcher: exactly
+   * {@code POST /invoice-inbox/upload}, nothing else of the spec and nothing null.
+   */
+  @Test
+  void servesOnlyPostOnTheInvoiceInboxUploadPath() {
+    assertTrue(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "POST"));
+
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "GET"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", "post"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "header", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("sales-order", "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("image", "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves(null, "upload", "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", null, "POST"));
+    assertFalse(InvoiceInboxUploadEndpoint.serves("invoice-inbox", "upload", null));
   }
 }

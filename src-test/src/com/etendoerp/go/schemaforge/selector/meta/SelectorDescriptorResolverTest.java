@@ -1320,7 +1320,11 @@ public class SelectorDescriptorResolverTest {
     when(dal.createCriteria(Selector.class)).thenReturn(selCrit);
 
     Entity entity = entityWithName("ProductByPriceAndWarehouse");
-    when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
+    // the label shows the description, so the fallback adds it as a path (ETP-6103)
+    Property description = mock(Property.class);
+    when(description.getName()).thenReturn("description");
+    when(description.isPrimitive()).thenReturn(true);
+    when(entity.getIdentifierProperties()).thenReturn(List.of(description));
     when(entity.hasProperty(anyString())).thenAnswer(inv -> "description".equals(inv.getArgument(0)));
     when(modelProvider.getEntityByTableName("M_Product_Price_Warehouse_V")).thenReturn(entity);
 

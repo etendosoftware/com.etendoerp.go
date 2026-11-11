@@ -258,15 +258,28 @@ final class McpDocumentPdfTool {
     }
   }
 
+  /** The queued case of a multi-id call, inside the retry clauses. */
+  private static final String OVER_BUDGET = "or this call asked for more than "
+      + NeoDocumentPdf.SYNC_RENDERS_PER_CALL + " documents";
+
   /**
-   * The stale advice (ETP-6013): a document completed a moment ago gets its PDF regenerated on the
-   * server, so asking again shortly is the first thing to try; the application remains the way to
-   * regenerate it where the server cannot.
+   * The last resort of the PDF tool's hints (ETP-6013): the application, ONLY for what the server
+   * could not render (no printable declared, a read-only role, a person's own main file, no
+   * jsreport, a failed render). "From there" matters: through this MCP the email tool would hit the
+   * same verdict. A return receipt's preview stores nothing, so for it only a send does.
    */
-  static final String STALE_HINT = "If the document was just completed, its PDF is being "
-      + "regenerated: ask again in a few seconds. Otherwise ask the user to open the document's "
-      + "preview in the application (or to send the document by email, for a window whose preview "
-      + "stores nothing) so the PDF is regenerated, then ask again.";
+  private static final String APP_FALLBACK = "the server could not generate it: ask the user to "
+      + "open the document's preview in the application, or to send the document by email from "
+      + "there (a return receipt's preview stores nothing), then ask again.";
+
+  /**
+   * The stale advice (ETP-6013): a reactivated document is a draft again and gets no PDF until it
+   * is completed again; a document completed a moment ago gets its PDF regenerated on the server,
+   * so asking again shortly comes next; the application only where the server cannot.
+   */
+  static final String STALE_HINT = "If the document was reactivated, complete it again, then ask "
+      + "again. If it was just completed, " + OVER_BUDGET + ", its PDF is being regenerated: ask "
+      + "again in a few seconds. Otherwise " + APP_FALLBACK;
 
   /**
    * The retry advice for a document completed a moment ago (ETP-6013), prefixed to the no-PDF hint.
@@ -277,30 +290,44 @@ final class McpDocumentPdfTool {
       + "generated: ask again in a few seconds, once. If it is still missing then, asking again or "
       + "completing the document again will not produce it. ";
 
-  /** What to do about a draft, for both PDF tools: only one thing is true of it. */
-  static final String DRAFT_HINT_PREFIX = "This document is a draft and a draft never stores a "
-      + "PDF: complete it first, then open its preview in the application and ";
+  /** The same retry for a stale PDF, worded "regenerated"; the email tool's stale hint uses it. */
+  static final String STALE_RETRY_HINT = "If the document was just completed, its PDF is being "
+      + "regenerated: ask again in a few seconds. ";
+
+  /**
+   * This tool's retry advice (ETP-6013): besides a document completed a moment ago, a multi-id call
+   * renders at most {@link NeoDocumentPdf#SYNC_RENDERS_PER_CALL} documents and queues the rest, which
+   * answer no_pdf / pdf_stale while they render. The email tool sends one document, unbudgeted, so it
+   * keeps {@link #JUST_COMPLETED_HINT}.
+   */
+  static final String RETRY_HINT = "If the document was just completed, " + OVER_BUDGET
+      + ", its PDF is being generated: ask again in a few seconds. ";
+
+  /**
+   * What to do about a draft, for both PDF tools: complete it. Completing is enough — the PDF is
+   * generated then (ETP-6013), and the next answer says what to do if it could not be.
+   */
+  static final String DRAFT_HINT_PREFIX = "This document is a draft and a draft never has a PDF: "
+      + "complete it first, then ";
 
   /** The draft advice of {@code etendo_get_document_pdf}: the retry verb is "ask again". */
   static final String DRAFT_HINT = DRAFT_HINT_PREFIX + "ask again.";
 
+  /** The draft remark of a no-PDF hint when the document's status is unknown, for both tools. */
+  static final String UNKNOWN_STATUS_DRAFT_REMARK = "If the document is a draft, complete it "
+      + "first: a draft never has a PDF. ";
+
   /**
    * The advice for a document with no PDF, by what is known of its state: a draft gets only the
-   * draft sentence; a document of a known other status gets the preview advice; an unknown status
-   * (no {@code documentStatus} property) keeps the generic text, which is true either way.
+   * draft sentence; a document of a known other status gets the retry and, last, the application;
+   * an unknown status (no {@code documentStatus} property) also gets the draft remark first.
    */
   private static String missingHint(NeoDocumentPdf.Result result) {
-    String documentStatus = result.getDocumentStatus();
     if (result.isDraft()) {
       return DRAFT_HINT;
     }
-    String advice = JUST_COMPLETED_HINT + "Otherwise open the document's preview in the "
-        + "application, or send the document by "
-        + "email, and ask again";
-    String tail = ". Which of the two stores one depends on the window: a return receipt's "
-        + "preview stores nothing, only sending it does.";
-    return documentStatus == null
-        ? advice + " (a draft never stores a PDF: complete it first)" + tail : advice + tail;
+    String advice = RETRY_HINT + "Otherwise " + APP_FALLBACK;
+    return result.getDocumentStatus() == null ? UNKNOWN_STATUS_DRAFT_REMARK + advice : advice;
   }
 
   private static JSONObject found(NeoAttachmentTarget target, JSONObject stored)
