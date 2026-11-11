@@ -480,7 +480,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
       String nameVal = nullIfEmpty(body.optString("name", null));
       if (nameVal != null) {
-        bpLoc.setName(nameVal);
+        // ETP-6206: capped at C_BPartner_Location.Name (60) like the create path, or an edit that
+        // sends "city, long address line" fails at flush.
+        bpLoc.setName(ContactAddressName.capped(nameVal));
       }
       applyLocationFlags(body, bpLoc);
       // The address lives in C_Location, so an address-only edit would leave this row clean and
