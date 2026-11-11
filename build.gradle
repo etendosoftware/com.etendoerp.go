@@ -252,6 +252,21 @@ rootProject.afterEvaluate { rootProj ->
 }
 
 /**
+ * ETP-6069 — how many JVMs {@code goTestUnit} runs side by side.
+ *
+ * <p>One by default, the serial run. Measured on 12 cores: 1 fork 341 s, 2 forks ~250 s, more
+ * forks no faster. Not worth it yet: with more than one fork, which classes share a JVM depends on
+ * scheduling, so a leak {@code StaticStateLeakListener} cannot repair (a failed static
+ * initializer, see {@code docs/test-jvm-isolation.md}) would turn into a CI failure nobody can
+ * reproduce. {@code -PgoTestUnitForks=N} runs N forks, for a local run or once those leaks are
+ * fixed at their source.</p>
+ */
+def goTestUnitForks = { rootProj ->
+    def requested = rootProj.findProperty('goTestUnitForks')
+    return requested == null ? 1 : Math.max(1, requested.toString().toInteger())
+}
+
+/**
  * ETP-5695 — {@code goTestUnit}: the database-free half of this module's Java suite.
  *
  * <p>The module's test classes split cleanly in two. A few dozen reach {@code OBBaseTest} or
@@ -316,8 +331,8 @@ rootProject.afterEvaluate { rootProj ->
         t.maxHeapSize = rootTest.maxHeapSize
         t.workingDir = rootTest.workingDir
         t.environment(rootTest.environment)
-        t.maxParallelForks = rootTest.maxParallelForks
         t.forkEvery = rootTest.forkEvery
+        t.maxParallelForks = goTestUnitForks(rootProj)
     }
 
     // goTestUnit's own coverage, read by scripts/check-diff-coverage.py. jacocoRootReport merges

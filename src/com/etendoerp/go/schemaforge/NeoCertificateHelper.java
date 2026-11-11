@@ -63,7 +63,13 @@ import com.etendoerp.sif.general.utility.SifGeneralUtils;
 public class NeoCertificateHelper {
 
   private static final Logger log = LogManager.getLogger(NeoCertificateHelper.class);
-  private static final String DATE_FORMAT = "dd/MM/yyyy";
+  /**
+   * Machine format of every certificate date this helper returns ({@code validTo} of
+   * {@code GET /certificate}, {@code validFrom}/{@code validTo} of the upload details): ISO
+   * {@code yyyy-MM-dd}, the same as the agents' {@code certificate} action. The client formats it
+   * for display; a localized {@code dd/MM/yyyy} here was read month-first by the browser (ETP-6053).
+   */
+  private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String PARAM_ORG_ID = "orgId";
   private static final String KEY_EXISTS = "exists";
 
@@ -93,7 +99,8 @@ public class NeoCertificateHelper {
    * Handles GET /sws/neo/certificate — returns the active certificate status for an organization.
    *
    * @param request HTTP request; must include {@code orgId} query parameter
-   * @return NeoResponse with {@code exists} boolean and {@code validTo} date when found
+   * @return NeoResponse with {@code exists} boolean and, when found, {@code validTo} as an ISO
+   *     {@code yyyy-MM-dd} date (e.g. {@code "2027-07-01"})
    */
   public static NeoResponse handleCertificateGet(HttpServletRequest request) {
     try {

@@ -694,6 +694,14 @@ public abstract class AbstractInvoiceHeaderHandler {
     if (rectificationBlock != null) {
       return rectificationBlock;
     }
+    // ETP-5745 CP-13/CP-14: correct the structural SII fields (aeatsiiClaveTipo, aeatsiiTipoRectif)
+    // and require a rectification code/motive from every active fiscal system (SII, TicketBAI,
+    // VERI*FACTU) on the MCP/REST completion path, which never ran the classic UI's own equivalent
+    // logic. See RectificationFiscalCodeGuard for the full rule.
+    NeoResponse fiscalCodeBlock = RectificationFiscalCodeGuard.checkAndApply(context);
+    if (fiscalCodeBlock != null) {
+      return fiscalCodeBlock;
+    }
     return InvoiceCompletionService.completeInvoice(context.getRecordId(), context.getObContext());
   }
 

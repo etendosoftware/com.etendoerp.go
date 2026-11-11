@@ -17,10 +17,12 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -32,21 +34,26 @@ import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.system.Language;
 
 import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.oauth2.PublicApiKeyAttribution;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.usageevents.PublicApiCall;
 import com.etendoerp.go.usageevents.PublicApiCaller;
 import com.etendoerp.go.usageevents.PublicApiUsageCounter;
@@ -54,11 +61,13 @@ import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 /**
  * How {@link NeoServlet}'s request entry point maps a failure inside the routed handler to an HTTP
  * status. The collaborators the servlet builds in its field initializers are replaced with
- * {@code mockConstruction} so the routed call can be made to throw.
+ * {@code mockConstruction} so the routed call can be made to throw. ETP-6158: the response it
+ * writes has its Classic fiscal messages reworded in the language captured after authentication.
  *
  * @covers com.etendoerp.go.schemaforge.NeoServlet
  * @covers com.etendoerp.go.schemaforge.NeoPublicApiUsage
  * @covers com.etendoerp.go.schemaforge.NeoErrorResponses
+ * @covers com.etendoerp.go.schemaforge.ClassicMessageRemap
  */
 class NeoServletProcessRequestTest {
 
@@ -90,6 +99,8 @@ class NeoServletProcessRequestTest {
 
   @AfterEach
   void tearDown() {
+    ClassicMessageRemap.setTextsForTest(null);
+    NeoLanguage.restoreRequestCode(null);
     pseudoSpecs.close();
     builtIns.close();
     routers.close();
@@ -109,6 +120,68 @@ class NeoServletProcessRequestTest {
       return e;
     }
     throw new AssertionError("expected " + text + " to be malformed");
+  }
+
+  private static final String REVERSED_ES = "Si el tipo de factura es Rectificativa o Factura "
+      + "emitida en sustitución de facturas simplificadas, debe añadir las facturas relacionadas "
+      + "en la solapa Facturas Rectificativas.";
+  private static final String REVERSED_GO_ES = "El Tipo de Factura de VERI*FACTU (pestaña SIF) es "
+      + "rectificativo o F3 (emitida en sustitución de simplificadas): añade las facturas que "
+      + "rectifica en la pestaña Rectificaciones.";
+
+  private static void switchLanguage(OBContext ctx, String code) {
+    Language language = mock(Language.class);
+    when(language.getLanguage()).thenReturn(code);
+    when(ctx.getLanguage()).thenReturn(language);
+  }
+
+  /**
+   * ETP-6158, REST end to end: a handler answers a Classic fiscal message after a Classic call
+   * switched the {@code OBContext} language; the response leaves reworded in the language the
+   * request was authenticated with, with the AD_MESSAGE key in {@code error.messageKeys}, and the
+   * captured language does not outlive the request.
+   */
+  @Test
+  void aClassicFiscalMessageLeavesRewordedInTheRequestLanguage() throws Exception {
+    ClassicMessageRemap.setTextsForTest(Map.of("ETVFAC_reversed_invoice", List.of(REVERSED_ES)));
+    OBContext ctx = mock(OBContext.class);
+    switchLanguage(ctx, "es_ES");
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+    doAnswer(inv -> {
+      switchLanguage(ctx, "en_US"); // a Classic call changing the session language
+      servlet.writeResponse(inv.getArgument(3),
+          NeoResponse.ensureTopLevelMessage(NeoResponse.error(422, REVERSED_ES)));
+      return null;
+    }).when(routers.constructed().get(0)).handleSpecRequest(any(), anyString(), any(), any());
+
+    servlet.doPost(mock(HttpServletRequest.class), response);
+
+    verify(response).setStatus(422);
+    JSONObject written = new JSONObject(body.toString());
+    assertEquals(REVERSED_GO_ES, written.getString("message"));
+    JSONObject error = written.getJSONObject("error");
+    assertEquals(REVERSED_GO_ES, error.getString("message"));
+    assertEquals("ETVFAC_reversed_invoice", error.getJSONArray("messageKeys").getString(0));
+    assertEquals("en_US", NeoLanguage.requestCode());
+  }
+
+  /** writeResponse on its own: the remap runs before the body is serialized. */
+  @Test
+  void writeResponseRemapsBeforeWriting() throws Exception {
+    ClassicMessageRemap.setTextsForTest(Map.of("ETVFAC_reversed_invoice", List.of(REVERSED_ES)));
+    OBContext ctx = mock(OBContext.class);
+    switchLanguage(ctx, "en_US");
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+
+    servlet.writeResponse(response, NeoResponse.error(409, "Cannot complete: " + REVERSED_ES));
+
+    verify(response).setStatus(409);
+    verify(response).setContentType(eq("application/json"));
+    JSONObject error = new JSONObject(body.toString()).getJSONObject("error");
+    assertEquals("Cannot complete: The VERI*FACTU Invoice type (SIF tab) is a corrective one or "
+        + "F3 (issued to replace simplified invoices): add the invoices it corrects in the "
+        + "Rectifications tab.", error.getString("message"));
+    assertEquals("ETVFAC_reversed_invoice", error.getJSONArray("messageKeys").getString(0));
   }
 
   @Test

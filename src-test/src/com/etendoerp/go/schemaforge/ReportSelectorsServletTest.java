@@ -730,16 +730,16 @@ class ReportSelectorsServletTest {
     }
 
     @Test
-    @DisplayName("clamps limit above MAX_LIMIT to 100")
+    @DisplayName("clamps limit above MAX_LIMIT to 1000")
     @SuppressWarnings("unchecked")
     void limitAboveMax() throws Exception {
       configureAuthenticatedGet("bpartner");
-      when(request.getParameter("limit")).thenReturn("500");
+      when(request.getParameter("limit")).thenReturn("5000");
 
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
-      verify(dataQuery).setMaxResults(100);
+      verify(dataQuery).setMaxResults(1000);
     }
 
     @Test

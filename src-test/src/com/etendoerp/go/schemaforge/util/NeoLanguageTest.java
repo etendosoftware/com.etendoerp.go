@@ -47,6 +47,11 @@ import org.openbravo.model.ad.system.Language;
 /**
  * Unit tests for {@link NeoLanguage} — the shared request-language helper (ETP-4304).
  * Uses Mockito static mocking of {@link OBContext} / {@link OBDal}; no DB.
+ *
+ * <p>ETP-6158: the request-language capture ({@code captureRequestCode} / {@code requestCode} /
+ * {@code restoreRequestCode}) that the Classic message remap answers in.
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoLanguage
  */
 class NeoLanguageTest {
 
@@ -64,6 +69,8 @@ class NeoLanguageTest {
 
   @AfterEach
   void tearDown() {
+    // the captured request language is a ThreadLocal: never leak it into the next test
+    NeoLanguage.restoreRequestCode(null);
     obDal.close();
     obContext.close();
   }
@@ -218,5 +225,91 @@ class NeoLanguageTest {
   void applyToContextNoopForInvalidCode() {
     NeoLanguage.applyToContext("nope");
     obContext.verify(OBContext::getOBContext, never());
+  }
+
+  // ── request-language capture (ETP-6158) ─────────────────────────────────────────────────────
+
+  /** A mutable OBContext language, as a Classic call that switches it mid-request leaves it. */
+  private OBContext contextIn(String code) {
+    OBContext ctx = mock(OBContext.class);
+    switchLanguage(ctx, code);
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+    return ctx;
+  }
+
+  private static void switchLanguage(OBContext ctx, String code) {
+    Language language = mock(Language.class);
+    when(language.getLanguage()).thenReturn(code);
+    when(ctx.getLanguage()).thenReturn(language);
+  }
+
+  @Test
+  @DisplayName("requestCode keeps the captured language when the OBContext language changes")
+  void requestCodeKeepsTheCapturedLanguage() {
+    OBContext ctx = contextIn("es_ES");
+
+    String previous = NeoLanguage.captureRequestCode();
+    switchLanguage(ctx, "en_US");
+
+    assertNull(previous);
+    assertEquals("es_ES", NeoLanguage.requestCode());
+    assertEquals("en_US", NeoLanguage.currentCode());
+  }
+
+  @Test
+  @DisplayName("requestCode falls back to currentCode when nothing was captured")
+  void requestCodeFallsBackToCurrentCode() {
+    contextIn("en_US");
+
+    assertEquals("en_US", NeoLanguage.requestCode());
+
+    obContext.when(OBContext::getOBContext).thenReturn(null);
+    assertNull(NeoLanguage.requestCode());
+  }
+
+  @Test
+  @DisplayName("a restored capture does not leak into the next request on a pooled thread")
+  void aRestoredCaptureDoesNotLeakIntoTheNextRequest() {
+    // request 1 on this (pooled) thread
+    OBContext ctx = contextIn("es_ES");
+    String previous = NeoLanguage.captureRequestCode();
+    NeoLanguage.restoreRequestCode(previous);
+
+    // request 2 on the same thread, another user's language, nothing captured yet
+    switchLanguage(ctx, "en_US");
+
+    assertEquals("en_US", NeoLanguage.requestCode());
+  }
+
+  @Test
+  @DisplayName("a nested capture hands back the outer one, and restore reinstates it")
+  void aNestedCaptureRestoresTheOuterOne() {
+    OBContext ctx = contextIn("es_ES");
+    String outerPrevious = NeoLanguage.captureRequestCode();
+    switchLanguage(ctx, "en_US");
+
+    String innerPrevious = NeoLanguage.captureRequestCode();
+    assertEquals("en_US", NeoLanguage.requestCode());
+    NeoLanguage.restoreRequestCode(innerPrevious);
+
+    assertEquals("es_ES", innerPrevious);
+    assertEquals("es_ES", NeoLanguage.requestCode());
+    NeoLanguage.restoreRequestCode(outerPrevious);
+    assertEquals("en_US", NeoLanguage.requestCode());
+  }
+
+  @Test
+  @DisplayName("capturing with no language (or a failing context) captures nothing")
+  void capturingWithNoLanguageCapturesNothing() {
+    OBContext ctx = contextIn("es_ES");
+    NeoLanguage.captureRequestCode();
+    obContext.when(OBContext::getOBContext).thenThrow(new IllegalStateException("no context"));
+
+    String previous = NeoLanguage.captureRequestCode();
+
+    assertEquals("es_ES", previous);
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+    switchLanguage(ctx, "en_US");
+    assertEquals("en_US", NeoLanguage.requestCode());
   }
 }
