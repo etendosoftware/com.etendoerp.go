@@ -3,8 +3,9 @@
 # Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=localizacion [-Pkind=mock|integration|all]
 
-# --- con mocks (41)
+# --- con mocks (43)
 com.etendoerp.go.schemaforge.AbstractFiscalHandlerTest
+com.etendoerp.go.schemaforge.ClassicMessageRemapTest
 com.etendoerp.go.schemaforge.CorrectInvoiceHandlerTest
 com.etendoerp.go.schemaforge.DefaultTaxResolverTest
 com.etendoerp.go.schemaforge.Fiscal303BoxesHandlerTest
@@ -29,6 +30,7 @@ com.etendoerp.go.schemaforge.FiscalSubmittedSnapshotSupportTest
 com.etendoerp.go.schemaforge.LineCalloutTaxRateHelperTest
 com.etendoerp.go.schemaforge.MarkSubsanationHandlerTest
 com.etendoerp.go.schemaforge.NeoFiscalModelsCatalogServiceTest
+com.etendoerp.go.schemaforge.RectificationFiscalCodeGuardTest
 com.etendoerp.go.schemaforge.RectificationTotalGuardTest
 com.etendoerp.go.schemaforge.RectificativeImportGateTest
 com.etendoerp.go.schemaforge.RectificativeSupportTest
@@ -46,6 +48,7 @@ com.etendoerp.go.schemaforge.handlers.TaxSifOverrideHandlerTest
 com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandlerTest
 com.etendoerp.go.schemaforge.selector.policy.InvoiceLineTaxSifSelectorPolicyTest
 
-# --- integración (BD) (2)
+# --- integración (BD) (3)
+com.etendoerp.go.schemaforge.ClassicMessageRemapCatalogIntegrationTest
 com.etendoerp.go.schemaforge.EtgoGetDeliveryStatusFunctionIntegrationTest
 com.etendoerp.go.schemaforge.EtgoGetTbaiStatusFunctionIntegrationTest

@@ -18,17 +18,25 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
 import javax.servlet.http.HttpServletResponse;
 
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -354,6 +362,129 @@ public class InvoiceCompletionServiceTest {
       verify(processInvoiceUtil).process(
           eq("inv-throw-ok"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
     }
+  }
+
+  // ── populateVerifactuFieldsFromDocType (ETP-5745 CP-21) ─────────────────────
+
+  @After
+  public void tearDownRectificativeFlag() {
+    RectificativeSupport.setColumnPresentForTests(null);
+  }
+
+  /**
+   * Invokes the private {@code populateVerifactuFieldsFromDocType(String)} directly via
+   * reflection — the same pattern already used elsewhere in this test suite for a
+   * private/package method with no lighter public entry point — and captures the SQL text handed
+   * to {@code conn.prepareStatement} for the main {@code UPDATE c_invoice} statement.
+   *
+   * @param isRectificative the value the method's own {@code em_etsg_isrectificative} lookup
+   *     query answers
+   * @return the captured {@code UPDATE} SQL text
+   */
+  private static String invokeAndCaptureUpdateSql(boolean isRectificative) throws Exception {
+    RectificativeSupport.setColumnPresentForTests(true);
+    Method method = InvoiceCompletionService.class
+        .getDeclaredMethod("populateVerifactuFieldsFromDocType", String.class);
+    method.setAccessible(true);
+
+    Connection conn = mock(Connection.class);
+
+    // isTargetDocTypeRectificative: SELECT dt.em_etsg_isrectificative FROM c_invoice i JOIN c_doctype ...
+    PreparedStatement rectifPs = mock(PreparedStatement.class);
+    ResultSet rectifRs = mock(ResultSet.class);
+    when(rectifPs.executeQuery()).thenReturn(rectifRs);
+    when(rectifRs.next()).thenReturn(true);
+    when(rectifRs.getString(1)).thenReturn(isRectificative ? "Y" : "N");
+    when(conn.prepareStatement(argThat(
+            sql -> sql != null && sql.contains("em_etsg_isrectificative"))))
+        .thenReturn(rectifPs);
+
+    // The main UPDATE — executeUpdate() returns 0 so the post-update cache-eviction branch
+    // (which would need OBDal.getInstance().getSession()) is never reached.
+    PreparedStatement updatePs = mock(PreparedStatement.class);
+    when(updatePs.executeUpdate()).thenReturn(0);
+    when(conn.prepareStatement(argThat(sql -> sql != null && sql.startsWith("UPDATE c_invoice"))))
+        .thenReturn(updatePs);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      method.invoke(null, "inv-verifactu");
+    }
+
+    org.mockito.ArgumentCaptor<String> sqlCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+    verify(conn, Mockito.atLeastOnce()).prepareStatement(sqlCaptor.capture());
+    return sqlCaptor.getAllValues().stream()
+        .filter(sql -> sql.startsWith("UPDATE c_invoice"))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("UPDATE c_invoice was never prepared"));
+  }
+
+  /**
+   * ETP-5745 CP-21: the THIRD place (after {@code InvoiceCalloutHelper} and
+   * {@code SalesRectificativeFiscalDefaults}) found copying a DocType-configured VERI*FACTU code
+   * onto a rectificative invoice. When the invoice's own document type IS rectificative,
+   * {@code em_etvfac_inv_type} must be reassigned to itself (a no-op), never to the DocType's
+   * {@code dt.em_etvfac_inv_type}.
+   */
+  @Test
+  public void populateVerifactuFieldsFromDocType_rectificativeInvoice_neverCopiesDocTypeInvType()
+      throws Exception {
+    String updateSql = invokeAndCaptureUpdateSql(true);
+
+    assertTrue("rectificative invoice: em_etvfac_inv_type must be a no-op self-assignment",
+        updateSql.contains("em_etvfac_inv_type       = i.em_etvfac_inv_type,"));
+    assertFalse("must not reference the DocType's own configured code",
+        updateSql.contains("dt.em_etvfac_inv_type"));
+  }
+
+  /** The original (correct, unrelated-to-the-bug) behavior is preserved for a normal invoice. */
+  @Test
+  public void populateVerifactuFieldsFromDocType_nonRectificativeInvoice_stillCopiesDocTypeInvType()
+      throws Exception {
+    String updateSql = invokeAndCaptureUpdateSql(false);
+
+    assertTrue("a normal invoice may still pick up the DocType's configured code",
+        updateSql.contains("COALESCE(i.em_etvfac_inv_type, dt.em_etvfac_inv_type)"));
+  }
+
+  /**
+   * Fail-SAFE control: when the rectificative flag cannot be resolved (e.g. SIF General not
+   * installed — {@code RectificativeSupport#isColumnPresent} false),
+   * {@code isTargetDocTypeRectificative} short-circuits to {@code false} rather than throwing or
+   * guessing, so the legacy COALESCE copy STILL runs — correct, since without the column no
+   * DocType can ever be flagged rectificative in the first place, so there is nothing to skip.
+   * This is the one case in this test class where the copy is NOT skipped.
+   */
+  @Test
+  public void populateVerifactuFieldsFromDocType_rectificativeColumnAbsent_stillCopiesDocTypeInvType()
+      throws Exception {
+    RectificativeSupport.setColumnPresentForTests(false);
+    Method method = InvoiceCompletionService.class
+        .getDeclaredMethod("populateVerifactuFieldsFromDocType", String.class);
+    method.setAccessible(true);
+
+    Connection conn = mock(Connection.class);
+    PreparedStatement updatePs = mock(PreparedStatement.class);
+    when(updatePs.executeUpdate()).thenReturn(0);
+    when(conn.prepareStatement(argThat(sql -> sql != null && sql.startsWith("UPDATE c_invoice"))))
+        .thenReturn(updatePs);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      method.invoke(null, "inv-no-sifgeneral");
+    }
+
+    // isColumnPresent()==false short-circuits isTargetDocTypeRectificative to false (not an
+    // error), so the UPDATE still runs with the normal COALESCE copy — correct, since without
+    // the column no DocType can ever be flagged rectificative in the first place.
+    verify(conn).prepareStatement(argThat(sql ->
+        sql != null && sql.contains("COALESCE(i.em_etvfac_inv_type, dt.em_etvfac_inv_type)")));
   }
 
   // ── ETP-6060: a plan quota refuses the completion ────────────────────────────

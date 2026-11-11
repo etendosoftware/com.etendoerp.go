@@ -297,6 +297,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return rateRefusal;
     }
     autoCreateOrUpdateConversionRateDocument(context);
+    // ETP-5745/ETP-5747 merge note: develop already refactored this into afterNonRead() below,
+    // which calls rectificationLinks.persistOriginInvoice/persistSiiAuthorizationno AND
+    // SalesRectificativeFiscalDefaults.apply (ETP-5745 CP-14), then threads the fiscal defaults
+    // into the write response via completeWriteResponse — strictly more complete than this
+    // branch's own inline duplicate (which only called apply() with no response wiring), so the
+    // inline block that used to be here was dropped in favor of afterNonRead().
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return afterNonRead(context);
     }

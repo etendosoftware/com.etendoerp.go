@@ -40,9 +40,12 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * environment the Spanish translation simply does not exist in the database, and {@code messageBD}
  * answers the English base text to a Spanish user — through REST and MCP, which have no SPA to
  * translate it afterwards. The Spanish text is therefore versioned in the
- * {@code messages/neo_hints_<lang>.properties} catalog.
+ * {@code messages/neo_hints_<lang>.properties} catalog. A catalog-only key with no
+ * {@code AD_MESSAGE} row (e.g. {@code ETGO_FiscalSubmitNoCertificate}, ETP-6158) resolves through
+ * steps 2 and 4 below.
  *
- * <p><b>Resolution order</b> (request language = {@link NeoLanguage#currentCode()}, the GO locale):
+ * <p><b>Resolution order</b> (request language = {@link NeoLanguage#requestCode()}, the GO locale
+ * captured at the start of the request, else {@link NeoLanguage#currentCode()}):
  * <ol>
  *   <li>an {@code AD_MESSAGE_TRL} row of that language marked {@code IsTranslated = 'Y'} — so an
  *       environment that does carry a translation keeps it (the untranslated copy Etendo creates
@@ -146,10 +149,15 @@ public final class NeoMessageText {
     NeoHints.addMessage(body, mcpOrigin, NeoHints.TYPE_WARNING, text(key, args));
   }
 
-  /** The request language, or {@code null} when there is no usable context. */
+  /**
+   * The request language, or {@code null} when there is no usable context: the one captured at the
+   * start of the request when there is one ({@link NeoLanguage#requestCode()}, which a Classic call
+   * cannot change, ETP-6158), else the current {@code OBContext} language.
+   */
   private static String currentLanguage() {
     try {
-      return NeoLanguage.currentCode();
+      String captured = NeoLanguage.requestCode();
+      return captured != null ? captured : NeoLanguage.currentCode();
     } catch (Exception e) {
       log.debug("No request language: {}", e.getMessage());
       return null;

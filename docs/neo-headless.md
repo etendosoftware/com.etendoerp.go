@@ -5429,7 +5429,7 @@ Other MCP-only refusals declared in §4.12.6:
 | journal entries of a sales invoice (ETP-5852, M-81) | neither invoice window shows an accounting tab | `sales-invoice/accounting` is published read-only like `purchase-invoice/accounting` (`FactAcctHandler`, `parentId` = the invoice); `renderTab:false`, so the app is unchanged |
 | a user's roles (ETP-5852, M-201) | the Users window's role chips (`SFUserRoleAssignments`) | read-only declared action `user/user` → `roles`: `{userId, administrator, roles:[{id,name}]}` (applied template roles + client admin), administrators only (403 otherwise); assigning stays in the app (`UserRolesReadAction`) |
 | a report spec's `AGENT_PROMPT` (ETP-5852, M-228) | n/a | appended to the `generate_<report>` tool description, as a window's reaches `etendo_discover` (`ToolRegistry#buildReportTool`) |
-| organization signing certificate status (ETP-5852, M-170) | the fiscal configuration's expiry warning (`GET /sws/neo/certificate`) | read-only declared action `organization/organization` → `certificate`: `{exists, validTo, daysLeft}`, never the file or its password; an organization outside the role's readable organizations answers 404 (`OrganizationCertificateAction`, `@NeoExtension`; both read `NeoCertificateHelper#activeCertificateExpiry`) |
+| organization signing certificate status (ETP-5852, M-170) | the fiscal configuration's expiry warning (`GET /sws/neo/certificate`) | read-only declared action `organization/organization` → `certificate`: `{exists, validTo, daysLeft}`, never the file or its password; an organization outside the role's readable organizations answers 404 (`OrganizationCertificateAction`, `@NeoExtension`; both read `NeoCertificateHelper#activeCertificateExpiry`, and both return `validTo` as ISO `yyyy-MM-dd` — the REST endpoint returned a localized `dd/MM/yyyy` until ETP-6053, which the browser read month-first; the day is the calendar day of the stored instant in the server's default timezone on both paths, so servers in different zones can differ by one day at a UTC-midnight edge — decided and kept, pinned by `NeoCertificateHelperTest`) |
 | billing preferences sent on a contact create (ETP-5852, M-106) — `priceList`, `paymentTerms`, `paymentMethod`, `account`, `customerBlocking` and their purchase twins | cleared by `BusinessPartnerHandler` (the form fills them after the contact exists) | a value the agent itself sent is kept, the defaults pass's are still cleared; the handler declares them in `NeoHandler#createUnsetFields`, so `view:"create"` no longer marks them `serverDefaulted` and `etendo_defaults` no longer offers them (`McpServerResolvedFields#unsetOnCreate`, `McpDefaultsView#withoutExcluded`) |
 | `etendo_defaults` on a field the agent surface excludes, e.g. `goods-receipt/goodsReceiptLine.operativeUOM` (field `MCP_CONFIG` `included:false`) (ETP-5852, M-119) | served with every included field | dropped, with its `$_identifier` (`McpDefaultsView#withoutExcluded`): a field the agent may not send is not a default to offer |
 | a handler's 403 refusal, e.g. an aging report the role may not run (ETP-5852, M-154) | `403` with the handler's body | `error:"forbidden"` (`McpSupportInternals#errorCodeForStatus`, also for batch rows); it read `validation_error`, as if the request could be fixed |
@@ -6988,6 +6988,145 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   answers `[]`, at most once a minute (the failure is cached), never touching the request.
 - **Write warnings** (a WARN verdict on a create) are not returned on this path.
 
+
+### 4.17 Classic fiscal messages reworded for GO (ETP-6158)
+
+The Spanish fiscal modules (VERI\*FACTU `com.etendoerp.verifactu`, TicketBAI `com.smf.ticketbai`,
+SII `org.openbravo.module.sii`, AEAT 303/349/390) raise `AD_MESSAGE`s whose text names Classic-only
+UI: a tab ("solapa Facturas Rectificativas"), a process ("Añadir Certificado Digital"), a window
+("ventana de configuración"), a launcher parameter, or a field label GO does not use. Their
+`AD_MESSAGE`/`AD_MESSAGE_TRL` rows are shared with Classic and **must not change**. NEO rewords them
+on the way out instead.
+
+**Where.** `ClassicMessageRemap` (`schemaforge/`) runs at the two exits every response passes:
+`NeoServlet#writeResponse` (REST single, `/batch`, batch-job polls, and every `sendError`, the
+fiscal handlers' included, since `sendError` writes through it) and `McpResponseSanitizer#render`
+(every MCP JSON tool result); the plain-text `McpToolRouter#wrapAsErrorContent(String)` calls
+`ClassicMessageRemap.remapText` itself. On REST it runs after `identifyPeriodRefusal`. Same
+behaviour on every channel: nothing to declare in §4.12.9.
+
+**Which strings.** Only string values under a `message`, `text`, `msgText` or `detail` key of the
+body, at any depth (`detail` is where the MCP write-path envelope of `McpWriteRequestSupport`
+carries the refusal). Any other key is never touched. Within those:
+
+- a string of **20 to 8192 characters** is compared with each catalogued entry. A longer one is left
+  untouched (with a debug log line when it holds a fragment of a catalogued message);
+- a raw, unparsed **`@KEY@` token** of a catalogued `AD_MESSAGE` is replaced whatever the length of
+  the string, so a whole message such as `@TBAI_SetKey@` is covered. Only when the GO text takes no
+  arguments (a raw token carries none); whitespace that only pads the token against the edge of the
+  string is dropped with it;
+- a string that is itself a **serialized JSON object** (an MCP content item, a body wrapped as text)
+  is parsed and remapped on its values, never on its serialized text, so JSON escapes survive. It is
+  serialized again only when a value changed.
+
+**The catalog.** `ClassicMessageRemap.ENTRIES` holds two kinds of entry:
+
+- an **AD_MESSAGE entry** matches the base text and every `AD_MESSAGE_TRL` text of its key, because
+  Classic may have resolved it in a language other than the request's. The texts are read with two
+  HQL queries (base texts, then translations), once for all entries, in a DAL session of their own
+  (`IsolatedDalRead`), so the read can neither abort nor be broken by the request's transaction,
+  which is still open while the response is written. They are cached for the JVM; a failed read
+  leaves every text untouched and is retried after 30 s, never on every response. `%0..%n` and `%s`
+  are placeholders, handed to the GO text as `{0}..{n}`;
+- a **literal entry** matches a fixed Classic sentence that has no `AD_MESSAGE` (the two SII
+  pre-send sentences of `SIIUtils.invoicePreviousValidations`, ETP-5745, formerly
+  `SiiSendHandler.DRIFTED_CLASSIC_SENTENCES`). It has no `AD_MESSAGE` key, so it never publishes one
+  in `messageKeys`.
+
+**Matching.** No regular expression runs over the text. A template is the list of the literal
+fragments between its placeholders, found in order with `indexOf` (and skipped at once when the
+text lacks its longest fragment), so the cost is linear in the text whatever it holds. A
+placeholder between two fragments takes what lies between them; one that starts the template takes
+only the run of letters and digits right before the first fragment (`Resultado:3 factura(s)…` gives
+`3`: text in front of the message never leaks into it); one that ends it takes the rest. Of several
+occurrences of the first fragment before the second one, the last starts the match, so an earlier
+truncated copy stays as it is. Every occurrence of a message is replaced, up to 10 per string.
+
+Both sides are compared with `<br />` (also as a JSON serializer writes it, `<br \/>`), `&quot;`,
+the literal `\n` that `messageBD` escapes and runs of whitespace normalised. The text is
+normalised once, and again only after a replacement. The normalisation is used for matching only:
+the match and every argument are mapped back to the original string (a `C:\new\cert.p12` path
+keeps its backslashes) and only the matched span is replaced, so escapes and spacing outside it stay
+exactly as they were. Whitespace the match took at either edge becomes one space between the GO
+text and other text, and is dropped against the start or end of the string; no separator is ever
+added where the original had none (next to a quote or a bracket).
+
+**The GO text.** `messages/neo_hints_<lang>.properties`, key = the `AD_MESSAGE` value (or the
+literal entry's own key), in the request language; the English bundle when the request language's
+lacks the key; when neither has it the Classic text is left as it is. The request language is the
+one captured right after authentication (`NeoLanguage.captureRequestCode()` in `NeoServlet` and in
+`McpSessionManager.executeInContext`, restored in a `finally`, read with
+`NeoLanguage.requestCode()`), not the current `OBContext` language, which a Classic call can change
+mid-request (ETP-5745). Outside a request (a background thread, a unit test) `requestCode()` falls
+back to `NeoLanguage.currentCode()`. `NeoMessageText.text(key, args)` resolves its language the
+same way, so a GO-authored text built after a Classic call cannot flip language either: the 303/390
+telematic-filing refusal `NO_CERTIFICATE`, formerly a hardcoded English sentence, is now
+`NeoMessageText.text("ETGO_FiscalSubmitNoCertificate")` (catalog only, no `AD_MESSAGE`; same wording
+as the SPA's `fm.aeat.error.noCertificate`).
+
+**Identity (`messageKeys`).** When a recognised text sits in an `error` object, or next to an
+existing `messageKeys` array, its `AD_MESSAGE` key is added there (once). On MCP the root of an
+error tool result is that error object (`McpResponseSanitizer#renderError`, used by
+`McpToolRouter#wrapAsErrorContent(JSONObject)` and by `McpActionEnvelope` for an `isError`
+result), so the key lands at its root: `{status, title, message, error:"validation_error",
+detail, messageKeys:["TBAI_EmptyNifCode"]}`. A text may already be the GO text when it reaches an
+exit (an `etendo_action_batch` document result is the single action's rendered error, parsed and
+rendered again; `SiiSendHandler` remaps itself; a plain-text error): the GO text of each
+`AD_MESSAGE` entry, in any catalog language, is recognised too, so the key is still published and
+the text is left as is. The remap is therefore idempotent. Total: any failure leaves the original
+text.
+
+Example: a TicketBAI refusal that a handler answered with `NeoResponse.error(status, message)`,
+for an `es_ES` request. The Classic text (`TBAI_EmptyNifCode`, which names the Classic field label)
+leaves NEO as:
+
+```json
+{"error":{"status":400,
+          "message":"El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.",
+          "messageKeys":["TBAI_EmptyNifCode"]}}
+```
+
+The `status` is whatever the handler chose; the remap changes only `message` and adds the key.
+
+A client that needs its own wording keys on `messageKeys`, never on the prose.
+
+**Catalogued keys** (the window guides `sales-invoice.md` / `purchase-invoice.md` of
+`etendo_schema_forge` list which ones a user meets in each window):
+
+| Group | Keys |
+|---|---|
+| Names Classic-only UI | `ETVFAC_invoice_type_rectifying`, `ETVFAC_reversed_invoice`, `AEAT349_CINVREV_CHECK`, `AEATSII_EmptyCertificatePath`, `TBAI_CertificateNotValid`, `AEATSII_InvoiceManualSending`, `AEAT390_MARSHALLERROR`, `AEAT303_Periodicity_NotValid`, `AEAT349_Periodicity_NotValid`, `AEAT303_Period_NotDetected`, `AEAT349_Period_NotDetected`, `ETVFAC_Missing_DocType_Config`, `AEATSII_SII_ACCRUAL_DATE_EMPTY`, `TBAI_ConfigNotFound` |
+| Field named differently in GO | `ETVFAC_error_code_idtype`, `TBAI_EmptyNifCode`, `TBAI_EmptyPostalCode`, `TBAI_EmptyDir` |
+| Misleading in both products, corrected in GO only | `TBAI_SetKey`, `TBAI_NullCertificate` |
+| Literal (no `AD_MESSAGE`) | `siiMissingInvoiceType`, `siiMissingDocumentNo` |
+
+`ENTRIES` is the source of truth; keep this table in step with it.
+
+**Adding an entry.**
+
+1. Confirm a GO user can actually trigger the message (where it is raised, and which GO action
+   triggers it). A message GO never shows is left out, even when its text names Classic UI:
+   `AEATSII_RECTIFIC_2017` (raised only by the Classic `UpdateInvoicesPreSii` process, which GO
+   never runs) and `ETVFAC_complete_rectifying_type` (GO always fills the invoice's
+   `em_etvfac_reverseinvtype` before VERI\*FACTU validates it: `SalesRectificativeFiscalDefaults`
+   on header writes, `InvoiceCompletionService.populateVerifactuFieldsFromDocType` at completion,
+   and GO's rectificative document types ship `R1`/`I`) were dropped for that reason, and so was
+   `ETVFAC_null_description` (at Complete the DB function `ETVFAC_MANDATORY_FIELDS` raises
+   `ETVFAC_Missing_Inv_Verifactu_Fields` first for a null or blank Descripción Operación, and GO
+   saves a whitespace-only value as null, so `InitialValidator`'s check never runs from GO).
+2. Add `Entry.ofAdMessage("<AD_MESSAGE value>")` (or `Entry.ofLiteral("<key>", "<sentence>")`) to
+   `ClassicMessageRemap.ENTRIES`.
+3. Add `<key> = <text>` to **both** `neo_hints_es.properties` (tú, no voseo) and
+   `neo_hints_en.properties`. No HTML. Every GO label you cite must exist in the SPA locales
+   (`tools/app-shell/src/locales/es_ES.json` / `en_US.json`); note the locale key in the comment.
+   Use `{0}..{n}` for the Classic placeholders; a GO text with arguments is not used for a raw
+   `@KEY@` token.
+4. `ClassicMessageRemapTest#everyEntryHasAGoTextInBothLanguages` fails when step 3 is missing.
+5. Update the table above and the window guide of every window where the message shows.
+
+Never edit the Classic module's `AD_MESSAGE` to get the same effect, and never add a spec or window
+condition here: the catalog is keyed by message only.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
@@ -8425,6 +8564,8 @@ NEO Headless enforces security at multiple levels:
 
 - `AbstractFiscalHandler.handle(String entityName, String method, HttpServletRequest, HttpServletResponse)` — the single entry point every `/fiscal303/*` and `/fiscal349/*` sub-route funnels through (`declarations`, `incidents`, `boxes`, `submit`, `modified`, `validate-vies`) — now checks access as the very first thing it does, before any entity routing. A denied request gets `403 Forbidden` ("Access denied") regardless of which sub-route it named.
 - `NeoBuiltInEndpointHandler.handleFiscalModelsCatalogEndpoint` — `GET`/`PUT /sws/neo/fiscal-models-catalog` isn't routed through `AbstractFiscalHandler` at all, so it needed its own, separate call to the same helper at the top of the method.
+
+**`PUT /sws/neo/fiscal-models-catalog` writes a System row (ETP-5831).** The catalog is the `ETGO_FiscalModelsCatalog` `AD_Preference`, and core's `Preferences.setPreferenceValue` stores it at client `0` / org `0` with `Visibleat_Client_ID` = the tenant. The NEO tenant write guard (`NeoTenantWriteGuard`, ETP-5819) refuses that row on flush (`OBSecurityException` → `403`), so between ETP-5819 and ETP-5831 every save failed and the change was lost. `NeoFiscalModelsCatalogService.saveActiveModels` now runs the write **and its flush** inside `NeoTenantWriteGuard.allowingSystemRows` (System rows only, never another tenant). Other NEO writers of `AD_Preference` through the same core helper (favorites, saved filters, grid views) are not covered by this change.
 
 The Go SPA's corresponding fix (`tools/app-shell/src/windows/custom/fiscal-models/index.jsx` in `etendo_schema_forge`) gates the `/fiscal-models` route itself on the same window id via `useWindowAccess`/`WindowAccessGuard` — the sidebar already hid the entry for a role without the grant, but before ETP-5546 the route rendered fully on direct navigation regardless of role. See that repo's `docs/generated-custom-windows/fiscal-models.md` for the frontend side.
 
@@ -13300,6 +13441,44 @@ a generic comma join — `tools/app-shell/src/lib/backendErrors.js`'s `joinWithC
 the same conjunction join. `rectificativas` stays a plain comma-joined-on-render array throughout. Same
 code path on every channel, so no divergence to declare here.
 
+**MCP path only:** the hook is in `McpToolRouter.route` (`etendo_action` case), not in `handleAction` or `NeoButtonActionHelper`, so the REST action endpoint and the SPA (which
+un-posts on its own and then posts `documentAction RE` to `/sws/neo`) never reach it: a double un-post is impossible. A single call leaves the final commit of the
+reactivation to the request, as every `etendo_action` does; the un-post is committed on its own before it.
+
+**An id that is not a document (ETP-5715, round 5).** A `documentAction` on an id that is no row of the entity's table used to reach the core process, which answered an unrelated *NotCorrectOrgDoctypeInvoice*. `NeoActionRecordGuard.refusalForMissingDocument`, called in `McpToolRouter.handleAction` right after the foreign-record check, now answers the same `404 Record not found` a foreign id gets, so an unknown id and another tenant's id cannot be told apart, in `etendo_action` and per document in `etendo_action_batch`. Only the `DocAction` button (whose id always names a row of the entity's own table) is judged; every other action, whose id may name another table, is untouched. REST and the SPA are unchanged (the check lives in the MCP path only).
+
+**Partial failure, stated plainly.** Each step is its own transaction. *Un-post fails:* that is the document's error, nothing is
+reactivated, the session is rolled back, the next document goes on. *Un-post succeeds, reactivation fails* (or throws): the un-post is
+**already committed and is not undone** — the document stays Completed and un-posted — and the reactivation's own session is rolled
+back. An exception thrown by the reactivation after the un-post is reported the same way, in the batch and in a single `etendo_action` (the single call used to rethrow and lose the news that the un-post had committed). The result is `ok:false`, carries the reactivation's error, `steps:["unpost","documentAction"]` and a `partial` note saying the
+un-post stays. There is no compensating re-post: the SPA leaves the document in the same state, and an automatic re-post would be a
+new accounting write nobody asked for. The note tells the agent to post again if that is wanted.
+
+**Where it still differs from the SPA** (measured in ETP-5715; each left as it is, on purpose):
+
+| | SPA | `etendo_action_batch` | why not aligned |
+|---|---|---|---|
+| Concurrency | per-record requests fired together (`Promise.allSettled`, uncapped) | one document after another | the DAL session is per request: there is nothing to run in parallel on, and a document per transaction in order is easier to read back |
+| `rowFilter` omission | rows that cannot apply (post of an unprocessed row, un-post of an unposted one) are filtered **in the client and never sent** | every id is sent; the core answers per document | availability is advisory (ETP-5714 decision (2)): the server adds no refusal rule of its own, so an omitted row would become a hidden one |
+| Clone | the multi-clone dialog is sequential and **stops at the first failing clone** | continues and reports each | a stop-at-first-failure leaves the rest silently unprocessed; the approved model is a per-document result |
+
+**Further divergences with REST / the SPA, declared (round 5):**
+
+| | REST / SPA | MCP | why |
+|---|---|---|---|
+| Transaction of the un-post in a single `etendo_action` | the SPA sends `unpost` and `documentAction RE` as two requests, each its own transaction | the un-post is committed in a SEPARATE transaction before the reactivation, inside one tool call (if the reactivation then fails the un-post stays, `partial` says so) | the SPA's two requests behave the same; the difference is only that one MCP call carries both |
+| Amortization | the SPA un-posts on Reactivate | the MCP does **not**: the module declares no `unpost` contract for it | inventing one is a separate change; until then a posted amortization must be un-posted with its own SPA action |
+| Which entities un-post | the invoice windows only | the same, by opt-in (`unpostBeforeReactivate`), never by "declares `unpost`" | goods documents, returns and journals declare `unpost` too, and the SPA deliberately leaves them alone |
+| `steps` / `partial` keys | n/a | added to a single answer only when the step ran; a decimal in the body is not re-rendered (the keys are spliced into the rendered text) | additive, so every other answer is byte for byte unchanged |
+| A nonexistent id of a document-action button | REST / the SPA reach the core process and answer its unrelated "not correct organization/doctype" message | MCP answers the same 404 "Record not found" a foreign id gets (`NeoActionRecordGuard.refusalForMissingDocument`, called from `McpToolRouter.handleAction`; `etendo_action` and `etendo_action_batch` alike), only for the `DocAction` button | the old answer hid the real cause and told a caller a foreign id (404) and a missing one (org message) apart, so an id could be probed for existence; the SPA never sends an absent id, so it is left unchanged |
+
+**Tests:** `McpActionBatchTest` (unit, mocked runner and DAL), `McpToolRouterRouteTest` (routing of the tool),
+`ToolRegistryTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`.
+
+#### 4.12.36b Rectificative invoice validation guards and fiscal-code corrections (ETP-5745)
+
+Three completion-time guards and one GET-enrichment field, all channel-agnostic (UI, MCP, batch) because they hook `AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded` or the handler's own GET enrichment, not any MCP-specific tool — unlike the rest of §4.12, which documents MCP server behavior specifically. Full user-facing description: `etendo_schema_forge`'s `docs/generated-custom-windows/sales-invoice.md` → *Rectificative invoice fiscal-code validation — ETP-5745 (CP-13 through CP-26)*.
+
 **ETP-5745 CP-9 — `RectificationTotalGuard` caps a rectificativa's total against its origin.** New guard,
 wired from `AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded` right before the real completion runs
 (the same spot `validateLineQtyBeforeComplete` used to occupy). Completing (`documentAction=CO`) a
@@ -13317,6 +13496,28 @@ rectificativa is never meant to carry a different currency than its origin — t
 misuse the UI should prevent at the source, not a case this guard needs to reconcile numerically, so
 both the conversion logic and the per-row entity reads were reverted; the guard is plain aggregate
 SQL end to end again.
+
+**ETP-5745 CP-13/CP-24/CP-25/CP-26 — `RectificationFiscalCodeGuard` blocks completion when a
+rectificativa is missing an active fiscal system's code.** New guard, wired from
+`AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded` next to `RectificationTotalGuard`, so it runs
+on every channel (UI, MCP, batch) the same way. For a rectificative invoice (DocType
+`em_etsg_isrectificative = 'Y'`), completion is refused with a 422
+(`messageKeys:["ETGO_InvoiceRectificationCodeRequired"]`, `messageParams:{systems:[...]}`, a real
+`JSONArray` for the same locale-aware-conjunction reason as CP-9's `fiscalSystems` above — see
+`translateRectificationCodeRequired` in `tools/app-shell/src/lib/backendErrors.js`) when at least
+one fiscal system that is **active for the invoice's organization** still has a blank code: SII
+(`aeatsiiMotivoRectif`, gated on `SalesRectificativeFiscalDefaults.siiConfigActive`), TicketBAI
+(`tbaiReverseinvoicecode`, gated on `tbaiConfigActive`), VERI\*FACTU (`etvfacInvType` not one of
+R1–R5, gated on its own config-active check). A system that is not configured for the org is never
+counted as missing. Separately, a **non**-rectificative invoice that still carries a stray
+VERI\*FACTU rectificative code (R1–R5 left over from a reverted document-type change) is refused
+with `messageKeys:["ETGO_InvoiceVerifactuInvTypeNotRectificative"]` rather than silently corrected
+back to `F1` — consistent with this guard's "block, never silently fix" stance; the top-level
+`message` on both is plain English prose for a caller that ignores `messageParams`. Fails open on
+any read error, mirroring `InvoiceReactivationGuard`/`RectificationTotalGuard`. Same code path on
+every channel, so no divergence to declare. Full user-facing description:
+`etendo_schema_forge`'s `docs/generated-custom-windows/sales-invoice.md` → *Rectificative invoice
+fiscal-code validation*.
 
 **ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
 already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`
@@ -13440,6 +13641,14 @@ rectificative was computed either on the detail GET or by the header callout whe
   outside the spec's exposed field set on every channel alike — see the ETP-5747 note in §4.12.9.
   Purchase invoices are unchanged: SII offers no `R` in `EM_Aeatsii_Clave_Tipo_Fc`,
   VERI*FACTU never sends a purchase, and the TicketBAI reverse fields are sales-only.
+
+> **Superseded by ETP-6158 — see §4.17.** The two SII sentences described below are now literal
+> entries (`siiMissingInvoiceType`, `siiMissingDocumentNo`) of the central Classic message remap
+> (`ClassicMessageRemap`), applied at NEO's REST and MCP exits; `remapDriftedFieldLabels` only
+> delegates to it. Two statements below no longer hold: only the matched sentence is replaced, not
+> the whole `message`; and the language is captured for every request right after authentication
+> (`NeoLanguage.captureRequestCode()`), not only by `SiiSendHandler` before its Classic call (which
+> it still does). The rest is kept as the history of the ETP-5745 fix.
 
 **ETP-5745 (5th fix) — `SiiSendHandler` replaces two drifted classic validation sentences with a
 bilingual GO sentence.** `SIIUtils.invoicePreviousValidations` (classic `org.openbravo.module.sii`,

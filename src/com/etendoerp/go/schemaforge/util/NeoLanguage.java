@@ -148,6 +148,60 @@ public final class NeoLanguage {
   }
 
   /**
+   * The request language captured by {@link #captureRequestCode()} (ETP-6158). Pooled servlet
+   * threads: every capture is paired with a {@link #restoreRequestCode(String)} in a finally.
+   */
+  private static final ThreadLocal<String> REQUEST_CODE = new ThreadLocal<>();
+
+  /**
+   * Captures {@link #currentCode()} as the language of the request being served, right after
+   * authentication and before any Classic code runs: a Classic call can change the
+   * {@link OBContext} language mid-request (see {@code SiiSendHandler}), and text built on the way
+   * out (the Classic message remap) must still use the language the client asked for.
+   *
+   * @return the previously captured value, to hand back to {@link #restoreRequestCode(String)}
+   */
+  public static String captureRequestCode() {
+    String previous = REQUEST_CODE.get();
+    String code = null;
+    try {
+      code = currentCode();
+    } catch (Exception e) {
+      log.debug("No request language to capture: {}", e.getMessage());
+    }
+    if (code == null) {
+      REQUEST_CODE.remove();
+    } else {
+      REQUEST_CODE.set(code);
+    }
+    return previous;
+  }
+
+  /**
+   * Restores the value {@link #captureRequestCode()} replaced.
+   *
+   * @param previous the value it returned
+   */
+  public static void restoreRequestCode(String previous) {
+    if (previous == null) {
+      REQUEST_CODE.remove();
+    } else {
+      REQUEST_CODE.set(previous);
+    }
+  }
+
+  /**
+   * The language captured at the start of the request, or {@link #currentCode()} when none was
+   * (a background thread, a unit test).
+   *
+   * @return the request language code, or {@code null}
+   */
+  public static String requestCode() {
+    String captured = REQUEST_CODE.get();
+    return captured != null ? captured : currentCode();
+  }
+
+  /**
    * Run {@code body} with the {@link OBContext} language forced to {@code lang},
    * restoring the previous language afterwards (even on exception). Use when a
    * specific path must resolve translations in a given language regardless of the

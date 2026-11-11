@@ -5882,6 +5882,77 @@ public class NeoDefaultsServiceTest {
     }
   }
 
+  // ETP-5745 CP-17 note: applyDefaultWithComboFallback is now also gated on the column being
+  // mandatory, mirroring the identical gate the tryInjectFirstFromLookup method of
+  // NeoMandatoryDefaultsService already applies on the CREATE path from ETP-4274. The /defaults
+  // bootstrap path never had that gate, so an optional List-reference column with no declared
+  // default and no AD_Ref_List row flagged as the default fell through to whichever row sorts
+  // first. List references order by their sequence number, and a reference whose rows were never
+  // given one falls back to the AD_Ref_List row id, which is an arbitrary ordering. That was the
+  // root cause of the ghost default picking up the fourth rectification reason for SII's own
+  // motivo field during the ETP-5745 investigation: that field is nullable since its check
+  // constraint only requires it conditionally, and its AD_Ref_List rows all had an empty sequence
+  // number, so picking the first row by id landed on that fourth reason purely by accident.
+
+  @Test
+  public void testApplyDefaultWithComboFallbackSkipsForOptionalColumnWithNoResolvedValue()
+      throws Exception {
+    SFField sfField = mock(SFField.class);
+    when(sfField.isReadOnly()).thenReturn(false);
+    Column adColumn = mockColumn("EM_Aeatsii_Motivo_Rectif", false, false, true);
+    Entity dalEntity = mock(Entity.class);
+    JSONObject defaults = new JSONObject();
+
+    try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      invokePrivate("applyDefaultWithComboFallback",
+          new Class<?>[]{ NeoContext.class, SFField.class, Object.class, Column.class,
+              JSONObject.class, String.class, Entity.class },
+          null, sfField, null, adColumn, defaults, "aeatsiiMotivoRectif", dalEntity);
+
+      assertFalse("an OPTIONAL column with no genuine default must stay absent from /defaults — "
+              + "never an arbitrarily-ordered 'first' AD_Ref_List row",
+          defaults.has("aeatsiiMotivoRectif"));
+      // Proves the short-circuit happens BEFORE resolveFirstComboOption's own selector query —
+      // not merely that the selector happened to answer empty.
+      selectorMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void testApplyDefaultWithComboFallbackStillAppliesForMandatoryColumnWithNoResolvedValue()
+      throws Exception {
+    SFField sfField = mock(SFField.class);
+    when(sfField.isReadOnly()).thenReturn(false);
+    Column adColumn = mockColumn("C_DocType_ID", true, false, true);
+    Entity dalEntity = mock(Entity.class);
+    JSONObject defaults = new JSONObject();
+
+    JSONObject item = new JSONObject();
+    item.put("id", "FIRST-DOCTYPE-ID");
+    JSONArray items = new JSONArray();
+    items.put(item);
+    JSONObject selectorBody = new JSONObject();
+    selectorBody.put("items", items);
+    NeoResponse selectorResp = NeoResponse.ok(selectorBody);
+
+    try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(adColumn)).thenReturn("17");
+      selectorMock.when(() -> NeoSelectorService.hasObuiselSelector(adColumn)).thenReturn(false);
+      selectorMock.when(() -> NeoSelectorService.querySelectorByColumn(
+          eq(adColumn), eq("C_DocType_ID"), eq(null), eq(1), eq(0), any()))
+          .thenReturn(selectorResp);
+
+      invokePrivate("applyDefaultWithComboFallback",
+          new Class<?>[]{ NeoContext.class, SFField.class, Object.class, Column.class,
+              JSONObject.class, String.class, Entity.class },
+          null, sfField, null, adColumn, defaults, "transactionDocument", dalEntity);
+
+      assertEquals("a MANDATORY (NOT NULL) column with no genuine default must still fall back "
+              + "to the first combo option, to avoid a NOT NULL violation on save",
+          "FIRST-DOCTYPE-ID", defaults.getString("transactionDocument"));
+    }
+  }
+
   @Test
   public void testResolveFromPrefsOrDocTypeReturnsNullForAllFourExcludedColumnsAtThePrimitiveLevel()
       throws Exception {
