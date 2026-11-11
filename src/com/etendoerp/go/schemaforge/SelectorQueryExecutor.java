@@ -47,6 +47,8 @@ final class SelectorQueryExecutor {
 
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
   static final String PARAM_SEARCH = "search";
+  /** Companion of {@link #PARAM_SEARCH}: the ASCII-upper / non-ASCII-wildcard form, see {@link #searchLoosePattern}. */
+  static final String PARAM_SEARCH_LOOSE = "searchLoose";
   static final String ORDER_BY = " ORDER BY ";
   private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
@@ -140,7 +142,8 @@ final class SelectorQueryExecutor {
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance().createQuery(meta.entityName, whereStr);
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
-      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
+      countQuery.setNamedParameter(PARAM_SEARCH, searchPattern(search));
+      countQuery.setNamedParameter(PARAM_SEARCH_LOOSE, searchLoosePattern(search));
     }
     int totalCount = countQuery.count();
 
@@ -149,7 +152,8 @@ final class SelectorQueryExecutor {
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
-      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
+      dataQuery.setNamedParameter(PARAM_SEARCH, searchPattern(search));
+      dataQuery.setNamedParameter(PARAM_SEARCH_LOOSE, searchLoosePattern(search));
     }
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
@@ -220,7 +224,8 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, extraFilterParams);
     if (hasSearch) {
-      countQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
+      countQuery.setNamedParameter(PARAM_SEARCH, searchPattern(search));
+      countQuery.setNamedParameter(PARAM_SEARCH_LOOSE, searchLoosePattern(search));
     }
     int totalCount = countQuery.count();
 
@@ -231,7 +236,8 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
     if (hasSearch) {
-      dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search + "%");
+      dataQuery.setNamedParameter(PARAM_SEARCH, searchPattern(search));
+      dataQuery.setNamedParameter(PARAM_SEARCH_LOOSE, searchLoosePattern(search));
     }
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
@@ -345,7 +351,7 @@ final class SelectorQueryExecutor {
     if (extraFilterParams != null) {
       fromParams.putAll(extraFilterParams);
     }
-    String searchParam = hasSearch ? "%" + search + "%" : null;
+    String searchParam = hasSearch ? search : null;
 
     String displayOrder = alias + "." + meta.displayProperty;
     // Decided up front, with no query: no fallback on failure. A failing Hibernate query marks the
@@ -560,11 +566,36 @@ final class SelectorQueryExecutor {
       java.util.Arrays.asList("where", "join", "left", "inner", "right", "full", "cross", "order",
           "group", "having", "fetch", "outer"));
 
+  /** The {@code :search} value: the term lowercased in Java, exactly as before ETP-6103. */
+  static String searchPattern(String search) {
+    return "%" + search.toLowerCase() + "%";
+  }
+
+  /**
+   * The {@code :searchLoose} value, built from {@link #searchPattern}: ASCII letters upper-cased,
+   * every other code point (one per character, surrogate pairs included) a {@code _} wildcard. It
+   * matches whenever the lower() predicate does, whatever the database locale (on a C-collation
+   * database upper()/lower() only fold ASCII), and it can drive a trigram index on {@code upper(col)}.
+   */
+  static String searchLoosePattern(String search) {
+    StringBuilder out = new StringBuilder();
+    searchPattern(search).codePoints().forEach(cp -> {
+      // A backslash is LIKE's escape: "\ú" would become "\_" (a literal "_") and reject rows.
+      if (cp < 128 && cp != '\\') {
+        out.append((char) Character.toUpperCase(cp));
+      } else {
+        out.append('_');
+      }
+    });
+    return out.toString();
+  }
+
   private static void bindCustomHqlParams(org.hibernate.query.Query<?> query,
       Map<String, Object> params, String searchParam) {
     NeoSelectorExecutionHelper.bindNamedParameters(query, params);
     if (searchParam != null) {
-      query.setParameter(PARAM_SEARCH, searchParam);
+      query.setParameter(PARAM_SEARCH, searchPattern(searchParam));
+      query.setParameter(PARAM_SEARCH_LOOSE, searchLoosePattern(searchParam));
     }
   }
 

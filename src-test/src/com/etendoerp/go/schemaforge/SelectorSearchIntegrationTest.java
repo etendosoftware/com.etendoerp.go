@@ -46,7 +46,7 @@ import org.openbravo.test.base.TestConstants.Roles;
 import org.openbravo.test.base.TestConstants.Users;
 
 /**
- * ETP-6103 — the selector search runs as {@code upper(col) LIKE upper(:search)} so a trigram index
+ * ETP-6103 — the selector search runs as {@code (upper(col) LIKE :searchLoose AND lower(col) LIKE :search)} so a trigram index
  * on {@code upper(col)} can serve it. Checked here against the real model and database: which
  * fragments are searched as a plain string column, that both predicate forms are valid HQL, and
  * that the translated-name branch still matches accented text in any case.
@@ -98,12 +98,13 @@ public class SelectorSearchIntegrationTest extends OBBaseTest {
     SelectorOrgFilter.appendCustomSearchFilter(where, List.of("e.name", "e.creditLimit"), "e",
         "x", false, BP);
     String hql = where.toString();
-    assertTrue(hql, hql.contains("upper(e.name) LIKE upper(:search)"));
-    assertTrue(hql, hql.contains("upper(COALESCE(cast(e.creditLimit as string), '')) LIKE upper(:search)"));
+    assertTrue(hql, hql.contains("(upper(e.name) LIKE :searchLoose AND lower(e.name) LIKE :search)"));
+    assertTrue(hql, hql.contains("(upper(COALESCE(cast(e.creditLimit as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.creditLimit as string), '')) LIKE :search)"));
 
     // a lower-case search finds the upper-case name, through the string branch
     OBQuery<BusinessPartner> query = OBDal.getInstance().createQuery(BusinessPartner.class, hql);
-    query.setNamedParameter("search", "%" + partner.getName().toLowerCase() + "%");
+    query.setNamedParameter("search", SelectorQueryExecutor.searchPattern(partner.getName()));
+    query.setNamedParameter("searchLoose", SelectorQueryExecutor.searchLoosePattern(partner.getName()));
     assertTrue("the partner is found by its name in another case", query.count() >= 1);
   }
 
@@ -121,6 +122,28 @@ public class SelectorSearchIntegrationTest extends OBBaseTest {
       assertTrue("'" + search + "' finds Cubic Meter",
           searchIds(search).contains(cubicMeter.getId()));
     }
+  }
+
+  /**
+   * On a C-collation database upper()/lower() only fold ASCII. The ETP-6103 form
+   * {@code upper(x) LIKE upper(:s)} then misses accented text; the two-part predicate does not.
+   * Native SQL because HQL cannot express COLLATE.
+   */
+  @Test
+  public void twoPartPredicateFindsAccentedTextUnderCCollation() {
+    String text = "Metro cúbico";
+    String search = "CÚBICO";
+    Object broken = OBDal.getInstance().getSession()
+        .createNativeQuery("select (upper(cast(:t as text) collate \"C\") like upper(cast(:s as text)))")
+        .setParameter("t", text).setParameter("s", "%" + search + "%").uniqueResult();
+    assertFalse("documents the ETP-6103 bug: upper() leaves the accent alone under C", (Boolean) broken);
+    Object fixed = OBDal.getInstance().getSession()
+        .createNativeQuery("select (upper(cast(:t as text) collate \"C\") like :loose"
+            + " and lower(cast(:t as text) collate \"C\") like :exact)")
+        .setParameter("t", text)
+        .setParameter("loose", SelectorQueryExecutor.searchLoosePattern(search))
+        .setParameter("exact", SelectorQueryExecutor.searchPattern(search)).uniqueResult();
+    assertTrue("two-part predicate matches under C collation", (Boolean) fixed);
   }
 
   private static String spanishName(UOM uom) {

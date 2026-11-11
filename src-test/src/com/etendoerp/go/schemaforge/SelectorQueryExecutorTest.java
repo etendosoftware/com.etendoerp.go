@@ -1567,9 +1567,10 @@ public class SelectorQueryExecutorTest {
     PagedRun run = runPaged(meta, "Ab", 20, 0, "e.active = true", 1L,
         Arrays.asList((Object) "P1"), Arrays.asList(valueRow("idA", "P1", "A")));
 
-    verify(run.countQuery).setParameter("search", "%Ab%");
-    verify(run.pageQuery).setParameter("search", "%Ab%");
-    verify(run.rowsQuery).setParameter("search", "%Ab%");
+    for (Query<?> q : Arrays.asList(run.countQuery, run.pageQuery, run.rowsQuery)) {
+      verify(q).setParameter("search", "%ab%");
+      verify(q).setParameter("searchLoose", "%AB%");
+    }
     String where = run.where.get(0);
     assertTrue(where, where.contains("cast(e.product.name as string)"));
     assertTrue(where, where.contains("cast(e.product.searchKey as string)"));
@@ -1958,8 +1959,8 @@ public class SelectorQueryExecutorTest {
     List<String> where = captureRichWhere(meta, "es", "e.active = true");
 
     assertEquals("as e where e.active = true AND ("
-        + "upper(COALESCE(cast(e.name as string), '')) LIKE upper(:search)"
-        + " OR upper(COALESCE(cast(e.iSOCountryCode as string), '')) LIKE upper(:search))", where.get(0));
+        + "(upper(COALESCE(cast(e.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.name as string), '')) LIKE :search)"
+        + " OR (upper(COALESCE(cast(e.iSOCountryCode as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.iSOCountryCode as string), '')) LIKE :search))", where.get(0));
   }
 
   /**
@@ -1978,8 +1979,23 @@ public class SelectorQueryExecutorTest {
     List<String> where = captureRichWhere(meta, "p", "e.active = true");
 
     assertEquals("as e where e.active = true AND ("
-        + "upper(COALESCE(cast(e.product.name as string), '')) LIKE upper(:search)"
-        + " OR upper(COALESCE(cast(e.product.searchKey as string), '')) LIKE upper(:search))", where.get(0));
+        + "(upper(COALESCE(cast(e.product.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.product.name as string), '')) LIKE :search)"
+        + " OR (upper(COALESCE(cast(e.product.searchKey as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.product.searchKey as string), '')) LIKE :search))", where.get(0));
     assertFalse("stock-breakdown selector must not be de-duplicated", where.get(0).contains("not null"));
+  }
+
+  @Test
+  public void searchPatternsKeepTheLowercaseTermAndLoosenNonAscii() {
+    assertEquals("%abc%", SelectorQueryExecutor.searchPattern("AbC"));
+    assertEquals("%ABC%", SelectorQueryExecutor.searchLoosePattern("AbC"));
+    assertEquals("%C_BICO%", SelectorQueryExecutor.searchLoosePattern("CÚBICO"));
+    assertEquals("%C_BICO%", SelectorQueryExecutor.searchLoosePattern("cúbico"));
+    assertEquals("%_A_O%", SelectorQueryExecutor.searchLoosePattern("ñaño"));
+    // an emoji is a surrogate pair: one wildcard, not two
+    assertEquals("%A_B%", SelectorQueryExecutor.searchLoosePattern("a\uD83D\uDE00b"));
+    // user wildcards are left as typed, like before
+    assertEquals("%A%_1%", SelectorQueryExecutor.searchLoosePattern("a%_1"));
+    // a backslash (LIKE's escape) is loosened too, so the prefilter never turns into a literal
+    assertEquals("%A__%", SelectorQueryExecutor.searchLoosePattern("a\\ú"));
   }
 }

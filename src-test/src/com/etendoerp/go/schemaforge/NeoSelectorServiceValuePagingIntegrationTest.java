@@ -232,9 +232,9 @@ public class NeoSelectorServiceValuePagingIntegrationTest extends OBBaseTest {
         SearchableFragment.ofRelativePath("name"), SearchableFragment.ofRelativePath("creditLimit"),
         SearchableFragment.ofRelativePath("greeting.name")), "e", "x", false, "BusinessPartner");
 
-    assertEquals(" WHERE (upper(e.name) LIKE upper(:search)"
-        + " OR upper(COALESCE(cast(e.creditLimit as string), '')) LIKE upper(:search)"
-        + " OR upper(e.greeting.name) LIKE upper(:search))",
+    assertEquals(" WHERE ((upper(e.name) LIKE :searchLoose AND lower(e.name) LIKE :search)"
+        + " OR (upper(COALESCE(cast(e.creditLimit as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.creditLimit as string), '')) LIKE :search)"
+        + " OR (upper(e.greeting.name) LIKE :searchLoose AND lower(e.greeting.name) LIKE :search))",
         hql.toString());
   }
 
