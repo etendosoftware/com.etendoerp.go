@@ -86,7 +86,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * split into one binding per entity, later joined by the goods-shipment and sales-quotation
  * headers (and, with ETP-6099, the goods-receipt header) and, with ETP-5581, by the two report specs of the bank reconciliation
  * ({@code bank-reconciliation}, {@code bank-statements}), and with ETP-6206 by the contacts
- * {@code businessPartner} handler. Their rows carry no {@code Java_Qualifier}
+ * {@code businessPartner} and {@code locationAddress} handlers. Their rows carry no {@code Java_Qualifier}
  * and the classes no {@code @Named}, so the annotation is the only binding. What can regress is the binding itself (a
  * wrong {@code (spec, entity)} pair, a {@code @Named} creeping back) and the resolution: every
  * channel and every entity-level reader must find the class with no qualifier to fall back on.
@@ -109,6 +109,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
  * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
  * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
+ * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  * @covers com.etendoerp.go.schemaforge.NeoRequestRouter
  * @covers com.etendoerp.go.schemaforge.util.NeoHandlerLookup
  * @covers com.etendoerp.go.schemaforge.util.NeoReportCallability
@@ -138,7 +139,8 @@ class NeoExtensionMigrationTest {
           "cabeceraDeConfiguraciónVerifactu"),
       new Binding(ReconciliationHandler.class, "bank-reconciliation", "bank-reconciliation"),
       new Binding(BankStatementsHandler.class, "bank-statements", "bank-statements"),
-      new Binding(BusinessPartnerHandler.class, "contacts", "businessPartner") };
+      new Binding(BusinessPartnerHandler.class, "contacts", "businessPartner"),
+      new Binding(ContactsLocationAddressHandler.class, "contacts", "locationAddress") };
 
   /** The bean classes to deploy in the mocked CDI container, one per migrated binding. */
   private static final List<Class<? extends NeoHandler>> MIGRATED_TYPES = Stream.of(MIGRATED)
@@ -236,7 +238,8 @@ class NeoExtensionMigrationTest {
     try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
       weld.when(WeldUtils::getStaticInstanceBeanManager).thenReturn(bm);
 
-      // ETP-6206: contacts/businessPartner migrated; the fixture is a pair still bound by qualifier.
+      // ETP-6206: contacts/businessPartner and contacts/locationAddress migrated; the fixture is a
+      // pair still bound by qualifier.
       SFEntity qualified = entity("contacts", "customerAccounting", "customerAccountingHandler");
       assertSame(legacy, NeoHandlerLookup.forEntity(qualified,
           q -> "customerAccountingHandler".equals(q) ? legacy : null));

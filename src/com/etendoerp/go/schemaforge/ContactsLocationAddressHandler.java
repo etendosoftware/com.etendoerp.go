@@ -28,8 +28,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
-import javax.inject.Named;
-
 import org.openbravo.module.bptaxidkey.ViesService;
 
 import org.apache.commons.lang3.StringUtils;
@@ -73,12 +71,11 @@ import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddre
  *   <li>GET  /contacts/locationAddress + DELETE        — fall through to default CRUD unchanged</li>
  * </ul>
  *
- * <p>Registered via {@code JAVA_QUALIFIER = 'contactsLocationAddressHandler'} on the
- * ETGO_SF_ENTITY record for {@code locationAddress} in the {@code contacts} spec, and (ETP-5806)
- * also via {@link NeoExtension}, resolved first — see the annotation javadoc. Both bindings name
- * this same class, so {@code NeoExtensionIndex.warnOnQualifierDisagreement} never fires for it.
+ * <p>Bound to {@code locationAddress} in the {@code contacts} spec by {@link NeoExtension} alone
+ * (ETP-6206). It was also registered by {@code JAVA_QUALIFIER = 'contactsLocationAddressHandler'}
+ * until then; the annotation already won on every channel, so dropping the qualifier changes no
+ * resolution.
  */
-@Named("contactsLocationAddressHandler")
 @NeoExtension(spec = "contacts", entity = "locationAddress")
 public class ContactsLocationAddressHandler implements NeoHandler {
 
