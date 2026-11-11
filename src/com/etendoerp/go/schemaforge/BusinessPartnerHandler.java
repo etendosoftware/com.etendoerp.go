@@ -29,8 +29,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.regex.Pattern;
 
-import javax.inject.Named;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -116,10 +114,12 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * checks the field name and falls through ({@code null}) for every other selector field this
  * entity exposes, so no other column or window is affected.
  *
- * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerHandler'} on the
- * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
+ * <p>Bound to the contacts spec's businessPartner entity by {@link NeoExtension} (ETP-6206; it was
+ * {@code JAVA_QUALIFIER = 'businessPartnerHandler'} before). Every hook it answers ({@code handle},
+ * {@code afterHandle}, {@code serverResolvedCreateFields}, {@code createUnsetFields},
+ * {@code resolveServerCreateFields}) is resolved annotation-first on REST single, batch and MCP.
  */
-@Named("businessPartnerHandler")
+@NeoExtension(spec = "contacts", entity = "businessPartner")
 public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
