@@ -47,6 +47,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 import com.etendoerp.go.schemaforge.NeoErrorResponses;
 import com.etendoerp.go.schemaforge.NeoMessageText;
+import com.etendoerp.go.schemaforge.NeoPropertyPaths;
 import com.etendoerp.go.schemaforge.NeoReferenceActiveness;
 import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
@@ -210,6 +211,8 @@ final class McpWriteRequestSupport {
     // properties, so they would otherwise be reported unknown while being honoured. Resolved only
     // when an unresolved key turns up: it is a customization lookup most writes never need.
     Set<String> directiveNames = null;
+    // ETP-6148: the property-path fields, looked up once per body and only if a key needs them.
+    NeoPropertyPaths[] propertyPaths = new NeoPropertyPaths[1];
     JSONObject mapped = new JSONObject();
 
     Iterator<String> keys = fields.keys();
@@ -229,6 +232,9 @@ final class McpWriteRequestSupport {
       }
 
       if (prop == null) {
+        // ETP-6148: a property-path field is advertised by etendo_schema as readOnly:true, so it
+        // gets the read-only refusal every other read-only field gets, not the unknown report.
+        refuseIfPropertyPath(key, sfEntity, dalEntity, propertyPaths);
         // parentId is a declared argument of the write tools, not a stray key - see
         // resolveParentFK. Every other unresolved key is reported, not refused (IMP-18).
         // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
@@ -242,6 +248,28 @@ final class McpWriteRequestSupport {
       mapped.put(mappedKey, value);
     }
     return mapped;
+  }
+
+  /**
+   * Refuses a write of a property-path field's key (ETP-6148) with the read-only refusal.
+   * Looked up only for a key that is no property of the entity, which a path key never is, and
+   * at most once per body: {@code cache} holds the lookup across the body's keys.
+   *
+   * @param cache a one-slot holder, empty on the body's first key and filled on first need
+   *
+   * @throws McpRoutingException 422 {@code read_only_field} when {@code key} is a path field's
+   */
+  static void refuseIfPropertyPath(String key, SFEntity sfEntity, Entity dalEntity,
+      NeoPropertyPaths[] cache) {
+    if (sfEntity == null || McpConstants.PARAM_PARENT_ID.equals(key)) {
+      return;
+    }
+    if (cache[0] == null) {
+      cache[0] = McpQuerySupport.propertyPathsOf(sfEntity, dalEntity);
+    }
+    if (cache[0].isPathKey(key)) {
+      throw McpRoutingException.readOnlyField(key, sfEntity.getName());
+    }
   }
 
   /**

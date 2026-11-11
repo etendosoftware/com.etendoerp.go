@@ -111,11 +111,12 @@ Represents a column (for window specs) or a process parameter (for process specs
 |--------|------|-------|
 | `ETGO_SF_FIELD_ID` | VARCHAR (PK) | UUID |
 | `ETGO_SF_ENTITY_ID` | VARCHAR (FK) | Parent entity. |
-| `AD_COLUMN_ID` | VARCHAR (FK) | Links to AD_Column. Null for process specs. |
+| `AD_COLUMN_ID` | VARCHAR (FK) | Links to AD_Column. Null for process specs and for a property-path field. |
 | `ISINCLUDED` | CHAR(1) | Only included fields participate in selectors and actions. |
 | `ISREADONLY` | CHAR(1) | Field-level read-only flag. |
 | `DEFAULTVALUE` | VARCHAR | Default value override. For process specs, stores the parameter default. |
-| `JAVA_QUALIFIER` | VARCHAR | For process specs: stores the parameter DB column name. |
+| `JAVA_QUALIFIER` | VARCHAR | For a window field: its API key when it differs from the DAL property (required on a property-path field). For process specs: stores the parameter DB column name. |
+| `PROPERTY_PATH` | VARCHAR(255) | Dotted DAL path, relative to the entity, of a read-only field whose value lives on a related record (ETP-6148, §4.3a). Null for a column field. Unique per entity (`ETGO_SF_FIELD_ENT_PATH_UQ`). |
 | `VISIBILITY` | VARCHAR | Curated `editable`/`readOnly`/`system`/`discarded`. Frequently `NULL`; the REST layer does not gate on it, the MCP does. See §4.12.6. |
 | `ISBUSINESSCRITICAL` | CHAR(1) | Marks the field part of the entity's curated summary. |
 | `SEQNO` | NUMERIC | Display/processing order. |
@@ -1425,6 +1426,67 @@ classification.)
   document of `etendo_action_batch`, where it is that document's `ok:false` result while the
   others carry on) also reaches, so every channel behaves the same; MCP reads `status >= 400` and
   the flat body, so the 422 needs no change there. No divergence to declare in §4.12.9.
+
+### 4.3a Property-path fields (ETP-6148)
+
+A **property-path field** shows a value of a related record, reached through a dotted DAL path
+from the entity — the NEO form of a Classic `AD_Field.Property` field. Example, on the remittance
+lines (`REM_RemittanceLine`): `paymentScheduleDetail.invoicePaymentSchedule.invoice.documentNo`
+(invoice number), `paymentScheduleDetail.businessPartner` (customer),
+`paymentScheduleDetail.invoicePaymentSchedule.expectedDate` (due date), with no column added to
+the line table.
+
+**Declaration.** An `ETGO_SF_FIELD` row with `PROPERTY_PATH` set, `AD_COLUMN_ID` **null**, and its
+API key in `JAVA_QUALIFIER` (required). The path may come from a Classic `AD_Field.Property` or be
+declared only in `decisions.json`; the row is the same. `AD_COLUMN_ID` stays null on purpose: some
+thirty readers of `ETGO_SF_FIELD` (defaults, selectors, mandatory checks, callouts, the MCP schema
+and write gate) treat a row's column as "this column's field", and already skip a row without one.
+Push keys the row by `<spec>/<ad_tab_id>/path:<PROPERTY_PATH>`, so two paths sharing their first
+step coexist.
+
+**Validation** (`NeoPropertyPaths`, at filter build; a failing row is skipped with a WARN log,
+never an error to the caller): every step must exist, every step but the last must be a
+many-to-one reference, none may be a collection; the API key must not be a property of the entity
+nor another field's key. Only included rows are served.
+
+**Read** (REST GET list and by id, `etendo_list`, `etendo_get`): the paths are added to core's
+`_extraProperties`, and each value comes back under the API key — `apiKey` for a value
+(a date as `yyyy-MM-dd`), `apiKey` + `apiKey$_identifier` for a reference, like any foreign key.
+Core writes a reference's id under the dotted key (`a.b.c`) and everything else under the
+`$`-joined one (`a$b$c`); NEO reads both and strips the raw keys.
+
+**Filter, sort, distinct, summary.** The caller uses the API key only. NEO rewrites it to the
+`$`-joined path in the grid `criteria` (`fieldName`, any nesting), `_sortBy` (`-` and `name desc`
+kept), `_summary` keys and `?_distinct=`. `apiKey$_identifier` maps to `path$_identifier` (text
+filter on the reference's identifier). A reference sorts by its identifier. Whenever it rewrites
+one of them, NEO also sets `_use_alias=true`: core's `AdvancedQueryBuilder` turns the path into
+left outer joins (wherever a step is optional) **only in alias mode**; without it the join is
+implicit, i.e. inner, and a row whose path is broken (a remittance line from an order has no
+invoice) silently disappears from the sorted or filtered list. The REST list always runs in alias
+mode (its where clause); an `etendo_list` with an `orderBy` and no filter did not, which is why the
+flag is set here, for every caller. `_distinct` projects
+through the path and offers the values of the property it ends on.
+
+**Write.** Never writable, on every method. REST: the key is dropped from the body and logged by
+the read-only warning (ETP-5556), like any read-only field. MCP: `etendo_create`/`etendo_update`
+refuse it with 422 `read_only_field`, like any read-only field.
+
+**MCP.** `etendo_schema` lists each one with `readOnly:true`, `visibility:"readOnly"`, the `type`
+and `label` of the column the path ends on, and `propertyPath`. `etendo_list` filters accept the
+key with the usual operators. **Known limitation, pinned by a test:** an MCP filter is a
+where-clause fragment, so the path is joined implicitly (inner) there, not left-joined as in the
+REST grid. That drops a row whose path is broken, which gives the same rows as REST only because
+every MCP operator today (equality, `gt`/`gte`/`lt`/`lte`, `between`, `contains`, `in`) is false on
+a null value. Adding an operator that can match null (`isNull`, `notEqual`, `notIn`) to the MCP
+filters requires moving path filters to a left-joined form (an `e.id in (select … left join …)`
+subquery) first. An `orderBy` on the key goes
+through core's `_sortBy` in alias mode (above), so it keeps those rows, as REST does. A path field with a list
+position (`GRID_SEQNO`) is part of the default `etendo_list` projection. **No divergence between
+channels.**
+
+**Release order.** `PROPERTY_PATH` must exist in the database (`update.database`) before any
+`push-to-neo` writes a path row; a model generated before the column answers no path, so the
+runtime simply serves no path field until then.
 
 ### 4.4 Selectors (FK Dropdowns)
 

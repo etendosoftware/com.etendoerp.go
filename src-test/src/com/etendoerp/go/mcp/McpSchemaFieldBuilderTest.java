@@ -2878,4 +2878,104 @@ class McpSchemaFieldBuilderTest {
       }
     }
   }
+
+  // ─── buildPropertyPathFieldsArray (ETP-6148) ─────────────────────────
+
+  /**
+   * ETP-6148: the descriptors {@code etendo_schema} publishes for the property-path fields of the
+   * mocked remittance-line model ({@code NeoPropertyPathsTestSupport}): read-only, typed and
+   * labelled from the column the path ends on, and naming the path the value comes from.
+   */
+  @Nested
+  @DisplayName("buildPropertyPathFieldsArray")
+  class BuildPropertyPathFieldsArray {
+
+    private JSONArray build() throws Exception {
+      com.etendoerp.go.schemaforge.data.SFEntity sfEntity =
+          mock(com.etendoerp.go.schemaforge.data.SFEntity.class);
+      Entity dalEntity = mock(Entity.class);
+      when(dalEntity.getName()).thenReturn("REM_RemittanceLine");
+      com.etendoerp.go.schemaforge.NeoFieldFilter filter =
+          mock(com.etendoerp.go.schemaforge.NeoFieldFilter.class);
+      com.etendoerp.go.schemaforge.NeoPropertyPaths paths =
+          com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.allPaths();
+      when(filter.propertyPaths()).thenReturn(paths);
+      Column partnerColumn = column("Business Partner", "30");
+      Column amountColumn = column("Amount", "12");
+      OBDal dal = mock(OBDal.class);
+      when(dal.get(Column.class,
+          com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.COLUMN_PARTNER))
+          .thenReturn(partnerColumn);
+      when(dal.get(Column.class,
+          com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.COLUMN_AMOUNT))
+          .thenReturn(amountColumn);
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.NeoFieldFilter> filters =
+          mockStatic(com.etendoerp.go.schemaforge.NeoFieldFilter.class);
+          MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+        filters.when(() -> com.etendoerp.go.schemaforge.NeoFieldFilter.forEntity(sfEntity,
+            "REM_RemittanceLine")).thenReturn(filter);
+        dalStatic.when(OBDal::getInstance).thenReturn(dal);
+        return McpSchemaFieldBuilder.buildPropertyPathFieldsArray(sfEntity, dalEntity);
+      }
+    }
+
+    private Column column(String name, String referenceId) {
+      org.openbravo.model.ad.domain.Reference reference =
+          mock(org.openbravo.model.ad.domain.Reference.class);
+      when(reference.getId()).thenReturn(referenceId);
+      Column column = mock(Column.class);
+      when(column.getName()).thenReturn(name);
+      when(column.getReference()).thenReturn(reference);
+      return column;
+    }
+
+    @Test
+    @DisplayName("one read-only descriptor per path field, in declaration order")
+    void oneReadOnlyDescriptorPerPathField() throws Exception {
+      JSONArray fields = build();
+
+      assertEquals(3, fields.length());
+      assertEquals("scheduleBusinessPartner", fields.getJSONObject(0).getString("name"));
+      assertEquals("scheduleAmount", fields.getJSONObject(1).getString("name"));
+      assertEquals("partnerCreditUsed", fields.getJSONObject(2).getString("name"));
+      for (int i = 0; i < fields.length(); i++) {
+        JSONObject field = fields.getJSONObject(i);
+        assertTrue(field.getBoolean(McpSchemaFieldBuilder.KEY_READ_ONLY));
+        assertEquals(McpSchemaFieldBuilder.VISIBILITY_READ_ONLY,
+            field.getString(McpSchemaFieldBuilder.KEY_VISIBILITY));
+        assertFalse(field.getBoolean("required"));
+        assertFalse(field.getBoolean("businessCritical"));
+        assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field),
+            field.getString("name") + " must never be offered for a write");
+      }
+    }
+
+    @Test
+    @DisplayName("type and label come from the column the path ends on")
+    void typeAndLabelComeFromTheTargetColumn() throws Exception {
+      JSONArray fields = build();
+
+      JSONObject partner = fields.getJSONObject(0);
+      assertEquals("Business Partner", partner.getString(McpConstants.KEY_LABEL));
+      assertEquals(McpSchemaFieldBuilder.mapColumnType("30"), partner.getString("type"));
+      assertEquals("paymentScheduleDetail.businessPartner", partner.getString("propertyPath"));
+      JSONObject amount = fields.getJSONObject(1);
+      assertEquals("Amount", amount.getString(McpConstants.KEY_LABEL));
+      assertEquals(McpSchemaFieldBuilder.mapColumnType("12"), amount.getString("type"));
+      JSONObject computed = fields.getJSONObject(2);
+      assertEquals("creditUsed", computed.getString(McpConstants.KEY_LABEL),
+          "no column behind it: the property name");
+      assertEquals(McpSchemaFieldBuilder.mapColumnType(null), computed.getString("type"));
+    }
+
+    @Test
+    @DisplayName("nothing without an entity")
+    void nothingWithoutAnEntity() throws Exception {
+      assertEquals(0, McpSchemaFieldBuilder.buildPropertyPathFieldsArray(null,
+          mock(Entity.class)).length());
+      assertEquals(0, McpSchemaFieldBuilder.buildPropertyPathFieldsArray(
+          mock(com.etendoerp.go.schemaforge.data.SFEntity.class), null).length());
+    }
+  }
 }

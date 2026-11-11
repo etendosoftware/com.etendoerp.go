@@ -626,6 +626,45 @@ final class McpSchemaFieldBuilder {
   }
 
   /**
+   * ETP-6148: the descriptors of the entity's property-path fields — values of a related record
+   * reached through a dotted path ({@code NeoPropertyPaths}). Always {@code readOnly:true}: the
+   * write tools refuse them like any read-only field. {@code type} and {@code label} come from the
+   * column the path ends on; {@code propertyPath} says where the value really lives, the way
+   * {@code backingTable} does for a virtual field.
+   *
+   * @param sfEntity  the SchemaForge entity
+   * @param dalEntity the DAL entity of its tab
+   * @return the descriptors, empty when the entity declares none
+   * @throws JSONException if a descriptor cannot be built
+   */
+  static JSONArray buildPropertyPathFieldsArray(SFEntity sfEntity, Entity dalEntity)
+      throws JSONException {
+    JSONArray fields = new JSONArray();
+    if (sfEntity == null || dalEntity == null) {
+      return fields;
+    }
+    for (com.etendoerp.go.schemaforge.NeoPropertyPaths.PathField pathField
+        : McpQuerySupport.propertyPathsOf(sfEntity, dalEntity).fields()) {
+      Property target = pathField.getTarget();
+      Column column = target.getColumnId() == null ? null
+          : OBDal.getInstance().get(Column.class, target.getColumnId());
+      String refId = column != null && column.getReference() != null
+          ? (String) column.getReference().getId() : null;
+      JSONObject field = new JSONObject();
+      field.put("name", pathField.getApiKey());
+      field.put(McpConstants.KEY_LABEL, column != null ? column.getName() : target.getName());
+      field.put("type", mapColumnType(refId));
+      field.put("required", false);
+      field.put(KEY_READ_ONLY, true);
+      field.put(KEY_VISIBILITY, VISIBILITY_READ_ONLY);
+      field.put("propertyPath", pathField.getPath());
+      field.put("businessCritical", false);
+      fields.put(field);
+    }
+    return fields;
+  }
+
+  /**
    * ETP-5806 — the 3 structured SEPA address columns, gated behind the backend-only
    * {@code structured-address-for-sepa} flag (TTL 2026-11-15). Structural (checked by DB column
    * name, same set {@link com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicy}

@@ -1027,6 +1027,89 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
+  // property-path fields on the REST read (ETP-6148)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("handleDefault applies the property-path fields to a read (ETP-6148)")
+  class PropertyPathReads {
+
+    private Tab tab() {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      Window window = mock(Window.class);
+      when(table.getName()).thenReturn(NeoPropertyPathsTestSupport.ROOT);
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getId()).thenReturn("tab-lines");
+      when(adTab.getWindow()).thenReturn(window);
+      when(window.getId()).thenReturn("win-rem");
+      return adTab;
+    }
+
+    /** Runs handleDefault with a field filter that declares the model's paths; returns the
+     *  datasource params core was handed. */
+    private Map<String, String> fetchParams(String method, String recordId,
+        Map<String, String> query) throws Exception {
+      org.openbravo.service.json.DefaultJsonDataService json;
+      try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+          mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+        json = mock(org.openbravo.service.json.DefaultJsonDataService.class);
+      }
+      List<Map<String, String>> fetched = new ArrayList<>();
+      when(json.fetch(any())).thenAnswer(inv -> {
+        fetched.add(new HashMap<>(inv.getArgument(0)));
+        return "{\"response\":{\"status\":0,\"data\":[]}}";
+      });
+      // Built before the stubbing: allPaths() stubs mocks of its own (no nested stubbing).
+      NeoPropertyPaths paths = NeoPropertyPathsTestSupport.allPaths();
+      NeoFieldFilter filter = mock(NeoFieldFilter.class);
+      when(filter.propertyPaths()).thenReturn(paths);
+      when(filter.filterGetResponse(any())).thenAnswer(inv -> inv.getArgument(0));
+      try (MockedStatic<BatchService> batch = mockStatic(BatchService.class);
+          MockedStatic<NeoFieldFilter> filters = mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoReadPredicates> preds = mockStatic(NeoReadPredicates.class);
+          MockedStatic<NeoParentTabFilterResolver> parent =
+              mockStatic(NeoParentTabFilterResolver.class);
+          MockedStatic<NeoTabDefaultSort> sort = mockStatic(NeoTabDefaultSort.class);
+          MockedStatic<NeoListAggregateQuery> agg = mockStatic(NeoListAggregateQuery.class)) {
+        batch.when(BatchService::currentJsonService).thenReturn(json);
+        filters.when(() -> NeoFieldFilter.forEntity(any(), anyString(), any())).thenReturn(filter);
+        filters.when(() -> NeoFieldFilter.forEntity(any(), anyString())).thenReturn(filter);
+
+        handler.handleDefault(buildContext(method, recordId, tab(), null, null, query));
+      }
+      assertEquals(1, fetched.size(), "one datasource fetch");
+      return fetched.get(0);
+    }
+
+    @Test
+    @DisplayName("a list GET asks core for the paths and rewrites the API keys")
+    void aListGetAppliesTheReadParams() throws Exception {
+      Map<String, String> query = new HashMap<>();
+      query.put("criteria", "{\"fieldName\":\"" + NeoPropertyPathsTestSupport.KEY_PARTNER
+          + "\",\"operator\":\"equals\",\"value\":\"BP-1\"}");
+      query.put(JsonConstants.SORTBY_PARAMETER, "-" + NeoPropertyPathsTestSupport.KEY_AMOUNT);
+
+      Map<String, String> params = fetchParams("GET", null, query);
+
+      assertTrue(params.get(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER)
+          .contains(NeoPropertyPathsTestSupport.PATH_PARTNER));
+      assertTrue(params.get("criteria").contains("paymentScheduleDetail$businessPartner"),
+          params.get("criteria"));
+      assertEquals("-paymentScheduleDetail$amount", params.get(JsonConstants.SORTBY_PARAMETER));
+    }
+
+    @Test
+    @DisplayName("a GET by id asks core for the paths too")
+    void aGetByIdAppliesTheReadParams() throws Exception {
+      Map<String, String> params = fetchParams("GET", "LINE-1", new HashMap<>());
+
+      assertTrue(params.get(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER)
+          .contains(NeoPropertyPathsTestSupport.PATH_AMOUNT));
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // validatePostRequest tests (via reflection)
   // -------------------------------------------------------------------------
 
@@ -3402,6 +3485,99 @@ class NeoCrudHandlerTest {
         Map<String, String> forwarded = captor.getValue();
         assertFalse(forwarded.containsKey("id"));
         assertEquals("(e.x = 1)", forwarded.get("whereAndFilterClause"));
+      }
+    }
+
+    /** ETP-6148: a field filter declaring the model's property paths. */
+    private NeoFieldFilter pathFilter() {
+      // Built before the stubbing: allPaths() stubs mocks of its own (no nested stubbing).
+      NeoPropertyPaths paths = NeoPropertyPathsTestSupport.allPaths();
+      NeoFieldFilter filter = mock(NeoFieldFilter.class);
+      when(filter.propertyPaths()).thenReturn(paths);
+      return filter;
+    }
+
+    @Test
+    @DisplayName("ETP-6148: _distinct on a property-path key projects through its path")
+    void distinctOnAPathKeyProjectsThroughThePath() throws Exception {
+      Tab adTab = distinctTab(NeoPropertyPathsTestSupport.ROOT);
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", NeoPropertyPathsTestSupport.KEY_AMOUNT);
+      params.put("criteria", "{\"fieldName\":\"" + NeoPropertyPathsTestSupport.KEY_PARTNER
+          + "\",\"value\":\"BP-1\"}");
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, params);
+      ArgumentCaptor<Map<String, String>> captor = newParamsCaptor();
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<NeoFieldFilter> filters = Mockito.mockStatic(NeoFieldFilter.class);
+           MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class);
+           MockedStatic<NeoListAggregateQuery> agg =
+               Mockito.mockStatic(NeoListAggregateQuery.class)) {
+        dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(null);
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity(NeoPropertyPathsTestSupport.ROOT)).thenReturn(entity);
+        NeoFieldFilter filter = pathFilter();
+        filters.when(() -> NeoFieldFilter.forEntity(any(), anyString())).thenReturn(filter);
+        NeoListAggregateQuery query = stubQuery(agg, captor, Arrays.asList(10, 20));
+
+        NeoResponse result = invokeDistinctFetch(adTab, params, context);
+
+        assertEquals(200, result.getHttpStatus());
+        verify(query).distinctValues(eq("e." + NeoPropertyPathsTestSupport.PATH_AMOUNT), eq(null),
+            eq(null), eq(0), eq(51));
+        assertTrue(captor.getValue().get("criteria").contains("paymentScheduleDetail$businessPartner"),
+            "a path key in the grid criteria narrows the values too");
+        verify(entity, Mockito.never()).getProperty(NeoPropertyPathsTestSupport.KEY_AMOUNT, false);
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-6148: an unknown field is still 400 when the entity declares paths")
+    void anUnknownFieldIsStill400WithPaths() throws Exception {
+      Tab adTab = distinctTab(NeoPropertyPathsTestSupport.ROOT);
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "nope");
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, params);
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<NeoFieldFilter> filters = Mockito.mockStatic(NeoFieldFilter.class)) {
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity(NeoPropertyPathsTestSupport.ROOT)).thenReturn(entity);
+        when(entity.getProperty("nope", false)).thenReturn(null);
+        when(entity.getProperties()).thenReturn(Collections.emptyList());
+        NeoFieldFilter filter = pathFilter();
+        filters.when(() -> NeoFieldFilter.forEntity(any(), anyString())).thenReturn(filter);
+
+        NeoResponse result = invokeDistinctFetch(adTab, params, context);
+
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-6148: a null context never builds a field filter and never NPEs")
+    void aNullContextBuildsNoFieldFilter() throws Exception {
+      Tab adTab = distinctTab("C_Order");
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "nonExistentField");
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<NeoFieldFilter> filters = Mockito.mockStatic(NeoFieldFilter.class)) {
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity("C_Order")).thenReturn(entity);
+        when(entity.getProperties()).thenReturn(Collections.emptyList());
+
+        NeoResponse result = invokeDistinctFetch(adTab, params, null);
+
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+        filters.verifyNoInteractions();
       }
     }
 

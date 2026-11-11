@@ -1391,6 +1391,250 @@ class McpWriteGateTest {
             "e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".deliveryStatus=100"));
   }
 
+  // ── property-path fields (ETP-6148) ───────────────────────────────────
+
+  /**
+   * ETP-6148: a property-path field's API key is never a property of the entity. Filters on it
+   * are compared on the property its path ends on, a write of it is refused as read-only, and the
+   * list's grid fields carry it in its position. The paths are those of the mocked remittance-line
+   * model of {@code NeoPropertyPathsTestSupport}, served by a stubbed {@code NeoFieldFilter}.
+   */
+  @Nested
+  @DisplayName("property-path fields: filtered on their path, never written (ETP-6148)")
+  class PropertyPathFields {
+
+    private MockedStatic<com.etendoerp.go.schemaforge.NeoFieldFilter> filterStatic;
+
+    @BeforeEach
+    void stubThePaths() {
+      com.etendoerp.go.schemaforge.NeoFieldFilter filter =
+          mock(com.etendoerp.go.schemaforge.NeoFieldFilter.class);
+      com.etendoerp.go.schemaforge.NeoPropertyPaths paths =
+          com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.allPaths();
+      when(filter.propertyPaths()).thenReturn(paths);
+      filterStatic = mockStatic(com.etendoerp.go.schemaforge.NeoFieldFilter.class,
+          org.mockito.Mockito.CALLS_REAL_METHODS);
+      filterStatic.when(() -> com.etendoerp.go.schemaforge.NeoFieldFilter.forEntity(
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq(ENTITY_NAME)))
+          .thenReturn(filter);
+    }
+
+    @AfterEach
+    void closeThePaths() {
+      filterStatic.close();
+    }
+
+    private String where(String json) throws Exception {
+      return McpQuerySupport.buildWhereFromFilters(new JSONObject(json), adTab, specEntity(),
+          null);
+    }
+
+    @Test
+    @DisplayName("equality on a reference path compares its .id")
+    void equalityOnAReferencePath() throws Exception {
+      assertEquals("e.paymentScheduleDetail.businessPartner.id='BP-1'",
+          where("{\"scheduleBusinessPartner\":\"BP-1\"}"));
+    }
+
+    @Test
+    @DisplayName("equality and an operator on a value path compare the value")
+    void equalityAndOperatorsOnAValuePath() throws Exception {
+      assertEquals("e.paymentScheduleDetail.amount=5", where("{\"scheduleAmount\":5}"));
+      assertEquals("e.paymentScheduleDetail.amount > 1",
+          where("{\"scheduleAmount\":{\"gt\":1}}"));
+      assertEquals("e.paymentScheduleDetail.amount between 1 and 9",
+          where("{\"scheduleAmount\":{\"between\":[1,9]}}"));
+    }
+
+    @Test
+    @DisplayName("in on a reference path compares the ids")
+    void inOnAReferencePath() throws Exception {
+      assertEquals("e.paymentScheduleDetail.businessPartner.id in ('A', 'B')",
+          where("{\"scheduleBusinessPartner\":{\"in\":[\"A\",\"B\"]}}"));
+    }
+
+    @Test
+    @DisplayName("a path ending on a computed column goes through the proxy")
+    void aComputedTargetGoesThroughTheProxy() throws Exception {
+      assertEquals("e.paymentScheduleDetail.businessPartner."
+          + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".creditUsed < 100",
+          where("{\"partnerCreditUsed\":{\"lt\":100}}"));
+    }
+
+    @Test
+    @DisplayName("a real property never looks the paths up")
+    void aRealPropertySkipsThePathLookup() throws Exception {
+      Property prop = declareProperty("documentNo", "DocumentNo");
+      when(prop.isPrimitive()).thenReturn(true);
+      doReturn(String.class).when(prop).getPrimitiveObjectType();
+
+      assertEquals("e.documentNo='1001'", where("{\"documentNo\":\"1001\"}"));
+      filterStatic.verify(() -> com.etendoerp.go.schemaforge.NeoFieldFilter.forEntity(
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString()),
+          org.mockito.Mockito.never());
+    }
+
+    @Test
+    @DisplayName("writing a path key answers 422 read_only_field")
+    void aPathKeyWriteIsRefusedAsReadOnly() throws Exception {
+      for (String key : new String[] { "scheduleBusinessPartner",
+          "scheduleBusinessPartner$_identifier", "scheduleAmount" }) {
+        McpRoutingException thrown = assertThrows(McpRoutingException.class,
+            () -> write(fields(key, "x"), specEntity()), key);
+
+        JSONObject envelope = thrown.toEnvelope();
+        assertEquals(422, envelope.getInt(McpConstants.KEY_STATUS));
+        assertEquals(McpConstants.ERROR_READ_ONLY_FIELD,
+            envelope.getString(McpConstants.KEY_ERROR));
+        assertEquals(key, envelope.getString(McpConstants.PARAM_FIELD));
+      }
+    }
+
+    @Test
+    @DisplayName("an unknown key is still reported, not refused as read-only")
+    void anUnknownKeyIsStillReported() throws Exception {
+      Set<String> unknown = new TreeSet<>();
+
+      McpWriteRequestSupport.mapFieldsToDalProperties(fields("notAPath", "x"), adTab,
+          specEntity(), unknown);
+
+      assertEquals(Set.of("notAPath"), unknown);
+    }
+
+    @Test
+    @DisplayName("the list's grid fields carry the path column in its position")
+    void gridFieldsIncludeThePathColumnInPosition() throws Exception {
+      declareProperty("documentNo", "DocumentNo");
+      curate("DocumentNo", Boolean.TRUE, Boolean.FALSE, null, null);
+      curatedRows.add(pathRow(com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.PATH_PARTNER));
+      curatedRows.add(pathRow("paymentScheduleDetail.unknownStep"));
+      declareProperty("grandTotalAmount", "GrandTotal");
+      curate("GrandTotal", Boolean.TRUE, Boolean.FALSE, null, null);
+
+      Set<String> grid = McpQuerySupport.gridFields(specEntity(), adTab);
+
+      assertEquals(List.of("documentNo", "scheduleBusinessPartner", "grandTotalAmount"),
+          new ArrayList<>(grid), "a path that is not a declared field is left out");
+    }
+
+    // ---- W2: the paths are looked up zero times when known, at most once otherwise
+
+    private com.etendoerp.go.schemaforge.NeoPropertyPaths knownPaths() {
+      return com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.allPaths();
+    }
+
+    private void verifyLookups(int times) {
+      filterStatic.verify(() -> com.etendoerp.go.schemaforge.NeoFieldFilter.forEntity(
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString()),
+          org.mockito.Mockito.times(times));
+    }
+
+    @Test
+    @DisplayName("filters with the paths already known never look them up")
+    void knownPathsAreNeverLookedUpByTheFilters() throws Exception {
+      com.etendoerp.go.schemaforge.NeoPropertyPaths paths = knownPaths();
+
+      String where = McpQuerySupport.buildWhereFromFilters(
+          new JSONObject("{\"scheduleAmount\":5,\"scheduleBusinessPartner\":\"BP-1\"}"),
+          adTab, specEntity(), java.util.Map.of(), null, paths, null);
+
+      assertTrue(where.contains("e.paymentScheduleDetail.amount=5"), where);
+      assertTrue(where.contains("e.paymentScheduleDetail.businessPartner.id='BP-1'"), where);
+      verifyLookups(0);
+    }
+
+    @Test
+    @DisplayName("filters without known paths look them up once, whatever the number of path keys")
+    void unknownPathsAreLookedUpOnceByTheFilters() throws Exception {
+      where("{\"scheduleAmount\":5,\"scheduleBusinessPartner\":\"BP-1\","
+          + "\"partnerCreditUsed\":{\"gt\":1}}");
+
+      verifyLookups(1);
+    }
+
+    @Test
+    @DisplayName("grid fields with the paths already known never look them up")
+    void knownPathsAreNeverLookedUpByTheGridFields() throws Exception {
+      com.etendoerp.go.schemaforge.NeoPropertyPaths paths = knownPaths();
+      curatedRows.add(pathRow(com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.PATH_PARTNER));
+      curatedRows.add(pathRow(com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.PATH_AMOUNT));
+
+      Set<String> grid = McpQuerySupport.gridFields(specEntity(), adTab, paths);
+
+      assertEquals(List.of("scheduleBusinessPartner", "scheduleAmount"), new ArrayList<>(grid));
+      verifyLookups(0);
+    }
+
+    @Test
+    @DisplayName("grid fields without known paths look them up once for several path rows")
+    void unknownPathsAreLookedUpOnceByTheGridFields() throws Exception {
+      curatedRows.add(pathRow(com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.PATH_PARTNER));
+      curatedRows.add(pathRow(com.etendoerp.go.schemaforge.NeoPropertyPathsTestSupport.PATH_AMOUNT));
+
+      McpQuerySupport.gridFields(specEntity(), adTab);
+
+      verifyLookups(1);
+    }
+
+    @Test
+    @DisplayName("a write body with several unknown keys looks the paths up once")
+    void aWriteBodyLooksThePathsUpOnce() throws Exception {
+      Set<String> unknown = new TreeSet<>();
+      JSONObject body = new JSONObject().put("notAPath", "x").put("alsoNotAPath", "y")
+          .put("stillNot", "z");
+
+      McpWriteRequestSupport.mapFieldsToDalProperties(body, adTab, specEntity(), unknown);
+
+      assertEquals(Set.of("notAPath", "alsoNotAPath", "stillNot"), unknown);
+      verifyLookups(1);
+    }
+
+    @Test
+    @DisplayName("refuseIfPropertyPath fills its cache on first use and reuses it")
+    void refuseIfPropertyPathCachesTheLookup() {
+      com.etendoerp.go.schemaforge.NeoPropertyPaths[] cache =
+          new com.etendoerp.go.schemaforge.NeoPropertyPaths[1];
+      SFEntity entity = specEntity();
+
+      McpWriteRequestSupport.refuseIfPropertyPath("notAPath", entity, dalEntity, cache);
+      assertTrue(cache[0] != null, "filled on first use");
+      com.etendoerp.go.schemaforge.NeoPropertyPaths first = cache[0];
+      McpWriteRequestSupport.refuseIfPropertyPath("alsoNotAPath", entity, dalEntity, cache);
+      assertThrows(McpRoutingException.class, () -> McpWriteRequestSupport
+          .refuseIfPropertyPath("scheduleAmount", entity, dalEntity, cache));
+
+      assertTrue(first == cache[0], "the same lookup is reused");
+      verifyLookups(1);
+    }
+
+    @Test
+    @DisplayName("refuseIfPropertyPath never looks up for parentId or without an entity")
+    void refuseIfPropertyPathSkipsParentIdAndNoEntity() {
+      com.etendoerp.go.schemaforge.NeoPropertyPaths[] cache =
+          new com.etendoerp.go.schemaforge.NeoPropertyPaths[1];
+
+      McpWriteRequestSupport.refuseIfPropertyPath(McpConstants.PARAM_PARENT_ID, specEntity(),
+          dalEntity, cache);
+      McpWriteRequestSupport.refuseIfPropertyPath("scheduleAmount", null, dalEntity, cache);
+
+      assertNull(cache[0]);
+      verifyLookups(0);
+    }
+
+    private SFField pathRow(String path) {
+      Entity fieldModel = mock(Entity.class);
+      when(fieldModel.hasProperty("propertyPath"))
+          .thenReturn(true);
+      SFField row = mock(SFField.class);
+      when(row.getADColumn()).thenReturn(null);
+      when(row.getEntity()).thenReturn(fieldModel);
+      when(row.get("propertyPath")).thenReturn(path);
+      when(row.isIncluded()).thenReturn(Boolean.TRUE);
+      when(row.isReadOnly()).thenReturn(Boolean.TRUE);
+      return row;
+    }
+  }
+
   static Stream<Arguments> filterPathCases() {
     String proxy = "e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".";
     return Stream.of(

@@ -1580,6 +1580,46 @@ public class McpToolRouterTest {
         hookContext < attribute && attribute < handedOver && handedOver < dispatch);
   }
 
+  // ── property-path fields (ETP-6148) ─────────────────────────────────
+
+  /**
+   * ETP-6148: {@code etendo_list} and {@code etendo_get} read the property-path fields exactly as
+   * the REST list and GET by id do: the paths are applied to the datasource parameters before
+   * core runs the fetch, and the field filter hands the values back under their API keys after
+   * it. Asserted on the source ({@link McpSourceScanner}) like the other router call sites; the
+   * rewriting itself is specified in {@code NeoPropertyPathsTest}.
+   */
+  @Test
+  public void testListAndGetApplyThePropertyPathsBeforeTheFetch() {
+    String source = McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java");
+    for (String method : new String[] { "handleList", "handleGet" }) {
+      String body = McpSourceScanner.stripComments(McpSourceScanner.methodBody(source, method))
+          .replaceAll("\\s+", "");
+      int apply = body.indexOf("NeoPropertyPaths.of(fieldFilter).applyToReadParams(params);");
+      int fetch = body.indexOf("jsonService.fetch(params)");
+      int restore = body.indexOf("fieldFilter.filterGetResponse(responseJson);");
+      assertTrue(method + " no longer applies the property paths to its read params",
+          apply >= 0);
+      assertTrue(method + ": the paths must be applied before the fetch", apply < fetch);
+      assertTrue(method + ": the field filter restores the API keys after the fetch",
+          fetch < restore);
+    }
+  }
+
+  /** ETP-6148: etendo_schema publishes the property-path descriptors with the virtual fields. */
+  @Test
+  public void testSchemaPublishesThePropertyPathFields() {
+    String body = McpSourceScanner.stripComments(McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleSchema"))
+        .replaceAll("\\s+", "");
+    int paths = body.indexOf("McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,"
+        + "McpSchemaFieldBuilder.buildPropertyPathFieldsArray(sfEntity,dalEntity));");
+    int preconditions = body.indexOf("McpSchemaFieldBuilder.applyPreconditionRequirements(");
+    assertTrue("handleSchema no longer appends the property-path descriptors", paths >= 0);
+    assertTrue("the path descriptors must be in the array the views are built from",
+        paths < preconditions);
+  }
+
   private static int indexOrFail(String body, String anchor) {
     int index = body.indexOf(anchor);
     assertTrue("handleCreate no longer contains " + anchor + " — either the call was dropped or"

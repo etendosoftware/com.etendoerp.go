@@ -32,6 +32,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoPropertyPaths;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
@@ -209,6 +210,19 @@ final class McpQuerySupport {
   static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
       java.util.Map<String, String> aliases, java.util.Map<String, String> applied,
       org.apache.logging.log4j.Logger log) throws JSONException {
+    return buildWhereFromFilters(filters, adTab, sfEntity, aliases, applied, null, log);
+  }
+
+  /**
+   * As above, with the entity's property-path fields already in hand (ETP-6148): the caller's
+   * own field filter has them, so they are not looked up again. {@code null} looks them up on
+   * the first key that is no property of the entity.
+   *
+   * @param knownPaths the entity's property-path fields, or {@code null}
+   */
+  static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
+      java.util.Map<String, String> aliases, java.util.Map<String, String> applied,
+      NeoPropertyPaths knownPaths, org.apache.logging.log4j.Logger log) throws JSONException {
     Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
     if (dalEntity == null) {
@@ -226,6 +240,7 @@ final class McpQuerySupport {
     excluded.remove(McpParentScope.forEntity(sfEntity).getParentField());
 
     StringBuilder where = new StringBuilder();
+    NeoPropertyPaths propertyPaths = knownPaths;
     java.util.Iterator<String> keys = filters.keys();
     while (keys.hasNext()) {
       String key = keys.next();
@@ -233,6 +248,18 @@ final class McpQuerySupport {
       if (McpBusinessFilters.STATUS_KEY.equalsIgnoreCase(key) && value instanceof String
           && appendStatusCondition(where, sfEntity, (String) value, log)) {
         continue;
+      }
+      // ETP-6148: a property-path field's API key is never a property of the entity, so the
+      // paths are only looked up (one query) for a key that is not one.
+      if (dalEntity.getPropertyByColumnName(key, false) == null && !dalEntity.hasProperty(key)) {
+        if (propertyPaths == null) {
+          propertyPaths = propertyPathsOf(sfEntity, dalEntity);
+        }
+        NeoPropertyPaths.PathField pathField = propertyPaths.get(key);
+        if (pathField != null) {
+          appendPathCondition(where, pathField, key, value);
+          continue;
+        }
       }
       Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
       Property target = aliasTarget(dalEntity, prop, aliases, excluded, applied);
@@ -685,20 +712,74 @@ final class McpQuerySupport {
   private static void appendEqualityCondition(StringBuilder where, String key, Property prop,
       Property target,
       Object value) {
+    appendEqualityAt(where, key, prop, filterPath(prop, target, ""),
+        filterPath(prop, target, ".id"), value);
+  }
+
+  /**
+   * Append {@code <path> = value}, or {@code <idPath> = 'value'} for a reference.
+   *
+   * @param path   the HQL expression of the value
+   * @param idPath the HQL expression of the referenced id ({@code path + ".id"})
+   */
+  private static void appendEqualityAt(StringBuilder where, String key, Property prop,
+      String path, String idPath, Object value) {
     appendAnd(where);
     if (!prop.isPrimitive()) {
-      where.append(filterPath(prop, target, ".id")).append('=')
+      where.append(idPath).append('=')
           .append(McpBusinessFilters.formatHqlValue(key, String.class, false, value));
     } else {
-      where.append(filterPath(prop, target, "")).append('=').append(
+      where.append(path).append('=').append(
           McpBusinessFilters.formatHqlValue(key, prop.getPrimitiveObjectType(), true, value));
     }
+  }
+
+  /**
+   * ETP-6148: the condition on a property-path field, compared on the property its path ends on.
+   * Same operators and refusals as a column field. The path is joined implicitly, which drops a
+   * row whose path is broken: every operator offered here (equality, ranges, {@code between},
+   * {@code contains}, {@code in}) is false on a null value anyway, so the result is the one the
+   * REST grid's left-joined criteria give.
+   */
+  private static void appendPathCondition(StringBuilder where,
+      NeoPropertyPaths.PathField pathField, String key, Object value) throws JSONException {
+    Property prop = pathField.getTarget();
+    String path = pathField.hqlPath("e");
+    String idPath = path + ".id";
+    if (value instanceof JSONObject) {
+      appendOperatorConditionsAt(where, prop, path, idPath, key, (JSONObject) value);
+    } else {
+      appendEqualityAt(where, key, prop, path, idPath, value);
+    }
+  }
+
+  /**
+   * The entity's property-path fields (ETP-6148), from the same filter the read applies.
+   *
+   * @param sfEntity  the SchemaForge entity, or {@code null}
+   * @param dalEntity the DAL entity
+   * @return the fields, possibly empty
+   */
+  static NeoPropertyPaths propertyPathsOf(SFEntity sfEntity, Entity dalEntity) {
+    // forEntity answers an inactive filter, with no path, for a null entity.
+    return NeoPropertyPaths.of(NeoFieldFilter.forEntity(sfEntity, dalEntity.getName()));
   }
 
   /** Append one HQL comparison per range operator found in {@code operators}. */
   private static void appendOperatorConditions(StringBuilder where, Property prop,
       Property target, String key, JSONObject operators) throws JSONException {
-    String path = filterPath(prop, target, "");
+    appendOperatorConditionsAt(where, prop, filterPath(prop, target, ""),
+        filterPath(prop, target, ".id"), key, operators);
+  }
+
+  /**
+   * As {@link #appendOperatorConditions}, on given HQL expressions.
+   *
+   * @param path   the HQL expression of the value
+   * @param idPath the HQL expression of the referenced id, used by {@code in} on a reference
+   */
+  private static void appendOperatorConditionsAt(StringBuilder where, Property prop,
+      String path, String idPath, String key, JSONObject operators) throws JSONException {
     Class<?> type = prop.isPrimitive() ? prop.getPrimitiveObjectType() : String.class;
     java.util.Iterator<String> ops = operators.keys();
     while (ops.hasNext()) {
@@ -709,7 +790,7 @@ final class McpQuerySupport {
       } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
         where.append(containsCondition(path, prop, type, key, operators.get(op)));
       } else if (McpBusinessFilters.OP_IN.equals(op)) {
-        String inPath = prop.isPrimitive() ? path : filterPath(prop, target, ".id");
+        String inPath = prop.isPrimitive() ? path : idPath;
         where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(),
             inValues(key, operators.optJSONArray(op))));
       } else {
@@ -888,6 +969,15 @@ final class McpQuerySupport {
    * none, in which case the caller leaves the response full.
    */
   static java.util.Set<String> gridFields(SFEntity sfEntity, Tab adTab) {
+    return gridFields(sfEntity, adTab, null);
+  }
+
+  /**
+   * As {@link #gridFields(SFEntity, Tab)}, with the entity's property-path fields already in hand
+   * (ETP-6148); {@code null} looks them up on the first path row.
+   */
+  static java.util.Set<String> gridFields(SFEntity sfEntity, Tab adTab,
+      NeoPropertyPaths knownPaths) {
     java.util.Set<String> result = new java.util.LinkedHashSet<>();
     Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
@@ -899,12 +989,25 @@ final class McpQuerySupport {
     crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     crit.add(Restrictions.isNotNull(SFField.PROPERTY_GRIDPOSITION));
     crit.addOrder(org.hibernate.criterion.Order.asc(SFField.PROPERTY_GRIDPOSITION));
+    NeoPropertyPaths propertyPaths = knownPaths;
     for (SFField sfField : crit.list()) {
       Column col = sfField.getADColumn();
       Property prop = col == null ? null
           : dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
       if (prop != null) {
         result.add(prop.getName());
+        continue;
+      }
+      // ETP-6148: a property-path list column, in its list position, under its API key.
+      String path = NeoFieldFilter.propertyPathOf(sfField);
+      if (col == null && path != null) {
+        if (propertyPaths == null) {
+          propertyPaths = propertyPathsOf(sfEntity, dalEntity);
+        }
+        NeoPropertyPaths.PathField pathField = propertyPaths.byPath(path);
+        if (pathField != null) {
+          result.add(pathField.getApiKey());
+        }
       }
     }
     return result;
@@ -937,7 +1040,8 @@ final class McpQuerySupport {
     } else if (listDefault && !McpFieldProjection.isFullView(view)) {
       requested = McpListSection.configuredFields(sfEntity);
       if (requested.isEmpty()) {
-        requested = gridFields(sfEntity, adTab);
+        requested = gridFields(sfEntity, adTab,
+            fieldFilter == null ? null : NeoPropertyPaths.of(fieldFilter));
       }
       McpFieldProjection.reportOmittedFields(responseJson, requested);
     } else {

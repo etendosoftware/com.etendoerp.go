@@ -169,15 +169,31 @@ public class NeoFieldFilter {
    */
   private final boolean active;
 
+  /**
+   * The entity's property-path fields (ETP-6148): {@code ETGO_SF_FIELD} rows with a
+   * {@code PROPERTY_PATH} and no column. Read-only, served under their API key; see
+   * {@link NeoPropertyPaths}.
+   */
+  private final NeoPropertyPaths propertyPaths;
+
   private NeoFieldFilter(Set<String> includedFields, Set<String> writableFields,
       Set<String> rejectableOnCreateFields,
       Map<String, String> apiKeyToPropName, Map<String, String> propNameToApiKey, boolean active) {
+    this(includedFields, writableFields, rejectableOnCreateFields, apiKeyToPropName,
+        propNameToApiKey, active, NeoPropertyPaths.empty());
+  }
+
+  private NeoFieldFilter(Set<String> includedFields, Set<String> writableFields,
+      Set<String> rejectableOnCreateFields,
+      Map<String, String> apiKeyToPropName, Map<String, String> propNameToApiKey, boolean active,
+      NeoPropertyPaths propertyPaths) {
     this.includedFields = includedFields;
     this.writableFields = writableFields;
     this.rejectableOnCreateFields = rejectableOnCreateFields;
     this.apiKeyToPropName = apiKeyToPropName;
     this.propNameToApiKey = propNameToApiKey;
     this.active = active;
+    this.propertyPaths = propertyPaths;
   }
 
   /**
@@ -262,8 +278,10 @@ public class NeoFieldFilter {
       // rejectableOnCreateFields javadoc).
       boolean entityHasHandler = NeoHandlerLookup.hasCustomization(sfEntity);
 
+      NeoPropertyPaths.Builder pathBuilder = NeoPropertyPaths.builder(dalEntity);
       processFieldMappings(allFields, dalEntity, included, writable, rejectableOnCreate,
-          apiKeyMap, propToApiMap, dalEntityName, entityHasHandler);
+          apiKeyMap, propToApiMap, dalEntityName, entityHasHandler, pathBuilder);
+      NeoPropertyPaths paths = pathBuilder.build(propToApiMap.values());
 
       // Always include "id" — it's needed for record identification
       included.add("id");
@@ -296,7 +314,8 @@ public class NeoFieldFilter {
       log.debug("Field filter for entity {}: {} included, {} writable, {} rejectable on create",
           sfEntity.getName(), included.size(), writable.size(), rejectableOnCreate.size());
 
-      return new NeoFieldFilter(included, writable, rejectableOnCreate, apiKeyMap, propToApiMap, true);
+      return new NeoFieldFilter(included, writable, rejectableOnCreate, apiKeyMap, propToApiMap, true,
+          paths);
 
     } catch (Exception e) {
       log.error("Error building field filter for entity {}: {}",
@@ -312,8 +331,23 @@ public class NeoFieldFilter {
   private static void processFieldMappings(List<SFField> fields, Entity dalEntity,
       Set<String> included, Set<String> writable, Set<String> rejectableOnCreate,
       Map<String, String> apiKeyMap, Map<String, String> propToApiMap,
-      String dalEntityName, boolean entityHasHandler) {
+      String dalEntityName, boolean entityHasHandler, NeoPropertyPaths.Builder pathBuilder) {
     for (SFField sfField : fields) {
+      // push-to-neo.js stores the frontend field name (e.g. "unitPrice") in
+      // javaQualifier. DefaultJsonDataService expects the DAL property name
+      // (e.g. "priceActual"). Build both maps:
+      //   POST: apiKeyMap  (qualifier → propName) for remapApiKeys()
+      //   GET:  propToApiMap (propName → qualifier) for renameToApiKeys()
+      // A property-path field (ETP-6148) has no column: its qualifier is its API key, and it is
+      // collected apart, never into the column maps or the writable set.
+      String qualifier = sfField.getJavaQualifier();
+      String propertyPath = propertyPathOf(sfField);
+      if (propertyPath != null) {
+        if (Boolean.TRUE.equals(sfField.isIncluded())) {
+          pathBuilder.add(qualifier, propertyPath);
+        }
+        continue;
+      }
       Property prop = resolveProperty(sfField, dalEntity, dalEntityName);
       if (prop == null) {
         continue;
@@ -321,12 +355,6 @@ public class NeoFieldFilter {
 
       String propName = prop.getName();
 
-      // push-to-neo.js stores the frontend field name (e.g. "unitPrice") in
-      // javaQualifier. DefaultJsonDataService expects the DAL property name
-      // (e.g. "priceActual"). Build both maps:
-      //   POST: apiKeyMap  (qualifier → propName) for remapApiKeys()
-      //   GET:  propToApiMap (propName → qualifier) for renameToApiKeys()
-      String qualifier = sfField.getJavaQualifier();
       if (qualifier != null && !qualifier.equals(propName)) {
         apiKeyMap.put(qualifier, propName);
         propToApiMap.put(propName, qualifier);
@@ -349,6 +377,26 @@ public class NeoFieldFilter {
         }
       }
     }
+  }
+
+  /** DAL property of {@code ETGO_SF_FIELD.PROPERTY_PATH} (ETP-6148). */
+  static final String PROPERTY_PATH = "propertyPath";
+
+  /**
+   * The {@code PROPERTY_PATH} of a field row, read by name so a model generated before the column
+   * existed answers {@code null} instead of failing.
+   *
+   * @param sfField the row
+   * @return the trimmed path, or {@code null} for a column field
+   */
+  public static String propertyPathOf(SFField sfField) {
+    if (sfField == null || sfField.getEntity() == null
+        || !sfField.getEntity().hasProperty(PROPERTY_PATH)) {
+      return null;
+    }
+    Object value = sfField.get(PROPERTY_PATH);
+    return value instanceof String ? org.apache.commons.lang3.StringUtils.trimToNull((String) value)
+        : null;
   }
 
   /**
@@ -487,9 +535,12 @@ public class NeoFieldFilter {
       if (data != null) {
         for (int i = 0; i < data.length(); i++) {
           JSONObject item = data.getJSONObject(i);
+          // ETP-6148: taken before filterRecord, which strips the raw path keys core wrote.
+          Map<String, Object> pathValues = propertyPaths.capture(item);
           filterRecord(item, includedFields, ALWAYS_READABLE_PROPS);
           renameToApiKeys(item);
           renameAuditPropsToApiKeys(item);
+          propertyPaths.restore(item, pathValues);
         }
       }
     } catch (Exception e) {
@@ -595,6 +646,10 @@ public class NeoFieldFilter {
    * @return {@code true} if the client may supply this key
    */
   private boolean isWritableOrExemptOnCreate(String key, boolean isCreate) {
+    if (propertyPaths.isPathKey(key)) {
+      // ETP-6148: a property-path field is read-only on every method, create included.
+      return false;
+    }
     String propertyName = apiKeyToPropName.getOrDefault(key, key);
     boolean readOnlyIncluded = !NeoServerOwnedFields.isServerOwned(propertyName)
         && includedFields.contains(propertyName) && !writableFields.contains(propertyName);
@@ -620,6 +675,13 @@ public class NeoFieldFilter {
    */
   public String resolveWritablePropName(String apiKey) {
     return apiKeyToPropName.getOrDefault(apiKey, apiKey);
+  }
+
+  /**
+   * @return the entity's property-path fields (ETP-6148); empty when the filter is inactive
+   */
+  public NeoPropertyPaths propertyPaths() {
+    return propertyPaths;
   }
 
   /**
@@ -661,6 +723,7 @@ public class NeoFieldFilter {
     // Audit keys served regardless of ETGO_SF_FIELD: they have no SFField row, so their rename
     // comes from AUDIT_PROP_TO_API_KEY and is already applied in ALWAYS_READABLE_API_KEYS.
     keys.addAll(ALWAYS_READABLE_API_KEYS);
+    keys.addAll(propertyPaths.responseKeys());
     return Optional.of(keys);
   }
 
