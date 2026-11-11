@@ -2347,7 +2347,7 @@ not recorded by `CopilotToolUsageRecorder` (the client calls the service directl
 
 Classic's «Remittance» window (`org.openbravo.module.remittance`, window
 `FF8080812E71F7C7012E71FD0499001B`) served as the spec `remittance`: header `remittance`
-(`REM_Remittance`) and read-only `lines` (`REM_RemittanceLine`). Behind the per-account flag
+(`REM_Remittance`) and `lines` (`REM_RemittanceLine`, only «A remesar» editable). Behind the per-account flag
 `sepa-remittances` (`SepaRemittancesFlag`, off by default). Only two columns are new; everything else
 is Classic's model.
 
@@ -2387,8 +2387,22 @@ is Classic's model.
 - **Lines** (`RemittanceLinesHandler`): `GET`, and `DELETE` while the remittance is not processed
   (the generic delete, which is all REM's `DeleteRemittanceLineActionHandler` does; a processed
   one is `422 ETGO_RemittanceProcessedNotEditable`, and `REM_REMITTANCELINE_TRG` refuses it too).
-  `POST`/`PUT`/`PATCH` are `405 ETGO_RemittanceLinesReadOnly`; lines are only added by
-  `selectDueItems`. DELETE also needs the entity's `ISDELETE` in its NEO configuration.
+  `POST` is `405 ETGO_RemittanceLinesReadOnly`; lines are only added by `selectDueItems` /
+  `syncDueItems`. DELETE also needs the entity's `ISDELETE` in its NEO configuration.
+- **«A remesar»** (round 3): `PUT`/`PATCH` on a line change `amount`, its only editable field
+  (`ETGO_SF_FIELD.ISREADONLY = 'N'` on `Amount`, every other field and every path row read-only;
+  the entity's `ISPUT`/`ISPATCH`). A whole-row body is fine: REST drops the read-only and path keys
+  and logs them (ETP-5556); MCP refuses them with `read_only_field`, as for any read-only field. The
+  pre-hook, on both channels: a processed remittance is `422 ETGO_RemittanceProcessedNotEditable`;
+  a line with no due (a payment line) is `422 ETGO_RemittanceLineAmountNotEditable`; the amount must
+  have the sign of the due and `0 < |amount| ≤ |outstanding|`, where the outstanding is the amount
+  of the payment schedule detail the line points to — exactly REM's own `REM_OutOfRangeAmount`
+  check at processing — else `422 ETGO_RemittanceLineAmountInvalid` (`{0}` and `error.max` = the
+  outstanding). The rule lives in `RemittanceLineAmount`, shared with `syncDueItems`.
+  **Partial amounts are REM-native:** processing a line of 20.00 on a due of 53.24 creates a 20.00
+  payment and splits the schedule detail into 20.00 (paid by it) + 33.24 (still open); after
+  settlement the invoice shows paid 20.00, outstanding 33.24, and the 33.24 is a candidate for
+  another remittance (verified in a rolled-back DAL run, ETP-6148 round 3).
 - **«Procesar»** — declared action `process` of the header (`RemittanceProcessAction`), POST, body
   `{"fieldValues": {grouping?: "P" | "GGPD"}}` (default `P`, one payment per line; `GGPD` per
   business partner and due date). Both remittance actions are declared `withFieldValuesBody()`:
@@ -2411,9 +2425,13 @@ is Classic's model.
   `ETGO_RemittanceProcessedNotEditable`) or one without type, account or due date (422
   `ETGO_RemittanceTypeOrAccountMissing`):
   - `availableDueItems` (read; params `search`, `page` from 1, `pageSize` default 50, max 200) →
-    `{items: [{id (FIN_Payment_Schedule), documentNo, businessPartner, dueDate (expected date,
-    yyyy-MM-dd), outstandingAmount, currency (ISO), alreadyInRemittance}], total}`, ordered by
-    dueDate then documentNo. Candidates follow Classic's «Select Invoices and Orders» rules
+    `{items: [{id (FIN_Payment_Schedule), documentNo, invoiceId, salesTransaction, invoiceDate,
+    dueDate (expected date, yyyy-MM-dd), dueStatus (`OVERDUE` / `DUE_TODAY` / `PENDING` against
+    the server's day), businessPartner, businessPartnerId, grandTotalAmount,
+    outstandingAmount (the most that can be remitted), currency (ISO), alreadyInRemittance,
+    lineAmount + lineIds (only when already in it; a due with several open details has one line
+    each)}], total}`, ordered by dueDate then documentNo. The dues already in this remittance are
+    always listed, even when its due date has moved before theirs. Candidates follow Classic's «Select Invoices and Orders» rules
     without its default payment-method filter: unpaid, not cancelled, not invoice-paid, invoice
     schedules only, with a business partner, organization in the remittance org's child tree,
     expected date ≤ the remittance due date, direction from the account ↔ type-method link
@@ -2426,7 +2444,19 @@ is Classic's model.
     `NeoProcessService.executeObuiappClass` with each schedule's full outstanding amount and no
     `_allRows`, so existing lines are never deleted → `{created, message}`. A refusal by REM is 422
     `ETGO_RemittanceDueItemsSelectionFailed`.
-  - The lines endpoint itself stays read-only (405).
+  - `syncDueItems` (POST; body `{items: [{id, amount}], remove: [id…]}`) applies the dialog as a
+    manager of the remittance's documents, in one transaction: validate everything first (a
+    `remove` id not in the remittance, or also in `items` → 422 `ETGO_RemittanceDueItemNotIncluded`;
+    an `items` id that is not a candidate → 422 `ETGO_RemittanceDueItemNotAvailable`; an amount
+    failing the «A remesar» rule against the due's outstanding → 422
+    `ETGO_RemittanceLineAmountInvalid`; all with `error.invalidIds`), then remove the lines of the
+    `remove` dues, replace the lines of an included due whose amount changed, and add the new and
+    changed dues through the same `REMSelectInvoicesAndOrders` run with their amount (Classic
+    spreads it over the due's open details). An included due sent with its current amount is left
+    alone. A REM refusal rolls everything back (422 `ETGO_RemittanceDueItemsSelectionFailed`) →
+    `{created, updated, removed, message}`, counted in dues. Removal is explicit on purpose: the
+    dialog is paginated and searchable, so "whatever is not in the list" would drop every due off
+    the loaded page.
 - **Status.** `REM_REMITTANCE.REMITTANCE_STATUS` (field `remittanceStatus`, list
   `REM_RemittanceStatus`: `PE`, `PR`, `CT`/`PT`, `CP`/`PP`, `AN`) belongs to the remittance module
   (`org.openbravo.module.remittance`, the remittance module's `REMITTANCE_STATUS` added by

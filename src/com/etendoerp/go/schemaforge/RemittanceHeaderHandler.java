@@ -78,7 +78,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *       name field the user never edited; an existing remittance (the form carries an {@code id})
  *       never gets one. Every other callout is answered empty.</li>
  *   <li><b>«Seleccionar desde factura»</b>: declared actions {@code availableDueItems} and
- *       {@code selectDueItems} ({@link RemittanceDueItems}); 422 on a processed remittance.</li>
+ *       {@code selectDueItems}, {@code syncDueItems} ({@link RemittanceDueItems}); 422 on a
+ *       processed remittance.</li>
  *   <li><b>«Procesar»</b>: declared action {@code process} ({@link RemittanceProcessAction}),
  *       Classic's {@code REMRemittanceProcess}; 422 when already processed, without lines, or
  *       refused by REM. <b>«Reactivar»</b>: {@code reactivate}, the same process with action
@@ -215,7 +216,8 @@ public class RemittanceHeaderHandler implements NeoHandler {
 
   /**
    * The «Seleccionar desde factura» actions ({@link RemittanceDueItems}): {@code availableDueItems}
-   * (read) and {@code selectDueItems} (write, POST only). The record id is the remittance.
+   * (read), {@code selectDueItems} and {@code syncDueItems} (write, POST only). The record id is
+   * the remittance.
    */
   @Override
   public java.util.Map<String, NeoActionContract> actionContracts() {
@@ -238,7 +240,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
   NeoResponse handleDueItemsAction(NeoContext context) {
     String action = context.getFieldName();
     boolean post = "POST".equals(context.getHttpMethod());
-    boolean write = RemittanceDueItems.ACTION_SELECT.equals(action)
+    boolean write = RemittanceDueItems.isWrite(action)
         || RemittanceProcessAction.serves(action);
     if (write && !post) {
       return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
@@ -265,11 +267,17 @@ public class RemittanceHeaderHandler implements NeoHandler {
       if (Boolean.TRUE.equals(remittance.isProcessed())) {
         return NeoMessageText.error(SC_UNPROCESSABLE, MSG_PROCESSED);
       }
+      if (RemittanceDueItems.ACTION_SYNC.equals(action)) {
+        return syncDueItems(remittance, params);
+      }
       return RemittanceDueItems.ACTION_AVAILABLE.equals(action)
           ? availableDueItems(remittance, params)
           : selectDueItems(remittance, params);
     } catch (Exception e) {
       log.error("remittance action {} failed on {}", action, context.getRecordId(), e);
+      // syncDueItems deletes lines before the Classic run: an unexpected failure after that must
+      // not leave the deletes pending in the session (unless a batch owns the transaction).
+      NeoErrorResponses.rollbackUnlessBatchOwned();
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Could not run " + action + ". Please check logs for details.");
     } finally {
@@ -310,6 +318,11 @@ public class RemittanceHeaderHandler implements NeoHandler {
   /** Seam over {@link RemittanceDueItems#select}. */
   NeoResponse selectDueItems(Remittance remittance, JSONObject params) throws JSONException {
     return RemittanceDueItems.select(remittance, params);
+  }
+
+  /** Seam over {@link RemittanceDueItems#sync}. */
+  NeoResponse syncDueItems(Remittance remittance, JSONObject params) throws JSONException {
+    return RemittanceDueItems.sync(remittance, params);
   }
 
   private java.util.Map<String, String> queryParams(NeoContext context) {

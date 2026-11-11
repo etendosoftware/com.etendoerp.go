@@ -910,7 +910,8 @@ class RemittanceHeaderHandlerTest {
   @Test
   void theHeaderDeclaresTheDueItemsAndProcessActions() {
     assertTrue(handler.servesActions());
-    assertEquals(List.of("availableDueItems", "selectDueItems", "process", "reactivate"),
+    assertEquals(List.of("availableDueItems", "selectDueItems", "syncDueItems", "process",
+        "reactivate"),
         new ArrayList<>(handler.actionContracts().keySet()));
   }
 
@@ -998,6 +999,79 @@ class RemittanceHeaderHandlerTest {
   }
 
   @Test
+  void syncDueItemsOnlyAcceptsPost() throws Exception {
+    stubStored(false);
+    JSONObject body = new JSONObject().put("remove", new JSONArray().put("IPS-1"));
+
+    for (String method : new String[] { "GET", "PUT", "DELETE" }) {
+      assertEquals(405, handler.handle(action(method, "syncDueItems", body)).getHttpStatus(),
+          method);
+    }
+    verify(handler, never()).syncDueItems(any(), any());
+  }
+
+  @Test
+  void syncDueItemsIsRoutedWithItsBodyAndItsAnswerReturnedAsIs() throws Exception {
+    Remittance stored = stubStored(false);
+    JSONObject body = new JSONObject()
+        .put("items", new JSONArray().put(new JSONObject().put("id", "IPS-1").put("amount", 50)))
+        .put("remove", new JSONArray().put("IPS-2"));
+    NeoResponse synced = NeoResponse.ok(new JSONObject().put("created", 1).put("removed", 1));
+    doReturn(synced).when(handler).syncDueItems(stored, body);
+
+    assertSameResponse(synced, handler.handle(action("POST", "syncDueItems", body)));
+    verify(handler, never()).selectDueItems(any(), any());
+    verify(handler, never()).availableDueItems(any(), any());
+    contextStatic.verify(OBContext::restorePreviousMode);
+  }
+
+  /**
+   * Alex W2 (ETP-6148 round 3): {@code syncDueItems} deletes lines before the Classic run, so an
+   * unexpected exception after the deletes must not leave them pending in the session: the 500
+   * path rolls back (unless a batch owns the transaction).
+   */
+  @Test
+  void anUnexpectedSyncFailureRollsBackBeforeAnswering500() throws Exception {
+    Remittance stored = stubStored(false);
+    JSONObject body = new JSONObject().put("remove", new JSONArray().put("IPS-2"));
+    org.mockito.Mockito.doThrow(new IllegalStateException("boom after the deletes"))
+        .when(handler).syncDueItems(stored, body);
+    try (org.mockito.MockedStatic<NeoErrorResponses> errors =
+        org.mockito.Mockito.mockStatic(NeoErrorResponses.class)) {
+
+      NeoResponse response = handler.handle(action("POST", "syncDueItems", body));
+
+      assertEquals(500, response.getHttpStatus());
+      errors.verify(NeoErrorResponses::rollbackUnlessBatchOwned);
+    }
+    contextStatic.verify(OBContext::restorePreviousMode);
+  }
+
+  @Test
+  void syncDueItemsOnAProcessedRemittanceIsRefused422AndOnAnUnknownOne404() throws Exception {
+    JSONObject body = new JSONObject().put("remove", new JSONArray().put("IPS-1"));
+    doReturn(null).when(handler).loadRemittance(REM_ID);
+    assertEquals(404, handler.handle(action("POST", "syncDueItems", body)).getHttpStatus());
+
+    stubStored(true);
+    NeoResponse response = handler.handle(action("POST", "syncDueItems", body));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceHeaderHandler.MSG_PROCESSED, messageKey(response));
+    verify(handler, never()).syncDueItems(any(), any());
+  }
+
+  @Test
+  void syncDueItemsAnswers403WhileTheFlagIsOff() throws Exception {
+    doReturn(false).when(handler).isFlagEnabled();
+
+    assertEquals(403, handler.handle(action("POST", "syncDueItems",
+        new JSONObject().put("remove", new JSONArray().put("IPS-1")))).getHttpStatus());
+    verify(handler, never()).loadRemittance(any());
+    verify(handler, never()).syncDueItems(any(), any());
+  }
+
+  @Test
   void anUnknownParameterIsRefusedByTheContract() throws Exception {
     stubStored(false);
 
@@ -1054,6 +1128,7 @@ class RemittanceHeaderHandlerTest {
     assertNull(handler.handle(action("POST", "archiveEverything", new JSONObject())));
     verify(handler, never()).availableDueItems(any(), any());
     verify(handler, never()).selectDueItems(any(), any());
+    verify(handler, never()).syncDueItems(any(), any());
     verify(handler, never()).processRemittance(any(), any());
     verify(handler, never()).reactivateRemittance(any());
     verify(handler, never()).loadRemittance(any());

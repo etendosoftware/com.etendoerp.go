@@ -183,7 +183,11 @@ final class RemittanceProcessAction {
       org.openbravo.scheduling.Process process =
           WeldUtils.getInstanceFromStaticBeanManager(REMRemittanceProcess.class);
       VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
-      ProcessBundle bundle = new ProcessBundle(PROCESS_ID, vars);
+      // The DAL connection, as NeoProcessService runs a process: REM's payment creation runs the
+      // payment process on bundle.getConnection(), which is null without init (NPE in
+      // ProcessData, ETP-6148 round 3).
+      ProcessBundle bundle = new ProcessBundle(PROCESS_ID, vars)
+          .init(new org.openbravo.service.db.DalConnectionProvider(false));
       Map<String, Object> bundleParams = new HashMap<>();
       bundleParams.put("REM_Remittance_ID", remittanceId);
       bundleParams.put("action", grouping);

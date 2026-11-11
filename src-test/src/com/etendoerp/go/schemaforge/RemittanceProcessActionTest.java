@@ -19,6 +19,9 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -31,6 +34,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -40,12 +45,20 @@ import org.hibernate.query.Query;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.module.remittance.Remittance;
+import org.openbravo.module.remittance.process.REMRemittanceProcess;
 import org.openbravo.module.remittance.utility.RemittanceStatusUtil;
+import org.openbravo.scheduling.ClusterInstanceProcessAccess;
+import org.openbravo.scheduling.ProcessBundle;
+import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
@@ -58,7 +71,9 @@ import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
  * the status read back.
  *
  * <p>{@link RemittanceProcessAction#run} — the Classic process — is stubbed through a
- * {@code CALLS_REAL_METHODS} static mock, so {@code process} itself runs for real; the DAL answers
+ * {@code CALLS_REAL_METHODS} static mock, so {@code process} itself runs for real (the run tests
+ * leave it unstubbed and mock what it calls: Weld, the bundle's {@code ProcessData} lookup and its
+ * DAL connection); the DAL answers
  * the active-line count and the reloaded remittance. {@link NeoMessageTranslator} is mocked to
  * identity: translating {@code @key@} tokens needs a database.
  *
@@ -347,6 +362,112 @@ class RemittanceProcessActionTest {
 
     verify(dal, never()).rollbackAndClose();
     actionStatic.verify(RemittanceProcessAction::rollback, never());
+  }
+
+  // ---------------------------------------------------------------- run (the Classic process)
+
+  /**
+   * REM's payment creation runs the payment process on {@code bundle.getConnection()}: the bundle
+   * must be initialised on a DAL connection, or processing a remittance fails with an NPE inside
+   * {@code ProcessData}. Pins {@code new ProcessBundle(...).init(new DalConnectionProvider(false))}
+   * — the bundle's process lookup runs on that connection and the bundle keeps it — with REM's
+   * parameters set after the init (which resets them).
+   */
+  @Test
+  void runInitialisesTheBundleOnADalConnectionAndPassesRemsParameters() throws Exception {
+    REMRemittanceProcess process = mock(REMRemittanceProcess.class);
+    ProcessBundle[] seen = new ProcessBundle[1];
+    OBError remAnswer = success("Remesa procesada");
+    Mockito.doAnswer(inv -> {
+      seen[0] = inv.getArgument(0);
+      seen[0].setResult(remAnswer);
+      return null;
+    }).when(process).execute(any(ProcessBundle.class));
+    PreparedStatement statement = processLookup();
+
+    try (ClassicRun classic = new ClassicRun(process, statement)) {
+      OBError result = RemittanceProcessAction.run(REM_ID, "GGPD");
+
+      assertSame(remAnswer, result, "REM's own result is returned");
+      ProcessBundle bundle = seen[0];
+      assertNotNull(bundle, "REM ran");
+      assertEquals(1, classic.connections.constructed().size());
+      DalConnectionProvider connection = classic.connections.constructed().get(0);
+      assertNotNull(bundle.getConnection(), "the payment process needs a connection");
+      assertSame(connection, bundle.getConnection());
+      verify(connection).getPreparedStatement(org.mockito.ArgumentMatchers.contains("AD_Process"));
+      verify(statement).setString(1, RemittanceProcessAction.PROCESS_ID);
+      assertEquals(RemittanceProcessAction.PROCESS_ID, bundle.getProcessId());
+      assertEquals(REM_ID, bundle.getParams().get("REM_Remittance_ID"));
+      assertEquals("GGPD", bundle.getParams().get("action"));
+    }
+  }
+
+  @Test
+  void aRunThatThrowsIsAnErrorResultWithTheExceptionText() throws Exception {
+    REMRemittanceProcess process = mock(REMRemittanceProcess.class);
+    Mockito.doThrow(new IllegalStateException("payment failed")).when(process)
+        .execute(any(ProcessBundle.class));
+
+    try (ClassicRun classic = new ClassicRun(process, processLookup())) {
+      OBError result = RemittanceProcessAction.run(REM_ID, "P");
+
+      assertEquals("Error", result.getType());
+      assertEquals("payment failed", result.getMessage());
+    }
+  }
+
+  @Test
+  void aRunWhoseResultIsNotAnObErrorAnswersNull() throws Exception {
+    REMRemittanceProcess process = mock(REMRemittanceProcess.class);
+
+    try (ClassicRun classic = new ClassicRun(process, processLookup())) {
+      assertNull(RemittanceProcessAction.run(REM_ID, "P"),
+          "no result: process() reads it as a refusal");
+      verify(process).execute(any(ProcessBundle.class));
+    }
+  }
+
+  /** The bundle's {@code AD_Process} lookup: a statement whose query finds no row. */
+  private static PreparedStatement processLookup() throws Exception {
+    PreparedStatement statement = mock(PreparedStatement.class);
+    ResultSet empty = mock(ResultSet.class);
+    when(statement.executeQuery()).thenReturn(empty);
+    return statement;
+  }
+
+  /**
+   * What {@code run} reaches outside the bundle: Weld (REM's process), the context and its
+   * variables, the DAL connection (answering the bundle's process lookup with {@code statement})
+   * and the cluster check. Closed by try-with-resources.
+   */
+  private static final class ClassicRun implements AutoCloseable {
+    final MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class);
+    final MockedStatic<OBContext> context = mockStatic(OBContext.class);
+    final MockedStatic<NeoDefaultsService> defaults = mockStatic(NeoDefaultsService.class);
+    final MockedConstruction<DalConnectionProvider> connections;
+    final MockedConstruction<ClusterInstanceProcessAccess> cluster =
+        Mockito.mockConstruction(ClusterInstanceProcessAccess.class);
+
+    ClassicRun(REMRemittanceProcess process, PreparedStatement statement) {
+      connections = Mockito.mockConstruction(DalConnectionProvider.class,
+          (connection, ctx) -> when(connection.getPreparedStatement(anyString()))
+              .thenReturn(statement));
+      weld.when(() -> WeldUtils.getInstanceFromStaticBeanManager(REMRemittanceProcess.class))
+          .thenReturn(process);
+      context.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+      defaults.when(() -> NeoDefaultsService.buildVariablesSecureApp(any(OBContext.class)))
+          .thenReturn(mock(VariablesSecureApp.class));
+    }
+
+    @Override
+    public void close() {
+      cluster.close();
+      connections.close();
+      defaults.close();
+      context.close();
+      weld.close();
+    }
   }
 
   // ---------------------------------------------------------------- helpers

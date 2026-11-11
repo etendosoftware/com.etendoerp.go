@@ -61,14 +61,17 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.module.remittance.Remittance;
+import org.openbravo.module.remittance.RemittanceLine;
 import org.openbravo.module.remittance.RemittanceType;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link RemittanceDueItems}, «Seleccionar desde factura»: the candidate rules of
- * the invoice due amounts a remittance can take, the paged list, and the selection through
- * Classic's {@code REMSelectInvoicesAndOrders}.
+ * the invoice due amounts a remittance can take, the paged list (with the due status and what the
+ * remittance already takes of each due), the selection through Classic's
+ * {@code REMSelectInvoicesAndOrders}, and the sync that adds, changes and removes dues in one
+ * transaction.
  *
  * <p>The DAL is mocked: every HQL query is recorded with the parameters it is bound with and
  * answered from the fixtures of the test, and {@link NeoProcessService#executeObuiappClass} stands
@@ -78,7 +81,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * the query on a real session.
  *
  * <p>A class of its own: {@code RemittanceDueItems} is a separate production class with its own
- * rules; {@code RemittanceHeaderHandlerTest} pins only how the header routes the two actions to it.
+ * rules; {@code RemittanceHeaderHandlerTest} pins only how the header routes the actions to it.
  *
  * @covers com.etendoerp.go.schemaforge.RemittanceDueItems
  */
@@ -115,7 +118,8 @@ class RemittanceDueItemsTest {
   private FinAccPaymentMethod link;
   private List<Object[]> candidateRows = new ArrayList<>();
   private Long candidateTotal = 0L;
-  private List<String> schedulesInThisRemittance = new ArrayList<>();
+  /** The lines of this remittance: {schedule id, line id, amount}, in line order. */
+  private final List<Object[]> includedLines = new ArrayList<>();
   private final List<Long> lineCounts = new ArrayList<>();
   private NeoResponse classicAnswer;
   private JSONObject classicParams;
@@ -156,13 +160,23 @@ class RemittanceDueItemsTest {
   // ---------------------------------------------------------------- contracts
 
   @Test
-  void theTwoActionsAreDeclaredWithTheirParameters() {
+  void theThreeActionsAreDeclaredWithTheirParameters() {
     Map<String, NeoActionContract> contracts = new java.util.LinkedHashMap<>();
     RemittanceDueItems.addContracts(contracts);
 
-    assertEquals(List.of("availableDueItems", "selectDueItems"), new ArrayList<>(contracts.keySet()));
+    assertEquals(List.of("availableDueItems", "selectDueItems", "syncDueItems"),
+        new ArrayList<>(contracts.keySet()));
     assertFalse(contracts.get("availableDueItems").isMutating());
     assertTrue(contracts.get("selectDueItems").isMutating());
+    assertTrue(contracts.get("syncDueItems").isMutating());
+    List<String> syncParams = new ArrayList<>();
+    contracts.get("syncDueItems").getParams().forEach(p -> syncParams.add(p.getName()));
+    assertEquals(List.of("items", "remove"), syncParams);
+    assertTrue(RemittanceDueItems.serves("syncDueItems"));
+    assertTrue(RemittanceDueItems.isWrite("selectDueItems"));
+    assertTrue(RemittanceDueItems.isWrite("syncDueItems"));
+    assertFalse(RemittanceDueItems.isWrite("availableDueItems"), "the list is a read");
+    assertFalse(RemittanceDueItems.isWrite(null));
     List<String> readParams = new ArrayList<>();
     contracts.get("availableDueItems").getParams().forEach(p -> readParams.add(p.getName()));
     assertEquals(List.of("search", "page", "pageSize"), readParams);
@@ -189,7 +203,10 @@ class RemittanceDueItemsTest {
     assertTrue(hql.contains("psd.canceled = false and psd.invoicePaid = false"),
         "cancelled and invoice-paid details are excluded");
     assertTrue(hql.contains("psd.organization.id in (:orgs)"), hql);
-    assertTrue(hql.contains("ips.expectedDate < :dueDateLimit"), hql);
+    assertTrue(hql.contains("(ips.expectedDate < :dueDateLimit or exists (select 1 from "
+        + "REM_RemittanceLine as mine where mine.paymentScheduleDetail.id = psd.id"
+        + " and mine.remittance.id = :remittance))"),
+        "a due already in this remittance stays listed past the remittance due date: " + hql);
     assertTrue(hql.contains("cur.id = :currency"), "the invoice currency is the account's");
     assertTrue(hql.contains("other.remittance.id <> :remittance"
         + " and other.remittance.processed = false"),
@@ -233,7 +250,8 @@ class RemittanceDueItemsTest {
 
       RemittanceDueItems.available(remittance(), new JSONObject());
 
-      assertFalse(rowsQuery().hql.contains("salesTransaction"), String.valueOf(candidate));
+      assertFalse(rowsQuery().hql.contains("inv.salesTransaction = :sales"),
+          String.valueOf(candidate));
       assertFalse(rowsQuery().params.containsKey("sales"));
     }
   }
@@ -282,10 +300,12 @@ class RemittanceDueItemsTest {
 
   @Test
   void theListMapsEachScheduleAndFlagsOnlyTheOnesAlreadyInThisRemittance() throws Exception {
-    candidateRows.add(row("IPS-1", "FV-001", "Cliente A", LocalDate.of(2026, 11, 10), "120.50"));
+    candidateRows.add(new Object[] { "IPS-1", "FV-001", "Cliente A", date(LocalDate.of(2026, 11,
+        10)), new BigDecimal("120.50"), "EUR", "INV-1", Boolean.TRUE,
+        date(LocalDate.of(2026, 10, 1)), new BigDecimal("242.00"), "BP-A" });
     candidateRows.add(row("IPS-2", "FV-002", "Cliente B", LocalDate.of(2026, 11, 30), "80"));
     candidateTotal = 7L;
-    schedulesInThisRemittance = List.of("IPS-2");
+    includedLines.add(new Object[] { "IPS-2", "LINE-1", new BigDecimal("30") });
 
     NeoResponse response = RemittanceDueItems.available(remittance(), new JSONObject());
 
@@ -295,18 +315,93 @@ class RemittanceDueItemsTest {
     JSONObject first = items.getJSONObject(0);
     assertEquals("IPS-1", first.getString("id"));
     assertEquals("FV-001", first.getString("documentNo"));
+    assertEquals("INV-1", first.getString("invoiceId"));
+    assertTrue(first.getBoolean("salesTransaction"));
+    assertFalse(first.has("docTypeName"), "the document type is not offered");
+    assertEquals("2026-10-01", first.getString("invoiceDate"));
     assertEquals("Cliente A", first.getString("businessPartner"));
+    assertEquals("BP-A", first.getString("businessPartnerId"));
     assertEquals("2026-11-10", first.getString("dueDate"));
+    assertEquals(0, new BigDecimal("242.00").compareTo(new BigDecimal(first.get("grandTotalAmount")
+        .toString())));
     assertEquals(0, new BigDecimal("120.50").compareTo(new BigDecimal(first.get("outstandingAmount")
         .toString())));
     assertEquals("EUR", first.getString("currency"));
     assertFalse(first.getBoolean("alreadyInRemittance"));
-    assertTrue(items.getJSONObject(1).getBoolean("alreadyInRemittance"));
+    assertFalse(first.has("lineAmount"), "only a due already in the remittance has a line amount");
+    assertFalse(first.has("lineIds"));
+    JSONObject second = items.getJSONObject(1);
+    assertTrue(second.getBoolean("alreadyInRemittance"));
+    assertEquals(0, new BigDecimal("30").compareTo(new BigDecimal(second.get("lineAmount")
+        .toString())), "what this remittance takes, not the outstanding");
+    assertEquals("LINE-1", second.getJSONArray("lineIds").getString(0));
     assertEquals(7L, response.getBody().getLong("total"), "the total counts every candidate");
-    Recorded inRemittance = queries.stream()
-        .filter(q -> q.hql.startsWith("select distinct rl.paymentScheduleDetail"))
-        .findFirst().orElseThrow(() -> new AssertionError("no in-remittance query"));
+    Recorded inRemittance = includedQuery();
     assertEquals(REM_ID, inRemittance.params.get("remittance"));
+    assertTrue(inRemittance.hql.contains("order by rl.lineNo"), inRemittance.hql);
+  }
+
+  /**
+   * Classic spreads a due over one line per open schedule detail: the item shows the sum of all
+   * the lines of the due, and every line id in line order.
+   */
+  @Test
+  void theLineAmountOfADueIsTheSumOfAllItsLines() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "Cliente A", LocalDate.of(2026, 11, 10), "200"));
+    includedLines.add(new Object[] { "IPS-1", "LINE-A", new BigDecimal("50.25") });
+    includedLines.add(new Object[] { "IPS-9", "LINE-X", new BigDecimal("999") });
+    includedLines.add(new Object[] { "IPS-1", "LINE-B", new BigDecimal("24.75") });
+
+    JSONObject item = RemittanceDueItems.available(remittance(), new JSONObject()).getBody()
+        .getJSONArray("items").getJSONObject(0);
+
+    assertEquals(0, new BigDecimal("75.00").compareTo(new BigDecimal(item.get("lineAmount")
+        .toString())));
+    JSONArray lineIds = item.getJSONArray("lineIds");
+    assertEquals(2, lineIds.length());
+    assertEquals("LINE-A", lineIds.getString(0));
+    assertEquals("LINE-B", lineIds.getString(1));
+  }
+
+  @Test
+  void eachItemCarriesTheStatusOfItsDueDateAgainstToday() throws Exception {
+    LocalDate today = LocalDate.now();
+    candidateRows.add(row("IPS-1", "FV-001", "A", today.minusDays(1), "1"));
+    candidateRows.add(row("IPS-2", "FV-002", "B", today, "1"));
+    candidateRows.add(row("IPS-3", "FV-003", "C", today.plusDays(1), "1"));
+    Object[] noDate = row("IPS-4", "FV-004", "D", today, "1");
+    noDate[3] = null;
+    noDate[8] = null;
+    candidateRows.add(noDate);
+
+    JSONArray items = RemittanceDueItems.available(remittance(), new JSONObject()).getBody()
+        .getJSONArray("items");
+
+    assertEquals("OVERDUE", items.getJSONObject(0).getString("dueStatus"));
+    assertEquals("DUE_TODAY", items.getJSONObject(1).getString("dueStatus"));
+    assertEquals("PENDING", items.getJSONObject(2).getString("dueStatus"));
+    JSONObject undated = items.getJSONObject(3);
+    assertEquals("PENDING", undated.getString("dueStatus"));
+    assertTrue(undated.isNull("dueDate"));
+    assertTrue(undated.isNull("invoiceDate"));
+  }
+
+  @Test
+  void dueStatusComparesTheDayWithTodayAtItsBoundaries() {
+    LocalDate today = LocalDate.of(2026, 11, 11);
+
+    assertEquals(RemittanceDueItems.DUE_OVERDUE,
+        RemittanceDueItems.dueStatus(LocalDate.of(2026, 11, 10), today));
+    assertEquals(RemittanceDueItems.DUE_TODAY, RemittanceDueItems.dueStatus(today, today));
+    assertEquals(RemittanceDueItems.DUE_PENDING,
+        RemittanceDueItems.dueStatus(LocalDate.of(2026, 11, 12), today));
+    assertEquals(RemittanceDueItems.DUE_OVERDUE,
+        RemittanceDueItems.dueStatus(LocalDate.of(2025, 12, 31), today));
+    assertEquals(RemittanceDueItems.DUE_PENDING, RemittanceDueItems.dueStatus(null, today),
+        "no date: not overdue");
+    assertEquals("OVERDUE", RemittanceDueItems.DUE_OVERDUE);
+    assertEquals("DUE_TODAY", RemittanceDueItems.DUE_TODAY);
+    assertEquals("PENDING", RemittanceDueItems.DUE_PENDING);
   }
 
   @Test
@@ -530,6 +625,269 @@ class RemittanceDueItemsTest {
     assertTrue(RemittanceDueItems.idsOf(null).isEmpty());
   }
 
+  // ---------------------------------------------------------------- sync
+
+  @Test
+  void syncingNothingIsRefused422() throws Exception {
+    for (JSONObject params : new JSONObject[] { new JSONObject(),
+        new JSONObject().put("items", new JSONArray()).put("remove", new JSONArray()),
+        new JSONObject().put("items", new JSONArray().put(new JSONObject().put("amount", 5))),
+        new JSONObject().put("remove", new JSONArray().put(" ")) }) {
+      NeoResponse response = RemittanceDueItems.sync(remittance(), params);
+
+      assertEquals(422, response.getHttpStatus(), params.toString());
+      assertEquals(RemittanceDueItems.MSG_IDS_REQUIRED, messageKey(response));
+    }
+    processStatic.verifyNoInteractions();
+    verify(dal, never()).remove(any());
+  }
+
+  @Test
+  void syncOnARemittanceWithoutTypeOrAccountIsRefused422() throws Exception {
+    Remittance noType = remittance();
+    when(noType.getRemittanceType()).thenReturn(null);
+
+    NeoResponse response = RemittanceDueItems.sync(noType,
+        new JSONObject().put("remove", new JSONArray().put("IPS-1")));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceDueItems.MSG_TYPE_OR_ACCOUNT_MISSING, messageKey(response));
+  }
+
+  @Test
+  void removingADueThatIsNotInTheRemittanceRefusesTheWholeSyncAndNamesIt() throws Exception {
+    includedLines.add(new Object[] { "IPS-1", "LINE-1", new BigDecimal("10") });
+    Remittance remittance = remittance();
+    withLines(remittance, "LINE-1");
+
+    NeoResponse response = RemittanceDueItems.sync(remittance,
+        new JSONObject().put("remove", new JSONArray().put("IPS-1").put("IPS-9")));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals("ETGO_RemittanceDueItemNotIncluded", messageKey(response));
+    assertEquals(List.of("IPS-9"), invalidIds(response));
+    verify(dal, never()).remove(any());
+    assertEquals(1, remittance.getREMRemittanceLineList().size(), "nothing removed");
+    processStatic.verifyNoInteractions();
+  }
+
+  @Test
+  void aDueBothKeptAndRemovedIsRefusedNotIncluded() throws Exception {
+    includedLines.add(new Object[] { "IPS-1", "LINE-1", new BigDecimal("10") });
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "100"));
+
+    NeoResponse response = RemittanceDueItems.sync(remittance(), new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", 20)))
+        .put("remove", new JSONArray().put("IPS-1")));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceDueItems.MSG_NOT_INCLUDED, messageKey(response));
+    assertEquals(List.of("IPS-1"), invalidIds(response));
+    processStatic.verifyNoInteractions();
+  }
+
+  @Test
+  void anItemThatIsNotACandidateRefusesTheWholeSyncAndNamesIt() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "100"));
+
+    NeoResponse response = RemittanceDueItems.sync(remittance(), new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", 20)).put(item("IPS-GONE", 5))));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceDueItems.MSG_NOT_AVAILABLE, messageKey(response));
+    assertEquals(List.of("IPS-GONE"), invalidIds(response));
+    Recorded rows = rowsQuery();
+    assertTrue(rows.hql.contains("ips.id in (:ids)"), "re-checked against the candidate rules");
+    assertTrue(rows.hql.contains("psd.paymentDetails is null"), rows.hql);
+    assertEquals(Set.of("IPS-1", "IPS-GONE"), rows.params.get("ids"));
+    processStatic.verifyNoInteractions();
+  }
+
+  @Test
+  void anAmountOutOfRangeIsRefused422WithTheMaxOfThatDue() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "133.10"));
+    candidateRows.add(row("IPS-2", "FV-002", "B", LocalDate.of(2026, 11, 12), "50"));
+
+    NeoResponse response = RemittanceDueItems.sync(remittance(), new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", "133.11")).put(item("IPS-2", 10))));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceLineAmount.MSG_INVALID, messageKey(response));
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals(0, new BigDecimal("133.10").compareTo(new BigDecimal(error.get("max")
+        .toString())));
+    assertEquals(List.of("IPS-1"), invalidIds(response));
+    processStatic.verifyNoInteractions();
+    verify(dal, never()).flush();
+  }
+
+  @Test
+  void severalBadAmountsAreAllNamedWithoutASingleMax() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "100"));
+    candidateRows.add(row("IPS-2", "FV-002", "B", LocalDate.of(2026, 11, 12), "50"));
+    candidateRows.add(row("IPS-3", "FV-003", "C", LocalDate.of(2026, 11, 13), "50"));
+
+    NeoResponse response = RemittanceDueItems.sync(remittance(), new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", 0)).put(item("IPS-2", "abc"))
+            .put(item("IPS-3", -5))));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceLineAmount.MSG_INVALID, messageKey(response));
+    assertFalse(response.getBody().getJSONObject("error").has("max"),
+        "no single max for several dues");
+    assertEquals(List.of("IPS-1", "IPS-2", "IPS-3"), invalidIds(response));
+    processStatic.verifyNoInteractions();
+  }
+
+  @Test
+  void aNewDueIsAddedThroughClassicWithAPartOfItsOutstanding() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "133.10"));
+    classicAnswer = viewMessage("success", "1 line created");
+
+    NeoResponse response = RemittanceDueItems.sync(remittance(), new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", "50"))));
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject body = response.getBody();
+    assertEquals(1, body.getInt("created"));
+    assertEquals(0, body.getInt("updated"));
+    assertEquals(0, body.getInt("removed"));
+    assertEquals("1 line created", body.getString("message"));
+    processStatic.verify(() -> NeoProcessService.executeObuiappClass(
+        RemittanceDueItems.SELECT_HANDLER_CLASS, RemittanceDueItems.SELECT_PROCESS_ID,
+        classicParams));
+    assertEquals(REM_ID, classicParams.getString("inpRecordId"));
+    assertEquals(RemittanceDueItems.HEADER_TAB_ID, classicParams.getString("inpTabId"));
+    JSONObject grid = classicParams.getJSONObject(RemittanceDueItems.GRID_PARAMETER);
+    assertFalse(grid.has("_allRows"), "without _allRows REM never deletes an existing line");
+    JSONObject selected = grid.getJSONArray("_selection").getJSONObject(0);
+    assertEquals("IPS-1", selected.getString("paymentScheduleID"));
+    assertEquals("50", selected.getString("realpayment"), "the part asked for");
+    assertEquals("133.10", selected.getString("outstandingamount"));
+    assertEquals("0", selected.getString("rest"));
+    verify(dal).flush();
+    verify(dal, never()).remove(any());
+  }
+
+  @Test
+  void aChangedAmountReplacesTheLinesOfTheDue() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "200"));
+    includedLines.add(new Object[] { "IPS-1", "LINE-A", new BigDecimal("50") });
+    includedLines.add(new Object[] { "IPS-1", "LINE-B", new BigDecimal("25") });
+    Remittance remittance = remittance();
+    Map<String, RemittanceLine> lines = withLines(remittance, "LINE-A", "LINE-B", "LINE-OTHER");
+    classicAnswer = viewMessage("success", "ok");
+
+    NeoResponse response = RemittanceDueItems.sync(remittance, new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", 120))));
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(0, response.getBody().getInt("created"));
+    assertEquals(1, response.getBody().getInt("updated"));
+    verify(dal).remove(lines.get("LINE-A"));
+    verify(dal).remove(lines.get("LINE-B"));
+    verify(dal, never()).remove(lines.get("LINE-OTHER"));
+    assertEquals(List.of(lines.get("LINE-OTHER")), remittance.getREMRemittanceLineList(),
+        "only the lines of that due leave the remittance's collection");
+    JSONObject selected = classicParams.getJSONObject(RemittanceDueItems.GRID_PARAMETER)
+        .getJSONArray("_selection").getJSONObject(0);
+    assertEquals("120", selected.getString("realpayment"));
+    assertEquals("200", selected.getString("outstandingamount"));
+  }
+
+  @Test
+  void aDueAlreadyInTheRemittanceWithTheSameAmountIsLeftAsItIs() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "200"));
+    includedLines.add(new Object[] { "IPS-1", "LINE-A", new BigDecimal("20") });
+    includedLines.add(new Object[] { "IPS-1", "LINE-B", new BigDecimal("10") });
+
+    NeoResponse response = RemittanceDueItems.sync(remittance(), new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", "30.00"))));
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(0, response.getBody().getInt("created"));
+    assertEquals(0, response.getBody().getInt("updated"));
+    assertEquals(0, response.getBody().getInt("removed"));
+    assertEquals("", response.getBody().getString("message"));
+    processStatic.verifyNoInteractions();
+    verify(dal, never()).remove(any());
+  }
+
+  @Test
+  void removingADueDeletesAllItsLinesWithoutCallingClassic() throws Exception {
+    includedLines.add(new Object[] { "IPS-1", "LINE-A", new BigDecimal("20") });
+    includedLines.add(new Object[] { "IPS-1", "LINE-B", new BigDecimal("10") });
+    includedLines.add(new Object[] { "IPS-2", "LINE-C", new BigDecimal("5") });
+    Remittance remittance = remittance();
+    Map<String, RemittanceLine> lines = withLines(remittance, "LINE-A", "LINE-B", "LINE-C");
+
+    NeoResponse response = RemittanceDueItems.sync(remittance,
+        new JSONObject().put("remove", new JSONArray().put("IPS-1")));
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(1, response.getBody().getInt("removed"), "counted in dues, not lines");
+    assertEquals(0, response.getBody().getInt("created"));
+    verify(dal).remove(lines.get("LINE-A"));
+    verify(dal).remove(lines.get("LINE-B"));
+    verify(dal, never()).remove(lines.get("LINE-C"));
+    verify(dal).flush();
+    processStatic.verifyNoInteractions();
+  }
+
+  @Test
+  void aSyncAddsChangesAndRemovesInOneCall() throws Exception {
+    candidateRows.add(row("IPS-NEW", "FV-001", "A", LocalDate.of(2026, 11, 10), "100"));
+    candidateRows.add(row("IPS-KEPT", "FV-002", "B", LocalDate.of(2026, 11, 11), "100"));
+    includedLines.add(new Object[] { "IPS-KEPT", "LINE-K", new BigDecimal("100") });
+    includedLines.add(new Object[] { "IPS-OUT", "LINE-O", new BigDecimal("40") });
+    Remittance remittance = remittance();
+    withLines(remittance, "LINE-K", "LINE-O");
+    classicAnswer = NeoResponse.ok(new JSONObject());
+
+    NeoResponse response = RemittanceDueItems.sync(remittance, new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-NEW", 100)).put(item("IPS-KEPT", 60)))
+        .put("remove", new JSONArray().put("IPS-OUT")));
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(1, response.getBody().getInt("created"));
+    assertEquals(1, response.getBody().getInt("updated"));
+    assertEquals(1, response.getBody().getInt("removed"));
+    assertEquals("2", response.getBody().getString("message"),
+        "without a REM message, the number of dues written");
+    JSONArray selection = classicParams.getJSONObject(RemittanceDueItems.GRID_PARAMETER)
+        .getJSONArray("_selection");
+    assertEquals(2, selection.length(), "one Classic run for the new and the changed due");
+  }
+
+  @Test
+  void aRemRefusalOfTheSyncRollsEverythingBack() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "100"));
+    includedLines.add(new Object[] { "IPS-2", "LINE-B", new BigDecimal("10") });
+    Remittance remittance = remittance();
+    withLines(remittance, "LINE-B");
+    classicAnswer = viewMessage("ERROR", "La factura ya está en otra remesa");
+
+    NeoResponse response = RemittanceDueItems.sync(remittance, new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", 40)))
+        .put("remove", new JSONArray().put("IPS-2")));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceDueItems.MSG_SELECTION_FAILED, messageKey(response));
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("La factura ya está en otra remesa"));
+    verify(dal).rollbackAndClose();
+  }
+
+  @Test
+  void aSuccessfulSyncIsNeverRolledBack() throws Exception {
+    candidateRows.add(row("IPS-1", "FV-001", "A", LocalDate.of(2026, 11, 10), "100"));
+    classicAnswer = viewMessage("success", "ok");
+
+    assertEquals(200, RemittanceDueItems.sync(remittance(), new JSONObject()
+        .put("items", new JSONArray().put(item("IPS-1", 40)))).getHttpStatus());
+    verify(dal, never()).rollbackAndClose();
+  }
+
   // ---------------------------------------------------------------- helpers
 
   @SuppressWarnings("unchecked")
@@ -557,8 +915,8 @@ class RemittanceDueItemsTest {
       if (hql.contains(FinAccPaymentMethod.ENTITY_NAME)) {
         return link != null ? new ArrayList<Object>(List.of(link)) : new ArrayList<Object>();
       }
-      if (hql.startsWith("select distinct rl.paymentScheduleDetail")) {
-        return new ArrayList<Object>(schedulesInThisRemittance);
+      if (hql.startsWith("select rl.paymentScheduleDetail.invoicePaymentSchedule.id")) {
+        return new ArrayList<Object>(includedLines);
       }
       if (hql.startsWith("select ips.id")) {
         return new ArrayList<Object>(filterByIds(recorded));
@@ -597,9 +955,46 @@ class RemittanceDueItemsTest {
         .orElseThrow(() -> new AssertionError("no candidate rows query"));
   }
 
+  private Recorded includedQuery() {
+    return queries.stream()
+        .filter(q -> q.hql.startsWith("select rl.paymentScheduleDetail.invoicePaymentSchedule.id"))
+        .findFirst().orElseThrow(() -> new AssertionError("no in-remittance query"));
+  }
+
   private Recorded countQuery() {
     return queries.stream().filter(q -> q.hql.startsWith("select count(distinct ips.id)"))
         .findFirst().orElseThrow(() -> new AssertionError("no candidate count query"));
+  }
+
+  private static JSONObject item(String id, Object amount) throws Exception {
+    return new JSONObject().put("id", id).put("amount", amount);
+  }
+
+  private static List<String> invalidIds(NeoResponse response) throws Exception {
+    JSONArray ids = response.getBody().getJSONObject("error").getJSONArray("invalidIds");
+    List<String> list = new ArrayList<>();
+    for (int i = 0; i < ids.length(); i++) {
+      list.add(ids.getString(i));
+    }
+    return list;
+  }
+
+  /**
+   * Gives {@code remittance} a mutable line collection with one line per id, each also answered by
+   * {@code OBDal.get}.
+   */
+  private Map<String, RemittanceLine> withLines(Remittance remittance, String... ids) {
+    Map<String, RemittanceLine> lines = new java.util.LinkedHashMap<>();
+    List<RemittanceLine> collection = new ArrayList<>();
+    for (String id : ids) {
+      RemittanceLine line = mock(RemittanceLine.class);
+      when(line.getId()).thenReturn(id);
+      when(dal.get(RemittanceLine.class, id)).thenReturn(line);
+      lines.put(id, line);
+      collection.add(line);
+    }
+    when(remittance.getREMRemittanceLineList()).thenReturn(collection);
+    return lines;
   }
 
   private static Remittance remittance() {
@@ -635,7 +1030,9 @@ class RemittanceDueItemsTest {
 
   private static Object[] row(String id, String documentNo, String partner, LocalDate expected,
       String amount) {
-    return new Object[] { id, documentNo, partner, date(expected), new BigDecimal(amount), "EUR" };
+    return new Object[] { id, documentNo, partner, date(expected), new BigDecimal(amount), "EUR",
+        "INV-" + id, Boolean.FALSE, date(expected.minusDays(30)),
+        new BigDecimal(amount), "BP-" + id };
   }
 
   private static Date date(LocalDate day) {
