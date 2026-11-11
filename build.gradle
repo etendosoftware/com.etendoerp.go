@@ -252,6 +252,21 @@ rootProject.afterEvaluate { rootProj ->
 }
 
 /**
+ * ETP-6069 — how many JVMs {@code goTestUnit} runs side by side.
+ *
+ * <p>One by default, the serial run. Measured on 12 cores: 1 fork 341 s, 2 forks ~250 s, more
+ * forks no faster. Not worth it yet: with more than one fork, which classes share a JVM depends on
+ * scheduling, so a leak {@code StaticStateLeakListener} cannot repair (a failed static
+ * initializer, see {@code docs/test-jvm-isolation.md}) would turn into a CI failure nobody can
+ * reproduce. {@code -PgoTestUnitForks=N} runs N forks, for a local run or once those leaks are
+ * fixed at their source.</p>
+ */
+def goTestUnitForks = { rootProj ->
+    def requested = rootProj.findProperty('goTestUnitForks')
+    return requested == null ? 1 : Math.max(1, requested.toString().toInteger())
+}
+
+/**
  * ETP-5695 — {@code goTestUnit}: the database-free half of this module's Java suite.
  *
  * <p>The module's test classes split cleanly in two. A few dozen reach {@code OBBaseTest} or
@@ -316,8 +331,8 @@ rootProject.afterEvaluate { rootProj ->
         t.maxHeapSize = rootTest.maxHeapSize
         t.workingDir = rootTest.workingDir
         t.environment(rootTest.environment)
-        t.maxParallelForks = rootTest.maxParallelForks
         t.forkEvery = rootTest.forkEvery
+        t.maxParallelForks = goTestUnitForks(rootProj)
     }
 
     // goTestUnit's own coverage, read by scripts/check-diff-coverage.py. jacocoRootReport merges
@@ -363,7 +378,7 @@ rootProject.afterEvaluate { rootProj ->
  * {@code goCellMockTest}.</p>
  */
 def cellsDir = file('src-test/cells')
-def schemaforgeTestsDir = file('src-test/src/com/etendoerp/go/schemaforge')
+def testsDir = file('src-test/src')
 
 def sharedCellsDir = new File(cellsDir, 'compartidos')
 
@@ -480,7 +495,7 @@ rootProject.afterEvaluate { rootProj ->
 
     rootProj.tasks.create('goCellCheck') { t ->
         t.group = 'verification'
-        t.description = 'Falla si algún test de schemaforge no está en ninguna célula o está en varias.'
+        t.description = 'Falla si algún test de src-test no está en ninguna célula o está en varias.'
         t.doLast {
             // Cada clase debe estar en un solo archivo; una célula puede además incluir grupos compartidos.
             readCells()
@@ -489,14 +504,14 @@ rootProject.afterEvaluate { rootProj ->
             }
             def byClass = assigned.groupBy { it[0] }
             def existing = []
-            schemaforgeTestsDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+            testsDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
                 if (!f.name.endsWith('.java')) {
                     return
                 }
                 String src = f.getText('UTF-8')
                 if (src =~ /@(org\.junit\.(jupiter\.api\.)?)?(Test|ParameterizedTest)\b/ && !(src =~ /abstract\s+class/)) {
-                    String rel = schemaforgeTestsDir.toPath().relativize(f.toPath()).toString()
-                    existing << 'com.etendoerp.go.schemaforge.' + (rel - '.java').replace(File.separator, '.')
+                    String rel = testsDir.toPath().relativize(f.toPath()).toString()
+                    existing << (rel - '.java').replace(File.separator, '.')
                 }
             }
             def missing = existing - byClass.keySet()
@@ -508,7 +523,7 @@ rootProject.afterEvaluate { rootProj ->
             if (missing || stale || duplicated) {
                 throw new GradleException("Revisa src-test/cells/: ${missing.size()} sin célula, ${stale.size()} obsoletos, ${duplicated.size()} duplicados.")
             }
-            println "OK: ${existing.size()} tests de schemaforge, cada uno en un solo archivo de célula."
+            println "OK: ${existing.size()} clases de test, cada una en un solo archivo de célula."
         }
     }
 }

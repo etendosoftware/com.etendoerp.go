@@ -25,6 +25,7 @@ import java.sql.Savepoint;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -37,13 +38,15 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
- * Where business code reports the account events HubSpot learns about: a new account, a demo
- * ready, and the Stripe billing events. The other events (first entry into the demo, payment,
+ * Where business code reports the account events HubSpot learns about: a new account (once its
+ * address is confirmed, or at once when an identity provider vouched for it), a demo ready, and
+ * the Stripe billing events. The other events (first entry into the demo, payment,
  * expired trial) are detected by {@link HubSpotSyncService} itself.
  *
  * <p>Each call adds a row to the outbox in the caller's transaction and does not commit: the event
  * exists exactly when the change it reports does. Only accounts the app's own registration
- * created are reported; one created through the signup API carries a channel and is left out.
+ * created are reported; one created through the signup API carries a channel and is left out,
+ * unless the call named the deal of a booked demo (ETP-6082): its demo is reported, on that deal.
  *
  * <p>Reporting never fails the caller. The row is written in plain JDBC inside a savepoint: a
  * failed write is rolled back alone and logged, and Hibernate never sees the exception. Through a
@@ -56,6 +59,28 @@ public final class HubSpotOutbox {
 
   static final String FIELD_COMPANY_NAME = "companyName";
   static final String FIELD_COUNTRY = "country";
+  static final String FIELD_COUNTRY_CODE = "countryCode";
+  /** The booked demo's deal, in a {@code DEMO_READY} payload. */
+  static final String FIELD_DEMO_DEAL = "hubspotDealId";
+
+  /**
+   * The business sectors the register form offers: the internal values of the HubSpot contact's
+   * {@code sector} enumeration, which marketing keeps fixed (ETP-6082). Any other value would make
+   * HubSpot refuse the whole contact.
+   */
+  public static final Set<String> SECTORS = Set.of("industria", "distribución_logística",
+      "servicios", "startups_tecnología", "otro");
+
+  /**
+   * Reads a sector sent by the register form.
+   *
+   * @param value what the form sent
+   * @return the sector, or {@code null} when it is not one of {@link #SECTORS}
+   */
+  public static String sector(String value) {
+    String sector = StringUtils.trimToNull(value);
+    return sector != null && SECTORS.contains(sector) ? sector : null;
+  }
 
   // clock_timestamp(), not now(): now() is the transaction's start, so two events reported in one
   // transaction (a first entry and a payment detected in the same pass) would tie, and the sync
@@ -72,7 +97,7 @@ public final class HubSpotOutbox {
   static final String OWNED_DEAL_PAYLOAD = "{\"owned\":true}";
 
   // Written already sent: the row is the record of a decision the sync made, not work to do.
-  private static final String ENVIRONMENT_DEAL_SQL = "insert into etgo_hubspot_outbox"
+  private static final String RECORDED_ROW_SQL = "insert into etgo_hubspot_outbox"
       + " (etgo_hubspot_outbox_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"
       + " updatedby, etgo_account_id, event_type, event_key, environment_id, payload,"
       + " hubspot_object_id, status, attempt_count, processed_at)"
@@ -80,8 +105,14 @@ public final class HubSpotOutbox {
       + " ?, ?, ?, ?, ?, ?, 'SENT', 0, clock_timestamp())"
       + " on conflict (etgo_account_id, event_type, event_key) do nothing";
 
-  private static final String SELF_SERVE_ACCOUNT_SQL = "select etgo_account_id from etgo_account"
-      + " where lower(email) = lower(?) and isactive = 'Y' and signup_channel is null";
+  // The account whose demo HubSpot hears about: one the app's registration created, or one the
+  // signup API created for a booked demo, which carries its deal.
+  private static final String DEMO_ACCOUNT_SQL = "select a.etgo_account_id, d.hubspot_object_id"
+      + " from etgo_account a left join etgo_hubspot_outbox d"
+      + " on d.etgo_account_id = a.etgo_account_id and d.event_type = '"
+      + HubSpotOutboxStore.DEMO_DEAL + "'"
+      + " where lower(a.email) = lower(?) and a.isactive = 'Y'"
+      + " and (a.signup_channel is null or d.hubspot_object_id is not null)";
 
   private static final String COUNTRY_NAME_SQL = "select name from c_country"
       + " where countrycode = ?";
@@ -108,9 +139,12 @@ public final class HubSpotOutbox {
   }
 
   /**
-   * Reports a new account.
+   * Reports a new account: the contact and the deal in its first stage. Called when the owner
+   * confirms the address (ETP-6082: an unconfirmed sign-up is not a lead yet), or when the account
+   * is created by a single sign-on, whose provider already vouched for the address. Reporting it
+   * twice adds nothing.
    *
-   * @param account the account just created
+   * @param account the account
    */
   public static void accountCreated(Account account) {
     if (account == null || StringUtils.isNotBlank(account.getSignupChannel())) {
@@ -137,12 +171,38 @@ public final class HubSpotOutbox {
       return;
     }
     write("demo " + clientId + " ready", connection -> {
-      String accountId = selectString(connection, SELF_SERVE_ACCOUNT_SQL, accountEmail.trim());
-      if (accountId == null) {
+      String[] account = selectRow(connection, DEMO_ACCOUNT_SQL, accountEmail.trim());
+      if (account == null) {
         return;
       }
-      enqueue(connection, accountId, HubSpotOutboxStore.DEMO_READY, clientId,
-          demoPayload(companyName, countryName(connection, countryCode)));
+      enqueue(connection, account[0], HubSpotOutboxStore.DEMO_READY, clientId,
+          demoPayload(companyName, countryName(connection, countryCode), countryCode,
+              account[1]));
+    });
+  }
+
+  /**
+   * Records the deal marketing created for a booked demo, named by the signup API call that
+   * creates its account (ETP-6082). The account's demo is then reported on that deal, which the
+   * sync moves in the Demo pipeline; no contact or deal of its own is created.
+   *
+   * @param accountId the account the signup API created
+   * @param dealId    the HubSpot deal of the booking
+   */
+  public static void demoDeal(String accountId, String dealId) {
+    if (StringUtils.isBlank(accountId) || StringUtils.isBlank(dealId)) {
+      return;
+    }
+    write("deal of the demo of account " + accountId, connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(RECORDED_ROW_SQL)) {
+        statement.setString(1, accountId);
+        statement.setString(2, HubSpotOutboxStore.DEMO_DEAL);
+        statement.setString(3, HubSpotOutboxStore.ONCE);
+        statement.setString(4, null);
+        statement.setString(5, null);
+        statement.setString(6, dealId.trim());
+        statement.executeUpdate();
+      }
     });
   }
 
@@ -203,7 +263,7 @@ public final class HubSpotOutbox {
 
   static void recordEnvironmentDeal(Connection connection, String accountId,
       String environmentId, HubSpotOutboxStore.EnvironmentDeal deal) throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement(ENVIRONMENT_DEAL_SQL)) {
+    try (PreparedStatement statement = connection.prepareStatement(RECORDED_ROW_SQL)) {
       statement.setString(1, accountId);
       statement.setString(2, HubSpotOutboxStore.PRODUCTIVE_DEAL);
       statement.setString(3, environmentId);
@@ -215,10 +275,26 @@ public final class HubSpotOutbox {
   }
 
   static String demoPayload(String companyName, String country) {
+    return demoPayload(companyName, country, null);
+  }
+
+  static String demoPayload(String companyName, String country, String countryCode) {
+    return demoPayload(companyName, country, countryCode, null);
+  }
+
+  static String demoPayload(String companyName, String country, String countryCode,
+      String demoDealId) {
     try {
       JSONObject payload = new JSONObject();
       payload.put(FIELD_COMPANY_NAME, StringUtils.trimToEmpty(companyName));
       payload.put(FIELD_COUNTRY, StringUtils.trimToEmpty(country));
+      String code = StringUtils.upperCase(StringUtils.trimToNull(countryCode));
+      if (code != null) {
+        payload.put(FIELD_COUNTRY_CODE, code);
+      }
+      if (StringUtils.isNotBlank(demoDealId)) {
+        payload.put(FIELD_DEMO_DEAL, demoDealId.trim());
+      }
       return payload.toString();
     } catch (JSONException e) {
       throw new IllegalStateException("Could not build the demo event payload", e);
@@ -233,6 +309,26 @@ public final class HubSpotOutbox {
     }
     String code = countryCode.trim().toUpperCase();
     return StringUtils.defaultString(selectString(connection, COUNTRY_NAME_SQL, code), code);
+  }
+
+  /** The first row's columns as text, or {@code null} when there is none. */
+  private static String[] selectRow(Connection connection, String sql, String... parameters)
+      throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+      for (int i = 0; i < parameters.length; i++) {
+        statement.setString(i + 1, parameters[i]);
+      }
+      try (ResultSet result = statement.executeQuery()) {
+        if (!result.next()) {
+          return null; // NOSONAR - "no row" is what the callers test for
+        }
+        String[] row = new String[result.getMetaData().getColumnCount()];
+        for (int i = 0; i < row.length; i++) {
+          row[i] = result.getString(i + 1);
+        }
+        return row;
+      }
+    }
   }
 
   private static String selectString(Connection connection, String sql, String... parameters)

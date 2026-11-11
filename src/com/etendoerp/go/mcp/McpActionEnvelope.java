@@ -75,7 +75,10 @@ final class McpActionEnvelope {
       if (message != null) {
         body.put(KEY_MESSAGE, NeoMessageTranslator.safeParseTranslation(message));
       }
-      item.put(KEY_TEXT, McpResponseSanitizer.render(body));
+      // ETP-6158: an error result keeps the Classic message key at its root.
+      item.put(KEY_TEXT, result.optBoolean("isError", false)
+          ? McpResponseSanitizer.renderError(body)
+          : McpResponseSanitizer.render(body));
     } catch (JSONException e) {
       // A body that is not a JSON object is left as it came: the envelope is additive.
     }

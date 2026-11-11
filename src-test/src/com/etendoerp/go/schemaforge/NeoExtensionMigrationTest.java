@@ -84,7 +84,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * The handlers migrated to {@link NeoExtension} by ETP-5588: the financial-account, sales-invoice,
  * purchase-invoice and period-control headers, and the payment Reactivate/Confirm/Remove handler
  * split into one binding per entity, later joined by the goods-shipment and sales-quotation
- * headers and, with ETP-5581, by the two report specs of the bank reconciliation
+ * headers (and, with ETP-6099, the goods-receipt header) and, with ETP-5581, by the two report specs of the bank reconciliation
  * ({@code bank-reconciliation}, {@code bank-statements}). Their rows carry no {@code Java_Qualifier}
  * and the classes no {@code @Named}, so the annotation is the only binding. What can regress is the binding itself (a
  * wrong {@code (spec, entity)} pair, a {@code @Named} creeping back) and the resolution: every
@@ -100,6 +100,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentInReactivateHandler
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
  * @covers com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler
  * @covers com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler
@@ -127,6 +128,7 @@ class NeoExtensionMigrationTest {
       new Binding(PaymentInReactivateHandler.class, "payment-in", "finPayment"),
       new Binding(PaymentOutReactivateHandler.class, "payment-out", "header"),
       new Binding(GoodsShipmentHeaderHandler.class, "goods-shipment", "goodsShipment"),
+      new Binding(GoodsReceiptHeaderHandler.class, "goods-receipt", "goodsReceipt"),
       new Binding(SalesQuotationHeaderHandler.class, "sales-quotation", "quotation"),
       new Binding(SiiConfigDeactivateHandler.class, "sii-config", "siiConfiguration"),
       new Binding(TbaiConfigSequenceHandler.class, "tbai-config", "header"),

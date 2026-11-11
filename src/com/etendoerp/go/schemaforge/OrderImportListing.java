@@ -30,71 +30,45 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * The pure pieces of {@link ImportOrderLinesIntoInvoiceHandler}'s listing actions, extracted
- * unchanged (ETP-5828, the handler was past the method count Sonar accepts): the sales-only
- * contract parameters of {@code availableOrders} / {@code availableOrderLines}, the
- * {@code limit} parsing, and the per-line row an {@code availableOrderLines} answer carries (price,
- * line discount, amount). No DAL access, no seams: the handler keeps everything a test overrides.
+ * unchanged (ETP-5828, the handler was past the method count Sonar accepts): the contract
+ * parameters of {@code availableOrders} / {@code availableOrderLines} (shared listing parameters
+ * of {@link ImportListing} since ETP-6099), and the per-line row an {@code availableOrderLines}
+ * answer carries (price, line discount, amount, and the {@code detail} keys). No DAL access, no seams: the handler keeps everything a test overrides.
  */
 final class OrderImportListing {
-
-  private static final String PARAM_LIMIT = ImportOrderLinesIntoInvoiceHandler.PARAM_LIMIT;
-  private static final String PARAM_INCLUDE_COVERED =
-      ImportOrderLinesIntoInvoiceHandler.PARAM_INCLUDE_COVERED;
-  private static final int MAX_LISTED_ORDERS = ImportOrderLinesIntoInvoiceHandler.MAX_LISTED_ORDERS;
 
   private OrderImportListing() {
   }
 
-  /** {@code limit} on a sales invoice only (ETP-5828); a purchase invoice keeps no parameter. */
-  static NeoActionContract.Param[] availableOrdersParams(boolean sales) {
-    if (!sales) {
-      return new NeoActionContract.Param[0];
-    }
-    return new NeoActionContract.Param[] {
-        NeoActionContract.Param.optional(PARAM_LIMIT, NeoActionContract.TYPE_NUMBER,
-            "How many orders to list at most, a whole number from 1 to " + MAX_LISTED_ORDERS
-                + "; default " + OrderImportRequest.MAX_ORDERS
-                + ". The scan looks at no fewer candidates than "
-                + "that.") };
+  /** What {@code detail} adds to an {@code availableOrderLines} row (ETP-6099). */
+  static final String LINE_DETAIL_KEYS = "listPrice, grossUnitPrice, tax, description, "
+      + "orderedQuantity and invoicedQuantity of the order line";
+
+  /**
+   * {@code limit}, {@code offset}, {@code includeCovered} on both directions: ETP-5828 gave the
+   * sales invoice {@code limit}, ETP-6099 the rest, and the purchase invoice the same set (its
+   * popup lists through the action now).
+   */
+  static NeoActionContract.Param[] availableOrdersParams() {
+    return ImportListing.listParams(OrderImportRequest.MAX_ORDERS, "creationDate");
   }
 
-  /** {@code orderId}, plus {@code includeCovered} on a sales invoice only (ETP-5828). */
-  static NeoActionContract.Param[] availableLinesParams(boolean sales) {
+  /** {@code orderId}, {@code includeCovered} and {@code detail}, on both directions (ETP-6099). */
+  static NeoActionContract.Param[] availableLinesParams() {
     NeoActionContract.Param orderId = NeoActionContract.Param.required(
         OrderImportRequest.PARAM_ORDER_ID,
         NeoActionContract.TYPE_STRING, "Id of an order returned by availableOrders.");
-    if (!sales) {
-      return new NeoActionContract.Param[] { orderId };
-    }
-    return new NeoActionContract.Param[] { orderId,
-        NeoActionContract.Param.optional(PARAM_INCLUDE_COVERED, NeoActionContract.TYPE_BOOLEAN,
-            "Default false. true also lists the order's lines with nothing left to invoice "
-                + "(already invoiced, or held by a draft invoice, this one included) with "
-                + "pendingQuantity 0, as the import popup shows them greyed out; they cannot be "
-                + "imported.") };
+    return ImportListing.linesParams(LINE_DETAIL_KEYS, orderId);
   }
 
-  /**
-   * {@code limit} of a sales {@code availableOrders}: absent is {@code defaultLimit}, anything but
-   * a whole number from 1 to {@value #MAX_LISTED_ORDERS} a 400.
-   */
-  static int requestedLimit(JSONObject body, int defaultLimit) {
-    Object value = body == null ? null : body.opt(PARAM_LIMIT);
-    if (value == null || JSONObject.NULL.equals(value)) {
-      return defaultLimit;
-    }
-    int limit;
-    try {
-      limit = new BigDecimal(String.valueOf(value).trim()).intValueExact();
-    } catch (ArithmeticException | NumberFormatException e) {
-      limit = 0;
-    }
-    if (limit < 1 || limit > MAX_LISTED_ORDERS) {
-      throw new DocumentLineImport.ImportRefusal(javax.servlet.http.HttpServletResponse
-          .SC_BAD_REQUEST, DocumentLineImport.ERROR_INVALID_PARAMETER, PARAM_LIMIT
-          + " must be a whole number from 1 to " + MAX_LISTED_ORDERS, null);
-    }
-    return limit;
+  /** The keys {@code detail} adds to an {@code availableOrderLines} row (ETP-6099). */
+  static void putLineDetail(JSONObject row, OrderLine ol) throws JSONException {
+    ImportListing.putNullable(row, "listPrice", ol.getListPrice());
+    ImportListing.putNullable(row, "grossUnitPrice", ol.getGrossUnitPrice());
+    ImportListing.putNullable(row, "tax", ol.getTax() == null ? null : ol.getTax().getId());
+    ImportListing.putNullable(row, "description", ol.getDescription());
+    ImportListing.putNullable(row, "orderedQuantity", ol.getOrderedQuantity());
+    ImportListing.putNullable(row, "invoicedQuantity", ol.getInvoicedQuantity());
   }
 
   /** An active line other than the total-discount line: what the order's lines GET lists. */

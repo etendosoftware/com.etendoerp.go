@@ -2165,7 +2165,6 @@
 <!--6102D47FD12A4162858D948885F80544-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--6102D47FD12A4162858D948885F80544-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--6102D47FD12A4162858D948885F80544-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
-<!--6102D47FD12A4162858D948885F80544-->  <JAVA_QUALIFIER><![CDATA[goodsReceiptHeaderHandler]]></JAVA_QUALIFIER>
 <!--6102D47FD12A4162858D948885F80544-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--6102D47FD12A4162858D948885F80544-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted","etblkpBulkposting"],"redirect":{"invoicefromshipment":"createPurchaseInvoice","CreateFrom":"importOrderLines"},"redirectReason":"The classic invoice-from-receipt process creates a SALES invoice from a purchase receipt, does not mark the receipt as invoiced and can report success without creating anything; createPurchaseInvoice creates a completed purchase invoice from this receipt","reason":"Classic invoicefromshipment is not the purchase flow; use createPurchaseInvoice","reasons":{"CreateFrom":"The classic Create Lines From button has no process an agent can run; importOrderLines adds the pending lines of a completed purchase order to this draft goods receipt, with availableOrders and availableOrderLines listing what can be imported","posted":"The posted button is a blind post/unpost toggle the app never uses; book the document with this entity's post action and remove its accounting entries with its unpost action, which state their preconditions and how to react to a cost that is not calculated yet. The posted field itself stays readable","etblkpBulkposting":"The Bulk Posting button is a classic mass-accounting toggle with no process an agent can run; book the document with this entity's post action and remove its accounting entries with its unpost action. The value itself stays readable"}},"pdf":{"source":"supplier","reason":"the receipt has no printable (hidePrint) and its preview shows the supplier delivery note the user uploads as the main attachment"},"defaults":{"context":["businessPartner"],"reason":"The partner address comes from the business partner."}}]]></MCP_CONFIG>
 <!--6102D47FD12A4162858D948885F80544--></ETGO_SF_ENTITY>
@@ -4031,7 +4030,6 @@
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISDELETE><![CDATA[N]]></ISDELETE>
-<!--B898797B8C184821BFE6FD8B1304E943-->  <JAVA_QUALIFIER><![CDATA[document-sequence]]></JAVA_QUALIFIER>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--B898797B8C184821BFE6FD8B1304E943--></ETGO_SF_ENTITY>
 

@@ -180,7 +180,7 @@ tests. There is no list to update.
 ## The underlying leaks
 
 Running every Go test in a single JVM (`forkEvery = 0`, DAL tests included) reproduces the
-contamination and shows where it comes from. There are three leaks:
+contamination and shows where it comes from. There are four leaks:
 
 1. **Admin mode.** `OBContext.setAdminMode()` pushes onto the stack *before* it installs the admin
    context. With no `OBContext` and no DAL, `setAdminContextLocally()` throws after the push, and
@@ -199,8 +199,15 @@ contamination and shows where it comes from. There are three leaks:
    `McpToolRouterRouteTest$TablessEntityTests#tabBackedEntityNeverRunsTheReadHook`, which catches
    the error on purpose and then breaks `NeoBatchJsonDataServiceTest`, `NeoCrudHandlerTest`,
    `NeoQuotaWriteGateTest` and every DAL test that uses the class later in the same JVM.
+4. **Request context.** `OBContext.instance` is a thread-local as well. A mocked test that installs
+   a real (or mock) `OBContext` and never calls `setOBContext((OBContext) null)` hands it to every
+   later class of its fork. Code that branches on `OBContext.getOBContext() == null` then depends
+   on the fork packing: `TenantOwnership.loadOwned()` skips the tenant check only with no context,
+   so `FinancialAccountHandlerTest#testLoadAccountReturnsDalResult` failed when `goTestUnit` ran
+   with 4 forks and passed with 1. `OnboardingOrgInfoServiceTest` and
+   `OnboardingWarehouseAddressServiceTest` were the leakers; both now clear it in `@After`.
 
-Keeping DAL tests out of the mocked JVMs makes all three harmless to them. Leaks 1 and 3 can still
+Keeping DAL tests out of the mocked JVMs makes all four harmless to them. Leaks 1, 3 and 4 can still
 break *mocked* tests that share a JVM with the leaker, depending on how Gradle packs the forks.
 
 ### Finding the leaking test
@@ -208,7 +215,9 @@ break *mocked* tests that share a JVM with the leaker, depending on how Gradle p
 `com.etendoerp.go.testsupport.StaticStateLeakListener` is a JUnit Platform
 `TestExecutionListener`, registered in
 `src-test/resources/META-INF/services/org.junit.platform.launcher.TestExecutionListener`. After
-every test and container it checks leaks 1 and 2 on the worker thread. When it finds one, it logs
+every test and container it checks leaks 1 and 2 on the worker thread, and after every top-level
+class that is not a `*IntegrationTest` it checks leak 4 (a DAL class keeps its context by design,
+and a single test may hand one to the next test of its class). When it finds one, it logs
 an error with the `STATIC-STATE-LEAK` marker naming the test that just finished, and puts the state
 back as a fresh JVM would have it. It reads and resets the fields by reflection, so a class-level
 `mockStatic(OBContext.class)` cannot hide them.
@@ -223,4 +232,14 @@ grep -oh 'STATIC-STATE-LEAK.\{0,300\}' build/test-results/*/TEST-*.xml | sort | 
 
 The single-JVM run that motivated this listed `EtendoGoJwtServletOnboardingDatasetTest`,
 `McpWriteRequestSupportClearedMandatoryTest`, `NeoDocumentPdfTest` and `InvoiceLineHandlerTest`
-as admin-mode leakers. `StaticStateLeakListenerTest` reproduces leaks 1 and 2 on purpose.
+as admin-mode leakers. `StaticStateLeakListenerTest` reproduces leaks 1, 2 and 4 on purpose.
+
+### Parallel forks in `goTestUnit`
+
+`goTestUnit` runs one fork by default (a new JVM every 100 classes); `-PgoTestUnitForks=N` runs N
+side by side. It stays at one: the gain is about 1.5 minutes, and with several forks the packing
+depends on scheduling, so leak 3, which the listener cannot repair, could fail CI at random.
+Measured locally on 12 cores: 1 fork 341 s, 2 forks 251 s, 4 forks 257 s, 6 forks 278 s. Past 2,
+the JVM start-up and CPU contention eat the gain. Changing the fork count changes which classes
+share a JVM, which is how leak 4 surfaced: a test that only passes with a given packing is a leak
+to fix at its source, never a reason to go back to one fork.

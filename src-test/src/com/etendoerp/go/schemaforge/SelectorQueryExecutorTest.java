@@ -51,12 +51,14 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.base.structure.IdentifierProvider;
 import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.schemaforge.selector.meta.AuxFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
 import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
@@ -346,9 +348,12 @@ public class SelectorQueryExecutorTest {
           () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt())).thenReturn(
           expected);
 
-      NeoResponse result = SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
+      NeoResponse result = SelectorQueryExecutor.execute(meta, "spa", 20, 0, null, "org-1", null);
       assertNotNull(result);
       assertEquals(expected, result);
+      // the typed text is a contains-match on both the count and the page query
+      verify(countQuery).setNamedParameter("search", "%spa%");
+      verify(dataQuery).setNamedParameter("search", "%spa%");
     }
   }
 
@@ -748,6 +753,62 @@ public class SelectorQueryExecutorTest {
       assertEquals(1, capturedItems[0].length());
       assertEquals("47", capturedItems[0].getJSONObject(0).getString("id"));
       assertEquals("Spain", capturedItems[0].getJSONObject(0).getString("label"));
+    }
+  }
+
+  /**
+   * ETP-6103 — a rich page preloads the label translations of its rows and of the objects its grid
+   * fields show, in one call. A grid path that cannot be walked is skipped, not fatal.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testExecuteRichQueryPreloadsRowsAndGridLeaves() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("Country", "name").isRich(true)
+        .gridFields(Arrays.asList(new RichFieldMeta("currency", "Currency", "currency", 10),
+            new RichFieldMeta("broken", "Broken", "broken", 20)))
+        .build();
+
+    BaseOBObject currency = mock(BaseOBObject.class);
+    BaseOBObject bob = mock(BaseOBObject.class);
+    when(bob.getId()).thenReturn("47");
+    when(bob.getIdentifier()).thenReturn("Spain");
+    when(bob.get("currency")).thenReturn(currency);
+    when(bob.get("broken")).thenThrow(new IllegalStateException("no such property"));
+
+    OBQuery countQuery = mock(OBQuery.class);
+    OBQuery dataQuery = mock(OBQuery.class);
+    when(countQuery.count()).thenReturn(1);
+    when(dataQuery.list()).thenReturn(Collections.singletonList(bob));
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createQuery(anyString(), anyString())).thenReturn(countQuery, dataQuery);
+    IdentifierProvider identifierProvider = mock(IdentifierProvider.class);
+
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(
+        SelectorQueryBuilder.class); MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
+        NeoSelectorExecutionHelper.class); MockedStatic<SelectorRowMapper> mapperMock = mockStatic(
+        SelectorRowMapper.class); MockedStatic<SelectorAuxResolver> auxMock = mockStatic(
+        SelectorAuxResolver.class); MockedStatic<OBDal> obDalMock = mockStatic(
+        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+        SelectorResponseSupport.class); MockedStatic<IdentifierProvider> idMock = mockStatic(
+        IdentifierProvider.class)) {
+
+      builderMock.when(
+          () -> SelectorQueryBuilder.buildRichQueryWhereClause(any(), any(), any(), any(), any())).thenReturn(
+          SelectorQueryBuilder.HqlWithParams.empty());
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(OBQuery.class), any())).thenAnswer(
+          inv -> null);
+      mapperMock.when(() -> SelectorRowMapper.normalizeEntityId("47")).thenReturn("47");
+      auxMock.when(() -> SelectorAuxResolver.appendAuxFields(any(), any(), any())).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      idMock.when(IdentifierProvider::getInstance).thenReturn(identifierProvider);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any())).thenReturn(new JSONArray());
+      respMock.when(
+          () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt())).thenReturn(
+          NeoResponse.ok(new JSONObject()));
+
+      assertNotNull(SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null));
+
+      verify(identifierProvider).preloadTranslations(Arrays.asList(bob, currency));
     }
   }
 
@@ -1494,7 +1555,7 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * The search text is bound (lower-cased, wrapped in %) on the count, the page and the rows query,
+   * The search text is bound as typed (wrapped in %; the predicate upper-cases it in the database) on the count, the page and the rows query,
    * and every property the search touches belongs to the one alias {@code e}: the old copy into a
    * sub-alias is gone, so there is nothing for a bare {@code product.} to bind to.
    */
@@ -1506,9 +1567,9 @@ public class SelectorQueryExecutorTest {
     PagedRun run = runPaged(meta, "Ab", 20, 0, "e.active = true", 1L,
         Arrays.asList((Object) "P1"), Arrays.asList(valueRow("idA", "P1", "A")));
 
-    verify(run.countQuery).setParameter("search", "%ab%");
-    verify(run.pageQuery).setParameter("search", "%ab%");
-    verify(run.rowsQuery).setParameter("search", "%ab%");
+    verify(run.countQuery).setParameter("search", "%Ab%");
+    verify(run.pageQuery).setParameter("search", "%Ab%");
+    verify(run.rowsQuery).setParameter("search", "%Ab%");
     String where = run.where.get(0);
     assertTrue(where, where.contains("cast(e.product.name as string)"));
     assertTrue(where, where.contains("cast(e.product.searchKey as string)"));
@@ -1897,8 +1958,8 @@ public class SelectorQueryExecutorTest {
     List<String> where = captureRichWhere(meta, "es", "e.active = true");
 
     assertEquals("as e where e.active = true AND ("
-        + "lower(COALESCE(cast(e.name as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(e.iSOCountryCode as string), '')) LIKE :search)", where.get(0));
+        + "upper(COALESCE(cast(e.name as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(e.iSOCountryCode as string), '')) LIKE upper(:search))", where.get(0));
   }
 
   /**
@@ -1917,8 +1978,8 @@ public class SelectorQueryExecutorTest {
     List<String> where = captureRichWhere(meta, "p", "e.active = true");
 
     assertEquals("as e where e.active = true AND ("
-        + "lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
-        + " OR lower(COALESCE(cast(e.product.searchKey as string), '')) LIKE :search)", where.get(0));
+        + "upper(COALESCE(cast(e.product.name as string), '')) LIKE upper(:search)"
+        + " OR upper(COALESCE(cast(e.product.searchKey as string), '')) LIKE upper(:search))", where.get(0));
     assertFalse("stock-breakdown selector must not be de-duplicated", where.get(0).contains("not null"));
   }
 }
