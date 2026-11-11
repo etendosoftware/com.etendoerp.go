@@ -1986,16 +1986,16 @@ public class SelectorQueryExecutorTest {
 
   @Test
   public void searchPatternsKeepTheLowercaseTermAndLoosenNonAscii() {
-    assertEquals("%abc%", SelectorQueryExecutor.searchPattern("AbC"));
-    assertEquals("%ABC%", SelectorQueryExecutor.searchLoosePattern("AbC"));
-    assertEquals("%C_BICO%", SelectorQueryExecutor.searchLoosePattern("CÚBICO"));
-    assertEquals("%C_BICO%", SelectorQueryExecutor.searchLoosePattern("cúbico"));
-    assertEquals("%_A_O%", SelectorQueryExecutor.searchLoosePattern("ñaño"));
+    assertEquals("%abc%", SelectorOrgFilter.searchPattern("AbC"));
+    assertEquals("%ABC%", SelectorOrgFilter.searchLoosePattern("AbC"));
+    assertEquals("%C_BICO%", SelectorOrgFilter.searchLoosePattern("CÚBICO"));
+    assertEquals("%C_BICO%", SelectorOrgFilter.searchLoosePattern("cúbico"));
+    assertEquals("%_A_O%", SelectorOrgFilter.searchLoosePattern("ñaño"));
     // an emoji is a surrogate pair: one wildcard, not two
-    assertEquals("%A_B%", SelectorQueryExecutor.searchLoosePattern("a\uD83D\uDE00b"));
+    assertEquals("%A_B%", SelectorOrgFilter.searchLoosePattern("a\uD83D\uDE00b"));
     // user wildcards are left as typed, like before
-    assertEquals("%A%_1%", SelectorQueryExecutor.searchLoosePattern("a%_1"));
+    assertEquals("%A%_1%", SelectorOrgFilter.searchLoosePattern("a%_1"));
     // a backslash (LIKE's escape) is loosened too, so the prefilter never turns into a literal
-    assertEquals("%A__%", SelectorQueryExecutor.searchLoosePattern("a\\ú"));
+    assertEquals("%A__%", SelectorOrgFilter.searchLoosePattern("a\\ú"));
   }
 }

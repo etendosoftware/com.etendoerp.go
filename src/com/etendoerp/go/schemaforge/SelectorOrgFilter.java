@@ -200,10 +200,34 @@ public final class SelectorOrgFilter {
    * trigram index on {@code upper(x)} can serve; {@code lower(x) LIKE :search} keeps the exact
    * pre-ETP-6103 results, because on a C-collation database upper()/lower() only fold ASCII, so a
    * plain {@code upper(x) LIKE upper(:search)} would miss accented text. The caller binds both
-   * params (see {@code SelectorQueryExecutor.searchPattern / searchLoosePattern}).
+   * params (see {@link #searchPattern} / {@link #searchLoosePattern}).
    */
   static String searchLike(String expression) {
     return "(upper(" + expression + ") LIKE :searchLoose AND lower(" + expression + ") LIKE :search)";
+  }
+
+  /** The {@code :search} value: the term lowercased in Java, exactly as before ETP-6103. */
+  static String searchPattern(String search) {
+    return "%" + search.toLowerCase() + "%";
+  }
+
+  /**
+   * The {@code :searchLoose} value, built from {@link #searchPattern}: ASCII letters upper-cased,
+   * every other code point (one per character, surrogate pairs included) a {@code _} wildcard. It
+   * matches whenever the lower() predicate does, whatever the database locale (on a C-collation
+   * database upper()/lower() only fold ASCII), and it can drive a trigram index on {@code upper(col)}.
+   */
+  static String searchLoosePattern(String search) {
+    StringBuilder out = new StringBuilder();
+    searchPattern(search).codePoints().forEach(cp -> {
+      // A backslash is LIKE's escape: "\ú" would become "\_" (a literal "_") and reject rows.
+      if (cp < 128 && cp != '\\') {
+        out.append((char) Character.toUpperCase(cp));
+      } else {
+        out.append('_');
+      }
+    });
+    return out.toString();
   }
 
   /**

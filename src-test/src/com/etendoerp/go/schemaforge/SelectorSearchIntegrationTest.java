@@ -103,8 +103,8 @@ public class SelectorSearchIntegrationTest extends OBBaseTest {
 
     // a lower-case search finds the upper-case name, through the string branch
     OBQuery<BusinessPartner> query = OBDal.getInstance().createQuery(BusinessPartner.class, hql);
-    query.setNamedParameter("search", SelectorQueryExecutor.searchPattern(partner.getName()));
-    query.setNamedParameter("searchLoose", SelectorQueryExecutor.searchLoosePattern(partner.getName()));
+    query.setNamedParameter("search", SelectorOrgFilter.searchPattern(partner.getName()));
+    query.setNamedParameter("searchLoose", SelectorOrgFilter.searchLoosePattern(partner.getName()));
     assertTrue("the partner is found by its name in another case", query.count() >= 1);
   }
 
@@ -141,8 +141,8 @@ public class SelectorSearchIntegrationTest extends OBBaseTest {
         .createNativeQuery("select (upper(cast(:t as text) collate \"C\") like :loose"
             + " and lower(cast(:t as text) collate \"C\") like :exact)")
         .setParameter("t", text)
-        .setParameter("loose", SelectorQueryExecutor.searchLoosePattern(search))
-        .setParameter("exact", SelectorQueryExecutor.searchPattern(search)).uniqueResult();
+        .setParameter("loose", SelectorOrgFilter.searchLoosePattern(search))
+        .setParameter("exact", SelectorOrgFilter.searchPattern(search)).uniqueResult();
     assertTrue("two-part predicate matches under C collation", (Boolean) fixed);
   }
 
