@@ -44,6 +44,8 @@ import com.etendoerp.go.schemaforge.data.Plan;
  * <p>Two refusals must stay distinguishable, because they mean opposite things to the person on
  * the other end — "your request named something that is not for sale" versus "this deployment has
  * nothing to sell yet".
+ *
+ * @covers com.etendoerp.go.payment.HostedCheckoutService
  */
 class HostedCheckoutSessionPlanTest {
 
