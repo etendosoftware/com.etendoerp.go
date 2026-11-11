@@ -55,7 +55,7 @@ concurrency:
 env:
   CORE_BRANCH: epic/ETP-3504
   MODULE_BRANCH: ${{ github.head_ref || github.ref_name }}
-  PIPELINES_REPO: git@bitbucket.org:koodu_software/com.etendoerp.jenkins.pipelines.git
+  PIPELINES_REPO: git@ssh.bitbucket.org:koodu_software/com.etendoerp.jenkins.pipelines.git
   RETENTION_DAYS: 30
 
 jobs:
