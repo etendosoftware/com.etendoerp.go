@@ -53,12 +53,15 @@ import com.etendoerp.go.usage.IsolatedDalRead;
  * {@code RAISE}, a process result — so the only thing left to recognise is the text itself.
  *
  * <p><b>Choke points.</b> {@code NeoServlet#writeResponse} (REST single, {@code /batch}, the fiscal
- * handlers' {@code sendError}, batch-job polls) and {@code McpResponseSanitizer#render} (every MCP
- * JSON tool result) call {@link #apply}; nothing else needs to.
+ * handlers' {@code sendError}, batch-job polls) calls {@link #apply}; {@code McpResponseSanitizer}
+ * (every MCP JSON tool result) calls {@link #applyToBody} or, for an error result,
+ * {@link #applyToErrorBody}; the plain-text MCP error ({@code McpToolRouter#wrapAsErrorContent})
+ * calls {@link #remapText}. A handler that rewords early ({@code SiiSendHandler}) is harmless: the
+ * remap is idempotent.
  *
  * <p><b>Recognition.</b> Every string under a {@code message}, {@code text}, {@code msgText} or
- * {@code detail} key of the body, at any depth, of at most {@link #MAX_TEXT_LENGTH} characters, is
- * tried against each {@link #ENTRIES entry}:
+ * {@code detail} key of the body, at any depth, of 20 ({@code MIN_TEXT_LENGTH}) to
+ * {@link #MAX_TEXT_LENGTH} characters, is tried against each {@link #ENTRIES entry}:
  * <ul>
  *   <li>an <em>AD_MESSAGE entry</em> matches the {@code AD_MESSAGE} base text and every
  *       {@code AD_MESSAGE_TRL} text of its key (read once, in a session of its own, and cached),
@@ -71,8 +74,8 @@ import com.etendoerp.go.usage.IsolatedDalRead;
  * Matching uses no regular expression over the text: a template is the list of its literal
  * fragments, found in order with {@code indexOf}, so the cost is linear in the text whatever it
  * holds. A placeholder between two fragments takes what lies between them; one that starts the
- * text takes only the run of letters and digits before the first fragment; one that ends it takes
- * the rest. A raw {@code @KEY@} token is replaced whatever the length of the text. Both sides
+ * template takes only the run of letters and digits before the first fragment; one that ends it
+ * takes the rest. A raw {@code @KEY@} token is replaced whatever the length of the text. Both sides
  * are compared with HTML line breaks, {@code &quot;}, the {@code \n} that {@code messageBD} escapes
  * and runs of whitespace normalised; the match and every argument are mapped back to the original
  * string, so nothing outside the matched span changes.
@@ -80,7 +83,8 @@ import com.etendoerp.go.usage.IsolatedDalRead;
  * <p><b>Text.</b> The GO text is the {@code neo_hints_<lang>.properties} catalog entry keyed by the
  * {@code AD_MESSAGE} value (or the literal entry's own key), in the language captured at the start
  * of the request ({@link NeoLanguage#requestCode()}), never the current {@code OBContext} language,
- * which a Classic call can change (see {@code SiiSendHandler}).
+ * which a Classic call can change (see {@code SiiSendHandler}); the English entry when that
+ * language's bundle lacks the key, and the Classic text left as is when neither has it.
  *
  * <p><b>Identity.</b> When the recognised text sits next to a {@code messageKeys} array, or inside
  * an {@code error} object (or at the root of an MCP error result, {@link #applyToErrorBody}), its

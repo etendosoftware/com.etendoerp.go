@@ -40,7 +40,9 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
  * environment the Spanish translation simply does not exist in the database, and {@code messageBD}
  * answers the English base text to a Spanish user — through REST and MCP, which have no SPA to
  * translate it afterwards. The Spanish text is therefore versioned in the
- * {@code messages/neo_hints_<lang>.properties} catalog.
+ * {@code messages/neo_hints_<lang>.properties} catalog. A catalog-only key with no
+ * {@code AD_MESSAGE} row (e.g. {@code ETGO_FiscalSubmitNoCertificate}, ETP-6158) resolves through
+ * steps 2 and 4 below.
  *
  * <p><b>Resolution order</b> (request language = {@link NeoLanguage#requestCode()}, the GO locale
  * captured at the start of the request, else {@link NeoLanguage#currentCode()}):

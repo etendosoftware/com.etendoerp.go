@@ -158,7 +158,8 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
    * out). {@link #executeAction} therefore reads {@code NeoLanguage.currentCode()} itself, before
    * the call, and passes it here. The REST and MCP choke points apply the same remap again with the
    * language captured at the start of the request ({@code NeoLanguage.requestCode()}); a text
-   * already reworded is not recognised a second time, so the two never conflict.
+   * already reworded is recognised as a GO text and left as is (only its key is published), so
+   * the two never conflict.
    *
    * @param response the response {@link #normalizeErrorShape} already ran on
    * @param requestLanguage the language captured BEFORE the Classic call

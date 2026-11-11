@@ -6999,66 +6999,108 @@ UI: a tab ("solapa Facturas Rectificativas"), a process ("Añadir Certificado Di
 on the way out instead.
 
 **Where.** `ClassicMessageRemap` (`schemaforge/`) runs at the two exits every response passes:
-`NeoServlet#writeResponse` (REST single, `/batch`, batch-job polls, and every `sendError` of the
-fiscal handlers) and `McpResponseSanitizer#render` (every MCP JSON tool result; the plain-text
-`McpToolRouter#wrapAsErrorContent(String)` too). It runs after `identifyPeriodRefusal`. Same
+`NeoServlet#writeResponse` (REST single, `/batch`, batch-job polls, and every `sendError`, the
+fiscal handlers' included, since `sendError` writes through it) and `McpResponseSanitizer#render`
+(every MCP JSON tool result); the plain-text `McpToolRouter#wrapAsErrorContent(String)` calls
+`ClassicMessageRemap.remapText` itself. On REST it runs after `identifyPeriodRefusal`. Same
 behaviour on every channel: nothing to declare in §4.12.9.
 
-**What it does.** Every string of 20 to 8192 characters under a `message`, `text`, `msgText` or
-`detail` key of the body, at any depth, is compared (a longer string is left untouched, with a
-debug log line when it holds a fragment of a catalogued message; a raw `@KEY@` token is replaced
-whatever the length of the text, so a whole message such as `@TBAI_SetKey@` is covered) with each catalogued entry (`detail` is where the MCP write-path envelope of
-`McpWriteRequestSupport` carries the refusal). A string that is itself a serialized JSON object (an
-MCP content item, a body wrapped as text) is parsed and remapped on its values, never on its
-serialized text, and is serialized again only when a value changed:
+**Which strings.** Only string values under a `message`, `text`, `msgText` or `detail` key of the
+body, at any depth (`detail` is where the MCP write-path envelope of `McpWriteRequestSupport`
+carries the refusal). Any other key is never touched. Within those:
+
+- a string of **20 to 8192 characters** is compared with each catalogued entry. A longer one is left
+  untouched (with a debug log line when it holds a fragment of a catalogued message);
+- a raw, unparsed **`@KEY@` token** of a catalogued `AD_MESSAGE` is replaced whatever the length of
+  the string, so a whole message such as `@TBAI_SetKey@` is covered. Only when the GO text takes no
+  arguments (a raw token carries none); whitespace that only pads the token against the edge of the
+  string is dropped with it;
+- a string that is itself a **serialized JSON object** (an MCP content item, a body wrapped as text)
+  is parsed and remapped on its values, never on its serialized text, so JSON escapes survive. It is
+  serialized again only when a value changed.
+
+**The catalog.** `ClassicMessageRemap.ENTRIES` holds two kinds of entry:
 
 - an **AD_MESSAGE entry** matches the base text and every `AD_MESSAGE_TRL` text of its key, because
   Classic may have resolved it in a language other than the request's. The texts are read with two
-  HQL queries (base texts and translations), once for all entries, in a DAL session of their own
+  HQL queries (base texts, then translations), once for all entries, in a DAL session of their own
   (`IsolatedDalRead`), so the read can neither abort nor be broken by the request's transaction,
-  which is still open while the response is written; they are cached for the JVM and a failed read
-  is retried after 30 s, never per response. `%0..%n` and `%s` are passed to the GO text as
-  `{0}..{n}`; the raw `@KEY@` token is replaced too when the GO text has no arguments;
+  which is still open while the response is written. They are cached for the JVM; a failed read
+  leaves every text untouched and is retried after 30 s, never on every response. `%0..%n` and `%s`
+  are placeholders, handed to the GO text as `{0}..{n}`;
 - a **literal entry** matches a fixed Classic sentence that has no `AD_MESSAGE` (the two SII
-  pre-send sentences of `SIIUtils.invoicePreviousValidations`, ETP-5745 — formerly
-  `SiiSendHandler.DRIFTED_CLASSIC_SENTENCES`, now in this catalog).
+  pre-send sentences of `SIIUtils.invoicePreviousValidations`, ETP-5745, formerly
+  `SiiSendHandler.DRIFTED_CLASSIC_SENTENCES`). It has no `AD_MESSAGE` key, so it never publishes one
+  in `messageKeys`.
 
-**Matching cost.** No regular expression runs over the text. A template is the list of the
-literal fragments between its placeholders, found in order with `indexOf` (and skipped at once
-when the text lacks its longest fragment), so the cost is linear in the text whatever it holds. A
-placeholder between two fragments takes what lies between them; one that starts the template
-takes only the run of letters and digits right before the first fragment (`Resultado:3 factura(s)…`
-gives `3`: text in front of the message never leaks into it); one that ends it takes the rest. Of
-several occurrences of the first fragment before the second one, the last starts the match, so an
-earlier truncated copy stays as it is. The text is normalised once, and again only after a
-replacement. Every occurrence is replaced (up to 10 per text). Arguments
-are taken from the original text, not the normalised one (a `C:\new\cert.p12` path keeps its
-backslashes).
+**Matching.** No regular expression runs over the text. A template is the list of the literal
+fragments between its placeholders, found in order with `indexOf` (and skipped at once when the
+text lacks its longest fragment), so the cost is linear in the text whatever it holds. A
+placeholder between two fragments takes what lies between them; one that starts the template takes
+only the run of letters and digits right before the first fragment (`Resultado:3 factura(s)…` gives
+`3`: text in front of the message never leaks into it); one that ends it takes the rest. Of several
+occurrences of the first fragment before the second one, the last starts the match, so an earlier
+truncated copy stays as it is. Every occurrence of a message is replaced, up to 10 per string.
 
 Both sides are compared with `<br />` (also as a JSON serializer writes it, `<br \/>`), `&quot;`,
-the literal `\n` that `messageBD` escapes and runs of whitespace normalised. The normalisation is
-used for matching only: the match is mapped back to the original string and only that span is
-replaced, so escapes and spacing outside it stay exactly as they were. Whitespace the match took at
-either edge becomes one space between the GO text and other text, and is dropped against the start
-or end of the string; no separator is ever added where the original had none (next to a quote or a
-bracket). The GO text comes from
-`messages/neo_hints_<lang>.properties` (key = the `AD_MESSAGE` value, or the literal entry's key),
-in the language captured right after authentication (`NeoLanguage.captureRequestCode()` in
-`NeoServlet` and `McpSessionManager.executeInContext`, read with `NeoLanguage.requestCode()`), not
-the current `OBContext` language, which a Classic call can change mid-request (ETP-5745).
-`NeoMessageText.text(key, args)` resolves its language the same way (captured first, then the
-current one), so a GO-authored text built after a Classic call cannot flip either.
+the literal `\n` that `messageBD` escapes and runs of whitespace normalised. The text is
+normalised once, and again only after a replacement. The normalisation is used for matching only:
+the match and every argument are mapped back to the original string (a `C:\new\cert.p12` path
+keeps its backslashes) and only the matched span is replaced, so escapes and spacing outside it stay
+exactly as they were. Whitespace the match took at either edge becomes one space between the GO
+text and other text, and is dropped against the start or end of the string; no separator is ever
+added where the original had none (next to a quote or a bracket).
+
+**The GO text.** `messages/neo_hints_<lang>.properties`, key = the `AD_MESSAGE` value (or the
+literal entry's own key), in the request language; the English bundle when the request language's
+lacks the key; when neither has it the Classic text is left as it is. The request language is the
+one captured right after authentication (`NeoLanguage.captureRequestCode()` in `NeoServlet` and in
+`McpSessionManager.executeInContext`, restored in a `finally`, read with
+`NeoLanguage.requestCode()`), not the current `OBContext` language, which a Classic call can change
+mid-request (ETP-5745). Outside a request (a background thread, a unit test) `requestCode()` falls
+back to `NeoLanguage.currentCode()`. `NeoMessageText.text(key, args)` resolves its language the
+same way, so a GO-authored text built after a Classic call cannot flip language either: the 303/390
+telematic-filing refusal `NO_CERTIFICATE`, formerly a hardcoded English sentence, is now
+`NeoMessageText.text("ETGO_FiscalSubmitNoCertificate")` (catalog only, no `AD_MESSAGE`; same wording
+as the SPA's `fm.aeat.error.noCertificate`).
 
 **Identity (`messageKeys`).** When a recognised text sits in an `error` object, or next to an
-existing `messageKeys` array, its `AD_MESSAGE` key is added there. On MCP the root of an error tool
-result is that error object (`McpResponseSanitizer#renderError`, used by
+existing `messageKeys` array, its `AD_MESSAGE` key is added there (once). On MCP the root of an
+error tool result is that error object (`McpResponseSanitizer#renderError`, used by
 `McpToolRouter#wrapAsErrorContent(JSONObject)` and by `McpActionEnvelope` for an `isError`
 result), so the key lands at its root: `{status, title, message, error:"validation_error",
 detail, messageKeys:["TBAI_EmptyNifCode"]}`. A text may already be the GO text when it reaches an
 exit (an `etendo_action_batch` document result is the single action's rendered error, parsed and
-rendered again; a handler such as `SiiSendHandler` remaps itself; a plain-text error): the GO text
-of each entry, in any catalog language, is recognised too, so the key is still published and the
-text is left as is — remapping stays idempotent. Total: any failure leaves the original text.
+rendered again; `SiiSendHandler` remaps itself; a plain-text error): the GO text of each
+`AD_MESSAGE` entry, in any catalog language, is recognised too, so the key is still published and
+the text is left as is. The remap is therefore idempotent. Total: any failure leaves the original
+text.
+
+Example: a TicketBAI refusal that a handler answered with `NeoResponse.error(status, message)`,
+for an `es_ES` request. The Classic text (`TBAI_EmptyNifCode`, which names the Classic field label)
+leaves NEO as:
+
+```json
+{"error":{"status":400,
+          "message":"El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.",
+          "messageKeys":["TBAI_EmptyNifCode"]}}
+```
+
+The `status` is whatever the handler chose; the remap changes only `message` and adds the key.
+
+A client that needs its own wording keys on `messageKeys`, never on the prose.
+
+**Catalogued keys** (the window guides `sales-invoice.md` / `purchase-invoice.md` of
+`etendo_schema_forge` list which ones a user meets in each window):
+
+| Group | Keys |
+|---|---|
+| Names Classic-only UI | `ETVFAC_invoice_type_rectifying`, `ETVFAC_reversed_invoice`, `AEAT349_CINVREV_CHECK`, `AEATSII_EmptyCertificatePath`, `TBAI_CertificateNotValid`, `AEATSII_InvoiceManualSending`, `AEAT390_MARSHALLERROR`, `AEAT303_Periodicity_NotValid`, `AEAT349_Periodicity_NotValid`, `AEAT303_Period_NotDetected`, `AEAT349_Period_NotDetected`, `ETVFAC_Missing_DocType_Config`, `AEATSII_SII_ACCRUAL_DATE_EMPTY`, `TBAI_ConfigNotFound` |
+| Field named differently in GO | `ETVFAC_error_code_idtype`, `TBAI_EmptyNifCode`, `TBAI_EmptyPostalCode`, `TBAI_EmptyDir` |
+| Misleading in both products, corrected in GO only | `TBAI_SetKey`, `TBAI_NullCertificate` |
+| Literal (no `AD_MESSAGE`) | `siiMissingInvoiceType`, `siiMissingDocumentNo` |
+
+`ENTRIES` is the source of truth; keep this table in step with it.
 
 **Adding an entry.**
 
@@ -7072,12 +7114,15 @@ text is left as is — remapping stays idempotent. Total: any failure leaves the
    `ETVFAC_null_description` (at Complete the DB function `ETVFAC_MANDATORY_FIELDS` raises
    `ETVFAC_Missing_Inv_Verifactu_Fields` first for a null or blank Descripción Operación, and GO
    saves a whitespace-only value as null, so `InitialValidator`'s check never runs from GO).
-2. Add `Entry.adMessage("<AD_MESSAGE value>")` (or `Entry.literal("<key>", "<sentence>")`) to
+2. Add `Entry.ofAdMessage("<AD_MESSAGE value>")` (or `Entry.ofLiteral("<key>", "<sentence>")`) to
    `ClassicMessageRemap.ENTRIES`.
 3. Add `<key> = <text>` to **both** `neo_hints_es.properties` (tú, no voseo) and
    `neo_hints_en.properties`. No HTML. Every GO label you cite must exist in the SPA locales
    (`tools/app-shell/src/locales/es_ES.json` / `en_US.json`); note the locale key in the comment.
+   Use `{0}..{n}` for the Classic placeholders; a GO text with arguments is not used for a raw
+   `@KEY@` token.
 4. `ClassicMessageRemapTest#everyEntryHasAGoTextInBothLanguages` fails when step 3 is missing.
+5. Update the table above and the window guide of every window where the message shows.
 
 Never edit the Classic module's `AD_MESSAGE` to get the same effect, and never add a spec or window
 condition here: the catalog is keyed by message only.
@@ -13595,7 +13640,13 @@ rectificative was computed either on the detail GET or by the header callout whe
   Purchase invoices are unchanged: SII offers no `R` in `EM_Aeatsii_Clave_Tipo_Fc`,
   VERI*FACTU never sends a purchase, and the TicketBAI reverse fields are sales-only.
 
-> **ETP-6158:** these two sentences are now literal entries of the central Classic message remap (`ClassicMessageRemap`, neo-headless.md §4.17), applied at NEO's REST and MCP exits; `remapDriftedFieldLabels` only delegates to it. Only the matched sentence is replaced now, not the whole `message`.
+> **Superseded by ETP-6158 — see §4.17.** The two SII sentences described below are now literal
+> entries (`siiMissingInvoiceType`, `siiMissingDocumentNo`) of the central Classic message remap
+> (`ClassicMessageRemap`), applied at NEO's REST and MCP exits; `remapDriftedFieldLabels` only
+> delegates to it. Two statements below no longer hold: only the matched sentence is replaced, not
+> the whole `message`; and the language is captured for every request right after authentication
+> (`NeoLanguage.captureRequestCode()`), not only by `SiiSendHandler` before its Classic call (which
+> it still does). The rest is kept as the history of the ETP-5745 fix.
 
 **ETP-5745 (5th fix) — `SiiSendHandler` replaces two drifted classic validation sentences with a
 bilingual GO sentence.** `SIIUtils.invoicePreviousValidations` (classic `org.openbravo.module.sii`,
