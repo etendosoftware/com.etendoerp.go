@@ -27,6 +27,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -55,6 +56,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpToolResponses
  * @covers com.etendoerp.go.mcp.McpResponseSanitizer
  * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
+ * @covers com.etendoerp.go.schemaforge.ClassicMessageRemap
  */
 public class McpToolRouterTest {
 
@@ -183,6 +186,25 @@ public class McpToolRouterTest {
     assertFalse("error result must not be pretty-printed: " + text, text.contains("\n"));
   }
 
+  /**
+   * ETP-6158: the root of an MCP error result is the error object the client reads, so a Classic
+   * fiscal message recognised there (here already reworded for GO) publishes its AD_MESSAGE key
+   * in a root {@code messageKeys}.
+   */
+  @Test
+  public void testWrapAsErrorContentPublishesTheClassicMessageKeyAtTheRoot() throws Exception {
+    JSONObject error = new JSONObject().put("status", "error").put("title", "Error: ")
+        .put("message", "El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.").put("error", "validation_error")
+        .put("detail", "Request failed with status 400");
+
+    JSONObject result = McpToolRouter.wrapAsErrorContent(error);
+
+    JSONObject parsed = new JSONObject(
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
+    assertEquals("El contacto no está marcado como Factura Simplificada, así que su NIF/CIF es obligatorio. Complétalo en Contactos.", parsed.getString("message"));
+    assertEquals("TBAI_EmptyNifCode", parsed.getJSONArray("messageKeys").getString(0));
+  }
+
   /** IMP-53: the unexpected-failure envelope is rendered compact. */
   @Test
   public void testUnexpectedErrorBodyIsCompact() throws Exception {
@@ -220,6 +242,70 @@ public class McpToolRouterTest {
     JSONObject block = content.getJSONObject(0);
     assertEquals("text", block.getString("type"));
     assertEquals("Something failed", block.getString("text"));
+  }
+
+  /**
+   * ETP-6158: an exception message passed as plain text can carry a Classic fiscal message; it
+   * leaves the MCP reworded for GO, in the language captured for the request (here the current
+   * {@code OBContext} language, nothing having been captured). The SII sentence and the raw
+   * {@code @KEY@} token need no AD_MESSAGE row, so no database is involved.
+   */
+  @Test
+  public void testWrapAsErrorContentRemapsAClassicMessageInThePlainText() throws Exception {
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      JSONObject result = McpToolRouter.wrapAsErrorContent("Process execution failed: "
+          + "La factura debe contener información en el campo Clave tipo factura.");
+
+      assertTrue(result.getBoolean(FIELD_IS_ERROR));
+      assertEquals("Process execution failed: La factura debe contener información en el campo "
+          + "Tipo factura.", result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
+    }
+    try (MockedStatic<OBContext> ctx = contextInLanguage("en_US")) {
+      JSONObject result = McpToolRouter.wrapAsErrorContent("Error: @TBAI_ConfigNotFound@");
+
+      assertEquals("Error: There is no active TicketBAI configuration for this organization. "
+          + "Check it in Fiscal configuration (TicketBAI tab).",
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text"));
+    }
+  }
+
+  /**
+   * ETP-6158: every JSON tool result rendered by {@link McpResponseSanitizer#render} has its
+   * Classic fiscal messages reworded, at any depth; a plain (non-error) result gets no root
+   * {@code messageKeys}, only the {@code error} object inside it does.
+   */
+  @Test
+  public void testRenderRemapsClassicMessagesAtAnyDepth() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("message", "Error: @TBAI_ConfigNotFound@")
+        .put("results", new JSONArray().put(new JSONObject().put("error", new JSONObject()
+            .put("message", "@TBAI_ConfigNotFound@ (organización 2)"))));
+
+    String rendered;
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      rendered = McpResponseSanitizer.render(body);
+    }
+
+    JSONObject parsed = new JSONObject(rendered);
+    String go = "No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI).";
+    assertEquals("Error: " + go, parsed.getString("message"));
+    assertFalse(parsed.has("messageKeys"));
+    JSONObject error = parsed.getJSONArray("results").getJSONObject(0).getJSONObject("error");
+    assertEquals(go + " (organización 2)", error.getString("message"));
+    assertEquals("TBAI_ConfigNotFound", error.getJSONArray("messageKeys").getString(0));
+  }
+
+  /** A static OBContext whose language is {@code code}; the caller closes it. */
+  private static MockedStatic<OBContext> contextInLanguage(String code) {
+    org.openbravo.model.ad.system.Language language =
+        mock(org.openbravo.model.ad.system.Language.class);
+    when(language.getLanguage()).thenReturn(code);
+    OBContext context = mock(OBContext.class);
+    when(context.getLanguage()).thenReturn(language);
+    MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+    ctx.when(OBContext::getOBContext).thenReturn(context);
+    return ctx;
   }
 
   /** Tests that wrapAsErrorContent handles an empty error message. */
@@ -1642,6 +1728,39 @@ public class McpToolRouterTest {
     assertEquals(McpConstants.SEE_ALSO_WRITING, envelope.getString("seeAlso"));
   }
 
+  /**
+   * ETP-6158: a classified write failure that already carries a key keeps it; the key of the
+   * Classic message recognised in its {@code detail} is appended once, also when the error result
+   * is rendered a second time (the text is then already the GO one).
+   */
+  @Test
+  public void testClassifiedFailureKeepsItsKeysAndAppendsTheClassicOneOnce() throws Exception {
+    JSONObject response = dalFailure("Some core prose");
+    response.getJSONObject("response").getJSONObject("error").put("neoClassification",
+        new JSONObject().put("status", 422).put("code", "business_rule")
+            .put("message", "No se pudo completar: @TBAI_ConfigNotFound@")
+            .put("messageKeys", new JSONArray().put("APRM_PAYMENTMETHOD_MISSING")));
+    String go = "No hay ninguna configuración de TicketBAI activa para esta organización. "
+        + "Revísala en Configuración fiscal (pestaña TicketBAI).";
+
+    JSONObject first;
+    JSONObject second;
+    try (MockedStatic<OBContext> ctx = contextInLanguage("es_ES")) {
+      JSONObject envelope = invokeCheckJsonServiceError(response, McpConstants.SEE_ALSO_WRITING);
+      first = new JSONObject(contentText(McpToolRouter.wrapAsErrorContent(envelope)));
+      second = new JSONObject(contentText(McpToolRouter.wrapAsErrorContent(
+          new JSONObject(first.toString()))));
+    }
+
+    for (JSONObject rendered : List.of(first, second)) {
+      assertEquals("No se pudo completar: " + go, rendered.getString("detail"));
+      JSONArray keys = rendered.getJSONArray("messageKeys");
+      assertEquals(rendered.toString(), 2, keys.length());
+      assertEquals("APRM_PAYMENTMETHOD_MISSING", keys.getString(0));
+      assertEquals("TBAI_ConfigNotFound", keys.getString(1));
+    }
+  }
+
   /** A captured fault keeps this channel's existing answer for a refused write (declared, §4.12.9). */
   @Test
   public void testCapturedServerFaultKeepsTheExistingWriteAnswer() throws Exception {
@@ -1734,6 +1853,143 @@ public class McpToolRouterTest {
       McpToolRouter.wrapAsTextContent(new JSONObject().put("documentNo", "FV1"));
       policy.verify(com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy::currentRoleSeesAccounting,
           org.mockito.Mockito.never());
+    }
+  }
+
+  // ── handleUpdate: product change re-derives uOM (QA CP-15, AD message 20111) ──
+
+  /**
+   * {@code etendo_update} on a line that changes {@code product} must re-derive {@code uOM} from
+   * the NEW product, as the REST update does. The agent cannot send uOM (read-only), so without
+   * this the line hits the C_OrderLine trigger with the old unit and is refused (20111).
+   *
+   * <p>Wiring is asserted on the source, as the neighbouring {@code handleCreate} guards are:
+   * reaching it needs {@code DefaultJsonDataService}, {@code ModelProvider} and an AD_Tab. The
+   * derivation itself is specified in {@code NeoCommercialLinePolicyTest}.</p>
+   */
+  @Test
+  public void testUpdateRederivesUomRightAfterTheAgentPriceAndNeverDefersToAClientValue() {
+    String body = McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleUpdate")
+        .replaceAll("\\s+", "");
+
+    int price = indexOrFail(body, "McpLinePriceInjector.applyAgentPriceOnUpdate(");
+    int uom = indexOrFail(body, "injectLineUomIfApplicable(filteredBody,dalEntity,false);");
+    int mandatory = indexOrFail(body, "McpWriteRequestSupport.rejectClearedMandatoryFields(");
+    int write = indexOrFail(body, "NeoExtensionDispatcher.dispatch(");
+
+    assertTrue("uOM is re-derived after the agent price and before the write is dispatched",
+        price < uom && uom < mandatory && mandatory < write);
+    assertEquals("handleUpdate derives uOM exactly once, never deferring to a sent value", 1,
+        body.split("injectLineUomIfApplicable\\(", -1).length - 1);
+  }
+
+  private static void invokeInjectLineUom(JSONObject body,
+      org.openbravo.base.model.Entity entity) throws Exception {
+    java.lang.reflect.Method m = McpToolRouter.class.getDeclaredMethod(
+        "injectLineUomIfApplicable", JSONObject.class, org.openbravo.base.model.Entity.class,
+        boolean.class);
+    m.setAccessible(true);
+    m.invoke(new McpToolRouter(), body, entity, false);
+  }
+
+  private static org.openbravo.base.model.Entity lineEntity(boolean declaresUom,
+      boolean transactional) {
+    org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+    when(entity.hasProperty("uOM")).thenReturn(declaresUom);
+    when(entity.hasProperty("orderedQuantity")).thenReturn(transactional);
+    return entity;
+  }
+
+  private static org.openbravo.model.common.plm.Product productWithUom(String uomId) {
+    org.openbravo.model.common.uom.UOM uom = mock(org.openbravo.model.common.uom.UOM.class);
+    when(uom.getId()).thenReturn(uomId);
+    org.openbravo.model.common.plm.Product product =
+        mock(org.openbravo.model.common.plm.Product.class);
+    when(product.getUOM()).thenReturn(uom);
+    return product;
+  }
+
+  /** A changed product writes the NEW product's uOM, replacing whatever the body held. */
+  @Test
+  public void testUpdateLineUomIsTheNewProductsAndReplacesAnyClientValue() throws Exception {
+    JSONObject body = new JSONObject().put("product", "P-NEW").put("uOM", "STALE-UOM");
+    org.openbravo.model.common.plm.Product product = productWithUom("UOM-NEW");
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-NEW")).thenReturn(product);
+
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertEquals("UOM-NEW", body.getString("uOM"));
+    }
+  }
+
+  /** A price- or quantity-only update (no product key) is left untouched and never reads the DAL. */
+  @Test
+  public void testUpdateWithoutProductAddsNoUom() throws Exception {
+    JSONObject body = new JSONObject().put("unitPrice", 12);
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertFalse(body.has("uOM"));
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** Entities that do not declare uOM, or are not transactional lines, are untouched. */
+  @Test
+  public void testUpdateOnEntityWithoutUomOrNotATransactionalLineIsUntouched() throws Exception {
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      JSONObject noUom = new JSONObject().put("product", "P-NEW");
+      invokeInjectLineUom(noUom, lineEntity(false, true));
+      assertFalse(noUom.has("uOM"));
+
+      JSONObject notALine = new JSONObject().put("product", "P-NEW");
+      invokeInjectLineUom(notALine, lineEntity(true, false));
+      assertFalse(notALine.has("uOM"));
+
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** A {@code $ref:} product is a batch placeholder, not an id: nothing is resolved or written. */
+  @Test
+  public void testUpdateWithRefPrefixedProductAddsNoUom() throws Exception {
+    JSONObject body = new JSONObject().put("product", "$ref:line1.product");
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      invokeInjectLineUom(body, lineEntity(true, true));
+
+      assertFalse(body.has("uOM"));
+      obdal.verifyNoInteractions();
+    }
+  }
+
+  /** Unknown product, or one without a UOM: no uOM injected and no exception (the trigger decides). */
+  @Test
+  public void testUpdateWithUnresolvableProductOrUomInjectsNothingAndDoesNotThrow()
+      throws Exception {
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.plm.Product noUom =
+          mock(org.openbravo.model.common.plm.Product.class);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-MISSING")).thenReturn(null);
+      when(dal.get(org.openbravo.model.common.plm.Product.class, "P-NOUOM")).thenReturn(noUom);
+
+      JSONObject missing = new JSONObject().put("product", "P-MISSING");
+      invokeInjectLineUom(missing, lineEntity(true, true));
+      assertFalse(missing.has("uOM"));
+
+      JSONObject withoutUom = new JSONObject().put("product", "P-NOUOM");
+      invokeInjectLineUom(withoutUom, lineEntity(true, true));
+      assertFalse(withoutUom.has("uOM"));
     }
   }
 }

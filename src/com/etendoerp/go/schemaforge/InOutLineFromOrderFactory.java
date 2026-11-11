@@ -291,6 +291,36 @@ final class InOutLineFromOrderFactory {
   }
 
   /**
+   * Per order line, the document numbers of the DRAFT documents of the direction (oldest created
+   * first) whose lines point at it, the document {@code excludedInOutId} left out (ETP-6099): the
+   * "in draft shipment: …" note of the import popups, which names the OTHER drafts holding a line.
+   * Same population as {@link #loadDraftQuantities}.
+   *
+   * @param excludedInOutId the target document, or {@code null} to name every draft
+   */
+  static Map<String, Set<String>> draftDocumentNos(java.util.Collection<String> orderLineIds,
+      boolean salesTransaction, String excludedInOutId) {
+    Map<String, Set<String>> docs = new HashMap<>();
+    if (orderLineIds == null || orderLineIds.isEmpty()) {
+      return docs;
+    }
+    String hql = "select iol.salesOrderLine.id, io.id, io.documentNo "
+        + "from MaterialMgmtShipmentInOutLine iol join iol.shipmentReceipt io "
+        + "where io.documentStatus = 'DR' and io.salesTransaction = :sot "
+        + "and iol.salesOrderLine.id in :ids order by io.creationDate";
+    List<Object[]> rows = OBDal.getInstance().getSession().createQuery(hql, Object[].class)
+        .setParameter("sot", salesTransaction)
+        .setParameterList("ids", orderLineIds)
+        .list();
+    for (Object[] row : rows) {
+      if (excludedInOutId == null || !excludedInOutId.equals(row[1])) {
+        docs.computeIfAbsent((String) row[0], k -> new LinkedHashSet<>()).add((String) row[2]);
+      }
+    }
+    return docs;
+  }
+
+  /**
    * Persists a new {@link ShipmentInOutLine} populated from {@code orderLine}
    * and attached to {@code parentInOut}, then links any draft invoice lines
    * of the same order line via {@link InvoiceLineLinker}. The flow mirrors

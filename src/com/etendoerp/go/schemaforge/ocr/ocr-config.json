@@ -4,7 +4,7 @@
       "id": "purchase-invoice",
       "toolName": "SimpleOcrTool",
       "resolver": "purchase-invoice",
-      "question": "Extract all invoice fields: vendor name, vendor tax id, vendor address (street, postal code, city, country), vendor email and phone, document number, invoice date, line items (description, quantity, unit price). Return strict JSON.",
+      "question": "Extract all invoice fields: vendor name, vendor tax id, vendor address (street, postal code, city, country), vendor email and phone, document number, invoice date, total amount with taxes, line items (description, quantity, unit price). Return strict JSON.",
       "dataKeys": [
         "vendor_name",
         "tax_id",
@@ -38,6 +38,13 @@
               "string",
               "null"
             ]
+          },
+          "total_amount": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Grand total of the invoice including taxes, as printed (the amount due). Null if no total is printed."
           },
           "issuer": {
             "type": [
@@ -240,6 +247,7 @@
           "tax_id",
           "document_no",
           "invoice_date",
+          "total_amount",
           "issuer",
           "receiver",
           "vendor_address",

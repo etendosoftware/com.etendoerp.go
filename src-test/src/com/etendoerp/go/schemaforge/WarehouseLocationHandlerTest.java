@@ -550,6 +550,130 @@ class WarehouseLocationHandlerTest {
     }
   }
 
+  // ── ETP-5806: streetName/buildingNumber/buildingName are trimmed ───────────
+
+  /**
+   * A whitespace-padded value is validated AND persisted trimmed, never the raw padded string.
+   */
+  @Test
+  void testCreateTrimsPaddedStructuredFieldsBeforeValidatingAndPersisting() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-trim-1");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "  Calle Mayor  ");
+    body.put("buildingNumber", " 45 ");
+    body.put("buildingName", " Torre A ");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc).setOBSEPAStreetName("Calle Mayor");
+      verify(geoLoc).setOBSEPABuildingNumber("45");
+      verify(geoLoc).setOBSEPABuildingName("Torre A");
+      // Composed from the trimmed values, not the padded raw ones.
+      verify(geoLoc).setAddressLine1("Calle Mayor, 45 - Torre A");
+    }
+  }
+
+  /**
+   * A {@code streetName} (or {@code buildingNumber}/{@code cityName}) made up of only whitespace
+   * is visually empty to whoever typed it and must be treated as missing: 400, never persisted.
+   */
+  @Test
+  void testCreateWhitespaceOnlyStreetNameIsTreatedAsMissingReturns400() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("streetName", "   ");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+      verify(obDal, never()).save(any());
+    }
+  }
+
+  /** Same trimming rule applies on update. */
+  @Test
+  void testUpdateTrimsPaddedBuildingNumberBeforePersisting() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-trim-upd");
+    when(obDal.get(Location.class, "geo-trim-upd")).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Mayor");
+    body.put("buildingNumber", "  7  ");
+    body.put("cityName", "Toledo");
+    body.put("country", "country-upd");
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("PUT", "geo-trim-upd", body));
+
+      assertEquals(200, r.getHttpStatus());
+      verify(geoLoc).setOBSEPABuildingNumber("7");
+      verify(geoLoc).setAddressLine1("Calle Mayor, 7");
+    }
+  }
+
+  // ── ETP-5806 follow-up (QA finding): buildingNumber omitted from the body ──
+
+  /**
+   * A create whose body never carries the {@code buildingNumber} key at all (not {@code ""}, not
+   * {@code "s/n"} — the key itself is absent) must NOT be rejected as missing a mandatory field:
+   * it falls back to {@code "s/n"} and is persisted. Before the fix, an MCP or direct-API caller
+   * that simply never sent the key got a 400 even though the frontend convention is to accept the
+   * omission.
+   */
+  @Test
+  void testCreateOmittedBuildingNumberKeyFallsBackToSlashN() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-omitted-bn");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+    // buildingNumber key intentionally never put on the body at all.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc).setOBSEPABuildingNumber("s/n");
+      verify(obDal).save(geoLoc);
+    }
+  }
+
+  /**
+   * Same omission, but {@code streetName} is ALSO absent: streetName remains strictly mandatory,
+   * so this is still a clean 400 — the fallback never masks the real missing-field error.
+   */
+  @Test
+  void testCreateOmittedBuildingNumberWithStreetNameAlsoMissingStillReturns400() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+    // streetName and buildingNumber both intentionally never put on the body.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+      verify(obDal, never()).save(any());
+    }
+  }
+
   // ── handleUpdate ──────────────────────────────────────────────────────────
 
   /**

@@ -229,6 +229,37 @@ class NeoTelemetryServiceTest {
     assertEquals("mixed", emitted.get("types_source"));
   }
 
+  /**
+   * ETP-5581: the bounce-pair KPI properties pass the allowlist with their types; mistyped or
+   * out-of-bounds values are dropped.
+   */
+  @Test
+  void emitKeepsTheBounceKpiPropertiesWithTheirTypes() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED, mapOf(
+        "account_id", "CLIENT-1", "channel", "ui", "flag_enabled", true,
+        "detection_signal", "pis_link", "signals_count", 2, "confidence", "high",
+        "ambiguous", false, "adjacent", true, "preselected", true, "decision", "discarded",
+        "surface", "modal", "chosen_among_alternatives", false));
+    assertEquals(12, sink.last().getProperties().size(), sink.last().getProperties().toString());
+
+    service.emit(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_RESTORED,
+        mapOf("days_since_decided", 4L, "confidence", "review"));
+    assertEquals(4L, sink.last().getProperties().get("days_since_decided"));
+
+    service.emit(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_SUGGESTIONS_APPLIED, mapOf(
+        "pairs_shown", 3, "pairs_discarded", 1, "pairs_unchecked", 1, "pairs_sent_to_panel", 1,
+        "preselection_changed", true));
+    assertEquals(5, sink.last().getProperties().size(), sink.last().getProperties().toString());
+
+    service.emit(NeoTelemetryEvents.BACKEND_BANK_BOUNCE_PAIR_DECIDED, mapOf(
+        "signals_count", 4, "preselected", "Y", "days_since_decided", -1L,
+        "environment", "production", "$insert_id", "x"));
+    assertTrue(sink.last().getProperties().isEmpty(), sink.last().getProperties().toString());
+  }
+
   /** The contact flags must be real booleans and the contact age a whole number within bounds. */
   @Test
   void emitDropsMistypedOrOutOfBoundsContactKpiValues() {

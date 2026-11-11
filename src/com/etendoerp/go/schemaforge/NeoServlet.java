@@ -29,7 +29,9 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.usage.IsolatedDalRead;
+import com.etendoerp.go.usageevents.PublicApiUsageCounter;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
 import com.smf.securewebservices.SWSConfig;
 
@@ -107,6 +109,12 @@ public class NeoServlet extends HttpBaseServlet {
   @Override
   public void destroy() {
     try {
+      // ETP-6057: first, so the last minute of public API counts is written before anything stops.
+      PublicApiUsageCounter.getDefault().shutdown();
+    } catch (RuntimeException e) {
+      log.debug("Could not flush the public API usage counter on servlet destroy.", e);
+    }
+    try {
       UsageEventRecorder.shutdown();
     } catch (Exception e) {
       log.debug("Could not stop the usage event writer on servlet destroy.", e);
@@ -162,6 +170,16 @@ public class NeoServlet extends HttpBaseServlet {
 
   private void processRequest(HttpServletRequest request, HttpServletResponse response,
       String method) throws IOException {
+    try {
+      dispatchRequest(request, response, method);
+    } finally {
+      // ETP-6057: counts the answer of a public API request, whichever path wrote it.
+      NeoPublicApiUsage.getDefault().recordRequest(request, response, method);
+    }
+  }
+
+  private void dispatchRequest(HttpServletRequest request,
+      HttpServletResponse response, String method) throws IOException {
     if (handleUnauthenticatedRoute(request, response, method)) {
       return;
     }
@@ -169,7 +187,17 @@ public class NeoServlet extends HttpBaseServlet {
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
+    // ETP-6158: the language the Classic message remap answers in, fixed before any Classic call.
+    String previousLanguage = NeoLanguage.captureRequestCode();
+    try {
+      dispatchAuthenticated(request, response, method);
+    } finally {
+      NeoLanguage.restoreRequestCode(previousLanguage);
+    }
+  }
 
+  private void dispatchAuthenticated(HttpServletRequest request, HttpServletResponse response,
+      String method) throws IOException {
     NeoPathInfo pathInfo = requestRouter.parseRequestPath(request, response);
     if (pathInfo == null) {
       return;
@@ -346,6 +374,8 @@ public class NeoServlet extends HttpBaseServlet {
   void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
       throws IOException {
     NeoResponse.identifyPeriodRefusal(neoResponse);
+    // ETP-6158: Classic fiscal messages that name Classic-only UI, reworded for GO.
+    ClassicMessageRemap.apply(neoResponse);
     if (neoResponse == null) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;

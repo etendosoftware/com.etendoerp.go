@@ -17,13 +17,26 @@
 
 package com.etendoerp.go.hubspot;
 
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
+import static com.etendoerp.go.hubspot.HubSpotValues.association;
+import static com.etendoerp.go.hubspot.HubSpotValues.countryCode;
+import static com.etendoerp.go.hubspot.HubSpotValues.countryName;
+import static com.etendoerp.go.hubspot.HubSpotValues.date;
+import static com.etendoerp.go.hubspot.HubSpotValues.dateTime;
+import static com.etendoerp.go.hubspot.HubSpotValues.encode;
+import static com.etendoerp.go.hubspot.HubSpotValues.equalTo;
+import static com.etendoerp.go.hubspot.HubSpotValues.eventDate;
+import static com.etendoerp.go.hubspot.HubSpotValues.hubSpotPlan;
+import static com.etendoerp.go.hubspot.HubSpotValues.isAnnual;
+import static com.etendoerp.go.hubspot.HubSpotValues.payloadOf;
+import static com.etendoerp.go.hubspot.HubSpotValues.putIfPresent;
+
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -33,6 +46,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.hubspot.HubSpotClient.HubSpotUnreachableException;
+import com.etendoerp.go.hubspot.HubSpotConfiguration.Pipeline;
 import com.etendoerp.go.hubspot.HubSpotClient.Response;
 import com.etendoerp.go.hubspot.HubSpotOutboxStore.EnvironmentDeal;
 import com.etendoerp.go.hubspot.HubSpotOutboxStore.PendingEvent;
@@ -43,21 +57,33 @@ import com.etendoerp.go.hubspot.HubSpotOutboxStore.SubscriptionEnvironment;
  *
  * <ul>
  *   <li>{@code ACCOUNT_CREATED}: the contact, created or updated by address, as a self-serve
- *       lead.</li>
- *   <li>{@code DEMO_READY}: the contact's trial dates, the company, and the deal in the trial
- *       stage, associated with both. The deal's id is what every later event moves.</li>
- *   <li>{@code DEMO_ENTERED}: the contact's "trial activated" flag and the deal's active stage.</li>
- *   <li>{@code PAID}: the deal won, with the plan chosen.</li>
- *   <li>{@code DEMO_EXPIRED}: the deal lost.</li>
+ *       one, and the deal in the account stage (MQL), associated with it. The contact's lifecycle
+ *       stage is never sent: HubSpot derives it from the deal's.</li>
+ *   <li>{@code DEMO_READY}: the contact's trial dates and country, the company, and the deal named
+ *       after the company. The deal's id is what every later event moves. An account created for
+ *       a booked demo already has its deal, in the Demo pipeline: it only gets the account's id.
+ *       </li>
+ *   <li>{@code DEMO_ENTERED}: the contact's "trial activated" flag.</li>
+ *   <li>{@code MILESTONE}: the deal activated (SQL) on the first one, and, when configured, the
+ *       milestone's date.</li>
+ *   <li>{@code PAID}: the deal in the card stage, with the plan and the billing interval. An
+ *       annual plan is paid up front for the year, so it goes straight to the first-payment
+ *       stage.</li>
+ *   <li>{@code DEMO_EXPIRED}: the deal in the expired-trial stage.</li>
  *   <li>The billing events ({@code PAYMENT}, {@code PAYMENT_FAILED}, {@code CANCEL_REQUESTED},
  *       {@code CANCEL_REVERTED}, {@code CANCELED}): the subscription state and dates on the deal
- *       of the productive environment the subscription pays for.</li>
+ *       of the productive environment the subscription pays for. The first charge above zero
+ *       moves it to the first-payment stage, the end of the subscription to the lost stage.</li>
  * </ul>
+ *
+ * <p>A stage only moves forward: each move names the stages it may leave, so a late or repeated
+ * event never takes a deal back (a milestone after the payment, an expiry after the card). The
+ * stages are those of the deal's own pipeline, Self-Serve or Demo.
  *
  * <p>Each productive environment has its own deal. The first one takes the account's deal: the
  * one its demo created, or else the one marketing created with the account's id. Any further
- * productive gets a new deal, won from the start. Stages move only on the deals the sync created;
- * a marketing deal only gets its properties written.
+ * productive gets a new deal, in the first one's pipeline. Stages move only on the deals of the
+ * Self-Serve and Demo pipelines; a deal in any other only gets its properties written.
  *
  * <p>Every call is safe to repeat: the contact is upserted by address and a deal is looked up
  * before one is created, so a retry after a half-finished send does not duplicate it.
@@ -78,12 +104,15 @@ class HubSpotEventSender {
   static final String LAST_PAYMENT = "etendo_fecha_ultimo_pago";
   static final String FAILED_CHARGE = "etendo_fecha_cobro_fallido";
   static final String CANCELLATION = "etendo_fecha_baja";
+  /** Deal flag of a customer who had cancelled and pays again, created by marketing (ETP-6082). */
+  static final String REACTIVATION = "etendo_es_reactivacion";
   static final String STATE_TRIAL = "trial";
   static final String STATE_ACTIVE = "active";
   static final String STATE_SUSPENDED = "suspended";
   static final String STATE_CANCELLED = "cancelled";
 
   private static final String DEALS_PATH = "/crm/v3/objects/deals"; // NOSONAR - see COMPANIES_PATH
+  private static final String PROPERTIES_QUERY = "?properties=";
   private static final String DEAL_STAGE = "dealstage";
   private static final String PLAN = "etendo_plan";
   private static final String ACCOUNT_ID = "etendo_account_id";
@@ -93,8 +122,25 @@ class HubSpotEventSender {
   private static final String EMAIL = "email";
   private static final String RESULTS = "results";
 
-  /** The values of the deal's {@code etendo_plan} enumeration; any other key would be refused. */
-  static final Set<String> HUBSPOT_PLANS = Set.of("start", "core", "pro", "scale", "enterprise");
+  /** Contact property of the sign-up, created by marketing (ETP-6082). */
+  static final String SECTOR = "sector";
+  /**
+   * HubSpot's standard contact country. Marketing asked for {@code ip_country}, but HubSpot keeps
+   * that one read-only (it geolocates the tracking IP) and refuses the whole contact if it is sent.
+   */
+  static final String COUNTRY = "country";
+  /** HubSpot's standard two-letter country code of the contact. */
+  static final String COUNTRY_CODE = "hs_country_region_code";
+
+  /** The deal {@code datetime} property of each milestone, created by marketing on 2026-11-05. */
+  static final Map<String, String> MILESTONE_PROPERTIES = Map.of(
+      HubSpotOutboxStore.MILESTONE_IMPORT, "etendo_fecha_primera_importacion",
+      HubSpotOutboxStore.MILESTONE_BUSINESS_PARTNER, "etendo_fecha_primer_tercero",
+      HubSpotOutboxStore.MILESTONE_PRODUCT, "etendo_fecha_primer_producto",
+      HubSpotOutboxStore.MILESTONE_ORDER, "etendo_fecha_primer_pedido",
+      HubSpotOutboxStore.MILESTONE_INVOICE, "etendo_fecha_primera_factura",
+      HubSpotOutboxStore.MILESTONE_INVOICE_COMPLETED, "etendo_fecha_primera_factura_completada",
+      HubSpotOutboxStore.MILESTONE_INVOICE_POSTED, "etendo_fecha_primera_factura_contabilizada");
 
   /** HubSpot-defined association types. */
   static final int DEAL_TO_CONTACT = 3;
@@ -125,16 +171,18 @@ class HubSpotEventSender {
     try {
       switch (event.eventType()) {
         case HubSpotOutboxStore.ACCOUNT_CREATED:
-          return Outcome.sent(upsertContact(event, contactBase(event)
-              .put("lifecyclestage", "lead")));
+          return Outcome.sent(sendAccountCreated(event));
         case HubSpotOutboxStore.DEMO_READY:
           return Outcome.sent(sendDemoReady(event, now));
         case HubSpotOutboxStore.DEMO_ENTERED:
           return sendDemoEntered(event);
+        case HubSpotOutboxStore.MILESTONE:
+          return sendMilestone(event);
         case HubSpotOutboxStore.PAID:
-          return moveDeal(event, configuration.wonStage(), planOf(event));
+          return sendPaid(event);
         case HubSpotOutboxStore.DEMO_EXPIRED:
-          return moveDeal(event, configuration.lostStage(), null);
+          return moveDeal(event, Pipeline::expiredStage, new JSONObject(),
+              p -> Set.of(p.entryStage(), p.activatedStage()));
         case HubSpotOutboxStore.PAYMENT:
         case HubSpotOutboxStore.PAYMENT_FAILED:
         case HubSpotOutboxStore.CANCEL_REQUESTED:
@@ -151,29 +199,91 @@ class HubSpotEventSender {
     }
   }
 
+  /**
+   * The contact, and the account's deal in its first stage. No {@code lifecyclestage}: HubSpot
+   * derives the contact's from its deal's (marketing's spec, ETP-6082).
+   */
+  private String sendAccountCreated(PendingEvent event) throws CallFailed, JSONException {
+    String contactId = upsertContact(event, contactBase(event, true));
+    String existingDeal = findDeal(event.accountId());
+    if (existingDeal != null) {
+      return existingDeal;
+    }
+    return createAccountDeal(event, StringUtils.defaultIfBlank(event.name(), event.email()),
+        contactId, null);
+  }
+
   private String sendDemoReady(PendingEvent event, Instant now)
       throws CallFailed, JSONException {
     JSONObject payload = payloadOf(event);
-    JSONObject contact = contactBase(event);
+    String bookedDeal = StringUtils.trimToNull(payload.optString(HubSpotOutbox.FIELD_DEMO_DEAL,
+        ""));
+    JSONObject contact = contactBase(event, bookedDeal == null);
     Optional<DemoTrials.Trial> trial = trials.find(event.environmentId(), now);
     if (trial.isPresent()) {
       contact.put("etendo_inicio_prueba", date(trial.get().startedAt()));
       contact.put("etendo_fin_prueba", date(trial.get().endsAt()));
     }
+    String country = countryName(payload);
+    putIfPresent(contact, COUNTRY, country);
+    putIfPresent(contact, COUNTRY_CODE, countryCode(payload));
     String contactId = upsertContact(event, contact);
-
-    String existingDeal = findDeal(event.accountId());
-    if (existingDeal != null) {
-      return existingDeal;
+    if (bookedDeal != null) {
+      return claimBookedDeal(event, bookedDeal);
     }
-    String companyName = payload.optString(HubSpotOutbox.FIELD_COMPANY_NAME, "");
-    String companyId = createCompany(companyName,
-        payload.optString(HubSpotOutbox.FIELD_COUNTRY, ""), contactId);
 
+    String companyName = payload.optString(HubSpotOutbox.FIELD_COMPANY_NAME, "");
+    JSONObject existingDeal = searchDeal(event.accountId());
+    if (existingDeal == null) {
+      // An account confirmed before the deal moved to the confirmation (ETP-6082) has none yet.
+      String companyId = createCompany(companyName, country, contactId);
+      return createAccountDeal(event, StringUtils.defaultIfBlank(companyName, event.email()),
+          contactId, companyId);
+    }
+    String dealId = existingDeal.getString("id");
+    if (configuration.pipelineId().equals(pipelineOf(existingDeal))
+        && StringUtils.isNotBlank(companyName)) {
+      completeAccountDeal(dealId, companyName, country, contactId);
+    }
+    return dealId;
+  }
+
+  /**
+   * The deal marketing created when the demo was booked, named by the signup API call that created
+   * this account: it gets the account's id, which links every later event to it. Its name, company
+   * and stage are marketing's; the sync moves it once marketing has moved it to "Demo realizada".
+   */
+  private String claimBookedDeal(PendingEvent event, String dealId)
+      throws CallFailed, JSONException {
+    // Read first: an id that names no deal is a final refusal, not a deal to create.
+    call("GET", DEALS_PATH + "/" + encode(dealId) + PROPERTIES_QUERY + PIPELINE, null);
+    updateDeal(dealId, new JSONObject().put(ACCOUNT_ID, event.accountId()));
+    return dealId;
+  }
+
+  /**
+   * Names the account's deal after the company the owner entered, and gives it the company. A
+   * retry finds the company already associated and does not create a second one.
+   */
+  private void completeAccountDeal(String dealId, String companyName, String country,
+      String contactId) throws CallFailed, JSONException {
+    updateDeal(dealId, new JSONObject().put(DEAL_NAME, companyName + DEAL_SUFFIX));
+    if (dealCompany(dealId) != null) {
+      return;
+    }
+    String companyId = createCompany(companyName, country, contactId);
+    if (companyId != null) {
+      call("PUT", "/crm/v4/objects/deals/" + encode(dealId) // NOSONAR - see COMPANIES_PATH
+          + "/associations/default/companies/" + encode(companyId), null);
+    }
+  }
+
+  private String createAccountDeal(PendingEvent event, String nameBase, String contactId,
+      String companyId) throws CallFailed, JSONException {
     JSONObject deal = new JSONObject()
-        .put(DEAL_NAME, StringUtils.defaultIfBlank(companyName, event.email()) + DEAL_SUFFIX)
+        .put(DEAL_NAME, nameBase + DEAL_SUFFIX)
         .put(PIPELINE, configuration.pipelineId())
-        .put(DEAL_STAGE, configuration.trialStage())
+        .put(DEAL_STAGE, configuration.accountStage())
         .put(ACCOUNT_ID, event.accountId())
         .put("etendo_camino_entrada_deal", SELF_SERVE)
         .put(SUBSCRIPTION_STATE, STATE_TRIAL);
@@ -187,19 +297,51 @@ class HubSpotEventSender {
         .put(ASSOCIATIONS, associations)));
   }
 
+  /** The contact's flag only: the deal is activated by what the owner does, not by entering. */
   private Outcome sendDemoEntered(PendingEvent event) throws CallFailed, JSONException {
     call("PATCH", "/crm/v3/objects/contacts/" + encode(event.email()) + "?idProperty=email",
         new JSONObject().put(PROPERTIES, new JSONObject().put("etendo_prueba_activada", "si")));
-    // A deal already won or lost stays where it is: entering the demo after paying is no news.
-    if (store.findStatus(event.accountId(), HubSpotOutboxStore.PAID) != null
-        || store.findStatus(event.accountId(), HubSpotOutboxStore.PAYMENT) != null
-        || store.findStatus(event.accountId(), HubSpotOutboxStore.DEMO_EXPIRED) != null) {
-      return Outcome.sent(null);
-    }
-    return moveDeal(event, configuration.activeStage(), null);
+    return Outcome.sent(null);
   }
 
-  private Outcome moveDeal(PendingEvent event, String stage, String plan)
+  private Outcome sendMilestone(PendingEvent event) throws CallFailed, JSONException {
+    JSONObject payload = payloadOf(event);
+    JSONObject properties = new JSONObject();
+    String property = MILESTONE_PROPERTIES.get(
+        payload.optString(HubSpotSyncService.FIELD_MILESTONE, ""));
+    if (property != null) {
+      properties.put(property, dateTime(eventDate(event, payload)));
+    }
+    return moveDeal(event, Pipeline::activatedStage, properties, p -> Set.of(p.entryStage()));
+  }
+
+  /**
+   * The plan and interval are written on any deal; the stage moves only on the sync's own. A
+   * monthly plan goes to the card stage and waits for its first renewal; an annual one has just
+   * paid the year, which is the customer's first payment (ETP-6082).
+   */
+  private Outcome sendPaid(PendingEvent event) throws CallFailed, JSONException {
+    JSONObject payload = payloadOf(event);
+    JSONObject properties = new JSONObject();
+    putIfPresent(properties, PLAN, hubSpotPlan(payload.optString(HubSpotSyncService.FIELD_PLAN,
+        null), event.accountId()));
+    String interval = payload.optString(StripeSubscriptionEvents.FIELD_INTERVAL, null);
+    putIfPresent(properties, BILLING_INTERVAL, interval);
+    if (isAnnual(interval)) {
+      return moveDeal(event, Pipeline::firstPaymentStage, properties,
+          Pipeline::beforeFirstPayment);
+    }
+    return moveDeal(event, Pipeline::cardStage, properties,
+        p -> Set.of(p.entryStage(), p.activatedStage(), p.expiredStage()));
+  }
+
+
+  /**
+   * Writes {@code properties} on the account's deal and moves it to {@code stage} when it is in a
+   * pipeline the sync moves and sits in one of {@code from}, both read in that pipeline.
+   */
+  private Outcome moveDeal(PendingEvent event, Function<Pipeline, String> stage,
+      JSONObject properties, Function<Pipeline, Set<String>> from)
       throws CallFailed, JSONException {
     String dealId = store.findDealId(event.accountId());
     if (dealId == null) {
@@ -209,12 +351,42 @@ class HubSpotEventSender {
       }
       return Outcome.skipped("The account has no HubSpot deal (demo event " + demoStatus + ")");
     }
-    JSONObject properties = new JSONObject().put(DEAL_STAGE, stage);
-    if (plan != null) {
-      properties.put(PLAN, plan);
+    putStageIfIn(properties, dealId, stage, from);
+    if (properties.length() > 0) {
+      updateDeal(dealId, properties);
     }
-    updateDeal(dealId, properties);
     return Outcome.sent(dealId);
+  }
+
+  /**
+   * Adds the stage to {@code properties} when the deal is in a pipeline the sync moves and sits in
+   * {@code from}, both read in the deal's pipeline.
+   */
+  private void putStageIfIn(JSONObject properties, String dealId,
+      Function<Pipeline, String> stage, Function<Pipeline, Set<String>> from)
+      throws CallFailed, JSONException {
+    JSONObject deal = call("GET", DEALS_PATH + "/" + encode(dealId) + PROPERTIES_QUERY
+        + PIPELINE + "," + DEAL_STAGE, null);
+    JSONObject current = deal.optJSONObject(PROPERTIES);
+    Optional<Pipeline> pipeline = configuration.pipeline(pipelineOf(deal));
+    if (current == null || pipeline.isEmpty()) {
+      return;
+    }
+    if (from.apply(pipeline.get()).contains(current.optString(DEAL_STAGE, ""))) {
+      properties.put(DEAL_STAGE, stage.apply(pipeline.get()));
+    }
+  }
+
+  /** The pipeline of a deal read with its {@code pipeline} property, or {@code null}. */
+  private static String pipelineOf(JSONObject deal) {
+    JSONObject properties = deal.optJSONObject(PROPERTIES);
+    return properties == null || properties.isNull(PIPELINE) ? null
+        : properties.optString(PIPELINE, null);
+  }
+
+  /** Whether the sync moves the stages of a deal: those of the Self-Serve and Demo pipelines. */
+  private boolean isOwned(JSONObject deal) {
+    return configuration.pipeline(pipelineOf(deal)).isPresent();
   }
 
   private Outcome sendBillingEvent(PendingEvent event) throws CallFailed, JSONException {
@@ -222,6 +394,12 @@ class HubSpotEventSender {
     Optional<SubscriptionEnvironment> environment = store.findSubscriptionEnvironment(
         payload.optString(StripeSubscriptionEvents.FIELD_SUBSCRIPTION, ""));
     if (environment.isEmpty()) {
+      if (HubSpotOutboxStore.PAYMENT_FAILED.equals(event.eventType())
+          && store.countEnvironmentDeals(event.accountId()) == 0) {
+        // A failed first charge never provisions the productive it would land on: it goes to
+        // the account's deal, which that productive would have taken anyway (ETP-6082).
+        return sendFailedFirstCharge(event, payload);
+      }
       // The first payment usually arrives before its environment exists; it waits for it.
       return Outcome.retry("The subscription's productive environment is not provisioned yet");
     }
@@ -241,6 +419,18 @@ class HubSpotEventSender {
     return Outcome.sent(dealId);
   }
 
+  private Outcome sendFailedFirstCharge(PendingEvent event, JSONObject payload)
+      throws CallFailed, JSONException {
+    Optional<EnvironmentDeal> deal = accountDeal(event.accountId());
+    if (deal.isEmpty()) {
+      return Outcome.skipped("The account has no HubSpot deal");
+    }
+    updateDeal(deal.get().dealId(), new JSONObject()
+        .put(SUBSCRIPTION_STATE, STATE_SUSPENDED)
+        .put(FAILED_CHARGE, date(eventDate(event, payload))));
+    return Outcome.sent(deal.get().dealId());
+  }
+
   private JSONObject billingProperties(PendingEvent event, JSONObject payload,
       EnvironmentDeal deal, SubscriptionEnvironment environment)
       throws CallFailed, JSONException {
@@ -248,38 +438,84 @@ class HubSpotEventSender {
     JSONObject properties = new JSONObject();
     switch (event.eventType()) {
       case HubSpotOutboxStore.PAYMENT:
-        properties.put(SUBSCRIPTION_STATE, STATE_ACTIVE).put(LAST_PAYMENT, day);
-        putIfPresent(properties, "amount", payload.optString(StripeSubscriptionEvents.FIELD_AMOUNT,
-            null));
-        putIfPresent(properties, BILLING_INTERVAL,
-            payload.optString(StripeSubscriptionEvents.FIELD_INTERVAL, null));
-        if (deal.owned()) {
-          // A payment wins the deal, whatever it went through: a trial that expired before the
-          // owner paid left it lost.
-          properties.put(DEAL_STAGE, configuration.wonStage());
-          putIfPresent(properties, PLAN, hubSpotPlan(environment.planKey(), event.accountId()));
-        }
+        putPaymentProperties(properties, event, payload, deal, environment, day);
         break;
       case HubSpotOutboxStore.PAYMENT_FAILED:
         properties.put(SUBSCRIPTION_STATE, STATE_SUSPENDED).put(FAILED_CHARGE, day);
         break;
       case HubSpotOutboxStore.CANCEL_REQUESTED:
-        // The owner keeps access until the period ends, so the subscription is still active.
-        properties.put(CANCELLATION, day);
+        // Marketing's spec (ETP-6082): cancelled from the moment it is asked, dated the day the
+        // owner loses access.
+        properties.put(SUBSCRIPTION_STATE, STATE_CANCELLED).put(CANCELLATION,
+            date(accessEnds(event, payload)));
         break;
       case HubSpotOutboxStore.CANCEL_REVERTED:
         properties.put(SUBSCRIPTION_STATE, STATE_ACTIVE).put(CANCELLATION, "");
+        if (deal.owned()) {
+          putStageIfIn(properties, deal.dealId(), Pipeline::firstPaymentStage,
+              p -> Set.of(p.lostStage()));
+        }
         break;
       default:
         properties.put(SUBSCRIPTION_STATE, STATE_CANCELLED);
-        // The date of a scheduled cancellation is when it was asked for: kept, not overwritten
-        // with the end of the period.
+        if (deal.owned()) {
+          putStageIfIn(properties, deal.dealId(), Pipeline::lostStage,
+              p -> Set.of(p.entryStage(), p.activatedStage(), p.cardStage(),
+                  p.firstPaymentStage(), p.expiredStage()));
+        }
+        // A scheduled cancellation already dated the deal with the end of the access.
         if (StringUtils.isBlank(dealProperty(deal.dealId(), CANCELLATION))) {
           properties.put(CANCELLATION, day);
         }
         break;
     }
     return properties;
+  }
+
+  /** The day a scheduled cancellation ends the access; the day it was asked if Stripe said none. */
+  private static Instant accessEnds(PendingEvent event, JSONObject payload) {
+    String at = payload.optString(StripeSubscriptionEvents.FIELD_ACCESS_ENDS, "");
+    if (StringUtils.isNotBlank(at)) {
+      try {
+        return Instant.parse(at);
+      } catch (DateTimeParseException e) {
+        log.warn("Billing event {} carries an unreadable access end '{}'", event.id(), at);
+      }
+    }
+    return eventDate(event, payload);
+  }
+
+  /**
+   * A paid invoice: the subscription is active again, and on a deal the sync moves, the stage
+   * does too. Any invoice that gets here collected more than zero (a zero one, such as the free
+   * first month, is never reported), so it is the customer's first payment (marketing's spec,
+   * ETP-6082). A payment after the environment's cancellation re-subscribes it (ETP-5742): the
+   * one way out of the lost stage, straight to the first-payment one.
+   */
+  private void putPaymentProperties(JSONObject properties, PendingEvent event, JSONObject payload,
+      EnvironmentDeal deal, SubscriptionEnvironment environment, String day)
+      throws CallFailed, JSONException {
+    properties.put(SUBSCRIPTION_STATE, STATE_ACTIVE).put(LAST_PAYMENT, day);
+    putIfPresent(properties, "amount", payload.optString(StripeSubscriptionEvents.FIELD_AMOUNT,
+        null));
+    String interval = payload.optString(StripeSubscriptionEvents.FIELD_INTERVAL, null);
+    putIfPresent(properties, BILLING_INTERVAL, interval);
+    boolean reactivation = store.wasCanceledBefore(event.accountId(),
+        environment.environmentId(), eventDate(event, payload));
+    if (reactivation) {
+      properties.put(REACTIVATION, "true");
+    }
+    if (!deal.owned()) {
+      return;
+    }
+    putIfPresent(properties, PLAN, hubSpotPlan(environment.planKey(), event.accountId()));
+    putStageIfIn(properties, deal.dealId(), Pipeline::firstPaymentStage, p -> {
+      Set<String> from = new HashSet<>(p.beforeFirstPayment());
+      if (reactivation) {
+        from.add(p.lostStage());
+      }
+      return from;
+    });
   }
 
   /**
@@ -318,14 +554,12 @@ class HubSpotEventSender {
     if (found == null) {
       return Optional.empty();
     }
-    JSONObject properties = found.optJSONObject(PROPERTIES);
-    boolean owned = properties != null
-        && configuration.pipelineId().equals(properties.optString(PIPELINE, ""));
-    return Optional.of(new EnvironmentDeal(found.getString("id"), owned));
+    return Optional.of(new EnvironmentDeal(found.getString("id"), isOwned(found)));
   }
 
   /**
-   * A further productive's own deal, won, next to the contact and company of the first one.
+   * A further productive's own deal, in the card stage (the first-payment one when its event is a
+   * payment or says the plan is annual), next to the contact and company of the first one.
    *
    * <p>It carries no {@code etendo_account_id}: HubSpot holds that property unique, and the
    * account's first deal already has it. The link to the environment is the
@@ -343,11 +577,19 @@ class HubSpotEventSender {
     if (existing != null) {
       return existing.getString("id");
     }
+    // In the first deal's pipeline: a booked demo's further productive stays a demo's.
+    Pipeline pipeline = configuration.pipeline(pipelineOf(call("GET", DEALS_PATH + "/"
+        + encode(accountDeal.dealId()) + PROPERTIES_QUERY + PIPELINE, null)))
+        .orElse(configuration.selfServe());
+    boolean paid = HubSpotOutboxStore.PAYMENT.equals(event.eventType())
+        || isAnnual(payloadOf(event).optString(StripeSubscriptionEvents.FIELD_INTERVAL, null));
     JSONObject deal = new JSONObject()
         .put(DEAL_NAME, dealName)
-        .put(PIPELINE, configuration.pipelineId())
-        .put(DEAL_STAGE, configuration.wonStage())
-        .put("etendo_camino_entrada_deal", SELF_SERVE);
+        .put(PIPELINE, pipeline.id())
+        .put(DEAL_STAGE, paid ? pipeline.firstPaymentStage() : pipeline.cardStage());
+    if (pipeline.id().equals(configuration.pipelineId())) {
+      deal.put("etendo_camino_entrada_deal", SELF_SERVE);
+    }
     putIfPresent(deal, PLAN, hubSpotPlan(environment.planKey(), event.accountId()));
     JSONArray associations = new JSONArray().put(association(contactId, DEAL_TO_CONTACT));
     String companyId = dealCompany(accountDeal.dealId());
@@ -377,7 +619,7 @@ class HubSpotEventSender {
   }
 
   private String dealProperty(String dealId, String property) throws CallFailed, JSONException {
-    JSONObject deal = call("GET", DEALS_PATH + "/" + encode(dealId) + "?properties="
+    JSONObject deal = call("GET", DEALS_PATH + "/" + encode(dealId) + PROPERTIES_QUERY
         + encode(property), null);
     JSONObject properties = deal.optJSONObject(PROPERTIES);
     // A property never set comes back as JSON null, which optString would read as "null".
@@ -391,46 +633,20 @@ class HubSpotEventSender {
         new JSONObject().put(PROPERTIES, properties));
   }
 
-  private static Instant eventDate(PendingEvent event, JSONObject payload) {
-    String at = payload.optString(StripeSubscriptionEvents.FIELD_AT, "");
-    if (StringUtils.isNotBlank(at)) {
-      try {
-        return Instant.parse(at);
-      } catch (DateTimeParseException e) {
-        log.warn("Billing event {} carries an unreadable date '{}'", event.id(), at);
-      }
-    }
-    return event.occurredAt() != null ? event.occurredAt() : Instant.now();
-  }
 
-  private static void putIfPresent(JSONObject object, String key, String value)
-      throws JSONException {
-    if (StringUtils.isNotBlank(value)) {
-      object.put(key, value);
-    }
-  }
 
-  private static String planOf(PendingEvent event) throws JSONException {
-    return hubSpotPlan(payloadOf(event).optString("plan", null), event.accountId());
-  }
 
-  private static String hubSpotPlan(String planKey, String accountId) {
-    String plan = StringUtils.trimToNull(planKey);
-    if (plan == null) {
-      return null;
+  /**
+   * The contact's own properties.
+   *
+   * @param selfServe whether the contact came by itself: a booked demo's contact is marketing's,
+   *                  and keeps the way in marketing gave it
+   */
+  private JSONObject contactBase(PendingEvent event, boolean selfServe) throws JSONException {
+    JSONObject properties = new JSONObject().put(EMAIL, event.email());
+    if (selfServe) {
+      properties.put("etendo_camino_entrada", SELF_SERVE);
     }
-    if (!HUBSPOT_PLANS.contains(plan)) {
-      log.warn("Plan '{}' paid by account {} is not a HubSpot plan; the deal goes without it",
-          plan, accountId);
-      return null;
-    }
-    return plan;
-  }
-
-  private JSONObject contactBase(PendingEvent event) throws JSONException {
-    JSONObject properties = new JSONObject()
-        .put(EMAIL, event.email())
-        .put("etendo_camino_entrada", SELF_SERVE);
     String name = StringUtils.trimToEmpty(event.name());
     if (!name.isEmpty()) {
       properties.put("firstname", StringUtils.substringBefore(name, " "));
@@ -439,8 +655,21 @@ class HubSpotEventSender {
         properties.put("lastname", lastName);
       }
     }
+    // ETP-6081: optional, and asked after the account exists, so it reaches HubSpot with the
+    // first event sent once the profile step stored it (the demo's, normally). Never cleared.
+    String phone = StringUtils.trimToNull(event.phone());
+    if (phone != null) {
+      properties.put("phone", phone);
+    }
+    // ETP-6082: asked at sign-up; an unknown value would make HubSpot refuse the whole contact.
+    String sector = StringUtils.trimToNull(event.sector());
+    if (sector != null && HubSpotOutbox.SECTORS.contains(sector)) {
+      properties.put(SECTOR, sector);
+    }
     return properties;
   }
+
+
 
   private String upsertContact(PendingEvent event, JSONObject properties)
       throws CallFailed, JSONException {
@@ -481,12 +710,6 @@ class HubSpotEventSender {
     return results == null || results.length() == 0 ? null : results.getJSONObject(0);
   }
 
-  private static JSONObject equalTo(String property, String value) throws JSONException {
-    return new JSONObject()
-        .put("propertyName", property)
-        .put("operator", "EQ")
-        .put("value", value);
-  }
 
   /**
    * Creates the company. A company is a courtesy: the deal is what links HubSpot with Etendo, so a
@@ -518,13 +741,6 @@ class HubSpotEventSender {
     return idOf(new JSONObject(response.body()));
   }
 
-  private static JSONObject association(String toId, int typeId) throws JSONException {
-    return new JSONObject()
-        .put("to", new JSONObject().put("id", toId))
-        .put("types", new JSONArray().put(new JSONObject()
-            .put("associationCategory", "HUBSPOT_DEFINED")
-            .put("associationTypeId", typeId)));
-  }
 
   private JSONObject call(String method, String path, JSONObject body)
       throws CallFailed, JSONException {
@@ -559,19 +775,9 @@ class HubSpotEventSender {
     return id;
   }
 
-  private static JSONObject payloadOf(PendingEvent event) throws JSONException {
-    return StringUtils.isBlank(event.payload()) ? new JSONObject()
-        : new JSONObject(event.payload());
-  }
 
-  /** HubSpot date properties take a {@code yyyy-MM-dd} calendar day. */
-  static String date(Instant instant) {
-    return instant.atZone(ZoneOffset.UTC).toLocalDate().toString();
-  }
 
-  private static String encode(String value) {
-    return URLEncoder.encode(value, StandardCharsets.UTF_8);
-  }
+
 
   /** What became of one event. */
   record Outcome(Kind kind, String hubSpotObjectId, String detail) {

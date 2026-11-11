@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -581,6 +582,18 @@ public class BatchJobServiceTest {
         job.getInt("processedRows"));
     assertEquals("the worker did not carry on committing rows it can no longer report", 2,
         seen.size());
+  }
+
+  @Test
+  public void aDeleteOperationWithoutRecordIdIsRefusedBeforeTheJobIsRecorded() throws Exception {
+    JSONArray ops = new JSONArray()
+        .put(new JSONObject().put("id", "d0").put("spec", "product").put("entity", "product")
+            .put("method", "DELETE").put("recordId", "R0"))
+        .put(new JSONObject().put("id", "d1").put("spec", "product").put("entity", "product")
+            .put("method", "DELETE"));
+
+    assertEquals("operations[1] DELETE requires 'recordId'", BatchJobService.validate(ops));
+    assertNull(BatchJobService.validate(new JSONArray().put(ops.get(0))));
   }
 
   @Test

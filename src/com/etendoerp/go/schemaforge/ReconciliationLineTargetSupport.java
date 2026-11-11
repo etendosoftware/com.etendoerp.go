@@ -30,6 +30,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.advpaymentmngt.hook.BankStatementLineFilterContext.Usage;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -137,10 +138,12 @@ final class ReconciliationLineTargetSupport {
    *                        account
    * @param conflictMessage message of the 409 for a fully reconciled line (the two callers word it
    *                        differently and the frontend matches both by text)
+   * @param discardsHonoured whether discarded lines are honoured: {@code bank-bounce-suggestions}
+   *                         as the action entry evaluated it, once for the whole request
    * @return the line to operate on, or the refusal
    */
   static Target resolveForMatch(ReconciliationHandler handler, FIN_BankStatementLine line,
-      String conflictMessage) throws Exception {
+      String conflictMessage, boolean discardsHonoured) throws Exception {
     FIN_FinaccTransaction trx = line.getFinancialAccountTransaction();
     if (trx == null) {
       return Target.of(line);
@@ -160,6 +163,15 @@ final class ReconciliationLineTargetSupport {
     if (ReconciliationSupport.isOnDraftStatement(line)) {
       return Target.failed(NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT));
+    }
+    // ETP-5581 toggle point: with bank-bounce-suggestions on, never free a line a
+    // BankStatementLineFilterHook excludes: it cannot be reconciled afterwards anyway, so the heal
+    // (a write) must not happen. Off, it answers null. A pending line (no movement) is returned
+    // above unchanged and its caller runs the same guard next to its draft check.
+    NeoResponse discarded = StatementLineFilter.discardedLineError(discardsHonoured, line,
+        Usage.MATCH_STATEMENT_GRID);
+    if (discarded != null) {
+      return Target.failed(discarded);
     }
     NeoResponse healError = healStuckLine(handler, line);
     if (healError != null) {

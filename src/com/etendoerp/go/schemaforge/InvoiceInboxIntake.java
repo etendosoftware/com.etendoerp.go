@@ -261,6 +261,7 @@ final class InvoiceInboxIntake {
     row.setStatus(STATUS_PROCESSING);
     row.setAdjusted(false);
     row.setReviewed(false);
+    row.setProcessingAttempts(0L);
     return row;
   }
 

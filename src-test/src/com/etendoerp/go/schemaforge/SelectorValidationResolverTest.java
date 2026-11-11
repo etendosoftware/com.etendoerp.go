@@ -459,7 +459,7 @@ class SelectorValidationResolverTest {
       }
 
       assertEquals("as e where " + filter
-          + " AND (lower(COALESCE(cast(e.name as string), '')) LIKE :search)", where);
+          + " AND ((upper(COALESCE(cast(e.name as string), '')) LIKE :searchLoose AND lower(COALESCE(cast(e.name as string), '')) LIKE :search))", where);
       assertFalse(hasTopLevelOr(where.substring("as e where ".length())),
           "An OR outside parentheses would let rows skip the search: " + where);
     }
