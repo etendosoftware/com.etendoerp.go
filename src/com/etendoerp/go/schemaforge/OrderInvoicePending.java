@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -81,32 +82,6 @@ final class OrderInvoicePending {
   }
 
   /**
-   * The rule the purchase invoice's order popup computed in the browser before ETP-6099
-   * ({@code invoiceOrderImport.js}, {@code fetchOrderLines}, {@code importVia: 'client'}:
-   * {@code Math.max(0, ordered - invoiced)}), served under {@code pendingBasis: "classic"}: every
-   * active line other than the total-discount line (a line without product included, as the order's
-   * lines GET listed it), at {@code max(0, ordered - invoiced)}. NO draft deduction, and a line with
-   * nothing left is PRESENT at 0 (the popup greyed it), unlike {@link #beforeDrafts}.
-   *
-   * @param order the order
-   * @return {@code orderLineId -> pending (>= 0)}, in the order's line order
-   */
-  static Map<String, BigDecimal> classic(Order order) {
-    Map<String, BigDecimal> pending = new LinkedHashMap<>();
-    for (OrderLine ol : order.getOrderLineList()) {
-      if (!OrderImportListing.isListedLine(ol)) {
-        continue;
-      }
-      BigDecimal ordered = ol.getOrderedQuantity() == null ? BigDecimal.ZERO
-          : ol.getOrderedQuantity();
-      BigDecimal invoiced = ol.getInvoicedQuantity() == null ? BigDecimal.ZERO
-          : ol.getInvoicedQuantity();
-      pending.put(ol.getId(), ordered.subtract(invoiced).max(BigDecimal.ZERO));
-    }
-    return pending;
-  }
-
-  /**
    * {@code base} minus {@code drafts}; a line a draft already covers (or over-covers) drops out.
    *
    * @param base   pending before drafts, from {@link #beforeDrafts}
@@ -143,6 +118,52 @@ final class OrderInvoicePending {
           BigDecimal::add);
     }
     return held;
+  }
+
+  /**
+   * The DRAFT invoices (of the direction, {@code exceptInvoiceId} left out) whose active lines hold
+   * each order line, by document number: the same population {@link #DRAFT_QUANTITIES_HQL} counts.
+   */
+  static final String DRAFT_HOLDERS_HQL = "select distinct il.salesOrderLine.id, i.id, "
+      + "i.documentNo from InvoiceLine il join il.invoice i where i.documentStatus = 'DR' "
+      + "and i.salesTransaction = :sot and il.active = true and il.salesOrderLine.id in :ids "
+      + "and i.id <> :inv order by i.documentNo, i.id";
+
+  /** A draft invoice holding part of an order line: what the popup and the agent are told. */
+  static final class DraftInvoiceRef {
+    final String id;
+    final String documentNo;
+
+    DraftInvoiceRef(String id, String documentNo) {
+      this.id = id;
+      this.documentNo = documentNo;
+    }
+  }
+
+  /**
+   * Which OTHER draft invoices hold each order line (ETP-5828 QA UI-4): an order line the popup
+   * shows as taken can name the draft that took it instead of a bare «ya importado».
+   *
+   * @param orderLineIds    the order lines; an empty collection reads nothing
+   * @param sales           the direction of the drafts
+   * @param exceptInvoiceId the invoice the caller imports into (its own lines are "imported here")
+   * @return {@code orderLineId -> drafts by document number}; a line no other draft holds is absent
+   */
+  static Map<String, List<DraftInvoiceRef>> draftHolders(Collection<String> orderLineIds,
+      boolean sales, String exceptInvoiceId) {
+    Map<String, List<DraftInvoiceRef>> holders = new LinkedHashMap<>();
+    if (orderLineIds.isEmpty()) {
+      return holders;
+    }
+    List<Object[]> rows = OBDal.getInstance().getSession()
+        .createQuery(DRAFT_HOLDERS_HQL, Object[].class)
+        .setParameter("sot", sales).setParameter("inv", exceptInvoiceId)
+        .setParameterList("ids", orderLineIds).list();
+    for (Object[] row : rows) {
+      holders.computeIfAbsent((String) row[0], k -> new ArrayList<>())
+          .add(new DraftInvoiceRef((String) row[1], (String) row[2]));
+    }
+    return holders;
   }
 
   /**
