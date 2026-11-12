@@ -2343,36 +2343,133 @@ MCP:** `agentExcludedActions()` returns `discard`, so `etendo_action` answers 40
 **Known limits.** One similarity search per line; AI spend of the worker's OCR calls is probably
 not recorded by `CopilotToolUsageRecorder` (the client calls the service directly; not verified).
 
-### 4.6c SEPA remittances: the `remittance` spec and «Admite remesas» (ETP-6148)
+### 4.6c SEPA remittances: the `remittance` spec and the remittance bank accounts (ETP-6148)
 
 Classic's «Remittance» window (`org.openbravo.module.remittance`, window
 `FF8080812E71F7C7012E71FD0499001B`) served as the spec `remittance`: header `remittance`
 (`REM_Remittance`) and `lines` (`REM_RemittanceLine`, only «A remesar» editable). Behind the per-account flag
-`sepa-remittances` (`SepaRemittancesFlag`, off by default). Only two columns are new; everything else
-is Classic's model.
+`sepa-remittances` (`SepaRemittancesFlag`, off by default). `com.etendoerp.go` adds no column:
+everything is Classic's model.
 
-- **The account toggle.** `FIN_FINANCIAL_ACCOUNT.EM_ETGO_ALLOW_REMITTANCE` (field
-  `eTGOAllowRemittance` of `financial-account/account`), enforced by
-  `FinancialAccountRemittanceSupport` from `FinancialAccountHandler`: changing it with the flag off is
-  `403 feature_disabled`; on needs a Bank account with a valid IBAN (`400`); off, or archiving, with
-  open remittances is `422 ETGO_RemittanceAccountHasOpenRemittances`.
-- **Lazy provisioning.** The first account of a client turned on runs
-  `RemittanceSepaProvisioning.ensureClient` in the pre-hook (a failure aborts the save): the «In
-  Remittance» execution process, an active `REM_REM` document type and sequence, two payment methods
-  (SEPA direct debit collection, SEPA credit transfer payment) and their `REM_Remittance_Type` rows,
-  marked by the type parameter `ETGO_SEPA_SCHEME` = `CORE` / `SCT` — the only way they are found
-  again, never by name. Serialized per client by a PostgreSQL advisory lock; a leftover unique
-  conflict is `409 ETGO_RemittanceProvisioningConflict`. After the save both methods are linked to
-  the account with the setup Classic's `checkPMSetup` requires; turning off leaves the links
-  inactive.
+- **No per-account switch.** Every **Bank** (`B`) financial account created while the flag is on for
+  the acting user gets the two remittance payment methods; Cash and Card accounts never do. Accounts
+  created before, or with the flag off, are not revisited — there is no backfill and no data-fix.
+  Three creation paths, all through `RemittanceSepaProvisioning`:
+  - `financial-account/account` create (REST single and batch, MCP), `FinancialAccountHandler` with
+    `FinancialAccountRemittanceSupport`: the flag is read in the pre-hook, which runs
+    `ensureClient` last, after every validation, in the transaction that inserts the account — a
+    failure refuses the create and leaves nothing behind (`409 ETGO_RemittanceProvisioningConflict`
+    for a unique conflict, retry). The post-hook links the account, which needs its id; outside a
+    batch it runs after the commit, so a link failure is logged and the account stays without the
+    methods (and is then not offered by the remittance window).
+  - Bank connection `createAndLink` (`FinancialAccountBankConnectionHandler`): setup and links in
+    the handler's own transaction, before the Salt Edge linking; a failure refuses the create.
+  - Onboarding: the base dataset gives a tenant no financial account; the opt-in sample data brings
+    «Cuenta de Banco» (Bank, no IBAN). `OnboardingRemittanceSetupService` runs after the sample data,
+    after the commit, best effort, reading the flag for the account receiving the tenant (the
+    onboarding runs as System, so a DAL observer could not read it).
+- **Type change.** A Bank account with open remittances (REM status `PE`/`PR`/`CP`/`PP`, of a
+  provisioned type) cannot leave Bank: an update that changes `type` away from `B` answers
+  `422 ETGO_RemittanceAccountTypeChangeBlocked` with the count
+  (`FinancialAccountRemittanceSupport.checkTypeChange`, `RemittanceSepaProvisioning.countOpenRemittances`).
+  Not gated by the flag: the remittances exist whatever the flag says now, and only provisioned
+  types are counted, which exist only where the flag was on. With no open remittance the change
+  is allowed, and the account's remittance-method links (`FIN_FinAcc_PaymentMethod` rows to a
+  method a `ETGO_SEPA_SCHEME`-marked type points at) are deactivated by the post-hook, only once
+  the generic CRUD answered the update with success and the re-read account is no longer Bank
+  (`FinancialAccountRemittanceSupport.deactivateAfterLeavingBank` →
+  `RemittanceSepaProvisioning.deactivateAccountLinks`). The pre-hook only refuses or marks the
+  change (context attribute `financialAccount.leavingBank`): it writes nothing, because the generic
+  CRUD may still refuse the update (`missing_updated`, a stale record) and a pre-hook write would
+  then be committed with the refusal. Outside a batch the post-hook runs after the update is
+  committed, so a failure there is logged and the account keeps active links (registry debt
+  `remittance-link-failure-after-commit`). The remittance window then stops offering the account.
+  If the account becomes Bank again the links are **not** reactivated automatically.
+- **Lazy provisioning.** The first remittance account of a client runs
+  `RemittanceSepaProvisioning.ensureClient`: the «In Remittance» execution process, an active
+  `REM_REM` document type and sequence, two payment methods (SEPA direct debit collection, SEPA
+  credit transfer payment) and their `REM_Remittance_Type` rows, marked by the type parameter
+  `ETGO_SEPA_SCHEME` = `CORE` / `SCT` — the only way they are found again, never by name.
+  Serialized per client by a PostgreSQL advisory lock. Both methods are linked to the account with
+  the setup Classic's `checkPMSetup` requires; links are never removed, only deactivated when the
+  account leaves Bank (above).
 - **Header** (`RemittanceHeaderHandler`, `@NeoExtension(spec = "remittance", entity =
-  "remittance")`): flag off is `403 feature_disabled` on every surface; writes need an account that
-  allows remittances and a provisioned type linked to it (`422`); a processed remittance is not
-  editable (`422`). Selectors are served in `handle()`: `financialAccount` offers only accounts with
-  the toggle on, `remittanceType` only the provisioned types linked to the request's
-  `FIN_Financial_Account_ID`. DEFAULTS never prefill an account without the toggle. Interactive
+  "remittance")`): flag off is `403 feature_disabled` on every surface. A **remittance account** is a
+  Bank account (else `422 ETGO_RemittanceAccountNotBank`) with a valid IBAN for its country — the
+  account form's own pair check, `FinancialAccountCountrySupport.validateIbanCountryPair` (else
+  `422 ETGO_RemittanceAccountIbanRequired`) — and an active link to a remittance method (else
+  `422 ETGO_RemittanceAccountNotAllowed`). The link requirement keeps out the Bank accounts created
+  before the feature, which have no methods and would only fail later, at «Procesar», in
+  `checkPMSetup`. Writes need a remittance account and a provisioned type linked to it (`422`); a
+  processed remittance is not editable (`422`). Selectors are served in `handle()`:
+  `financialAccount` offers the active Bank accounts with an active remittance-method link, **with
+  or without a valid IBAN** (the header lets the user give the account one, below); the link
+  condition is `RemittanceSepaProvisioning.activeRemittanceLinkExists`, the same one
+  `hasRemittanceMethodLink` runs, and every item is `{id, label, iban (raw or null), ibanValid}`
+  (`ibanValid` = the account form's pair check); `totalCount`/`hasMore` come from the same list as
+  the items. `remittanceType` offers only the provisioned types linked to the request's
+  `FIN_Financial_Account_ID`. Writes stay strict: saving with an account without a valid IBAN is
+  `422 ETGO_RemittanceAccountIbanRequired`. DEFAULTS keep the strict rule too and never prefill an
+  account that is not a remittance account, an IBAN-less one included. Interactive
   callouts never reach Classic's `REM_RemittanceType_FinAccount` (it runs type → account, the
   reverse of this window, and fails on a cleared type); the handler answers them itself.
+- **«Datos para el fichero SEPA»** — declared read action `sepaFileData` of the header
+  (`RemittanceSepaFileData`). It reads the account, not the remittance, so it answers for a
+  remittance not saved yet: the SPA calls `POST …/remittance/remittance/new/action/sepaFileData`
+  (sentinel id `new`, never loaded; the generic `NeoActionRecordGuard` lets it through, it is not a
+  row) or the saved id, body `{accountId, organizationId?}` (GET with the same query parameters
+  also works). The organization is `organizationId` when sent, else the saved remittance's, else the
+  account's. Answer: `{accountId, accountName, iban (raw or null), ibanValid, organizationId,
+  country, creditorId, creditorIdAvailable, missing[]}`. `country` is the **organization's** ISO
+  code and `creditorId` the SEPA creditor identifier (AT-02) computed as Classic's
+  `SEPAUtil.getAT02Identification` does (`SepaCreditorId.build`), from the organization's own
+  `AD_OrgInfo` location country and tax ID — where Classic's `SEPA_RemittanceCreateFile` reads
+  them, no parent-organization fallback — and the **creditor business code** (positions 4-6): the
+  `Creditor_Business_Code` parameter of the client's provisioned collection type (`CORE`, found by
+  the `ETGO_SEPA_SCHEME` marker; the client is the account's), the parameter Classic's
+  `CoreDirectDebit` reads when it writes the file
+  (`RemittanceSepaProvisioning.creditorBusinessCode`). It is normalized as Classic does
+  (whitespace removed, first three characters) and is `000` when the parameter is missing or blank
+  (`RemittanceSepaFileData.suffixOf`), so the block shows what the file will contain. `missing`
+  lists, in this order, `iban` (no valid IBAN), `orgTaxId` (none, or one that cannot form an
+  identifier), `country`, and `creditorBusinessCode` when the stored code is not three letters or
+  digits. No BIC. 404 for an account or organization the tenant does not own; 422
+  `ETGO_RemittanceAccountNotBank` / `ETGO_RemittanceAccountNotAllowed` for an account that cannot
+  be used at all; 403 with the flag off. Not injected into the header GET (no `afterHandle`
+  enrichment): it is an action on purpose.
+- **Saving the IBAN on the account.** The IBAN typed in that block is saved on the **account**, not
+  on the remittance, through the financial-account spec so its validation and window access apply:
+  `GET /sws/neo/financial-account/account/{id}` then `PATCH` it with `{iBAN, updated}`
+  (`FinancialAccountHandler.validateCountryAndIban`, then `FIN_FINANCIAL_ACCOUNT_TRG2`). The
+  remittance handler never writes the account. **The account needs a country first:** the country is
+  never derived from the IBAN (ETP-5473), so on an account stored without one (legacy and
+  sample-data Bank accounts) the PATCH answers `400 ETGO_FinAccIbanRequiresCountry` and nothing is
+  saved; the user sets the country in the account's edit form, then saves the IBAN.
+- **Customer SEPA mandate** (contacts `businessPartner`, `BusinessPartnerHandler` →
+  `ContactSepaMandateDefaults`, every write channel: REST single, `/batch`, MCP). The OBSEPAD
+  columns `EM_Obsepad_Mandate_Identifier` (`obsepadMandateIdentifier`, max 35) and
+  `EM_Obsepad_Mandate_Date` (`obsepadMandateDate`) are **stored**, not only used as a fallback,
+  behind `sepa-remittances`:
+  - **create** of a customer (`customer` absent counts as customer, its AD default): a blank
+    identifier (absent, `null` or empty) takes the tax ID (`taxID`, cut to 35) when there is one,
+    a blank date takes today;
+  - **update** of a customer — any save, so contacts created before the feature or with the flag
+    off get it on their next save: each mandate field that is empty **in the database** and that
+    the body does **not send** is filled, the identifier with the current tax ID (the body's, else
+    the stored one, cut to 35) when there is one, the date with the contact's `Created` date;
+  - a value the caller sends always wins, and a stored non-empty value is never overwritten — a
+    later change of the tax ID keeps the identifier, which must stay a stable mandate reference;
+  - **limitation — a clear is not remembered.** A body that sends a mandate key empty or `null`
+    clears it for that save, but no column records that the clear was intended, so the next save
+    that does not send the key fills it again from the tax ID / creation date. A mandate cannot be
+    left empty for good on a customer while the flag is on. Accepted (ETP-6148); a marker column
+    was ruled out;
+  - a non-customer gets nothing: a **create** of a non-customer drops both keys (they can only come
+    from the form's DEFAULTS, fetched before the user picks the type); an update of one keeps what
+    it carries;
+  - **DEFAULTS** of a new contact prefill `obsepadMandateDate` with today (flag on, OBSEPAD
+    installed); the identifier is not prefilled, the tax ID is not known when the form opens;
+  - flag off: both keys are dropped from the write body (never persisted, never refused).
 - **Name suggestion.** On a new remittance, a callout for `dueDate` or `remittanceType` answers
   `updates.name = {value, suggested: true}` with «Cobros noviembre 2026» (pay-in type), «Pagos
   noviembre 2026» (pay-out type) or «Remesa noviembre 2026» (no type yet); English «Collections /
@@ -2463,8 +2560,8 @@ is Classic's model.
   ETP-6148): its own processes set it at every transition (process, reactivate, settle, return and
   their undo) through `RemittanceStatusUtil`. It is not backfilled: a remittance that existed
   before the column keeps the default `'PE'` until one of those transitions refreshes it.
-  `com.etendoerp.go` only reads it (list, filter, the open-remittances check). `RemittanceMethodLinkObserver` refuses a remittance-method link on an
-  account without the toggle, Classic included.
+  `com.etendoerp.go` only reads it (list, filter). `RemittanceMethodLinkObserver` refuses an active
+  remittance-method link on a non-Bank account, on every channel, Classic included.
 
 Flag, debt and retirement: `docs/feature-flags-and-tenant-upgrade.md` → `sepa-remittances`.
 
@@ -4186,7 +4283,9 @@ that is still linked to Salt Edge remains blocked from deletion.
 `FinancialAccountHandler` enforces on every channel (REST single, `/batch`, MCP) what the SPA's
 account forms enforce: on **create** `country` is mandatory for every type (Bank, Cash, Card); on
 **update** clearing it is refused on a Bank account that keeps an IBAN. The IBAN is never used to
-derive a country.
+derive a country: an IBAN cannot be saved on an account that has no country (`400
+ETGO_FinAccIbanRequiresCountry`), whoever sends it — the remittance window's «Datos para el fichero
+SEPA» block included (§4.6c). ETP-6148 briefly derived it from the IBAN prefix; that was reverted.
 
 **Refusals the handler answers.** Two `AD_MESSAGE`s of this module, built with **400** (on MCP the
 nested `error` is flattened into the tool envelope, `messageKeys` included, as for any handler

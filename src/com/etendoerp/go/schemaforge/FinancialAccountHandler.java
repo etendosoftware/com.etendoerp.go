@@ -214,6 +214,10 @@ public class FinancialAccountHandler implements NeoHandler {
    *  {@link FinancialAccountCountrySupport#buildIbanRules}. */
   private static final String FIELD_COUNTRY_IBAN_RULES = "countryIbanRules";
 
+  /** Context attribute set by the update pre-hook when the update takes a Bank account away
+   *  from Bank (ETP-6148); read by the post-hook. */
+  static final String ATTR_LEAVING_BANK = "financialAccount.leavingBank";
+
   static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
   static final String TYPE_CARD = "CA";
@@ -249,8 +253,8 @@ public class FinancialAccountHandler implements NeoHandler {
       new FinancialAccountBankConnectionActions();
 
   /**
-   * The «Admite remesas» rules (ETP-6148). Package-visible and non-final so unit tests can swap in
-   * one with its DAL and flag seams stubbed.
+   * The SEPA remittance provisioning of a new Bank account (ETP-6148). Package-visible and
+   * non-final so unit tests can swap in one with its DAL and flag seams stubbed.
    */
   FinancialAccountRemittanceSupport remittanceSupport = new FinancialAccountRemittanceSupport();
 
@@ -310,7 +314,12 @@ public class FinancialAccountHandler implements NeoHandler {
         return validateAndEnrichCreate(context.getRequestBody());
       }
       if (METHOD_PUT.equals(method) || METHOD_PATCH.equals(method)) {
-        return validateAndEnrichUpdate(context.getRecordId(), context.getRequestBody());
+        NeoResponse refusal =
+            validateAndEnrichUpdate(context.getRecordId(), context.getRequestBody());
+        if (refusal == null) {
+          markLeavingBank(context);
+        }
+        return refusal;
       }
       if (METHOD_DELETE.equals(method)) {
         return deleteAccount(context.getRecordId());
@@ -410,7 +419,7 @@ public class FinancialAccountHandler implements NeoHandler {
         return null;
       }
       addImportFromAdvisory(context);
-      applyRemittanceLinks(context, context.getRecordId());
+      deactivateRemittanceLinksAfterLeavingBank(context);
       return null;
     }
     if (!METHOD_POST.equals(context.getHttpMethod()) || !NeoEndpointTypes.isCrud(context)) {
@@ -437,33 +446,77 @@ public class FinancialAccountHandler implements NeoHandler {
       exitAdminMode();
     }
     // Inline, NOT in provisionNewAccount: that seam holds what EVERY new account receives (default
-    // payment methods, accounting defaults) and is shared with the bank-connection creation flow.
-    // The remittance links are not a default: they follow eTGOAllowRemittance in this request's
-    // body and run only while the sepa-remittances flag is on, so they belong to this hook alone.
-    applyRemittanceLinks(context, extractCreatedId(context));
+    // payment methods, accounting defaults), best-effort. The remittance links apply to Bank
+    // accounts only, while the sepa-remittances flag is on, and their client setup already ran in
+    // the pre-hook (validateAndEnrichCreate), in the account's own transaction.
+    linkRemittanceMethods(context, extractCreatedId(context));
     // Keep the original CRUD response untouched.
     return null;
   }
 
   /**
-   * ETP-6148: after a successful create or update that carried {@code eTGOAllowRemittance}, links
-   * or unlinks the remittance payment methods ({@link FinancialAccountRemittanceSupport#afterWrite}).
-   * The account is already saved, so a failure is logged, not answered: the next save of the flag
-   * repairs the links, because they are reconciled idempotently.
+   * ETP-6148: records on the context that this update takes a Bank account to another type, so
+   * {@link #deactivateRemittanceLinksAfterLeavingBank} deactivates its remittance links once the
+   * update succeeded. Nothing is written here: the generic CRUD may still refuse the update
+   * ({@code missing_updated}, a stale record), and the pre-hook does not roll back.
    */
-  private void applyRemittanceLinks(NeoContext context, String accountId) {
-    JSONObject request = context.getRequestBody();
+  private void markLeavingBank(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null || !body.has(FIELD_TYPE)) {
+      return;
+    }
+    FIN_FinancialAccount stored = loadAccount(context.getRecordId());
+    if (stored != null && remittanceSupport.leavesBank(stored,
+        normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored)))) {
+      context.setAttribute(ATTR_LEAVING_BANK, Boolean.TRUE);
+    }
+  }
+
+  /**
+   * ETP-6148: after an update that took a Bank account to another type succeeded, deactivates its
+   * remittance-method links ({@link FinancialAccountRemittanceSupport#deactivateAfterLeavingBank}).
+   * Outside a batch the update is committed by now, so a failure is logged, not answered: the
+   * account keeps active links, which the remittance window no longer offers (it is not Bank).
+   */
+  private void deactivateRemittanceLinksAfterLeavingBank(NeoContext context) {
     NeoResponse prev = context.getPreviousResult();
-    if (request == null || !request.has(FinancialAccountRemittanceSupport.FIELD_ALLOW)
-        || StringUtils.isBlank(accountId) || prev == null || prev.getHttpStatus() < 200
+    if (!Boolean.TRUE.equals(context.getAttribute(ATTR_LEAVING_BANK)) || prev == null
+        || prev.getHttpStatus() < 200 || prev.getHttpStatus() >= 300) {
+      return;
+    }
+    try {
+      enterAdminMode();
+      FIN_FinancialAccount account = loadAccount(context.getRecordId());
+      if (account != null) {
+        refreshAccount(account);
+      }
+      remittanceSupport.deactivateAfterLeavingBank(account);
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to deactivate the remittance links of {}",
+          context.getRecordId(), e);
+    } finally {
+      exitAdminMode();
+    }
+  }
+
+  /**
+   * ETP-6148: after a successful create, links a new Bank account to the two SEPA remittance
+   * payment methods while the {@code sepa-remittances} flag is on
+   * ({@link FinancialAccountRemittanceSupport#linkNewAccount}). Outside a batch the account is
+   * already committed, so a failure is logged, not answered: the account stays usable, without
+   * the remittance methods, and is then not offered by the remittance window.
+   */
+  private void linkRemittanceMethods(NeoContext context, String accountId) {
+    NeoResponse prev = context.getPreviousResult();
+    if (StringUtils.isBlank(accountId) || prev == null || prev.getHttpStatus() < 200
         || prev.getHttpStatus() >= 300) {
       return;
     }
     try {
       enterAdminMode();
-      remittanceSupport.afterWrite(loadAccount(accountId));
+      remittanceSupport.linkNewAccount(loadAccount(accountId));
     } catch (Exception e) {
-      log.error("financial-account afterHandle: failed to reconcile the remittance links of {}",
+      log.error("financial-account afterHandle: failed to link the remittance methods of {}",
           accountId, e);
     } finally {
       exitAdminMode();
@@ -776,14 +829,6 @@ public class FinancialAccountHandler implements NeoHandler {
     if (countryError != null) {
       return countryError;
     }
-    // ETP-6148: «Admite remesas» on create. Before the provider upsert below for the same reason
-    // as the country check: a refused create must leave nothing behind.
-    if (body.has(FinancialAccountRemittanceSupport.FIELD_ALLOW)) {
-      NeoResponse remittanceError = remittanceSupport.checkWrite(body, null, type);
-      if (remittanceError != null) {
-        return remittanceError;
-      }
-    }
     // Persist the chosen Salt Edge provider (offline "with bank selected" flow, bank and card
     // accounts): upsert the provider and inject the FK so the account remembers its bank. The
     // account stays offline — this is metadata only — but a later bank connect can then preselect
@@ -796,6 +841,13 @@ public class FinancialAccountHandler implements NeoHandler {
     // so reconciliation has an algorithm to work with.
     injectDefaultMatchingAlgorithm(body);
 
+    // ETP-6148: a Bank account created with sepa-remittances on gets the remittance payment
+    // methods. The client setup runs here, last, once every validation passed, so it shares the
+    // account insert's transaction: a failure refuses the create (409 on a provisioning conflict)
+    // and leaves nothing behind. The links follow in afterHandle, which has the account's id.
+    if (remittanceSupport.appliesTo(type)) {
+      return remittanceSupport.prepareClient();
+    }
     return null;
   }
 
@@ -842,16 +894,16 @@ public class FinancialAccountHandler implements NeoHandler {
     if (countryError != null) {
       return countryError;
     }
-    return validateRemittanceUpdate(body, id);
+    return validateTypeChange(body, id);
   }
 
   /**
-   * ETP-6148: the «Admite remesas» rules on update — the flag itself, and a type change or IBAN
-   * clear on an account that allows remittances. Loads the account only when the body can affect
-   * them, so the ordinary partial update (rename, tolerances) never reaches the DAL here.
+   * ETP-6148: a Bank account with open SEPA remittances cannot leave Bank
+   * ({@link FinancialAccountRemittanceSupport#checkTypeChange}). Loads the account only when the
+   * body carries the type, so an ordinary partial update never reaches the DAL here.
    */
-  private NeoResponse validateRemittanceUpdate(JSONObject body, String id) throws JSONException {
-    if (!remittanceSupport.isRelevant(body)) {
+  private NeoResponse validateTypeChange(JSONObject body, String id) {
+    if (!body.has(FIELD_TYPE)) {
       return null;
     }
     FIN_FinancialAccount stored = loadAccount(id);
@@ -860,7 +912,7 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     String effectiveType =
         normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored));
-    return remittanceSupport.checkWrite(body, stored, effectiveType);
+    return remittanceSupport.checkTypeChange(stored, effectiveType);
   }
 
   // ---------------------------------------------------------------------------
@@ -1128,6 +1180,11 @@ public class FinancialAccountHandler implements NeoHandler {
   Currency loadCurrency(String currencyId) {
     // tenant-ok: C_Currency is system reference data (client 0), it carries no tenant
     return OBDal.getInstance().get(Currency.class, currencyId);
+  }
+
+  /** Re-reads the account from the database, so the post-hook sees the type the update stored. */
+  void refreshAccount(FIN_FinancialAccount account) {
+    OBDal.getInstance().refresh(account);
   }
 
   FIN_FinancialAccount loadAccount(String accountId) {

@@ -53,6 +53,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.module.remittance.Remittance;
@@ -60,7 +61,7 @@ import org.openbravo.module.remittance.RemittanceType;
 
 /**
  * Unit tests for {@link RemittanceHeaderHandler}, the {@code remittance} spec's header
- * customization: the flag gate, the write rules (account with «Admite remesas», a provisioned type
+ * customization: the flag gate, the write rules (a remittance account, a provisioned type
  * linked to that account, processed is read-only, the name), the two selectors, the name
  * suggestion ({@link RemittanceNameSuggestion}) the callout answers and the create hooks fill
  * (REST pre-hook, MCP {@code resolveServerCreateFields}), and the routing of the two
@@ -78,6 +79,13 @@ import org.openbravo.module.remittance.RemittanceType;
  * @covers com.etendoerp.go.schemaforge.RemittanceHeaderHandler
  */
 class RemittanceHeaderHandlerTest {
+
+  /** A valid Spanish IBAN (mod-97 ok, 24 characters). */
+  private static final String ES_IBAN = "ES9121000418450200051332";
+  /** {@link #ES_IBAN} with its check digits broken. */
+  private static final String ES_IBAN_BAD_CHECKSUM = "ES0021000418450200051332";
+  /** A valid French IBAN: valid on its own, but not for a Spanish account. */
+  private static final String FR_IBAN = "FR1420041010050500013M02606";
 
   private static final String CLIENT_ID = "CLIENT-1";
   private static final String ACC_ID = "ACC-1";
@@ -155,7 +163,7 @@ class RemittanceHeaderHandlerTest {
   // ---------------------------------------------------------------- writes
 
   @Test
-  void aCreateOnAnAccountWithoutTheSettingIsRefusedAccountNotAllowed() throws Exception {
+  void aCreateOnAnAccountThatIsNotARemittanceAccountIsRefusedWithItsReason() throws Exception {
     stubAccount(false);
 
     NeoResponse response = handler.handle(create(validBody()));
@@ -331,30 +339,44 @@ class RemittanceHeaderHandlerTest {
 
   // ---------------------------------------------------------------- selectors
 
+  /**
+   * The account selector offers every active Bank account with a remittance-method link, WITH OR
+   * WITHOUT a valid IBAN (the header lets the user give it one); each item says which, and carries
+   * the stored IBAN. The link condition is the shared one of RemittanceSepaProvisioning.
+   */
   @Test
-  void theAccountSelectorOffersOnlyActiveAccountsThatAllowRemittances() throws Exception {
-    FIN_FinancialAccount bbva = mock(FIN_FinancialAccount.class);
-    when(bbva.getId()).thenReturn(ACC_ID);
-    when(bbva.getIdentifier()).thenReturn("BBVA");
-    selectorRows = List.of(bbva);
-    selectorTotal = 1;
+  void theAccountSelectorOffersBankAccountsWithLinksAndMarksTheirIban() throws Exception {
+    FIN_FinancialAccount bbva = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    FIN_FinancialAccount broken = bankAccount("ACC-BROKEN", "Broken", ES_IBAN_BAD_CHECKSUM);
+    FIN_FinancialAccount none = bankAccount("ACC-NONE", "Sin IBAN", null);
+    selectorRows = List.of(bbva, broken, none);
     doReturn(request(Map.of())).when(handler).currentRequest();
 
     NeoResponse response = handler.handle(selector("financialAccount"));
 
     JSONArray items = response.getBody().getJSONArray("items");
-    assertEquals(1, items.length());
+    assertEquals(3, items.length(), "an account without a valid IBAN is still offered");
     assertEquals(ACC_ID, items.getJSONObject(0).getString("id"));
     assertEquals("BBVA", items.getJSONObject(0).getString("label"));
-    assertEquals(1, response.getBody().getLong("totalCount"));
+    assertTrue(items.getJSONObject(0).getBoolean("ibanValid"));
+    assertEquals(ES_IBAN, items.getJSONObject(0).getString("iban"));
+    assertFalse(items.getJSONObject(1).getBoolean("ibanValid"));
+    assertEquals(ES_IBAN_BAD_CHECKSUM, items.getJSONObject(1).getString("iban"));
+    assertFalse(items.getJSONObject(2).getBoolean("ibanValid"));
+    assertTrue(items.getJSONObject(2).isNull("iban"));
+    assertEquals(3, response.getBody().getLong("totalCount"));
     assertFalse(response.getBody().getBoolean("hasMore"));
-    assertEquals(2, queries.size(), "a count and a page");
-    for (Recorded query : queries) {
-      assertTrue(query.hql.contains("a.eTGOAllowRemittance = true"), query.hql);
-      assertTrue(query.hql.contains("a.active = true"), query.hql);
-      assertEquals(CLIENT_ID, query.params.get("client"));
-      assertEquals(List.of("0", "ORG-1"), query.params.get("orgs"));
-    }
+    assertEquals(1, queries.size(), "one query; the page is cut from the same list");
+    Recorded query = queries.get(0);
+    assertTrue(query.hql.contains("a.type = :bank"), query.hql);
+    assertFalse(query.hql.contains("iBAN"), "no IBAN filter: " + query.hql);
+    assertTrue(query.hql.contains(RemittanceSepaProvisioning.activeRemittanceLinkExists("a")),
+        query.hql);
+    assertTrue(query.hql.contains("a.active = true"), query.hql);
+    assertEquals("B", query.params.get("bank"));
+    assertEquals(RemittanceSepaProvisioning.PARAM_SCHEME, query.params.get("marker"));
+    assertEquals(CLIENT_ID, query.params.get("client"));
+    assertEquals(List.of("0", "ORG-1"), query.params.get("orgs"));
   }
 
   @Test
@@ -365,7 +387,7 @@ class RemittanceHeaderHandlerTest {
 
     handler.handle(selector("FIN_Financial_Account_ID"));
 
-    assertEquals(2, queries.size());
+    assertEquals(1, queries.size());
     assertTrue(queries.get(0).hql.contains("lower(a.name) like :search"));
     assertEquals("%bb%", queries.get(0).params.get("search"));
   }
@@ -419,7 +441,11 @@ class RemittanceHeaderHandlerTest {
 
   @Test
   void theSelectorPagesWithLimitAndOffsetAndReportsHasMore() throws Exception {
-    selectorTotal = 30;
+    List<Object> accounts = new ArrayList<>();
+    for (int i = 0; i < 30; i++) {
+      accounts.add(bankAccount("ACC-" + i, "Bank " + i, ES_IBAN));
+    }
+    selectorRows = accounts;
     HttpServletRequest request = request(Map.of());
     when(request.getParameter("limit")).thenReturn("10");
     when(request.getParameter("offset")).thenReturn("5");
@@ -427,8 +453,177 @@ class RemittanceHeaderHandlerTest {
 
     NeoResponse response = handler.handle(selector("financialAccount"));
 
+    JSONArray items = response.getBody().getJSONArray("items");
+    assertEquals(10, items.length());
+    assertEquals("ACC-5", items.getJSONObject(0).getString("id"));
     assertTrue(response.getBody().getBoolean("hasMore"));
     assertEquals(30, response.getBody().getLong("totalCount"));
+  }
+
+  /** An offset past the last account answers an empty page that has no more. */
+  @Test
+  void anOffsetPastTheEndAnswersAnEmptyPageWithoutMore() throws Exception {
+    selectorRows = List.of(bankAccount("ACC-0", "Bank 0", ES_IBAN),
+        bankAccount("ACC-1", "Bank 1", ES_IBAN));
+    HttpServletRequest request = request(Map.of());
+    when(request.getParameter("limit")).thenReturn("10");
+    when(request.getParameter("offset")).thenReturn("50");
+    doReturn(request).when(handler).currentRequest();
+
+    NeoResponse response = handler.handle(selector("financialAccount"));
+
+    assertEquals(0, response.getBody().getJSONArray("items").length());
+    assertFalse(response.getBody().getBoolean("hasMore"));
+    assertEquals(2, response.getBody().getLong("totalCount"));
+  }
+
+  // ---------------------------------------------------------------- remittance account
+
+  /**
+   * accountRefusal, cheapest first: a non-Bank account is NotBank without any link query; a Bank
+   * account without a valid IBAN for its country (none, no country, a broken checksum, an IBAN of
+   * another country) is IbanRequired; a valid Bank account without the remittance methods is
+   * NotAllowed; with them it is a remittance account.
+   */
+  @Test
+  void accountRefusalChecksTypeThenIbanThenTheRemittanceLinks() {
+    for (String type : new String[] { "C", "CA", null }) {
+      FIN_FinancialAccount account = bankAccount(ACC_ID, "Caja", ES_IBAN);
+      when(account.getType()).thenReturn(type);
+      assertEquals(RemittanceHeaderHandler.MSG_ACCOUNT_NOT_BANK, handler.accountRefusal(account),
+          String.valueOf(type));
+    }
+    verify(handler, never()).hasRemittanceMethods(any());
+
+    FIN_FinancialAccount noIban = bankAccount(ACC_ID, "BBVA", null);
+    FIN_FinancialAccount blankIban = bankAccount(ACC_ID, "BBVA", "  ");
+    FIN_FinancialAccount noCountry = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    when(noCountry.getCountry()).thenReturn(null);
+    FIN_FinancialAccount badChecksum = bankAccount(ACC_ID, "BBVA", ES_IBAN_BAD_CHECKSUM);
+    FIN_FinancialAccount otherCountry = bankAccount(ACC_ID, "BNP", FR_IBAN);
+    for (FIN_FinancialAccount account : List.of(noIban, blankIban, noCountry, badChecksum,
+        otherCountry)) {
+      assertEquals(RemittanceHeaderHandler.MSG_ACCOUNT_IBAN_REQUIRED,
+          handler.accountRefusal(account), String.valueOf(account.getIBAN()));
+    }
+    verify(handler, never()).hasRemittanceMethods(any());
+
+    FIN_FinancialAccount unlinked = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(false).when(handler).hasRemittanceMethods(unlinked);
+    assertEquals(RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED,
+        handler.accountRefusal(unlinked));
+
+    FIN_FinancialAccount remittanceAccount = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(true).when(handler).hasRemittanceMethods(remittanceAccount);
+    assertNull(handler.accountRefusal(remittanceAccount));
+  }
+
+  /** The IBAN is read as the account form reads it: spaces and case do not matter. */
+  @Test
+  void aValidIbanIsAcceptedWhateverItsSpacingOrCase() {
+    assertTrue(RemittanceHeaderHandler.hasValidIban(
+        bankAccount(ACC_ID, "BBVA", "es91 2100 0418 4502 0005 1332")));
+    assertFalse(RemittanceHeaderHandler.hasValidIban(
+        bankAccount(ACC_ID, "BBVA", ES_IBAN_BAD_CHECKSUM)));
+  }
+
+  /** A create answers each refusal of the account with its own key, before the type is read. */
+  @Test
+  void aCreateAnswersEachAccountRefusalWithItsOwnKey() throws Exception {
+    FIN_FinancialAccount cash = bankAccount(ACC_ID, "Caja", ES_IBAN);
+    when(cash.getType()).thenReturn("C");
+    FIN_FinancialAccount withoutIban = bankAccount(ACC_ID, "BBVA", null);
+    FIN_FinancialAccount unlinked = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(false).when(handler).hasRemittanceMethods(unlinked);
+    Object[][] cases = {
+        { cash, RemittanceHeaderHandler.MSG_ACCOUNT_NOT_BANK },
+        { withoutIban, RemittanceHeaderHandler.MSG_ACCOUNT_IBAN_REQUIRED },
+        { unlinked, RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED }, };
+
+    for (Object[] c : cases) {
+      doReturn(c[0]).when(handler).loadAccount(ACC_ID);
+
+      NeoResponse response = handler.handle(create(validBody()));
+
+      assertEquals(422, response.getHttpStatus(), (String) c[1]);
+      assertEquals(c[1], messageKey(response));
+    }
+    assertEquals("ETGO_RemittanceAccountNotBank", RemittanceHeaderHandler.MSG_ACCOUNT_NOT_BANK);
+    assertEquals("ETGO_RemittanceAccountIbanRequired",
+        RemittanceHeaderHandler.MSG_ACCOUNT_IBAN_REQUIRED);
+    assertEquals("ETGO_RemittanceAccountNotAllowed",
+        RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED);
+    verify(handler, never()).loadType(any());
+  }
+
+  // ---------------------------------------------------------------- DEFAULTS
+
+  /**
+   * The generic defaults may prefill any account; one that is not a remittance account — a Cash
+   * one, or a Bank one without the remittance methods — is dropped, and the type with it, while
+   * the other defaults stay.
+   */
+  @Test
+  void theDefaultsDropAnAccountThatIsNotARemittanceAccountAndItsType() throws Exception {
+    FIN_FinancialAccount cash = bankAccount(ACC_ID, "Caja", ES_IBAN);
+    when(cash.getType()).thenReturn("C");
+    FIN_FinancialAccount unlinked = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(false).when(handler).hasRemittanceMethods(unlinked);
+
+    for (FIN_FinancialAccount account : List.of(cash, unlinked)) {
+      doReturn(account).when(handler).loadAccount(ACC_ID);
+
+      NeoResponse response = handler.afterHandle(defaultsContext());
+
+      JSONObject defaults = response.getBody().getJSONObject("defaults");
+      assertFalse(defaults.has("financialAccount"), defaults.toString());
+      assertFalse(defaults.has("financialAccount$_identifier"), defaults.toString());
+      assertFalse(defaults.has("remittanceType"), defaults.toString());
+      assertFalse(defaults.has("remittanceType$_identifier"), defaults.toString());
+      assertEquals("Remesa noviembre", defaults.getString("name"), "other defaults stay");
+    }
+    verify(handler, never()).hasRemittanceMethods(cash);
+  }
+
+  /**
+   * A Bank account with the remittance methods but no valid IBAN may be chosen in the selector,
+   * but it is never prefilled: the defaults drop it, and the type with it.
+   */
+  @Test
+  void theDefaultsDropALinkedAccountWithoutAValidIban() throws Exception {
+    FIN_FinancialAccount noIban = bankAccount(ACC_ID, "BBVA", null);
+    FIN_FinancialAccount brokenIban = bankAccount(ACC_ID, "BBVA", ES_IBAN_BAD_CHECKSUM);
+
+    for (FIN_FinancialAccount account : List.of(noIban, brokenIban)) {
+      doReturn(true).when(handler).hasRemittanceMethods(account);
+      doReturn(account).when(handler).loadAccount(ACC_ID);
+
+      NeoResponse response = handler.afterHandle(defaultsContext());
+
+      JSONObject defaults = response.getBody().getJSONObject("defaults");
+      assertFalse(defaults.has("financialAccount"), defaults.toString());
+      assertFalse(defaults.has("remittanceType"), defaults.toString());
+    }
+  }
+
+  /** A remittance account is kept as the default: the generic result stands. */
+  @Test
+  void theDefaultsKeepARemittanceAccount() throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    assertNull(handler.afterHandle(defaultsContext()));
+  }
+
+  private static NeoContext defaultsContext() throws Exception {
+    JSONObject defaults = new JSONObject().put("financialAccount", ACC_ID)
+        .put("financialAccount$_identifier", "BBVA").put("remittanceType", TYPE_ID)
+        .put("remittanceType$_identifier", "SEPA CORE").put("name", "Remesa noviembre");
+    NeoContext ctx = context("GET", NeoEndpointType.DEFAULTS, null, null);
+    when(ctx.getPreviousResult())
+        .thenReturn(NeoResponse.ok(new JSONObject().put("defaults", defaults)));
+    return ctx;
   }
 
   // ---------------------------------------------------------------- callouts
@@ -715,10 +910,30 @@ class RemittanceHeaderHandlerTest {
     return request;
   }
 
-  private FIN_FinancialAccount stubAccount(boolean allow) {
+  /**
+   * The account the body names: a remittance account when {@code eligible}, otherwise one
+   * {@link RemittanceHeaderHandler#accountRefusal} refuses as without remittance methods.
+   */
+  private FIN_FinancialAccount stubAccount(boolean eligible) {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    when(account.isETGOAllowRemittance()).thenReturn(allow);
+    doReturn(eligible ? null : RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED).when(handler)
+        .accountRefusal(account);
     doReturn(account).when(handler).loadAccount(ACC_ID);
+    return account;
+  }
+
+  /** A Bank account in Spain (IBAN-configured country) with {@code iban}. */
+  private static FIN_FinancialAccount bankAccount(String id, String name, String iban) {
+    Country spain = mock(Country.class);
+    when(spain.getName()).thenReturn("Spain");
+    when(spain.getIBANCode()).thenReturn("ES");
+    when(spain.getIBANLength()).thenReturn(24L);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(id);
+    when(account.getIdentifier()).thenReturn(name);
+    when(account.getType()).thenReturn("B");
+    when(account.getIBAN()).thenReturn(iban);
+    when(account.getCountry()).thenReturn(spain);
     return account;
   }
 
@@ -911,8 +1126,287 @@ class RemittanceHeaderHandlerTest {
   void theHeaderDeclaresTheDueItemsAndProcessActions() {
     assertTrue(handler.servesActions());
     assertEquals(List.of("availableDueItems", "selectDueItems", "syncDueItems", "process",
-        "reactivate"),
+        "reactivate", "sepaFileData"),
         new ArrayList<>(handler.actionContracts().keySet()));
+  }
+
+  // ---------------------------------------------------------------- sepaFileData
+
+  /**
+   * «Datos para el fichero SEPA» on a remittance that is not saved yet (record id {@code new}, the
+   * SPA's POST body {@code {accountId}}): the remittance is never required, the account's
+   * organization is used, and an account without an IBAN is answered with iban in missing — the
+   * creditor identifier is the Classic AT-02 value for the organization's country and tax ID.
+   */
+  @Test
+  void sepaFileDataAnswersForANewRemittanceWithTheAccountsOrganization() throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", null);
+    when(account.getName()).thenReturn("BBVA");
+    org.openbravo.model.common.enterprise.Organization org = organization("ORG-1", "ES",
+        "B-12345678");
+    when(account.getOrganization()).thenReturn(org);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn(null).when(handler).creditorBusinessCode(account);
+    NeoContext ctx = context("POST", NeoEndpointType.ACTION,
+        new JSONObject().put("accountId", ACC_ID), "new");
+    when(ctx.getFieldName()).thenReturn("sepaFileData");
+
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject body = response.getBody();
+    assertEquals(ACC_ID, body.getString("accountId"));
+    assertEquals("BBVA", body.getString("accountName"));
+    assertTrue(body.isNull("iban"));
+    assertFalse(body.getBoolean("ibanValid"));
+    assertEquals("ORG-1", body.getString("organizationId"));
+    assertEquals("ES", body.getString("country"));
+    assertEquals(SepaCreditorId.build("ES", "000", "B12345678"), body.getString("creditorId"));
+    assertTrue(body.getBoolean("creditorIdAvailable"));
+    assertEquals(List.of("iban"), List.of(body.getJSONArray("missing").getString(0)));
+    assertEquals(1, body.getJSONArray("missing").length());
+    verify(handler, never()).loadRemittance(any());
+  }
+
+  /** Without the organization's tax ID and country, no creditor identifier and both are missing. */
+  @Test
+  void sepaFileDataNamesTheMissingOrganizationData() throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    org.openbravo.model.common.enterprise.Organization org = organization("ORG-1", null, "  ");
+    when(account.getOrganization()).thenReturn(org);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(null).when(handler).loadRemittance(REM_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn("000").when(handler).creditorBusinessCode(account);
+
+    NeoResponse response = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID)));
+
+    JSONObject body = response.getBody();
+    assertTrue(body.getBoolean("ibanValid"));
+    assertTrue(body.isNull("creditorId"));
+    assertFalse(body.getBoolean("creditorIdAvailable"));
+    assertEquals("[\"orgTaxId\",\"country\"]", body.getJSONArray("missing").toString());
+  }
+
+  /**
+   * The creditor business code is the one the file carries: the CORE type's
+   * Creditor_Business_Code, normalized as Classic does (whitespace removed, first three
+   * characters); missing or blank falls back to 000.
+   */
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource(value = { "ABC|ABC", " A B C D |ABC", "NULL|000",
+      "'   '|000" }, delimiter = '|', nullValues = "NULL")
+  void sepaFileDataBuildsTheCreditorIdWithTheClientsBusinessCode(String stored, String suffix)
+      throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    org.openbravo.model.common.enterprise.Organization org = organization("ORG-1", "ES",
+        "B-12345678");
+    when(account.getOrganization()).thenReturn(org);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(null).when(handler).loadRemittance(REM_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn(stored).when(handler).creditorBusinessCode(account);
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID))).getBody();
+
+    assertEquals(SepaCreditorId.build("ES", suffix, "B12345678"), body.getString("creditorId"));
+    assertEquals(suffix, body.getString("creditorId").substring(4, 7));
+    assertEquals(0, body.getJSONArray("missing").length());
+  }
+
+  /** A stored code that cannot form an identifier is named, not blamed on the tax ID. */
+  @Test
+  void sepaFileDataNamesAMalformedBusinessCode() throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    org.openbravo.model.common.enterprise.Organization org = organization("ORG-1", "ES",
+        "B-12345678");
+    when(account.getOrganization()).thenReturn(org);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(null).when(handler).loadRemittance(REM_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn("A").when(handler).creditorBusinessCode(account);
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID))).getBody();
+
+    assertTrue(body.isNull("creditorId"));
+    assertEquals("[\"creditorBusinessCode\"]", body.getJSONArray("missing").toString());
+  }
+
+  /** An account that cannot be used for a remittance at all is refused with its own key. */
+  @Test
+  void sepaFileDataRefusesAnAccountWithoutTheRemittanceMethods() throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(false).when(handler).hasRemittanceMethods(account);
+
+    NeoResponse response = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID)));
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(RemittanceHeaderHandler.MSG_ACCOUNT_NOT_ALLOWED, messageKey(response));
+  }
+
+  /** The organizationId a caller names must be one the tenant owns: otherwise 404. */
+  @Test
+  void sepaFileDataAnswers404ForAnOrganizationTheTenantDoesNotOwn() throws Exception {
+    sepaAccount();
+    doReturn(null).when(handler).loadOrganization("ORG-OTHER");
+
+    NeoResponse response = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID).put("organizationId", "ORG-OTHER")));
+
+    assertEquals(404, response.getHttpStatus());
+    verify(handler, never()).loadOrganizationInfo(any());
+    verify(handler, never()).loadRemittance(any());
+  }
+
+  /** A saved remittance is read for its organization, which wins over the account's. */
+  @Test
+  void sepaFileDataOfASavedRemittanceUsesTheRemittancesOrganization() throws Exception {
+    sepaAccount();
+    org.openbravo.model.common.enterprise.Organization remittanceOrg = organization("ORG-REM",
+        "FR", "FR12345678901");
+    Remittance stored = mock(Remittance.class);
+    when(stored.getOrganization()).thenReturn(remittanceOrg);
+    doReturn(stored).when(handler).loadRemittance(REM_ID);
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID))).getBody();
+
+    assertEquals("ORG-REM", body.getString("organizationId"));
+    assertEquals("FR", body.getString("country"));
+    assertEquals(SepaCreditorId.build("FR", "000", "FR12345678901"), body.getString("creditorId"));
+  }
+
+  /** An explicit organizationId is used as given, without reading the remittance. */
+  @Test
+  void sepaFileDataUsesAnExplicitOrganization() throws Exception {
+    sepaAccount();
+    org.openbravo.model.common.enterprise.Organization chosen = organization("ORG-CHOSEN", "ES",
+        "B-87654321");
+    doReturn(chosen).when(handler).loadOrganization("ORG-CHOSEN");
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID).put("organizationId", "ORG-CHOSEN")))
+        .getBody();
+
+    assertEquals("ORG-CHOSEN", body.getString("organizationId"));
+    verify(handler, never()).loadRemittance(any());
+  }
+
+  /** A GET carries its parameters in the query string. */
+  @Test
+  void sepaFileDataReadsAGetsQueryParameters() throws Exception {
+    sepaAccount();
+    org.openbravo.model.common.enterprise.Organization chosen = organization("ORG-CHOSEN", "ES",
+        "B-87654321");
+    doReturn(chosen).when(handler).loadOrganization("ORG-CHOSEN");
+    NeoContext ctx = action("GET", "sepaFileData", null);
+    when(ctx.getQueryParams()).thenReturn(
+        Map.of("accountId", " " + ACC_ID + " ", "organizationId", "ORG-CHOSEN"));
+
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(ACC_ID, response.getBody().getString("accountId"));
+    assertEquals("ORG-CHOSEN", response.getBody().getString("organizationId"));
+  }
+
+  @Test
+  void sepaFileDataAnswers403WhileTheFlagIsOff() throws Exception {
+    doReturn(false).when(handler).isFlagEnabled();
+
+    NeoResponse response = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID)));
+
+    assertEquals(403, response.getHttpStatus());
+    verify(handler, never()).loadAccount(any());
+  }
+
+  @Test
+  void sepaFileDataWithoutAnAccountIsRefusedByItsContract() throws Exception {
+    for (JSONObject body : new JSONObject[] { new JSONObject(),
+        new JSONObject().put("organizationId", "ORG-1") }) {
+      NeoResponse response = handler.handle(action("POST", "sepaFileData", body));
+
+      assertEquals(422, response.getHttpStatus());
+      assertEquals("accountId",
+          response.getBody().getJSONObject("error").getJSONArray("missingParameters").getString(0));
+    }
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** The MCP etendo_action call for a remittance not saved yet: id new, never a remittance read. */
+  @Test
+  void anMcpSepaFileDataCallWithIdNewAnswersTheAccount() throws Exception {
+    sepaAccount();
+    NeoContext ctx = context("POST", NeoEndpointType.ACTION,
+        new JSONObject().put("accountId", ACC_ID), RemittanceHeaderHandler.NEW_RECORD_ID);
+    when(ctx.getFieldName()).thenReturn("sepaFileData");
+    when(ctx.isMcpOrigin()).thenReturn(true);
+
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals("ORG-1", response.getBody().getString("organizationId"));
+    verify(handler, never()).loadRemittance(any());
+  }
+
+  /** A tax ID too long to form an identifier (over 28 characters) is reported as the tax ID. */
+  @Test
+  void sepaFileDataReportsATaxIdTooLongForAnIdentifier() throws Exception {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    org.openbravo.model.common.enterprise.Organization org = organization("ORG-1", "ES",
+        "B12345678901234567890123456789");
+    when(account.getOrganization()).thenReturn(org);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn(null).when(handler).creditorBusinessCode(account);
+    doReturn(null).when(handler).loadRemittance(REM_ID);
+
+    JSONObject body = handler.handle(action("POST", "sepaFileData",
+        new JSONObject().put("accountId", ACC_ID))).getBody();
+
+    assertTrue(body.isNull("creditorId"));
+    assertFalse(body.getBoolean("creditorIdAvailable"));
+    assertEquals("[\"orgTaxId\"]", body.getJSONArray("missing").toString());
+  }
+
+  /** A remittance account with a valid IBAN in Spain, organization ORG-1 (ES, B-12345678). */
+  private FIN_FinancialAccount sepaAccount() {
+    FIN_FinancialAccount account = bankAccount(ACC_ID, "BBVA", ES_IBAN);
+    org.openbravo.model.common.enterprise.Organization org = organization("ORG-1", "ES",
+        "B-12345678");
+    when(account.getOrganization()).thenReturn(org);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasRemittanceMethods(account);
+    doReturn(null).when(handler).creditorBusinessCode(account);
+    doReturn(null).when(handler).loadRemittance(REM_ID);
+    return account;
+  }
+
+  private static org.openbravo.model.common.enterprise.Organization organization(String id,
+      String countryIso, String taxId) {
+    org.openbravo.model.common.enterprise.Organization org =
+        mock(org.openbravo.model.common.enterprise.Organization.class);
+    when(org.getId()).thenReturn(id);
+    org.openbravo.model.common.enterprise.OrganizationInformation info =
+        mock(org.openbravo.model.common.enterprise.OrganizationInformation.class);
+    when(info.getTaxID()).thenReturn(taxId);
+    if (countryIso != null) {
+      Country country = mock(Country.class);
+      when(country.getISOCountryCode()).thenReturn(countryIso);
+      org.openbravo.model.common.geography.Location location =
+          mock(org.openbravo.model.common.geography.Location.class);
+      when(location.getCountry()).thenReturn(country);
+      when(info.getLocationAddress()).thenReturn(location);
+    }
+    when(org.getOrganizationInformationList()).thenReturn(List.of(info));
+    return org;
   }
 
   @Test

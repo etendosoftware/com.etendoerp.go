@@ -44,9 +44,9 @@ import org.openbravo.module.remittance.RemittanceType;
 import org.openbravo.module.remittance.RemittanceTypeParameter;
 
 /**
- * ETP-6148 — the per-client data SEPA remittances need, created lazily the first time a financial
- * account of the client is set to «Admite remesas», and the account links to the two remittance
- * payment methods.
+ * ETP-6148 — the per-client data SEPA remittances need, created lazily the first time a Bank
+ * financial account of the client is created while the {@code sepa-remittances} flag is on, and
+ * the links of that account to the two remittance payment methods ({@link #provisionAccount}).
  *
  * <p><b>What a client gets</b> ({@link #ensureClient}), all in organization {@code 0} and all
  * idempotent — a second call, or a second account, reuses what exists and never overwrites it:
@@ -77,12 +77,14 @@ import org.openbravo.module.remittance.RemittanceTypeParameter;
  * by {@code FinancialAccountSupport#createLink}: Classic's {@code REMRemittanceProcess#checkPMSetup}
  * refuses to process a remittance unless the account's link allows the remittance's direction, is
  * deferred, and executes automatically through a process — none of which the generic link sets.
- * Disabling never deletes a link: it is left inactive.
+ * Links are never removed. They are deactivated once, when the account stops being a Bank account
+ * ({@link #deactivateAccountLinks}, called by {@link FinancialAccountRemittanceSupport}), and are
+ * not reactivated if it becomes a Bank account again.
  *
  * <p><b>Concurrency.</b> {@link #ensureClient} takes a per-client advisory lock first, so two
- * first-time enables of the same client run one after the other and the second reuses what the
- * first committed. A remaining unique conflict (a writer outside this class inserting a document
- * type with the same name at the same instant) is answered 409 by
+ * first-time provisionings of the same client run one after the other and the second reuses what
+ * the first committed. A remaining unique conflict (a writer outside this class inserting a
+ * document type with the same name at the same instant) is answered 409 by
  * {@link FinancialAccountRemittanceSupport}, never 500.
  *
  * <p>Callers run in admin mode. Plain static utility; the DAL is the only collaborator.
@@ -93,6 +95,9 @@ public final class RemittanceSepaProvisioning {
 
   /** Name of the {@code REM_Remittance_Type_Param} that marks a provisioned remittance type. */
   public static final String PARAM_SCHEME = "ETGO_SEPA_SCHEME";
+  /** HQL parameter the {@link #activeRemittanceLinkExists} fragment binds the marker name to. */
+  public static final String PARAM_MARKER = "marker";
+
   /** Marker value of the SEPA direct debit (collection) type. */
   public static final String SCHEME_CORE = "CORE";
   /** Marker value of the SEPA credit transfer (payment) type. */
@@ -449,6 +454,25 @@ public final class RemittanceSepaProvisioning {
   }
 
   /**
+   * The creditor business code (positions 4-6 of the SEPA creditor identifier) the client's SEPA
+   * files carry: the {@value #PARAM_CREDITOR_BUSINESS_CODE} parameter of the client's provisioned
+   * collection type ({@value #SCHEME_CORE}, found by the {@value #PARAM_SCHEME} marker) — the
+   * parameter Classic's {@code CoreDirectDebit} reads from the remittance's type when it writes the
+   * file. Raw, as stored; the caller applies Classic's normalization and default.
+   *
+   * @param client the tenant (the account's client)
+   * @return the stored value, or {@code null} when the client has no provisioned collection type
+   *     or the type has no such parameter
+   */
+  public static String creditorBusinessCode(Client client) {
+    RemittanceType type = client != null ? findType(client, SCHEME_CORE) : null;
+    RemittanceTypeParameter parameter = type != null
+        ? findTypeParameter(type, PARAM_CREDITOR_BUSINESS_CODE)
+        : null;
+    return parameter != null ? parameter.getValue() : null;
+  }
+
+  /**
    * Whether {@code type} is a provisioned remittance type (carries the {@value #PARAM_SCHEME}
    * marker).
    *
@@ -499,44 +523,123 @@ public final class RemittanceSepaProvisioning {
   // ---------------------------------------------------------------------------
 
   /**
-   * Makes the account's links to the two remittance methods match {@code enabled}: created or
-   * reactivated (with the remittance setup re-applied) when enabled, left inactive when not.
-   * Flushes, so {@link RemittanceMethodLinkObserver} refuses here rather than at commit.
+   * Provisions a Bank account for remittances: the client setup ({@link #ensureClient}) and the
+   * account's links to the two remittance methods ({@link #ensureAccountLinks}). Idempotent.
+   * Callers decide whether it applies (Bank account, flag on); this method does not check either.
+   *
+   * @param account the financial account, already flushed
+   */
+  public static void provisionAccount(FIN_FinancialAccount account) {
+    ensureClient(account.getClient());
+    ensureAccountLinks(account);
+  }
+
+  /**
+   * Creates or reactivates the account's links to the two remittance methods, with the remittance
+   * setup re-applied, and flushes so {@link RemittanceMethodLinkObserver} refuses here rather than
+   * at commit. A client never provisioned (no remittance types) is logged and left unlinked.
    *
    * @param account the financial account
-   * @param enabled whether the account allows remittances
    */
-  public static void ensureAccountLinks(FIN_FinancialAccount account, boolean enabled) {
+  public static void ensureAccountLinks(FIN_FinancialAccount account) {
     boolean changed = false;
     for (String scheme : SCHEMES) {
       RemittanceType type = findType(account.getClient(), scheme);
       if (type == null || type.getPaymentMethod() == null) {
-        if (enabled) {
-          log.warn("Remittance type {} missing for client {}: account {} not linked", scheme,
-              account.getClient().getId(), account.getId());
-        }
+        log.warn("Remittance type {} missing for client {}: account {} not linked", scheme,
+            account.getClient().getId(), account.getId());
         continue;
       }
       FIN_PaymentMethod method = type.getPaymentMethod();
       FinAccPaymentMethod link = findLink(account, method);
-      if (enabled) {
-        if (link == null) {
-          createRemittanceLink(account, method);
-        } else {
-          applyRemittanceSetup(link, method);
-          link.setActive(true);
-          OBDal.getInstance().save(link);
-        }
-        changed = true;
-      } else if (link != null && Boolean.TRUE.equals(link.isActive())) {
-        link.setActive(false);
+      if (link == null) {
+        createRemittanceLink(account, method);
+      } else {
+        applyRemittanceSetup(link, method);
+        link.setActive(true);
         OBDal.getInstance().save(link);
-        changed = true;
       }
+      changed = true;
     }
     if (changed) {
       OBDal.getInstance().flush();
     }
+  }
+
+  /**
+   * Whether {@code account} has an active link to at least one provisioned remittance method — what
+   * makes it eligible for a remittance (offered by the account selector), together with being a
+   * Bank account; saving a remittance also needs a valid IBAN.
+   *
+   * @param account the financial account
+   * @return {@code true} when an active {@code FIN_FinAcc_PaymentMethod} joins it to a method a
+   *     marked remittance type points at
+   */
+  public static boolean hasRemittanceMethodLink(FIN_FinancialAccount account) {
+    if (account == null || StringUtils.isBlank(account.getId())) {
+      return false;
+    }
+    String hql = "select count(a.id) from " + FIN_FinancialAccount.ENTITY_NAME + " as a"
+        + " where a.id = :account and " + activeRemittanceLinkExists("a");
+    Long count = OBDal.getInstance().getSession().createQuery(hql, Long.class)
+        .setParameter("account", account.getId())
+        .setParameter(PARAM_MARKER, PARAM_SCHEME)
+        .uniqueResult();
+    return count != null && count > 0;
+  }
+
+  /**
+   * The HQL condition behind {@link #hasRemittanceMethodLink}, for a query that filters many
+   * accounts at once (the remittance window's account selector): true when the account aliased
+   * {@code accountAlias} has an active {@code FIN_FinAcc_PaymentMethod} to a method a marked
+   * remittance type points at. The caller binds {@value #PARAM_MARKER} to {@link #PARAM_SCHEME}.
+   * One definition, so the selector and the write check cannot disagree on what a remittance
+   * account is.
+   *
+   * @param accountAlias the HQL alias of the {@code FIN_Financial_Account} in the outer query
+   * @return the {@code exists (…)} condition
+   */
+  public static String activeRemittanceLinkExists(String accountAlias) {
+    return "exists (select 1 from " + FinAccPaymentMethod.ENTITY_NAME + " as rl, "
+        + RemittanceTypeParameter.ENTITY_NAME + " as rp"
+        + " where rl.account.id = " + accountAlias + ".id and rl.active = true"
+        + " and rp.remittanceType.paymentMethod.id = rl.paymentMethod.id"
+        + " and rp.name = :" + PARAM_MARKER + ")";
+  }
+
+  /**
+   * Deactivates the account's links to the remittance payment methods (the methods a remittance
+   * type carrying the {@value #PARAM_SCHEME} marker points at), and flushes. Called when a Bank
+   * account becomes Cash or Card with no open remittance: a remittance method on such an account
+   * is refused by {@link RemittanceMethodLinkObserver}, and Classic would otherwise keep offering
+   * it in the account's payment methods. The links are kept, inactive; becoming a Bank account
+   * again does not reactivate them. Every other link of the account is left alone.
+   *
+   * @param account the financial account
+   * @return how many links were deactivated
+   */
+  public static int deactivateAccountLinks(FIN_FinancialAccount account) {
+    if (account == null || StringUtils.isBlank(account.getId())) {
+      return 0;
+    }
+    String hql = "select l from " + FinAccPaymentMethod.ENTITY_NAME + " as l"
+        + " where l.account.id = :account and l.active = true"
+        + " and exists (select 1 from " + RemittanceTypeParameter.ENTITY_NAME + " as p"
+        + "   where p.remittanceType.paymentMethod.id = l.paymentMethod.id and p.name = :"
+        + PARAM_MARKER + ")";
+    List<FinAccPaymentMethod> links = OBDal.getInstance().getSession()
+        .createQuery(hql, FinAccPaymentMethod.class)
+        .setParameter("account", account.getId())
+        .setParameter(PARAM_MARKER, PARAM_SCHEME)
+        .list();
+    for (FinAccPaymentMethod link : links) {
+      link.setActive(false);
+      OBDal.getInstance().save(link);
+    }
+    if (!links.isEmpty()) {
+      OBDal.getInstance().flush();
+    }
+    return links.size();
   }
 
   /**

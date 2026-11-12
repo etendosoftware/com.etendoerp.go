@@ -28,7 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -182,10 +181,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "                  AND sc.connection_status = 'AC' "
           + "                  AND sc.last_fail_at IS NOT NULL "
           + "                  AND (sc.last_success_at IS NULL "
-          + "                       OR sc.last_fail_at > sc.last_success_at)), "
-          // Appended at the END for the same positional-read reason (ETP-6148). Always selected,
-          // but serialised only while the sepa-remittances flag is on — see buildAccountsArray.
-          + "       fa.em_etgo_allow_remittance "
+          + "                       OR sc.last_fail_at > sc.last_success_at)) "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -340,8 +336,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Set<String> accountsWithTransactions = loadAccountsWithTransactions(clientId, orgs);
 
     JSONObject data = new JSONObject();
-    data.put("accounts", buildAccountsArray(accounts, accountsWithTransactions,
-        isSepaRemittancesEnabled()));
+    data.put("accounts", buildAccountsArray(accounts, accountsWithTransactions));
     data.put("summary", buildSummary(accounts, resolveOrgCurrency()));
     // Sibling of accounts/summary, not a per-account field (ETP-4896). It is the same catalog that
     // the W-spec defaults response carries (see the injectAccountDefaults method over in
@@ -354,16 +349,6 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     JSONObject envelope = new JSONObject();
     envelope.put("response", responseData);
     return NeoResponse.ok(envelope);
-  }
-
-  /**
-   * ETP-6148 — whether the request's account has SEPA remittances on, evaluated at request entry
-   * through the flag's single gate. A seam so the unit test can drive both branches.
-   *
-   * @return {@code true} only when the {@code sepa-remittances} flag resolves to on
-   */
-  boolean isSepaRemittancesEnabled() {
-    return SepaRemittancesFlag.isEnabled();
   }
 
   // ---------------------------------------------------------------------------
@@ -431,7 +416,6 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // Left null when the account never synced (ETP-5582): the UI shows "never synced".
           row.lastSyncDate = rs.getTimestamp(25);
           row.bankConnectionStale = rs.getBoolean(26);
-          row.allowRemittance = "Y".equals(rs.getString(27));
           rows.add(row);
         }
       }
@@ -495,24 +479,6 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
   JSONArray buildAccountsArray(List<AccountRow> accounts,
       Set<String> accountsWithTransactions) throws JSONException {
-    return buildAccountsArray(accounts, accountsWithTransactions, false);
-  }
-
-  /**
-   * Serialises the account rows.
-   *
-   * @param accounts the rows read by {@link #loadAccounts}
-   * @param accountsWithTransactions ids of the accounts that already have transactions
-   * @param includeRemittance ETP-6148 — whether to add {@code allowRemittance}
-   *     ({@code EM_ETGO_ALLOW_REMITTANCE}), which the edit modal's "Admite remesas" toggle reads.
-   *     {@code true} only while the {@code sepa-remittances} flag is on for the request's account
-   *     ({@link #isSepaRemittancesEnabled()}); with it off the key is absent, so the payload is
-   *     the same as before the feature.
-   * @return the {@code accounts} array of the page payload
-   * @throws JSONException never in practice, from the JSON builders
-   */
-  JSONArray buildAccountsArray(List<AccountRow> accounts,
-      Set<String> accountsWithTransactions, boolean includeRemittance) throws JSONException {
     JSONArray arr = new JSONArray();
     for (AccountRow account : accounts) {
       JSONObject json = new JSONObject();
@@ -554,9 +520,6 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("glItemDifferenceId", account.glItemDifferenceId);
       json.put("glItemDifferenceName", account.glItemDifferenceName);
       json.put("hasTransactions", accountsWithTransactions.contains(account.id));
-      if (includeRemittance) {
-        json.put("allowRemittance", account.allowRemittance);
-      }
       arr.put(json);
     }
     return arr;
@@ -779,11 +742,6 @@ public class FinancialAccountsPageHandler implements NeoHandler {
      * {@code missing_updated}.
      */
     String updated = "";
-    /**
-     * Whether the account allows SEPA remittances ({@code EM_ETGO_ALLOW_REMITTANCE}, ETP-6148).
-     * Set by the loader; serialised only while the {@code sepa-remittances} flag is on.
-     */
-    boolean allowRemittance = false;
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {

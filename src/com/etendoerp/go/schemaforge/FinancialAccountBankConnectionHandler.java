@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import java.util.Date;
 import java.util.concurrent.TimeUnit;
 
-import javax.inject.Named;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -81,8 +80,15 @@ import com.google.common.cache.CacheBuilder;
  *   <li>{@code POST import-settings {financialAccountId, importFromDate?, importToDate?,
  *       statementGrouping?}} — updates the import configuration on the FA.</li>
  * </ul>
+ *
+ * <p>Bound by {@code @NeoExtension} since ETP-6148 (was {@code @Named(
+ * "financial-account-bank-connection")} plus the {@code ETGO_SF_ENTITY.Java_Qualifier}): a report
+ * spec, so the entity is named like the spec. Reached annotation-first by the report route
+ * ({@code NeoRequestRouter}) and by {@link FinancialAccountBankConnectionEndpoint}. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("financial-account-bank-connection")
+@NeoExtension(spec = "financial-account-bank-connection",
+    entity = "financial-account-bank-connection")
 public class FinancialAccountBankConnectionHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(FinancialAccountBankConnectionHandler.class);
@@ -177,6 +183,12 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
 
   /** Resolves the tenant's commercial plan; see {@link #includeSandboxProviders()}. */
   private final TenantPlanService tenantPlanService;
+
+  /**
+   * The SEPA remittance provisioning of a new Bank account (ETP-6148). Package-visible and
+   * non-final so unit tests can swap in one with its flag and DAL seams stubbed.
+   */
+  FinancialAccountRemittanceSupport remittanceSupport = new FinancialAccountRemittanceSupport();
 
   /** CDI requires a no-arg constructor; delegates to the test-injection one. */
   public FinancialAccountBankConnectionHandler() {
@@ -630,6 +642,14 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     // FIN_FINANCIAL_ACCOUNT_TRG has created the fin_financial_account_acct row the accounting step
     // corrects. Salt Edge linking below stays here — it is path-specific, not shared provisioning.
     FinancialAccountSupport.provisionNewAccount(finAcc);
+    // ETP-6148: a Bank account created with sepa-remittances on gets the remittance payment
+    // methods, in this same transaction (FinancialAccountRemittanceSupport). Not in
+    // provisionNewAccount: that seam is best-effort and unconditional, this is flag-gated and a
+    // failure refuses the create. Before the Salt Edge linking, so a refusal links nothing.
+    NeoResponse remittanceError = remittanceSupport.provisionNewAccount(finAcc);
+    if (remittanceError != null) {
+      return remittanceError;
+    }
 
     String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();

@@ -122,8 +122,8 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * <p>{@code capabilities.sepaRemittances} (ETP-6148) mirrors the backend-only
  * {@code sepa-remittances} flag. Same shape as {@code invoiceInbox}: per account, outside the admin
  * branch. {@link SepaRemittancesFlag} stays the one evaluator of the key; the Remittance menu entry
- * and window, the «Admite remesas» toggle of the Edit Account modal and the SEPA mandate section of
- * a contact read this capability and never evaluate the flag.</p>
+ * and window and the SEPA mandate section of a contact read this capability and never evaluate the
+ * flag.</p>
  *
  * GET /webhooks/SFWindowAccessMap
  */

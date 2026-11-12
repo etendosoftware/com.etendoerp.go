@@ -34,8 +34,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 /**
- * ETP-6148 — a remittance payment method can only be linked to a financial account that allows
- * remittances ({@code FIN_FINANCIAL_ACCOUNT.EM_ETGO_ALLOW_REMITTANCE = 'Y'}).
+ * ETP-6148 — a remittance payment method can only be linked to a Bank financial account
+ * ({@code FIN_FINANCIAL_ACCOUNT.TYPE = 'B'}): SEPA collections and transfers move money through a
+ * bank account with an IBAN, never through cash or a card.
  *
  * <p>A remittance method is one a provisioned remittance type points at
  * ({@link RemittanceSepaProvisioning#isRemittanceMethod}, the {@code ETGO_SEPA_SCHEME} type
@@ -43,15 +44,19 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
  * — the NEO financial-account window, MCP, and Classic's Financial Account window — and refused
  * with {@link MessageKeyedException} {@value #MSG_NOT_ALLOWED}, which NEO answers as 422
  * {@code business_rule}. Not flag-gated: the rule is about data, and a remittance method only
- * exists where the flag was on.
+ * exists where the flag was on. The provisioning itself only links Bank accounts
+ * ({@link FinancialAccountRemittanceSupport}); this guards the other writers, such as a user adding
+ * the method by hand in Classic's Financial Account window.
  *
- * <p>Only an <em>active</em> link is checked, so leaving a link inactive (what disabling
- * remittances does) is always allowed. On update the check runs only when the link's account,
+ * <p>Only an <em>active</em> link is checked, so leaving a link inactive is always allowed. On update the check runs only when the link's account,
  * method or active flag change, so an unrelated edit of an existing link is never refused.
  */
 public class RemittanceMethodLinkObserver extends EntityPersistenceEventObserver {
 
   static final String MSG_NOT_ALLOWED = "ETGO_RemittanceMethodAccountNotAllowed";
+
+  /** {@code FIN_FINANCIAL_ACCOUNT.TYPE} of a bank account. */
+  static final String TYPE_BANK = "B";
 
   private static Entity[] entities;
 
@@ -93,8 +98,7 @@ public class RemittanceMethodLinkObserver extends EntityPersistenceEventObserver
     }
     FIN_FinancialAccount account = (FIN_FinancialAccount) event.getCurrentState(accountProp);
     FIN_PaymentMethod method = (FIN_PaymentMethod) event.getCurrentState(methodProp);
-    if (account == null || method == null
-        || Boolean.TRUE.equals(account.isETGOAllowRemittance())) {
+    if (account == null || method == null || TYPE_BANK.equals(account.getType())) {
       return;
     }
     boolean remittanceMethod;

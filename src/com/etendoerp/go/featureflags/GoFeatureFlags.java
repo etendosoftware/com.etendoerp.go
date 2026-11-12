@@ -470,14 +470,15 @@ public final class GoFeatureFlags {
    * default: an unconfigured flag, an unreachable control plane and any evaluation error all read
    * as {@code false}.
    *
-   * <p><b>What it gates.</b> The «Admite remesas» toggle of a financial account
-   * ({@code EM_ETGO_ALLOW_REMITTANCE}, in the Edit Account modal) and the lazy provisioning and
-   * payment-method links it triggers — off, changing it is refused with 403
-   * {@code feature_disabled}; the default SEPA mandate of a customer — off, its keys are dropped
-   * from the write body; and the {@code remittance} spec (header and lines) — off, 403
-   * {@code feature_disabled}. <b>Not gated:</b> the {@code FIN_FINANCIAL_ACCOUNT.EM_ETGO_ALLOW_REMITTANCE}
-   * column, the messages, and the DAL observer that guards the remittance links — an observer
-   * cannot read a per-account flag, and remittance data only exists where the flag was on. The
+   * <p><b>What it gates.</b> The remittance provisioning of a new Bank financial account — on,
+   * a Bank account created through NEO (REST, batch, MCP), the bank-connection flow or the
+   * onboarding sample data gets the two SEPA remittance payment methods, provisioning the client
+   * on first use; off, it is created as before; existing accounts are never revisited — the default
+   * SEPA mandate of a customer — off, its keys are dropped from the write body; and the
+   * {@code remittance} spec (header and lines) — off, 403 {@code feature_disabled}. <b>Not
+   * gated:</b> the messages, and the DAL observer that keeps remittance methods on Bank accounts —
+   * an observer cannot read a per-account flag, and remittance data only exists where the flag was
+   * on. The
    * remittance status is not this module's: it is {@code REM_REMITTANCE.REMITTANCE_STATUS}, owned
    * and maintained by {@code org.openbravo.module.remittance} (added by ETP-6148).
    *

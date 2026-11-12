@@ -81,7 +81,9 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  *
  * <p>Linking is delegated to {@link SaltEdgeAccountLinkHelper}; account creation is delegated to
  * {@link FinancialAccountSupport}. Both are mocked statically so the tests assert only this
- * handler's orchestration and response envelope.
+ * handler's orchestration and response envelope. The SEPA remittance provisioning of a created
+ * Bank account ({@link FinancialAccountRemittanceSupport}, ETP-6148) is a spy whose flag and DAL
+ * seams are stubbed.
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
  */
@@ -99,6 +101,10 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   public void setUp() {
     handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
+    // ETP-6148: createAndLink reads the sepa-remittances flag for a Bank account, which a developer
+    // may have on locally; pin it off so these tests never provision remittances.
+    handler.remittanceSupport = spy(new FinancialAccountRemittanceSupport());
+    Mockito.doReturn(false).when(handler.remittanceSupport).isFlagEnabled();
   }
 
   @After
@@ -297,6 +303,102 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       assertEquals(201, response.getHttpStatus());
       support.verify(() -> FinancialAccountSupport.provisionNewAccount(created));
     }
+  }
+
+  // ── SEPA remittances: createAndLink provisions a Bank account before the Salt Edge link ────
+
+  /**
+   * Runs a createAndLink of an account of {@code type} with the remittance flag {@code flagOn},
+   * recording into {@code steps} the remittance provisioning and the Salt Edge link, in order. A
+   * non-null {@code provisioningFailure} is thrown by the provisioning after it is recorded.
+   */
+  private NeoResponse createAndLinkRecording(String type, boolean flagOn, List<String> steps,
+      FIN_FinancialAccount created, RuntimeException provisioningFailure) throws Exception {
+    JSONObject body = createAndLinkBody().put(PARAM_TYPE, type);
+    JSONArray nodes = new JSONArray().put(new JSONObject()
+        .put("id", SALT_EDGE_ACCOUNT_ID).put("name", "Ahorro").put("currency_code", "EUR"));
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+    when(created.getId()).thenReturn("FA-NEW");
+    when(created.getName()).thenReturn("BBVA - Ahorro");
+    when(created.getType()).thenReturn(type);
+    Mockito.doReturn(flagOn).when(handler.remittanceSupport).isFlagEnabled();
+    Mockito.doAnswer(inv -> {
+      steps.add("remittance");
+      if (provisioningFailure != null) {
+        throw provisioningFailure;
+      }
+      return null;
+    }).when(handler.remittanceSupport).provisionAccount(created);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      stubCreateAndLinkHappyPath(utils, support, linkHelper, obDal, nodes, details, type,
+          mock(Currency.class), created);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenAnswer(inv -> {
+            steps.add("saltEdgeLink");
+            return "";
+          });
+
+      return handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
+    }
+  }
+
+  /**
+   * A Bank account created with the sepa-remittances flag on is provisioned for remittances in the
+   * create transaction, before it is linked to Salt Edge.
+   */
+  @Test
+  public void testCreateAndLinkProvisionsABankAccountForRemittancesBeforeLinkingIt()
+      throws Exception {
+    List<String> steps = new java.util.ArrayList<>();
+    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
+
+    NeoResponse response = createAndLinkRecording("B", true, steps, created, null);
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(List.of("remittance", "saltEdgeLink"), steps);
+  }
+
+  /**
+   * A provisioning conflict (unique violation) answers 409 ETGO_RemittanceProvisioningConflict and
+   * the account is never linked to Salt Edge.
+   */
+  @Test
+  public void testCreateAndLinkSkipsTheSaltEdgeLinkWhenTheRemittanceProvisioningConflicts()
+      throws Exception {
+    List<String> steps = new java.util.ArrayList<>();
+    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
+    Mockito.doNothing().when(handler.remittanceSupport).rollback();
+    RuntimeException duplicate = new org.openbravo.base.exception.OBException("flush failed",
+        new java.sql.SQLException("duplicate key value violates unique constraint", "23505"));
+
+    NeoResponse response = createAndLinkRecording("B", true, steps, created, duplicate);
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(FinancialAccountRemittanceSupport.MSG_PROVISIONING_CONFLICT,
+        response.getBody().getJSONObject("error").getJSONArray("messageKeys").getString(0));
+    assertEquals("no Salt Edge link after a refused provisioning", List.of("remittance"), steps);
+    verify(handler.remittanceSupport).rollback();
+  }
+
+  /** A Card account, or the flag off, is linked to Salt Edge without remittance provisioning. */
+  @Test
+  public void testCreateAndLinkNeverProvisionsACardAccountOrWithTheFlagOff() throws Exception {
+    List<String> card = new java.util.ArrayList<>();
+    assertEquals(201, createAndLinkRecording("CA", true, card,
+        mock(FIN_FinancialAccount.class), null).getHttpStatus());
+    assertEquals(List.of("saltEdgeLink"), card);
+
+    List<String> flagOff = new java.util.ArrayList<>();
+    assertEquals(201, createAndLinkRecording("B", false, flagOff,
+        mock(FIN_FinancialAccount.class), null).getHttpStatus());
+    assertEquals(List.of("saltEdgeLink"), flagOff);
   }
 
   /**

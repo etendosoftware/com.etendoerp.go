@@ -844,32 +844,37 @@ Gates the **behaviour** of SEPA remittances (epic ETP-3504), never their schema.
 `true` = remittances are enabled. Default and every failure = `false`.
 
 **What it gates:**
-- «Admite remesas» on a financial account (`FIN_FINANCIAL_ACCOUNT.EM_ETGO_Allow_Remittance`, NEO
-  key `eTGOAllowRemittance`), enforced by `FinancialAccountRemittanceSupport` from
-  `FinancialAccountHandler`. A create or update that *changes* the flag while it is off answers
-  `403 feature_disabled` (a body that echoes the stored value passes: it changes nothing). On:
-  turning it on needs a Bank account with a valid IBAN (BIC optional), runs the lazy, per-client
-  provisioning (`RemittanceSepaProvisioning.ensureClient`) in the pre-hook and links both
-  remittance payment methods to the account after the save; while it is on, the type cannot leave
-  Bank nor the IBAN be cleared; turning it off, or archiving the account, is refused with 422
-  `ETGO_RemittanceAccountHasOpenRemittances` while remittances are open (status `PE`/`PR`/`CP`/`PP`),
-  and otherwise leaves the two links inactive;
+- the remittance provisioning of a new **Bank** financial account: on, a Bank account created
+  through `financial-account` (REST, batch, MCP — `FinancialAccountHandler` with
+  `FinancialAccountRemittanceSupport`), the bank-connection `createAndLink`, or the onboarding sample
+  data (`OnboardingRemittanceSetupService`, flag read for the receiving account) gets the two
+  remittance payment methods, running the lazy per-client provisioning
+  (`RemittanceSepaProvisioning.ensureClient`) on first use; off, the account is created as before.
+  There is no per-account switch and no backfill: accounts created before, or with the flag off,
+  never get the methods, and the remittance window does not offer them
+  (`ETGO_RemittanceAccountNotAllowed`). Cash and Card accounts never get them;
 - the default SEPA mandate of a customer (`EM_OBSEPAD_Mandate_Identifier` / `_Date`, owned by
   `org.openbravo.sepa.iso20022.coredirectdebit.customertobank`), applied by `BusinessPartnerHandler`
   through `ContactSepaMandateDefaults` on a contacts `businessPartner` create or update: on, a
-  customer's blank mandate ID takes its tax ID and an empty signature date its creation date
-  (today on create), and a value the caller sends wins; **off, the two keys are dropped from the
+  customer created with a blank mandate stores its tax ID as mandate ID and today as signature
+  date, any later save of a customer fills each mandate field empty in the database and not sent
+  (so existing contacts get it when next saved; an explicit clear holds only for that save; a
+  stored value is never overwritten), a value the caller sends wins, and the DEFAULTS of a new contact prefill the date (`neo-headless.md`
+  §4.6c); **off, the two keys are dropped from the
   write body** (never persisted, never refused — the `structured-address-for-sepa` contract, not a
   403, because the MCP schema still advertises the two fields while the flag is off);
-- the `remittance` spec (`RemittanceHeaderHandler`, `RemittanceLinesHandler`), refused with
-  `403 feature_disabled` when off;
+- the `remittance` spec (`RemittanceHeaderHandler`, `RemittanceLinesHandler`), its `sepaFileData`
+  read action included, refused with `403 feature_disabled` when off;
 - `SFWindowAccessMap`, which publishes `capabilities.sepaRemittances` for the UI (menu entry, page
-  guard, the «Admite remesas» toggle of the Edit Account modal, contact mandate section).
+  guard, contact mandate section).
 
-**Not gated:** the one column this module adds — `FIN_FINANCIAL_ACCOUNT.EM_ETGO_Allow_Remittance` —
-its messages, and the DAL observer `RemittanceMethodLinkObserver` (a remittance payment method can
-only be linked to an account that allows remittances, on every channel including Classic). An
+**Not gated:** the messages, the DAL observer `RemittanceMethodLinkObserver` (a remittance
+payment method can only be linked to a Bank account, on every channel including Classic), and the
+refusal to change a Bank account with open remittances to another type
+(`ETGO_RemittanceAccountTypeChangeBlocked`: the remittances exist whatever the flag says now) and
+the deactivation of its remittance-method links when it leaves Bank with none open. An
 observer cannot read a per-account flag, and remittance methods only exist where the flag was on.
+The module adds no column for remittances.
 The remittance status is not this module's: `REM_REMITTANCE.REMITTANCE_STATUS` (list
 `REM_RemittanceStatus`: `PE` pending, `PR` processed, `CT`/`PT` collected/paid, `CP`/`PP`
 partially, `AN` voided) is the remittance module's `REMITTANCE_STATUS` (added by ETP-6148), owned
@@ -883,7 +888,8 @@ method is a remittance method when such a type points at it — that is how prov
 rows again (never by name), how the observer recognises a remittance link, and how the remittance
 selectors filter. The CORE type also gets the OBSEPAD parameter `Creditor_Business_Code` = `000`, so
 the SEPA XML (another team) can build the creditor identifier from the organization's tax ID with
-`SepaCreditorId` — the identifier is not stored anywhere.
+`SepaCreditorId` — the identifier is not stored anywhere. The remittance header's `sepaFileData`
+action computes it the same way, reading that parameter (`000` when missing or blank).
 
 **The one gate.** `SepaRemittancesFlag` (`com.etendoerp.go.schemaforge`) is the only reader of
 `GoFeatureFlags.FLAG_SEPA_REMITTANCES`. Same API as `InvoiceInboxFlag`: `isEnabled()` (request user's
@@ -915,7 +921,10 @@ that writes settlement or return rows directly must call `RemittanceStatusUtil.r
 everyone. Unwrap every call to `SepaRemittancesFlag`, delete it and its test, delete
 `FLAG_SEPA_REMITTANCES` from `GoFeatureFlags` and the `SEPA_REMITTANCES` capability from
 `SFWindowAccessMap`, remove this section and the configuration-table row, and delete the hosted
-setting. Keep the registry feature entry in `etendo_schema_forge`.
+setting. Keep the registry feature entry in `etendo_schema_forge`. Retiring the flag does not link
+the Bank accounts created before (or with the flag off): they still answer
+`ETGO_RemittanceAccountNotAllowed` in the remittance window. Whether they get a data-fix then is a
+product decision; none exists today.
 
 ### `bank-bounce-suggestions` (ETP-5581) — backend-only, per account, off by default
 

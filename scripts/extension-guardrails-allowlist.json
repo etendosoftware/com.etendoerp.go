@@ -27,7 +27,6 @@
     "DocumentSequenceHandler",
     "FactAcctHandler",
     "FinancialAccountAccountingHandler",
-    "FinancialAccountBankConnectionHandler",
     "FinancialAccountTransactionsHandler",
     "GeneralLedgerConfigurationHandler",
     "GeneralLedgerReportHandler",

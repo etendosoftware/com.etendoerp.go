@@ -107,9 +107,7 @@ public class RemittanceProcessActionPartialAmountIntegrationTest extends WeldBas
     schedule = detail.getInvoicePaymentSchedule();
 
     RemittanceSepaProvisioning.ensureClient(client);
-    account.setETGOAllowRemittance(true);
-    OBDal.getInstance().save(account);
-    RemittanceSepaProvisioning.ensureAccountLinks(account, true);
+    RemittanceSepaProvisioning.ensureAccountLinks(account);
   }
 
   @After

@@ -44,16 +44,30 @@ import com.etendoerp.go.schemaforge.SepaRemittancesFlag;
  * the OBSEPAD module). Called only by the contacts {@code businessPartner} customization
  * ({@code BusinessPartnerHandler}); it is that entity's behaviour, not a shared rule.
  *
- * <p><b>Flag on</b> ({@link SepaRemittancesFlag}) and the contact is (or becomes) a customer:
+ * <p><b>Flag on</b> ({@link SepaRemittancesFlag}), the values are STORED, never only suggested:
  * <ul>
- *   <li>a blank mandate identifier takes the contact's tax ID ({@code TaxID}, the CIF/NIF);</li>
- *   <li>a missing signature date takes the contact's creation date ({@code Created}), today on a
- *       create.</li>
+ *   <li><b>Create</b> of a customer: a blank mandate identifier takes the contact's tax ID
+ *       ({@code TaxID}, the CIF/NIF, cut to 35) when it has one, and a blank signature date takes
+ *       today (the creation date).</li>
+ *   <li><b>Update</b> of a customer (any save, which also fills the contacts created before the
+ *       feature or with the flag off when they are next saved): each mandate field that is empty
+ *       in the database AND that the body does not send is filled — the identifier with the
+ *       current tax ID (the one the body sends, else the stored one) when there is one, the date
+ *       with the contact's {@code Created} date.</li>
+ *   <li>A value the caller sends always wins. An <b>explicit clear</b> (the body sends the key
+ *       empty) is respected for that save, but <b>not remembered</b>: there is no column marking
+ *       the mandate as cleared on purpose, so the next save that does not send the key fills it
+ *       again from the tax ID / creation date. Clearing a mandate for good is not possible
+ *       through this rule.</li>
+ *   <li>A non-blank stored value is never overwritten, so a later change of the tax ID keeps
+ *       the mandate identifier, which must stay a stable mandate reference.</li>
+ *   <li>A contact that is not a customer gets nothing; a create of a non-customer drops the two
+ *       keys, which only the form's DEFAULTS put there. An update of a non-customer keeps what it
+ *       carries.</li>
+ *   <li><b>DEFAULTS</b> of a new contact prefill the signature date with today
+ *       ({@link #applyDefaults}), so the form shows what the create will store.</li>
  * </ul>
- * "Blank" is the value the record ends up with: the one the body sends when it sends the key,
- * otherwise the persisted one. So an existing customer whose mandate was never filled gets it on
- * its next save, and a value the caller sends always wins. A contact that is not a customer is
- * left alone.
+ * On a create, "blank" is the value the body sends (absent, null or empty all get the default).
  *
  * <p><b>Flag off</b>: the two keys are removed from the write body, so they are never persisted
  * and never rejected. Same contract as {@code structured-address-for-sepa} on the address
@@ -137,40 +151,96 @@ public final class ContactSepaMandateDefaults {
     if (!mandateColumnsInstalled()) {
       return;
     }
-    Persisted persisted = null;
-    if (!create) {
-      persisted = queryPersisted(recordId);
-      if (persisted == null) {
-        // The record is gone (or the id is blank): generic CRUD answers it, not this rule.
-        return;
-      }
+    if (create) {
+      applyOnCreate(sections, today);
+    } else {
+      applyOnUpdate(sections, recordId);
     }
+  }
+
+  /**
+   * Create: a customer gets the tax ID as identifier and today as signature date, for each field
+   * the body leaves blank. A non-customer gets neither: a mandate authorizes collecting from a
+   * customer, and the keys of a non-customer create can only come from the form's DEFAULTS
+   * ({@link #applyDefaults}), fetched before the user chooses the type, so they are dropped.
+   */
+  private static void applyOnCreate(List<JSONObject> sections, LocalDate today)
+      throws JSONException {
     // IsCustomer's AD default is 'Y', so a create that does not send the flag is a customer.
-    boolean customer = ContactTypeRules.flag(effective(sections, List.of(FIELD_CUSTOMER),
-        create ? Boolean.TRUE : persisted.customer()));
-    if (!customer) {
+    if (!ContactTypeRules.flag(effective(sections, List.of(FIELD_CUSTOMER), Boolean.TRUE))) {
+      strip(sections);
       return;
     }
     JSONObject target = sections.get(sections.size() - 1);
+    String taxId = text(effective(sections, List.of(FIELD_TAX_ID), null));
+    if (text(effective(sections, MANDATE_ID_KEYS, null)) == null && taxId != null) {
+      putReplacing(sections, target, MANDATE_ID_KEYS, mandateIdOf(taxId));
+    }
+    if (text(effective(sections, MANDATE_DATE_KEYS, null)) == null) {
+      putReplacing(sections, target, MANDATE_DATE_KEYS, today.toString());
+    }
+  }
 
-    String mandateId = text(effective(sections, MANDATE_ID_KEYS,
-        create ? null : persisted.mandateId()));
-    if (mandateId == null) {
-      String taxId = text(effective(sections, List.of(FIELD_TAX_ID),
-          create ? null : persisted.taxId()));
-      if (taxId != null) {
-        putReplacing(sections, target, MANDATE_ID_KEYS, StringUtils.left(taxId, MANDATE_ID_MAX_LENGTH));
+  /**
+   * Update of a customer: each field empty in the database AND not sent is filled. A field the
+   * body sends, even empty (an explicit clear), is the caller's decision for this save. A missing
+   * record (or a blank id) is the generic CRUD's to answer.
+   */
+  private static void applyOnUpdate(List<JSONObject> sections, String recordId)
+      throws SQLException, JSONException {
+    Persisted persisted = queryPersisted(recordId);
+    if (persisted == null) {
+      return;
+    }
+    if (!ContactTypeRules.flag(effective(sections, List.of(FIELD_CUSTOMER),
+        persisted.customer()))) {
+      return;
+    }
+    JSONObject target = sections.get(sections.size() - 1);
+    String taxId = text(effective(sections, List.of(FIELD_TAX_ID), persisted.taxId()));
+    if (!sends(sections, MANDATE_ID_KEYS) && text(persisted.mandateId()) == null
+        && taxId != null) {
+      target.put(FIELD_MANDATE_ID, mandateIdOf(taxId));
+    }
+    if (!sends(sections, MANDATE_DATE_KEYS) && text(persisted.mandateDate()) == null
+        && persisted.created() != null) {
+      target.put(FIELD_MANDATE_DATE, persisted.created());
+    }
+  }
+
+  private static String mandateIdOf(String taxId) {
+    return StringUtils.left(taxId, MANDATE_ID_MAX_LENGTH);
+  }
+
+  /** Whether any section carries any spelling of the field, whatever its value. */
+  private static boolean sends(List<JSONObject> sections, List<String> keys) {
+    for (JSONObject section : sections) {
+      if (matchingKey(section, keys) != null) {
+        return true;
       }
     }
+    return false;
+  }
 
-    String mandateDate = text(effective(sections, MANDATE_DATE_KEYS,
-        create ? null : persisted.mandateDate()));
-    if (mandateDate == null) {
-      String signedOn = create ? today.toString() : persisted.created();
-      if (signedOn != null) {
-        putReplacing(sections, target, MANDATE_DATE_KEYS, signedOn);
-      }
+  /**
+   * DEFAULTS of a new contact (the form prefill): with the flag on, a signature date not already
+   * defaulted is today — what a create stores for a customer. The identifier is not prefilled:
+   * the tax ID is not known when the form opens; the create stores it.
+   *
+   * @param defaults the {@code defaults} object of the DEFAULTS response; mutated in place
+   * @param enabled whether the flag is on for the caller
+   * @param today the date to prefill
+   * @return whether {@code defaults} changed
+   * @throws JSONException if the default cannot be written
+   */
+  public static boolean applyDefaults(JSONObject defaults, boolean enabled, LocalDate today)
+      throws JSONException {
+    if (defaults == null || !enabled || !mandateColumnsInstalled()
+        || text(defaults.opt(FIELD_MANDATE_DATE)) != null) {
+      return false;
     }
+    defaults.put(FIELD_MANDATE_DATE, today.toString());
+    return true;
   }
 
   /**

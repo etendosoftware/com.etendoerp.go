@@ -115,6 +115,8 @@ public class RemittanceSepaProvisioningIdempotencyIntegrationTest extends OBBase
           RemittanceSepaProvisioning.PARAM_CREDITOR_BUSINESS_CODE));
       assertNull("only CORE carries the creditor business code",
           parameterValue(sct, RemittanceSepaProvisioning.PARAM_CREDITOR_BUSINESS_CODE));
+      assertEquals("the code the file and the SEPA block read is the CORE type's", "000",
+          RemittanceSepaProvisioning.creditorBusinessCode(client));
       assertTrue(RemittanceSepaProvisioning.isProvisionedType(core));
       assertTrue(RemittanceSepaProvisioning.isRemittanceMethod(core.getPaymentMethod()));
       assertTrue(RemittanceSepaProvisioning.isRemittanceMethod(sct.getPaymentMethod()));
@@ -151,21 +153,20 @@ public class RemittanceSepaProvisioningIdempotencyIntegrationTest extends OBBase
   }
 
   @Test
-  public void theAccountLinksPassCheckPmSetupAndAreDeactivatedNotDeleted() {
+  public void theAccountLinksPassCheckPmSetupAndAnInactiveOneIsReactivated() {
     OBContext.setAdminMode(true);
     try {
       RemittanceSepaProvisioning.ensureClient(client);
       FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class,
           BANK_ACCOUNT_ID);
       assertNotNull("the sample bank account must exist", account);
-      account.setETGOAllowRemittance(true);
-      OBDal.getInstance().save(account);
       FIN_PaymentMethod core = RemittanceSepaProvisioning
           .findType(client, RemittanceSepaProvisioning.SCHEME_CORE).getPaymentMethod();
       FIN_PaymentMethod sct = RemittanceSepaProvisioning
           .findType(client, RemittanceSepaProvisioning.SCHEME_SCT).getPaymentMethod();
 
-      RemittanceSepaProvisioning.ensureAccountLinks(account, true);
+      RemittanceSepaProvisioning.ensureAccountLinks(account);
+      assertTrue(RemittanceSepaProvisioning.hasRemittanceMethodLink(account));
 
       FinAccPaymentMethod coreLink = link(account, core);
       // REMRemittanceProcess#getErrorResult, direction IN.
@@ -187,12 +188,13 @@ public class RemittanceSepaProvisioningIdempotencyIntegrationTest extends OBBase
       assertTrue(RemittanceSepaProvisioning.hasActiveLink(account, core));
 
       String coreLinkId = coreLink.getId();
-      RemittanceSepaProvisioning.ensureAccountLinks(account, false);
+      coreLink.setActive(false);
+      sctLink.setActive(false);
+      OBDal.getInstance().flush();
       assertFalse(RemittanceSepaProvisioning.hasActiveLink(account, core));
-      assertFalse(RemittanceSepaProvisioning.hasActiveLink(account, sct));
-      assertEquals("deactivated, not deleted", coreLinkId, link(account, core).getId());
+      assertFalse(RemittanceSepaProvisioning.hasRemittanceMethodLink(account));
 
-      RemittanceSepaProvisioning.ensureAccountLinks(account, true);
+      RemittanceSepaProvisioning.ensureAccountLinks(account);
       assertTrue(RemittanceSepaProvisioning.hasActiveLink(account, core));
       assertEquals("the same link is reactivated", coreLinkId, link(account, core).getId());
       assertEquals(1, count(FinAccPaymentMethod.class,

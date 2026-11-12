@@ -170,6 +170,62 @@ class ContactSepaMandateDefaultsTest {
     assertFalse(body.has(MANDATE_DATE));
   }
 
+  /**
+   * A non-customer create drops the mandate keys: the form sends the DEFAULTS-prefilled date
+   * whatever type the user then picks, and a vendor-only contact gets no mandate.
+   */
+  @Test
+  void aCreateOfANonCustomerDropsTheMandateKeys() throws Exception {
+    JSONObject data = new JSONObject().put(MANDATE_DATE, TODAY.toString());
+    JSONObject body = new JSONObject().put("customer", false).put("vendor", true)
+        .put(MANDATE_ID, "M-1").put("data", data);
+
+    ContactSepaMandateDefaults.apply(body, true, true, null, TODAY);
+
+    assertFalse(body.has(MANDATE_ID));
+    assertFalse(data.has(MANDATE_DATE));
+  }
+
+  /** An update of a non-customer keeps what it carries: only a create drops the keys. */
+  @Test
+  void anUpdateOfANonCustomerKeepsTheMandateKeys() throws Exception {
+    persisted("N", "B12345678", null, null, "2025-03-01");
+    JSONObject body = new JSONObject().put(MANDATE_ID, "M-1");
+
+    ContactSepaMandateDefaults.apply(body, true, false, RECORD_ID, TODAY);
+
+    assertEquals("M-1", body.getString(MANDATE_ID));
+  }
+
+  /** DEFAULTS prefill today's signature date with the flag on, never the identifier. */
+  @Test
+  void theDefaultsPrefillTheSignatureDate() throws Exception {
+    JSONObject defaults = new JSONObject().put("name", "");
+
+    assertTrue(ContactSepaMandateDefaults.applyDefaults(defaults, true, TODAY));
+
+    assertEquals(TODAY.toString(), defaults.getString(MANDATE_DATE));
+    assertFalse(defaults.has(MANDATE_ID));
+  }
+
+  /** Flag off, an already defaulted date, or no OBSEPAD columns: the defaults are untouched. */
+  @Test
+  void theDefaultsAreLeftAloneOtherwise() throws Exception {
+    JSONObject off = new JSONObject();
+    assertFalse(ContactSepaMandateDefaults.applyDefaults(off, false, TODAY));
+    assertFalse(off.has(MANDATE_DATE));
+
+    JSONObject set = new JSONObject().put(MANDATE_DATE, "2020-01-01");
+    assertFalse(ContactSepaMandateDefaults.applyDefaults(set, true, TODAY));
+    assertEquals("2020-01-01", set.getString(MANDATE_DATE));
+
+    assertFalse(ContactSepaMandateDefaults.applyDefaults(null, true, TODAY));
+    when(bpEntity.hasProperty(MANDATE_DATE)).thenReturn(false);
+    JSONObject noColumns = new JSONObject();
+    assertFalse(ContactSepaMandateDefaults.applyDefaults(noColumns, true, TODAY));
+    assertFalse(noColumns.has(MANDATE_DATE));
+  }
+
   @Test
   void aValueTheCallerSendsWins() throws Exception {
     JSONObject body = new JSONObject().put("taxID", "B12345678").put(MANDATE_ID, "MANDATE-7")
@@ -221,8 +277,13 @@ class ContactSepaMandateDefaultsTest {
 
   // ---------------------------------------------------------------- update
 
+  /**
+   * Any save of a customer fills each mandate field empty in the database and not sent: an
+   * unrelated update of a contact created before the feature gets the stored tax ID and its
+   * creation date.
+   */
   @Test
-  void anUpdateWithBlankStoredValuesGetsTheStoredTaxIdAndCreationDate() throws Exception {
+  void anUnrelatedUpdateOfACustomerFillsAnEmptyMandate() throws Exception {
     persisted("Y", "B12345678", null, null, "2025-03-01");
     JSONObject body = new JSONObject().put("name", "Acme renamed");
 
@@ -232,14 +293,32 @@ class ContactSepaMandateDefaultsTest {
     assertEquals("2025-03-01", body.getString(MANDATE_DATE), "the creation date, not today");
   }
 
+  /** The identifier takes the CURRENT tax ID: the one the update sends over the stored one. */
   @Test
-  void anUpdateThatChangesTheTaxIdUsesTheNewOne() throws Exception {
+  void anUpdateFillsTheIdentifierWithTheTaxIdItSends() throws Exception {
     persisted("Y", "OLD-TAX", " ", null, "2025-03-01");
     JSONObject body = new JSONObject().put("taxID", "NEW-TAX");
 
     ContactSepaMandateDefaults.apply(body, true, false, RECORD_ID, TODAY);
 
     assertEquals("NEW-TAX", body.getString(MANDATE_ID));
+    assertEquals("2025-03-01", body.getString(MANDATE_DATE));
+  }
+
+  /** Without a tax ID only the date is filled; a stored date is kept. */
+  @Test
+  void anUpdateWithoutATaxIdFillsOnlyAnEmptyDate() throws Exception {
+    persisted("Y", null, null, null, "2025-03-01");
+    JSONObject withoutDate = new JSONObject().put("name", "Acme");
+    ContactSepaMandateDefaults.apply(withoutDate, true, false, RECORD_ID, TODAY);
+    assertFalse(withoutDate.has(MANDATE_ID));
+    assertEquals("2025-03-01", withoutDate.getString(MANDATE_DATE));
+
+    persisted("Y", "B12345678", null, "2025-04-10", "2025-03-01");
+    JSONObject withDate = new JSONObject().put("name", "Acme");
+    ContactSepaMandateDefaults.apply(withDate, true, false, RECORD_ID, TODAY);
+    assertEquals("B12345678", withDate.getString(MANDATE_ID));
+    assertFalse(withDate.has(MANDATE_DATE), "a stored date is never overwritten");
   }
 
   @Test
@@ -253,15 +332,26 @@ class ContactSepaMandateDefaultsTest {
     assertFalse(body.has(MANDATE_DATE));
   }
 
+  /**
+   * An explicit clear (the key sent empty) is respected for that save, even with the field empty
+   * in the database; the other field, not sent, is still filled. No marker remembers the clear, so
+   * a later save that does not send the key fills it again (see the class javadoc).
+   */
   @Test
-  void anUpdateThatClearsAStoredMandateGetsTheDefaultBack() throws Exception {
-    persisted("Y", "B12345678", "MANDATE-OLD", "2024-06-30", "2024-01-01");
-    JSONObject body = new JSONObject().put(MANDATE_ID, "").put(MANDATE_DATE, "");
+  void anExplicitClearStaysClearedInThatSave() throws Exception {
+    persisted("Y", "B12345678", null, null, "2024-01-01");
+    JSONObject body = new JSONObject().put(MANDATE_ID, "");
 
     ContactSepaMandateDefaults.apply(body, true, false, RECORD_ID, TODAY);
 
-    assertEquals("B12345678", body.getString(MANDATE_ID));
+    assertEquals("", body.getString(MANDATE_ID));
     assertEquals("2024-01-01", body.getString(MANDATE_DATE));
+
+    persisted("Y", "B12345678", "MANDATE-OLD", "2024-06-30", "2024-01-01");
+    JSONObject clearing = new JSONObject().put(MANDATE_ID, JSONObject.NULL).put(MANDATE_DATE, "");
+    ContactSepaMandateDefaults.apply(clearing, true, false, RECORD_ID, TODAY);
+    assertTrue(clearing.isNull(MANDATE_ID));
+    assertEquals("", clearing.getString(MANDATE_DATE));
   }
 
   @Test
@@ -283,6 +373,18 @@ class ContactSepaMandateDefaultsTest {
     ContactSepaMandateDefaults.apply(body, true, false, RECORD_ID, TODAY);
 
     assertEquals("B12345678", body.getString(MANDATE_ID));
+    assertEquals("2025-03-01", body.getString(MANDATE_DATE));
+  }
+
+  /** Becoming a customer keeps a stored identifier and fills only the empty date. */
+  @Test
+  void becomingACustomerKeepsAStoredMandateId() throws Exception {
+    persisted("N", "B12345678", "MANDATE-OLD", null, "2025-03-01");
+    JSONObject body = new JSONObject().put("customer", true);
+
+    ContactSepaMandateDefaults.apply(body, true, false, RECORD_ID, TODAY);
+
+    assertFalse(body.has(MANDATE_ID));
     assertEquals("2025-03-01", body.getString(MANDATE_DATE));
   }
 

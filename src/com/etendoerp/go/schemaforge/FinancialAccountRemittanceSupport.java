@@ -21,127 +21,117 @@ import java.sql.SQLException;
 
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
-import org.codehaus.jettison.json.JSONException;
-import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.system.Client;
-import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
- * ETP-6148 — the «Admite remesas» rules of a financial account ({@value #FIELD_ALLOW},
- * {@code FIN_FINANCIAL_ACCOUNT.EM_ETGO_ALLOW_REMITTANCE}), called by {@link FinancialAccountHandler}
- * on create and update. Entity behaviour of the {@code financial-account} spec, so it lives with
- * that spec's customization and nowhere shared.
+ * ETP-6148 — a new Bank financial account gets the two SEPA remittance payment methods, while the
+ * {@code sepa-remittances} flag is on for the acting user. There is no per-account switch: every
+ * Bank account created with the flag on is a remittance account, Cash and Card accounts never are.
+ * Accounts created before, or with the flag off, are not revisited (no backfill).
  *
- * <p><b>Pre-hook</b> ({@link #checkWrite}), on the <em>effective</em> state — the body's value
- * where the body carries one, the stored account's otherwise:
+ * <p>Entity behaviour of the account creation flows, so it lives with them and nowhere shared.
+ * Two callers, both evaluating the flag at request entry, as the account owner:
  * <ul>
- *   <li><b>Flag.</b> With {@code sepa-remittances} off, a body that <em>changes</em> the flag
- *       answers 403 {@code feature_disabled}. A body that echoes the stored value (a client that
- *       reads the record and writes it back whole) is let through: it changes nothing.</li>
- *   <li><b>On</b> requires a Bank account ({@code ETGO_RemittanceAccountNotBank}) with a valid
- *       IBAN ({@code ETGO_RemittanceAccountIbanRequired}); the BIC stays optional. The same two
- *       checks refuse, while the flag is on, changing the type away from Bank or clearing the
- *       IBAN. Both 400, like the handler's other input checks.</li>
- *   <li><b>Turning on</b> runs {@link RemittanceSepaProvisioning#ensureClient}. It runs in the
- *       pre-hook on purpose: a failure there aborts the save instead of leaving an account that
- *       allows remittances with nothing behind it.</li>
- *   <li><b>Turning off</b>, or archiving an account that allows remittances, is refused while it
- *       has open remittances: 422 {@code ETGO_RemittanceAccountHasOpenRemittances}, with the
- *       count.</li>
+ *   <li>{@link FinancialAccountHandler} (REST single and batch, MCP). The pre-hook runs
+ *       {@link #prepareClient}: the client setup ({@link RemittanceSepaProvisioning#ensureClient})
+ *       runs in the same transaction as the account insert, so a failure refuses the create and
+ *       leaves nothing behind. The post-hook runs {@link #linkNewAccount} once the account row
+ *       exists: the links need its id.</li>
+ *   <li>{@link FinancialAccountBankConnectionHandler#handleCreateAndLink}, which creates the account
+ *       itself inside its pre-hook and so runs {@link #provisionNewAccount} — setup and links — in
+ *       that one transaction.</li>
  * </ul>
  *
- * <p><b>Post-hook</b> ({@link #afterWrite}): links or unlinks the two remittance payment methods
- * through {@link RemittanceSepaProvisioning#ensureAccountLinks}, once the account row carries the
- * new value — {@link RemittanceMethodLinkObserver} reads it.
+ * <p><b>Type change.</b> A Bank account with open remittances cannot leave Bank
+ * ({@link #checkTypeChange}): a SEPA remittance settles through a bank account, and Classic would
+ * then process or settle it against a cash or card one. With none open the change goes ahead and,
+ * once the update succeeded, the post-hook deactivates the account's remittance-method links
+ * ({@link #deactivateAfterLeavingBank}); a refused update keeps them. Outside a batch the update is
+ * already committed then, so a failure there is logged and the account keeps active links (the
+ * same gap as a failed link on create). Becoming a Bank account again does not reactivate them. Not gated by the flag: the remittances and links exist whatever the flag
+ * says now (it may have been turned off for the user since), and both only concern the provisioned
+ * types and methods, which exist only where the flag was on.
  *
- * <p>Package-private seams ({@link #isFlagEnabled}, {@link #countOpenRemittances}, …) let unit tests
- * run the rules without the DAL.
+ * <p>The onboarding sample-data «Cuenta de Banco» is covered by
+ * {@code OnboardingRemittanceSetupService}, which reads the flag for the account receiving the
+ * tenant (the onboarding runs as System).
+ *
+ * <p>Package-private seams ({@link #isFlagEnabled}, {@link #ensureClient}, …) let unit tests run
+ * the rules without the DAL.
  */
 class FinancialAccountRemittanceSupport {
 
-  /** NEO field key (DAL property) of {@code EM_ETGO_ALLOW_REMITTANCE}. */
-  static final String FIELD_ALLOW = "eTGOAllowRemittance";
-
-  static final String MSG_NOT_BANK = "ETGO_RemittanceAccountNotBank";
-  static final String MSG_IBAN_REQUIRED = "ETGO_RemittanceAccountIbanRequired";
-  static final String MSG_OPEN_REMITTANCES = "ETGO_RemittanceAccountHasOpenRemittances";
   static final String MSG_PROVISIONING_CONFLICT = "ETGO_RemittanceProvisioningConflict";
-
-  private static final String SQLSTATE_UNIQUE = "23505";
+  static final String MSG_TYPE_CHANGE_BLOCKED = "ETGO_RemittanceAccountTypeChangeBlocked";
 
   private static final int SC_UNPROCESSABLE = 422;
 
+  private static final String SQLSTATE_UNIQUE = "23505";
+
   /**
-   * Whether the update body can affect the remittance rules, so the handler loads the stored
-   * account only then.
+   * Whether an account of {@code type} created now gets the remittance payment methods: a Bank
+   * account while the flag is on. Evaluated at request entry.
    *
-   * @param body the request body
-   * @return {@code true} when it carries the flag, the type, the IBAN or the country, or archives
+   * @param type the account type ({@code B}, {@code C}, {@code CA})
+   * @return {@code true} for a Bank account with the flag on
    */
-  boolean isRelevant(JSONObject body) {
-    return body != null && (body.has(FIELD_ALLOW) || body.has(FinancialAccountHandler.FIELD_TYPE)
-        || body.has(FinancialAccountHandler.FIELD_IBAN) || body.has("country")
-        || FinancialAccountSupport.isArchivingRequest(body));
+  boolean appliesTo(String type) {
+    return FinancialAccountHandler.TYPE_BANK.equals(type) && isFlagEnabled();
   }
 
   /**
-   * Validates a create or update against the remittance rules and provisions the client when the
-   * write turns remittances on.
+   * Pre-hook of a create that {@link #appliesTo} accepts: provisions the client in the
+   * transaction that will insert the account.
    *
-   * @param body          the request body; the flag is normalized to a boolean when present
-   * @param stored        the account on update, {@code null} on create
-   * @param effectiveType the account type the write leaves ({@code B}, {@code C}, {@code CA})
-   * @return an error response, or {@code null} to continue
-   * @throws JSONException never in practice, from the body accessors
+   * @return a 409 response on a provisioning conflict, or {@code null} to continue
    */
-  NeoResponse checkWrite(JSONObject body, FIN_FinancialAccount stored, String effectiveType)
-      throws JSONException {
-    boolean storedAllow = stored != null && Boolean.TRUE.equals(stored.isETGOAllowRemittance());
-    boolean bodyHasAllow = body.has(FIELD_ALLOW);
-    boolean effectiveAllow = storedAllow;
-    if (bodyHasAllow) {
-      effectiveAllow = toBoolean(body.opt(FIELD_ALLOW));
-      body.put(FIELD_ALLOW, effectiveAllow);
-      if (effectiveAllow != storedAllow && !isFlagEnabled()) {
-        return SepaRemittancesFlag.featureDisabled();
-      }
-    }
-
-    if (effectiveAllow) {
-      NeoResponse accountError = validateAllowedAccount(body, stored, effectiveType);
-      if (accountError != null) {
-        return accountError;
-      }
-    }
-
-    boolean turningOff = storedAllow && !effectiveAllow;
-    boolean archiving = storedAllow && FinancialAccountSupport.isArchivingRequest(body);
-    if (turningOff || archiving) {
-      long open = countOpenRemittances(stored);
-      if (open > 0) {
-        return NeoMessageText.error(SC_UNPROCESSABLE, MSG_OPEN_REMITTANCES, open);
-      }
-    }
-
-    if (effectiveAllow && !storedAllow) {
-      return provision(stored != null ? stored.getClient() : currentClient());
-    }
-    return null;
+  NeoResponse prepareClient() {
+    return provision(() -> ensureClient(currentClient()));
   }
 
   /**
-   * Runs the client provisioning. A unique violation there — a document type with the same name
+   * Post-hook of the same create: links the new account to the two remittance methods. Runs after
+   * the generic CRUD inserted (and, outside a batch, committed) the account; the client setup it
+   * relies on was committed with it by {@link #prepareClient}.
+   *
+   * @param account the persisted account; {@code null}, a non-Bank account or the flag off is a
+   *     no-op
+   */
+  void linkNewAccount(FIN_FinancialAccount account) {
+    if (account == null || !appliesTo(account.getType())) {
+      return;
+    }
+    ensureAccountLinks(account);
+  }
+
+  /**
+   * Setup and links in one go, for a flow that creates the account itself inside its own
+   * transaction ({@link FinancialAccountBankConnectionHandler#handleCreateAndLink}).
+   *
+   * @param account the created and flushed account
+   * @return a 409 response on a provisioning conflict (the transaction is rolled back), or
+   *     {@code null} when it was provisioned or does not apply
+   */
+  NeoResponse provisionNewAccount(FIN_FinancialAccount account) {
+    if (account == null || !appliesTo(account.getType())) {
+      return null;
+    }
+    return provision(() -> provisionAccount(account));
+  }
+
+  /**
+   * Runs a provisioning step. A unique violation there — a document type with the same name
    * inserted at the same instant by a writer outside {@link RemittanceSepaProvisioning}, which
    * serializes its own runs — leaves the transaction unusable, so it is rolled back (unless a batch
    * owns the transaction, which then rolls back the whole set) and answered
-   * 409 {@value #MSG_PROVISIONING_CONFLICT} (retry), never a 500.
+   * 409 {@value #MSG_PROVISIONING_CONFLICT} (retry), never a 500. Any other failure propagates and
+   * fails the create.
    */
-  private NeoResponse provision(Client client) {
+  private NeoResponse provision(Runnable step) {
     try {
-      ensureClient(client);
+      step.run();
       return null;
     } catch (RuntimeException e) {
       if (!isUniqueViolation(e)) {
@@ -150,6 +140,55 @@ class FinancialAccountRemittanceSupport {
       rollback();
       return NeoMessageText.error(HttpServletResponse.SC_CONFLICT, MSG_PROVISIONING_CONFLICT);
     }
+  }
+
+  /**
+   * Update pre-hook of a change that takes a Bank account to another type: refuses it while the
+   * account has open remittances (REM status pending, processed, partially collected or partially
+   * paid), with 422 {@value #MSG_TYPE_CHANGE_BLOCKED} carrying the count. Writes nothing: the
+   * links are deactivated by {@link #deactivateAfterLeavingBank}, from the post-hook, once the
+   * update succeeded. Runs only when the type really leaves Bank, so an ordinary update never
+   * queries.
+   *
+   * @param stored  the account as stored, {@code null} when unknown (the generic CRUD answers it)
+   * @param newType the type the update leaves, already normalized
+   * @return the refusal, or {@code null} to continue
+   */
+  NeoResponse checkTypeChange(FIN_FinancialAccount stored, String newType) {
+    if (!leavesBank(stored, newType)) {
+      return null;
+    }
+    long open = countOpenRemittances(stored);
+    return open > 0 ? NeoMessageText.error(SC_UNPROCESSABLE, MSG_TYPE_CHANGE_BLOCKED, open) : null;
+  }
+
+  /**
+   * Whether the update takes a stored Bank account to another type.
+   *
+   * @param stored  the account as stored, may be {@code null}
+   * @param newType the type the update leaves, already normalized
+   * @return {@code true} when the account is Bank today and will not be after the update
+   */
+  boolean leavesBank(FIN_FinancialAccount stored, String newType) {
+    return stored != null && FinancialAccountHandler.TYPE_BANK.equals(stored.getType())
+        && !FinancialAccountHandler.TYPE_BANK.equals(newType);
+  }
+
+  /**
+   * Update post-hook of a change that took a Bank account to another type: deactivates its
+   * remittance-method links ({@link RemittanceSepaProvisioning#deactivateAccountLinks}). Called
+   * only after the generic CRUD answered the update with success, so a refused update
+   * ({@code missing_updated}, a stale record, any validation) never touches them. The account is
+   * re-read: nothing is done unless it really is no longer a Bank account. Becoming a Bank account
+   * again does not reactivate them.
+   *
+   * @param account the account, re-read after the update; {@code null} is a no-op
+   */
+  void deactivateAfterLeavingBank(FIN_FinancialAccount account) {
+    if (account == null || FinancialAccountHandler.TYPE_BANK.equals(account.getType())) {
+      return;
+    }
+    deactivateAccountLinks(account);
   }
 
   static boolean isUniqueViolation(Throwable error) {
@@ -162,53 +201,6 @@ class FinancialAccountRemittanceSupport {
       }
     }
     return false;
-  }
-
-  /**
-   * Links or unlinks the remittance payment methods after a successful write that carried the
-   * flag. Runs only while the flag is on: with it off nothing could have changed.
-   *
-   * @param account the persisted account
-   */
-  void afterWrite(FIN_FinancialAccount account) {
-    if (account == null || !isFlagEnabled()) {
-      return;
-    }
-    ensureAccountLinks(account, Boolean.TRUE.equals(account.isETGOAllowRemittance()));
-  }
-
-  private NeoResponse validateAllowedAccount(JSONObject body, FIN_FinancialAccount stored,
-      String effectiveType) throws JSONException {
-    if (!FinancialAccountHandler.TYPE_BANK.equals(effectiveType)) {
-      return NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, MSG_NOT_BANK);
-    }
-    boolean bodyHasIban = body.has(FinancialAccountHandler.FIELD_IBAN);
-    String iban = FinancialAccountCountrySupport.effectiveIban(body, bodyHasIban, stored);
-    if (StringUtils.isBlank(iban)) {
-      return NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, MSG_IBAN_REQUIRED);
-    }
-    // A body that sent the IBAN or the country already had the pair validated by
-    // FinancialAccountHandler#validateCountryAndIban; a stored pair (turning the flag on for an
-    // account saved long ago) was not, and a legacy row may hold an inconsistent one.
-    if (!bodyHasIban && !body.has("country")) {
-      Country country = FinancialAccountCountrySupport.storedCountry(stored);
-      String normalized = FinancialAccountCountrySupport.normalizeIban(iban);
-      if (FinancialAccountCountrySupport.validateIbanCountryPair(normalized, country) != null) {
-        return NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, MSG_IBAN_REQUIRED);
-      }
-    }
-    return null;
-  }
-
-  private static boolean toBoolean(Object value) {
-    if (value instanceof Boolean) {
-      return (Boolean) value;
-    }
-    if (value == null || JSONObject.NULL.equals(value)) {
-      return false;
-    }
-    String text = value.toString().trim();
-    return "true".equalsIgnoreCase(text) || "Y".equalsIgnoreCase(text);
   }
 
   // ---------------------------------------------------------------------------
@@ -227,8 +219,16 @@ class FinancialAccountRemittanceSupport {
     RemittanceSepaProvisioning.ensureClient(client);
   }
 
-  void ensureAccountLinks(FIN_FinancialAccount account, boolean enabled) {
-    RemittanceSepaProvisioning.ensureAccountLinks(account, enabled);
+  void ensureAccountLinks(FIN_FinancialAccount account) {
+    RemittanceSepaProvisioning.ensureAccountLinks(account);
+  }
+
+  void provisionAccount(FIN_FinancialAccount account) {
+    RemittanceSepaProvisioning.provisionAccount(account);
+  }
+
+  void deactivateAccountLinks(FIN_FinancialAccount account) {
+    RemittanceSepaProvisioning.deactivateAccountLinks(account);
   }
 
   /**

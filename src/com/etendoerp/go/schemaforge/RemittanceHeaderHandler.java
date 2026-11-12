@@ -35,6 +35,9 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.OrganizationInformation;
+import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.module.remittance.Remittance;
@@ -50,19 +53,29 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <ul>
  *   <li><b>Flag.</b> With {@code sepa-remittances} off every request (CRUD, defaults, selectors,
  *       callouts) answers 403 {@code feature_disabled}.</li>
- *   <li><b>Defaults</b> never prefill an account without «Admite remesas»
- *       ({@link #afterHandle}).</li>
- *   <li><b>Writes.</b> The account must allow remittances ({@code ETGO_RemittanceAccountNotAllowed})
- *       and the type must be a provisioned remittance type whose payment method is actively linked
- *       to that account ({@code ETGO_RemittanceTypeNotAvailable}); a processed remittance cannot be
+ *   <li><b>Remittance account</b> ({@link #accountRefusal}): a Bank account
+ *       ({@value #MSG_ACCOUNT_NOT_BANK}) with a valid IBAN for its country
+ *       ({@value #MSG_ACCOUNT_IBAN_REQUIRED}, the same pair check as the account form,
+ *       {@link FinancialAccountCountrySupport#validateIbanCountryPair}) that has the remittance
+ *       payment methods linked ({@value #MSG_ACCOUNT_NOT_ALLOWED}). A Bank account gets those links
+ *       when it is created with the {@code sepa-remittances} flag on
+ *       ({@link FinancialAccountRemittanceSupport}); an older one has none (no backfill), and would
+ *       only fail later, at «Procesar», in Classic's {@code checkPMSetup}, so it is neither offered
+ *       nor accepted.</li>
+ *   <li><b>Defaults</b> never prefill an account that is not a remittance account, an account
+ *       without a valid IBAN included ({@link #afterHandle}).</li>
+ *   <li><b>Writes.</b> The account must be a remittance account (above, 422) and the type must be a
+ *       provisioned remittance type whose payment method is actively linked to that account
+ *       ({@code ETGO_RemittanceTypeNotAvailable}); a processed remittance cannot be
  *       modified or deleted ({@code ETGO_RemittanceProcessedNotEditable}); the name is required and
  *       at most {@value #NAME_MAX_LENGTH} characters. All 422 except the name checks (400). The
  *       document type ({@code REM_REM}) and the date come from their AD defaults, injected by the
  *       generic create.</li>
  *   <li><b>Selectors</b>, served here rather than through a {@code SelectorContextPolicy}, which
  *       would leak into every financial-account selector of the instance: {@code financialAccount}
- *       offers only accounts with «Admite remesas»; {@code remittanceType} only the provisioned
- *       types linked to the account the form already holds (request parameter
+ *       offers the Bank accounts with the remittance payment methods, with or without a valid
+ *       IBAN, each item marked {@code ibanValid} / {@code iban} ({@link #eligibilityRefusal});
+ *       {@code remittanceType} only the provisioned types linked to the account the form already holds (request parameter
  *       {@value #PARAM_ACCOUNT}, the field's {@code dependsOn.filterKey}). No account, no types.</li>
  *   <li><b>Callouts</b> are answered here and never reach Classic's. The header's only callout,
  *       {@code REM_RemittanceType_FinAccount} on the type, rebuilds the account combo from the
@@ -77,6 +90,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *       form's name is a name the user typed. {@code suggested} tells the SPA to apply it only to a
  *       name field the user never edited; an existing remittance (the form carries an {@code id})
  *       never gets one. Every other callout is answered empty.</li>
+ *   <li><b>«Datos para el fichero SEPA»</b>: declared read action {@code sepaFileData}
+ *       ({@link RemittanceSepaFileData}, {@link #handleSepaFileData}) — the account's IBAN and the
+ *       computed creditor identifier, for a saved or a new remittance. The IBAN the user types
+ *       there is saved on the account by the SPA through the financial-account spec, never
+ *       here.</li>
  *   <li><b>«Seleccionar desde factura»</b>: declared actions {@code availableDueItems} and
  *       {@code selectDueItems}, {@code syncDueItems} ({@link RemittanceDueItems}); 422 on a
  *       processed remittance.</li>
@@ -109,7 +127,12 @@ public class RemittanceHeaderHandler implements NeoHandler {
   static final String PARAM_ACCOUNT = "FIN_Financial_Account_ID";
   static final int NAME_MAX_LENGTH = 60;
 
+  /** A Bank account with a valid IBAN but without the remittance payment methods. */
   static final String MSG_ACCOUNT_NOT_ALLOWED = "ETGO_RemittanceAccountNotAllowed";
+  static final String MSG_ACCOUNT_NOT_BANK = "ETGO_RemittanceAccountNotBank";
+  static final String MSG_ACCOUNT_IBAN_REQUIRED = "ETGO_RemittanceAccountIbanRequired";
+  /** {@code FIN_FINANCIAL_ACCOUNT.TYPE} of a bank account. */
+  static final String TYPE_BANK = "B";
   static final String MSG_TYPE_NOT_AVAILABLE = "ETGO_RemittanceTypeNotAvailable";
   static final String MSG_PROCESSED = "ETGO_RemittanceProcessedNotEditable";
   /** The body key the SPA process dialog posts its collected parameters under. */
@@ -118,6 +141,9 @@ public class RemittanceHeaderHandler implements NeoHandler {
   static final String MSG_NAME_TOO_LONG = "ETGO_RemittanceNameTooLong";
   /** Catalog-only ({@code neo_hints}), no {@code AD_MESSAGE} row. */
   static final String MSG_DUE_DATE_PAST = "ETGO_RemittanceDueDatePast";
+
+  /** The record id the SPA sends for a remittance that is not saved yet. */
+  static final String NEW_RECORD_ID = "new";
 
   private static final int SC_UNPROCESSABLE = 422;
   private static final int SELECTOR_DEFAULT_LIMIT = 20;
@@ -132,6 +158,10 @@ public class RemittanceHeaderHandler implements NeoHandler {
     NeoEndpointType endpoint = context.getEndpointType();
     if (endpoint == NeoEndpointType.CALLOUT) {
       return nameSuggestionCallout();
+    }
+    if (endpoint == NeoEndpointType.ACTION
+        && RemittanceSepaFileData.serves(context.getFieldName())) {
+      return handleSepaFileData(context);
     }
     if (endpoint == NeoEndpointType.ACTION
         && (RemittanceDueItems.serves(context.getFieldName())
@@ -156,7 +186,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
   }
 
   /**
-   * DEFAULTS: never prefill an account that does not allow remittances. The account column has no
+   * DEFAULTS: never prefill an account that is not a remittance account. The account column has no
    * AD default, so the generic resolver falls back to the first account it finds, which the
    * account selector would not even offer; the default is dropped then, and the type with it,
    * since the type depends on the account.
@@ -177,8 +207,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
     try {
       String accountId = idOf(defaults.opt(FIELD_ACCOUNT));
       FIN_FinancialAccount account = accountId != null ? loadAccount(accountId) : null;
-      if (accountId != null && account != null
-          && Boolean.TRUE.equals(account.isETGOAllowRemittance())) {
+      if (accountId != null && account != null && accountRefusal(account) == null) {
         return null;
       }
       for (String key : List.of(FIELD_ACCOUNT, FIELD_TYPE)) {
@@ -224,6 +253,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
     java.util.Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     RemittanceDueItems.addContracts(contracts);
     RemittanceProcessAction.addContract(contracts);
+    RemittanceSepaFileData.addContract(contracts);
     return contracts;
   }
 
@@ -286,6 +316,111 @@ public class RemittanceHeaderHandler implements NeoHandler {
   }
 
   /**
+   * «Datos para el fichero SEPA» ({@link RemittanceSepaFileData}): reads the account named by the
+   * {@code accountId} parameter, never the remittance, so it answers for a remittance that is not
+   * saved yet (record id {@code new}). 404 for an account or organization the tenant does not
+   * own; 422 with the account's refusal when it is not a Bank account with the remittance payment
+   * methods. An account without a valid IBAN is answered, with {@code iban} in {@code missing}: the
+   * block is where the user gives it one.
+   */
+  NeoResponse handleSepaFileData(NeoContext context) {
+    OBContext.setAdminMode(true);
+    try {
+      JSONObject params = context.getRequestBody() != null ? context.getRequestBody()
+          : sepaFileDataParamsFromQuery(queryParams(context, RemittanceSepaFileData.P_ACCOUNT_ID,
+              RemittanceSepaFileData.P_ORGANIZATION_ID));
+      NeoResponse invalid = NeoActionContract.validate(actionContracts(),
+          RemittanceSepaFileData.ACTION, params);
+      if (invalid != null) {
+        return invalid;
+      }
+      FIN_FinancialAccount account =
+          loadAccount(params.optString(RemittanceSepaFileData.P_ACCOUNT_ID, null));
+      if (account == null) {
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Financial account not found");
+      }
+      String refusal = eligibilityRefusal(account);
+      if (refusal != null) {
+        return NeoMessageText.error(SC_UNPROCESSABLE, refusal);
+      }
+      OrganizationChoice choice = resolveOrganization(context, params, account);
+      if (choice.unknown) {
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Organization not found");
+      }
+      return NeoResponse.ok(sepaFileDataBody(account, choice.organization));
+    } catch (JSONException | RuntimeException e) {
+      log.error("remittance action {} failed for account", RemittanceSepaFileData.ACTION, e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Could not run " + RemittanceSepaFileData.ACTION + ". Please check logs for details.");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * The organization the creditor identifier is computed for: the {@code organizationId}
+   * parameter when sent (unknown to the tenant: {@link OrganizationChoice#unknown}), otherwise the
+   * saved remittance's, otherwise the account's.
+   */
+  OrganizationChoice resolveOrganization(NeoContext context, JSONObject params,
+      FIN_FinancialAccount account) {
+    String orgId = StringUtils.trimToNull(
+        params.optString(RemittanceSepaFileData.P_ORGANIZATION_ID, null));
+    if (orgId != null) {
+      Organization organization = loadOrganization(orgId);
+      return organization != null ? new OrganizationChoice(organization, false)
+          : new OrganizationChoice(null, true);
+    }
+    // The SPA sends the sentinel id "new" for a remittance that is not saved yet.
+    Remittance stored = NEW_RECORD_ID.equals(context.getRecordId()) ? null
+        : loadRemittance(context.getRecordId());
+    return new OrganizationChoice(
+        stored != null ? stored.getOrganization() : account.getOrganization(), false);
+  }
+
+  /** The {@code sepaFileData} answer for {@code account} and {@code organization} (may be null). */
+  private JSONObject sepaFileDataBody(FIN_FinancialAccount account, Organization organization)
+      throws JSONException {
+    OrganizationInformation info = organization != null ? loadOrganizationInfo(organization)
+        : null;
+    return RemittanceSepaFileData.build(account, hasValidIban(account),
+        organization != null ? organization.getId() : null, countryIsoOf(info),
+        info != null ? info.getTaxID() : null, creditorBusinessCode(account));
+  }
+
+  /** The outcome of {@link #resolveOrganization}: the organization, or an unknown one asked for. */
+  static final class OrganizationChoice {
+    final Organization organization;
+    final boolean unknown;
+
+    OrganizationChoice(Organization organization, boolean unknown) {
+      this.organization = organization;
+      this.unknown = unknown;
+    }
+  }
+
+  private static JSONObject sepaFileDataParamsFromQuery(java.util.Map<String, String> query)
+      throws JSONException {
+    JSONObject params = new JSONObject();
+    for (String key : List.of(RemittanceSepaFileData.P_ACCOUNT_ID,
+        RemittanceSepaFileData.P_ORGANIZATION_ID)) {
+      String value = query != null ? StringUtils.trimToNull(query.get(key)) : null;
+      if (value != null) {
+        params.put(key, value);
+      }
+    }
+    return params;
+  }
+
+  /** The organization's country ISO code, where Classic's SEPA file reads it, or {@code null}. */
+  static String countryIsoOf(OrganizationInformation info) {
+    Location location = info != null ? info.getLocationAddress() : null;
+    return location != null && location.getCountry() != null
+        ? location.getCountry().getISOCountryCode()
+        : null;
+  }
+
+  /**
    * The parameters of a call, read where its contract says they travel: {@code process} and
    * {@code reactivate} are pressed from the SPA's process dialog, which posts
    * {@code {"fieldValues": {...}}}, and {@code etendo_action} wraps the agent's flat parameters
@@ -326,6 +461,11 @@ public class RemittanceHeaderHandler implements NeoHandler {
   }
 
   private java.util.Map<String, String> queryParams(NeoContext context) {
+    return queryParams(context, RemittanceDueItems.P_SEARCH, RemittanceDueItems.P_PAGE,
+        RemittanceDueItems.P_PAGE_SIZE);
+  }
+
+  private java.util.Map<String, String> queryParams(NeoContext context, String... keys) {
     // An action context may carry an empty map rather than null; only a non-empty one is the
     // query string, otherwise read the servlet request.
     if (context.getQueryParams() != null && !context.getQueryParams().isEmpty()) {
@@ -334,8 +474,7 @@ public class RemittanceHeaderHandler implements NeoHandler {
     java.util.Map<String, String> params = new java.util.HashMap<>();
     HttpServletRequest request = currentRequest();
     if (request != null) {
-      for (String key : List.of(RemittanceDueItems.P_SEARCH, RemittanceDueItems.P_PAGE,
-          RemittanceDueItems.P_PAGE_SIZE)) {
+      for (String key : keys) {
         String value = request.getParameter(key);
         if (value != null) {
           params.put(key, value);
@@ -401,8 +540,9 @@ public class RemittanceHeaderHandler implements NeoHandler {
     if (account == null) {
       return null; // unknown reference: the generic write preflight answers it
     }
-    if (!Boolean.TRUE.equals(account.isETGOAllowRemittance())) {
-      return NeoMessageText.error(SC_UNPROCESSABLE, MSG_ACCOUNT_NOT_ALLOWED);
+    String accountRefusal = accountRefusal(account);
+    if (accountRefusal != null) {
+      return NeoMessageText.error(SC_UNPROCESSABLE, accountRefusal);
     }
     RemittanceType type = loadType(typeId);
     if (type == null) {
@@ -469,6 +609,58 @@ public class RemittanceHeaderHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * Why {@code account} cannot hold a remittance, or {@code null} when it can: a Bank account
+   * ({@value #MSG_ACCOUNT_NOT_BANK}) with a valid IBAN for its country
+   * ({@value #MSG_ACCOUNT_IBAN_REQUIRED}) and the remittance payment methods linked
+   * ({@value #MSG_ACCOUNT_NOT_ALLOWED}). Checked in that order, cheapest first; the link check is
+   * the only query.
+   *
+   * @param account the financial account
+   * @return the {@code AD_MESSAGE} key of the refusal, or {@code null}
+   */
+  String accountRefusal(FIN_FinancialAccount account) {
+    if (!TYPE_BANK.equals(account.getType())) {
+      return MSG_ACCOUNT_NOT_BANK;
+    }
+    if (!hasValidIban(account)) {
+      return MSG_ACCOUNT_IBAN_REQUIRED;
+    }
+    if (!hasRemittanceMethods(account)) {
+      return MSG_ACCOUNT_NOT_ALLOWED;
+    }
+    return null;
+  }
+
+  /**
+   * Why {@code account} cannot be chosen for a remittance at all, or {@code null} when it can: the
+   * account selector's rule, and the {@code sepaFileData} action's. A Bank account
+   * ({@value #MSG_ACCOUNT_NOT_BANK}) with the remittance payment methods linked
+   * ({@value #MSG_ACCOUNT_NOT_ALLOWED}); the IBAN is NOT required here, since the user can give the
+   * account one from the remittance header. Saving the remittance still needs it
+   * ({@link #accountRefusal}).
+   *
+   * @param account the financial account
+   * @return the {@code AD_MESSAGE} key of the refusal, or {@code null}
+   */
+  String eligibilityRefusal(FIN_FinancialAccount account) {
+    if (!TYPE_BANK.equals(account.getType())) {
+      return MSG_ACCOUNT_NOT_BANK;
+    }
+    return hasRemittanceMethods(account) ? null : MSG_ACCOUNT_NOT_ALLOWED;
+  }
+
+  /**
+   * Whether the stored IBAN is valid for the stored country: the account form's own pair check
+   * ({@link FinancialAccountCountrySupport#validateIbanCountryPair}), so an account the form would
+   * refuse to save is never used for a SEPA file. No country is invalid here.
+   */
+  static boolean hasValidIban(FIN_FinancialAccount account) {
+    String iban = FinancialAccountCountrySupport.normalizeIban(account.getIBAN());
+    return !iban.isEmpty() && account.getCountry() != null
+        && FinancialAccountCountrySupport.validateIbanCountryPair(iban, account.getCountry()) == null;
+  }
+
   boolean isTypeAvailable(FIN_FinancialAccount account, RemittanceType type) {
     return RemittanceSepaProvisioning.isProvisionedType(type)
         && RemittanceSepaProvisioning.hasActiveLink(account, type.getPaymentMethod());
@@ -489,25 +681,43 @@ public class RemittanceHeaderHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * The accounts a remittance can be made on ({@link #eligibilityRefusal}) that the user can read:
+   * active Bank accounts with an active link to a remittance payment method, WITH OR WITHOUT a valid
+   * IBAN — the remittance header lets the user give the account one. The link condition is
+   * {@link RemittanceSepaProvisioning#activeRemittanceLinkExists}, the one
+   * {@link RemittanceSepaProvisioning#hasRemittanceMethodLink} runs, so the selector and the write
+   * check cannot disagree. Every item carries {@code ibanValid} ({@link #hasValidIban}) and the
+   * stored {@code iban} (or {@code null}), so the SPA can mark the accounts that still need one.
+   * A client has a handful of bank accounts: every candidate is read, and the page is cut from
+   * that one list, so {@code totalCount} and {@code hasMore} describe the same set as the items.
+   */
   private NeoResponse accountSelector() throws JSONException {
     SelectorPage page = SelectorPage.fromRequest(currentRequest());
-    String where = " from " + FIN_FinancialAccount.ENTITY_NAME + " as a"
-        + " where a.client.id = :client and a.active = true and a.eTGOAllowRemittance = true"
+    String hql = "select a from " + FIN_FinancialAccount.ENTITY_NAME + " as a"
+        + " where a.client.id = :client and a.active = true and a.type = :bank"
         + " and a.organization.id in (:orgs)"
-        + (page.search != null ? " and lower(a.name) like :search" : "");
-    org.hibernate.query.Query<Long> count = OBDal.getInstance().getSession()
-        .createQuery("select count(a.id)" + where, Long.class);
+        + " and " + RemittanceSepaProvisioning.activeRemittanceLinkExists("a")
+        + (page.search != null ? " and lower(a.name) like :search" : "")
+        + " order by a.name, a.id";
     org.hibernate.query.Query<FIN_FinancialAccount> rows = OBDal.getInstance().getSession()
-        .createQuery("select a" + where + " order by a.name, a.id", FIN_FinancialAccount.class);
-    bindCommon(count, page);
+        .createQuery(hql, FIN_FinancialAccount.class);
     bindCommon(rows, page);
-    List<FIN_FinancialAccount> accounts =
-        rows.setFirstResult(page.offset).setMaxResults(page.limit).list();
+    rows.setParameter("bank", TYPE_BANK);
+    rows.setParameter(RemittanceSepaProvisioning.PARAM_MARKER,
+        RemittanceSepaProvisioning.PARAM_SCHEME);
+    List<FIN_FinancialAccount> accounts = rows.list();
     JSONArray items = new JSONArray();
-    for (FIN_FinancialAccount account : accounts) {
-      items.put(item(account.getId(), account.getIdentifier()));
+    int end = Math.min(accounts.size(), page.offset + page.limit);
+    for (int i = Math.min(page.offset, end); i < end; i++) {
+      FIN_FinancialAccount account = accounts.get(i);
+      JSONObject item = item(account.getId(), account.getIdentifier());
+      String iban = StringUtils.trimToNull(account.getIBAN());
+      item.put("iban", iban != null ? iban : JSONObject.NULL);
+      item.put("ibanValid", hasValidIban(account));
+      items.put(item);
     }
-    return page.response(items, count.uniqueResult());
+    return page.response(items, (long) accounts.size());
   }
 
   private NeoResponse typeSelector() throws JSONException {
@@ -762,8 +972,27 @@ public class RemittanceHeaderHandler implements NeoHandler {
     return TenantOwnership.loadOwned(FIN_FinancialAccount.class, id);
   }
 
+  boolean hasRemittanceMethods(FIN_FinancialAccount account) {
+    return RemittanceSepaProvisioning.hasRemittanceMethodLink(account);
+  }
+
   RemittanceType loadType(String id) {
     return TenantOwnership.loadOwned(RemittanceType.class, id);
+  }
+
+  /** The client's stored creditor business code ({@link RemittanceSepaProvisioning}), raw. */
+  String creditorBusinessCode(FIN_FinancialAccount account) {
+    return RemittanceSepaProvisioning.creditorBusinessCode(account.getClient());
+  }
+
+  Organization loadOrganization(String id) {
+    return TenantOwnership.loadOwned(Organization.class, id);
+  }
+
+  /** The organization's own information (no parent fallback), as Classic's SEPA file reads it. */
+  OrganizationInformation loadOrganizationInfo(Organization organization) {
+    List<OrganizationInformation> infos = organization.getOrganizationInformationList();
+    return infos == null || infos.isEmpty() ? null : infos.get(0);
   }
 
   /** Today in the server's default time zone. A seam, so tests can pin the day. */

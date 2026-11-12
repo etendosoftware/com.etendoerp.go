@@ -94,8 +94,6 @@ import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.OrgCurrency;
  *   <li>Suggestion engine counters stay at 0 (ETBR_Match_Suggestion lands in T5).</li>
  *   <li>{@code handle()} returns 405 on non-GET and never touches the loaders.</li>
  *   <li>{@code buildPayload()} envelope shape matches the contract the UI hook consumes.</li>
- *   <li>ETP-6148: {@code allowRemittance} is read from the last column and serialised only while
- *       the {@code sepa-remittances} flag is on.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountsPageHandler
@@ -192,8 +190,6 @@ public class FinancialAccountsPageHandlerTest {
     doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
     doReturn(withTransactions).when(handler).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
     doReturn(ORG_EUR).when(handler).resolveOrgCurrency();
-    // ETP-6148: the sepa-remittances gate is a seam; off keeps the payload as it was.
-    doReturn(false).when(handler).isSepaRemittancesEnabled();
 
     // ETP-4896: buildPayload also attaches the countryIbanRules catalog, built by
     // FinancialAccountCountrySupport straight from OBDal (not a spied seam on this handler).
@@ -245,8 +241,6 @@ public class FinancialAccountsPageHandlerTest {
     doReturn(Collections.emptySet()).when(handler)
         .loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
     doReturn(ORG_EUR).when(handler).resolveOrgCurrency();
-    // ETP-6148: the sepa-remittances gate is a seam; off keeps the payload as it was.
-    doReturn(false).when(handler).isSepaRemittancesEnabled();
 
     FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -1943,96 +1937,5 @@ public class FinancialAccountsPageHandlerTest {
     assertEquals(SYNC_OLD.toString(), arr.getJSONObject(0).getString("lastSyncDate"));
     assertTrue("the key must stay present", arr.getJSONObject(1).has("lastSyncDate"));
     assertTrue(arr.getJSONObject(1).isNull("lastSyncDate"));
-  }
-
-  // ── allowRemittance (ETP-6148) ────────────────────────────────────────────
-
-  /**
-   * {@code loadAccounts()} reads {@code fa.em_etgo_allow_remittance}, appended as column 27 after
-   * the stale-connection rule so no earlier position shifts: {@code 'Y'} maps to {@code true},
-   * anything else ({@code 'N'}, NULL) to {@code false}.
-   *
-   * @throws Exception if the mocked JDBC chain fails
-   */
-  @Test
-  public void testLoadAccountsReadsAllowRemittanceFromTheLastColumn() throws Exception {
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(true, true, true, false);
-    when(rs.getString(1)).thenReturn("acc-y", "acc-n", "acc-null");
-    when(rs.getString(8)).thenReturn("N", "N", "N");
-    when(rs.getString(9)).thenReturn("Y", "Y", "Y");
-    when(rs.getString(27)).thenReturn("Y", "N", null);
-
-    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
-
-    assertEquals(3, rows.size());
-    assertTrue("'Y' allows remittances", rows.get(0).allowRemittance);
-    assertFalse("'N' does not", rows.get(1).allowRemittance);
-    assertFalse("NULL does not", rows.get(2).allowRemittance);
-    org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
-    verify(conn).prepareStatement(sql.capture());
-    String normalized = sql.getValue().replaceAll("\\s+", " ");
-    assertTrue("selected as the last column, after the stale-connection rule",
-        normalized.contains("OR sc.last_fail_at > sc.last_success_at)), "
-            + "fa.em_etgo_allow_remittance FROM fin_financial_account fa"));
-  }
-
-  /** Flag on: every account carries {@code allowRemittance}, true or false from its row. */
-  @Test
-  public void testBuildPayloadWithSepaRemittancesOnEmitsAllowRemittancePerAccount()
-      throws Exception {
-    AccountRow allowed = account("acc-1", "BBVA", "B", new BigDecimal("10.00"), "EUR");
-    allowed.allowRemittance = true;
-    AccountRow plain = account("acc-2", "Caja", "C", new BigDecimal("5.00"), "EUR");
-
-    JSONArray accounts = buildPayloadAccounts(Arrays.asList(allowed, plain), true);
-
-    assertTrue(accounts.getJSONObject(0).getBoolean("allowRemittance"));
-    assertTrue("the key is present when false too", accounts.getJSONObject(1).has("allowRemittance"));
-    assertFalse(accounts.getJSONObject(1).getBoolean("allowRemittance"));
-  }
-
-  /** Flag off: the key is absent, so the payload is the one before the feature. */
-  @Test
-  public void testBuildPayloadWithSepaRemittancesOffOmitsAllowRemittance() throws Exception {
-    AccountRow allowed = account("acc-1", "BBVA", "B", new BigDecimal("10.00"), "EUR");
-    allowed.allowRemittance = true;
-
-    JSONArray accounts = buildPayloadAccounts(Arrays.asList(allowed), false);
-
-    assertFalse(accounts.getJSONObject(0).has("allowRemittance"));
-    assertFalse("the two-argument overload never emits it either",
-        handler.buildAccountsArray(Arrays.asList(allowed), Collections.emptySet())
-            .getJSONObject(0).has("allowRemittance"));
-  }
-
-  /** Runs {@code buildPayload()} over {@code rows} with the flag seam answering {@code flagOn}. */
-  private JSONArray buildPayloadAccounts(List<AccountRow> rows, boolean flagOn) throws Exception {
-    doReturn(rows).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
-    doReturn(Collections.emptySet()).when(handler)
-        .loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
-    doReturn(ORG_EUR).when(handler).resolveOrgCurrency();
-    doReturn(flagOn).when(handler).isSepaRemittancesEnabled();
-
-    FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      @SuppressWarnings("unchecked")
-      OBCriteria<Country> countryCriteria = mock(OBCriteria.class);
-      when(dal.createCriteria(Country.class)).thenReturn(countryCriteria);
-      when(countryCriteria.list()).thenReturn(Collections.emptyList());
-
-      NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
-
-      verify(handler).isSepaRemittancesEnabled();
-      return response.getBody().getJSONObject("response").getJSONObject("data")
-          .getJSONArray("accounts");
-    }
   }
 }

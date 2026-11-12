@@ -48,7 +48,7 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 /**
  * Unit tests for {@link RemittanceMethodLinkObserver}: an active {@code FIN_FinAcc_PaymentMethod}
- * that joins a remittance payment method to an account without «Admite remesas» is refused with
+ * that joins a remittance payment method to a non-Bank account (Cash, Card) is refused with
  * {@link MessageKeyedException} {@code ETGO_RemittanceMethodAccountNotAllowed}; everything else
  * passes.
  *
@@ -121,7 +121,7 @@ class RemittanceMethodLinkObserverTest {
   }
 
   @Test
-  void anActiveRemittanceMethodOnAnAccountWithoutTheSettingIsRefused() {
+  void anActiveRemittanceMethodOnANonBankAccountIsRefused() {
     FIN_PaymentMethod method = method("PM-REM");
     remittanceMethod(method, true);
     EntityNewEvent event = event(EntityNewEvent.class, true, account("ACC", false), method);
@@ -133,6 +133,22 @@ class RemittanceMethodLinkObserverTest {
     assertEquals("ETGO_RemittanceMethodAccountNotAllowed", refusal.getMessageKey());
     contextStatic.verify(() -> OBContext.setAdminMode(true));
     contextStatic.verify(OBContext::restorePreviousMode);
+  }
+
+  /** A Card account is not a Bank account either: the remittance method is refused on it too. */
+  @Test
+  void anActiveRemittanceMethodOnACardAccountIsRefused() {
+    FIN_PaymentMethod method = method("PM-REM");
+    remittanceMethod(method, true);
+    FIN_FinancialAccount card = account("ACC-CARD", false);
+    when(card.getType()).thenReturn("CA");
+    EntityNewEvent event = event(EntityNewEvent.class, true, card, method);
+
+    MessageKeyedException refusal = assertThrows(MessageKeyedException.class,
+        () -> observer.onNew(event));
+
+    assertEquals(RemittanceMethodLinkObserver.MSG_NOT_ALLOWED, refusal.getMessageKey());
+    provisioningStatic.verify(() -> RemittanceSepaProvisioning.isRemittanceMethod(method));
   }
 
   @Test
@@ -147,7 +163,7 @@ class RemittanceMethodLinkObserverTest {
   }
 
   @Test
-  void anAccountThatAllowsRemittancesPassesWithoutAskingAboutTheMethod() {
+  void aBankAccountPassesWithoutAskingAboutTheMethod() {
     FIN_PaymentMethod method = method("PM-REM");
     remittanceMethod(method, true);
     EntityNewEvent event = event(EntityNewEvent.class, true, account("ACC", true), method);
@@ -255,10 +271,11 @@ class RemittanceMethodLinkObserverTest {
     return event;
   }
 
-  private static FIN_FinancialAccount account(String id, boolean allowRemittance) {
+  /** A Bank ({@code B}) account when {@code bank}, a Cash ({@code C}) one otherwise. */
+  private static FIN_FinancialAccount account(String id, boolean bank) {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getId()).thenReturn(id);
-    when(account.isETGOAllowRemittance()).thenReturn(allowRemittance);
+    when(account.getType()).thenReturn(bank ? "B" : "C");
     return account;
   }
 

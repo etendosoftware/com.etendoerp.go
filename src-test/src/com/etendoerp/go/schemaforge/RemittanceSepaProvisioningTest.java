@@ -484,13 +484,13 @@ class RemittanceSepaProvisioningTest {
   // ---------------------------------------------------------------- ensureAccountLinks
 
   @Test
-  void enablingCreatesAMissingLinkPerProvisionedMethodAndFlushes() {
+  void linkingCreatesAMissingLinkPerProvisionedMethodAndFlushes() {
     FIN_FinancialAccount account = account("ACC");
     FIN_PaymentMethod core = remittanceMethod(true, mock(PaymentExecutionProcess.class));
     FIN_PaymentMethod sct = remittanceMethod(false, mock(PaymentExecutionProcess.class));
     resolveTypes(core, sct, null, null);
 
-    RemittanceSepaProvisioning.ensureAccountLinks(account, true);
+    RemittanceSepaProvisioning.ensureAccountLinks(account);
 
     List<FinAccPaymentMethod> links = all(FinAccPaymentMethod.class);
     assertEquals(2, links.size());
@@ -500,14 +500,14 @@ class RemittanceSepaProvisioningTest {
   }
 
   @Test
-  void enablingReactivatesAnInactiveLinkAndReappliesTheSetup() {
+  void linkingReactivatesAnInactiveLinkAndReappliesTheSetup() {
     FIN_PaymentMethod core = remittanceMethod(true, mock(PaymentExecutionProcess.class));
     FIN_PaymentMethod sct = remittanceMethod(false, mock(PaymentExecutionProcess.class));
     FinAccPaymentMethod coreLink = link(false);
     FinAccPaymentMethod sctLink = link(false);
     resolveTypes(core, sct, coreLink, sctLink);
 
-    RemittanceSepaProvisioning.ensureAccountLinks(account("ACC"), true);
+    RemittanceSepaProvisioning.ensureAccountLinks(account("ACC"));
 
     assertTrue(all(FinAccPaymentMethod.class).isEmpty(), "an existing link is reused");
     verify(coreLink).setActive(true);
@@ -522,39 +522,52 @@ class RemittanceSepaProvisioningTest {
   }
 
   @Test
-  void disablingSetsAnActiveLinkInactiveAndNeverDeletesIt() {
-    FIN_PaymentMethod core = remittanceMethod(true, mock(PaymentExecutionProcess.class));
-    FIN_PaymentMethod sct = remittanceMethod(false, mock(PaymentExecutionProcess.class));
-    FinAccPaymentMethod coreLink = link(true);
-    FinAccPaymentMethod sctLink = link(false);
-    resolveTypes(core, sct, coreLink, sctLink);
-
-    RemittanceSepaProvisioning.ensureAccountLinks(account("ACC"), false);
-
-    verify(coreLink).setActive(false);
-    verify(dal).save(coreLink);
-    verify(sctLink, never()).setActive(any());
-    verify(dal, never()).save(sctLink);
-    verify(dal, never()).remove(any());
-    verify(dal).flush();
-  }
-
-  @Test
-  void disablingAnAccountWithoutLinksTouchesNothing() {
-    resolveTypes(remittanceMethod(true, null), remittanceMethod(false, null), null, null);
-
-    RemittanceSepaProvisioning.ensureAccountLinks(account("ACC"), false);
-
-    verify(dal, never()).save(any());
-    verify(dal, never()).flush();
-  }
-
-  @Test
-  void enablingAnUnprovisionedClientLinksNothing() {
-    RemittanceSepaProvisioning.ensureAccountLinks(account("ACC"), true);
+  void linkingAnUnprovisionedClientLinksNothing() {
+    RemittanceSepaProvisioning.ensureAccountLinks(account("ACC"));
 
     assertTrue(created.isEmpty(), "created: " + created.keySet());
     verify(dal, never()).flush();
+  }
+
+  /**
+   * A client never provisioned (no remittance types) is not an error, but it is logged: one
+   * warning per missing scheme, naming the account left unlinked.
+   */
+  @Test
+  void linkingAnUnprovisionedClientWarnsOncePerMissingType() {
+    try (com.etendoerp.go.usageevents.LogCapture logs =
+        com.etendoerp.go.usageevents.LogCapture.of(RemittanceSepaProvisioning.class)) {
+      RemittanceSepaProvisioning.ensureAccountLinks(account("ACC"));
+
+      List<String> warnings = logs.messages(org.apache.logging.log4j.Level.WARN);
+      assertEquals(2, warnings.size(), warnings.toString());
+      assertTrue(warnings.get(0).contains(RemittanceSepaProvisioning.SCHEME_CORE), warnings.get(0));
+      assertTrue(warnings.get(1).contains(RemittanceSepaProvisioning.SCHEME_SCT), warnings.get(1));
+      for (String warning : warnings) {
+        assertTrue(warning.contains("ACC") && warning.contains("not linked"), warning);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- provisionAccount
+
+  /** provisionAccount sets the client up, then links the account: the links need the types. */
+  @Test
+  void provisionAccountSetsTheClientUpBeforeLinkingTheAccount() {
+    FIN_FinancialAccount account = account("ACC");
+    List<String> steps = new ArrayList<>();
+    try (MockedStatic<RemittanceSepaProvisioning> provisioning =
+        mockStatic(RemittanceSepaProvisioning.class, Mockito.CALLS_REAL_METHODS)) {
+      provisioning.when(() -> RemittanceSepaProvisioning.ensureClient(any()))
+          .thenAnswer(inv -> steps.add("ensureClient:" + (inv.getArgument(0) == client)));
+      provisioning.when(() -> RemittanceSepaProvisioning.ensureAccountLinks(any()))
+          .thenAnswer(inv -> steps.add("ensureAccountLinks:" + (inv.getArgument(0) == account)));
+
+      RemittanceSepaProvisioning.provisionAccount(account);
+    }
+
+    assertEquals(List.of("ensureClient:true", "ensureAccountLinks:true"), steps,
+        "the account's own client, then the account");
   }
 
   // ---------------------------------------------------------------- lookups
@@ -614,6 +627,36 @@ class RemittanceSepaProvisioningTest {
     resolver = q -> null;
     assertFalse(RemittanceSepaProvisioning.hasActiveLink(account, method));
     assertFalse(RemittanceSepaProvisioning.hasActiveLink(account(null), method));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void hasRemittanceMethodLinkCountsActiveLinksToMarkedMethods() {
+    Query<Long> query = mock(Query.class, RETURNS_SELF);
+    when(query.uniqueResult()).thenReturn(2L);
+    when(session.createQuery(anyString(), eq(Long.class))).thenReturn(query);
+
+    assertTrue(RemittanceSepaProvisioning.hasRemittanceMethodLink(account("ACC")));
+
+    verify(query).setParameter("account", "ACC");
+    verify(query).setParameter("marker", MARKER);
+    org.mockito.ArgumentCaptor<String> hql = org.mockito.ArgumentCaptor.forClass(String.class);
+    verify(session).createQuery(hql.capture(), eq(Long.class));
+    assertTrue(hql.getValue().contains("l.active = true"), hql.getValue());
+    assertTrue(hql.getValue().contains("p.name = :marker"), hql.getValue());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void hasRemittanceMethodLinkIsFalseForNoLinksANullCountOrAnUnsavedAccount() {
+    Query<Long> query = mock(Query.class, RETURNS_SELF);
+    when(query.uniqueResult()).thenReturn(0L, (Long) null);
+    when(session.createQuery(anyString(), eq(Long.class))).thenReturn(query);
+
+    assertFalse(RemittanceSepaProvisioning.hasRemittanceMethodLink(account("ACC")));
+    assertFalse(RemittanceSepaProvisioning.hasRemittanceMethodLink(account("ACC")));
+    assertFalse(RemittanceSepaProvisioning.hasRemittanceMethodLink(account(null)));
+    assertFalse(RemittanceSepaProvisioning.hasRemittanceMethodLink(null));
   }
 
   @Test

@@ -96,9 +96,7 @@ public class RemittanceDueItemsQueryIntegrationTest extends OBBaseTest {
     OBContext.setAdminMode(true);
     try {
       RemittanceSepaProvisioning.ensureClient(client);
-      account.setETGOAllowRemittance(true);
-      OBDal.getInstance().save(account);
-      RemittanceSepaProvisioning.ensureAccountLinks(account, true);
+      RemittanceSepaProvisioning.ensureAccountLinks(account);
 
       Remittance collection = remittance(RemittanceSepaProvisioning.SCHEME_CORE);
       assertEquals(Boolean.TRUE, RemittanceDueItems.direction(account,

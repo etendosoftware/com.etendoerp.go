@@ -13,10 +13,5 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="EM_ETGO_ALLOW_REMITTANCE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
-        <default><![CDATA[N]]></default>
-        <onCreateDefault><![CDATA['N']]></onCreateDefault>
-      </column>
-      <check name="EM_ETGO_FA_ALLOWREM_CHK"><![CDATA[EM_ETGO_ALLOW_REMITTANCE IN ('Y', 'N')]]></check>
     </table>
   </database>
