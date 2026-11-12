@@ -27,12 +27,16 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
@@ -49,6 +53,9 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  *   <li>{@code handle()} — must always return null to fall through to default CRUD.</li>
  *   <li>{@code afterHandle()} — guard conditions that short-circuit before DB access:
  *       non-GET method, missing previous result, null body, and empty data array.</li>
+ *   <li>ETP-6002 CP-22 — {@code invoiceLineId} declared as a create directive (the MCP no longer
+ *       reports it in {@code unknownFields}) and the sales link: the first shipment of an invoice
+ *       line in its column, a later partial one in {@code M_MatchSI}.</li>
  * </ul>
  *
  * <p>Tests that require DB access (orderLineQty / productCode enrichment via SQL)
@@ -512,6 +519,74 @@ public class GoodsShipmentLineHandlerTest {
       assertNull(new GoodsShipmentLineHandler().handle(ctx));
       assertEquals("loc-explicit", body.getString("storageBin"));
       Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
+    }
+  }
+
+  // ── ETP-6002 CP-22 — invoiceLineId: directive and sales link ──────────────
+
+  /**
+   * {@code invoiceLineId} is a create directive of the shipment line: the MCP write verbs read the
+   * directives to decide what is unknown, so declaring it is what keeps it out of
+   * {@code unknownFields} while the link it asks for is written.
+   */
+  @Test
+  public void createDirectivesDeclareInvoiceLineId() {
+    java.util.Map<String, String> directives = new GoodsShipmentLineHandler().createDirectives();
+
+    assertEquals(java.util.Set.of("invoiceLineId"), directives.keySet());
+    assertTrue(directives.get("invoiceLineId").contains("sales invoice line"));
+  }
+
+  /** Arms the handler with {@code invoiceLineId} and runs the POST post-hook for {@code newLineId}. */
+  private static void createWithInvoiceLine(GoodsShipmentLineHandler handler, String invoiceLineId,
+      String newLineId) throws Exception {
+    handler.handle(NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(new JSONObject().put("invoiceLineId", invoiceLineId)).build());
+    JSONObject created = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", newLineId))));
+    assertNull(handler.afterHandle(NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD).previousResult(new NeoResponse(201, created)).build()));
+  }
+
+  /**
+   * The first shipment of an invoice line is recorded in its column and no match row is written
+   * (M_INOUT_POST writes it on completion); a later partial shipment, whose invoice line already
+   * points at another shipment line, gets its {@code M_MatchSI} row now. Before ETP-6002 the
+   * second one was not linked at all, so an MCP partial shipment without an order line left the
+   * rest of the invoice line looking unshipped forever.
+   */
+  @SuppressWarnings({ "rawtypes", "unchecked" })
+  @Test
+  public void createLinksTheInvoiceLineInItsColumnThenInTheSalesMatchTable() throws Exception {
+    for (int updated : new int[] { 1, 0 }) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class)) {
+        context.when(OBContext::getOBContext).thenReturn(null);
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        org.hibernate.Session session = mock(org.hibernate.Session.class);
+        when(dal.getSession()).thenReturn(session);
+        org.hibernate.query.NativeQuery query = mock(org.hibernate.query.NativeQuery.class);
+        List<String> statements = new ArrayList<>();
+        when(session.createNativeQuery(Mockito.anyString())).thenAnswer(call -> {
+          statements.add(call.getArgument(0));
+          return query;
+        });
+        when(query.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(query);
+        when(query.executeUpdate()).thenReturn(updated);
+
+        createWithInvoiceLine(new GoodsShipmentLineHandler(), "inv-line-1", "ship-line-2");
+
+        String label = updated == 1 ? "first shipment" : "later partial shipment";
+        assertTrue(label, statements.get(0).contains("UPDATE C_InvoiceLine")
+            && statements.get(0).contains("M_InOutLine_ID IS NULL"));
+        assertEquals(label, updated == 1 ? 1 : 2, statements.size());
+        if (updated == 0) {
+          assertTrue(label, statements.get(1).contains("INSERT INTO m_matchsi"));
+        }
+        Mockito.verify(query, Mockito.atLeastOnce()).setParameter("inoutLineId", "ship-line-2");
+        Mockito.verify(query, Mockito.atLeastOnce()).setParameter("invoiceLineId", "inv-line-1");
+      }
     }
   }
 }

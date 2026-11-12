@@ -63,13 +63,16 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(GoodsShipmentHeaderHandler.class);
   /**
    * The invoices this shipment's "Import from invoice" popup offers (ETP-6099, ETP-6002 IMP-3):
-   * plain sales invoices only (a rectificative delivers nothing); pending = invoiced - delivered -
-   * every draft shipment, this one included.
+   * plain sales invoices only (a rectificative delivers nothing). Pending by the invoice line's own
+   * shipment links, capped by its order line's headroom (ETP-6002 CP-22,
+   * {@link ImportInvoiceLinesIntoInOutHandler.SourcePolicy#byDirectLinks}): an invoice already
+   * shipped is not offered again, whether its shipment carries the order line (window) or only the
+   * invoice line link (MCP {@code invoiceLineId}).
    */
   static final ImportInvoiceLinesIntoInOutHandler.SourcePolicy INVOICE_IMPORT_POLICY =
-      new ImportInvoiceLinesIntoInOutHandler.SourcePolicy(
+      ImportInvoiceLinesIntoInOutHandler.SourcePolicy.byDirectLinks(
           invoice -> !SalesInvoiceHeaderHandler.isRectificativeDocType(
-              invoice.getTransactionDocument()), true, true);
+              invoice.getTransactionDocument()));
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
   private static final String CAN_RETURN_SQL =
       "SELECT 1 FROM m_inoutline sil" +

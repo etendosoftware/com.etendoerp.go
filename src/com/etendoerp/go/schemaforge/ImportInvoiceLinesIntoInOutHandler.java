@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -34,6 +35,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
@@ -59,14 +61,19 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *       {@code includeCovered} also lists the others, at {@code pendingLines} 0, so the popup can
  *       say "all already imported".</li>
  *   <li><b>Which lines.</b> Active, other than the total-discount line, in line order.</li>
- *   <li><b>How much</b>, by the header's {@link SourcePolicy}. Goods shipment: a line with an order
- *       line (its own, or the header order's line of the same product, the last one winning, as the
- *       popup) has {@code invoiced - delivered - drafts} pending, never below 0, where drafts are the
- *       lines of every DRAFT shipment of the direction pointing at that order line, the target's own
- *       included; a line without one has its quantity unless it is already linked to a movement line
- *       ({@code linked}), then 0. Goods receipt (the popup's rule, delivered NOT deducted): a linked
- *       line has 0, any other {@code invoiced - drafts}, drafts being the OTHER draft receipts holding
- *       its order line.</li>
+ *   <li><b>How much</b>, by the header's {@link SourcePolicy}. Goods shipment
+ *       ({@link SourcePolicy#byDirectLinks}, ETP-6002 CP-22): what the invoice line still has to
+ *       ship by its OWN links, {@code invoiced - moved}, where moved is what the shipment lines
+ *       linked to it ({@code C_InvoiceLine.M_InOutLine_ID} or the match table), draft or completed,
+ *       give it — each shipment line's quantity split over every invoice line linked to it, oldest
+ *       invoice first ({@link #allocateMovements}). A line with an order line (its own, or the
+ *       header order's line of the same product, the last one winning, as the popup) is also capped
+ *       by that order line's headroom: what the counted invoices put on it, minus what it
+ *       delivered, minus what every DRAFT shipment of the direction holds of it (the target's own
+ *       included), shared out over the invoice's lines in line order. Never below 0. Goods receipt
+ *       (the popup's rule, delivered NOT deducted): a linked line has 0, any other
+ *       {@code invoiced - drafts}, drafts being the OTHER draft receipts holding its order
+ *       line.</li>
  * </ul>
  * The direction comes from the target document, never from the entity; the per-direction rule is
  * the header customization's own ({@link #ATTRIBUTE}). A plain CDI bean injected by the goods
@@ -104,6 +111,12 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
      * at {@code linked ? 0 : invoiced} with NO draft deduction ({@link #classicLineStates}).
      */
     final boolean offersClassicPending;
+    /**
+     * Whether a line pends by its own movement links ({@link #byDirectLinks}, ETP-6002 CP-22)
+     * instead of by what its order line delivered. Such a policy also gives
+     * {@code availableInvoices} rows (with {@code detail}) their pending {@code amount}.
+     */
+    final boolean pendsByDirectLinks;
 
     SourcePolicy(Predicate<Invoice> offered, boolean deductsDelivered,
         boolean deductsTargetDraft) {
@@ -112,10 +125,28 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
 
     SourcePolicy(Predicate<Invoice> offered, boolean deductsDelivered,
         boolean deductsTargetDraft, boolean offersClassicPending) {
+      this(offered, deductsDelivered, deductsTargetDraft, offersClassicPending, false);
+    }
+
+    private SourcePolicy(Predicate<Invoice> offered, boolean deductsDelivered,
+        boolean deductsTargetDraft, boolean offersClassicPending, boolean pendsByDirectLinks) {
       this.offered = offered;
       this.deductsDelivered = deductsDelivered;
       this.deductsTargetDraft = deductsTargetDraft;
       this.offersClassicPending = offersClassicPending;
+      this.pendsByDirectLinks = pendsByDirectLinks;
+    }
+
+    /**
+     * A line pends {@code invoiced - moved} by its own links (draft and completed movement lines,
+     * the target's included), capped by its order line's headroom (delivered and every draft
+     * deducted): the goods-shipment rule of the class comment. A movement line linked to the
+     * invoice line counts whatever order line it carries, or none, so a line created by the
+     * window's popup and one created through the MCP with only {@code invoiceLineId} give the
+     * same pending.
+     */
+    static SourcePolicy byDirectLinks(Predicate<Invoice> offered) {
+      return new SourcePolicy(offered, true, true, false, true);
     }
   }
 
@@ -141,11 +172,14 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         + "nothing is written by these two actions.";
     String on = DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.";
     String pendingRule = sales
-        ? "pendingQuantity is, for a line with an order line (its own, or the invoice's order line "
-            + "of the same product), the invoiced quantity minus what the order line already "
-            + "delivered minus what any DRAFT " + doc + " (this one included) holds of it, never "
-            + "below 0; for a line without one, its quantity, or 0 when it is already linked to a "
-            + doc + " line"
+        ? "pendingQuantity is the invoiced quantity minus what the " + doc + " lines linked to "
+            + "THIS invoice line already ship or hold (completed or DRAFT, this one included; a "
+            + doc + " line is linked when it was created with invoiceLineId), never below 0. A "
+            + "line with an order line (its own, or the invoice's order line of the same product) "
+            + "is also capped by what that order line still has to ship for its invoices: what "
+            + "the invoices put on it minus what it delivered minus what any DRAFT " + doc
+            + " holds of it. Only the invoice line's own links count, never another invoice's "
+            + "shipments of the same order line"
         : "pendingQuantity is 0 for a line already linked to a " + doc + " line, and otherwise the "
             + "invoiced quantity minus what OTHER draft " + doc + "s hold of its order line (its "
             + "own, or the invoice's order line of the same product), never below 0; what the "
@@ -159,14 +193,19 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
             + "the invoice's order id or null." + which + " hasMore true means the list may be "
             + "incomplete. limit (1 to " + ImportListing.MAX_LIMIT + "), offset and "
             + "includeCovered are optional; with limit or offset the answer adds offset and "
-            + "nextOffset (page on while hasMore); detail adds creationDate. includeCovered also lists the invoices with nothing left, at pendingLines 0. "
+            + "nextOffset (page on while hasMore); detail adds creationDate"
+            + (sales ? " and amount (unit price x pendingQuantity summed over the lines with a "
+                + "positive pending, at the invoice currency's precision: the import popup's row "
+                + "total)" : "")
+            + ". includeCovered also lists the invoices with nothing left, at pendingLines 0. "
             + "Step 1." + flow,
         ImportListing.listParams(MAX_INVOICES, "creationDate (ISO instant, UTC)"))
         .withIdDescription(on).availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of a " + invoice + " to " + (sales ? "ship" : "receive") + " here: "
             + "{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity, "
-            + "invoicedQuantity, orderLine, linked, inDraftDocuments}], hasMore:false}, where "
+            + "invoicedQuantity, orderLine, linked, inDraftDocuments"
+            + (sales ? ", unitPrice" : "") + "}], hasMore:false}, where "
             + pendingRule + "; orderLine is that order line id or null, linked whether the invoice "
             + "line already points at a " + doc + " line, and inDraftDocuments the document "
             + "numbers of the OTHER draft " + doc + "s holding its order line. Only the lines with "
@@ -238,8 +277,30 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       if (pendingLines == 0 && !(request.includeCovered && !lines.isEmpty())) {
         return null;
       }
-      return availableInvoiceRow(invoice, partnerId, pendingLines, request.detail);
+      JSONObject row = availableInvoiceRow(invoice, partnerId, pendingLines, request.detail);
+      if (request.detail && policy.pendsByDirectLinks && !classic) {
+        row.put("amount", pendingAmount(invoice, lines));
+      }
+      return row;
     }, request);
+  }
+
+  /**
+   * The popup's row total of an invoice (ETP-6002 CP-27): unit price x pending over the lines
+   * with a positive pending, at the invoice currency's precision — the same figure
+   * {@code availableOrders} gives an order ({@code ImportOrderLinesIntoInOutHandler}).
+   */
+  static BigDecimal pendingAmount(Invoice invoice, List<LineState> lines) {
+    BigDecimal sum = BigDecimal.ZERO;
+    for (LineState state : lines) {
+      if (state.pending.signum() > 0) {
+        sum = sum.add(orZero(state.line.getUnitPrice()).multiply(state.pending));
+      }
+    }
+    Currency currency = invoice.getCurrency();
+    int precision = currency == null || currency.getStandardPrecision() == null ? 2
+        : currency.getStandardPrecision().intValue();
+    return sum.setScale(precision, RoundingMode.HALF_UP);
   }
 
   /** The listed lines of {@code invoice} under the requested pending basis. */
@@ -287,6 +348,10 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
       ImportListing.putNullable(row, "orderLine", state.orderLineId);
       row.put("linked", line.getGoodsShipmentLine() != null);
       row.put("inDraftDocuments", new JSONArray(state.draftDocuments));
+      if (policy.pendsByDirectLinks && !classic) {
+        // ETP-6002 CP-27: the popup's row total follows the loaded lines, priced like an order's.
+        ImportListing.putNullable(row, "unitPrice", line.getUnitPrice());
+      }
       rows.put(row);
     }
     return completePage(rows);
@@ -331,6 +396,9 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
     Set<String> orderLineIds = new LinkedHashSet<>();
     orderLineOf.values().forEach(ol -> orderLineIds.add(ol.getId()));
     DraftTotals drafts = draftTotals(target, orderLineIds, policy);
+    if (policy.pendsByDirectLinks) {
+      return directLinkLineStates(target, invoice, lines, orderLineOf, drafts);
+    }
     List<LineState> states = new ArrayList<>();
     for (InvoiceLine line : lines) {
       OrderLine orderLine = orderLineOf.get(line.getId());
@@ -402,6 +470,122 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
           .subtract(held.getOrDefault(orderLine.getId(), BigDecimal.ZERO));
     }
     return line.getGoodsShipmentLine() != null ? BigDecimal.ZERO : quantity;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pending by direct links (SourcePolicy.byDirectLinks, ETP-6002 CP-22)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * One link between a movement line and an invoice line, as {@link #movementLinks} reads it: the
+   * movement line's quantity and the invoice line's invoiced quantity.
+   */
+  static final class MovementLink {
+    final String inOutLineId;
+    final BigDecimal movementQuantity;
+    final String invoiceLineId;
+    final BigDecimal invoicedQuantity;
+
+    MovementLink(String inOutLineId, BigDecimal movementQuantity, String invoiceLineId,
+        BigDecimal invoicedQuantity) {
+      this.inOutLineId = inOutLineId;
+      this.movementQuantity = movementQuantity;
+      this.invoiceLineId = invoiceLineId;
+      this.invoicedQuantity = invoicedQuantity;
+    }
+  }
+
+  /**
+   * The lines of {@code invoice} under {@link SourcePolicy#byDirectLinks}: each at
+   * {@code invoiced - moved} by its own links, and a line with an order line also capped by what
+   * that order line has left for its invoices, shared out in line order. The draft note is the
+   * same as under the order-line rule.
+   */
+  private List<LineState> directLinkLineStates(ShipmentInOut target, Invoice invoice,
+      List<InvoiceLine> lines, Map<String, OrderLine> orderLineOf, DraftTotals drafts) {
+    boolean sales = isSales(target);
+    List<String> lineIds = new ArrayList<>();
+    lines.forEach(line -> lineIds.add(line.getId()));
+    Map<String, BigDecimal> moved = allocateMovements(movementLinks(lineIds, sales));
+    Map<String, BigDecimal> headroom = orderLineHeadroom(invoice, lines, orderLineOf, drafts.held,
+        sales);
+    List<LineState> states = new ArrayList<>();
+    for (InvoiceLine line : lines) {
+      OrderLine orderLine = orderLineOf.get(line.getId());
+      BigDecimal pending = orZero(line.getInvoicedQuantity())
+          .subtract(moved.getOrDefault(line.getId(), BigDecimal.ZERO)).max(BigDecimal.ZERO);
+      if (orderLine != null) {
+        BigDecimal room = headroom.getOrDefault(orderLine.getId(), BigDecimal.ZERO)
+            .max(BigDecimal.ZERO);
+        pending = pending.min(room);
+        headroom.put(orderLine.getId(), room.subtract(pending));
+      }
+      states.add(new LineState(line, orderLine == null ? null : orderLine.getId(), pending,
+          orderLine == null ? Set.of()
+              : drafts.others.getOrDefault(orderLine.getId(), Set.of())));
+    }
+    return states;
+  }
+
+  /**
+   * How much of the movement lines each invoice line takes. {@code links} come grouped by movement
+   * line and, within one, oldest invoice first ({@link #movementLinks}); each movement line's
+   * quantity is handed out in that order, an invoice line never taking more than it invoiced over
+   * all its movement lines. A movement line linked to two invoice lines (the order-line link of
+   * {@code InvoiceLineLinker.linkPendingInvoiceLinesToInout}) is therefore counted once, not once
+   * per invoice.
+   *
+   * @return invoice line id to the quantity its links move; absent when none
+   */
+  static Map<String, BigDecimal> allocateMovements(List<MovementLink> links) {
+    Map<String, BigDecimal> taken = new HashMap<>();
+    String current = null;
+    BigDecimal left = BigDecimal.ZERO;
+    for (MovementLink link : links) {
+      if (!link.inOutLineId.equals(current)) {
+        current = link.inOutLineId;
+        left = orZero(link.movementQuantity).abs();
+      }
+      BigDecimal room = orZero(link.invoicedQuantity)
+          .subtract(taken.getOrDefault(link.invoiceLineId, BigDecimal.ZERO));
+      BigDecimal share = left.min(room).max(BigDecimal.ZERO);
+      if (share.signum() > 0) {
+        taken.merge(link.invoiceLineId, share, BigDecimal::add);
+        left = left.subtract(share);
+      }
+    }
+    return taken;
+  }
+
+  /**
+   * Per order line of {@code lines}, what it still has to ship for its invoices: what the OTHER
+   * counted invoices put on it ({@link #invoicedOnOrderLines}) plus what this invoice's lines
+   * resolved to it invoice, minus what it delivered, minus what the drafts hold of it.
+   */
+  private Map<String, BigDecimal> orderLineHeadroom(Invoice invoice, List<InvoiceLine> lines,
+      Map<String, OrderLine> orderLineOf, Map<String, BigDecimal> held, boolean sales) {
+    Map<String, BigDecimal> headroom = new HashMap<>();
+    if (orderLineOf.isEmpty()) {
+      return headroom;
+    }
+    Map<String, OrderLine> byId = new LinkedHashMap<>();
+    orderLineOf.values().forEach(ol -> byId.put(ol.getId(), ol));
+    Map<String, BigDecimal> elsewhere = invoicedOnOrderLines(byId.keySet(), invoice.getId(),
+        sales);
+    for (InvoiceLine line : lines) {
+      OrderLine orderLine = orderLineOf.get(line.getId());
+      if (orderLine != null) {
+        headroom.merge(orderLine.getId(),
+            orZero(line.getInvoicedQuantity()).max(BigDecimal.ZERO), BigDecimal::add);
+      }
+    }
+    for (OrderLine orderLine : byId.values()) {
+      String id = orderLine.getId();
+      headroom.merge(id, elsewhere.getOrDefault(id, BigDecimal.ZERO)
+          .subtract(orZero(orderLine.getDeliveredQuantity()))
+          .subtract(held.getOrDefault(id, BigDecimal.ZERO)), BigDecimal::add);
+    }
+    return headroom;
   }
 
   /**
@@ -569,5 +753,104 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
           (BigDecimal) row[3]));
     }
     return holdings;
+  }
+
+  /**
+   * The SQL behind {@link #movementLinks}, for one direction's match table. Exposed so a test can
+   * read it. {@code touched} is every movement line linked to one of {@code :ids} through the
+   * invoice line's own column or the match table; every link of those movement lines is then read,
+   * so the invoice lines they are shared with are known. Movement lines: active, of the direction,
+   * not voided (a draft holds, a completed one moved), with a positive quantity. Invoice lines:
+   * active, with a positive invoiced quantity, of an invoice neither draft nor voided. Ordered by
+   * movement line (oldest document first) and, within one, oldest invoice first.
+   */
+  static String movementLinksSql(InOutInvoiceLinks.MatchTable matchTable) {
+    String match = matchTable.tableName();
+    return "WITH touched AS ("
+        + " SELECT t.m_inoutline_id FROM c_invoiceline t"
+        + " WHERE t.c_invoiceline_id IN (:ids) AND t.m_inoutline_id IS NOT NULL"
+        + " UNION SELECT tm.m_inoutline_id FROM " + match + " tm"
+        + " WHERE tm.c_invoiceline_id IN (:ids)), "
+        + "links AS ("
+        + " SELECT il.m_inoutline_id, il.c_invoiceline_id FROM c_invoiceline il"
+        + " WHERE il.m_inoutline_id IN (SELECT m_inoutline_id FROM touched)"
+        + " UNION SELECT mt.m_inoutline_id, mt.c_invoiceline_id FROM " + match + " mt"
+        + " WHERE mt.m_inoutline_id IN (SELECT m_inoutline_id FROM touched)) "
+        + "SELECT sl.m_inoutline_id, sl.movementqty, cil.c_invoiceline_id, cil.qtyinvoiced "
+        + "FROM links lk "
+        + "JOIN m_inoutline sl ON sl.m_inoutline_id = lk.m_inoutline_id "
+        + "JOIN m_inout io ON io.m_inout_id = sl.m_inout_id "
+        + "JOIN c_invoiceline cil ON cil.c_invoiceline_id = lk.c_invoiceline_id "
+        + "JOIN c_invoice ci ON ci.c_invoice_id = cil.c_invoice_id "
+        + "WHERE sl.isactive = 'Y' AND io.isactive = 'Y' AND io.issotrx = :sot "
+        + "AND io.docstatus <> 'VO' AND sl.movementqty > 0 "
+        + "AND cil.isactive = 'Y' AND ci.isactive = 'Y' AND ci.docstatus NOT IN ('VO', 'DR') "
+        + "AND cil.qtyinvoiced > 0 "
+        + "ORDER BY io.created, io.documentno, sl.line, sl.m_inoutline_id, "
+        + "ci.created, ci.documentno, cil.line, cil.c_invoiceline_id";
+  }
+
+  /**
+   * Every link of the movement lines linked to one of {@code invoiceLineIds}, in the order
+   * {@link #allocateMovements} hands them out ({@link #movementLinksSql}).
+   */
+  @SuppressWarnings("unchecked")
+  protected List<MovementLink> movementLinks(Collection<String> invoiceLineIds, boolean sales) {
+    List<MovementLink> links = new ArrayList<>();
+    if (invoiceLineIds.isEmpty()) {
+      return links;
+    }
+    String sql = movementLinksSql(InOutInvoiceLinks.MatchTable.forSalesTransaction(sales));
+    List<Object[]> rows = OBDal.getInstance().getSession()
+        .createNativeQuery(sql)
+        .setParameterList("ids", invoiceLineIds)
+        .setParameter("sot", sales ? "Y" : "N")
+        .list();
+    for (Object[] row : rows) {
+      links.add(new MovementLink((String) row[0], decimal(row[1]), (String) row[2],
+          decimal(row[3])));
+    }
+    return links;
+  }
+
+  /** The SQL behind {@link #invoicedOnOrderLines}; exposed so a test can read it. */
+  static final String INVOICED_ON_ORDER_LINES_SQL =
+      "SELECT il.c_orderline_id, SUM(il.qtyinvoiced) FROM c_invoiceline il "
+          + "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
+          + "WHERE il.c_orderline_id IN (:ids) AND il.c_invoice_id <> :invoiceId "
+          + "AND il.isactive = 'Y' AND i.isactive = 'Y' AND i.issotrx = :sot "
+          + "AND i.docstatus NOT IN ('VO', 'DR') AND il.qtyinvoiced > 0 "
+          + "GROUP BY il.c_orderline_id";
+
+  /**
+   * What the invoices other than {@code invoiceId} put on each order line: active lines with a
+   * positive invoiced quantity, of an invoice of the direction neither draft nor voided.
+   *
+   * @return order line id to that quantity; absent when none
+   */
+  @SuppressWarnings("unchecked")
+  protected Map<String, BigDecimal> invoicedOnOrderLines(Collection<String> orderLineIds,
+      String invoiceId, boolean sales) {
+    Map<String, BigDecimal> invoiced = new HashMap<>();
+    if (orderLineIds.isEmpty()) {
+      return invoiced;
+    }
+    List<Object[]> rows = OBDal.getInstance().getSession()
+        .createNativeQuery(INVOICED_ON_ORDER_LINES_SQL)
+        .setParameterList("ids", orderLineIds)
+        .setParameter("invoiceId", invoiceId)
+        .setParameter("sot", sales ? "Y" : "N")
+        .list();
+    for (Object[] row : rows) {
+      invoiced.put((String) row[0], decimal(row[1]));
+    }
+    return invoiced;
+  }
+
+  private static BigDecimal decimal(Object value) {
+    if (value == null) {
+      return BigDecimal.ZERO;
+    }
+    return value instanceof BigDecimal ? (BigDecimal) value : new BigDecimal(value.toString());
   }
 }

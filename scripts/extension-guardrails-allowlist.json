@@ -34,7 +34,6 @@
     "GoodsMovementLineHandler",
     "GoodsMovementsHeaderHandler",
     "GoodsReceiptLineHandler",
-    "GoodsShipmentLineHandler",
     "ImportInOutLinesIntoInvoiceHandler",
     "ImportOrderLinesIntoInOutHandler",
     "InternalConsumptionHeaderHandler",

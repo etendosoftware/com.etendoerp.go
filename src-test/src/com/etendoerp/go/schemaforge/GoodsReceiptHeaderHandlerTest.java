@@ -1285,6 +1285,8 @@ public class GoodsReceiptHeaderHandlerTest {
         policy.offersClassicPending);
     assertFalse("a caller with no policy is offered no classic basis",
         ImportInvoiceLinesIntoInOutHandler.SourcePolicy.DEFAULT.offersClassicPending);
+    assertFalse("the receipt keeps the order-line rule; direct links are the shipment's "
+        + "(ETP-6002 CP-22)", policy.pendsByDirectLinks);
   }
 
   /**

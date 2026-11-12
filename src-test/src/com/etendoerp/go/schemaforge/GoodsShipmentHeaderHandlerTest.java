@@ -1326,10 +1326,11 @@ public class GoodsShipmentHeaderHandlerTest {
 
   /**
    * The shipment's popup rules: a rectificative invoice delivers nothing, so it is not offered,
-   * and pending deducts what the order line delivered and every draft shipment, this one included.
+   * and a line pends by its own shipment links, capped by what its order line delivered and every
+   * draft shipment holds, this one included (ETP-6002 CP-22).
    */
   @Test
-  public void invoiceImportPolicy_offersNoRectificative_andDeductsDeliveredAndEveryDraft() {
+  public void invoiceImportPolicy_offersNoRectificative_andPendsByDirectLinks() {
     ImportInvoiceLinesIntoInOutHandler.SourcePolicy policy =
         GoodsShipmentHeaderHandler.INVOICE_IMPORT_POLICY;
     org.openbravo.model.common.enterprise.DocumentType rectificative =
@@ -1356,6 +1357,8 @@ public class GoodsShipmentHeaderHandlerTest {
     assertTrue("the shipment's own draft lines count too", policy.deductsTargetDraft);
     assertFalse("the shipment offers no classic pending basis (ETP-6099 follow-up)",
         policy.offersClassicPending);
+    assertTrue("pending by the invoice line's own links (ETP-6002 CP-22)",
+        policy.pendsByDirectLinks);
   }
 
   /**

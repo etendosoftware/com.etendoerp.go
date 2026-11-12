@@ -74,6 +74,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 import com.etendoerp.go.schemaforge.ImportInvoiceLinesIntoInOutHandler.DraftHolding;
+import com.etendoerp.go.schemaforge.ImportInvoiceLinesIntoInOutHandler.MovementLink;
 import com.etendoerp.go.schemaforge.ImportInvoiceLinesIntoInOutHandler.SourcePolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
@@ -88,6 +89,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * {@code ImportOrderLinesIntoInOutHandlerTest} is about another delegate and another source).
  *
  * @covers com.etendoerp.go.schemaforge.ImportInvoiceLinesIntoInOutHandler
+ * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
  */
 public class ImportInvoiceLinesIntoInOutHandlerTest {
 
@@ -120,6 +122,12 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     String lastCurrency;
     Boolean lastSales;
     Boolean holdingsSales;
+    /** Every movement-line link of the instance, grouped by movement line, oldest invoice first. */
+    final List<MovementLink> links = new ArrayList<>();
+    /** What other invoices put on each order line. */
+    final Map<String, BigDecimal> invoicedElsewhere = new java.util.HashMap<>();
+    Boolean linksSales;
+    Collection<String> linksAskedFor;
 
     @Override
     protected void enterAdminMode() {
@@ -174,6 +182,43 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
       }
       return held;
     }
+
+    /** As the SQL: every link of the movement lines linked to one of the ids. */
+    @Override
+    protected List<MovementLink> movementLinks(Collection<String> invoiceLineIds, boolean sales) {
+      linksSales = sales;
+      linksAskedFor = new ArrayList<>(invoiceLineIds);
+      java.util.Set<String> touched = new java.util.HashSet<>();
+      for (MovementLink link : links) {
+        if (invoiceLineIds.contains(link.invoiceLineId)) {
+          touched.add(link.inOutLineId);
+        }
+      }
+      List<MovementLink> read = new ArrayList<>();
+      for (MovementLink link : links) {
+        if (touched.contains(link.inOutLineId)) {
+          read.add(link);
+        }
+      }
+      return read;
+    }
+
+    @Override
+    protected Map<String, BigDecimal> invoicedOnOrderLines(Collection<String> orderLineIds,
+        String invoiceId, boolean sales) {
+      Map<String, BigDecimal> read = new java.util.HashMap<>();
+      for (String id : orderLineIds) {
+        if (invoicedElsewhere.containsKey(id)) {
+          read.put(id, invoicedElsewhere.get(id));
+        }
+      }
+      return read;
+    }
+  }
+
+  private static MovementLink link(String inOutLineId, String moved, String invoiceLineId,
+      String invoiced) {
+    return new MovementLink(inOutLineId, bd(moved), invoiceLineId, bd(invoiced));
   }
 
   private static Probe probe(boolean sales) {
@@ -261,51 +306,103 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
   // ── pending per line, by direction ────────────────────────────────────────
 
   /**
-   * Goods shipment: a line with an order line pends invoiced - delivered - every draft (the
-   * target's own included), never below 0; one without pends its quantity, 0 once linked. The
-   * draft note names only the OTHER drafts. The total-discount and inactive lines are never listed.
+   * Goods shipment (ETP-6002 CP-22): a line pends what its OWN movement links leave, and a line
+   * with an order line is also capped by what that order line has left for its invoices. One line
+   * per case of the diagnosis; the old order-line rule got the first, third and sixth wrong. The
+   * draft note names only the OTHER drafts; the total-discount and inactive lines are never listed.
    */
   @Test
-  public void availableInvoiceLines_shipment_deductsDeliveredAndEveryDraft() throws Exception {
+  public void availableInvoiceLines_shipment_pendsByItsOwnLinks_cappedByItsOrderLine()
+      throws Exception {
     Probe probe = probe(true);
-    OrderLine sold = orderLine("olA", 10, product("p1", "Agua", true), "10", "3", "8");
-    OrderLine full = orderLine("olB", 20, product("p2", "Pan", true), "5", "5", "5");
-    InvoiceLine withOrder = line("il1", 10, sold.getProduct(), "8", sold, false);
-    InvoiceLine plain = line("il2", 20, product("p3", "Sal", false), "4", null, false);
-    InvoiceLine linkedPlain = line("il3", 30, product("p4", "Té", false), "2", null, true);
-    InvoiceLine overHeld = line("il4", 40, full.getProduct(), "5", full, false);
+    OrderLine quotation = orderLine("q1", 10, product("p1", "Agua", true), "5", "0", "5");
+    OrderLine copied = orderLine("q2", 20, product("p2", "Pan", true), "5", "5", "5");
+    OrderLine shared = orderLine("o3", 30, product("p3", "Sal", true), "10", "5", "10");
+    OrderLine byHand = orderLine("o4", 40, product("p4", "Té", true), "5", "5", "5");
+    OrderLine overLinked = orderLine("o6", 60, product("p6", "Miel", true), "10", "5", "10");
+    OrderLine drafted = orderLine("o7", 70, product("p7", "Café", true), "5", "0", "5");
     InvoiceLine discount = line("il0", 5, discountProduct(), "-1", null, false);
-    InvoiceLine inactive = line("il9", 50, product("p9", "Viejo", false), "7", null, false);
+    InvoiceLine inactive = line("il9", 90, product("p9", "Viejo", false), "7", null, false);
     when(inactive.isActive()).thenReturn(false);
-    invoice(probe, "inv1", true, overHeld, plain, discount, withOrder, inactive, linkedPlain);
-    probe.holdings.add(new DraftHolding("olA", "other", "DS-2", bd("2")));
-    probe.holdings.add(new DraftHolding("olA", "t1", "DS-1", bd("1")));
-    probe.holdings.add(new DraftHolding("olB", "third", "DS-3", bd("1")));
+    invoice(probe, "inv1", true, discount, inactive,
+        line("il1", 10, quotation.getProduct(), "5", quotation, true),
+        line("il2", 20, copied.getProduct(), "5", copied, true),
+        line("il3", 30, shared.getProduct(), "5", shared, false),
+        line("il4", 40, byHand.getProduct(), "5", byHand, false),
+        line("il5", 50, product("p5", "Aceite", false), "5", null, true),
+        line("il6", 60, overLinked.getProduct(), "5", overLinked, true),
+        line("il7", 70, drafted.getProduct(), "5", drafted, true),
+        line("il8", 80, product("p8", "Leche", false), "4", null, false));
+    probe.links.add(link("s1", "5", "il1", "5"));
+    probe.links.add(link("s2", "5", "il2", "5"));
+    probe.links.add(link("s3", "5", "ilA", "5"));
+    probe.links.add(link("s5", "3", "il5", "5"));
+    probe.links.add(link("s6", "5", "ilOld", "5"));
+    probe.links.add(link("s6", "5", "il6", "5"));
+    probe.links.add(link("s7", "3", "il7", "5"));
+    probe.invoicedElsewhere.put("o3", bd("5"));
+    probe.invoicedElsewhere.put("o6", bd("5"));
+    probe.holdings.add(new DraftHolding("o7", "t1", "DS-1", bd("3")));
+    probe.holdings.add(new DraftHolding("o7", "other", "DS-2", bd("1")));
 
     JSONArray all = rows(run(probe, LINES, linesOf("inv1", true), SHIPMENT));
 
     assertEquals("line order, no discount nor inactive line",
-        List.of("il1", "il2", "il3", "il4"), ids(all));
+        List.of("il1", "il2", "il3", "il4", "il5", "il6", "il7", "il8"), ids(all));
     Object[][] expected = {
-        { "8 - 3 delivered - 2 other draft - 1 this draft", "2", "olA", false, List.of("DS-2") },
-        { "no order line, not linked: its quantity", "4", null, false, List.of() },
-        { "no order line, already linked", "0", null, true, List.of() },
-        { "5 - 5 delivered - 1 draft clamps at 0", "0", "olB", false, List.of("DS-3") },
+        { "CP-22: shipped through the MCP (no order line on the shipment line), quotation line "
+            + "never delivered", "0", List.of() },
+        { "CP-14 shape: shipped through the window, order line copied and delivered", "0",
+            List.of() },
+        { "another invoice's shipment of the same order line does not cover this one", "5",
+            List.of() },
+        { "no link, but a hand-made shipment delivered the order line: capped at 0", "0",
+            List.of() },
+        { "partial: 3 of 5 shipped, no order line", "2", List.of() },
+        { "one shipment line linked to two invoices goes to the oldest", "5", List.of() },
+        { "3 of 5 in this draft, 1 more held by another draft of the order line", "1",
+            List.of("DS-2") },
+        { "no order line, no link: its quantity", "4", List.of() },
     };
     for (int i = 0; i < expected.length; i++) {
       JSONObject row = all.getJSONObject(i);
       String label = (String) expected[i][0];
       assertEquals(label, 0, bd((String) expected[i][1]).compareTo(pendingOf(row)));
-      assertEquals(label, expected[i][2] == null ? JSONObject.NULL : expected[i][2],
-          row.get("orderLine"));
-      assertEquals(label, expected[i][3], row.getBoolean("linked"));
-      assertEquals(label, expected[i][4], strings(row.getJSONArray("inDraftDocuments")));
+      assertEquals(label, expected[i][2], strings(row.getJSONArray("inDraftDocuments")));
     }
-    assertEquals("signed invoiced quantity", "8", all.getJSONObject(0).get("invoicedQuantity")
+    assertEquals("the order line is still named", "q1", all.getJSONObject(0).get("orderLine"));
+    assertTrue("linked still reports the column", all.getJSONObject(0).getBoolean("linked"));
+    assertTrue("a shipment's line carries its unit price, for the popup's row total (CP-27)",
+        all.getJSONObject(0).has("unitPrice"));
+    assertEquals("signed invoiced quantity", "5", all.getJSONObject(0).get("invoicedQuantity")
         .toString());
-    assertTrue("shipment drafts are read on the sales side", probe.holdingsSales);
-    assertEquals("without includeCovered only what pends", List.of("il1", "il2"),
-        ids(rows(run(probe, LINES, linesOf("inv1", false), SHIPMENT))));
+    assertTrue("links and drafts are read on the sales side",
+        probe.linksSales && probe.holdingsSales);
+    assertEquals("links read for the listed lines only",
+        List.of("il1", "il2", "il3", "il4", "il5", "il6", "il7", "il8"), probe.linksAskedFor);
+    assertEquals("without includeCovered only what pends", List.of("il3", "il5", "il6", "il7",
+        "il8"), ids(rows(run(probe, LINES, linesOf("inv1", false), SHIPMENT))));
+  }
+
+  /**
+   * One order line on two lines of the same invoice: its headroom is shared out in line order, so
+   * the two together never pend more than the order line has left.
+   */
+  @Test
+  public void availableInvoiceLines_shipment_sharesAnOrderLinesHeadroomInLineOrder()
+      throws Exception {
+    Probe probe = probe(true);
+    OrderLine sold = orderLine("o1", 10, product("p1", "Agua", true), "10", "7", "10");
+    invoice(probe, "inv1", true,
+        line("il1", 10, sold.getProduct(), "4", sold, false),
+        line("il2", 20, sold.getProduct(), "6", sold, false));
+
+    JSONArray all = rows(run(probe, LINES, linesOf("inv1", true), SHIPMENT));
+
+    assertEquals("10 invoiced - 7 delivered = 3 left: the first line takes it", 0,
+        bd("3").compareTo(pendingOf(all.getJSONObject(0))));
+    assertEquals("nothing left for the second", 0,
+        bd("0").compareTo(pendingOf(all.getJSONObject(1))));
   }
 
   /**
@@ -343,6 +440,8 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals("the target's own draft is not named", List.of("DR-2"),
         strings(all.getJSONObject(0).getJSONArray("inDraftDocuments")));
     assertFalse("receipt drafts are read on the purchase side", probe.holdingsSales);
+    assertNull("the receipt keeps its rule: no movement link is read", probe.linksSales);
+    assertFalse("nor a unit price", all.getJSONObject(0).has("unitPrice"));
   }
 
   /**
@@ -470,7 +569,9 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
   /**
    * Listed: what the policy offers with a line pending (pendingLines counts them) and the
    * invoice's order id; with includeCovered also an invoice whose lines are all covered, at 0 —
-   * never one without any listed line. detail adds creationDate (ISO instant, UTC, or null).
+   * never one without any listed line. detail adds creationDate (ISO instant, UTC, or null) and,
+   * on a goods shipment (ETP-6002 CP-27), the pending amount: unit price x pending over the lines
+   * still pending, at the currency's precision — what the popup's row shows instead of 0,00.
    */
   @Test
   public void availableInvoices_listsByPolicy_includeCoveredAndDetail() throws Exception {
@@ -480,16 +581,21 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     Invoice rect = invoice(probe, "rect", true, line("ir", 10, product("p1", "A", false), "3",
         null, false));
     when(rect.getTransactionDocument()).thenReturn(rectificative);
-    Invoice open = invoice(probe, "open", true,
-        line("io1", 10, product("p1", "A", false), "3", null, false),
-        line("io2", 20, product("p2", "B", false), "2", null, false),
-        line("io3", 30, product("p3", "C", false), "1", null, true));
+    InvoiceLine pendingA = line("io1", 10, product("p1", "A", false), "3", null, false);
+    InvoiceLine pendingB = line("io2", 20, product("p2", "B", false), "2", null, false);
+    InvoiceLine shipped = line("io3", 30, product("p3", "C", false), "1", null, true);
+    when(pendingA.getUnitPrice()).thenReturn(bd("2.5"));
+    when(pendingB.getUnitPrice()).thenReturn(bd("1.255"));
+    when(shipped.getUnitPrice()).thenReturn(bd("100"));
+    Invoice open = invoice(probe, "open", true, pendingA, pendingB, shipped);
+    probe.links.add(link("s-io3", "1", "io3", "1"));
     Order header = mock(Order.class);
     when(header.getId()).thenReturn("o1");
     doReturn(new ArrayList<>()).when(header).getOrderLineList();
     when(open.getSalesOrder()).thenReturn(header);
     when(open.getCreationDate()).thenReturn(Date.from(Instant.parse("2026-11-05T09:12:33.456Z")));
     invoice(probe, "covered", true, line("ic", 10, product("p1", "A", false), "3", null, true));
+    probe.links.add(link("s-ic", "3", "ic", "3"));
     invoice(probe, "onlyDiscount", true, line("id", 10, discountProduct(), "-2", null, false));
     probe.candidates = new ArrayList<>(List.of(rect, open, probe.invoices.get("covered"),
         probe.invoices.get("onlyDiscount")));
@@ -499,6 +605,7 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals(2, plain.getJSONObject(0).getInt("pendingLines"));
     assertEquals("o1", plain.getJSONObject(0).getString("order"));
     assertFalse("no detail, no creationDate", plain.getJSONObject(0).has("creationDate"));
+    assertFalse("no detail, no amount", plain.getJSONObject(0).has("amount"));
     assertEquals("scanned with the target's partner, direction and currency",
         Arrays.asList(PARTNER, true, CURRENCY),
         Arrays.asList(probe.lastPartner, probe.lastSales, probe.lastCurrency));
@@ -511,6 +618,10 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals("2026-11-05T09:12:33Z", all.getJSONObject(0).getString("creationDate"));
     assertTrue("missing creation date is null", all.getJSONObject(1).has("creationDate")
         && all.getJSONObject(1).isNull("creationDate"));
+    assertEquals("3 x 2.5 + 2 x 1.255, the shipped line left out, at 2 decimals", "10.01",
+        all.getJSONObject(0).get("amount").toString());
+    assertEquals("nothing pending, nothing to ship", 0,
+        BigDecimal.ZERO.compareTo(new BigDecimal(all.getJSONObject(1).get("amount").toString())));
   }
 
   /**
@@ -582,6 +693,31 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
           && hql.endsWith("order by i.creationDate desc, i.documentNo desc, i.id desc"));
       assertEquals(hql, withCurrency, hql.contains("i.currency.id = :cur"));
     }
+  }
+
+  /**
+   * The two reads of the direct-link rule (ETP-6002 CP-22): a movement line is reached through the
+   * invoice line's own column or the direction's match table, and every link of it is read so a
+   * movement line shared by two invoices is counted once; a voided movement and a draft or voided
+   * invoice never count, a draft movement does (it holds). The order-line read leaves this invoice
+   * out, its own lines are added by the handler.
+   */
+  @Test
+  public void directLinkReads_followBothLinks_andCountWhatMovesOrHolds() {
+    String sales = ImportInvoiceLinesIntoInOutHandler.movementLinksSql(
+        InOutInvoiceLinks.MatchTable.SALES);
+    assertTrue(sales, sales.contains("t.c_invoiceline_id IN (:ids) AND t.m_inoutline_id IS NOT NULL")
+        && sales.contains("FROM m_matchsi tm") && sales.contains("FROM m_matchsi mt")
+        && sales.contains("io.issotrx = :sot") && sales.contains("io.docstatus <> 'VO'")
+        && sales.contains("sl.movementqty > 0") && sales.contains("cil.qtyinvoiced > 0")
+        && sales.contains("ci.docstatus NOT IN ('VO', 'DR')")
+        && sales.contains("ORDER BY io.created, io.documentno, sl.line, sl.m_inoutline_id, "
+            + "ci.created"));
+    String elsewhere = ImportInvoiceLinesIntoInOutHandler.INVOICED_ON_ORDER_LINES_SQL;
+    assertTrue(elsewhere, elsewhere.contains("il.c_orderline_id IN (:ids)")
+        && elsewhere.contains("il.c_invoice_id <> :invoiceId")
+        && elsewhere.contains("i.docstatus NOT IN ('VO', 'DR')")
+        && elsewhere.contains("il.qtyinvoiced > 0"));
   }
 
   /**
@@ -697,6 +833,9 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
 
     assertEquals("server: the other draft holds all of inv1", List.of(),
         ids(rows(run(probe, INVOICES, "{\"pendingBasis\":\"server\"}", RECEIPT))));
+    assertFalse("the receipt rows keep no amount, even with detail (ETP-6002 is sales only)",
+        rows(run(probe, INVOICES, "{\"includeCovered\":true,\"detail\":true}", RECEIPT))
+            .getJSONObject(0).has("amount"));
     assertFalse("the server rule reads the drafts", probe.holdingsSales);
   }
 

@@ -13250,15 +13250,39 @@ not the total-discount line, line order; `{id, lineNo, product, product$_identif
 invoicedQuantity, orderLine, linked, inDraftDocuments}`, where `orderLine` is the line's order line or else the
 header order's line of the same product (the last one wins, as the popup). `pendingQuantity` follows the header's
 `SourcePolicy` (per direction, set by the header NeoExtension, never by the delegate):
-- **goods shipment**: `max(0, invoiced − delivered(order line) − drafts)` for a line with an order line (drafts: every
-  DRAFT shipment on that order line, the target included); for one without, its quantity, or 0 when `linked` (already
-  pointing at a movement line);
+- **goods shipment** (ETP-6002 CP-22, `SourcePolicy.byDirectLinks`): by the invoice line's **own** links, never by
+  another invoice's shipments of the same order line. `own = invoiced − moved`, where `moved` is what the shipment
+  lines linked to the invoice line give it — linked through `C_InvoiceLine.M_InOutLine_ID` or `M_MatchSI`, active, not
+  voided (a DRAFT one holds, the target's own included), with a positive quantity; each shipment line's quantity is
+  split over every counted invoice line linked to it (neither draft nor voided, positive quantity), oldest invoice
+  first, so one shipment line linked to two invoices (the order-line link of `linkPendingInvoiceLinesToInout`) is
+  counted once. A line with an order line (its own or the header order's line of the same product) is also capped by
+  that order line's **headroom**: what the counted invoices put on it (this one included) − `delivered(order line)` −
+  every DRAFT shipment on it (the target included), shared out over the invoice's lines in line order. `pending =
+  max(0, min(own, headroom))`; without an order line, `max(0, own)`. A shipment line created with `invoiceLineId`
+  counts whether or not it carries the order line, so the window's popup (which copies `salesOrderLine`) and an MCP
+  create with only `invoiceLineId` give the same pending. `linked` still reports the column only (display);
 - **goods receipt** (product decision: the popup's rule is kept, delivered is NOT deducted): 0 when `linked`, otherwise
   `max(0, invoiced − what the OTHER draft receipts hold of its order line)`.
 
 Only lines with something pending unless `includeCovered`. The line keys are always present (new actions, nothing to
-keep compatible); `availableInvoices` takes `detail` only for `creationDate`. The popup shows no row total for them (no
-price), so there is no `amount`.
+keep compatible). On the goods receipt `availableInvoices` takes `detail` only for `creationDate`; on the goods
+shipment (ETP-6002 CP-27) `detail` also adds `amount` — unit price (`C_InvoiceLine.PriceActual`) × `pendingQuantity`
+summed over the lines with a positive pending, at the invoice currency's standard precision — the same figure
+`availableOrders` gives an order, and what the shipment's «Añadir desde Factura» row shows (it used to show 0,00);
+its `availableInvoiceLines` rows add `unitPrice` (the line's `PriceActual`), so the row total keeps following the lines
+once they are loaded. The goods receipt's rows carry neither.
+
+**Invoice-line link of a goods-shipment line (ETP-6002 CP-22).** `invoiceLineId` on a `goods-shipment/goodsShipmentLine`
+create is a create directive of `GoodsShipmentLineHandler` (`NeoHandler#createDirectives`): MCP no longer reports it in
+`unknownFields`, and `etendo_schema(view:"create")` publishes it. After the create the line is linked with
+`InvoiceLineLinker.linkInvoiceLineToInOutLine(…, SALES)`: the first shipment of the invoice line in its column (the
+match row is written by `M_INOUT_POST` on completion), a later partial one in `M_MatchSI` at once (before, a second
+partial shipment was not linked at all). Same on REST single, `/batch` and MCP. The goods-receipt line keeps the
+column-only link (`AbstractInOutLineHandler#linkInvoiceLine`, unchanged). Binding: `GoodsShipmentLineHandler` moved from
+`@Named("goodsShipmentLineHandler")` + the row's `JAVA_QUALIFIER` to `@NeoExtension(spec = "goods-shipment", entity =
+"goodsShipmentLine")` (touch-means-migrate, §5.3.a): qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING`
+75 → 74, the class removed from `legacyHandlers`.
 
 **`pendingBasis`: the purchase popups keep their old pending rule (ETP-6099 follow-up).** The list
 above moved every popup to the server rule (drafts deducted). Product decision: ETP-6099 is about
