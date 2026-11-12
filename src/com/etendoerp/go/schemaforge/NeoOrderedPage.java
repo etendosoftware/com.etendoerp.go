@@ -30,6 +30,8 @@ public final class NeoOrderedPage {
   private final int totalRows;
 
   /**
+   * Creates a page.
+   *
    * @param ids the record ids of the page, in the order to serve
    * @param totalRows number of records of the whole filtered set
    */

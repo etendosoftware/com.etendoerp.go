@@ -39,7 +39,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -1361,7 +1361,7 @@ class ProductTransactionsHandlerTest {
     return decided ? result : other;
   }
 
-  private static Function<String, String> quoted() {
+  private static UnaryOperator<String> quoted() {
     return id -> "'" + id + "'";
   }
 

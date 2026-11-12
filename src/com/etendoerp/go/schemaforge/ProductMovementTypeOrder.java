@@ -22,7 +22,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import org.apache.commons.lang3.StringUtils;
 
@@ -51,15 +51,25 @@ final class ProductMovementTypeOrder {
   /** The sort field this order answers to. */
   static final String SORT_FIELD = "etgoDocKind";
 
+  // Bucket ids: part of the REST contract (typeLabelOrder), values must not change.
+  private static final String VENDOR_RECEIPT = "vendor-receipt";
+  private static final String VENDOR_RETURN = "vendor-return";
+  private static final String CUSTOMER_SHIPMENT = "customer-shipment";
+  private static final String CUSTOMER_RETURN = "customer-return";
+  private static final String TRANSFER = "transfer";
+  private static final String INTERNAL_CONSUMPTION = "internal-consumption";
+  private static final String INVENTORY_IN = "inventory-in";
+  private static final String INVENTORY_OUT = "inventory-out";
+
   /** Bucket ids, one per distinct visible label. */
-  static final List<String> BUCKETS = List.of("vendor-receipt", "vendor-return", "customer-shipment",
-      "customer-return", "transfer", "internal-consumption", "inventory-in", "inventory-out");
+  static final List<String> BUCKETS = List.of(VENDOR_RECEIPT, VENDOR_RETURN, CUSTOMER_SHIPMENT,
+      CUSTOMER_RETURN, TRANSFER, INTERNAL_CONSUMPTION, INVENTORY_IN, INVENTORY_OUT);
 
   /** Rows no bucket claims (production, work orders): they have no label and always sort last. */
   static final String UNLABELED = "unlabeled";
 
   private static final String ALIAS = "e.";
-  private static final String KIND = ALIAS + "etgoDocKind";
+  private static final String KIND = ALIAS + SORT_FIELD;
   private static final String QTY = ALIAS + "movementQuantity";
   private static final String MOVEMENT_TYPE = ALIAS + "movementType";
 
@@ -79,20 +89,20 @@ final class ProductMovementTypeOrder {
    *     id for the expression itself, a rank for the order-by
    * @return a {@code case ... end} expression over alias {@code e}
    */
-  static String bucketCase(Function<String, String> literal) {
+  static String bucketCase(UnaryOperator<String> literal) {
     return "case"
-        + kindWhen("goods-receipt", signed(QTY + " < 0", "vendor-return", "vendor-receipt", literal))
-        + kindWhen("return-to-vendor-shipment", literal.apply("vendor-return"))
-        + kindWhen("goods-shipment", signed(QTY + " > 0", "customer-return", "customer-shipment", literal))
-        + kindWhen("return-material-receipt", literal.apply("customer-return"))
-        + kindWhen("goods-movements", literal.apply("transfer"))
-        + kindWhen("internal-consumption", literal.apply("internal-consumption"))
-        + kindWhen("physical-inventory", signed(QTY + " < 0", "inventory-out", "inventory-in", literal))
-        + codeWhen("V+", "vendor-receipt", literal) + codeWhen("V-", "vendor-return", literal)
-        + codeWhen("C-", "customer-shipment", literal) + codeWhen("C+", "customer-return", literal)
-        + codeWhen("I+", "inventory-in", literal) + codeWhen("I-", "inventory-out", literal)
-        + codeWhen("M+", "transfer", literal) + codeWhen("M-", "transfer", literal)
-        + codeWhen("D+", "internal-consumption", literal) + codeWhen("D-", "internal-consumption", literal)
+        + kindWhen("goods-receipt", signed(QTY + " < 0", VENDOR_RETURN, VENDOR_RECEIPT, literal))
+        + kindWhen("return-to-vendor-shipment", literal.apply(VENDOR_RETURN))
+        + kindWhen("goods-shipment", signed(QTY + " > 0", CUSTOMER_RETURN, CUSTOMER_SHIPMENT, literal))
+        + kindWhen("return-material-receipt", literal.apply(CUSTOMER_RETURN))
+        + kindWhen("goods-movements", literal.apply(TRANSFER))
+        + kindWhen(INTERNAL_CONSUMPTION, literal.apply(INTERNAL_CONSUMPTION))
+        + kindWhen("physical-inventory", signed(QTY + " < 0", INVENTORY_OUT, INVENTORY_IN, literal))
+        + codeWhen("V+", VENDOR_RECEIPT, literal) + codeWhen("V-", VENDOR_RETURN, literal)
+        + codeWhen("C-", CUSTOMER_SHIPMENT, literal) + codeWhen("C+", CUSTOMER_RETURN, literal)
+        + codeWhen("I+", INVENTORY_IN, literal) + codeWhen("I-", INVENTORY_OUT, literal)
+        + codeWhen("M+", TRANSFER, literal) + codeWhen("M-", TRANSFER, literal)
+        + codeWhen("D+", INTERNAL_CONSUMPTION, literal) + codeWhen("D-", INTERNAL_CONSUMPTION, literal)
         + " else " + literal.apply(UNLABELED) + " end";
   }
 
@@ -100,12 +110,12 @@ final class ProductMovementTypeOrder {
     return " when " + KIND + " = '" + kind + "' then " + then;
   }
 
-  private static String codeWhen(String code, String bucket, Function<String, String> literal) {
+  private static String codeWhen(String code, String bucket, UnaryOperator<String> literal) {
     return " when " + MOVEMENT_TYPE + " = '" + code + "' then " + literal.apply(bucket);
   }
 
   private static String signed(String condition, String whenTrue, String whenFalse,
-      Function<String, String> literal) {
+      UnaryOperator<String> literal) {
     return "(case when " + condition + " then " + literal.apply(whenTrue) + " else "
         + literal.apply(whenFalse) + " end)";
   }
@@ -134,7 +144,7 @@ final class ProductMovementTypeOrder {
    * The rank of every bucket: the listed ones by position (reversed when descending), the buckets
    * the client did not list after them, the unlabeled rows last in either direction.
    */
-  private static Function<String, String> rankOf(List<String> order, boolean descending) {
+  private static UnaryOperator<String> rankOf(List<String> order, boolean descending) {
     int listed = order.size();
     return id -> {
       int index = order.indexOf(id);
