@@ -371,10 +371,16 @@ class only asks whether a kind was declared; it names no window or table.
   `resolve()` with `SENT_AT` null (pending) and the email's To and CC. The link id travels as
   `EmailProviderRequest#getSendCorrelationId()`, which is never part of the provider payload.
 - **Valid only if the email left.** `TransactionalEmailService` calls `EmailContract#onDelivered`
-  on a `SENT` outcome only, after the history row and before the audit row that commits the send.
-  The document contract confirms the link there (`SENT_AT`, `EXPIRES_AT = SENT_AT + 48h`,
-  `ETGO_EMAIL_SEND_LOG_ID`). A throttled, duplicate, suppressed or failed send leaves the link
-  pending, which the portal answers as invalid.
+  on a `SENT` outcome only, **after** the history row and the audit row — the DAL safety store has
+  already committed both — so a failure while confirming the link can never roll back the send's
+  own records. The document contract confirms the link there (`SENT_AT`,
+  `EXPIRES_AT = SENT_AT + TTL`, `ETGO_EMAIL_SEND_LOG_ID`); a failed confirmation is logged, its
+  write discarded from the session, and the link stays pending. A throttled, duplicate,
+  suppressed or failed send leaves the link pending, which the portal answers as invalid.
+- **Rows are created through the entity's mapping class.** `ETGO_Portal_Link` has a generated
+  class, so `PortalLinkDal` instantiates it via `ModelProvider`/`OBProvider`, never as a
+  `DynamicOBObject`: a `DynamicOBObject` re-read in the same session by a query fails with
+  `WrongClassException` and aborts the transaction (found in the ETP-6209 live test).
 - **Renewal.** `portal-link-renewal` mints the new link the same way, chained to the expired one
   (`PARENT_LINK_ID`, same `ROOT_LINK_ID`), and files the send under the document's own history
   (`getSpecName(EmailSendContext)`; `DalEmailSendLogStore` owns a System-context row by the

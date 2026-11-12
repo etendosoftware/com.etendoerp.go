@@ -283,9 +283,11 @@ public class PortalLinkService {
   /**
    * Confirms that a pending link's email left, which starts its lifetime, and records the KPI.
    *
-   * <p>Called from {@code EmailContract#onDelivered}, i.e. only for a {@code SENT} outcome. Never
-   * throws into the email service: a failed confirmation leaves the link pending (the customer
-   * then sees "invalid") and is logged — the email itself was delivered and must be reported so.
+   * <p>Called from {@code EmailContract#onDelivered}, i.e. only for a {@code SENT} outcome, after
+   * the send's history and audit rows are committed. Never throws into the email service: a failed
+   * confirmation leaves the link pending (the customer then sees "invalid") and is logged — the
+   * email itself was delivered and must be reported so. A failed write is also discarded from the
+   * session ({@link #discardFailedWrite}), so it cannot make the rest of the request fail on flush.
    *
    * @param linkId the pending link
    * @param sendLogId the {@code etgo_email_send_log} row of that send, may be {@code null}
@@ -309,6 +311,7 @@ public class PortalLinkService {
       }
     } catch (RuntimeException e) {
       log.error("Could not confirm portal link {} after its email was sent", linkId, e);
+      discardFailedWrite();
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -432,6 +435,19 @@ public class PortalLinkService {
       log.warn("Renewal email for portal link {} was not sent: {}", expired.getId(), status);
       PortalUsageEvents.renewalRefused(expired, ERROR_SEND_FAILED);
       return RenewalOutcome.FAILED;
+    }
+  }
+
+  /**
+   * Drops whatever the failed confirmation left in the Hibernate session, which an exception leaves
+   * in an undefined state. Safe here because the send's own rows were committed before
+   * {@link #confirm} ran; without it the request's closing flush would retry the broken write.
+   */
+  private static void discardFailedWrite() {
+    try {
+      OBDal.getInstance().getSession().clear();
+    } catch (RuntimeException e) {
+      log.error("Could not discard the failed portal link write", e);
     }
   }
 

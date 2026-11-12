@@ -128,10 +128,11 @@ public interface EmailContract {
    * Called once the provider accepted the email, i.e. only for a {@code SENT} outcome, and never
    * for a duplicate, throttled, suppressed or failed one.
    *
-   * <p>A no-op by default. Runs in the send's transaction, before it is committed, so whatever the
-   * contract writes here commits with the send's own audit row. It must not throw: the email has
-   * left and the send is reported as sent whatever happens here (the service logs and swallows a
-   * failure).
+   * <p>A no-op by default. Runs after the send's history and audit rows are written — and, for a
+   * send with an idempotency key, already committed by the DAL safety store — so a failure here
+   * can never take those rows back. What the contract writes here commits with the rest of the
+   * request. It must not throw: the email has left and the send is reported as sent whatever
+   * happens here (the service logs and swallows a failure).
    *
    * @param context the send that was delivered; {@code context.getProviderRequest()} carries the
    *     contract's own {@link EmailProviderRequest#getSendCorrelationId() correlation id}

@@ -21,6 +21,8 @@ import java.util.Date;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.structure.DynamicOBObject;
 import org.openbravo.dal.service.OBDal;
@@ -33,12 +35,20 @@ import org.openbravo.model.common.enterprise.Organization;
 /**
  * DAO boundary for {@code etgo_portal_link} (ETP-6209).
  *
- * <p><b>Written against the entity name, not a generated class.</b> Same technique as
- * {@code DalEmailSendLogStore}: a {@link DynamicOBObject} plus {@code createQuery(entityName, …)}.
- * The property names below are what the DAL derives from each {@code AD_Column.Name}
- * ({@code NamingUtil#getPropertyMappingName}: strip {@code _ID}, strip a one- or two-letter prefix,
- * camel-case on {@code _}), so they are fixed by the module's own AD data and do not depend on
- * {@code generate.entities} having run.
+ * <p><b>Written against the entity name, not a generated class</b>, so this code compiles before
+ * {@code generate.entities} has produced {@code com.etendoerp.go.schemaforge.data.PortalLink} (whose
+ * simple name would also collide with {@link PortalLink}). The property names below are what the
+ * DAL derives from each {@code AD_Column.Name} ({@code NamingUtil#getPropertyMappingName}: strip
+ * {@code _ID}, strip a one- or two-letter prefix, camel-case on {@code _}).
+ *
+ * <p><b>A new row is instantiated through the entity's mapping class, never as a
+ * {@link DynamicOBObject}.</b> The table has a generated class, so Hibernate maps the entity to
+ * it. A row saved as a {@code DynamicOBObject} is cached in the session under that entity, and the
+ * next query that loads it in the same session — {@link #confirm}'s {@link #findById} right after
+ * the email leaves — fails with {@code WrongClassException} ("loaded object was of wrong class
+ * DynamicOBObject"). That exception poisons the whole transaction (ETP-6209 live test: the link,
+ * the send history and the anti-abuse audit were all rolled back while the customer already had
+ * the email). {@link #newRow()} resolves the class from the runtime model instead.
  *
  * <p><b>Every query disables DAL's automatic client/organization filtering and states its scope
  * explicitly.</b> A portal request arrives with no session, so the context DAL would filter against
@@ -107,8 +117,7 @@ final class PortalLinkDal {
    * @param link the values of the new row
    */
   static void insertPending(NewLink link) {
-    DynamicOBObject row = new DynamicOBObject();
-    row.setEntityName(ENTITY);
+    BaseOBObject row = newRow();
     row.setId(link.id);
     row.setNewOBObject(true);
     row.set(PROP_CLIENT, link.client);
@@ -244,6 +253,21 @@ final class PortalLinkDal {
         (String) row.get(PROP_RECIPIENTS_CC), (String) row.get(PROP_EMAIL_LANGUAGE),
         (Date) row.get(PROP_SENT_AT), (Date) row.get(PROP_EXPIRES_AT),
         Boolean.TRUE.equals(row.get(PROP_ACTIVE)), row.get(PROP_FIRST_USED) != null);
+  }
+
+  /**
+   * A new, empty row of the entity, of the class the session maps it to: the generated class once
+   * {@code generate.entities} has run, a {@link DynamicOBObject} only for an entity the runtime
+   * model maps to no class.
+   */
+  private static BaseOBObject newRow() {
+    Class<?> mappingClass = ModelProvider.getInstance().getEntity(ENTITY).getMappingClass();
+    if (mappingClass == null || DynamicOBObject.class.equals(mappingClass)) {
+      DynamicOBObject row = new DynamicOBObject();
+      row.setEntityName(ENTITY);
+      return row;
+    }
+    return (BaseOBObject) OBProvider.getInstance().get(mappingClass);
   }
 
   private static BaseOBObject first(OBQuery<BaseOBObject> query) {

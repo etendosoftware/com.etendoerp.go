@@ -535,21 +535,24 @@ public class TransactionalEmailService {
   }
 
   /**
-   * {@link #recordAudit} for a {@code SENT} outcome, telling the contract the email left.
+   * {@link #recordAudit} for a {@code SENT} outcome, then tells the contract the email left.
    *
-   * <p>{@link EmailContract#onDelivered} runs between the history row (whose id it receives) and
-   * the anti-abuse audit row, whose DAL store commits a successful send — so whatever the contract
-   * writes there commits together with the send (ETP-6209: the portal link the email carried
-   * becomes valid only now). A contract failure is logged and swallowed: the email has left, and
-   * the send is reported as sent.</p>
+   * <p><b>{@link EmailContract#onDelivered} runs after the audit row, never before it.</b> The DAL
+   * safety store commits a successful send that carries an idempotency key, so by the time the
+   * contract runs the history row and the anti-abuse audit row are already committed, and nothing
+   * the contract does can take them back. Running it before the audit (as first written for
+   * ETP-6209) let one Hibernate failure in the portal link confirmation roll back the history, the
+   * audit and the link together, while the endpoint still answered {@code SENT} and the customer
+   * already had the email. A contract failure is logged and swallowed: the email has left, and the
+   * send is reported as sent.</p>
    */
   private void recordDeliveredAudit(EmailSendContext context, String idempotencyKey,
       Integer providerStatus) {
     EmailAuditRecord auditRecord = EmailAuditRecord.create(context, idempotencyKey,
         HttpServletResponse.SC_OK, STATUS_SENT, null, providerStatus, false);
     Optional<String> sendLogId = recordSendHistory(context, auditRecord);
-    notifyDelivered(context, sendLogId.orElse(null));
     safetyStore.recordAudit(auditRecord);
+    notifyDelivered(context, sendLogId.orElse(null));
   }
 
   private void notifyDelivered(EmailSendContext context, String sendLogId) {
