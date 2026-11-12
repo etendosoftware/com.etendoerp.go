@@ -2450,6 +2450,7 @@ public class EtendoGoJwtServletTest {
       setField(service, "checkoutRequestStore", store);
       setField(service, "stripeApiClient", stripe);
       setField(service, "stripePriceService", prices);
+      setField(service, "promotionTerms", mock(com.etendoerp.go.payment.CheckoutPromotionTerms.class));
       servlet.hostedCheckoutService = service;
       // Also the servlet's own store: no purchase in flight, so a new checkout is opened.
       servlet.checkoutRequestStore = store;
@@ -2463,11 +2464,15 @@ public class EtendoGoJwtServletTest {
       Plan plan = mock(Plan.class);
       when(plan.getSearchKey()).thenReturn(planKey);
       when(plan.getProviderPriceID()).thenReturn(priceId);
+      when(plan.getDisplayPrice()).thenReturn(BigDecimal.ZERO);
+      when(plan.getCurrencyCode()).thenReturn("EUR");
+      when(plan.getBillingInterval()).thenReturn("month");
       when(catalog.findPurchasablePlan(planKey)).thenReturn(Optional.of(plan));
       when(catalog.hasProviderPrice(plan)).thenReturn(true);
       StripePriceService.Price price = mock(StripePriceService.Price.class);
       when(price.getId()).thenReturn(priceId);
       when(price.getInterval()).thenReturn("month");
+      when(price.getCurrency()).thenReturn("EUR");
       when(prices.retrievePrice(priceId)).thenReturn(price);
       when(stripe.postForm(anyString(), anyString(), anyString())).thenReturn(new StripeResponse(
           200, new JSONObject().put("id", "cs_test_1").put("url", "https://checkout.test/s")

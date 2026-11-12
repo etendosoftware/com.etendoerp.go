@@ -47,6 +47,7 @@ import org.openbravo.dal.service.OBQuery;
 import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutRequestWrites;
+import com.etendoerp.go.payment.PromotionRecovery;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.StripeApiClient;
 import com.etendoerp.go.payment.StripeResponse;
@@ -103,6 +104,7 @@ public class BillingReconciliationServiceTest {
   private CheckoutRequestWrites checkoutWrites;
   private PaidReactivationService reactivations;
   private InternalAlertService internalAlerts;
+  private PromotionRecovery promotions;
   private ReconciliationSettings settings = ReconciliationSettings.defaults();
   private TestLogCapture auditLog;
 
@@ -117,6 +119,7 @@ public class BillingReconciliationServiceTest {
     reactivations = mock(PaidReactivationService.class);
     when(checkoutWrites.recordPaidPending(anyString(), any(), any())).thenReturn(true);
     internalAlerts = mock(InternalAlertService.class);
+    promotions = mock(PromotionRecovery.class);
     when(eventStore.recordReconciliation(anyString(), anyString(), any(), anyString(), any(),
         any())).thenReturn(true);
     doAnswer(call -> superseded.add(call.getArgument(0, String.class))).when(eventStore)
@@ -186,6 +189,7 @@ public class BillingReconciliationServiceTest {
       service.checkoutWrites = checkoutWrites;
       service.reactivations = reactivations;
       service.internalAlerts = internalAlerts;
+      service.promotions = promotions;
       return service.run(dryRun);
     }
   }
@@ -1449,6 +1453,37 @@ public class BillingReconciliationServiceTest {
   }
 
   // ── One failing phase does not stop the run ─────────────────────────────────────────────
+
+  @Test
+  public void aLiveRunRecoversCheckoutPromotions() {
+    ReconciliationResult result = run(false);
+
+    verify(promotions).recover(false);
+    assertTrue(result.getErrors().toString(), result.getErrors().isEmpty());
+  }
+
+  @Test
+  public void aDryRunKeepsCheckoutPromotionRecoveryReadOnly() {
+    ReconciliationResult result = run(true);
+
+    verify(promotions).recover(true);
+    verifyNothingProvisionedOrWritten();
+    assertTrue(result.getErrors().toString(), result.getErrors().isEmpty());
+  }
+
+  @Test
+  public void aFailingPromotionRecoveryIsRecordedAndTheStuckEventSweepStillRuns() {
+    doThrow(new IllegalStateException("promotion unavailable")).when(promotions).recover(false);
+    knownRequest(REQ, "PROVISIONED");
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_1", "checkout.session.completed",
+        REQ));
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(List.of("checkout promotions failed: IllegalStateException"), result.getErrors());
+    verify(eventStore).markIgnored(eq("evt_1"), anyString());
+    assertTrue(result.hasFailures());
+  }
 
   @Test
   public void aFailingPhaseIsRecordedAndTheNextPhasesStillRun() {

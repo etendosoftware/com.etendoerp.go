@@ -86,6 +86,8 @@ import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService.Claims;
  * produced by the attachment's own handler when an {@code AttachmentConf} is
  * set — and reads it directly. The streaming tests therefore exercise real
  * files in a temporary directory rather than a stubbed output stream.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoDocumentDownloadService
  */
 public class NeoDocumentDownloadServiceTest {
 
@@ -419,7 +421,7 @@ public class NeoDocumentDownloadServiceTest {
 
     File attachRoot = tempFolder.newFolder("attachments");
     writeStoredFile(attachRoot, NESTED_PATH, "invoice final.pdf", FILE_BYTES);
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     runHandle(response, claims, dal, stubAttachRoot(attachRoot.getAbsolutePath()), aim);
 
@@ -591,7 +593,7 @@ public class NeoDocumentDownloadServiceTest {
     AttachImplementation handler = mock(AttachImplementation.class);
     when(handler.downloadFile(attachment)).thenReturn(handlerFile);
     when(handler.isTempFile()).thenReturn(false);
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     when(aim.getHandler("S3")).thenReturn(handler);
 
     runHandle(response, claims, dal, null, aim);
@@ -628,7 +630,7 @@ public class NeoDocumentDownloadServiceTest {
     AttachImplementation handler = mock(AttachImplementation.class);
     when(handler.downloadFile(attachment)).thenReturn(tempFile);
     when(handler.isTempFile()).thenReturn(true);
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     when(aim.getHandler("S3")).thenReturn(handler);
 
     runHandle(response, claims, dal, null, aim);
@@ -654,7 +656,7 @@ public class NeoDocumentDownloadServiceTest {
     stubAttachmentConf(attachment, "RetiredMethod");
     when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     when(aim.getHandler("RetiredMethod")).thenReturn(null);
 
     runHandle(response, claims, dal, null, aim);
@@ -681,7 +683,7 @@ public class NeoDocumentDownloadServiceTest {
 
     AttachImplementation handler = mock(AttachImplementation.class);
     when(handler.downloadFile(attachment)).thenThrow(new OBException("storage backend unavailable"));
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     when(aim.getHandler("S3")).thenReturn(handler);
 
     runHandle(response, claims, dal, null, aim);
@@ -716,7 +718,7 @@ public class NeoDocumentDownloadServiceTest {
     writeStoredFile(attachRoot, NESTED_PATH, "orden.pdf", FILE_BYTES);
 
     runHandle(response, claims, dal, stubAttachRoot(attachRoot.getAbsolutePath()),
-        mock(AttachImplementationManager.class));
+        NeoAttachmentTestFixtures.mockStorageManager());
 
     verify(response).setStatus(HttpServletResponse.SC_OK);
     ArgumentCaptor<byte[]> bodyCaptor = ArgumentCaptor.forClass(byte[].class);
