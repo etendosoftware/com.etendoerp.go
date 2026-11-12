@@ -21,7 +21,6 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -36,7 +35,8 @@ import org.openbravo.model.common.order.OrderLine;
 
 /**
  * The listing actions of {@link ImportOrderLinesIntoInvoiceHandler} ({@code availableOrders},
- * {@code availableOrderLines}, server and {@code pendingBasis: "classic"} rules), moved unchanged
+ * {@code availableOrderLines}; the {@code pendingBasis: "classic"} rule was removed in ETP-5828,
+ * QA MCP-2, once the purchase popup listed with the server rule), moved unchanged
  * out of the handler (ETP-6099, the handler was past the method count Sonar accepts). Every DAL
  * read goes back through the handler's seams, so what a test overrides on the handler is still
  * what runs.
@@ -186,8 +186,18 @@ final class OrderInvoiceListing {
       boolean detail) throws JSONException {
     boolean sales = Boolean.TRUE.equals(order.isSalesTransaction());
     Map<String, BigDecimal> pending = handler.pendingToInvoice(order, sales);
-    // ETP-6099: detail adds importedHere, as the classic path does; the default answer is unchanged.
+    // ETP-6099: with detail the answer also marks the lines already on this invoice, otherwise it
+    // stays as it was.
     Set<String> importedHere = detail ? handler.orderLinesOnInvoice(invoice.getId()) : Set.of();
+    // ETP-5828 QA UI-4: which other drafts hold each line, so a taken line can be named.
+    List<String> lineIds = new ArrayList<>();
+    for (OrderLine ol : order.getOrderLineList()) {
+      if (OrderImportListing.isListedLine(ol)) {
+        lineIds.add(ol.getId());
+      }
+    }
+    Map<String, List<OrderInvoicePending.DraftInvoiceRef>> holders =
+        handler.draftInvoicesHolding(lineIds, sales, invoice.getId());
     JSONArray rows = new JSONArray();
     for (OrderLine ol : order.getOrderLineList()) {
       BigDecimal left = pending.get(ol.getId());
@@ -196,6 +206,7 @@ final class OrderInvoiceListing {
       }
       if (left != null) {
         JSONObject row = OrderImportListing.availableLineRow(order, ol, left);
+        putDraftHolders(row, holders.get(ol.getId()));
         if (detail) {
           OrderImportListing.putLineDetail(row, ol);
           row.put(ImportOrderLinesIntoInvoiceHandler.KEY_IMPORTED_HERE,
@@ -207,83 +218,17 @@ final class OrderInvoiceListing {
     return handler.completePage(rows);
   }
 
-  // ---------------------------------------------------------------------------
-  // pendingBasis "classic" (ETP-6099 follow-up)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * {@code availableOrders} with the purchase popup's own rule from before ETP-6099
-   * ({@code invoiceOrderImport.js}, {@code importVia: 'client'}: {@code fetchOrderDocuments} +
-   * {@code filterCandidateOrders}): the partner's completed orders of the invoice's direction, in
-   * the invoice's currency when it has one, whose {@code invoiceStatus} is below 100, newest created
-   * first. A return order is left out (it is never importable). {@code pendingLines} counts the
-   * lines the popup leaves selectable: classic pending ({@link OrderInvoicePending#classic}, no
-   * draft deduction) above 0 and not already on THIS invoice; an order left at 0 is listed only with
-   * {@code includeCovered}. {@code amount} sums those lines.
-   */
-  NeoResponse classicAvailableOrders(Invoice invoice, JSONObject body) throws JSONException {
-    boolean sales = Boolean.TRUE.equals(invoice.isSalesTransaction());
-    String partnerId = invoice.getBusinessPartner() == null ? null
-        : invoice.getBusinessPartner().getId();
-    String currencyId = invoice.getCurrency() == null ? null : invoice.getCurrency().getId();
-    ImportListing.ListRequest request = handler.listRequest(body);
-    List<Order> candidates = handler.findClassicCandidateOrders(partnerId, sales, currencyId,
-        request.offset, request.scan);
-    Set<String> importedHere = handler.orderLinesOnInvoice(invoice.getId());
-    return handler.discover(candidates,
-        order -> classicOrderRow(order, partnerId, importedHere, request), request);
-  }
-
-  private JSONObject classicOrderRow(Order order, String partnerId, Set<String> importedHere,
-      ImportListing.ListRequest request) throws JSONException {
-    if (isReturn(order) || !isBelowFullyInvoiced(order)) {
-      return null;
+  /** {@code inDraftInvoices} on a line row, only when another draft holds the line. */
+  private static void putDraftHolders(JSONObject row,
+      List<OrderInvoicePending.DraftInvoiceRef> drafts) throws JSONException {
+    if (drafts == null || drafts.isEmpty()) {
+      return;
     }
-    Map<String, BigDecimal> selectable = new LinkedHashMap<>();
-    for (Map.Entry<String, BigDecimal> line : OrderInvoicePending.classic(order).entrySet()) {
-      if (line.getValue().signum() > 0 && !importedHere.contains(line.getKey())) {
-        selectable.put(line.getKey(), line.getValue());
-      }
+    JSONArray refs = new JSONArray();
+    for (OrderInvoicePending.DraftInvoiceRef draft : drafts) {
+      refs.put(new JSONObject().put("id", draft.id).put("documentNo", draft.documentNo)
+          .put("quantity", OrderImportListing.trimmed(draft.quantity)));
     }
-    if (selectable.isEmpty() && !request.includeCovered) {
-      return null;
-    }
-    return orderRow(order, partnerId, selectable, request);
-  }
-
-  /** {@code Number(o.invoiceStatus ?? 0) < 100}, the old popup's filter. */
-  private boolean isBelowFullyInvoiced(Order order) {
-    Long status = handler.invoiceStatusOf(order);
-    return status == null || status < 100;
-  }
-
-  /**
-   * {@code availableOrderLines} with the purchase popup's own rule from before ETP-6099
-   * ({@code fetchOrderLines} + {@code orderLineRow}, {@code importVia: 'client'}): every listed line
-   * of the order (active, not the total-discount line) at {@code pendingQuantity = max(0, ordered -
-   * invoiced)}, no draft deduction, plus {@code importedHere} (THIS invoice has an active line
-   * linked to it). A line at 0 or {@code importedHere} is what the popup greys out: listed only with
-   * {@code includeCovered}; its {@code pendingQuantity} stays the classic value, as the popup's
-   * {@code _maxQty} did.
-   */
-  NeoResponse classicAvailableOrderLines(Invoice invoice, Order order, boolean includeCovered,
-      boolean detail) throws JSONException {
-    Map<String, BigDecimal> pending = OrderInvoicePending.classic(order);
-    Set<String> importedHere = handler.orderLinesOnInvoice(invoice.getId());
-    JSONArray rows = new JSONArray();
-    for (OrderLine ol : order.getOrderLineList()) {
-      BigDecimal left = pending.get(ol.getId());
-      boolean here = importedHere.contains(ol.getId());
-      if (left == null || (!includeCovered && (left.signum() <= 0 || here))) {
-        continue;
-      }
-      JSONObject row = OrderImportListing.availableLineRow(order, ol, left);
-      row.put(ImportOrderLinesIntoInvoiceHandler.KEY_IMPORTED_HERE, here);
-      if (detail) {
-        OrderImportListing.putLineDetail(row, ol);
-      }
-      rows.put(row);
-    }
-    return handler.completePage(rows);
+    row.put(ImportOrderLinesIntoInvoiceHandler.KEY_IN_DRAFT_INVOICES, refs);
   }
 }

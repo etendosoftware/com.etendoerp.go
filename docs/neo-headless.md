@@ -370,6 +370,17 @@ allowed sub-type), is left untouched. The defaults and create cascades run their
 the same method, so they get the same filtering before `reapplyDocTypeFromTabFilter` runs; their
 result is unchanged.
 
+Each column is checked only when the table has it, through the non-throwing
+`Entity#getPropertyByColumnName(column, false)`. A table that carries only `C_DocType_ID`
+(`M_InOut`) is checked on that column alone. The first version used the one-argument lookup,
+which throws `CheckException` for the missing `C_DocTypeTarget_ID`; the exception was caught and
+the guard did nothing on `M_InOut` (QA round 1, CP-9/CP-15). On a Return Material Receipt
+(`documentType.return=true`) picking the customer switched the doc type to the shipment one and
+the number preview to the shipment sequence, in the form and in `etendo_defaults` with a
+`recordContext.businessPartner`. `reapplyDocTypeFromTabFilter` does not cover that table either:
+it only acts when the table has `C_DocTypeTarget_ID`. The callout guard is what keeps the return
+doc type there.
+
 **Placeholders and the entity's pre-hook (ETP-5680).** On `etendo_create` the defaults pass runs
 *before* the entity's pre-hook, on a different `NeoContext`; `McpHookExecutor#forwardFallbackDefaults`
 copies the recorded placeholder keys onto the pre-hook's context, so a customization can tell a
@@ -5330,7 +5341,7 @@ this fix.
 
 > **Import popups: the SPA's purchase listings use the classic pending rule, MCP and every
 > default caller the server rule (ETP-6099 follow-up).** The purchase invoice's
-> `availableOrders` / `availableOrderLines` / `availableReceipts` / `availableReceiptLines` and the
+> `availableReceipts` / `availableReceiptLines` and the
 > goods receipt's `availableInvoices` / `availableInvoiceLines` accept `pendingBasis: "classic"`,
 > which the SPA's purchase popups send: no draft deduction anywhere, a receipt line at its full
 > movement quantity unless THIS invoice holds it (so a receipt invoiced elsewhere is listed again),
@@ -5341,6 +5352,12 @@ this fix.
 > scope (product owner decision). The two rules can therefore list different documents and
 > quantities for the same invoice; the SPA's sales popups and the goods receipt's «desde pedido»
 > already used the server rule and are unchanged. See §4.12.34, *`pendingBasis`*.
+> **ETP-5828 (QA MCP-2) closed this divergence for the purchase invoice's «Importar desde pedido»:**
+> its popup offered lines another draft invoice already held, while sales and MCP did not. It now
+> lists AND imports exactly like sales and the MCP (`availableOrders` / `availableOrderLines` with
+> the server rule, `importOrderLines` in one call carrying the global discount), and the classic
+> rule of those two order actions was removed: `pendingBasis: "classic"` on them is a 400
+> `importInvalidParameter` on either direction.
 
 > **Scope parity for actions (ETP-5783).** Running a document action or a process needs
 > `etendo:process` on every channel: the REST action route (by path), `POST` on a process spec (by
@@ -5569,6 +5586,7 @@ Other MCP-only refusals declared in §4.12.6:
 | a handler's 403 refusal, e.g. an aging report the role may not run (ETP-5852, M-154) | `403` with the handler's body | `error:"forbidden"` (`McpSupportInternals#errorCodeForStatus`, also for batch rows); it read `validation_error`, as if the request could be fixed |
 | `etendo_action` refused because the period is not open (`PeriodNotAvailable` / `PeriodNotValid`) (ETP-5852, M-193) | the refusal text only | also `period`: the record's `accountingDate` and the period that covers it in the calendar of the organization that controls periods — `id` (the `open-close-period-control/periodControl` record), `name`, `documentCategory` and its `status` for that category (`open`, `closed`, `neverOpened`, `permanentlyClosed`), or `exists:false` (`McpPeriodRefusal`); the keyed hint points at `period.id` |
 | `totalRows` of a paged list (ETP-5852, M-1) | core's default: while more rows remain it is an estimate, rows shown + 1 (the grid only needs to know there is more) | the real count of the records matching the filters and read predicates, on every page: `etendo_list` sends `_noCount=false`, one count query per call |
+| `etendo_list` / list `GET` with an offset at or past the end (ETP-5837, QA CP-16) | core's grid behaviour (`DefaultJsonDataService.fetch`): an empty page with `startRow > 0` is fetched again from row 0, so the first page comes back with `startRow: 0` | an empty page: `data: []`, `startRow` = the requested `offset`, `endRow` = `offset - 1` (no row served), `totalRows` unchanged (`McpListPaging#emptyPageWhenPastEnd`, applied in `handleList` right after the fetch, before the read hook). Detected structurally: core's `startRow` differs from the requested offset only when it restarted. Before, `etendo_list(offset:7)` over 7 rows answered the same 7 rows, so an agent paging until an empty page never got one. The REST list keeps core's answer. A customization that serves the list itself (read provider) pages on its own and is not affected |
 | `etendo_list` filter value of the wrong type — a word on a number, a date that is not `YYYY-MM-DD`, a boolean other than `true`/`false`, on equality, `gt/gte/lt/lte`, `between` and every `in` element (ETP-5914, ETP-5852) | n/a (the REST list takes core's criteria) | **422 `validation_error`** with `field`, `expectedType` and `received`, nothing read (`McpBusinessFilters#formatHqlValue`). Before: a number answered 500 `DataException`, a date was cleaned to empty and the filter matched everything, a boolean read as `false` |
 | list of `contacts/customer` or `contacts/vendorCreditor` without `parentId` (ETP-5852) | every business partner — the role tabs carry no AD filter | only the partners holding the role (`isCustomer` / `isVendor`), via the `readPredicates` of `handlers.ContactCustomerTabHandler` / `ContactVendorTabHandler` (`ContactRoleListScope`, MCP origin only; the same classes carry the contact type guard); a list with `parentId` is unchanged |
 | payment header buttons `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `psd2GenerateBankPayment`, and `retryPisPayment` / `pisPaymentStatus` on the payment record | served | **405** (`MCP_CONFIG.actions.hidden`), absent from `view:"actions"` |
@@ -7518,6 +7536,19 @@ while it has one and the simple class name otherwise. For these two specs it cha
 `bankReconciliation` / `bank-statements` to `ReconciliationHandler` / `BankStatementsHandler`.
 Nothing in the SPA or the artifacts reads it.
 
+**Migrated (ETP-6179).** `return-to-vendor-shipment` / `returnToVendorShipment` binds by annotation
+**only** (`ReturnToVendorShipmentHeaderHandler`, former qualifier
+`returnToVendorShipmentHeaderHandler`), forced by the touch rule: its `createReturnInvoice` contract
+gained `sifFields` and the pair gained `sifDefaults`. Every hook it overrides or inherits (`handle`,
+`afterHandle`, `responseEnrichedFields`, `actionContracts`, `unavailableActions`) already had an
+annotation-aware reader — the same set ETP-6026 proved for its sibling `return-material-receipt`. The
+row's `JAVA_QUALIFIER`, the class's `@Named` and the artifact's `javaQualifier` were removed,
+`EXTENSION_CEILING` went 78 → 77 on the branch (74 after merging develop, where ETP-6206 and ETP-6154 had migrated three more pairs), the class left `legacyHandlers` in the guardrail allowlist, and
+`NeoExtensionParityTest`'s legacy fixture moved to `return-to-vendor-shipment` /
+`returnToVendorShipmentLine` (`returnToVendorShipmentLineHandler`), still legacy. A database that has
+not run `update.database` still carries the old qualifier on the row: harmless, the annotation is
+resolved first and no bean carries that name any more.
+
 Still pending from the same audit: the `accountingDate` re-injection in
 `NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living
 in the generic update path; it moves to a `NeoHandler` hook answered by those NeoExtensions when
@@ -9035,7 +9066,7 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 **Resolution order** (mirrors `NeoAccessHelper.hasWindowAccess(Role, String, String)`, §7 item 3):
 
 1. No role assigned → `{"windowAccess": {}, "capabilities": {}}`, without querying the database — same convention as `SFListMenu`: the role is captured once, at the very top of the request, before the servlet enters `OBContext.setAdminMode()`.
-2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it): every distinct window ID in the **union** of (a) `AD_Window` references from active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` rows (`resolveActiveEtendoGoWindowIds()`) and (b) windows with at least one active `AD_Window_Access` row across **any role** (`resolveWindowsWithAnyGrant()`) resolves to `"full"`. Both queries skip null window references, and the union deduplicates IDs. The grant query has no per-role or explicit client/tenant restriction and does not require a spec, menu node, or read-write grant; neither query explicitly filters `AD_Window.IsActive`. This includes permission-anchor windows such as Financial Reports, Smart Scan, and Inventory Stock Report, which have grants but no backing spec (ETP-5240). `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true`; the accounting column is never queried for this branch. **`capabilities.isOwner` is the one exception** (ETP-5395): it is always PRESENT in this branch's response too, but it is never blanket `true` — it is resolved per-user via `OwnerSupport.isOwner(userId)`, so a client-admin who also happens to be the tenant owner gets `isOwner: true`, and one who is not still gets `isOwner: false`.
+2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it): every distinct window ID in the **union** of (a) `AD_Window` references from active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` rows (`resolveActiveEtendoGoWindowIds()`) and (b) windows with at least one active `AD_Window_Access` row across **any role** (`resolveWindowsWithAnyGrant()`) resolves to `"full"`. Both queries skip null window references, and the union deduplicates IDs. A permission-anchor window with no active grant for any role is absent from the admin map too, so it resolves to `none` for Admin (Smart Scan since ETP-5830). The grant query has no per-role or explicit client/tenant restriction and does not require a spec, menu node, or read-write grant; neither query explicitly filters `AD_Window.IsActive`. This includes permission-anchor windows such as Financial Reports, Smart Scan, and Inventory Stock Report, which have grants but no backing spec (ETP-5240). `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true`; the accounting column is never queried for this branch. **`capabilities.isOwner` is the one exception** (ETP-5395): it is always PRESENT in this branch's response too, but it is never blanket `true` — it is resolved per-user via `OwnerSupport.isOwner(userId)`, so a client-admin who also happens to be the tenant owner gets `isOwner: true`, and one who is not still gets `isOwner: false`.
 3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property). `capabilities.isAdminOrClientAdmin` is always `false` in this branch — reaching it at all already proves the bypass check in step 2 failed for this role. `capabilities.isOwner` is resolved exactly the same way as in step 2 above — via `OwnerSupport.isOwner(userId)`, per-user — since ownership is orthogonal to admin/client-admin status.
 
 **`AD_Role.EM_ETGO_Show_Acct_Fields`:** a Yes/No extension column added by this module (`AD_Column_ID = A0F2D12B5B4A48C2855EE73E3E93E274`, default `N`) and exposed as a real field (`AD_Field_ID = 98C71197D0744EED96856A497E49F159`) on the classic `AD_Role` window/tab, so a functional consultant can toggle it like any other role attribute. It gates accounting-sensitive field/tab visibility in Etendo GO — e.g. the `Posted` status pill on invoice windows and the financial-account edit form's "Cuentas contables" tab — independently of per-window `AD_Window_Access`. **`NeoAccountingAccessPolicy#canSeeAccounting` (used by this webhook and by every server-side accounting gate, §7 item 4b) reads it as a flat stored value with no join to `AD_Role_Inheritance` — it is a DERIVED fact, not an independent one, for any role composed via `UserRoleCompositionService` (ETP-4852).** `UserRoleCompositionService#syncShowAccountingFieldsFlag` (ETP-4877), called unconditionally at the end of every `reconcileInheritances`, keeps a personal role's column in sync with whether it currently inherits from the system Finance template (`'Y'` iff yes, `'N'` otherwise — both directions, including Finance being removed). The retroactive half for personal roles that predate this sync (or were never touched by a live composition call) is `R26-tenant-owner-and-personal-role-retrofit.sql` Step 8b in `etendo_schema_forge`, plus a one-time system-level health check (Step 8a) correcting the Finance template's own column, found stale (`'N'`) on the local dev DB. Both predicates must be kept in lockstep.
@@ -13021,7 +13052,14 @@ the comparisons and written without trailing zeros (`12.5`, `10`, never `12.5000
 the global discount — the import popup's row amount. `availableOrderLines` of an **invoice** adds, per line, `unitPrice`
 (the order line's net price, its line discount already applied), `discount` (that line discount as a %, written like
 `globalDiscount`) and `amount` (`unitPrice` × `pendingQuantity`, at the currency's precision), which is what the popup
-shows per line (ETP-5828, UI/MCP parity). **On a sales invoice only** (ETP-5828, the import popup reads these actions instead of the order GETs): `availableOrders` takes an optional `limit` (1–1000, default 50; the scan reads `max(200, limit)` candidates), looks only at orders that still have an active product line with `orderedQuantity ≠ invoicedQuantity` (a necessary condition of having something pending, so no listable order is skipped) and lists them newest created first (`creationDate desc`, the order the popup always used); `availableOrderLines` takes an optional `includeCovered` (default `false`) that also returns the order's lines with nothing left at `pendingQuantity` 0 (every active line except the Total Discount line), which the popup greys out as already imported. Both parameters are declared only in the sales contract; a purchase invoice keeps its order-date scan of 200 / 50 rows and ignores them. The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
+shows per line (ETP-5828, UI/MCP parity), and `inDraftInvoices` when OTHER draft invoices of the
+direction hold part of the line: `[{id, documentNo, quantity}]` of those drafts by document number (`quantity`: what that draft's active lines hold of the order line, ETP-5828 QA OBS-2: the popup also names the draft holding PART of a still selectable line, «1 en factura borrador X»), this
+invoice left out, absent when none (ETP-5828 QA UI-4: the popup says «en factura borrador X»
+instead of a bare «ya importado» for a line taken by another draft, and the agent can tell the user
+the same). Only the listed lines are looked up, and only drafts of the session's client and the
+role's readable organizations are named (`OrderInvoicePending.DRAFT_HOLDERS_HQL`: the document
+number reaches the caller); a draft outside them still counts in `pendingQuantity`, so such a line
+just carries no `inDraftInvoices`. **On a sales invoice only** (ETP-5828, the import popup reads these actions instead of the order GETs): `availableOrders` takes an optional `limit` (1–1000, default 50; the scan reads `max(200, limit)` candidates), looks only at orders that still have an active product line with `orderedQuantity ≠ invoicedQuantity` (a necessary condition of having something pending, so no listable order is skipped) and lists them newest created first (`creationDate desc`, the order the popup always used); `availableOrderLines` takes an optional `includeCovered` (default `false`) that also returns the order's lines with nothing left at `pendingQuantity` 0 (every active line except the Total Discount line), which the popup greys out as already imported. Both parameters are declared only in the sales contract; a purchase invoice keeps its order-date scan of 200 / 50 rows and ignores them. The `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
 hasMore:false, limit, scanLimit}`, where the line `id` is the `sourceLineId` the import takes. **Discovery is a bounded
 scan**: it reads the `scanLimit` (200) most recent completed candidates of the target's partner, client and currency and
 returns at most `limit` (50) documents, filtered by the same pending rule the import enforces. `hasMore` is `true` when
@@ -13245,8 +13283,8 @@ candidates with nothing pending are read but not listed. Before ETP-6099 only th
 `availableOriginInvoiceLines`, `availableInvoiceLines`): `includeCovered` (also the lines with nothing left, at
 `pendingQuantity: 0`, which the popups grey out; before, only the sales invoice's `availableOrderLines` took it) and
 `detail`. The pending quantity is the server's rule (drafts deducted, ETP-5709), also where a popup used to
-compute it in the browser without drafts — except under `pendingBasis: "classic"`, which the three purchase popups
-send (see *`pendingBasis`* below).
+compute it in the browser without drafts — except under `pendingBasis: "classic"`, which the two purchase receipt/invoice
+popups send (see *`pendingBasis`* below; the purchase invoice's order popup stopped sending it in ETP-5828, QA MCP-2).
 
 | Action (target) | "Covered" candidate / line | `detail` adds |
 |---|---|---|
@@ -13291,7 +13329,7 @@ price), so there is no `amount`.
 
 **`pendingBasis`: the purchase popups keep their old pending rule (ETP-6099 follow-up).** The list
 above moved every popup to the server rule (drafts deducted). Product decision: ETP-6099 is about
-speed, so the three PURCHASE popups get exactly the rule they computed in the browser before, and
+speed, so the PURCHASE popups get exactly the rule they computed in the browser before, and
 ask for it with an optional `pendingBasis` (`"server"`, the default, or `"classic"`). Absent or
 `"server"`, every action answers exactly as described above. `"classic"` is accepted only where the
 header's per-direction policy offers it (`RectificativeImportPolicy.offersClassicPending()`, set by
@@ -13302,14 +13340,16 @@ action or direction (sales invoice, goods shipment, the goods receipt's `availab
 `availableOrderLines`, returns, origin invoices, every `import*` write) and for any other value it
 is a **400 `importInvalidParameter`**. It is not declared in the contracts, so MCP refuses it as an
 unknown parameter: the MCP always gets the server rule (declared divergence, §4.12.9).
+**ETP-5828 (QA MCP-2):** the purchase invoice's `availableOrders` / `availableOrderLines` no longer
+offer `"classic"` (400 like any action without it): its «Importar desde pedido» popup offered lines
+other draft invoices held, unlike sales and the MCP, so it now lists and imports with the server
+rule (`importOrderLines`), and the two classic rows below were removed.
 `limit`, `offset`, `includeCovered`, `detail` work the same with it; `pendingLines`, `amount` and
 the covered rows are computed with the classic pending, so a document the popup would grey out
 entirely comes at `pendingLines: 0` (listed only with `includeCovered`).
 
 | Action (target) under `"classic"` | Documents listed | Line pending | Mirrors (before ETP-6099) |
 |---|---|---|---|
-| `availableOrders` (purchase invoice) | completed, active orders of the partner and direction, in the invoice's currency when it has one, `invoiceStatus` (the order's computed % invoiced) below 100, newest **created** first; return orders left out (not importable). `pendingLines` / `amount`: the lines with classic pending > 0 and not on this invoice | — | `invoiceOrderImport.js` `fetchOrderDocuments` + `filterCandidateOrders` (`documentStatus === 'CO' && businessPartner === bpId && invoiceStatus < 100`, then `currency === invoiceCurrency`) |
-| `availableOrderLines` (purchase invoice) | — | every active line except the total-discount line at `max(0, ordered − invoiced)`, no draft deduction; adds `importedHere` (this invoice has an active line linked to the order line). Covered = pending 0 or `importedHere`, listed only with `includeCovered`, its `pendingQuantity` left at the classic value (the popup's `_maxQty`) | `fetchOrderLines` (`Math.max(0, ordered − invoiced)`) + `orderLineRow` (`_alreadyImported: alreadyInCurrent \|\| pending <= 0`) |
 | `availableReceipts` (purchase invoice) | completed, active receipts of the partner, newest **created** first, whose header order is in the invoice's currency or that have no order; returns left out. NOTHING invoiced elsewhere (completed or draft) is deducted, so a fully invoiced receipt is listed again. `pendingLines`: lines with a quantity not held by this invoice | — | `ImportFromGoodsReceiptModal.jsx` `fetchDocuments` (`CO && businessPartner === bpId && invoiced !== true` — the goods-receipt spec has no `invoiced` field, so that test never excluded anything — and `!salesOrder \|\| orderCurrency === invoiceCurrency`) |
 | `availableReceiptLines` (purchase invoice) | — | the full movement quantity; 0 when this invoice holds the receipt line or its order line (`importedHere`) | `fetchLines` (`_maxQty: movementQuantity`, `_alreadyImported: receipt line or order line on this invoice`) |
 | `availableInvoices` (goods receipt) | unchanged filters (completed, partner, direction, receipt currency, grand total ≥ 0, newest created first); listed when a line is pending | — | `ImportFromPurchaseInvoiceModal.jsx` `fetchDocuments` |
@@ -13325,7 +13365,7 @@ qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING` 80 → 79, the 
 `scripts/extension-guardrails-allowlist.json`.
 
 **Channels.** REST and MCP reach the same delegates. One divergence is declared (§4.12.9): `pendingBasis: "classic"`
-is REST-only (undeclared in the contracts), so the SPA's purchase popups list with the classic rule and the MCP with the
+is REST-only (undeclared in the contracts), so the SPA's purchase receipt/invoice popups list with the classic rule and the MCP with the
 server rule.
 
 #### 4.12.35 Discoverability: which actions apply to a document now, and what its values mean (ETP-5714)
@@ -13722,6 +13762,79 @@ any read error, mirroring `InvoiceReactivationGuard`/`RectificationTotalGuard`. 
 every channel, so no divergence to declare. Full user-facing description:
 `etendo_schema_forge`'s `docs/generated-custom-windows/sales-invoice.md` → *Rectificative invoice
 fiscal-code validation*.
+
+**ETP-6179 — the one-step invoice-creating actions take the SIF fields and reach the guard.**
+`createDraftInvoice` (sales order, sales quotation, goods shipment), `createPurchaseInvoice`
+(purchase order, goods receipt) and `createReturnInvoice` (return material receipt, return to vendor
+shipment) build the invoice header with `OBProvider` and complete it in the same call, so they never
+went through `completeInvoiceIfNeeded`: a factura rectificativa generated from a return completed as
+an ordinary `F1` (the `C_Invoice.EM_Etvfac_Inv_Type` entity default, which also made
+`InvoiceCompletionService.populateVerifactuFieldsFromDocType`'s `COALESCE(invoice, docType)` a no-op
+for a document type configured `F2`), with no SII motive and no TicketBAI code. `InvoiceSifPreset`
+(invoice-specific, structure only) now runs right before `completeInvoiceOrThrow` in all three:
+
+- **Body key `sifFields`** (optional object, declared in every one of those contracts through
+  `InvoiceSifPreset.sifFieldsParam(sales)`): `{field: value}` with the DAL property names of the SIF tab.
+  The contract text is worded per direction: the sales actions (`createDraftInvoice`, the customer
+  return's `createReturnInvoice`) describe the `R4` rectificative default, the VERI\*FACTU type of
+  the document type and the `ETGO_InvoiceRectificationCodeRequired` refusal; the purchase actions
+  (`createPurchaseInvoice`, the return to vendor's `createReturnInvoice`) list the five SII fields
+  only and state that there is no rectification code, not even on a purchase rectificative.
+  Only the editable fields of the systems active for the invoice's organization are accepted — SII
+  (`siiConfigActive`, both directions): `etsgDateOperation`, `aeatsiiClaveTipo` (sales, `F1`/`F2`/`F4`)
+  or `aeatsiiMotivoRectif` (sales rectificative, `R1`–`R5`) or `aeatsiiClaveTipoFc` (purchase,
+  `F6`/`LC`/`F5`/`F1`), `aeatsiiDescripcionSii`, `aeatsiiIsauthorization`, `aeatsiiFechaRegCont`
+  (purchase); VERI\*FACTU (sales only): `etvfacInvType` (`F1`/`F2`, or `R1`–`R5` on a rectificative),
+  `etvfacVerifacDesc`, `etvfacSimpinvart7273`, `etvfacInvNoIDArt61d`; TicketBAI (sales rectificative
+  only): `tbaiReverseinvoicecode`. Anything else is a 422 `ETGO_InvoiceSifFieldInvalid`
+  (`messageParams.field`); `aeatsiiIsauthorization:true` without an SII authorization number is a 422
+  `ETGO_InvoiceSiiAuthorizationUnavailable`.
+- **A field not sent takes its previewed value** (MCP, REST, and the SPA alike): the invoice ends up
+  with exactly what `sifDefaults` shows for every editable field of the active systems, and only the
+  fields sent override it — a caller that sends nothing gets the preview as it is. The preview
+  values: the VERI\*FACTU type and description of the document type the action uses (type `F1`
+  when it has none or has a rectificative code), its art. 7.2/7.3 and 61d flags, the SII key (the
+  customer's own default key, else `F1`; on a purchase always `F1`), the SII description (the
+  order's, else the organization's default one for the direction, `aeatsii_description`), the
+  operation date (the order's, else today), the SII authorization unticked, on a purchase the
+  accounting registration date (today, empty when the SII configuration declares posted invoices),
+  and on a sales rectificative `R4` for SII's motive, TicketBAI's code and VERI\*FACTU's type.
+  **The order is part of the preview only when the invoice header will carry it** (ETP-6179 review
+  W2): the order route and a single shipment/receipt with an order build the header from the order,
+  while several shipments/receipts invoiced together (and a receipt without an order) build it from
+  the first document with no order on it — so their preview takes the organization's SII
+  description and today's operation date, exactly what the creation writes. Sales:
+  `CreateDraftInvoiceHandler.shipmentSifTarget`; purchase: `PurchaseInvoiceSifTarget` (split out of
+  `CreatePurchaseInvoiceHandler`, at Sonar's method-count limit). (QA BUG-1: an earlier version applied only the
+  corrective ones — type and rectification codes — so a factura rectificativa created without
+  `sifFields` kept the creation path's VERI\*FACTU description "Ventas" while the preview said the
+  document type's "Rectificaciones de Ventas".) Structural fields follow: SII `R`/`I`, the TicketBAI
+  and VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`). This supersedes,
+  for these flows only, the CP-14 "never preselect a motive" stance: the screen shows the value in a
+  mandatory step before anything is confirmed (decided by the user, ETP-6179).
+- **Then `RectificationFiscalCodeGuard.evaluate(invoice)`** — the same per-system rule and 422 bodies as
+  the header completion (`ETGO_InvoiceRectificationCodeRequired`,
+  `ETGO_InvoiceVerifactuInvTypeNotRectificative`). A refusal rolls the whole creation back
+  (`InvoiceSifPreset.Refused#toResponse`, batch-aware like `NeoQuotaCreateCheck.Refused`).
+- **Read action `sifDefaults`** (POST, creates nothing) on every one of those sources: same body keys
+  that select what is invoiced (`shipmentIds` / `receiptIds`), answers
+  `{data:{systems, sales, rectificative, fields:{name: default}, fieldSpecs:[{name, system, type,
+  options}], siiAuthorizationAvailable}}`, resolving the document type exactly as the creation does.
+  `systems` empty means nothing to choose. The SPA's "Datos fiscales" step is built from it, so the
+  screen and the server never disagree. Declared in the contracts of `sales-order/header`,
+  `sales-quotation/quotation`, `goods-shipment/goodsShipment`, `purchase-order/header`,
+  `goods-receipt/goodsReceipt`, `return-material-receipt/returnMaterialReceipt` and
+  `return-to-vendor-shipment/returnToVendorShipment`.
+- **Return to vendor:** `return-to-vendor-shipment/returnToVendorShipment` was migrated to
+  `@NeoExtension` in the same ticket (§5.3.a), so its contract declares `sifFields` and `sifDefaults`
+  like the customer return, on every channel. `sifDefaults` of both returns is answered by
+  `AbstractReturnDocumentHeaderHandler`, `createReturnInvoice` reads the key through the shared
+  `ReturnInvoiceSupport`. A purchase rectificative only has SII fields, and no motive (purchase-side
+  corrective support is not implemented, CP-10).
+- **Ordinary document types only for an ordinary invoice:** `CreateDraftInvoiceHandler.findARInvoiceDocType`
+  and `CreatePurchaseInvoiceHandler.findAPInvoiceDocType` skip return (`IsReturn`) and rectificative
+  types (`RectificativeSupport.isCorrective`); before, the org's default "Factura rectificativa" could
+  be picked for an invoice generated from a shipment.
 
 **ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
 already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`

@@ -185,9 +185,13 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
             + "negative, it refunds. Step 6." + FLOW,
         NeoActionContract.Param.array("originInvoices", NeoActionContract.TYPE_STRING, false,
             "Ids of the invoices it rectifies, from rectifiableInvoices. Default: the invoice "
-                + "auto-detected from the returned shipment lines; refused when none is found."))
+                + "auto-detected from the returned shipment lines; refused when none is found."),
+        InvoiceSifPreset.sifFieldsParam(true))
         .withIdDescription("The id of the completed return receipt.")
         .availableWhen(DocumentAvailability.WHEN_COMPLETED));
+    // ETP-6179: the SIF fields the factura rectificativa would get (R4 in every active system).
+    contracts.put(InvoiceSifPreset.ACTION_SIF_DEFAULTS, InvoiceSifPreset.defaultsContract(
+        ACTION_CREATE_RETURN_INVOICE, "The id of the return receipt."));
     contracts.putAll(GoodsPostingContracts.CONTRACTS);
     contracts.put(ReturnCompletionContract.CONTRACT.getName(), ReturnCompletionContract.CONTRACT);
     return Collections.unmodifiableMap(contracts);
@@ -449,8 +453,8 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
 
         // ETP-4737: resolves the unified "Factura Rectificativa" (ARI + isRectificative) doc
         // type, replacing the legacy ARI_RM ("Return Material Sales Invoice") lookup.
-        DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-            receipt.getClient(), receipt.getOrganization().getId(), "ARI", true, false, true);
+        // ETP-6179: the same lookup the sifDefaults preview uses, so the two cannot drift.
+        DocumentType docType = ReturnShipmentUtils.findReturnInvoiceDocType(receipt);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "No rectificative invoice document type found for this organization");
