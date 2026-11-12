@@ -68,6 +68,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
  * @covers com.etendoerp.go.schemaforge.InOutInvoiceLinks
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class GoodsReceiptHeaderHandlerTest {
 
@@ -1320,6 +1321,58 @@ public class GoodsReceiptHeaderHandlerTest {
 
       assertSame(refusal, h.handle(ctx));
       Mockito.verify(service, Mockito.never()).handleAction(any());
+    }
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new GoodsReceiptHeaderHandler().actionContracts();
+
+    assertSame(CreatePurchaseInvoiceHandler.RECEIPT_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createPurchaseInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a goods receipt previews the purchase invoice createPurchaseInvoice would
+   * create from it: SII only (never VERI*FACTU or TicketBAI) — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsThePurchaseInvoiceOfTheReceiptWithSiiOnly()
+      throws Exception {
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsReceiptHeaderHandler.class.getDeclaredField("createPurchaseInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreatePurchaseInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order order =
+          InvoiceSifPreviewTestSupport.sourceOrder("API", "F1");
+      ShipmentInOut receipt = org.mockito.Mockito.mock(ShipmentInOut.class);
+      org.openbravo.model.common.enterprise.Organization sourceOrg =
+          InvoiceSifPreviewTestSupport.org();
+      org.mockito.Mockito.when(receipt.getOrganization()).thenReturn(sourceOrg);
+      org.mockito.Mockito.when(receipt.getSalesOrder()).thenReturn(order);
+      org.mockito.Mockito.when(mocks.dal.get(ShipmentInOut.class, "gr-1")).thenReturn(receipt);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("goods-receipt", "gr-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalPurchasePreview(data);
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
     }
   }
 }

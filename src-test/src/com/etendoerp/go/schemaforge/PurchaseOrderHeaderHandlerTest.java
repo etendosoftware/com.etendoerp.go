@@ -79,6 +79,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * @covers com.etendoerp.go.schemaforge.CreateGoodsReceiptHandler
  * @covers com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.PartnerLocationDefaults
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class PurchaseOrderHeaderHandlerTest {
 
@@ -1017,5 +1018,53 @@ public class PurchaseOrderHeaderHandlerTest {
         org.openbravo.model.pricing.pricelist.PriceList.class), anyString());
     verify(draft, never()).setPriceList(any());
     verify(draft, never()).setCurrency(any());
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new PurchaseOrderHeaderHandler().actionContracts();
+
+    assertSame(CreatePurchaseInvoiceHandler.ORDER_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createPurchaseInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a purchase order previews the purchase invoice createPurchaseInvoice would
+   * create: SII only, with its purchase key and accounting registration date — never a
+   * VERI*FACTU or TicketBAI field, even with both configured — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsThePurchaseInvoiceWithSiiOnly() throws Exception {
+    PurchaseOrderHeaderHandler handler = new PurchaseOrderHeaderHandler();
+    java.lang.reflect.Field field =
+        PurchaseOrderHeaderHandler.class.getDeclaredField("createPurchaseInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreatePurchaseInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order order =
+          InvoiceSifPreviewTestSupport.sourceOrder("API", "F1");
+      org.mockito.Mockito.when(mocks.dal.get(org.openbravo.model.common.order.Order.class, "po-1"))
+          .thenReturn(order);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("purchase-order", "po-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalPurchasePreview(data);
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
+    }
   }
 }

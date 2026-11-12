@@ -103,6 +103,7 @@ import org.openbravo.model.common.order.Order;
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  * @covers com.etendoerp.go.schemaforge.DocActionRefusalGuard
  * @covers com.etendoerp.go.schemaforge.QuotationShipmentLinks
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class SalesQuotationHeaderHandlerTest {
 
@@ -1470,5 +1471,53 @@ public class SalesQuotationHeaderHandlerTest {
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
         com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
             "createDraftInvoice", new JSONObject().put("priceListId", "P1")).getHttpStatus());
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesQuotationHeaderHandler().actionContracts();
+
+    assertSame(CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createDraftInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a quotation previews the invoice createDraftInvoice would create from it: SII
+   * and VERI*FACTU, the VERI*FACTU type of the invoice document type the quotation links (F2)
+   * and the quotation's SII description and operation date — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsTheInvoiceOfTheQuotation() throws Exception {
+    SalesQuotationHeaderHandler handler = new SalesQuotationHeaderHandler();
+    java.lang.reflect.Field field =
+        SalesQuotationHeaderHandler.class.getDeclaredField("createDraftInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreateDraftInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order quotation =
+          InvoiceSifPreviewTestSupport.sourceOrder("ARI", "F2");
+      org.mockito.Mockito.when(mocks.dal.get(org.openbravo.model.common.order.Order.class, "sq-1"))
+          .thenReturn(quotation);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("sales-quotation", "sq-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalSalesPreview(data, "F2");
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
+    }
   }
 }

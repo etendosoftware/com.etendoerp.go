@@ -3502,4 +3502,60 @@ public class CreatePurchaseInvoiceHandlerTest {
       assertEquals("2", captor.getValue().getJSONObject(0).getString("orderedQuantity"));
     }
   }
+
+  // ─── findAPInvoiceDocType never picks a corrective type (ETP-6179) ─────────
+
+  /** A ranked AP candidate list the client lookup answers, in the given order. */
+  @SuppressWarnings("unchecked")
+  private static void stubApCandidates(OBDal dal, List<DocumentType> candidates) {
+    when(dal.get(Client.class, "client-1")).thenReturn(mock(Client.class));
+    OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(DocumentType.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.addOrderBy(anyString(), anyBoolean())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(candidates);
+  }
+
+  /**
+   * An ordinary purchase invoice was generated with a return or rectificative document type
+   * whenever one ranked first (the client's default "Factura rectificativa de proveedor", say),
+   * and was then booked as a correction of nothing. The first ordinary candidate wins.
+   */
+  @Test
+  public void findAPInvoiceDocTypeNeverPicksAReturnOrRectificativeType() {
+    RectificativeSupport.setColumnPresentForTests(true);
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType rectificative = mock(DocumentType.class);
+      when(rectificative.isEtsgIsRectificative()).thenReturn(true);
+      DocumentType returnType = mock(DocumentType.class);
+      when(returnType.isReturn()).thenReturn(true);
+      DocumentType ordinary = mock(DocumentType.class);
+      stubApCandidates(dal, Arrays.asList(rectificative, returnType, ordinary));
+
+      assertSame(ordinary, new CreatePurchaseInvoiceHandler().findAPInvoiceDocType("client-1"));
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
+  /** When every AP candidate is corrective there is none to use, not a corrective fallback. */
+  @Test
+  public void findAPInvoiceDocTypeAnswersNoneWhenEveryCandidateIsCorrective() {
+    RectificativeSupport.setColumnPresentForTests(true);
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType rectificative = mock(DocumentType.class);
+      when(rectificative.isEtsgIsRectificative()).thenReturn(true);
+      DocumentType returnType = mock(DocumentType.class);
+      when(returnType.isReturn()).thenReturn(true);
+      stubApCandidates(dal, Arrays.asList(rectificative, returnType));
+
+      assertNull(new CreatePurchaseInvoiceHandler().findAPInvoiceDocType("client-1"));
+    } finally {
+      RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
 }
