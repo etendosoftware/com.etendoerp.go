@@ -54,6 +54,8 @@ final class FinancialAccountBankConnectionSupport {
 
   private static final String KEY_DATA = "data";
   private static final String KEY_LOGO_URL = "logo_url";
+  /** Salt Edge middleware path prefix of the provider details endpoint ({@code providers/{code}}). */
+  private static final String SALT_EDGE_PROVIDERS_PATH = "providers/";
   private static final int NAME_MAX_LENGTH = 60;
   private static final String NAME_SEPARATOR = " - ";
 
@@ -298,7 +300,8 @@ final class FinancialAccountBankConnectionSupport {
     // waiting for the scheduled catalog sync (SyncBankProviders, in the psd2 module) to run.
     String logoUrl = null;
     try {
-      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + "providers/" + providerCode
+      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + SALT_EDGE_PROVIDERS_PATH
+          + providerCode
           + "?include_ais_fields=true&include_pis_fields=true&include_credentials_fields=false"
           + "&include_sandboxes=" + BankIntegrationUtils.isFakeProvidersEnabled();
       JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
@@ -363,7 +366,8 @@ final class FinancialAccountBankConnectionSupport {
    */
   static String fetchProviderLogo(String providerCode, String apiKey) {
     try {
-      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + "providers/" + providerCode;
+      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + SALT_EDGE_PROVIDERS_PATH
+          + providerCode;
       JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
       JSONObject data = response.optJSONObject(KEY_DATA);
       return data != null ? data.optString(KEY_LOGO_URL, "") : "";
@@ -446,7 +450,7 @@ final class FinancialAccountBankConnectionSupport {
    */
   private static JSONObject fetchSaltEdgeProvider(String providerCode, String apiKey) {
     try {
-      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + "providers/"
+      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + SALT_EDGE_PROVIDERS_PATH
           + URLEncoder.encode(providerCode, StandardCharsets.UTF_8) + "?include_ais_fields=true";
       JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
       return response != null ? response.optJSONObject(KEY_DATA) : null;

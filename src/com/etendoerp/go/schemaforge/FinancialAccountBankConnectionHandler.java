@@ -423,6 +423,34 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       accounts = SaltEdgeAccountLinkHelper.filterAccountsByCurrency(unlinked, finAcc);
     }
 
+    JSONArray out = toAccountRows(accounts);
+    JSONObject data = new JSONObject();
+    data.put(KEY_ACCOUNTS, out);
+    // Include the bank/provider name so the selection modal can show which bank these
+    // accounts belong to. Only resolved when there is something to select.
+    if (out.length() > 0) {
+      JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
+      data.put(KEY_PROVIDER_NAME, details.optString(BankIntegrationConstants.PROVIDER_NAME, ""));
+      String providerCode = details.optString(BankIntegrationConstants.PROVIDER_CODE, "");
+      if (StringUtils.isNotBlank(providerCode)) {
+        putProviderDisplay(data, providerCode, apiKey);
+      }
+    } else {
+      putEmptyDiagnosis(data, fromBank, typeFiltered, unlinked, finAcc);
+    }
+    return FinancialAccountBankConnectionSupport.okData(data);
+  }
+
+  /**
+   * Maps the Salt Edge accounts that survived the filters to the rows the SPA selection modal
+   * renders: {@code saltEdgeAccountId}, {@code name}, {@code currency}, {@code nature} and
+   * {@code iban}, each defaulting to an empty string. Entries that are not JSON objects are skipped.
+   *
+   * @param accounts the filtered Salt Edge accounts
+   * @return one row per account, in the same order
+   * @throws JSONException never in practice
+   */
+  private static JSONArray toAccountRows(JSONArray accounts) throws JSONException {
     JSONArray out = new JSONArray();
     for (int i = 0; i < accounts.length(); i++) {
       JSONObject node = accounts.optJSONObject(i);
@@ -437,35 +465,34 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       row.put(KEY_IBAN, FinancialAccountBankConnectionSupport.ibanOf(node));
       out.put(row);
     }
-    JSONObject data = new JSONObject();
-    data.put(KEY_ACCOUNTS, out);
-    // Include the bank/provider name so the selection modal can show which bank these
-    // accounts belong to. Only resolved when there is something to select.
-    if (out.length() > 0) {
-      JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
-      data.put(KEY_PROVIDER_NAME, details.optString(BankIntegrationConstants.PROVIDER_NAME, ""));
-      String providerCode = details.optString(BankIntegrationConstants.PROVIDER_CODE, "");
-      if (StringUtils.isNotBlank(providerCode)) {
-        // One Salt Edge call serves both the logo and, when the provider is not registered here
-        // yet, the history limit (ETP-6151).
-        if (Psd2ImportSettingsFlag.isEnabled()) {
-          FinancialAccountBankConnectionSupport.ProviderDisplay provider =
-              FinancialAccountBankConnectionSupport.fetchProviderDisplay(providerCode, apiKey);
-          data.put(KEY_PROVIDER_LOGO, provider.getLogoUrl());
-          // Omitted (not null) when unknown, so the SPA reads `undefined` and stays silent.
-          if (provider.getMaxFetchInterval() != null) {
-            data.put(KEY_MAX_FETCH_INTERVAL, provider.getMaxFetchInterval().intValue());
-          }
-        } else {
-          // Flag off: the logo alone, through the single call it always was.
-          data.put(KEY_PROVIDER_LOGO,
-              FinancialAccountBankConnectionSupport.fetchProviderLogo(providerCode, apiKey));
-        }
+    return out;
+  }
+
+  /**
+   * Puts the bank's {@code providerLogoUrl} and, with the PSD2 import settings flag on,
+   * {@code maxFetchInterval} into the accounts payload. One Salt Edge call serves both the logo
+   * and, when the provider is not registered here yet, the history limit (ETP-6151). The limit is
+   * omitted (not null) when unknown, so the SPA reads {@code undefined} and stays silent. With the
+   * flag off only the logo is put, through the single call it always was.
+   *
+   * @param data         the accounts payload being built
+   * @param providerCode the Salt Edge provider code of the connection, not blank
+   * @param apiKey       the PSD2 API key the call runs under
+   * @throws JSONException never in practice
+   */
+  private static void putProviderDisplay(JSONObject data, String providerCode, String apiKey)
+      throws JSONException {
+    if (Psd2ImportSettingsFlag.isEnabled()) {
+      FinancialAccountBankConnectionSupport.ProviderDisplay provider =
+          FinancialAccountBankConnectionSupport.fetchProviderDisplay(providerCode, apiKey);
+      data.put(KEY_PROVIDER_LOGO, provider.getLogoUrl());
+      if (provider.getMaxFetchInterval() != null) {
+        data.put(KEY_MAX_FETCH_INTERVAL, provider.getMaxFetchInterval().intValue());
       }
     } else {
-      putEmptyDiagnosis(data, fromBank, typeFiltered, unlinked, finAcc);
+      data.put(KEY_PROVIDER_LOGO,
+          FinancialAccountBankConnectionSupport.fetchProviderLogo(providerCode, apiKey));
     }
-    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   /**
