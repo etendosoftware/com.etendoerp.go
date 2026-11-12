@@ -38,7 +38,6 @@ import com.etendoerp.go.schemaforge.email.render.EmailDates;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
-import com.etendoerp.go.schemaforge.email.render.EmailPalette;
 import com.etendoerp.go.schemaforge.email.render.ValidityWindow;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
@@ -127,8 +126,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
 
-  private static final String PORTAL_LINK_STYLE =
-      "\" style=\"color:" + EmailPalette.LIGHT_LINK + ";text-decoration:none;\">";
 
   /** Suffix every document-send contract name carries, mirroring the frontend's own rule. */
   private static final String CONTRACT_NAME_SUFFIX = "-send";
@@ -498,9 +495,16 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           recipients, language);
       Optional<String> portalParagraph = portalLink.map(link -> renderPortalParagraph(link,
           language));
+      // ETP-6209 Part B — with a portal link the portal is the email's one call to action and the
+      // download button goes: the portal shows the same printable. Branches only on whether a link
+      // was minted, never on which contract this is; with no link the email is unchanged.
+      String ctaLabel = EmailMessages.get(portalLink.isPresent() ? "document.portal.cta"
+          : "document.cta", language);
+      String ctaUrl = portalLink.map(PortalLinkService.MintedLink::getUrl)
+          .orElse(downloadLink.get());
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
-          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits, replyTo,
-              join(extraParagraphHtml, portalParagraph)),
+          buildTemplateData(document.get(), downloadLink.get(), new CallToAction(ctaLabel, ctaUrl),
+              language, messageEdits, replyTo, join(extraParagraphHtml, portalParagraph)),
           replyTo).withSendCorrelationId(portalLink.map(PortalLinkService.MintedLink::getId)
               .orElse(null)));
     } catch (JSONException e) {
@@ -623,23 +627,29 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   }
 
   /**
-   * Renders the portal sentence and its inline anchor.
-   *
-   * <p>An anchor in a paragraph rather than a second call-to-action button: the layout carries
-   * exactly one button and it belongs to the document itself. Both the copy and the URL are
-   * escaped before interpolation, and {@code applyBold} runs after escaping — the order
-   * {@code EmailEscape#applyBold} documents as mandatory. The validity interpolates the configured
-   * lifetime, never a literal (a number in the copy always comes from the record).</p>
+   * Renders the portal sentence: where the document can be seen and for how long the link works.
+   * The link itself is the email's call-to-action button (ETP-6209 Part B), so the sentence carries
+   * no anchor. The copy is escaped before {@code applyBold} — the order
+   * {@code EmailEscape#applyBold} documents as mandatory — and the validity interpolates the
+   * configured lifetime, never a literal (a number in the copy always comes from the record).
    */
   private static String renderPortalParagraph(PortalLinkService.MintedLink link,
       String language) {
     Instant now = Instant.now();
     long hours = ValidityWindow.hoursUntil(now, now.plus(link.getValidity()));
-    String intro = EmailEscape.applyBold(EmailEscape.escapeHtml(
+    return EmailEscape.applyBold(EmailEscape.escapeHtml(
         EmailMessages.get("document.portal.intro", language, hours)));
-    String label = EmailEscape.escapeHtml(EmailMessages.get("document.portal.cta", language));
-    return intro + " <a class=\"sf-link\" href=\"" + EmailEscape.escapeHtml(link.getUrl())
-        + PORTAL_LINK_STYLE + label + "</a>";
+  }
+
+  /** The email's one button: the document download, or the portal when a link was minted. */
+  private static final class CallToAction {
+    private final String label;
+    private final String url;
+
+    private CallToAction(String label, String url) {
+      this.label = label;
+      this.url = url;
+    }
   }
 
   private static Optional<String> join(Optional<String> first, Optional<String> second) {
@@ -649,8 +659,10 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     return second.isPresent() ? Optional.of(first.get() + "<br><br>" + second.get()) : first;
   }
 
+  // Private composition step; grouping these into a holder would only move the list elsewhere.
+  @SuppressWarnings("java:S107")
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
-      String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
+      CallToAction cta, String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
       Optional<String> extraParagraphHtml)
       throws JSONException {
     JSONObject data = new JSONObject();
@@ -667,7 +679,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     }
     data.put("download_link", downloadLink);
     data.put(FIELD_SUBJECT, resolveSubject(document, language, messageEdits));
-    data.put(FIELD_BODY, EmailLayout.render(buildContent(document, downloadLink, language,
+    data.put(FIELD_BODY, EmailLayout.render(buildContent(document, cta, language,
         messageEdits, replyTo, extraParagraphHtml)));
     return data;
   }
@@ -675,12 +687,13 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   /**
    * Composes the document email from shared layout blocks.
    *
-   * <p>An operator-authored message replaces only the introductory paragraph. The download button
+   * <p>An operator-authored message replaces only the introductory paragraph. The call to action
    * and its link fallback are always appended after it, because the whole point of the email is
    * the document and an operator rewriting the greeting must not be able to remove it (ETP-4717,
-   * reopened).</p>
+   * reopened). The button is the download link, or the customer portal when the email carries a
+   * portal link (ETP-6209 Part B).</p>
    */
-  private EmailContent buildContent(EmailDocumentRecord document, String downloadLink,
+  private EmailContent buildContent(EmailDocumentRecord document, CallToAction cta,
       String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
       Optional<String> extraParagraphHtml) {
     EmailContent.Builder content = EmailContent.builder();
@@ -708,7 +721,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     // reads with the sentence above it rather than after the facts table.
     extraParagraphHtml.ifPresent(content::paragraphHtml);
     appendDetails(content, document, language);
-    content.cta(EmailMessages.get("document.cta", language), downloadLink)
+    content.cta(cta.label, cta.url)
         .linkFallbackText(EmailMessages.get("link.fallback", language));
     // A document email is the one place where answering reaches a person, so it closes by saying
     // so instead of with the generic team signature. Only when there is genuinely an address to

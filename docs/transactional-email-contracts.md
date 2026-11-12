@@ -363,9 +363,13 @@ link we mailed.
 ### Customer portal link (ETP-5267, ETP-6209)
 
 A document-send contract that declares `portalDocumentKind()` (only `sales-quotation-send`,
-`sales-order-send`, `goods-shipment-send` and `sales-invoice-send`) adds one paragraph with a link
-to the customer portal, when the `bp-portal-link` flag is on for the sending account. The base
-class only asks whether a kind was declared; it names no window or table.
+`sales-order-send`, `goods-shipment-send` and `sales-invoice-send`) carries a customer portal link
+when the `bp-portal-link` flag is on for the sending account. **With a link (ETP-6209 Part B) the
+portal is the email's one call-to-action button** (`document.portal.cta`, "Ver documento en el
+portal") and the download button goes — the portal shows the same printable — while the
+`document.portal.intro` sentence states the link's validity. With no link (flag off, purchase and
+return contracts) the email is byte-identical to before. The base class only asks whether a kind
+was declared and whether a link was minted; it names no window or table.
 
 - **One link per send.** `PortalLinkService#mintForSend` inserts an `ETGO_Portal_Link` row in
   `resolve()` with `SENT_AT` null (pending) and the email's To and CC. The link id travels as
