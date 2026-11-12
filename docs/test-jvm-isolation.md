@@ -186,6 +186,13 @@ contamination and shows where it comes from. There are four leaks:
    context. With no `OBContext` and no DAL, `setAdminContextLocally()` throws after the push, and
    production code calls `setAdminMode()` before its own `try/finally`, so nothing pops it. Every
    mocked test that reaches a real `setAdminMode()` without a DAL leaks one entry.
+   A second shape leaks the same way: a `try` whose `finally` restores only when a flag is set,
+   with the flag set *after* `setAdminMode()` returns. When the call throws, the flag stays
+   `false` and the pushed entry is never popped. Code that uses a restore flag must set it
+   *before* calling `setAdminMode()` (ETP-6069 fixed ten such call sites).
+   The standard shape, `setAdminMode()` on the line before `try {` (about 328 call sites in
+   `src/`), can still leak, but only when `setAdminMode()` itself throws, which needs a missing
+   DAL. That happens in mocked tests, not in production.
 2. **Connection pool.** `JdbcExternalConnectionPool.initPool()` assigns `availableDataSources`
    before it reads the pool properties. If that first read throws, for example under a mocked
    `OBPropertiesProvider`, the map stays empty for good. Every later `getConnection()` skips the
@@ -232,7 +239,8 @@ grep -oh 'STATIC-STATE-LEAK.\{0,300\}' build/test-results/*/TEST-*.xml | sort | 
 
 The single-JVM run that motivated this listed `EtendoGoJwtServletOnboardingDatasetTest`,
 `McpWriteRequestSupportClearedMandatoryTest`, `NeoDocumentPdfTest` and `InvoiceLineHandlerTest`
-as admin-mode leakers. `StaticStateLeakListenerTest` reproduces leaks 1, 2 and 4 on purpose.
+as admin-mode leakers. The `McpWriteRequestSupportClearedMandatoryTest` leak (the flag-after-call
+shape above) was fixed in ETP-6069. `StaticStateLeakListenerTest` reproduces leaks 1, 2 and 4 on purpose.
 
 ### Parallel forks in `goTestUnit`
 

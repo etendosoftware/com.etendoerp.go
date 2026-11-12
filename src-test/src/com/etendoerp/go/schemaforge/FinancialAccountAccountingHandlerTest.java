@@ -370,6 +370,31 @@ class FinancialAccountAccountingHandlerTest {
   }
 
   @Test
+  @DisplayName("GET reads the account from parentId, as the MCP names a child's parent (ETP-5848)")
+  void getResolvesTheAccountFromParentId() throws Exception {
+    wireAccountWithoutLedger();
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET").specName(SPEC).entityName(ENTITY)
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(Map.of("parentId", ACCOUNT_ID))
+        .build();
+
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(ACCOUNT_ID, row(response).getString("financialAccountId"));
+  }
+
+  @Test
+  @DisplayName("GET with neither financialAccountId nor parentId is a 400 that names the missing id")
+  void getWithoutAnyAccountIdIsRefused() {
+    NeoResponse response = handler.handle(getCtx(null));
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(String.valueOf(response.getBody()).contains("financialAccountId is required"));
+  }
+
+  @Test
   @DisplayName("GET soft-degrades (200, ledgerConfigured=false) when the org has no ledger configured")
   void getSoftDegradesWhenOrgHasNoLedgerConfigured() throws Exception {
     wireAccountWithoutLedger();

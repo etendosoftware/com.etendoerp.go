@@ -60,6 +60,13 @@ public final class UsageEventTypes {
   public static final String AI_TOOL_EXECUTE = "ai.tool.execute";
 
   /**
+   * One Decisions API request sent through the LLM gateway ({@code com.etendoerp.go.llm.LlmDecider}),
+   * with its input tokens and the cost the gateway reported. {@code target} is the feature that
+   * asked; failed requests are recorded too, with outcome {@code error}.
+   */
+  public static final String AI_DECISION_EXECUTE = "ai.decision.execute";
+
+  /**
    * One successful entry into an environment, recorded by the backend once the environment's
    * credential is issued ({@link SessionLoginUsage}). {@code action} tells the two paths apart.
    */
@@ -95,6 +102,7 @@ public final class UsageEventTypes {
       AI_AGENT_MESSAGE,
       AI_SUPPORT_MESSAGE,
       AI_TOOL_EXECUTE,
+      AI_DECISION_EXECUTE,
       SESSION_LOGIN,
       PUBLIC_API_REQUEST,
       PORTAL_LINK_SENT,
@@ -105,10 +113,11 @@ public final class UsageEventTypes {
   /**
    * ETP-6057 — the types only the backend itself may record. The UI ingest endpoint
    * ({@code NeoUsageEventEndpoint}, {@code POST /sws/neo/usage}) drops them, because a row of one of
-   * these types is read as a fact about the tenant: a login, or public API requests that are billed.
-   * Each must also be in {@link #KNOWN}.
+   * these types is read as a fact about the tenant: a login, public API requests that are billed,
+   * or a decision whose cost counts in the tenant's AI spend. Each must also be in {@link #KNOWN}.
    */
   private static final Set<String> SERVER_ONLY = Set.of(
+      AI_DECISION_EXECUTE,
       SESSION_LOGIN,
       PUBLIC_API_REQUEST,
       // ETP-6209: the portal KPIs are facts about what a tenant's customers did; a browser must not

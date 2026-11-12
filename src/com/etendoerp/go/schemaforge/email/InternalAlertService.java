@@ -63,8 +63,10 @@ public class InternalAlertService {
       previous = OBContext.getOBContext();
       OBContext.setOBContext("0", "0", "0", "0");
       contextChanged = true;
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       admin = true;
+      OBContext.setAdminMode(true);
       NeoResponse response = emailService.send(InternalAlertEmailContract.NAME,
           InternalAlertEmailContract.body(event, config));
       OBDal.getInstance().flush();

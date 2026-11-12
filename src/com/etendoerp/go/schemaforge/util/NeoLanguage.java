@@ -74,8 +74,10 @@ public final class NeoLanguage {
     }
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
       OBCriteria<Language> crit = OBDal.getInstance().createCriteria(Language.class);
       crit.add(Restrictions.eq(Language.PROPERTY_LANGUAGE, code.trim()));
       crit.add(Restrictions.eq(Language.PROPERTY_ACTIVE, true));
@@ -107,8 +109,10 @@ public final class NeoLanguage {
   public static void applyToContext(String code) {
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
       Language language = resolveActive(code);
       if (language != null) {
         OBContext.getOBContext().setLanguage(language);

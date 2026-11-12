@@ -57,9 +57,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -2586,8 +2588,6 @@ public class BankStatementsHandlerTest {
     FIN_BankStatementLine matched = mock(FIN_BankStatementLine.class);
     when(matched.getLineNo()).thenReturn(20L);
     FIN_BankStatementLine created = mock(FIN_BankStatementLine.class);
-    @SuppressWarnings("unchecked")
-    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
@@ -2595,11 +2595,7 @@ public class BankStatementsHandlerTest {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
-      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
-      // Every line query sees the one matched line: countMatchedLines → 1, maxExistingLineNo →
-      // 20, and deleteUnmatchedLines' own query (which in production would NOT return it).
-      when(crit.list()).thenReturn(Collections.singletonList(matched));
+      givenOnlyMatchedStatementLine(dal, matched);
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(FIN_BankStatementLine.class)).thenReturn(created);
@@ -2613,6 +2609,7 @@ public class BankStatementsHandlerTest {
       // Numbering continues after the highest existing LineNo so it cannot collide with the
       // matched line that was kept.
       verify(created).setLineNo(30L);
+      verify(dal, never()).remove(matched);
     }
   }
 
@@ -2633,24 +2630,46 @@ public class BankStatementsHandlerTest {
     FIN_BankStatement draft = draftStatement("st-1");
     when(draft.getName()).thenReturn("Solo cabecera");
     FIN_BankStatementLine matched = mock(FIN_BankStatementLine.class);
-    @SuppressWarnings("unchecked")
-    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
-      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
-      when(crit.list()).thenReturn(Collections.singletonList(matched));
+      givenOnlyMatchedStatementLine(dal, matched);
 
       NeoResponse r = handler.handle(postCtx(ctx, "update"));
       assertEquals(200, r.getHttpStatus());
       JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
           .getJSONObject("statement");
       assertEquals(1, data.getInt("lineCount"));
+      verify(dal, never()).remove(matched);
     }
+  }
+
+  /**
+   * One matched row remains visible to count/numbering queries, never to unmatched-line queries.
+   * Each criteria has independent restrictions, as in DAL: returning the matched row for every
+   * query would make identity capture read metadata for a row that cannot be rebuilt or deleted.
+   */
+  @SuppressWarnings("unchecked")
+  private static void givenOnlyMatchedStatementLine(OBDal dal, FIN_BankStatementLine matched) {
+    String unmatchedRestriction = Restrictions.isNull(
+        FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION).toString();
+    when(dal.createCriteria(FIN_BankStatementLine.class)).thenAnswer(create -> {
+      OBCriteria<FIN_BankStatementLine> criteria = mock(OBCriteria.class);
+      AtomicBoolean unmatched = new AtomicBoolean();
+      when(criteria.add(any())).thenAnswer(add -> {
+        Object restriction = add.getArgument(0);
+        if (unmatchedRestriction.equals(String.valueOf(restriction))) {
+          unmatched.set(true);
+        }
+        return criteria;
+      });
+      when(criteria.list()).thenAnswer(list -> unmatched.get()
+          ? Collections.emptyList() : Collections.singletonList(matched));
+      return criteria;
+    });
   }
 
   /** With no lines in the body AND no matched lines to keep, the statement would be left empty. */

@@ -94,8 +94,10 @@ public final class NeoTrl {
     }
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
 
       ModelProvider model = ModelProvider.getInstance();
       Entity base = model.getEntity(baseEntityName, false);
@@ -233,8 +235,10 @@ public final class NeoTrl {
       String langCode) {
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
 
       OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(meta.trlEntityName,
           "as t where lower(t." + meta.nameProperty + ") = :name and t.language.language = :lang");

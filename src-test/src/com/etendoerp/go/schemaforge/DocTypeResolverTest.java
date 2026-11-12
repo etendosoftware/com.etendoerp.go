@@ -47,6 +47,7 @@ import org.mockito.Mockito;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.util.CheckException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
@@ -677,8 +678,8 @@ class DocTypeResolverTest {
       ModelProvider instance = mock(ModelProvider.class);
       Entity dalEntity = mock(Entity.class);
       when(instance.getEntityByTableId(TABLE_ID)).thenReturn(dalEntity);
-      when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID")).thenReturn(targetProp);
-      when(dalEntity.getPropertyByColumnName("C_DocType_ID")).thenReturn(typeProp);
+      when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID", false)).thenReturn(targetProp);
+      when(dalEntity.getPropertyByColumnName("C_DocType_ID", false)).thenReturn(typeProp);
 
       DocumentType orgDefault = mock(DocumentType.class);
       when(orgDefault.getSOSubType()).thenReturn("SO");
@@ -726,19 +727,25 @@ class DocTypeResolverTest {
 
     /**
      * A ModelProvider whose entity maps {@code C_DocType_ID} and, when {@code withTarget},
-     * {@code C_DocTypeTarget_ID}. Without it the target lookup returns null, as on M_InOut.
+     * {@code C_DocTypeTarget_ID}. Without it the entity behaves as the real one does on M_InOut:
+     * the one-argument lookup throws {@link CheckException} and the {@code (column, false)}
+     * lookup returns null.
      */
     private ModelProvider modelProviderWithDocTypeColumns(boolean withTarget) {
-      Property targetProp = null;
-      if (withTarget) {
-        targetProp = mock(Property.class);
-        when(targetProp.getName()).thenReturn(TARGET);
-      }
       Property typeProp = mock(Property.class);
       when(typeProp.getName()).thenReturn(EFFECTIVE);
       Entity dalEntity = mock(Entity.class);
-      when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID")).thenReturn(targetProp);
+      if (withTarget) {
+        Property targetProp = mock(Property.class);
+        when(targetProp.getName()).thenReturn(TARGET);
+        when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID")).thenReturn(targetProp);
+        when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID", false)).thenReturn(targetProp);
+      } else {
+        when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID"))
+            .thenThrow(new CheckException("Property with C_DocTypeTarget_ID does not exist"));
+      }
       when(dalEntity.getPropertyByColumnName("C_DocType_ID")).thenReturn(typeProp);
+      when(dalEntity.getPropertyByColumnName("C_DocType_ID", false)).thenReturn(typeProp);
       ModelProvider instance = mock(ModelProvider.class);
       when(instance.getEntityByTableId(TABLE_ID)).thenReturn(dalEntity);
       return instance;
@@ -789,7 +796,10 @@ class DocTypeResolverTest {
      * The allowed rows are the over-dropping guard: a doc type the tab can hold must survive.
      * Rows with {@code hasTarget=false} are the M_InOut shape: the entity has only
      * {@code C_DocType_ID}, so the response carries no target entry and the missing target
-     * property must not stop {@code C_DocType_ID} from being checked.
+     * property must not stop {@code C_DocType_ID} from being checked. The last row is the
+     * return-receipt repro (QA CP-9/CP-15): the BP callout proposes the shipment doc type on a
+     * {@code return=true} tab; the real entity throws on the missing target column, which used
+     * to abort the check and keep the shipment doc type.
      */
     @ParameterizedTest(name = "[{index}] {0} | target col {4} | doc {1}/return {2} -> kept {3}")
     @CsvSource(delimiter = '|', quoteCharacter = '"', value = {

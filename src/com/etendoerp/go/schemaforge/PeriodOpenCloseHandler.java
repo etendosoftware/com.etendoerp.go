@@ -68,8 +68,11 @@ public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
   static final NeoActionContract OPEN_CLOSE = NeoActionContract.write(
       PeriodOpenCloseSupport.FIELD_OPEN_CLOSE,
       "Opens or closes this accounting period for every document type at once - the 'Open/Close "
-          + "period' action of the calendar. Posting a document dated in a closed period is "
-          + "refused, so ask the user before closing one. Returns the process message.",
+          + "period' action of the calendar. Opening or closing a period is the user's decision, "
+          + "never a step to get another request through: when a document is refused because its "
+          + "period is not open, ask the user before opening it (ETP-5848). Posting a document dated "
+          + "in a closed period is refused, so ask the user before closing one too. Returns the "
+          + "process message.",
       NeoActionContract.Param.requiredOptions(PeriodOpenCloseSupport.FIELD_OPEN_CLOSE,
           "O = open, C = close (can be reopened later), P = close permanently (can never be "
               + "reopened)",

@@ -44,6 +44,8 @@ import com.etendoerp.go.schemaforge.data.Plan;
  * <p>Two refusals must stay distinguishable, because they mean opposite things to the person on
  * the other end — "your request named something that is not for sale" versus "this deployment has
  * nothing to sell yet".
+ *
+ * @covers com.etendoerp.go.payment.HostedCheckoutService
  */
 class HostedCheckoutSessionPlanTest {
 
@@ -81,6 +83,7 @@ class HostedCheckoutSessionPlanTest {
     stripeApiClient = mock(StripeApiClient.class);
     stripePriceService = mock(StripePriceService.class);
     service = new HostedCheckoutService();
+    service.promotionTerms = mock(CheckoutPromotionTerms.class);
     service.stripePriceService = stripePriceService;
     service.planCatalogService = planCatalogService;
     service.checkoutRequestStore = checkoutRequestStore;
@@ -98,6 +101,9 @@ class HostedCheckoutSessionPlanTest {
     Plan plan = mock(Plan.class);
     when(plan.getSearchKey()).thenReturn(PLAN_KEY);
     when(plan.getProviderPriceID()).thenReturn(priceId);
+    when(plan.getDisplayPrice()).thenReturn(new java.math.BigDecimal("29.00"));
+    when(plan.getCurrencyCode()).thenReturn("EUR");
+    when(plan.getBillingInterval()).thenReturn("month");
     return plan;
   }
 

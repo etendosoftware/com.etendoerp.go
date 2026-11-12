@@ -242,16 +242,18 @@ public class FinancialAccountHandler implements NeoHandler {
   FinancialAccountTransferActions transferActions = new FinancialAccountTransferActions();
 
   /**
-   * The account's bank disconnection as declared actions (ETP-5804). Swappable like the above, so
-   * unit tests can run it over a stubbed bank connection endpoint.
+   * The account's bank connection (disconnect, ETP-5804; sync and sync status, ETP-6154) as
+   * declared actions. Swappable like the above, so unit tests can run it over a stubbed bank
+   * connection endpoint.
    */
   FinancialAccountBankConnectionActions bankConnectionActions =
       new FinancialAccountBankConnectionActions();
 
   /**
-   * The movement, funds-transfer and bank disconnection actions of the account, declared for
-   * agents (ETP-5558, ETP-5804): the SPA runs them through {@code financial-account-transactions}
-   * and {@code financial-account-bank-connection}, specs the MCP does not serve.
+   * The movement, funds-transfer and bank connection actions of the account, declared for
+   * agents (ETP-5558, ETP-5804, ETP-6154): the SPA runs them through
+   * {@code financial-account-transactions} and {@code financial-account-bank-connection}, specs
+   * the MCP does not serve.
    */
   @Override
   public Map<String, NeoActionContract> actionContracts() {

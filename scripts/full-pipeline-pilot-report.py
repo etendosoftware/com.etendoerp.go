@@ -145,6 +145,12 @@ def _tag(value):
     return re.sub(r'[^a-z0-9]+', '_', ascii_text.lower()).strip('_')
 
 
+def _job_tag(name):
+    """The job's tag without the "Pilot: " prefix the shadow jobs carry, so a job keeps its tag
+    when the prefix goes away at the switch from Jenkins."""
+    return _tag(re.sub(r'^\s*pilot:\s*', '', str(name), flags=re.IGNORECASE))
+
+
 def _span(job):
     """(start, end) of a finished job, or None."""
     if job.get('status') != 'completed':
@@ -189,7 +195,7 @@ def datadog_series(model, jobs=(), tags=(), now=None):
         if span:
             spans.append(span)
             series.append(point('etendo.ci.pilot.job.duration_minutes', _minutes(*span),
-                                [f"job:{_tag(job.get('name', ''))}", f"result:{job.get('conclusion') or 'unknown'}"]))
+                                [f"job:{_job_tag(job.get('name', ''))}", f"result:{job.get('conclusion') or 'unknown'}"]))
     if spans:
         series.append(point('etendo.ci.pilot.run.duration_minutes',
                             _minutes(min(s for s, _ in spans), max(e for _, e in spans)), []))

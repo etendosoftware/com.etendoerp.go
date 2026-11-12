@@ -1445,7 +1445,7 @@ public class Fiscal303SubmitHandlerTest {
     validationResult.setTestMode(true);
     validationResult.setPdfContent("draft-pdf".getBytes());
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
@@ -1486,7 +1486,7 @@ public class Fiscal303SubmitHandlerTest {
     validationResult.setTestMode(true);
     validationResult.setPdfContent("draft-pdf".getBytes());
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
@@ -1527,7 +1527,7 @@ public class Fiscal303SubmitHandlerTest {
     validationResult.setTestMode(true);
     // No PDF content — the attach path must not even be attempted.
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
@@ -1566,7 +1566,7 @@ public class Fiscal303SubmitHandlerTest {
     prodResult.setCsv("CSV999");
     prodResult.setPdfContent("real-pdf".getBytes());
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
@@ -1613,7 +1613,7 @@ public class Fiscal303SubmitHandlerTest {
     errorResult.setTestMode(true);
     errorResult.addError("E0100803 - some AEAT cause");
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
@@ -1652,7 +1652,7 @@ public class Fiscal303SubmitHandlerTest {
     errorResult.setTestMode(false);
     errorResult.addError("E0100803 - Razon social del Declarante");
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
@@ -1752,7 +1752,7 @@ public class Fiscal303SubmitHandlerTest {
 
     BaseOBObject staleIncFromPriorFailedAttempt = mock(BaseOBObject.class);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
@@ -2002,7 +2002,7 @@ public class Fiscal303SubmitHandlerTest {
     prodResult.addWarning("A001 - Aviso informativo AEAT.");
 
     BaseOBObject newInc = mock(BaseOBObject.class);
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
@@ -2059,7 +2059,7 @@ public class Fiscal303SubmitHandlerTest {
     validationResult.addWarning("A001 - Aviso informativo AEAT.");
 
     BaseOBObject newInc = mock(BaseOBObject.class);
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);

@@ -110,6 +110,8 @@ import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
+import com.etendoerp.go.payment.CheckoutPromotionTerms;
+import com.etendoerp.go.payment.MonthlySecondMonthPromotionService;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
@@ -266,6 +268,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** Default {@code upgradeAction} of an onboarding: create a new environment. */
   private static final String UPGRADE_ACTION_CREATE_PRODUCTIVE = "create-productive";
   private static final String FIELD_PLAN_KEY = "planKey";
+  private static final String FIELD_REPLACE_PURCHASE_ID = "replacePurchaseId";
+  private static final String STATUS_CHECKOUT_CREATED = "CREATED";
+  private static final String CODE_PURCHASE_SELECTION_CHANGED = "PURCHASE_SELECTION_CHANGED";
+  private static final String PURCHASE_SELECTION_CHANGED_MESSAGE =
+      "The pending checkout changed. Please review the purchase again.";
   private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
   private static final String PLAN_NOT_AVAILABLE_MESSAGE =
       "The selected plan is no longer available. Reload the page to see the current plans.";
@@ -986,6 +993,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     item.put("displayPrice", displayPrice.toPlainString());
     item.put(FIELD_CURRENCY, currency);
     item.put("billingInterval", StringUtils.defaultString(plan.getBillingInterval()));
+    item.put("secondMonthFree", CheckoutPromotionTerms.isEligiblePlan(plan));
     item.put("includesApi", Boolean.TRUE.equals(plan.isIncludesAPI()));
     item.put("highlight", plan.getHighlight() == null ? JSONObject.NULL : plan.getHighlight());
     item.put("quotas", buildPlanQuotasJson(plan));
@@ -1037,7 +1045,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
       if (activePurchase != null) {
-        handleExistingBillingPurchase(response, account, activePurchase);
+        handleActiveBillingPurchase(response, account, body, activePurchase);
         return;
       }
       CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
@@ -1182,8 +1190,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // The source, transfer choice, plan and Stripe Price are persisted on the purchase row, and
       // the flag-gated transfer selection and the onboarding inputs (ETP-5048) are recorded before
       // the provider is contacted.
-      JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
-          clientName, origin, planKey, new HostedCheckoutService.SessionOptions(
+      HostedCheckoutService.SessionOptions options = new HostedCheckoutService.SessionOptions(
               selection.demoClientId, selection.transferProducts, selection.transferContacts,
               requestId -> {
                 // ETP-5048 — what a server-side provisioning needs if the browser never comes
@@ -1192,7 +1199,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
                     body.optString(FIELD_LANGUAGE, ""), body.optString(FIELD_CURRENCY, ""),
                     body.optString(FIELD_COUNTRY_CODE, ""));
                 recordDemoDataTransferSelection(body, requestId, selection);
-              }));
+              }).withLanguage(body.optString(FIELD_LANGUAGE, "es_ES"));
+      String replaceId = StringUtils.trimToNull(body.optString(FIELD_REPLACE_PURCHASE_ID, ""));
+      JSONObject result = replaceId == null
+          ? hostedCheckoutService.createSession(account.getId(), account.getEmail(), clientName,
+              origin, planKey, options)
+          : hostedCheckoutService.createSession(account.getId(), account.getEmail(), clientName,
+              origin, planKey, options, replaceId);
       addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""),
           selection.demoClientId);
       return result;
@@ -1225,6 +1238,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("Rejected a checkout for an unavailable plan: {}", e.getMessage());
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
           PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
+    } catch (HostedCheckoutService.PurchaseSelectionChangedException e) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_PURCHASE_SELECTION_CHANGED,
+          PURCHASE_SELECTION_CHANGED_MESSAGE,
+          PURCHASE_SELECTION_CHANGED_MESSAGE);
     } catch (HostedCheckoutService.CheckoutNotConfiguredException e) {
       log.warn("Checkout is not available: {}", e.getMessage());
       writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
@@ -1278,16 +1295,36 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (clientName == null) return;
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
-      if (activePurchase != null) {
-        handleActiveBillingPurchase(response, account, body, activePurchase);
-        return;
-      }
+      if (handlePriorBillingPurchase(response, account, body, activePurchase)) return;
       CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
           body);
       if (selection == null) return;
       createHostedCheckoutSession(response, account, body, clientName, selection,
           true);
     });
+  }
+
+  /** Answers an existing purchase or a stale replacement; false permits purchase creation. */
+  private boolean handlePriorBillingPurchase(HttpServletResponse response, Account account,
+      JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
+    if (activePurchase != null) {
+      String replaceId = StringUtils.trimToNull(body.optString(FIELD_REPLACE_PURCHASE_ID, ""));
+      if (replaceId == null) {
+        handleActiveBillingPurchase(response, account, body, activePurchase);
+        return true;
+      }
+      if (!replaceId.equals(activePurchase.getRequest())
+          || !STATUS_CHECKOUT_CREATED.equals(activePurchase.getCheckoutRequestStatus())) {
+        writePurchaseSelectionConflict(response, activePurchase);
+        return true;
+      }
+    } else if (StringUtils.isNotBlank(body.optString(FIELD_REPLACE_PURCHASE_ID, ""))) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_PURCHASE_SELECTION_CHANGED,
+          PURCHASE_SELECTION_CHANGED_MESSAGE,
+          PURCHASE_SELECTION_CHANGED_MESSAGE);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -1410,13 +1447,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleActiveBillingPurchase(HttpServletResponse response, Account account,
       JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
-    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+    if ("CREATING".equals(status) || STATUS_CHECKOUT_CREATED.equals(status)) {
       try {
-        // Only a purchase that recorded a demo source may carry a transfer selection.
-        String persistedDemoClientId = activePurchase.getDemoClient() == null
-            ? null : activePurchase.getDemoClient().getId();
-        recordDemoDataTransferSelection(body, activePurchase.getRequest(),
-            new CheckoutSelection(persistedDemoClientId, false, false));
+        if (!recordActiveBillingPurchaseSelection(response, body, activePurchase)) return;
+      } catch (PlanNotAvailableException e) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
+            PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
+        return;
+      } catch (HostedCheckoutService.CheckoutNotConfiguredException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+        return;
+      } catch (IOException e) {
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
+            "Unable to verify the selected plan", "Unable to verify the selected plan");
+        return;
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_CONFLICT, "TRANSFER_SELECTION_LOCKED",
             "Transfer selection cannot change after checkout creation",
@@ -1431,10 +1476,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     handleExistingBillingPurchase(response, account, activePurchase);
   }
 
+  /** Validates and records the selection; false means the plan conflict was already answered. */
+  private boolean recordActiveBillingPurchaseSelection(HttpServletResponse response,
+      JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
+    String selectedPlanKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
+    if (selectedPlanKey != null
+        && !hostedCheckoutService.matchesSelection(activePurchase, selectedPlanKey)) {
+      writePurchaseSelectionConflict(response, activePurchase);
+      return false;
+    }
+    // Only a purchase that recorded a demo source may carry a transfer selection.
+    String persistedDemoClientId = activePurchase.getDemoClient() == null
+        ? null : activePurchase.getDemoClient().getId();
+    recordDemoDataTransferSelection(body, activePurchase.getRequest(),
+        new CheckoutSelection(persistedDemoClientId, false, false));
+    return true;
+  }
+
+  private void writePurchaseSelectionConflict(HttpServletResponse response, CheckoutRequest purchase)
+      throws IOException, JSONException {
+    JSONObject conflict = buildBillingPurchaseJson(purchase);
+    conflict.put("replacementAllowed",
+        STATUS_CHECKOUT_CREATED.equals(purchase.getCheckoutRequestStatus())
+            && StringUtils.isNotBlank(purchase.getStripeSession()));
+    JSONObject error = new JSONObject();
+    error.put(FIELD_CODE, CODE_PURCHASE_SELECTION_CHANGED);
+    error.put(FIELD_MESSAGE, "A pending checkout has different conditions. Confirm its replacement.");
+    conflict.put(FIELD_ERROR, error);
+    writeResponse(response, HttpServletResponse.SC_CONFLICT, conflict);
+  }
+
   private void handleExistingBillingPurchase(HttpServletResponse response, Account account,
       CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
-    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+    if ("CREATING".equals(status) || STATUS_CHECKOUT_CREATED.equals(status)) {
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
@@ -2139,6 +2214,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     applyReactivationIfPending(requestId, SubscriptionLifecycleApplier.eventCreatedAt(event));
+    // A failed schedule remains a failed/retryable billing event, never a silently lost offer.
+    new MonthlySecondMonthPromotionService().applyPaidCheckout(object);
     billingEventStore.markApplied(eventId);
     log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
   }

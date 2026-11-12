@@ -82,8 +82,13 @@ jobs:
             const checkRuns = await github.paginate(github.rest.checks.listForRef, {
               owner, repo, ref: sha, per_page: 100,
             });
+            // ETP-6149: the GitHub Actions pilot of the full pipeline (full-pipeline-pilot.yml) runs in
+            // shadow next to Jenkins, its job names prefixed "Pilot: ". Its runs on main take ~26 min,
+            // so counting them would hold every PR into main while they run, or for good if one fails.
+            // Remove this filter together with the prefix when Actions replaces Jenkins.
             const latestRuns = new Map();
             for (const run of checkRuns) {
+              if (run.name.startsWith('Pilot: ')) continue;
               const seen = latestRuns.get(run.name);
               if (!seen || run.id > seen.id) latestRuns.set(run.name, run);
             }

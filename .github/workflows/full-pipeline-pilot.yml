@@ -6,6 +6,11 @@ name: Full Pipeline Pilot
 # a failed block re-runs alone ("Re-run failed jobs"). This is not a required check: the pilot
 # compares duration and failures per block with Jenkins before anything is replaced.
 #
+# Every job name starts with "Pilot: ". The cut job (auto-cut.mjs in com.etendoerp.jenkins.pipelines)
+# and base-branch-health.yml ignore the checks with that prefix, so a red or still running pilot
+# job neither holds a cut nor turns main red while Jenkins is the gate. Dropping the prefix when
+# Actions replaces Jenkins makes them count.
+#
 # Both test jobs build the environment the way Jenkins builds it (.github/actions/etendo-env:
 # etendo-localenv, its own PostgreSQL, install, the GOClient seeds, smartbuild):
 #   go-tests     the module's Java suite, both halves, and the JaCoCo report. Sonar and the
@@ -55,12 +60,12 @@ concurrency:
 env:
   CORE_BRANCH: epic/ETP-3504
   MODULE_BRANCH: ${{ github.head_ref || github.ref_name }}
-  PIPELINES_REPO: git@bitbucket.org:koodu_software/com.etendoerp.jenkins.pipelines.git
+  PIPELINES_REPO: git@ssh.bitbucket.org:koodu_software/com.etendoerp.jenkins.pipelines.git
   RETENTION_DAYS: 30
 
 jobs:
   go-tests:
-    name: Go tests + coverage
+    name: 'Pilot: Go tests + coverage'
     # branch-merge-policy.yml already rejects any other branch into main; this keeps such a PR
     # from also spending runners before it is closed.
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
@@ -173,7 +178,7 @@ jobs:
           if-no-files-found: ignore
 
   integration:
-    name: Integration (Tomcat + Playwright)
+    name: 'Pilot: Integration (Tomcat + Playwright)'
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -254,9 +259,23 @@ jobs:
           cp .env.example .env
           make install
 
+      # No --with-deps: the runner image already has every library Chromium needs, so apt only added
+      # fonts no test uses, and when the Ubuntu mirror did not resolve it hung the job for 10 min and
+      # failed it. The browser is cached per Playwright version and downloads only on a bump.
+      - name: Playwright version
+        id: playwright
+        working-directory: etendo_core/schema_forge
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
       - name: Install Chromium
         working-directory: etendo_core/schema_forge
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       # The Playwright reporter of the per-cell report. Without it the suite still runs, only the
       # report misses the E2E results.
@@ -348,7 +367,7 @@ jobs:
           if-no-files-found: ignore
 
   cell-report:
-    name: Cell report
+    name: 'Pilot: Cell report'
     needs: [go-tests, integration]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergeblock/') || startsWith(github.head_ref, 'hotfix/')) }}
     runs-on: ubuntu-24.04

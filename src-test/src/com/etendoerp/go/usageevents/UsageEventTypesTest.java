@@ -111,7 +111,7 @@ class UsageEventTypesTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = { "session.login", "publicapi.request" })
+  @ValueSource(strings = { "session.login", "publicapi.request", "ai.decision.execute" })
   void serverOnlyTypesAreFlagged(String type) {
     assertTrue(UsageEventTypes.isServerOnly(type));
   }
