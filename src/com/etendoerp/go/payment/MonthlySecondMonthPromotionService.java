@@ -225,6 +225,8 @@ public class MonthlySecondMonthPromotionService {
       for (int index = 0; index < 3; index++) {
         JSONObject copy = new JSONObject(phase.toString());
         copy.remove("currency"); // Derived from items; not an update parameter.
+        JSONArray invoiceItems = copy.optJSONArray("add_invoice_items");
+        if (invoiceItems != null && invoiceItems.length() == 0) copy.remove("add_invoice_items");
         if (index > 0) {
           copy.remove("start_date");
           copy.remove("end_date");
