@@ -7486,6 +7486,19 @@ while it has one and the simple class name otherwise. For these two specs it cha
 `bankReconciliation` / `bank-statements` to `ReconciliationHandler` / `BankStatementsHandler`.
 Nothing in the SPA or the artifacts reads it.
 
+**Migrated (ETP-6179).** `return-to-vendor-shipment` / `returnToVendorShipment` binds by annotation
+**only** (`ReturnToVendorShipmentHeaderHandler`, former qualifier
+`returnToVendorShipmentHeaderHandler`), forced by the touch rule: its `createReturnInvoice` contract
+gained `sifFields` and the pair gained `sifDefaults`. Every hook it overrides or inherits (`handle`,
+`afterHandle`, `responseEnrichedFields`, `actionContracts`, `unavailableActions`) already had an
+annotation-aware reader — the same set ETP-6026 proved for its sibling `return-material-receipt`. The
+row's `JAVA_QUALIFIER`, the class's `@Named` and the artifact's `javaQualifier` were removed,
+`EXTENSION_CEILING` went 78 → 77 on the branch (74 after merging develop, where ETP-6206 and ETP-6154 had migrated three more pairs), the class left `legacyHandlers` in the guardrail allowlist, and
+`NeoExtensionParityTest`'s legacy fixture moved to `return-to-vendor-shipment` /
+`returnToVendorShipmentLine` (`returnToVendorShipmentLineHandler`), still legacy. A database that has
+not run `update.database` still carries the old qualifier on the row: harmless, the annotation is
+resolved first and no bean carries that name any more.
+
 Still pending from the same audit: the `accountingDate` re-injection in
 `NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living
 in the generic update path; it moves to a `NeoHandler` hook answered by those NeoExtensions when
@@ -13695,6 +13708,79 @@ any read error, mirroring `InvoiceReactivationGuard`/`RectificationTotalGuard`. 
 every channel, so no divergence to declare. Full user-facing description:
 `etendo_schema_forge`'s `docs/generated-custom-windows/sales-invoice.md` → *Rectificative invoice
 fiscal-code validation*.
+
+**ETP-6179 — the one-step invoice-creating actions take the SIF fields and reach the guard.**
+`createDraftInvoice` (sales order, sales quotation, goods shipment), `createPurchaseInvoice`
+(purchase order, goods receipt) and `createReturnInvoice` (return material receipt, return to vendor
+shipment) build the invoice header with `OBProvider` and complete it in the same call, so they never
+went through `completeInvoiceIfNeeded`: a factura rectificativa generated from a return completed as
+an ordinary `F1` (the `C_Invoice.EM_Etvfac_Inv_Type` entity default, which also made
+`InvoiceCompletionService.populateVerifactuFieldsFromDocType`'s `COALESCE(invoice, docType)` a no-op
+for a document type configured `F2`), with no SII motive and no TicketBAI code. `InvoiceSifPreset`
+(invoice-specific, structure only) now runs right before `completeInvoiceOrThrow` in all three:
+
+- **Body key `sifFields`** (optional object, declared in every one of those contracts through
+  `InvoiceSifPreset.sifFieldsParam(sales)`): `{field: value}` with the DAL property names of the SIF tab.
+  The contract text is worded per direction: the sales actions (`createDraftInvoice`, the customer
+  return's `createReturnInvoice`) describe the `R4` rectificative default, the VERI\*FACTU type of
+  the document type and the `ETGO_InvoiceRectificationCodeRequired` refusal; the purchase actions
+  (`createPurchaseInvoice`, the return to vendor's `createReturnInvoice`) list the five SII fields
+  only and state that there is no rectification code, not even on a purchase rectificative.
+  Only the editable fields of the systems active for the invoice's organization are accepted — SII
+  (`siiConfigActive`, both directions): `etsgDateOperation`, `aeatsiiClaveTipo` (sales, `F1`/`F2`/`F4`)
+  or `aeatsiiMotivoRectif` (sales rectificative, `R1`–`R5`) or `aeatsiiClaveTipoFc` (purchase,
+  `F6`/`LC`/`F5`/`F1`), `aeatsiiDescripcionSii`, `aeatsiiIsauthorization`, `aeatsiiFechaRegCont`
+  (purchase); VERI\*FACTU (sales only): `etvfacInvType` (`F1`/`F2`, or `R1`–`R5` on a rectificative),
+  `etvfacVerifacDesc`, `etvfacSimpinvart7273`, `etvfacInvNoIDArt61d`; TicketBAI (sales rectificative
+  only): `tbaiReverseinvoicecode`. Anything else is a 422 `ETGO_InvoiceSifFieldInvalid`
+  (`messageParams.field`); `aeatsiiIsauthorization:true` without an SII authorization number is a 422
+  `ETGO_InvoiceSiiAuthorizationUnavailable`.
+- **A field not sent takes its previewed value** (MCP, REST, and the SPA alike): the invoice ends up
+  with exactly what `sifDefaults` shows for every editable field of the active systems, and only the
+  fields sent override it — a caller that sends nothing gets the preview as it is. The preview
+  values: the VERI\*FACTU type and description of the document type the action uses (type `F1`
+  when it has none or has a rectificative code), its art. 7.2/7.3 and 61d flags, the SII key (the
+  customer's own default key, else `F1`; on a purchase always `F1`), the SII description (the
+  order's, else the organization's default one for the direction, `aeatsii_description`), the
+  operation date (the order's, else today), the SII authorization unticked, on a purchase the
+  accounting registration date (today, empty when the SII configuration declares posted invoices),
+  and on a sales rectificative `R4` for SII's motive, TicketBAI's code and VERI\*FACTU's type.
+  **The order is part of the preview only when the invoice header will carry it** (ETP-6179 review
+  W2): the order route and a single shipment/receipt with an order build the header from the order,
+  while several shipments/receipts invoiced together (and a receipt without an order) build it from
+  the first document with no order on it — so their preview takes the organization's SII
+  description and today's operation date, exactly what the creation writes. Sales:
+  `CreateDraftInvoiceHandler.shipmentSifTarget`; purchase: `PurchaseInvoiceSifTarget` (split out of
+  `CreatePurchaseInvoiceHandler`, at Sonar's method-count limit). (QA BUG-1: an earlier version applied only the
+  corrective ones — type and rectification codes — so a factura rectificativa created without
+  `sifFields` kept the creation path's VERI\*FACTU description "Ventas" while the preview said the
+  document type's "Rectificaciones de Ventas".) Structural fields follow: SII `R`/`I`, the TicketBAI
+  and VERI\*FACTU reverse types (`SalesRectificativeFiscalDefaults.computeAndSet`). This supersedes,
+  for these flows only, the CP-14 "never preselect a motive" stance: the screen shows the value in a
+  mandatory step before anything is confirmed (decided by the user, ETP-6179).
+- **Then `RectificationFiscalCodeGuard.evaluate(invoice)`** — the same per-system rule and 422 bodies as
+  the header completion (`ETGO_InvoiceRectificationCodeRequired`,
+  `ETGO_InvoiceVerifactuInvTypeNotRectificative`). A refusal rolls the whole creation back
+  (`InvoiceSifPreset.Refused#toResponse`, batch-aware like `NeoQuotaCreateCheck.Refused`).
+- **Read action `sifDefaults`** (POST, creates nothing) on every one of those sources: same body keys
+  that select what is invoiced (`shipmentIds` / `receiptIds`), answers
+  `{data:{systems, sales, rectificative, fields:{name: default}, fieldSpecs:[{name, system, type,
+  options}], siiAuthorizationAvailable}}`, resolving the document type exactly as the creation does.
+  `systems` empty means nothing to choose. The SPA's "Datos fiscales" step is built from it, so the
+  screen and the server never disagree. Declared in the contracts of `sales-order/header`,
+  `sales-quotation/quotation`, `goods-shipment/goodsShipment`, `purchase-order/header`,
+  `goods-receipt/goodsReceipt`, `return-material-receipt/returnMaterialReceipt` and
+  `return-to-vendor-shipment/returnToVendorShipment`.
+- **Return to vendor:** `return-to-vendor-shipment/returnToVendorShipment` was migrated to
+  `@NeoExtension` in the same ticket (§5.3.a), so its contract declares `sifFields` and `sifDefaults`
+  like the customer return, on every channel. `sifDefaults` of both returns is answered by
+  `AbstractReturnDocumentHeaderHandler`, `createReturnInvoice` reads the key through the shared
+  `ReturnInvoiceSupport`. A purchase rectificative only has SII fields, and no motive (purchase-side
+  corrective support is not implemented, CP-10).
+- **Ordinary document types only for an ordinary invoice:** `CreateDraftInvoiceHandler.findARInvoiceDocType`
+  and `CreatePurchaseInvoiceHandler.findAPInvoiceDocType` skip return (`IsReturn`) and rectificative
+  types (`RectificativeSupport.isCorrective`); before, the org's default "Factura rectificativa" could
+  be picked for an invoice generated from a shipment.
 
 **ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
 already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`
