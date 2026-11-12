@@ -722,9 +722,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * Returns ALL invoices linked to the given sales order via invoice lines.
    * This works even when C_Invoice.C_Order_ID is not set (e.g. invoices created
    * from classic Etendo UI that link via C_InvoiceLine.C_OrderLine_ID).
+   * Each row tells whether the invoice is a rectificative ({@code isRectificative},
+   * {@link SalesInvoiceHeaderHandler#isRectificativeDocType}, ETP-6002), so the sales order's and
+   * quotation's related documents can leave it out.
    */
   protected NeoResponse handleList(NeoContext context) {
-    return OrderInvoiceListSupport.listInvoices(context, true);
+    return OrderInvoiceListSupport.listInvoices(context, true,
+        invoice -> SalesInvoiceHeaderHandler.isRectificativeDocType(
+            invoice.getTransactionDocument()));
   }
 
   /**

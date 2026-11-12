@@ -99,6 +99,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String ACTION_DOCUMENT_ACTION = "documentAction";
   private static final String FIELD_LINKED_ORDERS = "linkedOrders";
+  private static final String FIELD_LINKED_INVOICES = "linkedInvoices";
   private static final String FIELD_PRICE_LIST_ID = "priceListId";
   private static final String FIELD_PRICE_LIST_IDENTIFIER = "priceList$_identifier";
   private static final String FIELD_RESOLVED_PRICE_LIST_ID = "resolvedPriceListId";
@@ -204,12 +205,33 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       // after the user switches the header to warehouse B. Re-anchor every line to the
       // header's CURRENT warehouse right before the native completion flow runs.
       NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
+      refreshDraftMatchQuantities(context.getRecordId());
       return null; // let NEO native process handle completion
     }
     context.setAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE, INVOICE_IMPORT_POLICY);
     return NeoHeaderActionRouter.dispatch(context,
         createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler,
         importOrderLinesHandler, importInvoiceLinesHandler);
+  }
+
+  /**
+   * ETP-6002 review M4: a later partial shipment of an invoice line got its {@code M_MatchSI} row
+   * at draft time with the line's quantity then; bring it to the current quantity before the
+   * shipment is completed ({@link InvoiceLineLinker#refreshDraftMatchQuantities}). Best effort: a
+   * failure is logged and completion goes on — the pending readers use the line quantity, not the
+   * match row's.
+   */
+  private static void refreshDraftMatchQuantities(String shipmentId) {
+    if (shipmentId == null) {
+      return;
+    }
+    try {
+      InvoiceLineLinker.refreshDraftMatchQuantities(shipmentId,
+          InOutInvoiceLinks.MatchTable.SALES);
+    } catch (RuntimeException e) {
+      log.warn("Could not refresh the draft invoice matches of shipment {}: {}", shipmentId,
+          e.getMessage());
+    }
   }
 
   /**
@@ -243,8 +265,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         shipmentRec.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
         NeoHandlerUtils.enrichIssuerOrg(shipmentRec, context.getRecordId());
         enrichLinkedOrder(shipmentRec, context.getRecordId());
-        enrichResolvedPriceList(shipmentRec, context.getRecordId());
         enrichLinkedInvoices(shipmentRec, context.getRecordId());
+        enrichResolvedPriceList(shipmentRec, context.getRecordId());
         enrichReturnReceipts(shipmentRec, context.getRecordId());
         enrichCanCreateReturn(shipmentRec, context.getRecordId());
       } else {
@@ -381,6 +403,9 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    *   <li>the price list of the first linked sales order — same "linked order" notion as
    *       {@link #enrichLinkedOrder} (i.e. {@code shipmentRec.linkedOrders[0]}), which this
    *       method reads rather than re-querying;</li>
+   *   <li>otherwise (ETP-6002), the price list of the first directly linked invoice
+   *       ({@code linkedInvoices[0]}, so {@link #enrichLinkedInvoices} runs first) — a shipment
+   *       made from an invoice that came from a quotation has no linked order;</li>
    *   <li>otherwise, the Business Partner's own configured price list;</li>
    *   <li>otherwise, the client's own DEFAULT sales price list — matching what Etendo Classic
    *       falls back to when a Business Partner has none configured (ETP-5410 follow-up: this
@@ -390,13 +415,17 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    * </ol>
    * Adds {@code resolvedPriceListId} / {@code resolvedPriceList$_identifier} to the header
    * JSON. Must run AFTER {@link #enrichLinkedOrder} in {@link #afterHandle}, since it reads
-   * the {@code linkedOrders} array that method just populated. Defensive by design — like
+   * the {@code linkedOrders} array that method just populated, and after
+   * {@link #enrichLinkedInvoices} (its {@code linkedInvoices}). Defensive by design — like
    * every other {@code enrich*} method here, a failure is logged and swallowed, never
    * propagated to the response.
    */
   private void enrichResolvedPriceList(JSONObject shipmentRec, String shipmentId) {
     try {
       if (applyPriceListFromLinkedOrder(shipmentRec)) {
+        return;
+      }
+      if (applyPriceListFromLinkedInvoice(shipmentRec)) {
         return;
       }
       if (applyPriceListFromBusinessPartner(shipmentRec, shipmentId)) {
@@ -409,11 +438,29 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   }
 
   private boolean applyPriceListFromLinkedOrder(JSONObject shipmentRec) throws JSONException {
-    JSONArray linkedOrders = shipmentRec.optJSONArray(FIELD_LINKED_ORDERS);
-    if (linkedOrders == null || linkedOrders.length() == 0) {
+    return applyPriceListOfFirst(shipmentRec, shipmentRec.optJSONArray(FIELD_LINKED_ORDERS));
+  }
+
+  /**
+   * ETP-6002 (CP-14 follow-up): a shipment made from an invoice that came straight from a
+   * quotation has no linked order any more (a quotation is never one), so the price list the
+   * create-invoice modal preselects comes from its directly linked invoice — the price list that
+   * quotation's invoice used, as the quotation itself did before. Only when there is no order.
+   */
+  private boolean applyPriceListFromLinkedInvoice(JSONObject shipmentRec) throws JSONException {
+    return applyPriceListOfFirst(shipmentRec, shipmentRec.optJSONArray(FIELD_LINKED_INVOICES));
+  }
+
+  /**
+   * Copies the price list of the FIRST entry of {@code linked}, the rule the order tier always
+   * had; {@code false} when there is none or it has no price list.
+   */
+  private boolean applyPriceListOfFirst(JSONObject shipmentRec, JSONArray linked)
+      throws JSONException {
+    if (linked == null || linked.length() == 0) {
       return false;
     }
-    JSONObject firstOrder = linkedOrders.getJSONObject(0);
+    JSONObject firstOrder = linked.getJSONObject(0);
     Object rawPriceListId = firstOrder.opt(FIELD_PRICE_LIST_ID);
     String priceListId = (rawPriceListId == null || JSONObject.NULL.equals(rawPriceListId))
         ? null : rawPriceListId.toString();
@@ -478,10 +525,12 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   @SuppressWarnings("java:S2077")
   private void enrichLinkedInvoices(JSONObject shipmentRec, String shipmentId) {
     String sql =
-        "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code " +
+        "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code, " +
+        "  i.m_pricelist_id, pl.name " +
         "FROM (" + InOutInvoiceLinks.linkedInvoiceIdsSql(InOutInvoiceLinks.MatchTable.SALES) + ") lk " +
         "JOIN c_invoice i ON i.c_invoice_id = lk.c_invoice_id " +
         "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id " +
+        "LEFT JOIN m_pricelist pl ON pl.m_pricelist_id = i.m_pricelist_id " +
         "WHERE i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL')";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -497,10 +546,17 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
           inv.put("grandTotalAmount", invTotal != null ? invTotal : JSONObject.NULL);
           inv.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
           inv.put("currency$_identifier", rs.getString(5));
+          // ETP-6002: read by enrichResolvedPriceList when the shipment has no order.
+          String invoicePriceListId = rs.getString(6);
+          inv.put(FIELD_PRICE_LIST_ID, invoicePriceListId != null ? invoicePriceListId
+              : JSONObject.NULL);
+          String invoicePriceListName = rs.getString(7);
+          inv.put(FIELD_PRICE_LIST_IDENTIFIER, invoicePriceListName != null ? invoicePriceListName
+              : JSONObject.NULL);
           invoices.put(inv);
         }
       }
-      shipmentRec.put("linkedInvoices", invoices);
+      shipmentRec.put(FIELD_LINKED_INVOICES, invoices);
     } catch (Exception e) {
       log.warn("Could not enrich linked invoices for shipment {}: {}", shipmentId, e.getMessage());
     }

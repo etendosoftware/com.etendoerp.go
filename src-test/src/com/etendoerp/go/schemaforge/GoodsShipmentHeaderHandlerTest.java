@@ -831,6 +831,26 @@ public class GoodsShipmentHeaderHandlerTest {
   // ReturnMaterialReceiptHeaderHandler / ReturnToVendorShipmentHeaderHandler, which already call
   // NeoHandlerUtils.reanchorLinesToHeaderWarehouse on this exact hook.
 
+  /**
+   * ETP-6002 review M4: completing a shipment first brings the draft-time M_MatchSI rows of its
+   * lines (later partial shipments of an invoice line) to the lines' current quantity, then lets
+   * the native completion run.
+   */
+  @Test
+  public void handleDocumentActionRefreshesTheDraftInvoiceMatchesBeforeCompletion() {
+    try (MockedStatic<NeoHandlerUtils> utils = Mockito.mockStatic(NeoHandlerUtils.class);
+         MockedStatic<InvoiceLineLinker> linker = Mockito.mockStatic(InvoiceLineLinker.class)) {
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("documentAction").recordId("ship-1").build();
+
+      assertNull(new GoodsShipmentHeaderHandler().handle(ctx));
+
+      linker.verify(() -> InvoiceLineLinker.refreshDraftMatchQuantities("ship-1",
+          InOutInvoiceLinks.MatchTable.SALES));
+    }
+  }
+
   @Test
   public void handleDocumentActionWithNullRecordIdSkipsReanchor() {
     NeoContext ctx = NeoContext.builder()
@@ -976,6 +996,33 @@ public class GoodsShipmentHeaderHandlerTest {
 
     assertEquals("PL-ORDER", shipmentRec.getString("resolvedPriceListId"));
     assertEquals("Order Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
+  }
+
+  /**
+   * ETP-6002 (CP-14 follow-up): a shipment made from an invoice that came straight from a
+   * quotation has no linked order (a quotation never is one), so the price list comes from its
+   * first directly linked invoice, before the Business Partner's (not stubbed: it must not be
+   * read). A linked order still wins over the invoice.
+   */
+  @Test
+  public void enrichResolvedPriceListUsesTheLinkedInvoiceWhenThereIsNoOrder() throws Exception {
+    JSONObject invoice = new JSONObject().put("id", "inv-1").put("documentNo", "FV1")
+        .put("priceListId", "PL-INVOICE").put("priceList$_identifier", "Invoice Price List");
+    JSONObject noOrder = new JSONObject().put("id", "sh-1").put("linkedOrders", new JSONArray())
+        .put("linkedInvoices", new JSONArray().put(invoice));
+
+    invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), noOrder, "sh-1");
+
+    assertEquals("PL-INVOICE", noOrder.getString("resolvedPriceListId"));
+    assertEquals("Invoice Price List", noOrder.getString("resolvedPriceList$_identifier"));
+
+    JSONObject withOrder = new JSONObject().put("id", "sh-1")
+        .put("linkedOrders", linkedOrdersWithPriceList("PL-ORDER", "Order Price List"))
+        .put("linkedInvoices", new JSONArray().put(invoice));
+
+    invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), withOrder, "sh-1");
+
+    assertEquals("PL-ORDER", withOrder.getString("resolvedPriceListId"));
   }
 
   /**

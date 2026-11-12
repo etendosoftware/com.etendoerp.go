@@ -13255,19 +13255,24 @@ not the total-discount line, line order; `{id, lineNo, product, product$_identif
 invoicedQuantity, orderLine, linked, inDraftDocuments}`, where `orderLine` is the line's order line or else the
 header order's line of the same product (the last one wins, as the popup). `pendingQuantity` follows the header's
 `SourcePolicy` (per direction, set by the header NeoExtension, never by the delegate):
-- **goods shipment** (ETP-6002 CP-22, `SourcePolicy.byDirectLinks`): by the invoice line's **own** links, never by
-  another invoice's shipments of the same order line. `own = invoiced − moved`, where `moved` is what the shipment
-  lines linked to the invoice line give it — linked through `C_InvoiceLine.M_InOutLine_ID` or `M_MatchSI`, active, not
-  voided (a DRAFT one holds, the target's own included), with a positive quantity; each shipment line's quantity is
-  split over every counted invoice line linked to it (neither draft nor voided, positive quantity), oldest invoice
-  first, so one shipment line linked to two invoices (the order-line link of `linkPendingInvoiceLinesToInout`) is
-  counted once. A line with an order line (its own or the header order's line of the same product) is also capped by
-  that order line's **headroom**: what the counted invoices put on it (this one included) − `delivered(order line)` −
-  every DRAFT shipment on it (the target included), shared out over the invoice's lines in line order. `pending =
-  max(0, min(own, headroom))`; without an order line, `max(0, own)`. A shipment line created with `invoiceLineId`
-  counts whether or not it carries the order line, so the window's popup (which copies `salesOrderLine`; a quotation
-  line is dropped by `GoodsShipmentLineHandler`, CP-14) and an MCP create with only `invoiceLineId` give the same
-  pending. `linked` still reports the column only (display);
+- **goods shipment** (ETP-6002 CP-22 and review M2, `SourcePolicy.byDirectLinks`): **exactly the pending of the
+  invoice's own «Crear albarán» follow-up** (`createShipment`, `InvoicePendingResolver.loadSources`, read through
+  `ImportInvoiceLinesIntoInOutHandler#followUpPending`), so the popup, `availableInvoiceLines` on MCP and
+  `createShipment` never disagree on the same invoice. Per invoice line: `QtyInvoiced − moved`, where `moved` is the
+  quantity of the movement lines linked to THAT invoice line (`C_InvoiceLine.M_InOutLine_ID` or `M_MatchSI`; active,
+  not voided, not a return; a DRAFT one counts, the target's own included) — never another invoice's shipments of the
+  same order line; then, for a line with its own `C_OrderLine_ID`, capped by `QtyOrdered − QtyDelivered − DRAFT
+  movement lines on it`, shared out over the invoice's lines in line order. A line the follow-up does not carry (no
+  product, nothing pending) is at 0. A shipment line created with `invoiceLineId` counts whether or not it carries the
+  order line, so the window's popup (which copies `salesOrderLine`; a quotation line is dropped by
+  `GoodsShipmentLineHandler`, CP-14) and an MCP create with only `invoiceLineId` give the same pending. `linked` still
+  reports the column only (display); `orderLine` (own, or the header order's line of the same product) and
+  `inDraftDocuments` are display only. Known, shared with the follow-up since ETP-5576: one movement line linked to
+  two invoice lines counts in full for each (can only under-state, never offer twice), and the order cap reads
+  `QtyOrdered`, so a shipment made by hand on the order line (no invoice link) of a partly invoiced order does not
+  lower the pending of the invoiced part. (A first CP-22 version capped by the invoices put on the order line and split
+  a shared movement line; review M2 replaced it with this one rule, which also removed its need to tell
+  rectificatives apart — review M1.)
 - **goods receipt** (product decision: the popup's rule is kept, delivered is NOT deducted): 0 when `linked`, otherwise
   `max(0, invoiced − what the OTHER draft receipts hold of its order line)`.
 
@@ -13289,6 +13294,32 @@ column-only link (`AbstractInOutLineHandler#linkInvoiceLine`, unchanged). Bindin
 `@Named("goodsShipmentLineHandler")` + the row's `JAVA_QUALIFIER` to `@NeoExtension(spec = "goods-shipment", entity =
 "goodsShipmentLine")` (touch-means-migrate, §5.3.a): qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING`
 75 → 74, the class removed from `legacyHandlers`.
+
+**Draft-time match rows (ETP-6002 review M4).** The `M_MatchSI` row a later partial shipment gets at draft time
+froze the line quantity of that moment. `GoodsShipmentHeaderHandler#handle` (the `documentAction` POST, before the
+native completion) calls `InvoiceLineLinker.refreshDraftMatchQuantities(shipment, SALES)`, which sets `qty =
+MovementQty` on the unposted rows of that DRAFT shipment's lines, so `M_INOUT_POST` (`QtyInvoiced`,
+`IsCompletelyInvoiced`) and `ETGO_GET_DELIVERY_STATUS` read the final quantity; a failure is logged and completion
+goes on (the pending readers use `MovementQty`, not the row's). Life cycle, verified on the schema: deleting the
+draft line or the draft shipment cascade-deletes the row (`m_matchsi_m_inoutline` `ON DELETE CASCADE`; the column is
+`ON DELETE SET NULL`); `M_MATCHSI_TRG` only refuses deleting a POSTED row, which a draft one never is; voiding a
+draft or a completed shipment leaves the rows on a `VO` movement, which every reader skips (`io.docstatus <> 'VO'` in
+the pending readers, `CO`/`CL` only in the delivery status), and the Classic reversal writes the opposite rows on the
+`VO` reversal; `M_INOUT_POST` has no reactivation for shipments. A later shipment of an invoice line whose column
+points at a voided line is linked through `M_MatchSI` (the column is set only when empty), so it is counted. The
+purchase side (`M_MatchInv`, follow-up linker) is unchanged.
+
+**Price list of the create-invoice modal (ETP-6002, CP-14 follow-up).** `GoodsShipmentHeaderHandler#enrichResolvedPriceList`
+gained a tier between the linked order and the business partner: the price list of the first directly linked invoice
+(`linkedInvoices[0]`, whose entries now carry `priceListId` / `priceList$_identifier`). A shipment made from an invoice
+that came straight from a quotation has no linked order since CP-14, and preselects that invoice's price list instead
+of falling to the partner's.
+
+**`listInvoices` on sales orders and quotations (ETP-6002).** Each row adds `isRectificative`
+(`SalesInvoiceHeaderHandler.isRectificativeDocType`, passed by `CreateDraftInvoiceHandler#handleList` to
+`OrderInvoiceListSupport.listInvoices`); rows and order are unchanged. The SPA's related documents of a sales order and
+a quotation leave those rows out (QA criterion: a Pedido / Presupuesto never shows a factura rectificativa). The
+purchase order's `listInvoices` passes no rule and its rows carry no such key.
 
 **`pendingBasis`: the purchase popups keep their old pending rule (ETP-6099 follow-up).** The list
 above moved every popup to the server rule (drafts deducted). Product decision: ETP-6099 is about

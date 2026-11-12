@@ -1192,10 +1192,6 @@ public class SalesQuotationHeaderHandlerTest {
   public void testAfterHandle_quotationDetailListsNoShipment() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       stubNoLinkedDocuments(obDalMock);
-      Connection readOnlyConn = mock(Connection.class);
-      OBDal readOnlyDal = mock(OBDal.class);
-      when(readOnlyDal.getConnection()).thenReturn(readOnlyConn);
-      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
       JSONObject body = new JSONObject().put("response", new JSONObject().put("data",
           new JSONArray().put(quotationRecordWithDiscount(true, 0.0, 100.0))));
       NeoContext ctx = getCtx("quot-ship-1");
