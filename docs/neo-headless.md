@@ -7475,7 +7475,7 @@ gained `sifFields` and the pair gained `sifDefaults`. Every hook it overrides or
 `afterHandle`, `responseEnrichedFields`, `actionContracts`, `unavailableActions`) already had an
 annotation-aware reader — the same set ETP-6026 proved for its sibling `return-material-receipt`. The
 row's `JAVA_QUALIFIER`, the class's `@Named` and the artifact's `javaQualifier` were removed,
-`EXTENSION_CEILING` went 78 → 77, the class left `legacyHandlers` in the guardrail allowlist, and
+`EXTENSION_CEILING` went 78 → 77 on the branch (74 after merging develop, where ETP-6206 and ETP-6154 had migrated three more pairs), the class left `legacyHandlers` in the guardrail allowlist, and
 `NeoExtensionParityTest`'s legacy fixture moved to `return-to-vendor-shipment` /
 `returnToVendorShipmentLine` (`returnToVendorShipmentLineHandler`), still legacy. A database that has
 not run `update.database` still carries the old qualifier on the row: harmless, the annotation is

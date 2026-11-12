@@ -236,30 +236,43 @@ final class InvoiceSifPreset {
           TYPE_DATE, null));
     }
     if (f.siiActive()) {
-      if (!f.sales()) {
-        specs.add(new FieldSpec(F_SII_KEY_PURCHASE, SYSTEM_SII, TYPE_OPTION, PURCHASE_SII_KEYS));
-      } else if (f.rectificative()) {
-        specs.add(new FieldSpec(F_SII_MOTIVE, SYSTEM_SII, TYPE_OPTION, RECTIFICATION_CODES));
-      } else {
-        specs.add(new FieldSpec(F_SII_KEY, SYSTEM_SII, TYPE_OPTION, SALES_SII_KEYS));
-      }
-      specs.add(new FieldSpec(F_SII_DESCRIPTION, SYSTEM_SII, TYPE_TEXT, null));
-      specs.add(new FieldSpec(F_SII_AUTHORIZATION, SYSTEM_SII, TYPE_BOOLEAN, null));
-      if (!f.sales()) {
-        specs.add(new FieldSpec(F_SII_ACCOUNTING_REG_DATE, SYSTEM_SII, TYPE_DATE, null));
-      }
+      specs.addAll(siiFields(f));
     }
     if (f.verifactuActive()) {
-      specs.add(new FieldSpec(F_VF_INV_TYPE, SYSTEM_VERIFACTU, TYPE_OPTION,
-          f.rectificative() ? RECTIFICATION_CODES : VF_NORMAL_TYPES));
-      specs.add(new FieldSpec(F_VF_DESCRIPTION, SYSTEM_VERIFACTU, TYPE_TEXT, null));
-      specs.add(new FieldSpec(F_VF_SIMPLIFIED_7273, SYSTEM_VERIFACTU, TYPE_BOOLEAN, null));
-      specs.add(new FieldSpec(F_VF_NO_RECIPIENT_61D, SYSTEM_VERIFACTU, TYPE_BOOLEAN, null));
+      specs.addAll(verifactuFields(f));
     }
     if (f.tbaiActive() && f.rectificative()) {
       specs.add(new FieldSpec(F_TBAI_CODE, SYSTEM_TBAI, TYPE_OPTION, RECTIFICATION_CODES));
     }
     return specs;
+  }
+
+  /** SII's own editable fields (the operation date is added by {@link #fields}). */
+  private static List<FieldSpec> siiFields(Facts f) {
+    List<FieldSpec> specs = new ArrayList<>();
+    if (!f.sales()) {
+      specs.add(new FieldSpec(F_SII_KEY_PURCHASE, SYSTEM_SII, TYPE_OPTION, PURCHASE_SII_KEYS));
+    } else if (f.rectificative()) {
+      specs.add(new FieldSpec(F_SII_MOTIVE, SYSTEM_SII, TYPE_OPTION, RECTIFICATION_CODES));
+    } else {
+      specs.add(new FieldSpec(F_SII_KEY, SYSTEM_SII, TYPE_OPTION, SALES_SII_KEYS));
+    }
+    specs.add(new FieldSpec(F_SII_DESCRIPTION, SYSTEM_SII, TYPE_TEXT, null));
+    specs.add(new FieldSpec(F_SII_AUTHORIZATION, SYSTEM_SII, TYPE_BOOLEAN, null));
+    if (!f.sales()) {
+      specs.add(new FieldSpec(F_SII_ACCOUNTING_REG_DATE, SYSTEM_SII, TYPE_DATE, null));
+    }
+    return specs;
+  }
+
+  /** VERI*FACTU's own editable fields (sales only, see {@link #resolveFacts}). */
+  private static List<FieldSpec> verifactuFields(Facts f) {
+    return List.of(
+        new FieldSpec(F_VF_INV_TYPE, SYSTEM_VERIFACTU, TYPE_OPTION,
+            f.rectificative() ? RECTIFICATION_CODES : VF_NORMAL_TYPES),
+        new FieldSpec(F_VF_DESCRIPTION, SYSTEM_VERIFACTU, TYPE_TEXT, null),
+        new FieldSpec(F_VF_SIMPLIFIED_7273, SYSTEM_VERIFACTU, TYPE_BOOLEAN, null),
+        new FieldSpec(F_VF_NO_RECIPIENT_61D, SYSTEM_VERIFACTU, TYPE_BOOLEAN, null));
   }
 
   /** The active systems that have at least one editable field, in SII/TicketBAI/VERI*FACTU order. */
@@ -515,19 +528,31 @@ final class InvoiceSifPreset {
   // Contracts
   // ---------------------------------------------------------------------------
 
-  /** The {@code sifFields} parameter every invoice-creating action declares. */
-  static NeoActionContract.Param sifFieldsParam() {
-    return NeoActionContract.Param.optional(PARAM_SIF_FIELDS, NeoActionContract.TYPE_OBJECT,
-        "The invoice's SIF fields (\"Datos fiscales\"), {field: value}, written before it is "
-            + "completed. Only the editable fields of the fiscal systems active for its "
-            + "organization are accepted, with their codes; read them and their defaults with "
-            + ACTION_SIF_DEFAULTS + " first. A field you omit takes exactly the value "
-            + ACTION_SIF_DEFAULTS + " shows for it (send nothing to get the preview as it is): "
-            + "a rectificative invoice gets R4 as the SII motive, TicketBAI code and VERI*FACTU "
+  /**
+   * The {@code sifFields} parameter every invoice-creating action declares, worded for its
+   * direction: a purchase invoice only carries SII fields and no rectification code.
+   *
+   * @param sales {@code true} for a sales invoice, {@code false} for a purchase one
+   */
+  static NeoActionContract.Param sifFieldsParam(boolean sales) {
+    String common = "The invoice's SIF fields (\"Datos fiscales\"), {field: value}, written before "
+        + "it is completed. Only the editable fields of the fiscal systems active for its "
+        + "organization are accepted, with their codes; read them and their defaults with "
+        + ACTION_SIF_DEFAULTS + " first. A field you omit takes exactly the value "
+        + ACTION_SIF_DEFAULTS + " shows for it (send nothing to get the preview as it is). ";
+    String direction = sales
+        ? "A rectificative invoice gets R4 as the SII motive, TicketBAI code and VERI*FACTU "
             + "type, a normal one the VERI*FACTU type and description of its document type (F1 "
-            + "when it has none). Refused with 422 " + MSG_FIELD_INVALID + " for an unknown field or code, "
-            + "and with 422 ETGO_InvoiceRectificationCodeRequired when a rectificative invoice "
-            + "is left without a code for an active system.");
+            + "when it has none). Refused with 422 " + MSG_FIELD_INVALID + " for an unknown "
+            + "field or code, and with 422 ETGO_InvoiceRectificationCodeRequired when a "
+            + "rectificative invoice is left without a code for an active system."
+        : "A purchase invoice only has SII fields: " + F_OPERATION_DATE + ", "
+            + F_SII_KEY_PURCHASE + " (F6, LC, F5, F1), " + F_SII_DESCRIPTION + ", "
+            + F_SII_AUTHORIZATION + " and " + F_SII_ACCOUNTING_REG_DATE + "; there is no "
+            + "rectification code, not even on a purchase rectificative. Refused with 422 "
+            + MSG_FIELD_INVALID + " for an unknown field or code.";
+    return NeoActionContract.Param.optional(PARAM_SIF_FIELDS, NeoActionContract.TYPE_OBJECT,
+        common + direction);
   }
 
   /**

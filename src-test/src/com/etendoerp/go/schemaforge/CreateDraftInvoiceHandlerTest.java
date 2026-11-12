@@ -3841,6 +3841,41 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
+  /**
+   * ETP-6179 review W2 repro: several shipments are invoiced through a header that carries NO
+   * order (createInvoiceHeaderFromShipment links it for a single shipment only), so the sifDefaults
+   * preview must not read the order either — otherwise a caller sending no sifFields gets the
+   * order's SII description/operation date in the preview and today's/the org's on the invoice.
+   */
+  @Test
+  public void testShipmentSifTargetCarriesTheOrderOnlyForASingleShipment() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+      Order order = mock(Order.class);
+      DocumentType orderDocType = mock(DocumentType.class);
+      DocumentType invoiceDocType = mock(DocumentType.class);
+      when(invoiceDocType.getDocumentSequence()).thenReturn(mock(Sequence.class));
+      when(orderDocType.getDocumentTypeForInvoice()).thenReturn(invoiceDocType);
+      when(order.getTransactionDocument()).thenReturn(orderDocType);
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      when(first.getOrganization()).thenReturn(org);
+      when(first.getSalesOrder()).thenReturn(order);
+      when(dal.get(ShipmentInOut.class, "sh-1")).thenReturn(first);
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler();
+
+      InvoiceSifPreset.Target several = handler.shipmentSifTarget(
+          new JSONObject().put("shipmentIds", new JSONArray().put("sh-1").put("sh-2")), "sh-1");
+      InvoiceSifPreset.Target single = handler.shipmentSifTarget(new JSONObject(), "sh-1");
+
+      assertNull("several shipments: the header carries no order", several.order());
+      assertSame(invoiceDocType, several.docType());
+      assertSame("one shipment: the header carries the order", order, single.order());
+    }
+  }
+
   // ── handlePendingLines ────────────────────────────────────────────────────
 
   /** Blank recordId returns 400. */

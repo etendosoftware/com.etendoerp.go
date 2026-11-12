@@ -492,8 +492,8 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       when(org.getId()).thenReturn("org-1");
       when(returnDoc.getOrganization()).thenReturn(org);
       DocumentType docType = mock(DocumentType.class);
-      utils.when(() -> ReturnShipmentUtils.findReturnDocTypeForOrg(any(), eq("org-1"),
-          eq("API"), anyBoolean(), anyBoolean(), anyBoolean())).thenReturn(docType);
+      // ETP-6179: the handler resolves it through the lookup the sifDefaults preview shares.
+      utils.when(() -> ReturnShipmentUtils.findReturnInvoiceDocType(returnDoc)).thenReturn(docType);
       support.when(() -> ReturnInvoiceSupport.createReturnInvoice(any(), anyString(), any(),
           any(), anyBoolean(), any(), any())).thenThrow(QuotaRefusalTestSupport.refusal());
 

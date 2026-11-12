@@ -136,7 +136,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "pending quantity (it is never capped silently), and so is a list none of whose "
               + "entries has an orderLineId and a quantity above zero. Omit to invoice the "
               + "pending quantity of every line."),
-      InvoiceSifPreset.sifFieldsParam())
+      InvoiceSifPreset.sifFieldsParam(true))
       .withIdDescription("the id of the sales order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -159,7 +159,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           + "completed the quotation moves to status ETGO_CI (\"Closed - Invoice Created\") and "
           + "can no longer be invoiced: a second call answers 400 naming the status. This action "
           + "never creates an order from the quotation. The only body key it reads is sifFields.",
-      InvoiceSifPreset.sifFieldsParam())
+      InvoiceSifPreset.sifFieldsParam(true))
       .withIdDescription("the id of the sales quotation to invoice");
 
   /**
@@ -200,7 +200,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "quantity (it is never capped silently), and so is a list none of whose entries "
               + "has a shipmentLineId and a quantity above zero. Omit to invoice the pending "
               + "quantity of every line."),
-      InvoiceSifPreset.sifFieldsParam())
+      InvoiceSifPreset.sifFieldsParam(true))
       .withIdDescription("the id of the goods shipment to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -484,26 +484,36 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           resolveARInvoiceDocType(order), true, order);
     }
     if (SPEC_GOODS_SHIPMENT.equals(specName)) {
-      List<String> shipmentIds = parseShipmentIds(body, recordId);
-      ShipmentInOut first = OBDal.getInstance().get(ShipmentInOut.class, shipmentIds.get(0));
-      if (first == null) {
-        throw new OBException("Shipment not found: " + shipmentIds.get(0));
-      }
-      Order order = first.getSalesOrder();
-      DocumentType docType;
-      if (shipmentIds.size() == 1 && order != null) {
-        docType = resolveARInvoiceDocType(order);
-      } else {
-        docType = order != null && order.getTransactionDocument() != null
-            ? order.getTransactionDocument().getDocumentTypeForInvoice() : null;
-        if (docType == null) {
-          docType = findARInvoiceDocType(first.getOrganization().getId());
-        }
-      }
-      return new InvoiceSifPreset.Target(first.getOrganization(), first.getBusinessPartner(),
-          docType, true, order);
+      return shipmentSifTarget(body, recordId);
     }
     return null;
+  }
+
+  /**
+   * The goods-shipment route of {@link #resolveSifTarget}: the document type the creation picks
+   * (a single shipment with an order goes through the order; otherwise the order's invoice type,
+   * else {@link #findARInvoiceDocType}), and the order only when the invoice header will carry it —
+   * {@link #createInvoiceHeaderFromShipment} links it for a single shipment only — so the preview
+   * reads the same order-derived values (SII description, operation date) the creation will
+   * (ETP-6179 review W2).
+   */
+  InvoiceSifPreset.Target shipmentSifTarget(JSONObject body, String recordId) {
+    List<String> shipmentIds = parseShipmentIds(body, recordId);
+    ShipmentInOut first = OBDal.getInstance().get(ShipmentInOut.class, shipmentIds.get(0));
+    if (first == null) {
+      throw new OBException("Shipment not found: " + shipmentIds.get(0));
+    }
+    Order order = first.getSalesOrder();
+    boolean single = shipmentIds.size() == 1;
+    DocumentType docType = single && order != null ? resolveARInvoiceDocType(order) : null;
+    if (docType == null && !single && order != null && order.getTransactionDocument() != null) {
+      docType = order.getTransactionDocument().getDocumentTypeForInvoice();
+    }
+    if (docType == null) {
+      docType = findARInvoiceDocType(first.getOrganization().getId());
+    }
+    return new InvoiceSifPreset.Target(first.getOrganization(), first.getBusinessPartner(),
+        docType, true, single ? order : null);
   }
 
   /**

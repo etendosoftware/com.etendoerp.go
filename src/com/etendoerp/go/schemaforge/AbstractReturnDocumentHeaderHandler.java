@@ -21,6 +21,9 @@ import java.util.Map;
 import javax.inject.Inject;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -43,6 +46,8 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  * subclass still gets its own {@code postingService} instance without redeclaring the field.
  */
 public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler {
+
+  private static final Logger LOG = LogManager.getLogger(AbstractReturnDocumentHeaderHandler.class);
 
   @Inject
   private DocumentPostingService postingService;
@@ -96,6 +101,7 @@ public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler 
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
+      LOG.error("Error previewing the SIF fields for return {}: {}", returnId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while previewing the invoice's fiscal data");
     }

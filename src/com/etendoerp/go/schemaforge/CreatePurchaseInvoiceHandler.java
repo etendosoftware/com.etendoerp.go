@@ -80,7 +80,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String PARAM_RECEIPT_IDS = "receiptIds";
   private static final String PARAM_PRICE_LIST_ID = "priceListId";
   private static final String PARAM_LINES = "lines";
-  private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
+  static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
+  static final String ERR_RECEIPT_NOT_FOUND = "Goods receipt not found: ";
+  static final String ERR_NO_RECEIPTS = "No goods receipts provided";
+  static final String ERR_RECEIPTS_DIFFERENT_PARTNER =
+      "All goods receipts must belong to the same Business Partner";
   private static final String KEY_RESPONSE = "response";
   private static final String ERR_NO_AP_INVOICE_DOC_TYPE = "No AP Invoice document type found";
   // ETP-4942 — same guard as CreateDraftInvoiceHandler#ensurePriceListResolved, surfaced as a
@@ -116,7 +120,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           + "allowDuplicate:true creates the invoice anyway and lists the drafts the order had. "
           + "The order's global discount (etgoTotalDiscount, always a %) "
           + "is carried to the new invoice's total discount as the same %, never as an amount.",
-      OrderInvoiceDuplicateGuard.allowDuplicateParam(), InvoiceSifPreset.sifFieldsParam())
+      OrderInvoiceDuplicateGuard.allowDuplicateParam(), InvoiceSifPreset.sifFieldsParam(false))
       .withIdDescription("the id of the purchase order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -159,7 +163,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
               + "400 naming the line and its pending quantity (it is never capped silently), and "
               + "so is a list none of whose entries has a receiptLineId and a non-zero quantity. "
               + "Omit to invoice the pending quantity of every line."),
-      InvoiceSifPreset.sifFieldsParam())
+      InvoiceSifPreset.sifFieldsParam(false))
       .withIdDescription("the id of the goods receipt to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -221,6 +225,31 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * The actions of this handler that create nothing: the goods-receipt-only reads, the order's
+   * {@code listInvoices} and {@code sifDefaults} (ETP-6179). Split out of {@link #handle} to keep
+   * its cognitive complexity down.
+   *
+   * @return the response, or {@code null} when none of them matches
+   */
+  private NeoResponse dispatchReadAction(NeoContext context, String specName, String fieldName,
+      String method) {
+    NeoResponse readOnlyOrPricingResponse =
+        dispatchGoodsReceiptOnlyAction(context, specName, fieldName, method);
+    if (readOnlyOrPricingResponse != null) {
+      return readOnlyOrPricingResponse;
+    }
+    // GET listInvoices — purchase invoices linked to the order by header or only by lines
+    if (SPEC_PURCHASE_ORDER.equals(specName) && LIST_ACTION.equals(fieldName) && "GET".equals(method)) {
+      return OrderInvoiceListSupport.listInvoices(context, false);
+    }
+    // POST sifDefaults — the SIF fields the invoice would get (ETP-6179), creates nothing
+    if (InvoiceSifPreset.ACTION_SIF_DEFAULTS.equals(fieldName) && "POST".equals(method)) {
+      return PurchaseInvoiceSifTarget.handleSifDefaults(this, context);
+    }
+    return null;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
@@ -234,20 +263,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     String fieldName = context.getFieldName();
     String method = context.getHttpMethod();
 
-    NeoResponse readOnlyOrPricingResponse =
-        dispatchGoodsReceiptOnlyAction(context, specName, fieldName, method);
-    if (readOnlyOrPricingResponse != null) {
-      return readOnlyOrPricingResponse;
-    }
-
-    // GET listInvoices — purchase invoices linked to the order by header or only by lines
-    if (SPEC_PURCHASE_ORDER.equals(specName) && LIST_ACTION.equals(fieldName) && "GET".equals(method)) {
-      return OrderInvoiceListSupport.listInvoices(context, false);
-    }
-
-    // POST sifDefaults — the SIF fields the invoice would get (ETP-6179), creates nothing
-    if (InvoiceSifPreset.ACTION_SIF_DEFAULTS.equals(fieldName) && "POST".equals(method)) {
-      return handleSifDefaults(context, specName);
+    NeoResponse readResponse = dispatchReadAction(context, specName, fieldName, method);
+    if (readResponse != null) {
+      return readResponse;
     }
 
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(method)) {
@@ -364,7 +382,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
    * {@code err.response.message}, falling back to a plain-text response if the JSON cannot be
    * assembled.
    */
-  private NeoResponse errorResponse(int status, String message) {
+  NeoResponse errorResponse(int status, String message) {
     try {
       JSONObject body = new JSONObject();
       body.put("status", "error");
@@ -425,7 +443,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   protected NeoResponse handleCheck(NeoContext context) {
     String recordId = context.getRecordId();
     if (StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
     try {
       OBContext.setAdminMode(true);
@@ -627,68 +645,6 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     return results.isEmpty() ? null : results.get(0);
   }
 
-  /**
-   * ETP-6179: answers {@code sifDefaults}, the SIF fields the purchase invoice
-   * {@code createPurchaseInvoice} would create from this record gets, creating nothing.
-   */
-  private NeoResponse handleSifDefaults(NeoContext context, String specName) {
-    String recordId = context.getRecordId();
-    if (StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        return InvoiceSifPreset.previewResponse(
-            resolveSifTarget(specName, recordId, context.getRequestBody()));
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (OBException e) {
-      return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-    } catch (Exception e) {
-      log.error("Error previewing the SIF fields for {}: {}", recordId, e.getMessage(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "An internal error occurred while previewing the invoice's fiscal data");
-    }
-  }
-
-  /**
-   * The purchase invoice the creation would build, as far as its SIF fields depend on it: the
-   * order's invoice type ({@link #resolveAPInvoiceDocType}) when there is an order, else the
-   * client's ({@link #findAPInvoiceDocType}).
-   */
-  protected InvoiceSifPreset.Target resolveSifTarget(String specName, String recordId,
-      JSONObject body) {
-    Order order;
-    org.openbravo.model.common.enterprise.Organization org;
-    BusinessPartner partner;
-    if (SPEC_GOODS_RECEIPT.equals(specName)) {
-      List<String> receiptIds = parseReceiptIds(body, recordId);
-      ShipmentInOut first = OBDal.getInstance().get(ShipmentInOut.class, receiptIds.get(0));
-      if (first == null) {
-        throw new OBException("Goods receipt not found: " + receiptIds.get(0));
-      }
-      order = receiptIds.size() == 1
-          ? (first.getSalesOrder() != null ? first.getSalesOrder() : deriveOrderFromLines(first))
-          : resolveCommonOrder(MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(
-              receiptIds, "Goods receipt not found: ", "No goods receipts provided",
-              "All goods receipts must belong to the same Business Partner"));
-      org = first.getOrganization();
-      partner = first.getBusinessPartner();
-    } else {
-      order = OBDal.getInstance().get(Order.class, recordId);
-      if (order == null) {
-        throw new OBException("Purchase order not found: " + recordId);
-      }
-      org = order.getOrganization();
-      partner = order.getBusinessPartner();
-    }
-    DocumentType docType = order != null ? resolveAPInvoiceDocType(order)
-        : findAPInvoiceDocType(org.getClient().getId());
-    return new InvoiceSifPreset.Target(org, partner, docType, false, order);
-  }
-
   // ── Multi-receipt (bulk) invoice creation ──────────────────────────────────────────
   //
   // Mirrors CreateDraftInvoiceHandler's goods-shipment bulk path (createFromShipments):
@@ -723,8 +679,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
    */
   protected List<ShipmentInOut> loadAndValidateReceipts(List<String> receiptIds) {
     List<ShipmentInOut> receipts = MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(
-        receiptIds, "Goods receipt not found: ", "No goods receipts provided",
-        "All goods receipts must belong to the same Business Partner");
+        receiptIds, ERR_RECEIPT_NOT_FOUND, ERR_NO_RECEIPTS,
+        ERR_RECEIPTS_DIFFERENT_PARTNER);
     requireReceiptsCompleted(receipts);
     return receipts;
   }
@@ -893,7 +849,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
    * or {@code null} when they do not all resolve to the SAME one (different orders, a mix of
    * with/without order, or none at all).
    */
-  private Order resolveCommonOrder(List<ShipmentInOut> receipts) {
+  Order resolveCommonOrder(List<ShipmentInOut> receipts) {
     Order common = null;
     for (ShipmentInOut r : receipts) {
       Order o = r.getSalesOrder();
@@ -1022,7 +978,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   protected Invoice createFromReceipt(String receiptId, JSONObject body) {
     ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, receiptId);
     if (receipt == null) {
-      throw new OBException("Goods receipt not found: " + receiptId);
+      throw new OBException(ERR_RECEIPT_NOT_FOUND + receiptId);
     }
     requireReceiptsCompleted(List.of(receipt));
 
@@ -1322,7 +1278,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     }
   }
 
-  private Order deriveOrderFromLines(ShipmentInOut receipt) {
+  Order deriveOrderFromLines(ShipmentInOut receipt) {
     for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
       if (rl.getSalesOrderLine() != null && rl.getSalesOrderLine().getSalesOrder() != null) {
         return rl.getSalesOrderLine().getSalesOrder();

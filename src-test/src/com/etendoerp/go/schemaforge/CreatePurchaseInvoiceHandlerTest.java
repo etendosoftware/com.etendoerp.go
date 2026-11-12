@@ -3558,4 +3558,39 @@ public class CreatePurchaseInvoiceHandlerTest {
       RectificativeSupport.setColumnPresentForTests(null);
     }
   }
+
+  /**
+   * ETP-6179 review W2 repro: several receipts are invoiced through a receipt-built header that
+   * carries NO order (only the single-receipt route builds the header from the order), so the
+   * sifDefaults preview must not read the common order either.
+   */
+  @Test
+  public void sifPreviewTargetCarriesTheOrderOnlyForASingleReceipt() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<MultiDocumentInvoiceSupport> multiMock =
+             Mockito.mockStatic(MultiDocumentInvoiceSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mock(Order.class);
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      when(first.getSalesOrder()).thenReturn(order);
+      when(first.getOrganization()).thenReturn(mock(Organization.class));
+      when(dal.get(ShipmentInOut.class, "rc-1")).thenReturn(first);
+      multiMock.when(() -> MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(
+          any(), any(), any(), any())).thenReturn(List.of(first, first));
+      DocumentType docType = mock(DocumentType.class);
+      CreatePurchaseInvoiceHandler handler = Mockito.spy(new CreatePurchaseInvoiceHandler());
+      Mockito.doReturn(order).when(handler).resolveCommonOrder(any());
+      Mockito.doReturn(docType).when(handler).resolveAPInvoiceDocType(order);
+
+      InvoiceSifPreset.Target several = PurchaseInvoiceSifTarget.resolve(handler, "goods-receipt",
+          "rc-1", new JSONObject().put("receiptIds", new JSONArray().put("rc-1").put("rc-2")));
+      InvoiceSifPreset.Target single = PurchaseInvoiceSifTarget.resolve(handler, "goods-receipt",
+          "rc-1", new JSONObject());
+
+      assertNull("several receipts: the header carries no order", several.order());
+      assertSame(docType, several.docType());
+      assertSame("one receipt: the header carries the order", order, single.order());
+    }
+  }
 }

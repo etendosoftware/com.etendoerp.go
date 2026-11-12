@@ -223,7 +223,7 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
             "Only the JSON boolean true creates a second factura rectificativa for a return "
                 + "that already has one; anything else (absent, false, a string, a number) keeps "
                 + "the one-per-return refusal. Use it only when a second one is really intended."),
-        InvoiceSifPreset.sifFieldsParam())
+        InvoiceSifPreset.sifFieldsParam(false))
         .withIdDescription("The id of the completed return shipment.")
         .availableWhen(DocumentAvailability.WHEN_COMPLETED));
     // ETP-6179: the SIF fields the factura rectificativa would get (SII only on a purchase).
@@ -469,8 +469,8 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
 
         // ETP-4737: resolves the unified "Factura Rectificativa" (API + isRectificative) doc
         // type, replacing the legacy plain-APC ("AP CreditMemo") lookup.
-        DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-            returnDoc.getClient(), returnDoc.getOrganization().getId(), "API", false, false, true);
+        // ETP-6179: the same lookup the sifDefaults preview uses, so the two cannot drift.
+        DocumentType docType = ReturnShipmentUtils.findReturnInvoiceDocType(returnDoc);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "No rectificative invoice document type found for this organization");
