@@ -109,7 +109,8 @@ Display names are not served; render them in the caller's language.
   "includeSampleData": true,
   "termsAccepted": true,
   "sendEmails": true,
-  "source": { "utm_source": "google", "utm_campaign": "q4", "referrer": "https://..." }
+  "source": { "utm_source": "google", "utm_campaign": "q4", "referrer": "https://..." },
+  "hubspotDealId": "123456789"
 }
 ```
 
@@ -126,6 +127,7 @@ Display names are not served; render them in the caller's language.
 | `termsAccepted` | no | when `true`, the acceptance time is stored (`TERMS_ACCEPTED_AT`) with the terms version in force (`TERMS_VERSION`, see [terms-and-conditions.md](terms-and-conditions.md)); never rejected |
 | `sendEmails` | no | default `true`. `false`: no mail at all; the caller asks for the link with `login-link` (sales preparing a demo) |
 | `source` | no | a JSON object, stored as-is (`SIGNUP_SOURCE`), ≤ 2000 characters serialized |
+| `hubspotDealId` | no | a booked demo's HubSpot deal: digits only (a number or its text), ≤ 30. The HubSpot sync then reports this account's demo on that deal and moves it in the Demo pipeline instead of leaving the account out (ETP-6082, see [hubspot-sync.md](hubspot-sync.md#booked-demos)). Omit it for any other signup |
 
 Unknown fields are ignored. `202 Accepted`:
 
@@ -184,6 +186,7 @@ are the contract: never rename one.
 | 400 | `UNSUPPORTED_COUNTRY` / `UNSUPPORTED_CURRENCY` / `UNSUPPORTED_LANGUAGE` | the field | not in `config` |
 | 400 | `INVALID_TAX_ID_FORMAT` | `taxId` | not a NIF/CIF/NIE |
 | 400 | `INVALID_TAX_ID_CHECK_DIGIT` | `taxId` | check digit mismatch |
+| 400 | `INVALID_HUBSPOT_DEAL_ID` | `hubspotDealId` | not the id of a HubSpot deal (digits only, ≤ 30) |
 | 400 | `RESERVED_COMPANY_NAME` | `companyName` | the name of a client still being provisioned |
 | 401 | `INVALID_API_KEY` | — | missing or unknown `X-Api-Key` |
 | 404 | `ACCOUNT_NOT_FOUND` | — | no account created through this API has that id |

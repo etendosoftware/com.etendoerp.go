@@ -58,6 +58,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionService;
@@ -92,6 +93,7 @@ public class Fiscal390SubmissionSupportTest {
   private AttachImplementationManager attachManager;
   private FiscalDeclCrudHandler declHandler;
 
+  private OBContext obContextInstance;
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
   private MockedStatic<NeoAttachmentsHelper> attachMock;
@@ -141,6 +143,7 @@ public class Fiscal390SubmissionSupportTest {
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
 
     OBContext ctx = mock(OBContext.class);
+    obContextInstance = ctx;
     when(ctx.getCurrentClient()).thenReturn(client);
     User user = mock(User.class);
     when(user.getName()).thenReturn("Ayelen");
@@ -148,7 +151,7 @@ public class Fiscal390SubmissionSupportTest {
     obContextMock = mockStatic(OBContext.class);
     obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
 
-    attachManager = mock(AttachImplementationManager.class);
+    attachManager = NeoAttachmentTestFixtures.mockStorageManager();
     attachMock = mockStatic(NeoAttachmentsHelper.class);
     attachMock.when(() -> NeoAttachmentsHelper.resolveTableId(anyString())).thenReturn("T1");
     attachMock.when(() -> NeoAttachmentsHelper.resolveTabId("T1", null)).thenReturn("TAB1");
@@ -390,6 +393,32 @@ public class Fiscal390SubmissionSupportTest {
     verify(resp).setStatus(HttpServletResponse.SC_CONFLICT);
     assertEquals(Fiscal390SubmissionSupport.ERR_NO_CERTIFICATE, json.getString("errorCode"));
     verify(service, never()).submitProduction(any());
+  }
+
+  /**
+   * ETP-6158: the no-certificate refusal is GO text ({@code ETGO_FiscalSubmitNoCertificate}) in
+   * the request language, Spanish and English.
+   */
+  @Test
+  public void testNoCertificateMessageIsInTheRequestLanguage() throws Exception {
+    when(service.hasOrgCertificate(any())).thenReturn(false);
+    String[][] cases = {
+        { "es_ES", "Esta organización no tiene un certificado configurado. Sube uno desde "
+            + "Configuración fiscal antes de presentar en producción (el modo de prueba no "
+            + "requiere certificado)." },
+        { "en_US", "This organization has no certificate configured. Upload one from Fiscal "
+            + "configuration before submitting in production (test mode does not require a "
+            + "certificate)." } };
+    for (String[] c : cases) {
+      Language language = mock(Language.class);
+      when(language.getLanguage()).thenReturn(c[0]);
+      when(obContextInstance.getLanguage()).thenReturn(language);
+      StringWriter out = new StringWriter();
+
+      JSONObject json = submit(PRODUCTION_BODY, response(out), out);
+
+      assertEquals(c[0], c[1], json.getJSONArray("errors").getString(0));
+    }
   }
 
   /** Another model, another exercise or another org: 404, nothing filed. */

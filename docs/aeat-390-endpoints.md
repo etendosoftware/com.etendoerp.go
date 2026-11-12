@@ -287,7 +287,7 @@ Flow of a production filing:
    | `409` | `ALREADY_SUBMITTED` | status is in the submitted family — correct it with a substitute |
    | `409` | `BLOCKING_INCIDENTS` | a blocking RULE holds for the STORED inputs — evaluated fresh, never from the stored rows (see "Incidents"); the answer carries `incidents` |
    | `400` | `MISSING_PRESENTER` | `presenterNif` / `presenterName` blank |
-   | `409` | `NO_CERTIFICATE` | the organization has no stored certificate |
+   | `409` | `NO_CERTIFICATE` | the organization has no stored certificate (text: `ETGO_FiscalSubmitNoCertificate` in the request language, ETP-6158) |
    | `422` | `INCOMPLETE_FISCAL_YEAR` | the file could not be generated because the calendar lacks periods; also `year`, `missingPeriods` |
    | `500` | `SUBMISSION_FAILED` | the file could not be generated |
    | `500` | `SNAPSHOT_FAILED` | the figures could not be frozen — nothing was sent to the AEAT |

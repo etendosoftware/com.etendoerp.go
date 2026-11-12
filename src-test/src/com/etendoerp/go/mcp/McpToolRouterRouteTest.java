@@ -3206,6 +3206,7 @@ class McpToolRouterRouteTest {
   class ActionBatchTests {
 
     private static final String ACTION_NAME = "documentAction";
+    private MockedStatic<org.openbravo.base.model.ModelProvider> modelMock;
 
     @BeforeEach
     void setupBatchSupport() {
@@ -3213,6 +3214,9 @@ class McpToolRouterRouteTest {
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
           .thenCallRealMethod();
+      // Error normalization has its own tests; retain the guard's body at this mocked boundary.
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
       // the batch calls this one; with the support class mocked it must run for real
       supportMock.when(() -> McpToolRouterSupport.validateArgs(any(), any(String[].class)))
           .thenCallRealMethod();
@@ -3225,6 +3229,39 @@ class McpToolRouterRouteTest {
       SFEntity entity = mockEntity();
       setupSpecLookup(spec);
       setupEntityLookup(entity, mockTab());
+
+      // Keep the real ownership/missing-document guards: these batches address existing orders
+      // readable by this tenant. Model metadata is a unit fixture, never a live DAL bootstrap.
+      org.openbravo.base.model.Entity dal = mock(org.openbravo.base.model.Entity.class);
+      when(dal.getName()).thenReturn("Order");
+      org.openbravo.base.model.ModelProvider provider =
+          mock(org.openbravo.base.model.ModelProvider.class);
+      when(provider.getEntityByTableId(TABLE_ID)).thenReturn(dal);
+      modelMock = mockStatic(org.openbravo.base.model.ModelProvider.class);
+      modelMock.when(org.openbravo.base.model.ModelProvider::getInstance).thenReturn(provider);
+      OBContext context = mock(OBContext.class);
+      when(context.getReadableClients()).thenReturn(new String[] {"batch-client"});
+      when(context.getReadableOrganizations()).thenReturn(new String[] {"batch-org"});
+      obContextMock.when(OBContext::getOBContext).thenReturn(context);
+      when(mockOBDal.get(eq("Order"), anyString())).thenAnswer(inv -> {
+        org.openbravo.model.common.order.Order row =
+            mock(org.openbravo.model.common.order.Order.class);
+        org.openbravo.model.ad.system.Client client =
+            mock(org.openbravo.model.ad.system.Client.class);
+        when(client.getId()).thenReturn("foreign".equals(inv.getArgument(1))
+            ? "other-client" : "batch-client");
+        when(row.getClient()).thenReturn(client);
+        org.openbravo.model.common.enterprise.Organization org =
+            mock(org.openbravo.model.common.enterprise.Organization.class);
+        when(org.getId()).thenReturn("batch-org");
+        when(row.getOrganization()).thenReturn(org);
+        return row;
+      });
+    }
+
+    @AfterEach
+    void closeBatchMetadata() {
+      modelMock.close();
     }
 
     private JSONObject batchArgs(String... ids) throws Exception {
@@ -3302,6 +3339,24 @@ class McpToolRouterRouteTest {
 
       assertFalse(answer.getJSONArray("results").getJSONObject(0).getBoolean("ok"));
       assertTrue(answer.getJSONArray("results").getJSONObject(1).getBoolean("ok"));
+    }
+
+    @Test
+    @DisplayName("another tenant's document is refused before its process runs")
+    void foreignDocumentRunsNothing() throws Exception {
+      JSONObject answer = new JSONObject(contentText(
+          router.route("etendo_action_batch", batchArgs("foreign"), WRITE_SCOPES)));
+
+      assertEquals(0, answer.getJSONObject("summary").getInt("succeeded"));
+      assertEquals(1, answer.getJSONObject("summary").getInt("failed"));
+      assertFalse(answer.getJSONArray("results").getJSONObject(0).getBoolean("ok"));
+      JSONObject refusal = answer.getJSONArray("results").getJSONObject(0)
+          .getJSONObject("error").getJSONObject("error");
+      assertEquals(404, refusal.getInt("status"));
+      assertEquals("Record not found", refusal.getString("message"));
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), anyString(), anyString(), any()), never());
+      verify(mockOBDal, never()).commitAndClose();
     }
 
     @Test

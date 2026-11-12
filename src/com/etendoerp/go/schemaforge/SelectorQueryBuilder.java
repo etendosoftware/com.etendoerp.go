@@ -127,7 +127,7 @@ class SelectorQueryBuilder {
     appendResolvedClause(hql, queryParams, HqlWithParams.of(validationFilter));
     appendResolvedClause(hql, queryParams,
         SelectorOrgFilter.resolveSelectorOrgFilter(meta.entityName, alias, contextOrganizationId));
-    appendSearchClause(hql, meta.searchableProperties, alias, search);
+    appendSearchClause(hql, meta.searchableProperties, alias, search, meta.entityName);
 
     String whereClause = hql.length() > 0
         ? "as " + alias + " where " + hql
@@ -181,7 +181,8 @@ class SelectorQueryBuilder {
     }
 
     SelectorOrgFilter.appendCustomSearchFilter(baseHql,
-        SearchableFragment.expressions(meta.searchableProperties), alias, search, hasWhere);
+        SearchableFragment.expressions(meta.searchableProperties), alias, search, hasWhere,
+        meta.entityName);
 
     return new HqlWithParams(baseHql.toString(), queryParams);
   }
@@ -210,8 +211,9 @@ class SelectorQueryBuilder {
   }
 
   private static void appendSearchClause(StringBuilder hql,
-      List<SearchableFragment> searchableProperties, String alias, String search) {
-    SelectorOrgFilter.appendRichSearchFilter(hql, searchableProperties, alias, search, hql.length() > 0);
+      List<SearchableFragment> searchableProperties, String alias, String search, String entityName) {
+    SelectorOrgFilter.appendRichSearchFilter(hql, searchableProperties, alias, search, hql.length() > 0,
+        entityName);
   }
 
 

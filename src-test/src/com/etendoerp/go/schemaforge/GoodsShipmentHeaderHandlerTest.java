@@ -66,6 +66,7 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class GoodsShipmentHeaderHandlerTest {
 
@@ -1135,7 +1136,8 @@ public class GoodsShipmentHeaderHandlerTest {
         new GoodsShipmentHeaderHandler().actionContracts();
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
-            "importOrderLines", "createDraftInvoice", "createReturn", "cloneRecord", "post", "unpost"),
+            "importOrderLines", "availableInvoices", "availableInvoiceLines", "createDraftInvoice",
+            "sifDefaults", "createReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
@@ -1193,7 +1195,7 @@ public class GoodsShipmentHeaderHandlerTest {
       names.add(p.getName());
       assertFalse(p.getName() + " must be optional: the SPA posts only priceListId", p.isRequired());
     }
-    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines"), names);
+    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines", "sifFields"), names);
     String d = c.getDescription();
     org.junit.Assert.assertTrue(d, d.contains("COMPLETES") && d.contains("completed")
         && d.contains("cannot have its quantities edited"));
@@ -1298,6 +1300,65 @@ public class GoodsShipmentHeaderHandlerTest {
     assertSame(expected, handler.handle(ctx));
   }
 
+  // ── invoice import listing (ETP-6099) ─────────────────────────────────────
+
+  /**
+   * availableInvoices / availableInvoiceLines go to the invoice-import delegate, which is handed
+   * the shipment's own policy on the context: nothing else names the sales-side rules.
+   */
+  @Test
+  public void handle_dispatchesTheInvoiceListingWithTheShipmentPolicy() throws Exception {
+    ImportInvoiceLinesIntoInOutHandler delegate = mock(ImportInvoiceLinesIntoInOutHandler.class);
+    GoodsShipmentHeaderHandler handler = new GoodsShipmentHeaderHandler();
+    Field field = GoodsShipmentHeaderHandler.class.getDeclaredField("importInvoiceLinesHandler");
+    field.setAccessible(true);
+    field.set(handler, delegate);
+    for (String action : new String[] { "availableInvoices", "availableInvoiceLines" }) {
+      NeoContext ctx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName(action).recordId("s1").build();
+      NeoResponse expected = NeoResponse.ok(new JSONObject().put("action", action));
+      when(delegate.handle(ctx)).thenReturn(expected);
+
+      assertSame(action, expected, handler.handle(ctx));
+      assertSame(action, GoodsShipmentHeaderHandler.INVOICE_IMPORT_POLICY,
+          ctx.getAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE));
+    }
+  }
+
+  /**
+   * The shipment's popup rules: a rectificative invoice delivers nothing, so it is not offered,
+   * and pending deducts what the order line delivered and every draft shipment, this one included.
+   */
+  @Test
+  public void invoiceImportPolicy_offersNoRectificative_andDeductsDeliveredAndEveryDraft() {
+    ImportInvoiceLinesIntoInOutHandler.SourcePolicy policy =
+        GoodsShipmentHeaderHandler.INVOICE_IMPORT_POLICY;
+    org.openbravo.model.common.enterprise.DocumentType rectificative =
+        mock(org.openbravo.model.common.enterprise.DocumentType.class);
+    org.openbravo.model.common.enterprise.DocumentType plain =
+        mock(org.openbravo.model.common.enterprise.DocumentType.class);
+    org.openbravo.model.common.invoice.Invoice credit =
+        mock(org.openbravo.model.common.invoice.Invoice.class);
+    org.openbravo.model.common.invoice.Invoice invoice =
+        mock(org.openbravo.model.common.invoice.Invoice.class);
+    when(credit.getTransactionDocument()).thenReturn(rectificative);
+    when(invoice.getTransactionDocument()).thenReturn(plain);
+
+    try (MockedStatic<SalesInvoiceHeaderHandler> rule =
+        Mockito.mockStatic(SalesInvoiceHeaderHandler.class)) {
+      rule.when(() -> SalesInvoiceHeaderHandler.isRectificativeDocType(rectificative))
+          .thenReturn(true);
+      rule.when(() -> SalesInvoiceHeaderHandler.isRectificativeDocType(plain)).thenReturn(false);
+
+      assertFalse("a rectificative is never offered", policy.offered.test(credit));
+      assertTrue("a plain sales invoice is", policy.offered.test(invoice));
+    }
+    assertTrue(policy.deductsDelivered);
+    assertTrue("the shipment's own draft lines count too", policy.deductsTargetDraft);
+    assertFalse("the shipment offers no classic pending basis (ETP-6099 follow-up)",
+        policy.offersClassicPending);
+  }
+
   /**
    * ETP-5714: the keys GoodsShipmentHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
    * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
@@ -1330,6 +1391,58 @@ public class GoodsShipmentHeaderHandlerTest {
 
       assertSame(refusal, h.handle(ctx));
       Mockito.verify(service, Mockito.never()).handleAction(any());
+    }
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new GoodsShipmentHeaderHandler().actionContracts();
+
+    assertSame(CreateDraftInvoiceHandler.SHIPMENT_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createDraftInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a goods shipment previews the invoice createDraftInvoice would create from it:
+   * a single shipment with an order takes the invoice type its order links (F2), the order's SII
+   * description and operation date — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsTheInvoiceOfTheShipment() throws Exception {
+    GoodsShipmentHeaderHandler handler = new GoodsShipmentHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsShipmentHeaderHandler.class.getDeclaredField("createDraftInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreateDraftInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order order =
+          InvoiceSifPreviewTestSupport.sourceOrder("ARI", "F2");
+      ShipmentInOut shipment = org.mockito.Mockito.mock(ShipmentInOut.class);
+      org.openbravo.model.common.enterprise.Organization sourceOrg =
+          InvoiceSifPreviewTestSupport.org();
+      org.mockito.Mockito.when(shipment.getOrganization()).thenReturn(sourceOrg);
+      org.mockito.Mockito.when(shipment.getSalesOrder()).thenReturn(order);
+      org.mockito.Mockito.when(mocks.dal.get(ShipmentInOut.class, "gs-1")).thenReturn(shipment);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("goods-shipment", "gs-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalSalesPreview(data, "F2");
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
     }
   }
 }

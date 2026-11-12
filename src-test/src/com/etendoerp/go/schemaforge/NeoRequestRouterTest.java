@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -58,6 +59,7 @@ import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
@@ -578,6 +580,66 @@ class NeoRequestRouterTest {
 
     verify(servlet, never()).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), anyString());
     verify(servlet).writeResponse(eq(response), any(NeoResponse.class));
+  }
+
+  /**
+   * ETP-6154 (QA G1): the gate is asked with the request's own HTTP method. For the bank
+   * connection spec and a role with read-only access to the Financial Account window
+   * ({@code hasReportSpecAccess} true for GET, false for POST — see
+   * {@code NeoAccessHelperTest#hasReportSpecAccess_bankConnectionSpecReadOnlyRole_allowsGetSyncStatusDeniesPostSync}),
+   * {@code POST ?action=sync} is refused with a 403 before any dispatch, while
+   * {@code GET ?action=syncStatus} reaches the {@code @NeoExtension} handler (no qualifier) as a
+   * GET carrying its action.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  void testBankConnectionReadOnlyRoleGetsSyncStatusButNotSync() throws Exception {
+    String specName = "financial-account-bank-connection";
+    NeoPathInfo pathInfo = new NeoPathInfo(specName, null, null);
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getId()).thenReturn("spec-bank-connection");
+    when(spec.getName()).thenReturn(specName);
+    when(servlet.authenticator.hasReportSpecAccess(spec, "GET")).thenReturn(true);
+    when(servlet.authenticator.hasReportSpecAccess(spec, "POST")).thenReturn(false);
+
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getJavaQualifier()).thenReturn(null);
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any(Criterion.class))).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(java.util.List.of(entity));
+    when(servlet.extractQueryParams(request)).thenReturn(java.util.Map.of(
+        "action", "syncStatus", "financialAccountIds", "FA-1,FA-2"));
+    NeoResponse syncStatusAnswer = NeoResponse.ok(new org.codehaus.jettison.json.JSONObject());
+    when(servlet.handleWithHooks(isNull(), any(), eq(request), eq(response)))
+        .thenReturn(syncStatusAnswer);
+
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class);
+         MockedStatic<NeoRequestBodyParser> bodyParserMock = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<NeoCsvExportService> csvMock = mockStatic(NeoCsvExportService.class)) {
+      lookupMock.when(() -> NeoHandlerLookup.hasCustomization(entity)).thenReturn(true);
+      bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn(null);
+      bodyParserMock.when(() -> NeoRequestBodyParser.parseOptionalJsonObject(any()))
+          .thenReturn(null);
+      csvMock.when(() -> NeoCsvExportService.tryExport(any(), any(), eq(response)))
+          .thenReturn(false);
+
+      router.handleReportSpecRequest(spec, pathInfo, "POST", request, response);
+
+      verify(servlet).sendError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to spec for current role");
+      verify(servlet, never()).handleWithHooks(any(), any(), any(), any());
+
+      router.handleReportSpecRequest(spec, pathInfo, "GET", request, response);
+
+      ArgumentCaptor<NeoContext> dispatched = ArgumentCaptor.forClass(NeoContext.class);
+      verify(servlet).handleWithHooks(isNull(), dispatched.capture(), eq(request), eq(response));
+      assertEquals("GET", dispatched.getValue().getHttpMethod());
+      assertEquals(specName, dispatched.getValue().getSpecName());
+      assertEquals("syncStatus", dispatched.getValue().getQueryParams().get("action"));
+      verify(servlet).writeResponse(response, syncStatusAnswer);
+      verify(servlet, org.mockito.Mockito.times(1)).sendError(any(), anyInt(), anyString());
+    }
   }
 
   // ── handleWindowSpecRequest ──────────────────────────────────────────────

@@ -34,6 +34,7 @@ import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutRequestWrites;
 import com.etendoerp.go.payment.HttpUrlConnectionStripeApiClient;
 import com.etendoerp.go.payment.PausedSubscriptionAlert;
+import com.etendoerp.go.payment.PromotionRecovery;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.StripeApiClient;
 import com.etendoerp.go.payment.StripeJson;
@@ -168,6 +169,8 @@ public class BillingReconciliationService {
   PaidReactivationService reactivations = new PaidReactivationService();
   /** Where review alerts go; package-visible so tests can substitute it. */
   InternalAlertService internalAlerts = new InternalAlertService();
+  /** Recovers paid checkout promotions; package-visible so tests can substitute it. */
+  PromotionRecovery promotions = new PromotionRecovery();
   private ReviewQueue reviews;
   /** Stuck-event review rows this run wrote; reset by every run, as {@link #reviews} is. */
   private int staleReviewsWritten;
@@ -219,6 +222,8 @@ public class BillingReconciliationService {
         () -> reviewSessionlessCheckouts(result, audit));
     runPhase(Phase.SUBSCRIPTIONS.label(), Phase.SUBSCRIPTIONS, result,
         () -> subscriptions.run(result, audit));
+    runPhase("checkout promotions", null, result,
+        () -> promotions.recover(dryRun));
     runPhase("stuck events", null, result, () -> sweepStaleEvents(result, audit));
     // Its own step, after the sweep and whatever the sweep could do: a DB fact on every run.
     // Counts the stuck events parked by earlier runs and still unresolved (a review row exists,

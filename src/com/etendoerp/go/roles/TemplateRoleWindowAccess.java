@@ -117,7 +117,9 @@ import java.util.Map;
  * <p><b>ETP-5830 removed the Smart Scan grant again from all four templates.</b> The page is still
  * mock data with no backend, so it must not be offered to tenants yet. The pseudo-window stays
  * as the permission anchor: with no grant, {@code useWindowAccess} resolves {@code 'none'} and the
- * page guard blocks every non-admin role. Inherited rows on existing tenants are swept by
+ * page guard blocks every role, Admin included: {@code SFWindowAccessMap} builds the admin map
+ * from windows with at least one active grant on any role, so an anchor no role holds is absent
+ * from it too. Inherited rows on existing tenants are swept by
  * {@code EnsureSystemRoleTemplatesScript#removeStaleWindowAccess} and the startup sweep.</p>
  *
  * <p><b>"Informes de inventario" was also in that windowless-gap list — a raw-SQL report handler

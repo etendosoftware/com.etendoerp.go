@@ -21,8 +21,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -44,8 +49,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for the bank connection actions of {@code financial-account/account}
- * (disconnectBank, deleteBankConnection). The endpoint is stubbed: the tests read the exact
- * context and body it would receive.
+ * (disconnectBank, deleteBankConnection, and since ETP-6154 syncBank and bankSyncStatus). The
+ * endpoint is stubbed: the tests read the exact context and body it would receive. Every action
+ * is also gated on the role's access to the endpoint's report spec ({@code hasEndpointAccess}, a
+ * spied seam granted by default here): POST access for the writes ({@code disconnectBank},
+ * {@code deleteBankConnection}, {@code syncBank}), GET access for {@code bankSyncStatus}.
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionActions
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionEndpoint
@@ -75,13 +83,15 @@ class FinancialAccountBankConnectionActionsTest {
     endpointAnswer = NeoResponse.ok(new JSONObject().put("response",
         new JSONObject().put("data", new JSONObject().put("disconnected", true)
             .put("permanent", false).put("reconnectable", true))));
-    actions = new FinancialAccountBankConnectionActions(context -> {
+    actions = spy(new FinancialAccountBankConnectionActions(context -> {
       calls.add(context);
       if (endpointFailure != null) {
         throw endpointFailure;
       }
       return endpointAnswer;
-    });
+    }));
+    // The real seam reads the role's report-spec access from the database.
+    doReturn(true).when(actions).hasEndpointAccess(anyBoolean());
   }
 
   @AfterEach
@@ -107,14 +117,35 @@ class FinancialAccountBankConnectionActionsTest {
   class Contracts {
 
     @Test
-    @DisplayName("disconnectBank then deleteBankConnection, both mutating, no parameters")
+    @DisplayName("four actions in order, no parameters; only bankSyncStatus is a read")
     void declared() {
       Map<String, NeoActionContract> c = FinancialAccountBankConnectionActions.actionContracts();
-      assertEquals(List.of("disconnectBank", "deleteBankConnection"), new ArrayList<>(c.keySet()));
+      assertEquals(List.of("disconnectBank", "deleteBankConnection", "syncBank", "bankSyncStatus"),
+          new ArrayList<>(c.keySet()));
       for (NeoActionContract contract : c.values()) {
-        assertTrue(contract.isMutating());
         assertTrue(contract.getParams().isEmpty());
       }
+      assertTrue(c.get("disconnectBank").isMutating());
+      assertTrue(c.get("deleteBankConnection").isMutating());
+      assertTrue(c.get("syncBank").isMutating());
+      assertFalse(c.get("bankSyncStatus").isMutating());
+    }
+
+    @Test
+    @DisplayName("syncBank tells the agent to poll bankSyncStatus on IN_PROGRESS and to retry the lock code")
+    void syncDescribesInProgressAndRetry() {
+      Map<String, NeoActionContract> c = FinancialAccountBankConnectionActions.actionContracts();
+      String d = c.get("syncBank").getDescription();
+      assertTrue(d.contains("IN_PROGRESS"), d);
+      assertTrue(d.contains("bankSyncStatus"), d);
+      assertTrue(d.contains("BANK_SYNC_LOCK_UNAVAILABLE"), d);
+      assertTrue(d.contains("BANK_SYNC_DUPLICATE_CHECK_FAILED"), d);
+      assertTrue(d.contains("calling syncBank again is safe"), d);
+      String s = c.get("bankSyncStatus").getDescription();
+      assertTrue(s.contains("inProgress"), s);
+      assertTrue(s.contains("lastResult"), s);
+      assertNotNull(c.get("syncBank").getIdDescription());
+      assertNotNull(c.get("bankSyncStatus").getIdDescription());
     }
 
     @Test
@@ -278,15 +309,192 @@ class FinancialAccountBankConnectionActionsTest {
   }
 
   @Nested
+  @DisplayName("sync (ETP-6154)")
+  class Sync {
+
+    @Test
+    @DisplayName("syncBank sends the SPA's body to ?action=sync and passes {status, message} through")
+    void syncBank() throws Exception {
+      endpointAnswer = NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+          .put("data", new JSONObject().put("status", "IN_PROGRESS")
+              .put("message", "Fetching statements, please wait\u2026")
+              .put("lastSyncDate", JSONObject.NULL))));
+
+      NeoResponse r = actions.handle(ctx("syncBank", ACCOUNT, "POST", true));
+
+      NeoContext c = onlyCall();
+      assertEquals("financial-account-bank-connection", c.getSpecName());
+      assertEquals("POST", c.getHttpMethod());
+      assertEquals("sync", c.getQueryParams().get("action"));
+      assertEquals(ACCOUNT, c.getRequestBody().getString("financialAccountId"));
+      assertFalse(c.getRequestBody().has("permanentDeletion"));
+      assertTrue(c.isMcpOrigin());
+      assertEquals(200, r.getHttpStatus());
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("IN_PROGRESS", data.getString("status"));
+      assertEquals("Fetching statements, please wait\u2026", data.getString("message"));
+    }
+
+    @Test
+    @DisplayName("syncBank passes the endpoint's code through with its status and message")
+    void syncBankPassesTheCodeThrough() throws Exception {
+      endpointAnswer = NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+          .put("data", new JSONObject().put("status", "WARNING")
+              .put("code", "BANK_SYNC_DUPLICATE_CHECK_FAILED")
+              .put("message", "Some bank movements could not be checked")
+              .put("lastSyncDate", JSONObject.NULL))));
+
+      NeoResponse r = actions.handle(ctx("syncBank", ACCOUNT, "POST", true));
+
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("WARNING", data.getString("status"));
+      assertEquals("BANK_SYNC_DUPLICATE_CHECK_FAILED", data.getString("code"));
+      assertEquals("Some bank movements could not be checked", data.getString("message"));
+    }
+
+    @Test
+    @DisplayName("syncBank passes an endpoint error through unchanged")
+    void syncBankError() {
+      endpointAnswer = NeoResponse.error(400, "boom sync");
+      NeoResponse r = actions.handle(ctx("syncBank", ACCOUNT, "POST", false));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().toString().contains("boom sync"));
+      assertFalse(onlyCall().isMcpOrigin());
+    }
+
+    @Test
+    @DisplayName("bankSyncStatus asks ?action=syncStatus for this one account and unwraps its entry")
+    void syncStatus() throws Exception {
+      JSONObject entry = new JSONObject().put("inProgress", true)
+          .put("lastSyncDate", "2026-11-01T08:00:00Z")
+          .put("lastResult", new JSONObject().put("status", "OK"));
+      endpointAnswer = NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+          .put("data", new JSONObject().put("accounts", new JSONObject().put(ACCOUNT, entry)))));
+
+      NeoResponse r = actions.handle(ctx("bankSyncStatus", ACCOUNT, "POST", true));
+
+      NeoContext c = onlyCall();
+      assertEquals("syncStatus", c.getQueryParams().get("action"));
+      assertEquals(1, c.getRequestBody().getJSONArray("financialAccountIds").length());
+      assertEquals(ACCOUNT, c.getRequestBody().getJSONArray("financialAccountIds").getString(0));
+      assertEquals(200, r.getHttpStatus());
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
+      assertTrue(data.getBoolean("inProgress"));
+      assertEquals("2026-11-01T08:00:00Z", data.getString("lastSyncDate"));
+      assertEquals("OK", data.getJSONObject("lastResult").getString("status"));
+      assertFalse(data.has("accounts"));
+    }
+
+    @Test
+    @DisplayName("bankSyncStatus is 404 when the endpoint omitted the account or sent no accounts")
+    void syncStatusOmitted() throws Exception {
+      endpointAnswer = NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+          .put("data", new JSONObject().put("accounts", new JSONObject()))));
+      NeoResponse omitted = actions.handle(ctx("bankSyncStatus", ACCOUNT, "POST", true));
+      endpointAnswer = NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+          .put("data", new JSONObject())));
+      NeoResponse noAccounts = actions.handle(ctx("bankSyncStatus", ACCOUNT, "POST", true));
+
+      assertEquals(404, omitted.getHttpStatus());
+      assertTrue(omitted.getBody().toString().contains("Financial account not found"));
+      assertEquals(404, noAccounts.getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("bankSyncStatus passes an endpoint error through unchanged")
+    void syncStatusError() {
+      endpointAnswer = NeoResponse.error(500, "boom status");
+      NeoResponse r = actions.handle(ctx("bankSyncStatus", ACCOUNT, "POST", true));
+      assertEquals(500, r.getHttpStatus());
+      assertTrue(r.getBody().toString().contains("boom status"));
+    }
+
+    @Test
+    @DisplayName("syncBank checks POST access to the endpoint spec; without it, 403 and no call")
+    void syncBankNeedsPostAccess() {
+      doReturn(false).when(actions).hasEndpointAccess(true);
+
+      NeoResponse r = actions.handle(ctx("syncBank", ACCOUNT, "POST", true));
+
+      assertEquals(403, r.getHttpStatus());
+      assertTrue(r.getBody().toString()
+          .contains(FinancialAccountBankConnectionActions.MSG_ACCESS_DENIED));
+      verify(actions).hasEndpointAccess(true);
+      assertTrue(calls.isEmpty());
+    }
+
+    @Test
+    @DisplayName("bankSyncStatus checks GET access to the endpoint spec; without it, 403 and no call")
+    void bankSyncStatusNeedsGetAccess() {
+      doReturn(false).when(actions).hasEndpointAccess(false);
+
+      NeoResponse r = actions.handle(ctx("bankSyncStatus", ACCOUNT, "POST", true));
+
+      assertEquals(403, r.getHttpStatus());
+      verify(actions).hasEndpointAccess(false);
+      verify(actions, never()).hasEndpointAccess(true);
+      assertTrue(calls.isEmpty());
+    }
+
+    @Test
+    @DisplayName("granted access lets both sync actions through, each checked with its own mode")
+    void grantedAccessPasses() {
+      actions.handle(ctx("syncBank", ACCOUNT, "POST", true));
+      actions.handle(ctx("bankSyncStatus", ACCOUNT, "POST", true));
+
+      verify(actions).hasEndpointAccess(true);
+      verify(actions).hasEndpointAccess(false);
+      assertEquals(2, calls.size());
+    }
+
+    @Test
+    @DisplayName("the disconnect actions are writes: each checks POST access to the endpoint spec")
+    void disconnectIsGatedAsAWrite() {
+      actions.handle(ctx("disconnectBank", ACCOUNT, "POST", true));
+      actions.handle(ctx("deleteBankConnection", ACCOUNT, "POST", true));
+
+      verify(actions, org.mockito.Mockito.times(2)).hasEndpointAccess(true);
+      verify(actions, never()).hasEndpointAccess(false);
+      assertEquals(2, calls.size());
+    }
+
+    @Test
+    @DisplayName("without POST access both disconnect actions are 403 and never reach the endpoint")
+    void disconnectWithoutAccessIsForbidden() {
+      doReturn(false).when(actions).hasEndpointAccess(true);
+
+      NeoResponse soft = actions.handle(ctx("disconnectBank", ACCOUNT, "POST", true));
+      NeoResponse permanent = actions.handle(ctx("deleteBankConnection", ACCOUNT, "POST", true));
+
+      for (NeoResponse r : new NeoResponse[] {soft, permanent}) {
+        assertEquals(403, r.getHttpStatus());
+        assertTrue(r.getBody().toString()
+            .contains(FinancialAccountBankConnectionActions.MSG_ACCESS_DENIED));
+      }
+      assertTrue(calls.isEmpty());
+    }
+
+    @Test
+    @DisplayName("sync actions on a missing or foreign account are 404 and never reach the endpoint")
+    void notFound() {
+      assertEquals(404, actions.handle(ctx("syncBank", "OTHER", "POST", true)).getHttpStatus());
+      assertEquals(404,
+          actions.handle(ctx("bankSyncStatus", "OTHER", "POST", true)).getHttpStatus());
+      assertTrue(calls.isEmpty());
+    }
+  }
+
+  @Nested
   @DisplayName("wiring")
   class Wiring {
 
     @Test
-    @DisplayName("FinancialAccountHandler declares both actions and routes them to its stub")
+    @DisplayName("FinancialAccountHandler declares the four actions and routes them to its stub")
     void wired() throws Exception {
       FinancialAccountHandler handler = new FinancialAccountHandler();
       assertTrue(handler.actionContracts().keySet()
-          .containsAll(List.of("disconnectBank", "deleteBankConnection")));
+          .containsAll(List.of("disconnectBank", "deleteBankConnection", "syncBank",
+              "bankSyncStatus")));
       FinancialAccountBankConnectionActions stub = mock(FinancialAccountBankConnectionActions.class);
       NeoResponse answer = NeoResponse.ok(new JSONObject());
       NeoContext context = ctx("disconnectBank", ACCOUNT, "POST", true);

@@ -1924,9 +1924,13 @@ class BusinessPartnerHandlerTest {
   @Test
   void attachesPrimaryAddressAndContactToEachListRow() throws Exception {
     JSONObject body = buildListBody("BP1", "BP2");
+    // Positional with LOCATION_COLUMNS: address1, street, buildingnumber, city, postal, country,
+    // region. BP1 is a structured address; BP2 a legacy one whose number column comes back blank.
     Map<String, String[]> locations = new HashMap<>();
-    locations.put("BP1", new String[] { "Calle Mayor 12", "Madrid", "28013", "Spain", "Madrid" });
-    locations.put("BP2", new String[] { "Av. Industria 45", "Barcelona", "08018", "Spain", "Barcelona" });
+    locations.put("BP1", new String[] { "Calle Mayor, 12", "Calle Mayor", "12",
+        "Madrid", "28013", "Spain", "Madrid" });
+    locations.put("BP2", new String[] { "Av. Industria 45", "Av. Industria 45", "   ",
+        "Barcelona", "08018", "Spain", "Barcelona" });
     Map<String, String[]> contacts = new HashMap<>();
     contacts.put("BP1", new String[] { "Lucía", "Fernández", "lucia@example.com", "610000101", "Compras" });
     contacts.put("BP2", new String[] { "Andrés", "Molina", "andres@example.com", "610000102", "Taller" });
@@ -1936,7 +1940,9 @@ class BusinessPartnerHandlerTest {
     assertNotNull(result);
     JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
     JSONObject child = row.getJSONObject("etgoChildData");
-    assertEquals("Calle Mayor 12", child.getString("address"));
+    assertEquals("Calle Mayor, 12", child.getString("address"));
+    assertEquals("Calle Mayor", child.getString("street"));
+    assertEquals("12", child.getString("buildingNumber"));
     assertEquals("Madrid", child.getString("city"));
     assertEquals("28013", child.getString("postal"));
     assertEquals("Spain", child.getString("country"));
@@ -1948,7 +1954,11 @@ class BusinessPartnerHandlerTest {
     assertEquals("Compras", child.getString("position"));
 
     JSONObject second = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(1);
-    assertEquals("Barcelona", second.getJSONObject("etgoChildData").getString("city"));
+    JSONObject secondChild = second.getJSONObject("etgoChildData");
+    assertEquals("Barcelona", secondChild.getString("city"));
+    assertEquals("Av. Industria 45", secondChild.getString("street"));
+    // A blank column leaves its key out — never "" or "null", which a re-import would write.
+    assertFalse(secondChild.has("buildingNumber"));
   }
 
   /**

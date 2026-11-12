@@ -4,6 +4,7 @@
 This directory stores module-specific technical documentation for `com.etendoerp.go`.
 
 ## Documents
+- `checkout-promotion.md` — immutable commercial terms and durable second-month-free promotion schedules.
 - `neo-headless.md` — Neo Headless overview and architecture notes.
 - `neo-headless-guide.md` — detailed Neo Headless development guide.
 - `onboarding-sampledata-packaging.md` — how onboarding sampledata is staged into `WebContent/WEB-INF/classes` for WAR packaging.
@@ -11,6 +12,7 @@ This directory stores module-specific technical documentation for `com.etendoerp
 - `onboarding-flow.md` — the `ensureOnboardingDataset` step pipeline (dataset, accounting chart/name wiring, GL Item provisioning, entity posting-account provisioning, periodControl (every period never-opened, ETP-5577), periodNormalize, sequences, orgReady, fiscal, orgInfo, customer, bankConnectionSync, bpGroupAcctPatch, acctdimVisibility, baseline), service responsibilities, included-tables rationale, NDJSON event format, the pre-provisioned tenant pool (ETP-5389: flag, `ETGO_TENANT_POOL`, filler process, claim, placeholder gaps), the initial period state per tenant type, and the accounting calendar review endpoints (`/sws/go/onboarding/calendar-review`, ETP-5577).
 - `transactional-email-contracts.md` — runtime endpoint, executor/provider boundary, and server-side provider configuration for transactional email contracts.
 - `document-email-contract-implementation.md` — step-by-step Java guide for adding document-send transactional email contracts.
+- `llm-decisions.md` — `LlmDecider` (`com.etendoerp.go.llm`): Java client of the Decisions API (`/decisions` on the LiteLLM gateway, model group `etendo-decisions` → OpenAI `gpt-6-luna`): predicate/choice/score questions answered with probabilities, the input shape LiteLLM 1.106 accepts, reuse of the Copilot credentials (`openai.api.key`, `copilot.proxy.url`) with no setting of its own, the `ai.decision.execute` usage event with the gateway-reported cost in `COST_USD` (AI spend), and which failures are retryable.
 - `aeat-303-submit-endpoint.md` — `POST /neo/fiscal303/submit` contract (AEAT Modelo 303 electronic submission, ETP-4456 Phase 2): request/response shapes, error codes, the idempotency guard, certificate flow, and known gaps.
 - `aeat-390-endpoints.md` — `/neo/fiscal390/*` contract (AEAT Modelo 390 annual VAT summary, ETP-5716): annual period `0A`, tax-report year fallback, box preview payload, computed boxes, TXT generation, incident rules (`POST /fiscal390/validate`, generate/submit guards), single-ordinary rule and module dependencies.
 - `STORED-COMPUTED-COLUMNS.md` — functional + technical guide to the stored computed column engine (EPL-1807): concepts, refresh modes, end-to-end flow, configuration, Oracle support, operations, and build validation. Illustrated with the `com.etendoerp.storedcomputedcolumn` pilot.

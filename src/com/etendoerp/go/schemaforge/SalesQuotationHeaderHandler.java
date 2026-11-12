@@ -390,6 +390,9 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(CreateDraftInvoiceHandler.QUOTATION_CONTRACT.getName(),
         CreateDraftInvoiceHandler.QUOTATION_CONTRACT);
+    // ETP-6179: the SIF fields the generated invoice would get.
+    contracts.put(CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT);
     contracts.put(RejectQuotationHandler.CONTRACT.getName(), RejectQuotationHandler.CONTRACT);
     contracts.put(CreateRejectReasonHandler.CONTRACT.getName(), CreateRejectReasonHandler.CONTRACT);
     return Collections.unmodifiableMap(contracts);
@@ -465,6 +468,12 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * transaction aborted, so the conversion would be rolled back at commit anyway, and answering 200
    * with a {@code salesOrderId} that never gets persisted would lie to the client. It propagates to
    * the catch below and the whole request fails as one unit.
+   *
+   * <p>ETP-5848: that catch answers through {@link NeoErrorResponses#fromException}, like every
+   * other NEO error funnel. A refusal core's {@code c_order_post1} RAISEs — a quotation with no
+   * payment method ({@code @APRM_PAYMENTMETHOD_MISSING@}) — is then a 422 with its translated text
+   * and {@code messageKeys}; it was a 500 carrying the raw {@code PSQLException}, which told an
+   * agent the server had failed when the quotation only lacked a field.
    */
   private NeoResponse handleConvertQuotation(String quotationId) {
     try {
@@ -483,9 +492,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     } catch (NeoQuotaCreateCheck.Refused e) {
       return e.toResponse();
     } catch (Exception e) {
-      log.error("[ETP-4027] handleConvertQuotation failed for quotation {}: {}",
-          quotationId, e.getMessage(), e);
-      return NeoResponse.error(500, e.getMessage());
+      return NeoErrorResponses.fromException(e, "POST",
+          "Convertquotation of quotation " + quotationId, null);
     }
   }
 

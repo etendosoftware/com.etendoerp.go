@@ -110,6 +110,8 @@ import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
+import com.etendoerp.go.payment.CheckoutPromotionTerms;
+import com.etendoerp.go.payment.MonthlySecondMonthPromotionService;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
@@ -267,6 +269,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** Default {@code upgradeAction} of an onboarding: create a new environment. */
   private static final String UPGRADE_ACTION_CREATE_PRODUCTIVE = "create-productive";
   private static final String FIELD_PLAN_KEY = "planKey";
+  private static final String FIELD_REPLACE_PURCHASE_ID = "replacePurchaseId";
+  private static final String STATUS_CHECKOUT_CREATED = "CREATED";
+  private static final String CODE_PURCHASE_SELECTION_CHANGED = "PURCHASE_SELECTION_CHANGED";
+  private static final String PURCHASE_SELECTION_CHANGED_MESSAGE =
+      "The pending checkout changed. Please review the purchase again.";
   private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
   private static final String PLAN_NOT_AVAILABLE_MESSAGE =
       "The selected plan is no longer available. Reload the page to see the current plans.";
@@ -429,6 +436,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       FIELD_BUILDING_NAME, FIELD_CITY_NAME, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   /** ETP-6081 — the optional phone, "+34 600123456", stored on the account. */
   private static final String FIELD_PHONE = "phone";
+  private static final String FIELD_SECTOR = "sector";
+  private static final String FIELD_SECTOR_MISSING = "sectorMissing";
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -987,6 +996,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     item.put("displayPrice", displayPrice.toPlainString());
     item.put(FIELD_CURRENCY, currency);
     item.put("billingInterval", StringUtils.defaultString(plan.getBillingInterval()));
+    item.put("secondMonthFree", CheckoutPromotionTerms.isEligiblePlan(plan));
     item.put("includesApi", Boolean.TRUE.equals(plan.isIncludesAPI()));
     item.put("highlight", plan.getHighlight() == null ? JSONObject.NULL : plan.getHighlight());
     item.put("quotas", buildPlanQuotasJson(plan));
@@ -1038,7 +1048,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
       if (activePurchase != null) {
-        handleExistingBillingPurchase(response, account, activePurchase);
+        handleActiveBillingPurchase(response, account, body, activePurchase);
         return;
       }
       CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
@@ -1183,8 +1193,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // The source, transfer choice, plan and Stripe Price are persisted on the purchase row, and
       // the flag-gated transfer selection and the onboarding inputs (ETP-5048) are recorded before
       // the provider is contacted.
-      JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
-          clientName, origin, planKey, new HostedCheckoutService.SessionOptions(
+      HostedCheckoutService.SessionOptions options = new HostedCheckoutService.SessionOptions(
               selection.demoClientId, selection.transferProducts, selection.transferContacts,
               requestId -> {
                 // ETP-5048 — what a server-side provisioning needs if the browser never comes
@@ -1193,7 +1202,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
                     body.optString(FIELD_LANGUAGE, ""), body.optString(FIELD_CURRENCY, ""),
                     body.optString(FIELD_COUNTRY_CODE, ""));
                 recordDemoDataTransferSelection(body, requestId, selection);
-              }));
+              }).withLanguage(body.optString(FIELD_LANGUAGE, "es_ES"));
+      String replaceId = StringUtils.trimToNull(body.optString(FIELD_REPLACE_PURCHASE_ID, ""));
+      JSONObject result = replaceId == null
+          ? hostedCheckoutService.createSession(account.getId(), account.getEmail(), clientName,
+              origin, planKey, options)
+          : hostedCheckoutService.createSession(account.getId(), account.getEmail(), clientName,
+              origin, planKey, options, replaceId);
       addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""),
           selection.demoClientId);
       return result;
@@ -1226,6 +1241,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("Rejected a checkout for an unavailable plan: {}", e.getMessage());
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
           PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
+    } catch (HostedCheckoutService.PurchaseSelectionChangedException e) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_PURCHASE_SELECTION_CHANGED,
+          PURCHASE_SELECTION_CHANGED_MESSAGE,
+          PURCHASE_SELECTION_CHANGED_MESSAGE);
     } catch (HostedCheckoutService.CheckoutNotConfiguredException e) {
       log.warn("Checkout is not available: {}", e.getMessage());
       writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
@@ -1279,16 +1298,36 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (clientName == null) return;
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
-      if (activePurchase != null) {
-        handleActiveBillingPurchase(response, account, body, activePurchase);
-        return;
-      }
+      if (handlePriorBillingPurchase(response, account, body, activePurchase)) return;
       CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
           body);
       if (selection == null) return;
       createHostedCheckoutSession(response, account, body, clientName, selection,
           true);
     });
+  }
+
+  /** Answers an existing purchase or a stale replacement; false permits purchase creation. */
+  private boolean handlePriorBillingPurchase(HttpServletResponse response, Account account,
+      JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
+    if (activePurchase != null) {
+      String replaceId = StringUtils.trimToNull(body.optString(FIELD_REPLACE_PURCHASE_ID, ""));
+      if (replaceId == null) {
+        handleActiveBillingPurchase(response, account, body, activePurchase);
+        return true;
+      }
+      if (!replaceId.equals(activePurchase.getRequest())
+          || !STATUS_CHECKOUT_CREATED.equals(activePurchase.getCheckoutRequestStatus())) {
+        writePurchaseSelectionConflict(response, activePurchase);
+        return true;
+      }
+    } else if (StringUtils.isNotBlank(body.optString(FIELD_REPLACE_PURCHASE_ID, ""))) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_PURCHASE_SELECTION_CHANGED,
+          PURCHASE_SELECTION_CHANGED_MESSAGE,
+          PURCHASE_SELECTION_CHANGED_MESSAGE);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -1411,13 +1450,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleActiveBillingPurchase(HttpServletResponse response, Account account,
       JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
-    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+    if ("CREATING".equals(status) || STATUS_CHECKOUT_CREATED.equals(status)) {
       try {
-        // Only a purchase that recorded a demo source may carry a transfer selection.
-        String persistedDemoClientId = activePurchase.getDemoClient() == null
-            ? null : activePurchase.getDemoClient().getId();
-        recordDemoDataTransferSelection(body, activePurchase.getRequest(),
-            new CheckoutSelection(persistedDemoClientId, false, false));
+        if (!recordActiveBillingPurchaseSelection(response, body, activePurchase)) return;
+      } catch (PlanNotAvailableException e) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
+            PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
+        return;
+      } catch (HostedCheckoutService.CheckoutNotConfiguredException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+        return;
+      } catch (IOException e) {
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
+            "Unable to verify the selected plan", "Unable to verify the selected plan");
+        return;
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_CONFLICT, "TRANSFER_SELECTION_LOCKED",
             "Transfer selection cannot change after checkout creation",
@@ -1432,10 +1479,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     handleExistingBillingPurchase(response, account, activePurchase);
   }
 
+  /** Validates and records the selection; false means the plan conflict was already answered. */
+  private boolean recordActiveBillingPurchaseSelection(HttpServletResponse response,
+      JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
+    String selectedPlanKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
+    if (selectedPlanKey != null
+        && !hostedCheckoutService.matchesSelection(activePurchase, selectedPlanKey)) {
+      writePurchaseSelectionConflict(response, activePurchase);
+      return false;
+    }
+    // Only a purchase that recorded a demo source may carry a transfer selection.
+    String persistedDemoClientId = activePurchase.getDemoClient() == null
+        ? null : activePurchase.getDemoClient().getId();
+    recordDemoDataTransferSelection(body, activePurchase.getRequest(),
+        new CheckoutSelection(persistedDemoClientId, false, false));
+    return true;
+  }
+
+  private void writePurchaseSelectionConflict(HttpServletResponse response, CheckoutRequest purchase)
+      throws IOException, JSONException {
+    JSONObject conflict = buildBillingPurchaseJson(purchase);
+    conflict.put("replacementAllowed",
+        STATUS_CHECKOUT_CREATED.equals(purchase.getCheckoutRequestStatus())
+            && StringUtils.isNotBlank(purchase.getStripeSession()));
+    JSONObject error = new JSONObject();
+    error.put(FIELD_CODE, CODE_PURCHASE_SELECTION_CHANGED);
+    error.put(FIELD_MESSAGE, "A pending checkout has different conditions. Confirm its replacement.");
+    conflict.put(FIELD_ERROR, error);
+    writeResponse(response, HttpServletResponse.SC_CONFLICT, conflict);
+  }
+
   private void handleExistingBillingPurchase(HttpServletResponse response, Account account,
       CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
-    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+    if ("CREATING".equals(status) || STATUS_CHECKOUT_CREATED.equals(status)) {
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
@@ -2140,6 +2217,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     applyReactivationIfPending(requestId, SubscriptionLifecycleApplier.eventCreatedAt(event));
+    // A failed schedule remains a failed/retryable billing event, never a silently lost offer.
+    new MonthlySecondMonthPromotionService().applyPaidCheckout(object);
     billingEventStore.markApplied(eventId);
     log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
   }
@@ -2581,6 +2660,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (phone != null) {
         account.set(EtendoGoJwtDalHelper.PROPERTY_PHONE, phone);
       }
+      // ETP-6082: the business sector of the register form, for HubSpot. The form requires it; a
+      // value outside the list is dropped rather than refusing the sign-up over a marketing field.
+      String sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
+      if (sector != null) {
+        account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
+      }
       // ETP-6081: the consent to promotional mail is a choice of its own; a body without it (an
       // older screen) gave none.
       TermsAndConditionsService.recordMarketingConsent(account,
@@ -2589,10 +2674,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // version it showed is recorded with the account.
       EtendoGoJwtDalHelper.recordTermsAcceptance(account, termsService.resolveAcceptedVersion(
           body.optString(FIELD_TERMS_VERSION, null), language), new Date());
-      // createAccount committed the account; this commit carries its phone, its terms and its
-      // HubSpot event, which reads the phone when it is sent.
-      HubSpotOutbox.accountCreated(account);
-      EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
+      // createAccount committed the account; this commit carries its phone, sector and terms. Its
+      // HubSpot event waits for the address to be confirmed (ETP-6082, handleVerifyEmail).
+      EtendoGoDalHelper.commitDalChanges("account sign-up details", log);
       String normalizedLanguage = StringUtils.trimToNull(language);
       // ETP-4798: the session token below still comes back, so the user keeps filling in the
       // onboarding form and their draft keeps saving. What the unconfirmed address blocks is the
@@ -2854,7 +2938,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
       return created;
     }
+    boolean confirming = EmailVerificationDalHelper.isEmailVerificationPending(account);
     EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
+    if (confirming) {
+      // ETP-6082: an account registered by the form and confirmed by signing in with its
+      // provider is a lead from now on, as if it had followed the mailed link.
+      reportConfirmedAccount(account);
+    }
     return account;
   }
 
@@ -3039,6 +3129,36 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-6082: a sign-up becomes a HubSpot lead, and gets its deal, once its address is proven:
+   * by the confirmation link, by the welcome mail's login link, or by signing in with an identity
+   * provider on that address. An account created by an SSO sign-in is reported when it is created
+   * instead (its provider vouched). Reporting it twice adds nothing.
+   *
+   * @param account the account whose address was just confirmed
+   */
+  /**
+   * ETP-6082 — keeps the business sector the company step asked for, on an account that had none.
+   * A sector already chosen at sign-up is never overwritten. Committed before provisioning, which
+   * switches the context to the new tenant; HubSpot reads it when it sends the demo's event.
+   */
+  static boolean isSectorMissing(Account account) {
+    return account.get(EtendoGoJwtDalHelper.PROPERTY_SECTOR) == null;
+  }
+
+  static void storeMissingSector(Account account, String sector) {
+    if (sector == null || !isSectorMissing(account)) {
+      return;
+    }
+    account.set(EtendoGoJwtDalHelper.PROPERTY_SECTOR, sector);
+    EtendoGoDalHelper.commitDalChanges("account sector", log);
+  }
+
+  private static void reportConfirmedAccount(Account account) {
+    HubSpotOutbox.accountCreated(account);
+    EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
+  }
+
+  /**
    * POST /sws/go/verify-email
    * Body: { "token": "..." }
    *
@@ -3090,6 +3210,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       if (!EmailVerificationDalHelper.isEmailVerified(account)) {
         EmailVerificationDalHelper.consumeEmailVerification(account, new Date());
+        reportConfirmedAccount(account);
       }
 
       JSONObject result = new JSONObject();
@@ -3520,6 +3641,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           EmailVerificationDalHelper.isEmailVerificationPending(account));
       result.put("authMethods", buildAuthMethods(account));
       result.put(FIELD_SUPPORT_SESSION, supportSessionBlock(authenticated.sessionRecord));
+      // ETP-6082: the onboarding asks the business sector only when the account has none yet.
+      result.put(FIELD_SECTOR_MISSING, isSectorMissing(account));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -5755,6 +5878,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (onboardingRequest == null) {
       return null;
     }
+    storeMissingSector(authenticated.account, onboardingRequest.sector);
     // ETP-5689: an additional environment arrives without a full name; fall back to the
     // account's name (then its email) here, once, so both the pooled and the classic path name
     // the owner after the person instead of the client-suffixed username.
@@ -6365,6 +6489,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.upgradeAction = body.optString("upgradeAction", UPGRADE_ACTION_CREATE_PRODUCTIVE).trim();
       // ETP-5426: opt-in, off unless the form explicitly sends true.
       data.includeSampleData = body.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
+      // ETP-6082: the company step asks the business sector only of an account that has none (an
+      // SSO sign-up never sees the register form). Anything outside HubSpot's list is dropped.
+      data.sector = HubSpotOutbox.sector(body.optString(FIELD_SECTOR, null));
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -7062,8 +7189,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       String accountId = account.getId();
+      boolean confirming = EmailVerificationDalHelper.isEmailVerificationPending(account);
       SignupAccountDalHelper.consumeLoginLink(account, new Date());
       Account consumed = EtendoGoJwtDalHelper.findActiveAccountById(accountId);
+      if (confirming) {
+        // ETP-6082: since ETP-6081 the welcome mail carries this link, not the confirmation-only
+        // one, so following it is how most sign-ups confirm their address.
+        reportConfirmedAccount(consumed);
+      }
       String environmentUserId = SignupAccountDalHelper.environmentUserId(consumed);
       IssuedGoSession issued = goSessionService.create(accountId, AUTH_METHOD_LINK,
           request.getHeader(HEADER_USER_AGENT), null);
@@ -7754,7 +7887,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Build the standard {@code {id, email, name}} JSON projection of an account, shared by every
+   * Build the standard {@code {id, email, name, sectorMissing}} JSON projection of an account, shared by every
    * endpoint that returns account data.
    */
   private static JSONObject buildAccountJson(Account account) throws JSONException {
@@ -7762,6 +7895,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     accountJson.put("id", account.getId());
     accountJson.put(FIELD_EMAIL, account.getEmail());
     accountJson.put("name", account.getName());
+    // ETP-6082: the onboarding asks the business sector only when the account has none yet.
+    accountJson.put(FIELD_SECTOR_MISSING, isSectorMissing(account));
     return accountJson;
   }
 
@@ -7958,6 +8093,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5426: the signup form's "include sample data" opt-in. Honoured only when
     // OnboardingSampleDataService.isEligible accepts the request.
     private boolean includeSampleData;
+    // ETP-6082: the business sector, sent only when the account had none.
+    private String sector;
     // ETP-5847: set for an environment the signup API creates, which mails its own ready message
     // (with a login link, or none at all when the caller turned mails off).
     private boolean skipEnvironmentReadyMail;

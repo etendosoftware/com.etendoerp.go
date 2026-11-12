@@ -27,6 +27,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.auth.EffectiveClientResolver;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -79,6 +80,8 @@ public class McpSessionManager {
       Callable<T> callable) throws Exception {
 
     OBContext previousContext = OBContext.getOBContext();
+    String previousLanguage = null;
+    boolean languageCaptured = false;
     try {
       // Resolve org: if "0" (wildcard), find the first transactional org for this role
       String effectiveOrg = orgId != null ? orgId : DEFAULT_ORG;
@@ -105,6 +108,9 @@ public class McpSessionManager {
       OBContext context = SecureWebServicesUtils.createContext(
           userId, roleId, effectiveOrg, warehouseId, effectiveClient);
       OBContext.setOBContext(context);
+      // ETP-6158: the language the Classic message remap answers in, fixed before any Classic call.
+      previousLanguage = NeoLanguage.captureRequestCode();
+      languageCaptured = true;
 
       T result = callable.call();
 
@@ -123,6 +129,9 @@ public class McpSessionManager {
     } finally {
       // Always restore previous context (even if null) to prevent cross-call leakage
       OBContext.setOBContext(previousContext);
+      if (languageCaptured) {
+        NeoLanguage.restoreRequestCode(previousLanguage);
+      }
     }
   }
 

@@ -103,6 +103,7 @@ import org.openbravo.model.common.order.Order;
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  * @covers com.etendoerp.go.schemaforge.DocActionRefusalGuard
  * @covers com.etendoerp.go.schemaforge.QuotationShipmentLinks
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class SalesQuotationHeaderHandlerTest {
 
@@ -938,6 +939,37 @@ public class SalesQuotationHeaderHandlerTest {
     }
   }
 
+  /**
+   * ETP-5848: a refusal core RAISEs while converting — a quotation with no payment method — is the
+   * caller's to fix, so it is a 422 naming the message key, not a 500 with the raw exception.
+   */
+  @Test
+  public void testConvertQuotation_coreRefusal_isA422WithItsMessageKey() throws Exception {
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    when(process.convertQuotationIntoSalesOrder(false, "q-5528")).thenThrow(new IllegalStateException(
+        new java.sql.SQLException("ERROR: @APRM_PAYMENTMETHOD_MISSING@", "P0001")));
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class), mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class), mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+    OBDal dal = mock(OBDal.class);
+    NeoResponse result;
+    try (MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalStatic = Mockito.mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("createOrder").recordId("q-5528").build());
+    }
+
+    assertEquals(422, result.getHttpStatus());
+    JSONObject error = result.getBody().getJSONObject("error");
+    assertEquals("APRM_PAYMENTMETHOD_MISSING", error.getJSONArray("messageKeys").getString(0));
+    assertFalse(result.getBody().has("salesOrderId"));
+    verify(dal).rollbackAndClose();
+  }
+
   /** An order core did not leave in CO is not reactivated. */
   @Test
   public void testConvertQuotation_orderNotCompleted_noReactivation() throws Exception {
@@ -1407,11 +1439,15 @@ public class SalesQuotationHeaderHandlerTest {
     Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
         new SalesQuotationHeaderHandler().actionContracts();
 
-    assertEquals(List.of("createDraftInvoice", "rejectQuotation", "createRejectReason"),
+    assertEquals(List.of("createDraftInvoice", "sifDefaults", "rejectQuotation",
+            "createRejectReason"),
         List.copyOf(contracts.keySet()));
     com.etendoerp.go.schemaforge.util.NeoActionContract invoice = contracts.get("createDraftInvoice");
     assertSame(CreateDraftInvoiceHandler.QUOTATION_CONTRACT, invoice);
-    assertTrue("a quotation is invoiced in full: no parameters", invoice.getParams().isEmpty());
+    // a quotation is invoiced in full: its only parameter is the SIF fields (ETP-6179)
+    assertEquals(List.of("sifFields"), invoice.getParams().stream()
+        .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName)
+        .collect(java.util.stream.Collectors.toList()));
     String description = invoice.getDescription();
     assertTrue("must warn the invoice is completed despite the name",
         description.contains("COMPLETES") && description.contains("despite the name"));
@@ -1435,5 +1471,53 @@ public class SalesQuotationHeaderHandlerTest {
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
         com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
             "createDraftInvoice", new JSONObject().put("priceListId", "P1")).getHttpStatus());
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesQuotationHeaderHandler().actionContracts();
+
+    assertSame(CreateDraftInvoiceHandler.QUOTATION_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createDraftInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a quotation previews the invoice createDraftInvoice would create from it: SII
+   * and VERI*FACTU, the VERI*FACTU type of the invoice document type the quotation links (F2)
+   * and the quotation's SII description and operation date — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsTheInvoiceOfTheQuotation() throws Exception {
+    SalesQuotationHeaderHandler handler = new SalesQuotationHeaderHandler();
+    java.lang.reflect.Field field =
+        SalesQuotationHeaderHandler.class.getDeclaredField("createDraftInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreateDraftInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order quotation =
+          InvoiceSifPreviewTestSupport.sourceOrder("ARI", "F2");
+      org.mockito.Mockito.when(mocks.dal.get(org.openbravo.model.common.order.Order.class, "sq-1"))
+          .thenReturn(quotation);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("sales-quotation", "sq-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalSalesPreview(data, "F2");
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
+    }
   }
 }

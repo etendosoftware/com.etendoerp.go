@@ -68,6 +68,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
  * @covers com.etendoerp.go.schemaforge.InOutInvoiceLinks
+ * @covers com.etendoerp.go.schemaforge.InvoiceSifPreset
  */
 public class GoodsReceiptHeaderHandlerTest {
 
@@ -1056,12 +1057,13 @@ public class GoodsReceiptHeaderHandlerTest {
         new GoodsReceiptHeaderHandler().actionContracts();
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
-            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord", "post",
+            "importOrderLines", "availableInvoices", "availableInvoiceLines",
+            "createPurchaseInvoice", "sifDefaults", "createPurchaseReturn", "cloneRecord", "post",
             "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
-    assertEquals(java.util.List.of("receiptIds", "priceListId", "lines"),
+    assertEquals(java.util.List.of("receiptIds", "priceListId", "lines", "sifFields"),
         invoice.getParams().stream().map(NeoActionContract.Param::getName)
             .collect(java.util.stream.Collectors.toList()));
     assertTrue("every body key is optional",
@@ -1236,6 +1238,57 @@ public class GoodsReceiptHeaderHandlerTest {
     verify(delegate).handle(ctx);
   }
 
+  // ── invoice import listing (ETP-6099) ─────────────────────────────────────
+
+  /**
+   * availableInvoices / availableInvoiceLines go to the invoice-import delegate, which is handed
+   * the receipt's own policy on the context: nothing else names the purchase-side rules.
+   */
+  @Test
+  public void handle_dispatchesTheInvoiceListingWithTheReceiptPolicy() throws Exception {
+    ImportInvoiceLinesIntoInOutHandler delegate = mock(ImportInvoiceLinesIntoInOutHandler.class);
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsReceiptHeaderHandler.class.getDeclaredField("importInvoiceLinesHandler");
+    field.setAccessible(true);
+    field.set(handler, delegate);
+    for (String action : new String[] { "availableInvoices", "availableInvoiceLines" }) {
+      NeoContext ctx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName(action).recordId("r1").build();
+      NeoResponse expected = NeoResponse.ok(new JSONObject().put("action", action));
+      when(delegate.handle(ctx)).thenReturn(expected);
+
+      assertSame(action, expected, handler.handle(ctx));
+      assertSame(action, GoodsReceiptHeaderHandler.INVOICE_IMPORT_POLICY,
+          ctx.getAttribute(ImportInvoiceLinesIntoInOutHandler.ATTRIBUTE));
+    }
+  }
+
+  /**
+   * The receipt's popup rules: invoices with a negative grand total are not offered (a missing
+   * total is), and pending deducts neither the delivered quantity nor this receipt's own draft.
+   */
+  @Test
+  public void invoiceImportPolicy_offersNoNegativeTotal_andDeductsOnlyOtherDrafts() {
+    ImportInvoiceLinesIntoInOutHandler.SourcePolicy policy =
+        GoodsReceiptHeaderHandler.INVOICE_IMPORT_POLICY;
+    Object[][] cases = { { "-0.01", false }, { "0", true }, { "120.50", true }, { null, true } };
+    for (Object[] c : cases) {
+      org.openbravo.model.common.invoice.Invoice invoice =
+          mock(org.openbravo.model.common.invoice.Invoice.class);
+      when(invoice.getGrandTotalAmount()).thenReturn(c[0] == null ? null
+          : new BigDecimal((String) c[0]));
+
+      assertEquals(String.valueOf(c[0]), c[1], policy.offered.test(invoice));
+    }
+    assertFalse("delivered is not deducted on a receipt", policy.deductsDelivered);
+    assertFalse("only OTHER draft receipts are deducted", policy.deductsTargetDraft);
+    assertTrue("the receipt's popup asks for pendingBasis classic (ETP-6099 follow-up)",
+        policy.offersClassicPending);
+    assertFalse("a caller with no policy is offered no classic basis",
+        ImportInvoiceLinesIntoInOutHandler.SourcePolicy.DEFAULT.offersClassicPending);
+  }
+
   /**
    * ETP-5714: the keys GoodsReceiptHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
    * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
@@ -1268,6 +1321,58 @@ public class GoodsReceiptHeaderHandlerTest {
 
       assertSame(refusal, h.handle(ctx));
       Mockito.verify(service, Mockito.never()).handleAction(any());
+    }
+  }
+
+  // ── sifDefaults: the SIF fields of the invoice it would create (ETP-6179) ──
+
+  /** sifDefaults is declared as a read action that creates nothing and documents its answer. */
+  @Test
+  public void actionContracts_declaresSifDefaultsAsAReadOnlyPreview() {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new GoodsReceiptHeaderHandler().actionContracts();
+
+    assertSame(CreatePurchaseInvoiceHandler.RECEIPT_SIF_DEFAULTS_CONTRACT,
+
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    InvoiceSifPreviewTestSupport.assertReadOnlySifDefaultsContract(
+        contracts.get(InvoiceSifPreset.ACTION_SIF_DEFAULTS));
+    assertTrue(contracts.get("createPurchaseInvoice").getParams().stream()
+        .anyMatch(p -> InvoiceSifPreset.PARAM_SIF_FIELDS.equals(p.getName())));
+  }
+
+  /**
+   * sifDefaults on a goods receipt previews the purchase invoice createPurchaseInvoice would
+   * create from it: SII only (never VERI*FACTU or TicketBAI) — and creates nothing.
+   */
+  @Test
+  public void handle_sifDefaultsPreviewsThePurchaseInvoiceOfTheReceiptWithSiiOnly()
+      throws Exception {
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsReceiptHeaderHandler.class.getDeclaredField("createPurchaseInvoiceHandler");
+    field.setAccessible(true);
+    field.set(handler, new CreatePurchaseInvoiceHandler());
+
+    try (InvoiceSifPreviewTestSupport.PreviewMocks mocks =
+
+        new InvoiceSifPreviewTestSupport.PreviewMocks(false)) {
+      org.openbravo.model.common.order.Order order =
+          InvoiceSifPreviewTestSupport.sourceOrder("API", "F1");
+      ShipmentInOut receipt = org.mockito.Mockito.mock(ShipmentInOut.class);
+      org.openbravo.model.common.enterprise.Organization sourceOrg =
+          InvoiceSifPreviewTestSupport.org();
+      org.mockito.Mockito.when(receipt.getOrganization()).thenReturn(sourceOrg);
+      org.mockito.Mockito.when(receipt.getSalesOrder()).thenReturn(order);
+      org.mockito.Mockito.when(mocks.dal.get(ShipmentInOut.class, "gr-1")).thenReturn(receipt);
+
+      NeoResponse response =
+
+          handler.handle(InvoiceSifPreviewTestSupport.sifDefaults("goods-receipt", "gr-1"));
+
+      JSONObject data = InvoiceSifPreviewTestSupport.assertPreview(response);
+      InvoiceSifPreviewTestSupport.assertNormalPurchasePreview(data);
+      org.mockito.Mockito.verify(mocks.dal, org.mockito.Mockito.never()).save(any());
     }
   }
 }

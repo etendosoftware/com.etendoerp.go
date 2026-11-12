@@ -703,8 +703,9 @@ and `NeoFiscalModelsCatalogService` its only caller:
   `saveActiveModels` throws `IllegalStateException` ("…could not be read; nothing was saved");
   `NeoBuiltInEndpointHandler` does not turn it into a 400 and `NeoServlet` answers **HTTP 500**.
   Nothing is written or flushed. A stored value that is blank or not valid JSON holds nothing to
-  keep and counts as `{}` (that save goes through). The SPA does not surface the 500 yet: its catalog
-  `PUT` is fire-and-forget (open item `refused-save-silent-in-spa` on the registry entry).
+  keep and counts as `{}` (that save goes through). Since ETP-5831 the SPA undoes the change and shows
+  an error on any failed catalog `PUT`; the generic 500 is open item `refused-save-generic-500` on
+  the registry entry.
 - **Errors fail hidden:** if the GET answer cannot be built, it is `{"_unavailable": ["390"]}`
   (`FiscalModel390Flag.failHiddenAnswer()`), never a bare `{}`.
 

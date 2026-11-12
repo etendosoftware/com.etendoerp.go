@@ -56,6 +56,7 @@ import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.BatchJobService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.ClassicMessageRemap;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.handlers.ReactivationUnpost;
@@ -545,6 +546,9 @@ public class McpToolRouter {
     if (error != null) {
       return wrapAsErrorContent(error);
     }
+    // ETP-5837 (QA CP-16): an offset at or past the end is an empty page, not the first page
+    // again — core restarts an empty page from row 0. MCP only; the REST list keeps core's answer.
+    McpListPaging.emptyPageWhenPastEnd(responseJson, offset);
 
     // Apply field filtering
     fieldFilter.filterGetResponse(responseJson);
@@ -2498,7 +2502,7 @@ public class McpToolRouter {
   static JSONObject wrapAsErrorContent(JSONObject body) {
     try {
       McpMessageKeyHints.addTo(body);
-      return wrapAsErrorContent(McpResponseSanitizer.render(body));
+      return wrapAsErrorContent(McpResponseSanitizer.renderError(body));
     } catch (JSONException e) {
       throw new McpToolException(ERROR_BUILDING_CONTENT, e);
     }
@@ -2535,7 +2539,8 @@ public class McpToolRouter {
     try {
       JSONObject content = new JSONObject();
       content.put("type", "text");
-      content.put("text", message);
+      // ETP-6158: an exception message can carry a Classic fiscal message, see ClassicMessageRemap.
+      content.put("text", ClassicMessageRemap.remapText(message, NeoLanguage.requestCode()));
 
       JSONObject result = new JSONObject();
       JSONArray contentArray = new JSONArray();

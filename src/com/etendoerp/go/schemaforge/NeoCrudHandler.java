@@ -1078,6 +1078,9 @@ class NeoCrudHandler {
     }
   }
 
+  // Pending: move to the @NeoExtension of each entity that needs it (contacts/businessPartner)
+  // through a NeoHandler hook to strip after default injection; kept here until that hook exists
+  // (ETP-6206, skill neo-extension-migration).
   private void stripContactsPreCreateBillingDefaults(JSONObject body, NeoContext context, Tab adTab) {
     if (body == null || context == null || adTab == null) {
       return;

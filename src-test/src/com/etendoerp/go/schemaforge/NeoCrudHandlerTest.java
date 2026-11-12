@@ -409,7 +409,7 @@ class NeoCrudHandlerTest {
           "contacts", "locationAddress", "POST".equals(method) ? null : "REC-1");
       when(spec.getId()).thenReturn("SPEC-1");
       when(entity.getADTab()).thenReturn(adTab);
-      when(entity.getJavaQualifier()).thenReturn("contactsLocationAddressHandler");
+      when(entity.getJavaQualifier()).thenReturn("someCustomizationQualifier");
       when(adTab.getTable()).thenReturn(table);
       when(table.getName()).thenReturn("BusinessPartnerLocation");
       when(servlet.findEntity("SPEC-1", "locationAddress")).thenReturn(entity);

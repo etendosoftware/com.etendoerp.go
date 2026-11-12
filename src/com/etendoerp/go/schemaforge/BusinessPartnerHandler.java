@@ -117,15 +117,16 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *
  * <p>On POST/PATCH/PUT, {@code handle()} also applies the customer's SEPA mandate rules (ETP-6148,
  * see {@link ContactSepaMandateDefaults}): behind the {@code sepa-remittances} flag, a customer
- * created with a blank mandate stores its tax ID as identifier and today as signature date; an
- * update fills a still-blank identifier only when it makes the contact a customer or gives it its
- * first tax ID; a value the caller sends always wins and a stored one is never overwritten. With
- * the flag off the two mandate keys are dropped from the body (never persisted, never rejected).
- * DEFAULTS prefill the signature date ({@code afterHandle}).
+ * created with a blank mandate stores its tax ID as identifier and today as signature date, and
+ * any later save of a customer fills each mandate field that is empty in the database and not sent;
+ * a value the caller sends always wins and a stored one is never overwritten. With the flag off the
+ * two mandate keys are dropped from the body (never persisted, never rejected). DEFAULTS prefill
+ * the signature date ({@code afterHandle}).
  *
- * <p>Bound with {@code @NeoExtension(spec = "contacts", entity = "businessPartner")} (ETP-6148,
- * migrated from {@code JAVA_QUALIFIER = 'businessPartnerHandler'}). No {@code @Named}: the class is a
- * {@code @Dependent} bean resolved through {@code NeoExtensionIndex} on every channel.
+ * <p>Bound to the contacts spec's businessPartner entity by {@link NeoExtension} (ETP-6206; it was
+ * {@code JAVA_QUALIFIER = 'businessPartnerHandler'} before). Every hook it answers ({@code handle},
+ * {@code afterHandle}, {@code serverResolvedCreateFields}, {@code createUnsetFields},
+ * {@code resolveServerCreateFields}) is resolved annotation-first on REST single, batch and MCP.
  */
 @NeoExtension(spec = "contacts", entity = "businessPartner")
 public class BusinessPartnerHandler extends AbstractPersonNameHandler {
@@ -894,11 +895,30 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    *
    * <p>One statement for the whole page (a window function, not a per-row query): a 5000-row
    * export must not turn into 5000 round trips.
+   *
+   * <p>ETP-6206 — the Contacts import's Calle / Número columns round-trip as two values instead of
+   * re-importing "Calle, Número" as a street. Built from the structured Street / Number
+   * ({@code EM_OBSEPA_StrtNm} / {@code EM_OBSEPA_BldgNb}, added to {@code C_Location} by
+   * {@code org.openbravo.sepa.iso20022}, which this module always brings in transitively — see
+   * {@code NeoAddressHelper}):
+   * <ul>
+   *   <li>{@code street} — the structured street, or the whole {@code address1} for an address never
+   *       broken down (street NULL or blank). Derived, so it is NOT the raw structured field.</li>
+   *   <li>{@code buildingnumber} — the structured number, but only when the structured street is
+   *       present: an address exported with {@code address1} as its street must not carry a number
+   *       too, or a re-import would write it twice.</li>
+   * </ul>
+   * Not gated by {@code structured-address-for-sepa}: where the flag was never on, the structured
+   * columns are NULL and {@code street} is exactly the {@code address1} this export always had.
    */
   static final String PRIMARY_LOCATIONS_SQL =
-      "SELECT c_bpartner_id, address1, city, postal, country, region FROM ("
+      "SELECT c_bpartner_id, address1, street, buildingnumber, city, postal, country, region FROM ("
           + "  SELECT bploc.c_bpartner_id,"
-          + "         loc.address1, loc.city, loc.postal,"
+          + "         loc.address1,"
+          + "         COALESCE(NULLIF(TRIM(loc.em_obsepa_strtnm), ''), loc.address1) AS street,"
+          + "         CASE WHEN NULLIF(TRIM(loc.em_obsepa_strtnm), '') IS NOT NULL"
+          + "              THEN loc.em_obsepa_bldgnb END AS buildingnumber,"
+          + "         loc.city, loc.postal,"
           + "         cty.name AS country, COALESCE(reg.name, loc.regionname) AS region,"
           + "         row_number() OVER ("
           + "           PARTITION BY bploc.c_bpartner_id"
@@ -937,9 +957,15 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   // renamed for both.
 
   /** Result-set columns {@link #PRIMARY_LOCATIONS_SQL} exposes, positionally paired with {@link #LOCATION_KEYS}. */
-  static final String[] LOCATION_COLUMNS = { "address1", "city", "postal", "country", "region" };
-  /** Response keys the address columns are attached under (see {@code importExportColumns.js}). */
-  static final String[] LOCATION_KEYS = { "address", "city", "postal", "country", "region" };
+  static final String[] LOCATION_COLUMNS = { "address1", "street", "buildingnumber",
+      "city", "postal", "country", "region" };
+  /**
+   * Response keys the address columns are attached under (see {@code importExportColumns.js} and
+   * the Contacts export hints in {@code contactsImportDescriptor.js}). A NULL or blank column
+   * leaves its key out ({@link #queryChildData}), never a {@code "null"} string.
+   */
+  static final String[] LOCATION_KEYS = { "address", "street", "buildingNumber",
+      "city", "postal", "country", "region" };
   /** Result-set columns {@link #PRIMARY_CONTACTS_SQL} exposes, positionally paired with {@link #CONTACT_KEYS}. */
   static final String[] CONTACT_COLUMNS = { "firstname", "lastname", "email", "phone", "title" };
   /** Response keys the contact-person columns are attached under (see {@code importExportColumns.js}). */
@@ -1005,6 +1031,13 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * {@code C_BPartner_Location}/{@code C_Location}, which a {@code C_BPartner} row does not
    * carry — the only address-shaped property on it is {@code eTGOLocation}, one concatenated
    * display string that cannot be split back into columns).
+   *
+   * <p>Address keys: {@code address} (composed {@code Address1}), {@code street} (the structured
+   * street, or the whole address line for an address never broken down), {@code buildingNumber}
+   * (only alongside a structured street), {@code city}, {@code postal}, {@code country}, {@code region}. Contact
+   * keys: {@code firstName}, {@code lastName}, {@code email}, {@code phone}, {@code position}. A key
+   * whose column is NULL or blank is absent. Only reached with {@code includeChildData=1}, which
+   * only the list CSV export sends: no UI screen and no MCP tool reads {@code etgoChildData}.
    *
    * <p>Nested rather than flattened onto the row: the export's {@code columns} spec already
    * understands dotted paths ({@code etgoChildData.city}), and a nested object cannot collide

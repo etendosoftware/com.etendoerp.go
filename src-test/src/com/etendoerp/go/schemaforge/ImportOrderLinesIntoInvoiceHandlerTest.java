@@ -88,6 +88,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceLineImportHandler
  * @covers com.etendoerp.go.schemaforge.InvoiceGlobalDiscountRule
  * @covers com.etendoerp.go.schemaforge.OrderImportRequest
+ * @covers com.etendoerp.go.schemaforge.ImportListing
  */
 public class ImportOrderLinesIntoInvoiceHandlerTest {
 
@@ -266,7 +267,58 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       lastScan = scan;
       return candidates;
     }
+
+    /** Where in the scan the last paged {@code availableOrders} started (ETP-6099). */
+    Integer lastOffset;
+
+    /** The page from {@code offset} on: the double hands back {@link #candidates} as that page. */
+    @Override
+    protected List<Order> findCandidateOrders(String partnerId, boolean sales, String cur,
+        int offset, int scan) {
+      lastOffset = offset;
+      lastScan = scan;
+      return candidates;
+    }
+
+    /** The order lines THIS invoice already has a line of. */
+    Set<String> linesOnInvoice = new HashSet<>();
+
+    @Override
+    protected Set<String> orderLinesOnInvoice(String invoiceId) {
+      calls.add("linesOnInvoice");
+      return linesOnInvoice;
+    }
+
+    /** The OTHER drafts holding each order line (ETP-5828 QA UI-4); empty: none. */
+    final Map<String, List<OrderInvoicePending.DraftInvoiceRef>> holders = new HashMap<>();
+    /** The invoice the last holders read left out, and the order lines it asked about. */
+    String holdersExcept;
+    List<String> holdersAsked;
+
+    @Override
+    protected Map<String, List<OrderInvoicePending.DraftInvoiceRef>> draftInvoicesHolding(
+        Collection<String> orderLineIds, boolean sales, String exceptInvoiceId) {
+      holdersExcept = exceptInvoiceId;
+      holdersAsked = new ArrayList<>(orderLineIds);
+      return holders;
+    }
   }
+
+  /** The purchase header's policy: offers pendingBasis "classic". */
+  private static final RectificativeImportPolicy PURCHASE_POLICY =
+      RectificativeImportPolicy.forHeader(type -> "STANDARD", false);
+  /** The sales header's policy: no classic basis. */
+  private static final RectificativeImportPolicy SALES_POLICY =
+      RectificativeImportPolicy.forHeader(type -> "STANDARD", true);
+
+  /** {@link #run} with the policy the header customization would have stored on the request. */
+  private static NeoResponse runWithPolicy(Probe probe, String action, String body,
+      RectificativeImportPolicy policy) throws Exception {
+    NeoContext context = action(action, "i1", body);
+    context.setAttribute(RectificativeImportPolicy.ATTRIBUTE, policy);
+    return probe.handle(context);
+  }
+
 
   /** A purchase draft invoice and a completed order: Agua 10 (2 invoiced), Pan 5. */
   private Probe scenario() {
@@ -1338,6 +1390,84 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   }
 
   /**
+   * ETP-5828 QA UI-4: a line other draft invoices hold names them ({@code inDraftInvoices}, this
+   * invoice left out), so the popup says «en factura borrador X» and the agent can tell the user
+   * the same; a line no other draft holds carries no such key. Both directions.
+   */
+  @Test
+  public void availableOrderLines_namesTheOtherDraftsHoldingALine() throws Exception {
+    for (boolean isSales : new boolean[] { true, false }) {
+      Probe probe = isSales ? salesScenario() : scenario();
+      probe.drafts.put("ol2", bd("5"));
+      probe.holders.put("ol2", List.of(
+          new OrderInvoicePending.DraftInvoiceRef("inv-a", "FV1000002", bd("2")),
+          new OrderInvoicePending.DraftInvoiceRef("inv-b", "FV1000003", bd("3.000"))));
+      String side = isSales ? "sales" : "purchase";
+
+      JSONArray rows = run(probe, "availableOrderLines",
+          "{\"orderId\":\"o1\",\"includeCovered\":true}")
+          .getBody().getJSONObject("response").getJSONArray("data");
+
+      assertEquals(side, "i1", probe.holdersExcept);
+      assertEquals(side + ": only the listed lines are looked up", List.of("ol1", "ol2"),
+          probe.holdersAsked);
+      assertFalse(side + ": no other draft holds ol1",
+          rows.getJSONObject(0).has("inDraftInvoices"));
+      JSONArray held = rows.getJSONObject(1).getJSONArray("inDraftInvoices");
+      assertEquals(side, 2, held.length());
+      assertEquals(side, "inv-a", held.getJSONObject(0).getString("id"));
+      assertEquals(side, "FV1000002", held.getJSONObject(0).getString("documentNo"));
+      assertEquals(side, "FV1000003", held.getJSONObject(1).getString("documentNo"));
+      assertEquals(side + ": what each draft holds of the line, no trailing zeros", "3",
+          held.getJSONObject(1).get("quantity").toString());
+    }
+  }
+
+  /**
+   * The holders read: drafts of the direction, the target left out, only the session's client and
+   * the role's readable organizations (their document number reaches the caller); nothing is read
+   * for no line or no readable organization.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void draftHolders_readsTheOtherDraftsOfTheDirection_inTheReadableOrgs() {
+    org.hibernate.Session session = mock(org.hibernate.Session.class);
+    when(dal.getSession()).thenReturn(session);
+    org.hibernate.query.Query<Object[]> query = mock(org.hibernate.query.Query.class);
+    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+    when(session.createQuery(hql.capture(), Mockito.eq(Object[].class))).thenReturn(query);
+    when(query.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(query);
+    when(query.setParameterList(Mockito.anyString(), Mockito.anyCollection())).thenReturn(query);
+    List<Object[]> found = List.<Object[]>of(new Object[] { "ol1", "inv-a", "FV1", bd("1") },
+        new Object[] { "ol1", "inv-b", "FV2", bd("4") });
+    when(query.list()).thenReturn(found);
+    List<String> orgs = List.of("org-1", "org-2");
+
+    Map<String, List<OrderInvoicePending.DraftInvoiceRef>> holders =
+        OrderInvoicePending.draftHolders(List.of("ol1"), true, "i1", "client-1", orgs);
+
+    assertEquals(2, holders.get("ol1").size());
+    assertEquals("FV2", holders.get("ol1").get(1).documentNo);
+    assertEquals(0, bd("4").compareTo(holders.get("ol1").get(1).quantity));
+    Mockito.verify(query).setParameter("inv", "i1");
+    Mockito.verify(query).setParameter("sot", true);
+    Mockito.verify(query).setParameter("client", "client-1");
+    Mockito.verify(query).setParameterList("orgs", orgs);
+    assertTrue(hql.getValue(), hql.getValue().contains("i.documentStatus = 'DR'")
+        && hql.getValue().contains("i.id <> :inv")
+        && hql.getValue().contains("i.client.id = :client")
+        && hql.getValue().contains("sum(il.invoicedQuantity)")
+        && hql.getValue().contains("i.organization.id in (:orgs)"));
+    assertTrue("no line, no query",
+        OrderInvoicePending.draftHolders(List.of(), true, "i1", "client-1", orgs).isEmpty());
+    assertTrue("no readable organization, no query",
+        OrderInvoicePending.draftHolders(List.of("ol1"), true, "i1", "client-1", List.of())
+            .isEmpty());
+    Mockito.verify(session, Mockito.times(1)).createQuery(Mockito.anyString(),
+        Mockito.eq(Object[].class));
+  }
+
+  /**
    * The order's amount is the popup row: the plain sum of its pending lines' amounts, never
    * reduced by the order's global discount.
    */
@@ -1381,18 +1511,13 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       assertEquals(422, NeoActionContract.validate(contracts, "availableOrderLines",
           new JSONObject()).getHttpStatus());
       assertNull(NeoActionContract.validate(contracts, "availableOrders", new JSONObject()));
-      // ETP-5828: limit / includeCovered are declared on the sales invoice only
-      NeoResponse limit = NeoActionContract.validate(contracts, "availableOrders",
-          new JSONObject().put("limit", 500));
-      NeoResponse covered = NeoActionContract.validate(contracts, "availableOrderLines",
-          new JSONObject().put("orderId", "o1").put("includeCovered", true));
-      if (sales) {
-        assertNull(limit);
-        assertNull(covered);
-      } else {
-        assertEquals(422, limit.getHttpStatus());
-        assertEquals(422, covered.getHttpStatus());
-      }
+      // ETP-6099: the listing parameters are declared on both directions (ETP-5828: sales only)
+      assertNull(sales + " availableOrders", NeoActionContract.validate(contracts,
+          "availableOrders", new JSONObject().put("limit", 500).put("offset", 50)
+              .put("includeCovered", true).put("detail", true)));
+      assertNull(sales + " availableOrderLines", NeoActionContract.validate(contracts,
+          "availableOrderLines", new JSONObject().put("orderId", "o1")
+              .put("includeCovered", true).put("detail", true)));
     }
   }
 
@@ -1472,6 +1597,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertEquals(2, complete.getJSONArray("data").length());
     assertFalse(complete.getBoolean("hasMore"));
 
+    // ETP-6099: the scan reads max(scanLimit, limit), so the page is narrowed with it
+    probe.rowLimit = 2;
     probe.scanLimit = 2;
     assertTrue("a scan that hit its limit may have hidden orders",
         run(probe, "availableOrders", null).getBody().getJSONObject("response")
@@ -1481,43 +1608,119 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5828: the sales invoice's popup lists through availableOrders, so on a sales invoice the
-   * caller may ask for a longer page ({@code limit}, 1-1000) and the scan reads at least that many
-   * candidates; anything else is a 400. A purchase invoice ignores it and keeps 50 rows / 200.
+   * ETP-5828 (sales) and ETP-6099 (purchase too, its popup lists here now): the caller may ask for
+   * a longer page ({@code limit}, 1-1000) and the scan reads at least that many candidates;
+   * anything else is a 400. Absent, both keep 50 rows / 200.
    */
   @Test
-  public void availableOrders_aSalesInvoiceHonoursLimit_aPurchaseOneKeepsItsLimits()
-      throws Exception {
-    Probe sales = salesScenario();
-    OrderLine extra = orderLine("olx", 10, product("px", "Extra", false), "3", "0", "0");
-    sales.candidates = List.of(sales.order, order("o2", true, extra));
+  public void availableOrders_honoursLimitOnBothDirections() throws Exception {
+    for (boolean isSales : new boolean[] { true, false }) {
+      Probe probe = isSales ? salesScenario() : scenario();
+      OrderLine extra = orderLine("olx", 10, product("px", "Extra", false), "3", "0", "0");
+      Order second = order("o2", isSales, extra);
+      probe.candidates = List.of(probe.order, second);
+      String side = isSales ? "sales" : "purchase";
 
-    JSONObject one = run(sales, "availableOrders", "{\"limit\":1}").getBody()
-        .getJSONObject("response");
-    assertEquals(1, one.getJSONArray("data").length());
-    assertTrue(one.getBoolean("hasMore"));
-    assertEquals(1, one.getInt("limit"));
-    assertEquals("never fewer candidates than the default scan", 200, one.getInt("scanLimit"));
+      JSONObject one = run(probe, "availableOrders", "{\"limit\":1}").getBody()
+          .getJSONObject("response");
+      assertEquals(side, 1, one.getJSONArray("data").length());
+      assertTrue(side, one.getBoolean("hasMore"));
+      assertEquals(side, 1, one.getInt("limit"));
+      assertEquals(side + ": never fewer candidates than the default scan", 200,
+          one.getInt("scanLimit"));
 
-    JSONObject wide = run(sales, "availableOrders", "{\"limit\":1000}").getBody()
-        .getJSONObject("response");
-    assertEquals(2, wide.getJSONArray("data").length());
-    assertEquals(1000, wide.getInt("limit"));
-    assertEquals(Integer.valueOf(1000), sales.lastScan);
-    assertEquals("absent keeps the default page", 50, run(sales, "availableOrders", null)
-        .getBody().getJSONObject("response").getInt("limit"));
-    for (String bad : new String[] { "0", "1001", "2.5", "\"many\"" }) {
-      assertEquals(bad, 400, run(sales, "availableOrders", "{\"limit\":" + bad + "}")
-          .getHttpStatus());
+      JSONObject wide = run(probe, "availableOrders", "{\"limit\":1000}").getBody()
+          .getJSONObject("response");
+      assertEquals(side, 2, wide.getJSONArray("data").length());
+      assertEquals(side, 1000, wide.getInt("limit"));
+      assertEquals(side, Integer.valueOf(1000), probe.lastScan);
+      assertEquals(side + ": absent keeps the default page", 50,
+          run(probe, "availableOrders", null).getBody().getJSONObject("response").getInt("limit"));
+      for (String bad : new String[] { "0", "1001", "2.5", "\"many\"" }) {
+        NeoResponse refused = run(probe, "availableOrders", "{\"limit\":" + bad + "}");
+        assertEquals(side + " " + bad, 400, refused.getHttpStatus());
+        assertEquals(side + " " + bad, "importInvalidParameter", errorCode(refused));
+      }
     }
+  }
 
-    Probe purchase = scenario();
-    purchase.candidates = List.of(purchase.order);
-    JSONObject unchanged = run(purchase, "availableOrders", "{\"limit\":1000}").getBody()
+  /**
+   * ETP-6099: without limit nor offset the page carries no paging keys (the MCP answer is
+   * unchanged); with them it echoes offset and answers nextOffset — the scan position after the
+   * last candidate examined while hasMore, null once the scan is complete.
+   */
+  @Test
+  public void availableOrders_paging_echoesOffsetAndAnswersNextOffset() throws Exception {
+    Probe probe = scenario();
+    OrderLine done = orderLine("ol7", 10, product("p7", "Hecho", false), "2", "0", "2");
+    Order finished = order("o8", false, done);
+    OrderLine extra = orderLine("olx", 10, product("px", "Extra", false), "3", "0", "0");
+    Order second = order("o2", false, extra);
+    probe.candidates = List.of(finished, probe.order, second);
+
+    JSONObject plain = run(probe, "availableOrders", null).getBody().getJSONObject("response");
+    assertFalse(plain.has("offset"));
+    assertFalse(plain.has("nextOffset"));
+
+    JSONObject first = run(probe, "availableOrders", "{\"limit\":1}").getBody()
         .getJSONObject("response");
-    assertEquals(50, unchanged.getInt("limit"));
-    assertEquals(200, unchanged.getInt("scanLimit"));
-    assertEquals(Integer.valueOf(200), purchase.lastScan);
+    assertEquals(List.of("o1"), ids(first.getJSONArray("data")));
+    assertEquals(0, first.getInt("offset"));
+    assertEquals("stopped at the row limit after examining 2 candidates", 2,
+        first.getInt("nextOffset"));
+    assertNull("offset 0 reads the scan from its start", probe.lastOffset);
+
+    JSONObject later = run(probe, "availableOrders", "{\"offset\":10}").getBody()
+        .getJSONObject("response");
+    assertEquals(Integer.valueOf(10), probe.lastOffset);
+    assertEquals(Integer.valueOf(200), probe.lastScan);
+    assertEquals(10, later.getInt("offset"));
+    assertFalse(later.getBoolean("hasMore"));
+    assertTrue("a complete scan answers nextOffset null", later.isNull("nextOffset"));
+
+    probe.rowLimit = 2;
+    probe.scanLimit = 3;
+    JSONObject fullScan = run(probe, "availableOrders", "{\"offset\":4}").getBody()
+        .getJSONObject("response");
+    assertEquals(2, fullScan.getJSONArray("data").length());
+    assertTrue("a scan that read its limit may have left candidates", fullScan.getBoolean("hasMore"));
+    assertEquals("offset + every candidate examined", 7, fullScan.getInt("nextOffset"));
+  }
+
+  /**
+   * ETP-6099: includeCovered also lists an order whose pending before drafts is entirely held by
+   * draft invoices, at pendingLines 0 and amount 0; a fully invoiced order stays out either way.
+   * detail adds creationDate, absent without it.
+   */
+  @Test
+  public void availableOrders_includeCoveredAndDetail() throws Exception {
+    for (boolean isSales : new boolean[] { true, false }) {
+      Probe probe = isSales ? salesScenario() : scenario();
+      OrderLine done = orderLine("ol7", 10, product("p7", "Hecho", false), "2", "0", "2");
+      Order finished = order("o8", isSales, done);
+      probe.candidates = List.of(probe.order, finished);
+      probe.drafts.put("ol1", bd("8"));
+      probe.drafts.put("ol2", bd("5"));
+      java.util.Date created = java.util.Date.from(java.time.Instant.parse("2026-11-05T09:12:33Z"));
+      when(probe.order.getCreationDate()).thenReturn(created);
+      String side = isSales ? "sales" : "purchase";
+
+      assertEquals(side, List.of(), ids(run(probe, "availableOrders", null).getBody()
+          .getJSONObject("response").getJSONArray("data")));
+
+      JSONArray rows = run(probe, "availableOrders", "{\"includeCovered\":true}").getBody()
+          .getJSONObject("response").getJSONArray("data");
+      assertEquals(side, List.of("o1"), ids(rows));
+      JSONObject covered = rows.getJSONObject(0);
+      assertEquals(side, 0, covered.getInt("pendingLines"));
+      assertEquals(side, 0, BigDecimal.ZERO.compareTo(new BigDecimal(covered.getString("amount"))));
+      assertFalse(side + ": no detail, no creationDate", covered.has("creationDate"));
+
+      JSONObject detailed = run(probe, "availableOrders",
+          "{\"includeCovered\":true,\"detail\":true}").getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      assertEquals(side, "2026-11-05T09:12:33Z", detailed.getString("creationDate"));
+    }
   }
 
   /**
@@ -1547,29 +1750,74 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5828: with includeCovered a sales invoice also gets the lines with nothing left, at 0 —
-   * the popup greys them out and so reads every line from this one call. A purchase invoice
-   * ignores the flag.
+   * ETP-5828 (sales) and ETP-6099 (purchase too): with includeCovered the invoice also gets the
+   * lines with nothing left, at 0 — the popup greys them out and so reads every line it shows from
+   * this one call. Without it they stay out. A non-boolean includeCovered / detail is a 400
+   * importInvalidParameter on both directions.
    */
   @Test
-  public void availableOrderLines_includeCovered_addsTheCoveredLinesAtZero_onSalesOnly()
+  public void availableOrderLines_includeCovered_addsTheCoveredLinesAtZero_onBothDirections()
       throws Exception {
     String withFlag = "{\"orderId\":\"o1\",\"includeCovered\":true}";
-    Probe sales = salesScenario();
-    sales.drafts.put("ol2", bd("5"));
+    for (boolean isSales : new boolean[] { true, false }) {
+      Probe probe = isSales ? salesScenario() : scenario();
+      probe.drafts.put("ol2", bd("5"));
+      String side = isSales ? "sales" : "purchase";
 
-    JSONArray rows = run(sales, "availableOrderLines", withFlag).getBody()
-        .getJSONObject("response").getJSONArray("data");
-    assertEquals(List.of("ol1", "ol2"), ids(rows));
-    assertEquals(0, rows.getJSONObject(1).getInt("pendingQuantity"));
-    assertEquals("Pan", rows.getJSONObject(1).getString("product$_identifier"));
-    assertEquals(List.of("ol1"), ids(run(sales, "availableOrderLines", "{\"orderId\":\"o1\"}")
-        .getBody().getJSONObject("response").getJSONArray("data")));
+      JSONArray rows = run(probe, "availableOrderLines", withFlag).getBody()
+          .getJSONObject("response").getJSONArray("data");
+      assertEquals(side, List.of("ol1", "ol2"), ids(rows));
+      assertEquals(side, 0, rows.getJSONObject(1).getInt("pendingQuantity"));
+      assertEquals(side, "Pan", rows.getJSONObject(1).getString("product$_identifier"));
+      assertEquals(side, List.of("ol1"), ids(run(probe, "availableOrderLines",
+          "{\"orderId\":\"o1\"}").getBody().getJSONObject("response").getJSONArray("data")));
+      // The listing flags go through ImportListing on both directions: a non-boolean is a 400
+      // importInvalidParameter (only importOrderLines' own flags answer importInvalidLine).
+      for (String bad : new String[] { "\"includeCovered\":\"yes\"", "\"detail\":1" }) {
+        NeoResponse refused = run(probe, "availableOrderLines", "{\"orderId\":\"o1\"," + bad + "}");
+        assertEquals(side + " " + bad, 400, refused.getHttpStatus());
+        assertEquals(side + " " + bad, "importInvalidParameter", errorCode(refused));
+      }
+    }
+  }
 
-    Probe purchase = scenario();
-    purchase.drafts.put("ol2", bd("5"));
-    assertEquals(List.of("ol1"), ids(run(purchase, "availableOrderLines", withFlag).getBody()
-        .getJSONObject("response").getJSONArray("data")));
+  /**
+   * ETP-6099: detail adds what the purchase popup's client-side import body needs (list / gross
+   * price, tax, description, ordered and invoiced quantities), JSON null where the line has none;
+   * without detail the row keeps exactly its ETP-5828 keys.
+   */
+  @Test
+  public void availableOrderLines_detail_addsTheLineKeys_onlyWhenAsked() throws Exception {
+    Probe probe = scenario();
+    pricedLines(probe);
+    OrderLine agua = probe.lineById.get("ol1");
+    org.openbravo.model.financialmgmt.tax.TaxRate tax =
+        mock(org.openbravo.model.financialmgmt.tax.TaxRate.class);
+    when(tax.getId()).thenReturn("t1");
+    when(agua.getListPrice()).thenReturn(bd("50"));
+    when(agua.getTax()).thenReturn(tax);
+    when(agua.getDescription()).thenReturn("Botella");
+
+    JSONArray rows = run(probe, "availableOrderLines", "{\"orderId\":\"o1\",\"detail\":true}")
+        .getBody().getJSONObject("response").getJSONArray("data");
+    JSONObject first = rows.getJSONObject(0);
+    assertEquals(0, bd("50").compareTo(new BigDecimal(first.getString("listPrice"))));
+    assertTrue("no gross price on the line", first.isNull("grossUnitPrice"));
+    assertEquals("t1", first.getString("tax"));
+    assertEquals("Botella", first.getString("description"));
+    assertEquals(0, bd("10").compareTo(new BigDecimal(first.getString("orderedQuantity"))));
+    assertEquals(0, bd("2").compareTo(new BigDecimal(first.getString("invoicedQuantity"))));
+    JSONObject second = rows.getJSONObject(1);
+    assertTrue(second.isNull("tax"));
+    assertTrue(second.isNull("description"));
+
+    JSONObject plain = run(probe, "availableOrderLines", "{\"orderId\":\"o1\"}").getBody()
+        .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    for (String key : new String[] { "listPrice", "grossUnitPrice", "tax", "description",
+        "orderedQuantity", "invoicedQuantity" }) {
+      assertFalse(key + " only under detail", plain.has(key));
+    }
+    assertTrue(plain.has("unitPrice") && plain.has("discount") && plain.has("amount"));
   }
 
   /**
@@ -1690,5 +1938,222 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       assertTrue(statement, statement.trim().endsWith("order by il.id"));
     }
     assertEquals(2, hql.getAllValues().size());
+  }
+
+  // ── server basis: the lines already on THIS invoice (ETP-6099) ────────────
+
+  /** The rows of a server-basis availableOrders answer. */
+  private static JSONArray serverOrders(Probe probe, String body) throws Exception {
+    return run(probe, "availableOrders", body).getBody().getJSONObject("response")
+        .getJSONArray("data");
+  }
+
+  /**
+   * With detail, a pending line THIS invoice already holds is not selectable: it counts in neither
+   * pendingLines nor amount, on both directions (sales reads the drafts batched, purchase lazily).
+   */
+  @Test
+  public void availableOrders_detail_leavesOutTheLinesAlreadyOnThisInvoice() throws Exception {
+    for (boolean isSales : new boolean[] { true, false }) {
+      Probe probe = isSales ? salesScenario() : scenario();
+      pricedLines(probe);
+      probe.linesOnInvoice = Set.of("ol2");
+      probe.candidates = List.of(probe.order);
+      String side = isSales ? "sales" : "purchase";
+
+      JSONArray rows = serverOrders(probe, "{\"detail\":true}");
+
+      assertEquals(side, List.of("o1"), ids(rows));
+      JSONObject o1 = rows.getJSONObject(0);
+      assertEquals(side + ": Pan is on this invoice, only Agua is selectable", 1,
+          o1.getInt("pendingLines"));
+      assertEquals(side + ": 47.50 x 8, Pan's 20 x 5 left out", "380.00",
+          o1.get("amount").toString());
+      assertEquals(side, 1, probe.calls.stream().filter("linesOnInvoice"::equals).count());
+    }
+  }
+
+  /**
+   * With detail, an order whose every pending line is already on THIS invoice is out of the plain
+   * answer, and with includeCovered it is listed at pendingLines 0 and amount 0.
+   */
+  @Test
+  public void availableOrders_detail_anOrderEntirelyOnThisInvoice_onlyWithIncludeCovered()
+      throws Exception {
+    Probe probe = salesScenario();
+    pricedLines(probe);
+    probe.linesOnInvoice = Set.of("ol1", "ol2");
+    probe.candidates = List.of(probe.order);
+
+    assertEquals(List.of(), ids(serverOrders(probe, "{\"detail\":true}")));
+
+    JSONArray rows = serverOrders(probe, "{\"detail\":true,\"includeCovered\":true}");
+    assertEquals(List.of("o1"), ids(rows));
+    assertEquals(0, rows.getJSONObject(0).getInt("pendingLines"));
+    assertEquals(0, BigDecimal.ZERO.compareTo(
+        new BigDecimal(rows.getJSONObject(0).getString("amount"))));
+  }
+
+  /** Without detail the answer is the pre-ETP-6099 one: the invoice's own lines are not read. */
+  @Test
+  public void availableOrders_withoutDetail_countsEveryPendingLine_andReadsNoInvoiceLines()
+      throws Exception {
+    for (boolean isSales : new boolean[] { true, false }) {
+      Probe probe = isSales ? salesScenario() : scenario();
+      pricedLines(probe);
+      probe.linesOnInvoice = Set.of("ol2");
+      probe.candidates = List.of(probe.order);
+      String side = isSales ? "sales" : "purchase";
+
+      JSONObject o1 = serverOrders(probe, null).getJSONObject(0);
+
+      assertEquals(side, 2, o1.getInt("pendingLines"));
+      assertEquals(side + ": 47.50 x 8 + 20 x 5", "480.00", o1.get("amount").toString());
+      assertFalse(side, probe.calls.contains("linesOnInvoice"));
+    }
+  }
+
+  /**
+   * Server availableOrderLines with detail marks importedHere per line; a line on THIS invoice is
+   * still listed with its pending (the popup greys it out). Without detail the key is absent and
+   * the invoice's lines are not read.
+   */
+  @Test
+  public void availableOrderLines_detail_marksImportedHere_onlyWhenAsked() throws Exception {
+    for (boolean isSales : new boolean[] { true, false }) {
+      Probe probe = isSales ? salesScenario() : scenario();
+      probe.linesOnInvoice = Set.of("ol2");
+      String side = isSales ? "sales" : "purchase";
+
+      JSONArray rows = run(probe, "availableOrderLines", "{\"orderId\":\"o1\",\"detail\":true}")
+          .getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(side, List.of("ol1", "ol2"), ids(rows));
+      assertFalse(side, rows.getJSONObject(0).getBoolean("importedHere"));
+      assertTrue(side, rows.getJSONObject(1).getBoolean("importedHere"));
+      assertEquals(side + ": Pan keeps its pending", 5,
+          rows.getJSONObject(1).getInt("pendingQuantity"));
+
+      probe.calls.clear();
+      JSONArray plain = run(probe, "availableOrderLines", "{\"orderId\":\"o1\"}").getBody()
+          .getJSONObject("response").getJSONArray("data");
+      assertEquals(side, List.of("ol1", "ol2"), ids(plain));
+      assertFalse(side, plain.getJSONObject(0).has("importedHere"));
+      assertFalse(side, plain.getJSONObject(1).has("importedHere"));
+      assertFalse(side, probe.calls.contains("linesOnInvoice"));
+    }
+  }
+
+  /**
+   * selectableOnly: an empty set (no detail) or an empty pending hands the same map back; otherwise
+   * a copy without exactly the keys in the set, leaving the input untouched.
+   */
+  @Test
+  public void selectableOnly_removesOnlyTheLinesOnThisInvoice() {
+    Map<String, BigDecimal> pending = new LinkedHashMap<>();
+    pending.put("ol1", bd("8"));
+    pending.put("ol2", bd("5"));
+    Object[][] cases = {
+        { Set.of(), List.of("ol1", "ol2") },
+        { Set.of("ol2"), List.of("ol1") },
+        { Set.of("ol9"), List.of("ol1", "ol2") },
+        { Set.of("ol1", "ol2"), List.of() },
+    };
+    for (Object[] c : cases) {
+      @SuppressWarnings("unchecked")
+      Set<String> here = (Set<String>) c[0];
+
+      Map<String, BigDecimal> selectable =
+          ImportOrderLinesIntoInvoiceHandler.selectableOnly(pending, here);
+
+      assertEquals(here.toString(), c[1], new ArrayList<>(selectable.keySet()));
+      assertEquals(here + ": the input is untouched", List.of("ol1", "ol2"),
+          new ArrayList<>(pending.keySet()));
+    }
+    assertSame("no lines on the invoice: the same map", pending,
+        ImportOrderLinesIntoInvoiceHandler.selectableOnly(pending, Set.of()));
+    Map<String, BigDecimal> none = Map.of();
+    assertSame("nothing pending: the same map", none,
+        ImportOrderLinesIntoInvoiceHandler.selectableOnly(none, Set.of("ol1")));
+    assertEquals(0, bd("8").compareTo(
+        ImportOrderLinesIntoInvoiceHandler.selectableOnly(pending, Set.of("ol2")).get("ol1")));
+  }
+
+  // ── pendingBasis (ETP-6099 follow-up, classic removed by ETP-5828 QA MCP-2) ─────────
+
+  /** A purchase listing page as the purchase header's request would carry it. */
+  private static JSONObject purchasePage(Probe probe, String action, String body)
+      throws Exception {
+    return runWithPolicy(probe, action, body, PURCHASE_POLICY).getBody()
+        .getJSONObject("response");
+  }
+
+  /**
+   * Without pendingBasis, or with "server", the purchase listings answer the server rule (drafts
+   * deducted), the one the purchase popup, the sales popup and the MCP all list with.
+   */
+  @Test
+  public void serverPendingBasis_isTheDefault_onTheOrderActions() throws Exception {
+    for (String body : new String[] { "{\"orderId\":\"o1\"}",
+        "{\"orderId\":\"o1\",\"pendingBasis\":\"server\"}" }) {
+      Probe probe = scenario();
+      probe.drafts.put("ol1", bd("3"));
+      probe.candidates = List.of(probe.order);
+
+      JSONArray lines = purchasePage(probe, "availableOrderLines", body).getJSONArray("data");
+      assertEquals(body, 5, lines.getJSONObject(0).getInt("pendingQuantity"));
+      assertFalse(body, lines.getJSONObject(0).has("importedHere"));
+
+      JSONArray orders = purchasePage(probe, "availableOrders", body).getJSONArray("data");
+      assertEquals(body, List.of("o1"), ids(orders));
+      assertFalse(body, probe.calls.contains("linesOnInvoice"));
+    }
+  }
+
+  /**
+   * ETP-5828 QA MCP-2: the purchase popup lists with the server rule, so no order action offers
+   * "classic" any more, not even on the purchase header (the receipt listings still do): it is a
+   * 400 importInvalidParameter before anything runs, like on the sales header or an import.
+   */
+  @Test
+  public void classicPendingBasis_isNotOfferedByTheOrderActions_is400AndNothingRuns()
+      throws Exception {
+    Object[][] cases = {
+        { false, "availableOrders", PURCHASE_POLICY },
+        { false, "availableOrderLines", PURCHASE_POLICY },
+        { true, "availableOrders", SALES_POLICY },
+        { true, "availableOrderLines", SALES_POLICY },
+        { false, "importOrderLines", PURCHASE_POLICY },
+        { false, "availableOrders", RectificativeImportPolicy.NONE },
+        { false, "availableOrders", null },
+    };
+    for (Object[] c : cases) {
+      Probe probe = (Boolean) c[0] ? salesScenario() : scenario();
+      probe.candidates = List.of(probe.order);
+      String label = c[1] + " / " + c[2];
+
+      NeoResponse refused = runWithPolicy(probe, (String) c[1],
+          "{\"orderId\":\"o1\",\"pendingBasis\":\"classic\"}",
+          (RectificativeImportPolicy) c[2]);
+
+      assertEquals(label, 400, refused.getHttpStatus());
+      assertEquals(label, "importInvalidParameter", errorCode(refused));
+      assertEquals(label, List.of(), probe.calls);
+      assertNull(label, probe.lastScan);
+      assertTrue(label, probe.batches.isEmpty());
+    }
+  }
+
+  /** An unknown pendingBasis is a 400 too. */
+  @Test
+  public void anUnknownPendingBasis_is400() throws Exception {
+    Probe probe = scenario();
+    probe.candidates = List.of(probe.order);
+
+    NeoResponse refused = runWithPolicy(probe, "availableOrders",
+        "{\"pendingBasis\":\"Classic\"}", PURCHASE_POLICY);
+
+    assertEquals(400, refused.getHttpStatus());
+    assertEquals("importInvalidParameter", errorCode(refused));
+    assertNull(probe.lastScan);
   }
 }

@@ -108,7 +108,7 @@ public final class PaymentMethodSelectorSupport {
   private static final String SELECTOR_PARAM_LIMIT = "limit";
   private static final String SELECTOR_PARAM_OFFSET = "offset";
   private static final int SELECTOR_DEFAULT_LIMIT = 20;
-  private static final int SELECTOR_MAX_LIMIT = 100;
+  private static final int SELECTOR_MAX_LIMIT = 1000;
 
   private static final String SELECTOR_FIELD_ID = "id";
   private static final String SELECTOR_FIELD_LABEL = "label";

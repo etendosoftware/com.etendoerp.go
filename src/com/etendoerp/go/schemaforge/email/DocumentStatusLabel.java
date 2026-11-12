@@ -89,8 +89,10 @@ public final class DocumentStatusLabel {
     }
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
       Connection conn = OBDal.getInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(SQL)) {
         int index = 1;

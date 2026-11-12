@@ -84,8 +84,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * The handlers migrated to {@link NeoExtension} by ETP-5588: the financial-account, sales-invoice,
  * purchase-invoice and period-control headers, and the payment Reactivate/Confirm/Remove handler
  * split into one binding per entity, later joined by the goods-shipment and sales-quotation
- * headers and, with ETP-5581, by the two report specs of the bank reconciliation
- * ({@code bank-reconciliation}, {@code bank-statements}). Their rows carry no {@code Java_Qualifier}
+ * headers (and, with ETP-6099, the goods-receipt header) and, with ETP-5581, by the two report specs of the bank reconciliation
+ * ({@code bank-reconciliation}, {@code bank-statements}), and with ETP-6206 by the contacts
+ * {@code businessPartner} and {@code locationAddress} handlers. Their rows carry no {@code Java_Qualifier}
  * and the classes no {@code @Named}, so the annotation is the only binding. What can regress is the binding itself (a
  * wrong {@code (spec, entity)} pair, a {@code @Named} creeping back) and the resolution: every
  * channel and every entity-level reader must find the class with no qualifier to fall back on.
@@ -100,6 +101,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentInReactivateHandler
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
  * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
  * @covers com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler
  * @covers com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler
@@ -109,6 +111,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionEndpoint
+ * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  * @covers com.etendoerp.go.schemaforge.NeoRequestRouter
  * @covers com.etendoerp.go.schemaforge.util.NeoHandlerLookup
  * @covers com.etendoerp.go.schemaforge.util.NeoReportCallability
@@ -130,6 +133,7 @@ class NeoExtensionMigrationTest {
       new Binding(PaymentInReactivateHandler.class, "payment-in", "finPayment"),
       new Binding(PaymentOutReactivateHandler.class, "payment-out", "header"),
       new Binding(GoodsShipmentHeaderHandler.class, "goods-shipment", "goodsShipment"),
+      new Binding(GoodsReceiptHeaderHandler.class, "goods-receipt", "goodsReceipt"),
       new Binding(SalesQuotationHeaderHandler.class, "sales-quotation", "quotation"),
       new Binding(SiiConfigDeactivateHandler.class, "sii-config", "siiConfiguration"),
       new Binding(TbaiConfigSequenceHandler.class, "tbai-config", "header"),
@@ -138,7 +142,8 @@ class NeoExtensionMigrationTest {
       new Binding(ReconciliationHandler.class, "bank-reconciliation", "bank-reconciliation"),
       new Binding(BankStatementsHandler.class, "bank-statements", "bank-statements"),
       new Binding(BusinessPartnerHandler.class, "contacts", "businessPartner"),
-      // ETP-6148 (B1): the bank connection report spec, its row's qualifier removed.
+      new Binding(ContactsLocationAddressHandler.class, "contacts", "locationAddress"),
+      // ETP-6148 / ETP-6154: the bank connection report spec, its row's qualifier removed.
       new Binding(FinancialAccountBankConnectionHandler.class, "financial-account-bank-connection",
           "financial-account-bank-connection") };
 
@@ -238,9 +243,11 @@ class NeoExtensionMigrationTest {
     try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
       weld.when(WeldUtils::getStaticInstanceBeanManager).thenReturn(bm);
 
-      SFEntity qualified = entity("contacts", "contact", "contactHandler");
+      // ETP-6206: contacts/businessPartner and contacts/locationAddress migrated; the fixture is a
+      // pair still bound by qualifier.
+      SFEntity qualified = entity("contacts", "customerAccounting", "customerAccountingHandler");
       assertSame(legacy, NeoHandlerLookup.forEntity(qualified,
-          q -> "contactHandler".equals(q) ? legacy : null));
+          q -> "customerAccountingHandler".equals(q) ? legacy : null));
       assertTrue(NeoHandlerLookup.hasCustomization(qualified));
 
       SFEntity plain = entity("contacts", "bp-trend", null);

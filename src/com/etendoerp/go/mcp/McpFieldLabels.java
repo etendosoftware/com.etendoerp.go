@@ -164,8 +164,10 @@ final class McpFieldLabels {
     }
     boolean adminMode = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminMode = true;
+      OBContext.setAdminMode(true);
       OBCriteria<FieldTrl> crit = OBDal.getInstance().createCriteria(FieldTrl.class);
       crit.add(Restrictions.in(FieldTrl.PROPERTY_FIELD + ".id", fieldIds));
       crit.add(Restrictions.eq(FieldTrl.PROPERTY_LANGUAGE + ".language", langCode));
