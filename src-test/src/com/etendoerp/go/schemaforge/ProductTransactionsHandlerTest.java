@@ -75,6 +75,7 @@ import org.openbravo.dal.service.OBDal;
  *
  * @covers com.etendoerp.go.schemaforge.ProductTransactionsHandler
  * @covers com.etendoerp.go.schemaforge.ProductMovementTypeOrder
+ * @covers com.etendoerp.go.schemaforge.ProductMovementTotals
  */
 class ProductTransactionsHandlerTest {
 
@@ -1616,5 +1617,123 @@ class ProductTransactionsHandlerTest {
     NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
     assertNull(HANDLER.orderedPage(productCtx(null), set, 0, 50));
     verify(set, never()).count();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Whole-set "Total del periodo" (response.totals), opt-in by etgoTotals=true
+  // ---------------------------------------------------------------------------
+
+  /** Runs afterHandle over an empty page with the aggregate mocked to {@code groupedRows} (null: no query, as MCP). */
+  private JSONObject totalsFor(Map<String, String> params, List<Object[]> groupedRows, boolean flagOn,
+      JSONArray page) throws Exception {
+    policy.when(ProductMovementsPolicy::isEnabled).thenReturn(flagOn);
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    when(set.groupBy(anyString(), anyString())).thenReturn(groupedRows);
+    try (MockedStatic<NeoListAggregateQuery> agg = Mockito.mockStatic(NeoListAggregateQuery.class)) {
+      agg.when(() -> NeoListAggregateQuery.of(Mockito.any())).thenReturn(groupedRows == null ? null : set);
+      NeoContext ctx = productCtx(params);
+      ctx.setPreviousResult(NeoResponse.ok(wrapData(page)));
+      NeoResponse out = HANDLER.afterHandle(ctx);
+      return out == null ? null : out.getBody().getJSONObject("response");
+    }
+  }
+
+  /** Opt-in on, flag on: net sum and count of the whole set sit at response.totals. */
+  @Test
+  void totals_optIn_carriesNetQuantityAndCount() throws Exception {
+    List<Object[]> grouped = Collections.singletonList(new Object[] { new BigDecimal("-12.5"), 87L });
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    when(set.groupBy(anyString(), anyString())).thenReturn(grouped);
+    JSONObject response;
+    try (MockedStatic<NeoListAggregateQuery> agg = Mockito.mockStatic(NeoListAggregateQuery.class)) {
+      agg.when(() -> NeoListAggregateQuery.of(Mockito.any())).thenReturn(set);
+      NeoContext ctx = productCtx(Map.of("etgoTotals", "true"));
+      ctx.setPreviousResult(NeoResponse.ok(wrapData(new JSONArray())));
+      response = HANDLER.afterHandle(ctx).getBody().getJSONObject("response");
+    }
+    // The exact server constants, and nothing else asked of the filtered set: no ordering, no paging, no count.
+    verify(set).groupBy("sum(e.movementQuantity), count(e.id)", "e.client.id");
+    Mockito.verifyNoMoreInteractions(set);
+
+    JSONObject totals = response.getJSONObject("totals");
+    assertEquals(0, new BigDecimal("-12.5").compareTo(new BigDecimal(totals.get("netQuantity").toString())));
+    assertEquals(87L, totals.getLong("count"));
+  }
+
+  /** Without the parameter (or with another value) nothing is aggregated and the page is untouched. */
+  @Test
+  void totals_withoutOptIn_areAbsent() throws Exception {
+    List<Object[]> grouped = Collections.singletonList(new Object[] { BigDecimal.ONE, 1L });
+    assertNull(totalsFor(Map.of("parentId", "P1"), grouped, true, new JSONArray()));
+    assertNull(totalsFor(Map.of("etgoTotals", "false"), grouped, true, new JSONArray()));
+  }
+
+  /** Flag off: no totals even when asked, the old behavior. */
+  @Test
+  void totals_flagOff_areAbsent() throws Exception {
+    List<Object[]> grouped = Collections.singletonList(new Object[] { BigDecimal.ONE, 1L });
+    assertNull(totalsFor(Map.of("etgoTotals", "true"), grouped, false, new JSONArray()));
+  }
+
+  /** MCP lists never remember an aggregate query: of() is null, so the response carries no totals. */
+  @Test
+  void totals_mcp_noAggregateQuery_areAbsent() throws Exception {
+    assertNull(totalsFor(Map.of("etgoTotals", "true"), null, true, new JSONArray()));
+  }
+
+  /** The Warehouse window shares the handler and is unchanged: no totals, the aggregate is never built. */
+  @Test
+  void totals_warehouseSpec_areAbsent() throws Exception {
+    try (MockedStatic<NeoListAggregateQuery> agg = Mockito.mockStatic(NeoListAggregateQuery.class)) {
+      NeoContext ctx = NeoContext.builder().specName("warehouse").entityName("productTransactions")
+          .httpMethod("GET").endpointType(NeoEndpointType.CRUD).queryParams(Map.of("etgoTotals", "true")).build();
+      ctx.setPreviousResult(NeoResponse.ok(wrapData(new JSONArray())));
+      assertNull(HANDLER.afterHandle(ctx));
+      agg.verifyNoInteractions();
+    }
+  }
+
+  /** An empty filtered set (no grouped row) is 0 / 0, also for an empty page. */
+  @Test
+  void totals_emptySet_isZeroAndZero() throws Exception {
+    JSONObject totals = totalsFor(Map.of("etgoTotals", "true"), Collections.emptyList(), true, new JSONArray())
+        .getJSONObject("totals");
+    assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(totals.get("netQuantity").toString())));
+    assertEquals(0L, totals.getLong("count"));
+  }
+
+  /** A null sum (every quantity null) and several groups fold null-safely. */
+  @Test
+  void totals_nullSumAndManyGroups_foldNullSafe() throws Exception {
+    JSONObject totals = ProductMovementTotals.fold(
+        Arrays.asList(new Object[] { null, 2L }, new Object[] { new BigDecimal("5"), 3L },
+            new Object[] { new BigDecimal("-2"), null }));
+    assertEquals(0, new BigDecimal("3").compareTo(new BigDecimal(totals.get("netQuantity").toString())));
+    assertEquals(5L, totals.getLong("count"));
+  }
+
+  /** A failing aggregate never costs the list: it is returned without totals. */
+  @Test
+  void totals_aggregateFailure_listStaysWithoutTotals() throws Exception {
+    policy.when(ProductMovementsPolicy::isEnabled).thenReturn(true);
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    when(set.groupBy(anyString(), anyString())).thenThrow(new IllegalStateException("boom"));
+    try (MockedStatic<NeoListAggregateQuery> agg = Mockito.mockStatic(NeoListAggregateQuery.class)) {
+      agg.when(() -> NeoListAggregateQuery.of(Mockito.any())).thenReturn(set);
+      NeoContext ctx = productCtx(Map.of("etgoTotals", "true"));
+      ctx.setPreviousResult(NeoResponse.ok(wrapData(new JSONArray())));
+      assertNull(HANDLER.afterHandle(ctx));
+    }
+  }
+
+  /** The aggregate asks for sum and count over server constants, and the ordered-page hook is unaffected by it. */
+  @Test
+  void totals_doNotInterfereWithOrderedPage() {
+    NeoListAggregateQuery set = mock(NeoListAggregateQuery.class);
+    when(set.orderedIds(anyString(), eq(0), eq(50))).thenReturn(List.of("A"));
+    when(set.count()).thenReturn(1);
+    NeoContext ctx = productCtx(Map.of("etgoTotals", "true", "_sortBy", "etgoDocKind,-id", "typeLabelOrder", ES_ORDER));
+    assertNotNull(HANDLER.orderedPage(ctx, set, 0, 50));
+    verify(set, never()).groupBy(anyString(), anyString());
   }
 }

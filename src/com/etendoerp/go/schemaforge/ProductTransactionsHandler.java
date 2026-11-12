@@ -82,6 +82,10 @@ import org.openbravo.dal.service.OBDal;
  * <p>All of that is behind {@link ProductMovementsPolicy} (the {@code product-movements-tab} flag,
  * evaluated per account): off, the handler adds the document fields only, exactly as before ETP-5889.
  *
+ * <p>The tab's "Total del periodo" row is the whole filtered set, not the loaded page: with
+ * {@code etgoTotals=true} the list response also carries {@code response.totals}
+ * ({@link ProductMovementTotals}), computed last by one aggregate query over the list's own filters.
+ *
  * <p>The stock only counts what the user can read: the native query filters by the readable
  * organizations of the session, which a native query would otherwise bypass.
  *
@@ -160,31 +164,44 @@ public class ProductTransactionsHandler implements NeoHandler {
   public NeoResponse afterHandle(NeoContext context) {
     // ProductMovementsPolicy.isEnabled() is evaluated once here and once in orderedPage: a flag flipped
     // between the two calls could yield a request that is ordered but not enriched (accepted, cosmetic).
+    NeoResponse previousResult = context.getPreviousResult();
+    if (previousResult == null) {
+      return null;
+    }
+    boolean enriched;
     try {
-      NeoResponse previousResult = context.getPreviousResult();
-      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
-      if (dataArr == null || previousResult == null) {
-        return null;
-      }
-      List<String> txIds = NeoHandlerUtils.collectIds(dataArr);
-      if (txIds.isEmpty()) {
-        return null;
-      }
-      Map<String, String[]> targets = resolveDocumentTargets(txIds);
-      // The extra work of the Product "Movements" tab (ETP-5889) runs only for the Product window and
-      // only for an account the flag is on for: the Warehouse window shares this handler and has no use
-      // for it, and an account that is off must not pay for it on the requests the side panel makes.
-      boolean movementsTab = isMovementsTab(context);
-      Map<String, MovementPoint> points = movementsTab
-          ? resolveStockAfter(txIds, isFilteredByWarehouse(context)) : new HashMap<>();
-      for (int i = 0; i < dataArr.length(); i++) {
-        enrichRow(dataArr.getJSONObject(i), targets, points);
-      }
-      return NeoResponse.ok(previousResult.getBody());
+      enriched = enrichPage(context);
     } catch (Exception e) {
       log.error("Error enriching product transactions with document targets", e);
-      return context.getPreviousResult();
+      return previousResult;
     }
+    // Last: a failed aggregate aborts the PG transaction, so nothing may query after it. It also runs
+    // for an empty page (whole-set total 0 / count 0), which enrichPage leaves untouched.
+    boolean totals = isMovementsTab(context) && ProductMovementTotals.injectInto(context, previousResult.getBody());
+    return enriched || totals ? NeoResponse.ok(previousResult.getBody()) : null;
+  }
+
+  /** Adds the document fields (and, on the Movements tab, stock and time) to the rows; false when none. */
+  private boolean enrichPage(NeoContext context) throws Exception {
+    JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+    if (dataArr == null) {
+      return false;
+    }
+    List<String> txIds = NeoHandlerUtils.collectIds(dataArr);
+    if (txIds.isEmpty()) {
+      return false;
+    }
+    Map<String, String[]> targets = resolveDocumentTargets(txIds);
+    // The extra work of the Product "Movements" tab (ETP-5889) runs only for the Product window and
+    // only for an account the flag is on for: the Warehouse window shares this handler and has no use
+    // for it, and an account that is off must not pay for it on the requests the side panel makes.
+    boolean movementsTab = isMovementsTab(context);
+    Map<String, MovementPoint> points = movementsTab
+        ? resolveStockAfter(txIds, isFilteredByWarehouse(context)) : new HashMap<>();
+    for (int i = 0; i < dataArr.length(); i++) {
+      enrichRow(dataArr.getJSONObject(i), targets, points);
+    }
+    return true;
   }
 
   /**

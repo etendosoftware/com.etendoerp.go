@@ -5322,6 +5322,11 @@ this fix.
 > `etgoDocKind`; MCP `etendo_list` never goes through `handleDefault`, ignores the parameter, and
 > keeps ordering by the stored `etgoDocKind` code. Nothing in an MCP response says so.
 
+> **Product Movements "Total del periodo" is REST only (ETP-5908).** `etgoTotals=true` on the REST
+> list of `product/transactions` adds `response.totals` (§5.3.4.b); MCP `etendo_list` never goes
+> through `handleDefault`, so `NeoListAggregateQuery.of` is null there and its response carries no
+> `totals`. Nothing in an MCP response says so.
+
 > **Public API usage is counted on REST only (ETP-6057).** A request made with a public API key's
 > token is counted (`publicapi.request`, [`public-api-usage.md`](public-api-usage.md)) on
 > `/sws/neo/*`, the batch route included (one request per operation), because that is the public API
@@ -8385,6 +8390,33 @@ cases; change the rule in both code and both tests together. The SPA computes `t
 the translated labels of the active language (`localeCompare`), so the order follows the user's
 locale; the server never reads `Accept-Language` for it. Against a backend without this change the
 parameter is ignored and the list keeps the stored-code order.
+
+#### 5.3.4.b Whole-set "Total del periodo" of the Movements tab (ETP-5908)
+
+`ProductTransactionsHandler.afterHandle` (the `product/transactions` binding only, behind the
+`product-movements-tab` flag) adds the net signed quantity and the record count of the WHOLE filtered
+set, not of the loaded page. Opt-in: request parameter `etgoTotals=true` on a list GET (the SPA sends
+it on page 0 only; the `_endRow=0` probe and every other caller pay nothing).
+
+```json
+{ "response": { "data": [ ... ], "totals": { "netQuantity": -12.5, "count": 87 } } }
+```
+
+Path: `response.totals.netQuantity` (sum of `movementQuantity` as stored, so returns and consumptions
+already carry their sign; `0` for an empty set) and `response.totals.count` (integer, `0` when
+empty). One grouped HQL query through `NeoListAggregateQuery` (`sum(e.movementQuantity),
+count(e.id)` grouped by client), so it applies exactly the list's criteria (period, warehouse,
+direction) and is independent of `_startRow`/`_endRow` and of `typeLabelOrder`. It is computed last
+in `afterHandle`, also for an empty page. Flag off, other spec (`warehouse/productTransactions` shares
+the handler and is unchanged), no parameter, or an MCP list: no `totals` key. A failed aggregate is
+logged and the list is returned without `totals`. The `totals` key name is this tab's own; the other
+list aggregates use `listTotals` (documents) and `summary` (payments).
+
+Invariant, traced (REST list GET): `afterHandle` runs after the read; the only code after it is
+`NeoAuditTokenRefresh.refreshInResponse` (no DB access for a list: it acts on writes and single reads),
+the in-memory public API counter and the request filter's commit, which an aborted read-only
+transaction survives (nothing dirty to flush). So a failed aggregate cannot break the response or later
+writes; no rollback is needed and none must be added. Keep the totals the last DB access in `afterHandle`.
 
 #### 5.3.5 Payment terms — days validation, duplicates and days-only create (`PaymentTermHandler`, ETP-5826)
 
