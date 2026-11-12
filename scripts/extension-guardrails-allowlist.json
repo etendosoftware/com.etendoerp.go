@@ -26,7 +26,6 @@
     "DocumentActionHandler",
     "FactAcctHandler",
     "FinancialAccountAccountingHandler",
-    "FinancialAccountBankConnectionHandler",
     "FinancialAccountTransactionsHandler",
     "FinancialAccountsPageHandler",
     "GeneralLedgerConfigurationHandler",

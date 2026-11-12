@@ -163,8 +163,10 @@ final class RectificativeImportGate {
     }
     boolean admin = false;
     try {
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       admin = true;
+      OBContext.setAdminMode(true);
       Invoice invoice = OBDal.getInstance().get(Invoice.class, id);
       boolean own = invoice != null && invoice.getClient() != null && invoice.getClient().getId()
           .equals(OBContext.getOBContext().getCurrentClient().getId());

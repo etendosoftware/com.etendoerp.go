@@ -41,7 +41,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
  * {@link BankStatementsHandler}'s own create/process/reactivate flows and from
  * {@link BankStatementLineAggregateHandler} whenever a LINE changes. A statement
  * imported through the PSD2 bank-connection sync
- * ({@code SaltEdgeAccountLinkHelper#fetchAccountTransactions}, in the external
+ * ({@code AccountTransactionsSync#fetchAccountTransactions}, in the external
  * {@code com.etendoerp.psd2} module) is created — and its lines inserted — through
  * a path that never calls into this module's handlers at all: the line-level
  * observer above DOES still fire for each inserted line (so line/matched counts
