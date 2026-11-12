@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -45,12 +46,18 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * {@link FinancialAccountTransactionsEndpointTest}: that class stubs the transactions spec, so the
  * bank connection spec and message need their own fixture.
  *
+ * <p>Since ETP-6154 {@link FinancialAccountBankConnectionHandler} is bound by
+ * {@code @NeoExtension(spec, entity)} only: the spec's {@code ETGO_SF_ENTITY} row carries no
+ * {@code Java_Qualifier}, so the resolved qualifier is {@code null} and the dispatch must go by
+ * spec + entity.</p>
+ *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionEndpoint
  */
 @DisplayName("FinancialAccountBankConnectionEndpoint")
 class FinancialAccountBankConnectionEndpointTest {
 
-  private static final String QUALIFIER = "financial-account-bank-connection";
+  /** What production resolves now that the handler is {@code @NeoExtension}-only (ETP-6154). */
+  private static final String NO_QUALIFIER = null;
 
   private MockedStatic<NeoServletSupport> supportMock;
   private MockedStatic<NeoReportCallability> callabilityMock;
@@ -69,7 +76,7 @@ class FinancialAccountBankConnectionEndpointTest {
         .thenReturn(spec);
     callabilityMock = mockStatic(NeoReportCallability.class);
     callabilityMock.when(() -> NeoReportCallability.resolveReportHandlerQualifier(spec))
-        .thenReturn(QUALIFIER);
+        .thenReturn(NO_QUALIFIER);
     refreshMock = mockStatic(NeoAuditTokenRefresh.class);
     handler = mock(NeoHandler.class);
     dispatchMock = mockStatic(NeoExtensionDispatcher.class);
@@ -102,7 +109,7 @@ class FinancialAccountBankConnectionEndpointTest {
   }
 
   @Test
-  @DisplayName("an MCP call runs the resolved qualifier's hooks on the MCP channel")
+  @DisplayName("an MCP call dispatches by spec + entity, with no qualifier, on the MCP channel")
   void mcpOriginUsesTheMcpChannel() throws Exception {
     pre = NeoResponse.ok(new JSONObject().put("ran", true));
     NeoContext ctx = context(true);
@@ -111,7 +118,9 @@ class FinancialAccountBankConnectionEndpointTest {
 
     assertSame(pre, result);
     assertEquals(2, dispatched.size(), "pre and post phases");
-    assertEquals(QUALIFIER, dispatched.get(0).qualifier());
+    assertNull(dispatched.get(0).qualifier(), "the @NeoExtension binding needs no qualifier");
+    assertEquals(FinancialAccountBankConnectionEndpoint.SPEC, dispatched.get(0).specName());
+    assertEquals(FinancialAccountBankConnectionEndpoint.SPEC, dispatched.get(0).entityName());
     assertEquals(NeoExtensionChannel.MCP, dispatched.get(0).channel());
     assertSame(ctx, dispatched.get(0).context());
     assertEquals(NeoExtensionRequest.Phase.POST, dispatched.get(1).phase());
