@@ -370,6 +370,17 @@ allowed sub-type), is left untouched. The defaults and create cascades run their
 the same method, so they get the same filtering before `reapplyDocTypeFromTabFilter` runs; their
 result is unchanged.
 
+Each column is checked only when the table has it, through the non-throwing
+`Entity#getPropertyByColumnName(column, false)`. A table that carries only `C_DocType_ID`
+(`M_InOut`) is checked on that column alone. The first version used the one-argument lookup,
+which throws `CheckException` for the missing `C_DocTypeTarget_ID`; the exception was caught and
+the guard did nothing on `M_InOut` (QA round 1, CP-9/CP-15). On a Return Material Receipt
+(`documentType.return=true`) picking the customer switched the doc type to the shipment one and
+the number preview to the shipment sequence, in the form and in `etendo_defaults` with a
+`recordContext.businessPartner`. `reapplyDocTypeFromTabFilter` does not cover that table either:
+it only acts when the table has `C_DocTypeTarget_ID`. The callout guard is what keeps the return
+doc type there.
+
 **Placeholders and the entity's pre-hook (ETP-5680).** On `etendo_create` the defaults pass runs
 *before* the entity's pre-hook, on a different `NeoContext`; `McpHookExecutor#forwardFallbackDefaults`
 copies the recorded placeholder keys onto the pre-hook's context, so a customization can tell a
