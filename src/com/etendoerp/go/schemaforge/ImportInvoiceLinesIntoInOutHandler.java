@@ -166,8 +166,11 @@ public class ImportInvoiceLinesIntoInOutHandler extends AbstractLineImportHandle
         : " Invoices with a negative grand total are never listed.";
     String flow = " Flow: on a DRAFT " + doc + ", " + ACTION_AVAILABLE_INVOICES + ", then "
         + ACTION_AVAILABLE_LINES + "; the lines are then created on the " + doc + " lines (each "
-        + "with the invoice line in invoiceLineId), as the window's import popup does. Read-only: "
-        + "nothing is written by these two actions.";
+        + "with the invoice line in invoiceLineId"
+        + (sales ? "; the line's salesOrderLine is then taken from that invoice line, never a "
+            + "quotation's" : "")
+        + "), as the window's import popup does. Read-only: nothing is written by these two "
+        + "actions.";
     String on = DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.";
     String pendingRule = sales
         ? "pendingQuantity is the invoiced quantity minus what the " + doc + " lines linked to "

@@ -13290,7 +13290,14 @@ create is a create directive of `GoodsShipmentLineHandler` (`NeoHandler#createDi
 `unknownFields`, and `etendo_schema(view:"create")` publishes it. After the create the line is linked with
 `InvoiceLineLinker.linkInvoiceLineToInOutLine(…, SALES)`: the first shipment of the invoice line in its column (the
 match row is written by `M_INOUT_POST` on completion), a later partial one in `M_MatchSI` at once (before, a second
-partial shipment was not linked at all). Same on REST single, `/batch` and MCP. The goods-receipt line keeps the
+partial shipment was not linked at all). Same on REST single, `/batch` and MCP. **QA BUG-1 (MCP parity):** a create
+that carries `invoiceLineId` and no `salesOrderLine` takes the invoice line's `C_OrderLine_ID` in the pre-hook
+(`GoodsShipmentLineHandler#deriveOrderLineFromInvoiceLine`), never a quotation's (`SalesQuotations`, CP-14), only for
+an invoice line of the caller's client (`TenantOwnership.loadOwned`); a `salesOrderLine` the caller sent is kept. The
+window always sent it; MCP agents are never offered it (system field, not in `view:"create"`), so their lines carried no
+order line: the order stayed undelivered and `availableOrderLines` offered the units again. The `invoiceLineId`
+directive and the `availableInvoiceLines` flow text say so. It does not double-count the invoice's pending: the
+follow-up rule takes `min(invoiced − moved by the link, QtyOrdered − QtyDelivered − drafts)`, never their sum. The goods-receipt line keeps the
 column-only link (`AbstractInOutLineHandler#linkInvoiceLine`, unchanged). Binding: `GoodsShipmentLineHandler` moved from
 `@Named("goodsShipmentLineHandler")` + the row's `JAVA_QUALIFIER` to `@NeoExtension(spec = "goods-shipment", entity =
 "goodsShipmentLine")` (touch-means-migrate, §5.3.a): qualifier removed from `ETGO_SF_ENTITY.xml`, `EXTENSION_CEILING`

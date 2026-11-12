@@ -21,7 +21,9 @@ import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.OrderLine;
 
 /**
@@ -29,8 +31,8 @@ import org.openbravo.model.common.order.OrderLine;
  *
  * <p>Order/invoice qty + product-code enrichment, the storageBin default-locator pre-hook
  * (ETP-4863) and the stock-derived {@code movementQuantity} strip (ETP-5062) are identical to
- * {@link GoodsReceiptLineHandler}'s and live in the shared {@link AbstractInOutLineHandler}. What is
- * the shipment line's own (ETP-6002 CP-22):
+ * {@link GoodsReceiptLineHandler}'s and live in the shared {@link AbstractInOutLineHandler}. What
+ * is the shipment line's own (ETP-6002 CP-22):
  * <ul>
  *   <li>{@link #createDirectives()} declares {@code invoiceLineId}, so an MCP create carrying it is
  *       not reported in {@code unknownFields} while the link it asks for is written.</li>
@@ -48,6 +50,9 @@ import org.openbravo.model.common.order.OrderLine;
  *       marked the quotation delivered and listed it on the shipment, though the shipment relates
  *       to the invoice only. A line of a real sales order is kept (order and shipment are
  *       related).</li>
+ *   <li>{@link #deriveOrderLineFromInvoiceLine} sets {@code salesOrderLine} from the
+ *       {@code invoiceLineId} of a create that sends none (QA BUG-1): the MCP is never offered
+ *       that system field, so its lines got no order line while the window's did.</li>
  * </ul>
  *
  * <p><b>Binding (ETP-6002).</b> {@link NeoExtension} on every channel; the row's
@@ -69,13 +74,58 @@ public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     dropQuotationOrderLine(context);
+    deriveOrderLineFromInvoiceLine(context);
     return super.handle(context);
   }
 
   /**
+   * ETP-6002 (QA BUG-1, MCP parity): on a create carrying {@code invoiceLineId} and no
+   * {@code salesOrderLine}, takes the order line from that invoice line, as the window's
+   * «Añadir desde Factura» popup sends it. Over MCP {@code salesOrderLine} is a system field the
+   * agent is never offered, so without this a shipment line made from an invoice of a regular
+   * sales order carried no order line: the order's delivered quantity stayed at 0, the shipment
+   * listed no order and {@code availableOrderLines} offered the units again. A QUOTATION line is
+   * never taken ({@link SalesQuotations#isQuotationLine}, CP-14); an invoice line that is not the
+   * caller's own is ignored (the link code ignores it too); a {@code salesOrderLine} the caller
+   * sent is kept. Same on REST single, {@code /batch} and MCP, which all run this pre-hook.
+   */
+  static void deriveOrderLineFromInvoiceLine(NeoContext context) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType())
+        || !"POST".equalsIgnoreCase(context.getHttpMethod())) {
+      return;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null || hasValue(body, FIELD_SALES_ORDER_LINE)
+        || !hasValue(body, FIELD_INVOICE_LINE_ID)) {
+      return;
+    }
+    InvoiceLine invoiceLine = TenantOwnership.loadOwned(InvoiceLine.class,
+        body.optString(FIELD_INVOICE_LINE_ID, null));
+    OrderLine orderLine = invoiceLine == null ? null : invoiceLine.getSalesOrderLine();
+    if (orderLine == null || SalesQuotations.isQuotationLine(orderLine)) {
+      return;
+    }
+    try {
+      body.put(FIELD_SALES_ORDER_LINE, orderLine.getId());
+    } catch (JSONException e) {
+      log.warn("Could not take the order line of invoice line {}: {}",
+          body.optString(FIELD_INVOICE_LINE_ID, null), e.getMessage());
+    }
+  }
+
+  /** Whether {@code body} carries a non-blank, non-null value under {@code key}. */
+  private static boolean hasValue(JSONObject body, String key) {
+    if (!body.has(key) || body.isNull(key)) {
+      return false;
+    }
+    String value = body.optString(key, null);
+    return value != null && !value.trim().isEmpty();
+  }
+
+  /**
    * Removes {@code salesOrderLine} from a CRUD write body when it names a line of a sales
-   * quotation (ETP-6002 CP-14): no shipment delivers a quotation. Same on REST single, {@code /batch}
-   * and MCP, which all run this pre-hook; the window keeps sending it and is corrected here. An
+   * quotation (ETP-6002 CP-14): no shipment delivers a quotation. Same on REST single,
+   * {@code /batch} and MCP, which all run this pre-hook; the window keeps sending it and is corrected here. An
    * order line that is not the caller's own is left alone (the write path refuses it).
    */
   static void dropQuotationOrderLine(NeoContext context) {
@@ -108,7 +158,9 @@ public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
         "Optional. The id of the sales invoice line this shipment line ships (from "
             + "availableInvoiceLines). Links the new line to that invoice line, so the invoice "
             + "line's pending quantity drops by what this line moves and a fully shipped invoice "
-            + "is no longer offered. An id that is not one of your invoice lines is ignored. "
+            + "is no longer offered. The shipment line also takes that invoice line's sales "
+            + "order line (salesOrderLine is set for you, never a quotation's), so the order "
+            + "counts the delivery too. An id that is not one of your invoice lines is ignored. "
             + "Create only.");
   }
 
