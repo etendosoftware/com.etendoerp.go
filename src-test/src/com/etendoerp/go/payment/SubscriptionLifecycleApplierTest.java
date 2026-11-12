@@ -36,6 +36,17 @@ public class SubscriptionLifecycleApplierTest {
   }
 
   @Test
+  public void freeSecondMonthInvoiceKeepsAccessAndAdvancesCalendarPeriod() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("invoice.paid", event(
+        "{\"data\":{\"object\":{\"subscription\":\"sub_gift\",\"amount_paid\":0,"
+            + "\"lines\":{\"data\":[{\"period\":{\"start\":1740700800,\"end\":1743379200}}]}}}}"));
+    assertTrue(outcome.isApplied());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, outcome.status());
+    assertEquals(Instant.ofEpochSecond(1743379200L), outcome.periodEnd());
+    assertEquals(null, outcome.dueAt());
+  }
+
+  @Test
   public void paymentFailedAnchorsOnThePaidPeriodEnd() throws Exception {
     // period_end 2026-11-04T00:00:00Z = 1793750400
     SubscriptionEventOutcome outcome = applier.evaluate("invoice.payment_failed",

@@ -5,6 +5,9 @@
 # el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=plataforma [-Pkind=mock|integration|all]
 
 # --- con mocks (617)
+com.etendoerp.go.payment.CheckoutPromotionTermsTest
+com.etendoerp.go.payment.MonthlySecondMonthPromotionServiceTest
+com.etendoerp.go.payment.PromotionRecoveryTest
 com.etendoerp.go.agentchat.AgentChatConversationsServletTest
 com.etendoerp.go.apps.AppsServletTest
 com.etendoerp.go.apps.JwtIssuerServiceTest
