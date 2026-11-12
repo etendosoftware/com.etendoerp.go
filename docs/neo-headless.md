@@ -479,7 +479,7 @@ The xlsx branch writes to `response.getOutputStream()`; the CSV branch keeps `ge
 
 A CSV export feeds a file the user edits and re-imports, so it needs whatever the import writes, including records on other tables. A list row has no way to express those, and the `fields` projection cannot expand a child collection (§4.12.5 — it is a flat whitelist over the entity's own keys). The export therefore sends `includeChildData=1` on every list GET, as a standing request: *a handler that can supply its child records should.* Handlers that cannot simply ignore it, exactly as they ignore `export`/`columns`.
 
-`BusinessPartnerHandler` implements it for Contacts (`attachChildData`): on a list GET it attaches each partner's primary contact person (`AD_User`) and primary address (`C_BPartner_Location` + `C_Location`) under a nested `etgoChildData` object, which the export addresses by dotted path (`columns=etgoChildData.city:ciudad`). Conventions worth copying in a new implementation:
+`BusinessPartnerHandler` implements it for Contacts (`attachChildData`): on a list GET it attaches each partner's primary contact person (`AD_User`) and primary address (`C_BPartner_Location` + `C_Location`) under a nested `etgoChildData` object, which the export addresses by dotted path (`columns=etgoChildData.city:ciudad`). Keys: `address` (composed `C_Location.Address1`), `street` (ETP-6206: the structured street `EM_OBSEPA_StrtNm`, or the whole address line for an address never broken down) and `buildingNumber` (`EM_OBSEPA_BldgNb`, only alongside a structured street, so a re-import never writes the number twice), `city`, `postal`, `country`, `region`, and for the contact `firstName`, `lastName`, `email`, `phone`, `position`. A NULL or blank column leaves its key out. Only the list export sends `includeChildData=1`; no screen and no MCP tool reads `etgoChildData`. Conventions worth copying in a new implementation:
 
 - **Nest, do not flatten.** A nested object cannot collide with a present or future DAL property name, and the `columns` spec already understands dotted paths.
 - **Reuse the ranking the UI already shows.** The address ranking is copied from `ETGO_GET_LOCATION` (the function behind the `eTGOLocation` column) — bill-to, then ship-to, then newest — so the list and the exported file cannot disagree. The contact is the oldest active one, the same one the `etgoEmail` fallback picks.
@@ -3998,10 +3998,32 @@ Expected on the GOClient vendor location `4380CC6D925841E99BB516C78E7717CF`: 21 
 21%*, 10 → *Adquisiciones IVA 10%*, 0 → *Adquisiciones interiores exentas (art 22)*, 4 → *Adquisiciones IVA 4%*. `NO_MATCH` is the generic answer when no purchase tax can be
 determined for the requested rate.
 
-##### 4.12.1.8 Bank connection — declared actions on `financial-account/account` (ETP-5804)
+##### 4.12.1.8 Bank connection — declared actions on `financial-account/account` (ETP-5804, ETP-6154)
 
-"Editar cuenta" and the row's kebab let a person disconnect an account from its bank (PSD2 / Salt
-Edge) in two ways. Both go to `financial-account-bank-connection?action=disconnect` with
+Four declared actions, `id` = the financial account, no parameters. Each one is handed to the SPA's
+own `financial-account-bank-connection` endpoint with the body the SPA sends, through
+`FinancialAccountBankConnectionEndpoint`, so `FinancialAccountBankConnectionHandler` does the work
+on both channels:
+
+| Action | Kind | Endpoint call | Section |
+|---|---|---|---|
+| `disconnectBank` | write | `POST ?action=disconnect`, `permanentDeletion: false` | below |
+| `deleteBankConnection` | write | `POST ?action=disconnect`, `permanentDeletion: true` | below |
+| `syncBank` | write | `POST ?action=sync` | *Synchronizing* below |
+| `bankSyncStatus` | read | `POST ?action=syncStatus` for this one account | *Synchronizing* below |
+
+**Role gate (ETP-6154), on all four.** `FinancialAccountBankConnectionActions.hasEndpointAccess`
+runs the check the SPA's own request passes in `NeoRequestRouter`:
+`NeoAccessHelper.hasReportSpecAccess` on the `financial-account-bank-connection` spec, as a `POST`
+for the three writes and as a `GET` for `bankSyncStatus`. A refusal answers **403** `Access denied
+to spec for current role`. It fails closed when the spec cannot be resolved. The check is needed
+because the MCP router authorizes `etendo_action` as a read of `financial-account`, while these
+actions call the endpoint directly, past the router. Before ETP-6154 a role with read-only access
+to the Financial Account window could therefore disconnect or delete a bank connection through the
+MCP, which it cannot do from the UI (a gap open since ETP-5804).
+
+**Disconnecting.** "Editar cuenta" and the row's kebab let a person disconnect an account from its
+bank (PSD2 / Salt Edge) in two ways. Both go to `financial-account-bank-connection?action=disconnect` with
 `{financialAccountId, permanentDeletion}` (`FinancialAccountBankConnectionHandler.handleDisconnect`);
 `FinancialAccountBankConnectionActions` declares them with `id` = the account, no parameters, and
 calls the endpoint through `FinancialAccountBankConnectionEndpoint` (the same bridge as
@@ -4018,8 +4040,8 @@ call it only after they confirm; for a reversible stop use `disconnectBank`"), a
 
 Answer: **200** `{disconnected, permanent, reconnectable}` in the `{"response":{"data":...}}`
 wrapper (re-wrapped from the endpoint's own answer). Refusals before the endpoint: a method other
-than POST **405**; an account that does not exist or is another tenant's **404** `Financial account
-not found`. The endpoint's own refusals pass through unchanged: **404** `No bank connection to
+than POST **405**; the role gate above **403**; an account that does not exist or is another
+tenant's **404** `Financial account not found`. The endpoint's own refusals pass through unchanged: **404** `No bank connection to
 disconnect for this account` (no connection; this is also the answer for a soft disconnect of an
 account that never had one), **400** when Salt Edge refuses, **500** when a permanent request
 leaves the account still linked (post-condition, ETP-5097). There is no local gate: the handler's
@@ -4033,6 +4055,103 @@ that is still linked to Salt Edge remains blocked from deletion.
 **Connecting and reconnecting stay hidden** (`pSD2GetConsent`, `psd2ReconnectFa`, ...,
 `MCP_CONFIG.actions.hidden`, §4.12.6): they need the account holder to authenticate at the bank
 (SCA), which an agent cannot do. The `reason` of `MCP_CONFIG` names the two actions.
+
+**Synchronizing (ETP-6154).** A bank sync imports the account's new movements from Salt Edge as
+bank statement lines. It is the same per-account fetch as Classic's *Get Bank Statement* button
+(`AccountTransactionsSync.fetchAccountTransactionsWithResult` in the PSD2 module) and it runs
+**synchronously** inside the request. At most one sync of an account runs at a time, on every path
+(SPA, MCP, Classic, scheduled processes): the PSD2 module wraps the fetch in a per-account,
+non-waiting PostgreSQL advisory lock (`AccountSyncLock`) and commits the imported lines before
+releasing it. The lock, its fail-closed rule, the duplicate check and the Salt Edge timeouts are
+described in the PSD2 module's `README.md` → *One synchronization per account*. The
+`pSD2GetBankstatement` button stays hidden (`MCP_CONFIG`, §4.12.6); it is protected by the same
+lock anyway.
+
+*REST: `POST financial-account-bank-connection?action=sync`*, body `{financialAccountId}`. Always
+**200** once the account is found (`loadAccount`, the tenant guard of every action of the handler):
+
+```json
+{"response": {"data": {
+  "status": "OK | WARNING | ERROR | IN_PROGRESS",
+  "code": "BANK_SYNC_LOCK_UNAVAILABLE | BANK_SYNC_DUPLICATE_CHECK_FAILED",
+  "message": "...",
+  "lastSyncDate": "2026-11-05T10:15:00Z"
+}}}
+```
+
+| Outcome | `status` | `code` | `message` |
+|---|---|---|---|
+| Finished | `OK` (the PSD2 module's `Success`, renamed on the wire by `wireSyncStatus`), `WARNING` or `ERROR` | absent | the PSD2 module's message lines, as before |
+| Another sync of the account holds the lock | `IN_PROGRESS` | absent | `psd2BankSyncInProgress` ("Fetching statements, please wait…") |
+| The lock could not be taken (no external pool, no connection); retriable | `ERROR` | `BANK_SYNC_LOCK_UNAVAILABLE` | `psd2BankSyncLockUnavailable` |
+| The "already imported?" check failed for at least one bank connection; retriable | the run's own status: `ERROR`, or `WARNING` when another connection still imported | `BANK_SYNC_DUPLICATE_CHECK_FAILED` | `psd2BankSyncDuplicateCheckFailed` |
+
+The duplicate-check row describes a **non-SQL** failure, which aborts only the failing bank
+connection's payload while the other connections are committed. A real PostgreSQL error during the
+check (statement timeout, cancel, lock timeout) aborts the whole DAL transaction instead, so the
+run rolls back entirely: the answer is the same coded one, or, when there was pending state to
+flush, a generic **500** without the code. No data is at risk either way: nothing is duplicated,
+the lock is always released, and a retry imports everything again. The code exists only on the
+`sync` answer itself: a sync followed through `syncStatus` (after `IN_PROGRESS` or a client
+timeout) never carries it, because `lastResult` reflects only the Salt Edge fetch.
+
+`IN_PROGRESS` does not wait and does not fail: the caller follows the running sync through
+`syncStatus`. The three bridge messages come from `NeoHints` (`neo_hints_en/es.properties`), in the
+caller's language (`NeoLanguage.currentCode()`). The three PSD2 `AD_MESSAGE`s behind them ship in
+English only, so they are never relayed. `code` is the stable identity a client translates by;
+`message` is prose. `lastSyncDate` is `EM_PSD2_LAST_SYNC_DATE`, read from the instance the PSD2
+module just stamped (ETP-5582).
+
+*REST: `syncStatus`*, in two forms with the same answer:
+
+- `POST ?action=syncStatus` with body `{"financialAccountIds": ["<id>", ...]}`
+- `GET ?action=syncStatus&financialAccountIds=<id>,<id>`
+
+The `GET` form exists for roles with **read-only** access to the Financial Account window:
+`hasReportSpecAccess` requires write access for a `POST` on a report spec, so the `POST` answered
+**403** to them although this action only reads. The SPA uses the `GET`.
+
+```json
+{"response": {"data": {"accounts": {
+  "<financialAccountId>": {
+    "inProgress": true,
+    "lastSyncDate": "2026-11-05T10:15:00Z",
+    "lastResult": {"status": "OK | ERROR | null", "message": "... | null", "at": "2026-11-05T10:15:00Z | null"}
+  }
+}}}}
+```
+
+- **Ids.** Trimmed and deduplicated in request order; blank ids are ignored. At most
+  **200 distinct ids** (`MAX_SYNC_STATUS_IDS`): above that, **400** `Too many financial accounts in
+  one syncStatus request: at most 200`. A missing `financialAccountIds` is **400** `Missing
+  required parameter: financialAccountIds`.
+- **Unreadable ids are omitted.** Each id goes through `loadAccount`. An account that does not
+  exist or that the caller cannot read is left out of `accounts`, never reported as an error, so the
+  answer is not an existence oracle.
+- **`inProgress`** comes from `AccountSyncLock.heldAmong` (a `pg_locks` probe on its own pooled
+  connection). It sees syncs running on any node that shares the database. A failed probe answers
+  `false`, which is safe: a sync started on that answer still runs into the lock.
+- **`lastResult` is the Salt Edge fetch health, not the outcome of our import.** It is read from the
+  account's latest `PSD2_FINACC_CONNECTION` (`LAST_SUCCESS_AT`, `LAST_FAIL_AT`,
+  `LAST_FAIL_MESSAGE`, ETP-5089), and the newer of the two dates wins: `ERROR` with the bank's
+  message, or `OK` with a null message. Every field is `null` when there is no connection or no
+  recorded attempt. It can describe an older fetch than the sync the caller is waiting for. To tell
+  whether the import itself ran, compare `lastSyncDate` with the moment the sync started (the SPA's
+  `resultOfFinishedSync` does exactly that).
+
+*MCP.* `syncBank` sends `{financialAccountId}` to `?action=sync` and passes its answer through
+unchanged, `IN_PROGRESS` included, re-wrapped in `{"response":{"data":...}}`. `bankSyncStatus`
+sends a one-id `syncStatus` body and answers that account's entry alone,
+`{inProgress, lastSyncDate, lastResult}`. Refusals before the endpoint are the ones listed above
+(405, 403, 404). A `syncStatus` answer that omits the account becomes **404** `Financial account
+not found`.
+
+**There is no server-side MCP timeout.** `syncBank` waits for the bank, so an agent's client can
+give up first while the sync keeps running on the server. Both descriptions, and the entity's
+`AGENT_PROMPT`, tell the agent what to do: after `IN_PROGRESS` or a client timeout, poll
+`bankSyncStatus` every few seconds until `inProgress` is `false`, instead of calling `syncBank`
+again. Calling `syncBank` again after `BANK_SYNC_LOCK_UNAVAILABLE` or
+`BANK_SYNC_DUPLICATE_CHECK_FAILED` is safe: movements already imported are never imported twice.
 
 ##### 4.12.1.9 The country of a financial account — required on create, refused in the caller's language (ETP-5473)
 
@@ -4790,7 +4909,7 @@ The shape and the rules are in §4.12.1.3.
 | `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `etendo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
 | `open-close-period-control/documents` | `openClose`, `processNow` | — | the calendar has no per-document-type open/close since ETP-4948; the period's own `openClose` (§4.12.1.6) opens or closes every document type at once |
-| `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | `aprmFundsTrans` → `transferFunds` (§4.12.1.5) | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); the bank connection is disconnected with the declared `disconnectBank` / `deleteBankConnection` actions (§4.12.1.8); PSD2 consent, connection and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
+| `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | `aprmFundsTrans` → `transferFunds` (§4.12.1.5) | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); the bank connection is disconnected with the declared `disconnectBank` / `deleteBankConnection` actions, and new bank movements are imported with the declared `syncBank` instead of `pSD2GetBankstatement`, followed with `bankSyncStatus` (§4.12.1.8, ETP-6154); PSD2 consent, connection and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
 | `goods-receipt/header` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `invoicefromshipment` → `createPurchaseInvoice` (ETP-5709); `CreateFrom` → `importOrderLines` with its own reason (ETP-5713, §4.12.34) | the classic *Invoicefromshipment* process, fired on a purchase receipt, creates a **sales** invoice (`isSotrx = true`), does not mark the receipt as invoiced and can report success without creating anything. The target is the header's declared `createPurchaseInvoice` (`GoodsReceiptHeaderHandler`), which creates a purchase invoice from the receipt and completes it in the same call. The return specs (`return-material-receipt`, `return-to-vendor-shipment`) carry the same classic button and are redirected to their own `createReturnInvoice` (ETP-5712, next two rows) |
 | `goods-shipment/goodsShipment` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `Invoicefromshipment` → `createDraftInvoice` (ETP-5709); `CreateFrom` → `importOrderLines` with its own reason (ETP-5713, §4.12.34) | the classic process bypasses every guard of the handler's own path (completed-status check, nothing-pending 400, scoping to the shipment's own lines, honoured partial `lines`), so agents are sent to `createDraftInvoice`, now declared by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`: optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]`). The key is the AD column name `Invoicefromshipment`, the only spelling both `McpActionsView.namesOf` (listing) and `McpDeclaredActions.namesOf` (call) accept. The other sales specs keep the classic button |
 | `return-to-vendor-shipment/returnToVendorShipment` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `RM_Shipment_Pickedit` → `importReceiptLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | *Pick/Edit Lines* has no process connected. `GenerateTo` (AD_Process 154, *Generate Invoice from Shipment*, `isdisplayed = N` in the tab) and `Invoicefromshipment` (no process) are the classic ways to invoice a shipment; on a return they would not build the factura rectificativa the app builds (negative lines, link to the invoice it rectifies, confirmed). The target is the header's declared `createReturnInvoice` (§4.12.33). Keys are AD column names |
@@ -4938,6 +5057,8 @@ downstream, so it still reported the raw property name wherever the field reache
 DB column name (upper-cased), consulted identically for any entity that happens to carry one of
 the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
 per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
+
+**Binding (ETP-6206).** `ContactsLocationAddressHandler` is bound by `@NeoExtension contacts/locationAddress` alone; its `@Named("contactsLocationAddressHandler")` and the row's `Java_Qualifier` were removed (the annotation already won on every channel since ETP-5806).
 
 **Update semantics and concurrency (ETP-6012).** `ContactsLocationAddressHandler` serves `PUT` and
 `PATCH` itself, so the default CRUD's stale-record check never runs for this entity; the handler
@@ -5246,6 +5367,16 @@ than keeping two in step. ETP-5415 closed enough of that gap to turn it back on 
 > that declares any (`header`, §4.12.1.3), so `defaultTax` is callable but not listed by
 > `etendo_schema(view:"actions")` for `purchase-invoice`.
 
+> **The bank sync (ETP-6154) does not diverge.** The MCP's `syncBank` / `bankSyncStatus` hand the
+> SPA's own body to `financial-account-bank-connection?action=sync|syncStatus` through
+> `FinancialAccountBankConnectionEndpoint`, so REST and MCP run the same handler, the same
+> per-account lock and the same status mapping (§4.12.1.8). The role gate matches too: the MCP
+> checks `hasReportSpecAccess` as `POST` for `syncBank` and as `GET` for `bankSyncStatus`, the same
+> answers REST gives for `POST ?action=sync` and for the `GET` form of `syncStatus` the SPA uses.
+> What differs is only the shape of a single-account read: `bankSyncStatus` answers one entry and
+> turns an omitted account into 404, where the REST batch simply leaves it out. `etendo_batch` has
+> no ACTION surface, so there is nothing to compare.
+
 > **Keys a write post-hook adds are outside the field filter — on every channel, so not a
 > divergence (ETP-5747).** `etendo_create` / `etendo_update` run `NeoFieldFilter.filterGetResponse`
 > on core's response and only then the entity's post-hook (`McpHookExecutor.runPostHookResponse`).
@@ -5421,7 +5552,7 @@ Other MCP-only refusals declared in §4.12.6:
 | `etendo_list(parentId)` on a child whose parent link the spec excludes, e.g. `open-close-period-control/documents` (ETP-5852, M-118) | n/a | the parent link stays filterable (`McpQuerySupport#buildWhereFromFilters` drops it from the excluded set), so `parentId` scopes the list instead of a 422 `unknown_filter_field` on `period` |
 | `orderBy` on a value many rows share (ETP-5852, M-188) | the grid's own sort | `id` is appended as the last key (`McpQuerySupport#withIdTieBreak`), so tied rows keep one order across pages; an order that already names `id` is sent as is |
 | labels in a create refusal's `missingFields` (ETP-5852, M-245) | n/a | the form's label in the session language, the one `etendo_schema` shows (`McpSchemaResponseHints#localizeLabels`), instead of the `AD_Column` name |
-| contact address created without `name` (ETP-5852, M-168) | the SPA always sends one: city and address line, else region and country, else "Location" | the same rule on the server (`ContactsLocationAddressHandler#addressName`, MCP only; the "." MCP's defaults pass puts in the body does not count as sent), instead of the AD default "." |
+| contact address created without `name` (ETP-5852, M-168) | the SPA always sends one: city and address line, else region and country, else "Location" | the same rule on the server (`ContactsLocationAddressHandler#addressName`, MCP only; the "." MCP's defaults pass puts in the body does not count as sent), instead of the AD default "." Whatever the source (sent, MCP display name, default), the stored name is capped at the 60 characters of `C_BPartner_Location.Name`, trailing ", " or spaces trimmed (ETP-6206, `ContactAddressName`; on every channel, on create and on update) |
 | create / update a customization's pre-hook serves by itself, e.g. `contacts/locationAddress` (ETP-5852) | the handler's own body | shaped like a generic write: `{data:{…}}` plus `url` when the entity has a page (`McpHookExecutor#servedRecordResult`); a refusal is unchanged |
 | aging detail (`showDetails`) per document (ETP-5852, M-153) | invoice number and date, buckets | MCP only: `docs[].dueDates` = the open installments `{dueDate, outstanding}` oldest first, from `FIN_Payment_Schedule` (`AgingDueDates`), described in `meta.columns` |
 | `chart-of-accounts/elementValue` without `parentId` (ETP-5852, M-135) | the SPA reads the client's only chart without naming it | `MCP_CONFIG.parent.optionalFor:[list,get]` (the chart is a per-client singleton). MCP reads go through the generic list/get (`ChartOfAccountsHandler` declines its native SQL for MCP), so filters, sort and `accountingElement` (the create's `parentId`) apply; the hierarchy enrichment still runs |
@@ -7359,6 +7490,24 @@ attachment to the table of the spec's header entity (its included entity on a le
 from `ETGO_SF_SPEC`/`ETGO_SF_ENTITY`; the frontend reads the same table from the window contract's
 primary entity (`documentEmailSend.js#resolveAttachmentTable`).
 
+**Migrated (ETP-6154).** The report spec of the bank connection follows the ETP-5581 recipe above. Touching
+`FinancialAccountBankConnectionHandler` (the `syncStatus` action and the `IN_PROGRESS` mapping of
+`sync`, §4.12.1.8) forced its migration. Its `ETGO_SF_ENTITY` row carries no `JAVA_QUALIFIER` (there
+is no `decisions.json` for the spec, so no regen) and the class no `@Named`; it left `legacyHandlers`
+in `scripts/extension-guardrails-allowlist.json`, and `EXTENSION_CEILING` went from 80 to 79.
+
+| `(spec, entity)` | class | former qualifier |
+|---|---|---|
+| `financial-account-bank-connection` / `financial-account-bank-connection` | `FinancialAccountBankConnectionHandler` | `financial-account-bank-connection` |
+
+Its only hook is `handle`, and both surfaces reach it annotation-first: the SPA's
+`/sws/neo/financial-account-bank-connection` route through `NeoRequestRouter` →
+`NeoExtensionDispatcher` (the `entityName` is the spec name, as for the two ETP-5581 specs), and the
+MCP bank actions of `financial-account/account` through `FinancialAccountBankConnectionEndpoint`,
+which dispatches with spec and entity set and a qualifier that is now `null`. The `reportHandler`
+attribute MCP publishes for the spec changes from `financial-account-bank-connection` to
+`FinancialAccountBankConnectionHandler`, the same visible change ETP-5581 describes.
+
 #### 5.3.b The legacy binding (`@Named` + `Java_Qualifier`)
 
 Still resolved, still supported, documented here because most existing handlers use it.
@@ -8357,7 +8506,7 @@ mandatory-defaults fallback `false` on every channel, as before ETP-5791.
 
 | Customization | Binding | Behaviour |
 |---|---|---|
-| `BusinessPartnerHandler` | `@Named` / `contacts/businessPartner` | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. On update, a write that changes `businessPartnerCategory` to a different category and carries **neither** `customer` nor `vendor` takes **both** from the new category (parity with the Contacts form, which overwrites its checkboxes on a category change); a write that carries either flag decides the type itself. Same rule on REST PATCH/PUT and MCP `etendo_update` (both hand the pre-hook the body as sent; `/batch` is create-only). Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled; after an update that sets a flag to true (sent or re-inherited), the ETP-4565 backfill adds the missing row. Otherwise existing contacts are never re-derived. MCP: `vendor` carries `MCP_CONFIG.fields.userRequired:false` (§4.12.6), so `view:"create"` lists it as optional. |
+| `BusinessPartnerHandler` | `@NeoExtension contacts/businessPartner` (ETP-6206; `@Named` + `Java_Qualifier` before) | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. On update, a write that changes `businessPartnerCategory` to a different category and carries **neither** `customer` nor `vendor` takes **both** from the new category (parity with the Contacts form, which overwrites its checkboxes on a category change); a write that carries either flag decides the type itself. Same rule on REST PATCH/PUT and MCP `etendo_update` (both hand the pre-hook the body as sent; `/batch` is create-only). Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled; after an update that sets a flag to true (sent or re-inherited), the ETP-4565 backfill adds the missing row. Otherwise existing contacts are never re-derived. MCP: `vendor` carries `MCP_CONFIG.fields.userRequired:false` (§4.12.6), so `view:"create"` lists it as optional. |
 | `BusinessPartnerCategoryHandler` | `@NeoExtension business-partner-category/businessPartnerCategory` | Create/update reject a category with neither flag (`ETGO_BPGroupContactTypeRequired`). |
 | `ContactCustomerTabHandler`, `ContactVendorTabHandler` (base `ContactTypeFlagGuardHandler`) | `@NeoExtension contacts/customer`, `contacts/vendorCreditor` | Same contact rule on updates through those tabs, only when the write sends `customer` or `vendor`. |
 

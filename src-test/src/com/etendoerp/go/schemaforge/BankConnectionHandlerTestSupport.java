@@ -21,17 +21,22 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.AccountSyncLock;
 
 /**
  * Shared test fixtures for the {@link FinancialAccountBankConnectionHandler} test classes. The handler is one
@@ -56,6 +61,8 @@ final class BankConnectionHandlerTestSupport {
   static final String PARAM_TYPE = "type";
   /** Disconnect mode flag: {@code true} deletes the connection, {@code false} only deactivates it. */
   static final String PARAM_PERMANENT_DELETION = "permanentDeletion";
+  /** Body key of {@code syncStatus}: the accounts to report on (ETP-6154). */
+  static final String PARAM_ACCOUNT_IDS = "financialAccountIds";
 
   private BankConnectionHandlerTestSupport() {
   }
@@ -131,5 +138,51 @@ final class BankConnectionHandlerTestSupport {
     when(criteria.setMaxResults(1)).thenReturn(criteria);
     when(criteria.uniqueResult()).thenReturn(found);
     return dal;
+  }
+
+  /**
+   * Body of a {@code syncStatus} request for the given account ids, in order (ETP-6154).
+   *
+   * @param ids the ids, repeated or blank ones included as given
+   * @return the JSON body
+   * @throws org.codehaus.jettison.json.JSONException never in practice
+   */
+  static JSONObject syncStatusBody(String... ids)
+      throws org.codehaus.jettison.json.JSONException {
+    JSONArray array = new JSONArray();
+    for (String id : ids) {
+      array.put(id);
+    }
+    return new JSONObject().put(PARAM_ACCOUNT_IDS, array);
+  }
+
+  /**
+   * Replaces the shared {@link AccountSyncLock} with a mock whose {@code pg_locks} probe reports
+   * the given accounts as being synchronized right now (ETP-6154).
+   *
+   * @param locks      the open MockedStatic over {@link AccountSyncLock}
+   * @param runningIds the accounts whose sync lock is held
+   * @return the lock mock, for verifying what was probed
+   */
+  @SuppressWarnings("java:S1854")
+  static AccountSyncLock stubSyncLock(org.mockito.MockedStatic<AccountSyncLock> locks,
+      String... runningIds) {
+    AccountSyncLock lock = mock(AccountSyncLock.class);
+    when(lock.heldAmong(any())).thenReturn(new HashSet<>(Arrays.asList(runningIds)));
+    locks.when(AccountSyncLock::getInstance).thenReturn(lock);
+    return lock;
+  }
+
+  /**
+   * A mock financial account answering the given id, for the tenant-guarded {@code loadAccount}
+   * seam.
+   *
+   * @param id the account id
+   * @return the mock account
+   */
+  static FIN_FinancialAccount account(String id) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(id);
+    return account;
   }
 }

@@ -143,6 +143,10 @@ class DatadogSeriesTest(unittest.TestCase):
         series = self.series(jobs=[{'name': 'Cell report', 'status': 'in_progress'}])
         self.assertFalse([k for k in series if 'duration' in k[0]])
 
+    def test_a_job_keeps_its_tag_with_or_without_the_pilot_prefix(self):
+        self.assertEqual(report._job_tag('Pilot: Go tests + coverage'), 'go_tests_coverage')
+        self.assertEqual(report._job_tag('Go tests + coverage'), 'go_tests_coverage')
+
     def test_tag_values_are_plain_ascii_words(self):
         self.assertEqual(report._tag('Integration (Tomcat + Playwright)'), 'integration_tomcat_playwright')
         self.assertEqual(report._tag(' sin célula '), 'sin_celula')

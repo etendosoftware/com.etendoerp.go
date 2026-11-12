@@ -440,8 +440,10 @@ class TransactionalAuthEmailSender {
     boolean adminModeSet = false;
     try {
       OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
+      // Set first: setAdminMode pushes the mode before it can throw, and the finally must
+      // pop it even then.
       adminModeSet = true;
+      OBContext.setAdminMode(true);
       NeoResponse response = emailService.send(contractName, body);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
