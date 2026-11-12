@@ -270,9 +270,10 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   @Override
   protected NeoResponse execute(NeoContext context, String action) throws Exception {
     JSONObject body = context.getRequestBody();
-    // ETP-5828 (QA MCP-2): no pendingBasis "classic" here any more. The purchase popup lists and
-    // imports with the server rule, drafts deducted, exactly as the sales popup and the MCP do;
-    // "classic" on these actions is the generic 400 of an action that does not offer it.
+    // ETP-5828 (QA MCP-2): the order actions no longer offer the classic pending basis. The
+    // purchase popup lists and imports with the server rule, drafts deducted, exactly as the
+    // sales popup and the MCP do, and asking for the classic basis here is refused with the
+    // generic 400 of an action that does not offer it.
     if (ACTION_AVAILABLE_ORDERS.equals(action)) {
       Invoice invoice = requireExistingInvoice(context.getRecordId());
       return new OrderInvoiceListing(this).availableOrders(invoice, body);

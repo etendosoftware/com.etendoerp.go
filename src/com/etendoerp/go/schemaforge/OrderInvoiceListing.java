@@ -186,7 +186,8 @@ final class OrderInvoiceListing {
       boolean detail) throws JSONException {
     boolean sales = Boolean.TRUE.equals(order.isSalesTransaction());
     Map<String, BigDecimal> pending = handler.pendingToInvoice(order, sales);
-    // ETP-6099: detail adds importedHere; the default answer is unchanged.
+    // ETP-6099: with detail the answer also marks the lines already on this invoice, otherwise it
+    // stays as it was.
     Set<String> importedHere = detail ? handler.orderLinesOnInvoice(invoice.getId()) : Set.of();
     // ETP-5828 QA UI-4: which other drafts hold each line, so a taken line can be named.
     List<String> lineIds = new ArrayList<>();
