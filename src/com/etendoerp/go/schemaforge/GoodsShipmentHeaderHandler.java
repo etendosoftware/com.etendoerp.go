@@ -149,6 +149,9 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     contracts.putAll(ImportInvoiceLinesIntoInOutHandler.contracts(true));
     contracts.put(CreateDraftInvoiceHandler.SHIPMENT_CONTRACT.getName(),
         CreateDraftInvoiceHandler.SHIPMENT_CONTRACT);
+    // ETP-6179: the SIF fields the generated invoice would get.
+    contracts.put(CreateDraftInvoiceHandler.SHIPMENT_SIF_DEFAULTS_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.SHIPMENT_SIF_DEFAULTS_CONTRACT);
     contracts.put(CreateReturnReceiptHandler.CONTRACT.getName(),
         CreateReturnReceiptHandler.CONTRACT);
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);

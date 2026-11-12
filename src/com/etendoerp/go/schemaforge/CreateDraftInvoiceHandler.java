@@ -135,7 +135,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "or for a line with nothing pending, is refused with 400 naming the line and its "
               + "pending quantity (it is never capped silently), and so is a list none of whose "
               + "entries has an orderLineId and a quantity above zero. Omit to invoice the "
-              + "pending quantity of every line."))
+              + "pending quantity of every line."),
+      InvoiceSifPreset.sifFieldsParam(true))
       .withIdDescription("the id of the sales order to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
@@ -157,7 +158,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           + "refused). Once the invoice is "
           + "completed the quotation moves to status ETGO_CI (\"Closed - Invoice Created\") and "
           + "can no longer be invoiced: a second call answers 400 naming the status. This action "
-          + "never creates an order from the quotation.")
+          + "never creates an order from the quotation. The only body key it reads is sifFields.",
+      InvoiceSifPreset.sifFieldsParam(true))
       .withIdDescription("the id of the sales quotation to invoice");
 
   /**
@@ -197,9 +199,24 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "with nothing pending is refused with 400 naming the line and its pending "
               + "quantity (it is never capped silently), and so is a list none of whose entries "
               + "has a shipmentLineId and a quantity above zero. Omit to invoice the pending "
-              + "quantity of every line."))
+              + "quantity of every line."),
+      InvoiceSifPreset.sifFieldsParam(true))
       .withIdDescription("the id of the goods shipment to invoice")
       .availableWhen(DocumentAvailability.WHEN_COMPLETED);
+
+  /** ETP-6179: the SIF fields the order's {@code createDraftInvoice} would give its invoice. */
+  static final NeoActionContract ORDER_SIF_DEFAULTS_CONTRACT = InvoiceSifPreset.defaultsContract(
+      ACTION_NAME, "the id of the sales order to invoice");
+
+  /** ETP-6179: the SIF fields the quotation's {@code createDraftInvoice} would give its invoice. */
+  static final NeoActionContract QUOTATION_SIF_DEFAULTS_CONTRACT =
+      InvoiceSifPreset.defaultsContract(ACTION_NAME, "the id of the sales quotation to invoice");
+
+  /** ETP-6179: the SIF fields the shipment's {@code createDraftInvoice} would give its invoice. */
+  static final NeoActionContract SHIPMENT_SIF_DEFAULTS_CONTRACT =
+      InvoiceSifPreset.defaultsContract(ACTION_NAME, "the id of the goods shipment to invoice",
+          NeoActionContract.Param.array(PARAM_SHIPMENT_IDS, NeoActionContract.TYPE_STRING, false,
+              "The same shipmentIds createDraftInvoice would receive. Omit for this shipment."));
 
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
@@ -294,6 +311,12 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return handleProductPrices(context);
     }
 
+    // POST sifDefaults — the SIF fields the invoice would get (ETP-6179), creates nothing
+    if (InvoiceSifPreset.ACTION_SIF_DEFAULTS.equals(fieldName)
+        && "POST".equals(context.getHttpMethod())) {
+      return handleSifDefaults(context);
+    }
+
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
@@ -360,6 +383,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         if (!SPEC_GOODS_SHIPMENT.equals(specName)) {
           DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
         }
+        // ETP-6179: the SIF fields the caller chose (or their defaults) and the rectification
+        // guard, which this one-step creation never reached through the header's completion.
+        InvoiceSifPreset.applyBeforeCompletion(invoice, body);
         InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
         Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
 
@@ -387,6 +413,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       }
     } catch (NeoQuotaCreateCheck.Refused e) {
       return e.toResponse();
+    } catch (InvoiceSifPreset.Refused e) {
+      log.warn("Refused the SIF fields of the invoice generated from {}", recordId);
+      return e.toResponse();
     } catch (DocumentCurrencyRate.MissingRateException e) {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
@@ -404,6 +433,87 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the invoice");
     }
+  }
+
+  /**
+   * ETP-6179: answers {@code sifDefaults}, the SIF fields the invoice {@code createDraftInvoice}
+   * would create from this record gets, without creating anything. The document type is the
+   * one the creation itself resolves; the source may still be a draft (the screen asks before
+   * confirming it).
+   */
+  protected NeoResponse handleSifDefaults(NeoContext context) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        InvoiceSifPreset.Target target = resolveSifTarget(context.getSpecName(), recordId,
+            context.getRequestBody());
+        if (target == null) {
+          return null;
+        }
+        return InvoiceSifPreset.previewResponse(target);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (OBException e) {
+      return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error previewing the SIF fields for {}: {}", recordId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An internal error occurred while previewing the invoice's fiscal data");
+    }
+  }
+
+  /**
+   * The invoice {@link #createFromSource} would build, as far as its SIF fields depend on it.
+   * Mirrors the document-type choice of each route: the order's ({@link
+   * #resolveARInvoiceDocType}); a single shipment with an order goes through the order; several
+   * shipments use their order's invoice type, else {@link #findARInvoiceDocType}.
+   */
+  protected InvoiceSifPreset.Target resolveSifTarget(String specName, String recordId,
+      JSONObject body) {
+    if (SPEC_SALES_ORDER.equals(specName) || SPEC_SALES_QUOTATION.equals(specName)) {
+      Order order = OBDal.getInstance().get(Order.class, recordId);
+      if (order == null) {
+        throw new OBException(ERR_ORDER_NOT_FOUND + recordId);
+      }
+      return new InvoiceSifPreset.Target(order.getOrganization(), order.getBusinessPartner(),
+          resolveARInvoiceDocType(order), true, order);
+    }
+    if (SPEC_GOODS_SHIPMENT.equals(specName)) {
+      return shipmentSifTarget(body, recordId);
+    }
+    return null;
+  }
+
+  /**
+   * The goods-shipment route of {@link #resolveSifTarget}: the document type the creation picks
+   * (a single shipment with an order goes through the order; otherwise the order's invoice type,
+   * else {@link #findARInvoiceDocType}), and the order only when the invoice header will carry it —
+   * {@link #createInvoiceHeaderFromShipment} links it for a single shipment only — so the preview
+   * reads the same order-derived values (SII description, operation date) the creation will
+   * (ETP-6179 review W2).
+   */
+  InvoiceSifPreset.Target shipmentSifTarget(JSONObject body, String recordId) {
+    List<String> shipmentIds = parseShipmentIds(body, recordId);
+    ShipmentInOut first = OBDal.getInstance().get(ShipmentInOut.class, shipmentIds.get(0));
+    if (first == null) {
+      throw new OBException("Shipment not found: " + shipmentIds.get(0));
+    }
+    Order order = first.getSalesOrder();
+    boolean single = shipmentIds.size() == 1;
+    DocumentType docType = single && order != null ? resolveARInvoiceDocType(order) : null;
+    if (docType == null && !single && order != null && order.getTransactionDocument() != null) {
+      docType = order.getTransactionDocument().getDocumentTypeForInvoice();
+    }
+    if (docType == null) {
+      docType = findARInvoiceDocType(first.getOrganization().getId());
+    }
+    return new InvoiceSifPreset.Target(first.getOrganization(), first.getBusinessPartner(),
+        docType, true, single ? order : null);
   }
 
   /**
@@ -1731,7 +1841,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * DocType would fall back to the table-default {@code AD_Sequence} which keeps
    * an independent counter and produces colliding numbers. Tries the given org
    * first, then the system org ({@code '0'}), then any. A second pass without
-   * the sequence filter provides a last-resort fallback.
+   * the sequence filter provides a last-resort fallback. Return and rectificative types are
+   * never candidates (ETP-6179, {@link RectificativeSupport#isCorrective}).
    *
    * @param orgId
    *     the {@code AD_Org_ID} of the target invoice's organization
@@ -1744,6 +1855,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true)).add(
         Restrictions.isNotNull(DocumentType.PROPERTY_DOCUMENTSEQUENCE)).addOrderBy(DocumentType.PROPERTY_DEFAULT,
         false).list();
+    // ETP-6179: never a return or rectificative type for an ordinary invoice.
+    withSeq = RectificativeSupport.ordinaryOnly(withSeq);
     log.info("findARInvoiceDocType orgId={} ARI-with-sequence candidates={}", orgId, summarizeDocTypes(withSeq));
 
     DocumentType picked = pickByOrg(withSeq, orgId);
@@ -1758,6 +1871,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "ARI")).add(
         Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true)).add(
         Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true)).addOrderBy(DocumentType.PROPERTY_DEFAULT, false).list();
+    any = RectificativeSupport.ordinaryOnly(any);
     log.info("findARInvoiceDocType orgId={} fallback ARI candidates={}", orgId, summarizeDocTypes(any));
     DocumentType fallback = pickByOrg(any, orgId);
     if (fallback != null) {
