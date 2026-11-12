@@ -6,7 +6,10 @@
 # Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
 @incluye ventas-compras
 
-# --- con mocks (36)
+# --- con mocks (40)
+com.etendoerp.go.portal.PortalLinkDalTest
+com.etendoerp.go.portal.PortalLinkServiceTest
+com.etendoerp.go.portal.PortalServletTest
 com.etendoerp.go.schemaforge.AgingReportHandlerTest
 com.etendoerp.go.schemaforge.BpLocationHandlerTest
 com.etendoerp.go.schemaforge.BusinessPartnerHandlerTest
@@ -32,6 +35,7 @@ com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandlerTest
 com.etendoerp.go.schemaforge.SalesLineCustomizationHandlersTest
 com.etendoerp.go.schemaforge.SalesOrderHeaderHandlerTest
 com.etendoerp.go.schemaforge.SalesQuotationHeaderHandlerTest
+com.etendoerp.go.schemaforge.email.contracts.PortalLinkRenewalEmailContractTest
 com.etendoerp.go.schemaforge.email.contracts.SalesDocumentEmailContractsTest
 com.etendoerp.go.schemaforge.handlers.BusinessPartnerCategoryAccountingHandlerTest
 com.etendoerp.go.schemaforge.handlers.ContactHandlerTest
