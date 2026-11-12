@@ -320,7 +320,7 @@ public class PortalLinkService {
   /**
    * Validates a presented token and, when valid, stamps the link as used.
    *
-   * @param rawToken the token from the URL path or the {@code Authorization} header
+   * @param rawToken the token from the {@code X-Portal-Token} header or the URL path
    * @return the state; unknown, pending, deactivated and blank tokens are all {@link State#INVALID}
    */
   public Validation validate(String rawToken) {

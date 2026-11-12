@@ -149,6 +149,8 @@ public class PortalServlet extends HttpBaseServlet {
   private static final String TABLE_C_INVOICE = "C_Invoice";
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String HEADER_AUTHORIZATION = "Authorization";
+  /** The portal token's own header, independent of the app's session credential scheme. */
+  static final String HEADER_PORTAL_TOKEN = "X-Portal-Token";
   private static final String BEARER_PREFIX = "Bearer ";
   private static final String CONTENT_TYPE_JSON = "application/json";
   /** {@code HttpServletResponse} has no constant for 429. */
@@ -522,22 +524,34 @@ public class PortalServlet extends HttpBaseServlet {
   }
 
   /**
-   * Reads the token from the {@code Authorization} header, falling back to the trailing path
-   * segment of {@code /me/{token}}.
+   * Reads the portal token: the {@value #HEADER_PORTAL_TOKEN} header first, then the trailing path
+   * segment of {@code /me/{token}}, then an {@code Authorization: Bearer} header.
    *
-   * <p>Both are supported because the two carry different exposure: the header keeps the token out
-   * of access logs and {@code Referer}, which is why every call after the first uses it, while the
-   * path form exists for the very first load, where the SPA has the token from its own route and no
-   * session to put it in (plan §4.4).
+   * <p><b>The portal token has its own header because it is not a session credential</b>
+   * (ETP-6209 live test). The SPA's request helper decides {@code Authorization} from the app's
+   * own credential scheme: under the cookie scheme — any browser holding an Etendo GO session —
+   * it drops an explicit bearer and sends the session cookie instead, so the portal received no
+   * token and answered "this link is no longer valid" to a valid link. A dedicated header is
+   * never touched by that scheme, and reading it first also means a GO session's own
+   * {@code Authorization} (a bearer JWT) can never be mistaken for a portal token: the portal is
+   * authenticated by the link, never by whoever happens to be signed in to GO in the browser.
+   *
+   * <p>The header and {@code Authorization} keep the token out of access logs and
+   * {@code Referer}; the path form exists for a first load made without headers (plan §4.4).
+   * {@code Authorization} stays last, for a caller that predates the dedicated header.
    */
   private String resolveToken(HttpServletRequest request) {
-    String header = StringUtils.trimToNull(request.getHeader(HEADER_AUTHORIZATION));
-    if (header != null && StringUtils.startsWithIgnoreCase(header, BEARER_PREFIX)) {
-      return StringUtils.trimToNull(header.substring(BEARER_PREFIX.length()));
+    String portalHeader = StringUtils.trimToNull(request.getHeader(HEADER_PORTAL_TOKEN));
+    if (portalHeader != null) {
+      return portalHeader;
     }
     String path = StringUtils.defaultString(request.getPathInfo());
     if (path.startsWith(PATH_ME + "/")) {
       return StringUtils.trimToNull(path.substring(PATH_ME.length() + 1));
+    }
+    String header = StringUtils.trimToNull(request.getHeader(HEADER_AUTHORIZATION));
+    if (header != null && StringUtils.startsWithIgnoreCase(header, BEARER_PREFIX)) {
+      return StringUtils.trimToNull(header.substring(BEARER_PREFIX.length()));
     }
     return null;
   }
