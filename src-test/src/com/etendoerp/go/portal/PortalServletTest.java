@@ -27,6 +27,7 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -154,18 +155,31 @@ public class PortalServletTest {
   }
 
   @Test
-  public void meAndRenewAnswer429WhenTheirRateLimiterRefuses() throws Exception {
-    when(meLimiter.tryAcquire(anyString())).thenReturn(false);
-    when(renewLimiter.tryAcquire(anyString())).thenReturn(false);
+  public void eachEndpointAnswers429OnlyWhenItsOwnRateLimiterRefuses() throws Exception {
+    when(linkService.renew(any())).thenReturn(PortalLinkService.RenewalOutcome.SENT);
 
+    // Only the /me limiter refuses: /me is throttled, /renew is served.
+    when(meLimiter.tryAcquire(anyString())).thenReturn(false);
     Call me = new Call();
     servlet.service(request("GET", "/me"), me.response);
     Call renew = new Call();
     servlet.service(request("POST", "/renew"), renew.response);
-
     assertEquals(429, me.status());
-    assertEquals(429, renew.status());
-    verifyNoInteractions(linkService);
+    assertEquals(HttpServletResponse.SC_OK, renew.status());
+    verify(linkService, never()).validate(any());
+
+    // Only the /renew limiter refuses: /renew is throttled, /me is served.
+    when(meLimiter.tryAcquire(anyString())).thenReturn(true);
+    when(renewLimiter.tryAcquire(anyString())).thenReturn(false);
+    clearInvocations(linkService);
+    Call meAgain = new Call();
+    servlet.service(request("GET", "/me"), meAgain.response);
+    Call renewAgain = new Call();
+    servlet.service(request("POST", "/renew"), renewAgain.response);
+    assertEquals("an invalid token, not a throttled request",
+        HttpServletResponse.SC_UNAUTHORIZED, meAgain.status());
+    assertEquals(429, renewAgain.status());
+    verify(linkService, never()).renew(any());
   }
 
   @Test

@@ -362,7 +362,8 @@ public class PortalLinkServiceTest {
   @Test
   public void renewHonoursTheFifteenMinuteCooldownPerLink() {
     // One earlier renewal of this link, created `age` ago, as the database would count it
-    // (CREATED >= since). Pending rows are counted just the same: see PortalLinkDalTest.
+    // (CREATED >= since). Pending rows are counted just the same: see
+    // PortalLinkDalTest#renewalCountsIncludePendingRowsByCreationButNotDeactivatedOnes.
     Object[][] cases = {
         { Duration.ofMinutes(14), PortalLinkService.RenewalOutcome.RECENTLY_SENT },
         { Duration.ofMinutes(15), PortalLinkService.RenewalOutcome.RECENTLY_SENT },

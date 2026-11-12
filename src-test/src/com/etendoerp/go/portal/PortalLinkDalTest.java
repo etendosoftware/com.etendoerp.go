@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
@@ -39,6 +40,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -194,9 +197,63 @@ public class PortalLinkDalTest {
       assertFalse("pending rows must count: " + clause,
           clause.contains(PortalLinkDal.PROP_SENT_AT));
     }
+    assertTrue(where.getAllValues().get(0).contains("l." + PortalLinkDal.PROP_PARENT_LINK
+        + " = :parentLinkId"));
+    verify(query).setNamedParameter("parentLinkId", "LINK-1");
+    verify(query).setNamedParameter("clientId", "CLIENT-1");
+    verify(query).setNamedParameter("bpartnerId", "BP-1");
     verify(query, atLeastOnce()).setNamedParameter("since", since);
     verify(query, atLeastOnce()).setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
     verify(query, never()).setFilterOnActive(false);
+  }
+
+  @Test
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  public void lockForRenewalSelectsTheExpiredRowForUpdateWithItsIdBound() {
+    // The W1 race fix: a second open of the same link waits on this row lock until the first
+    // renewal's transaction commits, and then counts that renewal.
+    Session session = mock(Session.class);
+    NativeQuery nativeQuery = mock(NativeQuery.class);
+    when(obDal.getSession()).thenReturn(session);
+    ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+    doReturn(nativeQuery).when(session).createNativeQuery(sql.capture());
+    doReturn(nativeQuery).when(nativeQuery).setParameter(anyString(), any());
+
+    PortalLinkDal.lockForRenewal("LINK-1");
+
+    assertTrue(sql.getValue(), sql.getValue().endsWith(" FOR UPDATE"));
+    assertTrue(sql.getValue(),
+        sql.getValue().contains("WHERE etgo_portal_link_id = :linkId"));
+    verify(nativeQuery).setParameter("linkId", "LINK-1");
+    verify(nativeQuery).list();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void deactivatePendingRenewalsSwitchesOffOnlyUnsentRenewalsOfThatLink() {
+    MappedRow first = new MappedRow();
+    first.set(PortalLinkDal.PROP_ACTIVE, Boolean.TRUE);
+    MappedRow second = new MappedRow();
+    second.set(PortalLinkDal.PROP_ACTIVE, Boolean.TRUE);
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(query.list()).thenReturn(Arrays.<BaseOBObject> asList(first, second));
+    ArgumentCaptor<String> where = ArgumentCaptor.forClass(String.class);
+    when(obDal.createQuery(eq(PortalLinkDal.ENTITY), where.capture())).thenReturn(query);
+
+    PortalLinkDal.deactivatePendingRenewalsOf("LINK-1");
+
+    // Sent renewals are working links and must stay active; only the unsent ones are switched off.
+    assertTrue(where.getValue(), where.getValue().contains("l." + PortalLinkDal.PROP_SENT_AT
+        + " is null"));
+    assertTrue(where.getValue(), where.getValue().contains("l." + PortalLinkDal.PROP_PARENT_LINK
+        + " = :parentLinkId"));
+    verify(query).setNamedParameter("parentLinkId", "LINK-1");
+    verify(query).setNamedParameter("origin", PortalLink.ORIGIN_RENEWAL);
+    assertEquals(Boolean.FALSE, first.get(PortalLinkDal.PROP_ACTIVE));
+    assertEquals(Boolean.FALSE, second.get(PortalLinkDal.PROP_ACTIVE));
+    verify(obDal).save(first);
+    verify(obDal).save(second);
+    verify(obDal).flush();
   }
 
   private BaseOBObject insert(List<String> to, List<String> cc) {
