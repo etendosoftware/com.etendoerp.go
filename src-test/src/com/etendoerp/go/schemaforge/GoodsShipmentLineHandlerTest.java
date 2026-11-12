@@ -43,7 +43,10 @@ import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.junit.After;
 import org.junit.Before;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
 
 /**
  * Unit tests for {@link GoodsShipmentLineHandler}.
@@ -56,12 +59,14 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  *   <li>ETP-6002 CP-22 — {@code invoiceLineId} declared as a create directive (the MCP no longer
  *       reports it in {@code unknownFields}) and the sales link: the first shipment of an invoice
  *       line in its column, a later partial one in {@code M_MatchSI}.</li>
+ *   <li>ETP-6002 CP-14 — a quotation line is never a shipment line's order line.</li>
  * </ul>
  *
  * <p>Tests that require DB access (orderLineQty / productCode enrichment via SQL)
  * are not included here — those are covered by integration tests.
  *
  * @covers com.etendoerp.go.schemaforge.GoodsShipmentLineHandler
+ * @covers com.etendoerp.go.schemaforge.SalesQuotations
  */
 public class GoodsShipmentLineHandlerTest {
 
@@ -587,6 +592,56 @@ public class GoodsShipmentLineHandlerTest {
         Mockito.verify(query, Mockito.atLeastOnce()).setParameter("inoutLineId", "ship-line-2");
         Mockito.verify(query, Mockito.atLeastOnce()).setParameter("invoiceLineId", "inv-line-1");
       }
+    }
+  }
+
+  // ── ETP-6002 CP-14 — a quotation line is never a shipment line's order line ──
+
+  /** An order line of an order whose target doc type has {@code DocSubTypeSO = subType}. */
+  private static OrderLine orderLineOfSubType(String subType) {
+    DocumentType docType = mock(DocumentType.class);
+    when(docType.getSOSubType()).thenReturn(subType);
+    Order order = mock(Order.class);
+    when(order.getTransactionDocument()).thenReturn(docType);
+    OrderLine orderLine = mock(OrderLine.class);
+    when(orderLine.getSalesOrder()).thenReturn(order);
+    return orderLine;
+  }
+
+  /**
+   * The window's «Añadir desde Factura» popup copies the invoice line's order line; an invoice
+   * made straight from a quotation carries quotation lines, and completing the shipment then
+   * marked the quotation delivered and related it to the shipment (QA CP-14). The pre-hook drops
+   * a quotation line from any CRUD write and keeps a sales-order line (order ↔ shipment is
+   * direct). Reads, actions and an order line that is not the caller's own are left alone.
+   */
+  @Test
+  public void dropsAQuotationOrderLineFromAWriteAndKeepsAnOrderLine() throws Exception {
+    OrderLine quotationLine = orderLineOfSubType("OB");
+    OrderLine salesOrderLine = orderLineOfSubType("SO");
+    ownership.when(() -> TenantOwnership.loadOwned(OrderLine.class, "ol-quotation"))
+        .thenReturn(quotationLine);
+    ownership.when(() -> TenantOwnership.loadOwned(OrderLine.class, "ol-order"))
+        .thenReturn(salesOrderLine);
+    Object[][] cases = {
+        // label, method, endpoint, order line id, kept
+        { "POST of a quotation line", "POST", NeoEndpointType.CRUD, "ol-quotation", false },
+        { "PATCH to a quotation line", "PATCH", NeoEndpointType.CRUD, "ol-quotation", false },
+        { "POST of a sales-order line", "POST", NeoEndpointType.CRUD, "ol-order", true },
+        { "an order line that is not the caller's", "POST", NeoEndpointType.CRUD, "ol-foreign",
+            true },
+        { "not a write", "GET", NeoEndpointType.CRUD, "ol-quotation", true },
+        { "not a CRUD call", "POST", NeoEndpointType.ACTION, "ol-quotation", true },
+    };
+    for (Object[] c : cases) {
+      JSONObject body = new JSONObject().put("salesOrderLine", c[3]).put("invoiceLineId", "il-1");
+      NeoContext ctx = NeoContext.builder().httpMethod((String) c[1])
+          .endpointType((NeoEndpointType) c[2]).requestBody(body).build();
+
+      GoodsShipmentLineHandler.dropQuotationOrderLine(ctx);
+
+      assertEquals((String) c[0], c[4], body.has("salesOrderLine"));
+      assertTrue((String) c[0] + ": the invoice line link stays", body.has("invoiceLineId"));
     }
   }
 }

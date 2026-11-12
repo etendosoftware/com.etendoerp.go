@@ -19,6 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.model.common.order.OrderLine;
+
 /**
  * NeoExtension of the Goods Shipment line entity.
  *
@@ -36,6 +41,13 @@ import java.util.Map;
  *       ({@link ImportInvoiceLinesIntoInOutHandler.SourcePolicy#byDirectLinks}); with only the
  *       column, a second partial shipment made with {@code invoiceLineId} and no order line was
  *       never seen and the rest of the invoice line was offered again.</li>
+ *   <li>{@link #handle} drops a {@code salesOrderLine} that is a QUOTATION line
+ *       ({@link SalesQuotations#isQuotationLine}) from a create or update (ETP-6002 CP-14). The
+ *       window's "Import from invoice" popup copies the invoice line's order line, and an invoice
+ *       made straight from a quotation carries quotation lines: completing the shipment then
+ *       marked the quotation delivered and listed it on the shipment, though the shipment relates
+ *       to the invoice only. A line of a real sales order is kept (order and shipment are
+ *       related).</li>
  * </ul>
  *
  * <p><b>Binding (ETP-6002).</b> {@link NeoExtension} on every channel; the row's
@@ -46,8 +58,43 @@ import java.util.Map;
 @NeoExtension(spec = "goods-shipment", entity = "goodsShipmentLine")
 public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
 
+  private static final Logger log = LogManager.getLogger(GoodsShipmentLineHandler.class);
+
   /** The create-body key naming the sales invoice line a shipment line ships. */
   static final String FIELD_INVOICE_LINE_ID = "invoiceLineId";
+
+  /** The body key of the shipment line's order line ({@code C_OrderLine_ID}). */
+  static final String FIELD_SALES_ORDER_LINE = "salesOrderLine";
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    dropQuotationOrderLine(context);
+    return super.handle(context);
+  }
+
+  /**
+   * Removes {@code salesOrderLine} from a CRUD write body when it names a line of a sales
+   * quotation (ETP-6002 CP-14): no shipment delivers a quotation. Same on REST single, {@code /batch}
+   * and MCP, which all run this pre-hook; the window keeps sending it and is corrected here. An
+   * order line that is not the caller's own is left alone (the write path refuses it).
+   */
+  static void dropQuotationOrderLine(NeoContext context) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType())
+        || !NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return;
+    }
+    JSONObject body = context.getRequestBody();
+    String orderLineId = body == null ? null : body.optString(FIELD_SALES_ORDER_LINE, null);
+    if (orderLineId == null || orderLineId.isEmpty()) {
+      return;
+    }
+    OrderLine orderLine = TenantOwnership.loadOwned(OrderLine.class, orderLineId);
+    if (SalesQuotations.isQuotationLine(orderLine)) {
+      body.remove(FIELD_SALES_ORDER_LINE);
+      log.debug("Shipment line not linked to quotation line {}: a quotation is not delivered",
+          orderLineId);
+    }
+  }
 
   /**
    * Publishes {@code invoiceLineId} to agents ({@code etendo_schema(view:"create")}) and lets the

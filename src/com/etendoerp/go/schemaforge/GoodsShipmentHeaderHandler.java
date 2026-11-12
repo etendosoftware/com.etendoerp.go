@@ -319,8 +319,10 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   /**
    * Injects {@code linkedOrders}: the order of the shipment header plus every order the
-   * shipment's lines point at, each with {@code isQuotation} ({@code DocSubTypeSO = 'OB'},
-   * ETP-6002) so a quotation renders as a quotation chip.
+   * shipment's lines point at — never a QUOTATION ({@code DocSubTypeSO = 'OB'}, ETP-6002 CP-14).
+   * A shipment made from an invoice that came straight from a quotation relates to the invoice
+   * only; older shipments whose lines still carry quotation lines no longer list the quotation
+   * either.
    */
   @SuppressWarnings("java:S2077")
   private void enrichLinkedOrder(JSONObject shipmentRec, String shipmentId) {
@@ -330,12 +332,14 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     // "first linked order" resolution instead of duplicating the query.
     String sql =
         "SELECT DISTINCT co.c_order_id, co.documentno, co.grandtotal, co.docstatus, cur.iso_code, " +
-        "  co.m_pricelist_id, pl.name, dt.docsubtypeso " +
+        "  co.m_pricelist_id, pl.name " +
         "FROM c_order co " +
         "LEFT JOIN c_currency cur ON cur.c_currency_id = co.c_currency_id " +
         "LEFT JOIN m_pricelist pl ON pl.m_pricelist_id = co.m_pricelist_id " +
         "LEFT JOIN c_doctype dt ON dt.c_doctype_id = co.c_doctypetarget_id " +
-        "WHERE co.isactive = 'Y' AND co.c_order_id IN (" +
+        "WHERE co.isactive = 'Y' " +
+        "  AND (dt.docsubtypeso IS NULL OR dt.docsubtypeso <> '" + SalesQuotations.QUOTATION_SUBTYPE + "') " +
+        "  AND co.c_order_id IN (" +
         "  SELECT io.c_order_id FROM m_inout io WHERE io.m_inout_id = ? AND io.c_order_id IS NOT NULL" +
         "  UNION" +
         "  SELECT ol.c_order_id FROM m_inoutline il JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id" +
@@ -359,11 +363,6 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
           order.put(FIELD_PRICE_LIST_ID, orderPriceListId != null ? orderPriceListId : JSONObject.NULL);
           String orderPriceListName = rs.getString(7);
           order.put(FIELD_PRICE_LIST_IDENTIFIER, orderPriceListName != null ? orderPriceListName : JSONObject.NULL);
-          // ETP-6002 (IMP-3): a shipment made from an invoice that came straight from a QUOTATION
-          // points at quotation lines, so the "order" here may be a quotation. Same structural
-          // signal as the invoice's linkedOrders (DocSubTypeSO = 'OB'); the chip renders it as a
-          // quotation instead of "Pedido".
-          order.put("isQuotation", "OB".equals(rs.getString(8)));
           orders.put(order);
         }
       }

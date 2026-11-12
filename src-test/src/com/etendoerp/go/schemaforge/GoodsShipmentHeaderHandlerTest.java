@@ -312,18 +312,15 @@ public class GoodsShipmentHeaderHandlerTest {
   }
 
   /**
-   * Each linked order carries {@code isQuotation}, read from its target doc type's
-   * {@code DocSubTypeSO}: {@code 'OB'} is a quotation, any other subtype (or none) is an order.
-   * Only the linked-orders statement answers rows; every other statement reads an empty result.
+   * ETP-6002 CP-14: a QUOTATION is never one of the shipment's {@code linkedOrders}. A shipment
+   * made from an invoice that came straight from a quotation relates to the invoice only, and an
+   * older shipment whose lines still carry quotation lines must not list it either, so the
+   * statement leaves out every order whose target doc type is {@code DocSubTypeSO = 'OB'} (an
+   * order with no subtype stays). The entries no longer carry {@code isQuotation}. Only the
+   * linked-orders statement answers rows; every other statement reads an empty result.
    */
   @Test
-  public void testEnrichLinkedOrderMarksQuotationsByDocSubType() throws Exception {
-    String[][] orders = {
-        // id, documentNo, docSubTypeSO, expected isQuotation
-        { "o-quot", "QUO-1", "OB", "true" },
-        { "o-order", "SO-1", "SO", "false" },
-        { "o-nosub", "SO-2", null, "false" },
-    };
+  public void testEnrichLinkedOrderNeverListsAQuotation() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -337,19 +334,25 @@ public class GoodsShipmentHeaderHandlerTest {
       when(otherPs.executeQuery()).thenReturn(emptyRs);
 
       ResultSet ordersRs = mock(ResultSet.class);
-      when(ordersRs.next()).thenReturn(true, true, true, false);
-      when(ordersRs.getString(1)).thenReturn(orders[0][0], orders[1][0], orders[2][0]);
-      when(ordersRs.getString(2)).thenReturn(orders[0][1], orders[1][1], orders[2][1]);
+      when(ordersRs.next()).thenReturn(true, true, false);
+      when(ordersRs.getString(1)).thenReturn("o-order", "o-nosub");
+      when(ordersRs.getString(2)).thenReturn("SO-1", "SO-2");
       when(ordersRs.getString(4)).thenReturn("CO");
       when(ordersRs.getString(5)).thenReturn("EUR");
       when(ordersRs.getString(6)).thenReturn("pl-1");
       when(ordersRs.getString(7)).thenReturn("Tarifa");
-      when(ordersRs.getString(8)).thenReturn(orders[0][2], orders[1][2], orders[2][2]);
       PreparedStatement ordersPs = mock(PreparedStatement.class);
       when(ordersPs.executeQuery()).thenReturn(ordersRs);
 
-      when(conn.prepareStatement(anyString())).thenAnswer(inv ->
-          ((String) inv.getArgument(0)).contains("dt.docsubtypeso") ? ordersPs : otherPs);
+      java.util.List<String> ordersSql = new java.util.ArrayList<>();
+      when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+        String sql = inv.getArgument(0);
+        if (sql.contains("dt.docsubtypeso")) {
+          ordersSql.add(sql);
+          return ordersPs;
+        }
+        return otherPs;
+      });
 
       NeoContext ctx = getDetailCtx("sh-1");
       ctx.setPreviousResult(NeoResponse.ok(shipmentBody("sh-1")));
@@ -357,14 +360,15 @@ public class GoodsShipmentHeaderHandlerTest {
       NeoResponse result = new GoodsShipmentHeaderHandler().afterHandle(ctx);
 
       assertNotNull(result);
+      assertEquals(1, ordersSql.size());
+      assertTrue(ordersSql.get(0),
+          ordersSql.get(0).contains("(dt.docsubtypeso IS NULL OR dt.docsubtypeso <> 'OB')"));
       JSONArray linkedOrders = result.getBody().getJSONObject("response").getJSONArray("data")
           .getJSONObject(0).getJSONArray("linkedOrders");
-      assertEquals(orders.length, linkedOrders.length());
-      for (int i = 0; i < orders.length; i++) {
-        JSONObject order = linkedOrders.getJSONObject(i);
-        assertEquals(orders[i][0], order.getString("id"));
-        assertEquals(orders[i][0], Boolean.parseBoolean(orders[i][3]),
-            order.getBoolean("isQuotation"));
+      assertEquals(2, linkedOrders.length());
+      for (int i = 0; i < linkedOrders.length(); i++) {
+        assertFalse("no quotation flag on a shipment's orders",
+            linkedOrders.getJSONObject(i).has("isQuotation"));
       }
     }
   }

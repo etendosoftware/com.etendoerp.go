@@ -350,10 +350,12 @@ public class ImportInvoiceLinesIntoInOutHandlerTest {
     assertEquals("line order, no discount nor inactive line",
         List.of("il1", "il2", "il3", "il4", "il5", "il6", "il7", "il8"), ids(all));
     Object[][] expected = {
-        { "CP-22: shipped through the MCP (no order line on the shipment line), quotation line "
-            + "never delivered", "0", List.of() },
-        { "CP-14 shape: shipped through the window, order line copied and delivered", "0",
+        { "CP-22 / CP-14: shipped from an invoice made from a quotation — through the MCP or, "
+            + "since CP-14, the window too (the quotation line is no longer copied, so the "
+            + "quotation stays undelivered): own 0 by the link, headroom untouched", "0",
             List.of() },
+        { "data shipped before CP-14: the shipment line carries the quotation line, which it "
+            + "delivered", "0", List.of() },
         { "another invoice's shipment of the same order line does not cover this one", "5",
             List.of() },
         { "no link, but a hand-made shipment delivered the order line: capped at 0", "0",
