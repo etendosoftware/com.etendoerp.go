@@ -40,17 +40,24 @@ public final class PortalLinkConfig {
   /** 48 hours — the product rule (ETP-6209 story item 3). */
   static final long DEFAULT_TTL_MINUTES = 48L * 60L;
 
-  /** An expired link is renewed at most once per this many minutes. */
+  /**
+   * An expired link is renewed at most once per this many minutes. Product rule (PO, ETP-6209):
+   * 15 minutes per link; re-opening the link inside the window sends nothing and the page still
+   * says a new link was sent.
+   */
   public static final String PROP_RENEWAL_COOLDOWN_MINUTES =
       "etendo.go.portal.renewal.cooldownMinutes";
   public static final String ENV_RENEWAL_COOLDOWN_MINUTES =
       "ETGO_PORTAL_RENEWAL_COOLDOWN_MINUTES";
-  static final long DEFAULT_RENEWAL_COOLDOWN_MINUTES = 60L;
+  static final long DEFAULT_RENEWAL_COOLDOWN_MINUTES = 15L;
 
-  /** Renewals per Business Partner per rolling 24 hours. {@code 0} means no limit. */
+  /**
+   * Renewals per Business Partner per rolling 24 hours. {@code 0} means no limit, which is the
+   * default: the story sets no cap beyond the per-link cool-down. Kept as an operator knob only.
+   */
   public static final String PROP_RENEWAL_MAX_PER_DAY = "etendo.go.portal.renewal.maxPerDay";
   public static final String ENV_RENEWAL_MAX_PER_DAY = "ETGO_PORTAL_RENEWAL_MAX_PER_DAY";
-  static final long DEFAULT_RENEWAL_MAX_PER_DAY = 5L;
+  static final long DEFAULT_RENEWAL_MAX_PER_DAY = 0L;
 
   private static final Logger log = LogManager.getLogger(PortalLinkConfig.class);
 
@@ -67,7 +74,7 @@ public final class PortalLinkConfig {
 
   /**
    * @return the per-link renewal cool-down; a non-positive or malformed override falls back to
-   *     60 minutes
+   *     15 minutes
    */
   public static Duration renewalCooldown() {
     return Duration.ofMinutes(readPositive(PROP_RENEWAL_COOLDOWN_MINUTES,
@@ -81,7 +88,7 @@ public final class PortalLinkConfig {
    * where a non-positive value falls back to the default. "No limit" is a legitimate product answer
    * here, so it has to be expressible. A negative or malformed value falls back to the default.
    *
-   * @return the ceiling, {@code 0} for none
+   * @return the ceiling, {@code 0} (the default) for none
    */
   public static long renewalMaxPerDay() {
     String configured = ConfigPropertyReader.readConfigValue(PROP_RENEWAL_MAX_PER_DAY,

@@ -390,7 +390,8 @@ public class PortalLinkService {
    *
    * <p>In order: the token must name a sent, expired link; the customer must not be blocked or
    * inactive and the issuing company's plan must be current (story item 5); the per-link cool-down
-   * and the per-Business-Partner daily ceiling must allow it (decision D-4). Each refusal is
+   * (15 minutes by default, decided by the PO) and the optional per-Business-Partner daily ceiling
+   * (off by default) must allow it. Each refusal is
    * recorded as a {@code portal.link.renewed} error event with its reason.
    *
    * @param rawToken the expired token the customer opened

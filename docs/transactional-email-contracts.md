@@ -383,8 +383,8 @@ class only asks whether a kind was declared; it names no window or table.
 | Property | Environment Variable | Default | Purpose |
 |----------|----------------------|---------|---------|
 | `etendo.go.portal.link.ttlMinutes` | `ETGO_PORTAL_LINK_TTL_MINUTES` | 2880 (48 h) | Link lifetime after its send. Non-positive or malformed ⇒ default. Lower it only to test expiry |
-| `etendo.go.portal.renewal.cooldownMinutes` | `ETGO_PORTAL_RENEWAL_COOLDOWN_MINUTES` | 60 | An expired link is renewed at most once per cool-down |
-| `etendo.go.portal.renewal.maxPerDay` | `ETGO_PORTAL_RENEWAL_MAX_PER_DAY` | 5 | Renewals per Business Partner per rolling 24 h. **`0` = no limit**; negative or malformed ⇒ default |
+| `etendo.go.portal.renewal.cooldownMinutes` | `ETGO_PORTAL_RENEWAL_COOLDOWN_MINUTES` | 15 | An expired link is renewed at most once per cool-down (PO rule). Re-opening it inside the window sends nothing; the page still says a new link was sent |
+| `etendo.go.portal.renewal.maxPerDay` | `ETGO_PORTAL_RENEWAL_MAX_PER_DAY` | 0 (no limit) | Optional operator cap: renewals per Business Partner per rolling 24 h. **`0` = no limit**; negative or malformed ⇒ default |
 
 `etendo.go.portal.tokenSecret` (MVP) is no longer read: tokens are random per link.
 

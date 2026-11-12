@@ -192,9 +192,9 @@ final class PortalLinkRenewalEmailContract implements EmailContract {
   }
 
   /**
-   * One email per new link. The renewal limits that matter to the product (cool-down per link,
-   * ceiling per Business Partner) are applied by {@code PortalLinkService#renew} before this
-   * contract runs; these throttles are only the email system's own backstop.
+   * One email per new link. The product's renewal limit (one per link per cool-down) is applied
+   * by {@code PortalLinkService#renew} before this contract runs; these throttles are only the
+   * email system's own anti-abuse backstop, at the same ceilings as the document emails.
    */
   @Override
   public EmailDeliveryPolicy deliveryPolicy(EmailContractCommand command,
@@ -205,7 +205,7 @@ final class PortalLinkRenewalEmailContract implements EmailContract {
     String key = EmailContractCommandSupport.idempotencyKey(getName(), tenantId,
         StringUtils.defaultIfBlank(newLinkId, linkId(command)));
     return EmailContractCommandSupport.deliveryPolicy(key,
-        EmailThrottleRule.perRecipient(5, 3600),
+        EmailThrottleRule.perRecipient(20, 3600),
         EmailThrottleRule.perTenant(100, 3600),
         EmailThrottleRule.global(2000, 60));
   }
