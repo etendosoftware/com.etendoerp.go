@@ -62,7 +62,6 @@ import org.mockito.Mockito;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
-import org.openbravo.base.model.Property;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
@@ -95,42 +94,10 @@ import org.openbravo.model.common.enterprise.Organization;
  */
 public class NeoAttachmentsHelperTest {
 
-  /**
-   * Initializes {@link AttachImplementationManager} before any test can mock it, with the
-   * one call its static initializer makes off the DB answered by a stub.
-   *
-   * <p>That class computes a static field from
-   * {@code ModelProvider.getInstance().getEntity(Attachment.class)}, so its {@code <clinit>}
-   * reads the model — and the model is loaded from the database, through a
-   * {@code ConnectionProviderImpl} built out of {@code OBPropertiesProvider}. Mockito's
-   * inline mock maker forces that {@code <clinit>} the first time anything in the JVM calls
-   * {@code mock(AttachImplementationManager.class)}, so the first such test decides whether
-   * the class initializes at all: once a static initializer has thrown, the JVM marks the
-   * class erroneous and every later mock of it dies with {@code NoClassDefFoundError}
-   * without the test ever running.</p>
-   *
-   * <p>That is what ETP-5526 hit. {@link #computeFileSizeReturnsExistingFileLength} stubs
-   * {@code OBPropertiesProvider} with a {@link Properties} holding only {@code attach.path},
-   * and now also builds the manager mock inside that scope; whenever JUnit happened to run it
-   * first, {@code ConnectionProviderImpl} read a null {@code bbdd.rdbms} from the stub and the
-   * {@code <clinit>} died, taking 17 untouched tests with it. Which test runs first is not
-   * something a test may depend on, and neither is a reachable database, so the initialization
-   * is pinned here instead: under a stubbed {@code ModelProvider} it needs neither.</p>
-   */
+  /** Makes the shared storage metadata boundary available before helper tests run. */
   @BeforeClass
-  public static void initializeAttachImplementationManager() throws Exception {
-    Property dataType = mock(Property.class);
-    when(dataType.getFieldLength()).thenReturn(60);
-    Entity attachmentEntity = mock(Entity.class);
-    when(attachmentEntity.getProperty(Attachment.PROPERTY_DATATYPE)).thenReturn(dataType);
-    ModelProvider modelProvider = mock(ModelProvider.class);
-    when(modelProvider.getEntity(Attachment.class)).thenReturn(attachmentEntity);
-
-    try (MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class)) {
-      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
-      Class.forName(AttachImplementationManager.class.getName(), true,
-          AttachImplementationManager.class.getClassLoader());
-    }
+  public static void initializeAttachImplementationManager() {
+    NeoAttachmentTestFixtures.initializeStorageManager();
   }
 
   @After
@@ -821,7 +788,7 @@ public class NeoAttachmentsHelperTest {
     Attachment regularAttachment = stubAttachment("ATT-OTHER", "note.pdf");
     when(criteria.list()).thenReturn(Arrays.asList(mainAttachment, regularAttachment));
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -863,7 +830,7 @@ public class NeoAttachmentsHelperTest {
     Attachment other = stubAttachment("ATT-A", "purchase-order.pdf");
     when(criteria.list()).thenReturn(Arrays.asList(other, wanted));
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -900,7 +867,7 @@ public class NeoAttachmentsHelperTest {
     Attachment own = stubAttachment("ATT-A", "purchase-order.pdf");
     when(criteria.list()).thenReturn(Collections.singletonList(own));
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -978,7 +945,7 @@ public class NeoAttachmentsHelperTest {
     when(attachment.getTable()).thenReturn(table);
     when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -1005,7 +972,7 @@ public class NeoAttachmentsHelperTest {
     when(attachment.getTable()).thenReturn(null);
     when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -1070,7 +1037,7 @@ public class NeoAttachmentsHelperTest {
         .thenReturn(FiscalDeclCrudHandler.DEFAULT_STATUS);
     when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(decl);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -1100,7 +1067,7 @@ public class NeoAttachmentsHelperTest {
     when(attachment.getRecord()).thenReturn(" ");
     when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -1131,7 +1098,7 @@ public class NeoAttachmentsHelperTest {
     when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
     when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(null);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -1166,7 +1133,7 @@ public class NeoAttachmentsHelperTest {
     when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(null);
     when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(decl);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -1294,7 +1261,7 @@ public class NeoAttachmentsHelperTest {
     when(oldAttachment.getId()).thenReturn("ATT-OLD");
     when(dal.get(Attachment.class, "ATT-OLD")).thenReturn(oldAttachment);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -1331,7 +1298,7 @@ public class NeoAttachmentsHelperTest {
     when(attachment.getId()).thenReturn("ATT1");
     when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
 
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
@@ -1755,7 +1722,7 @@ public class NeoAttachmentsHelperTest {
     OBDal dal = mock(OBDal.class);
     ModelProvider modelProvider = mock(ModelProvider.class);
     Entity entity = mock(Entity.class);
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     stubTableLookup(dal, "TABLE1");
     stubNoUploadedAttachment(dal);
     when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(entity);
@@ -1792,7 +1759,7 @@ public class NeoAttachmentsHelperTest {
     HttpServletRequest request = stubUploadRequest(part);
     OBDal dal = mock(OBDal.class);
     ModelProvider modelProvider = mock(ModelProvider.class);
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     stubTableLookup(dal, "TABLE1");
     stubNoUploadedAttachment(dal);
     when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(null);
@@ -1950,7 +1917,7 @@ public class NeoAttachmentsHelperTest {
    */
   private static void stubAttachManager(MockedStatic<WeldUtils> weldMock,
       AttachImplementation handler) {
-    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    AttachImplementationManager aim = NeoAttachmentTestFixtures.mockStorageManager();
     when(aim.getHandler(anyString())).thenReturn(handler);
     weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
         .thenReturn(aim);

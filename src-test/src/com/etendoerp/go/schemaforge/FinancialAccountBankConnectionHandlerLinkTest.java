@@ -469,8 +469,11 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
         spanish.getString("message"));
     assertFalse(spanish.has("code"));
     assertTrue(spanish.has("lastSyncDate"));
+    assertTrue(spanish.isNull("lastSyncDate"));
     assertEquals("IN_PROGRESS", english.getString("status"));
     assertEquals("Fetching statements, please wait\u2026", english.getString("message"));
+    assertTrue(english.has("lastSyncDate"));
+    assertTrue(english.isNull("lastSyncDate"));
   }
 
   /**
@@ -489,6 +492,10 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     assertEquals("BANK_SYNC_LOCK_UNAVAILABLE", english.getString("code"));
     assertEquals("The statements could not be fetched right now. Please try again in a few "
         + "moments.", english.getString("message"));
+    assertTrue(spanish.has("lastSyncDate"));
+    assertTrue(spanish.isNull("lastSyncDate"));
+    assertTrue(english.has("lastSyncDate"));
+    assertTrue(english.isNull("lastSyncDate"));
   }
 
   /**
@@ -1391,6 +1398,8 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       NeoResponse response = handler.handle(postContext("sync", body));
 
       assertEquals(200, response.getHttpStatus());
+      syncStatic.verify(() -> AccountTransactionsSync.fetchAccountTransactionsWithResult(eq(finAcc),
+          any()));
       return dataOf(response);
     }
   }

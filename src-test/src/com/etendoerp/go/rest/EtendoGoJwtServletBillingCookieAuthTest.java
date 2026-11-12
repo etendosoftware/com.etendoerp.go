@@ -52,6 +52,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
@@ -324,6 +325,36 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   }
 
   // ===================== POST /billing/purchases (cookie) =====================
+
+  @Test
+  public void aDifferentPlanNeverSilentlyReopensThePreviousCheckout() throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN)).thenReturn(fixture.validSession());
+    CheckoutRequest existing = mock(CheckoutRequest.class);
+    when(existing.getCheckoutRequestStatus()).thenReturn("CREATED");
+    when(existing.getRequest()).thenReturn("req-annual");
+    when(existing.getClientName()).thenReturn("Acme Corp");
+    when(existing.getStripeSession()).thenReturn("cs_annual");
+    when(fixture.requestStore.findActiveForAccountAndClientName(ACCOUNT_ID, ACCOUNT_EMAIL, "Acme Corp"))
+        .thenReturn(existing);
+    when(fixture.checkout.reopenSession("req-annual", ACCOUNT_EMAIL, "Acme Corp", null))
+        .thenReturn(new JSONObject().put("requestId", "req-annual")
+            .put("checkoutUrl", "https://checkout.test/annual"));
+    HttpServletRequest req = cookiePost(PURCHASES_PATH, SESSION_TOKEN, CSRF,
+        new JSONObject().put("clientName", "Acme Corp").put("planKey", "monthly").toString());
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById(ACCOUNT_ID)).thenReturn(fixture.account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(ACCOUNT_EMAIL))
+          .thenReturn(true);
+      fixture.servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(409, resp.status);
+    assertTrue(resp.body.toString().contains("PURCHASE_SELECTION_CHANGED"));
+    verify(fixture.checkout, never()).reopenSession(anyString(), anyString(), anyString(), any());
+  }
 
   @Test
   public void cookiePostPurchasesWithoutCsrfIsForbidden() throws Exception {
@@ -854,6 +885,7 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
         mock(TransactionalAuthEmailSender.class), mock(EtendoGoSsoProviderRegistry.class),
         goSessionService);
     final CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    final HostedCheckoutService checkout = mock(HostedCheckoutService.class);
     final StripeCustomerPortalService portalService = mock(StripeCustomerPortalService.class);
     final TenantEnvironmentLifecycleService lifecycle =
         mock(TenantEnvironmentLifecycleService.class);
@@ -865,6 +897,7 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
 
     Fixture() {
       servlet.checkoutRequestStore = requestStore;
+      servlet.hostedCheckoutService = checkout;
       servlet.stripeCustomerPortalService = portalService;
       servlet.tenantEnvironmentLifecycleService = lifecycle;
       servlet.subscriptionService = subscriptionService;

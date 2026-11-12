@@ -151,7 +151,7 @@ public class Fiscal390SubmissionSupportTest {
     obContextMock = mockStatic(OBContext.class);
     obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
 
-    attachManager = mock(AttachImplementationManager.class);
+    attachManager = NeoAttachmentTestFixtures.mockStorageManager();
     attachMock = mockStatic(NeoAttachmentsHelper.class);
     attachMock.when(() -> NeoAttachmentsHelper.resolveTableId(anyString())).thenReturn("T1");
     attachMock.when(() -> NeoAttachmentsHelper.resolveTabId("T1", null)).thenReturn("TAB1");
